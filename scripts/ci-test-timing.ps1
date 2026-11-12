@@ -86,18 +86,27 @@ $psi.UseShellExecute = $false
 $psi.RedirectStandardError = $true
 $psi.RedirectStandardOutput = $true
 $psi.WorkingDirectory = (Get-Location).Path
-$process = [System.Diagnostics.Process]::Start($psi)
-$stdoutTask = $process.StandardOutput.ReadToEndAsync()
-$clock = [System.Diagnostics.Stopwatch]::StartNew()
-$lines = [System.Collections.Generic.List[object]]::new()
-while ($null -ne ($line = $process.StandardError.ReadLine())) {
-    $lines.Add(@{ Seconds = $clock.Elapsed.TotalSeconds; Text = $line })
+# Each line reaches the log as it arrives, so a run the step's timeout kills
+# still leaves the log up to the test that hung (it then fails the skip budget
+# as cut off, and the upload carries it).
+$log = [System.IO.StreamWriter]::new((Join-Path (Resolve-Path -LiteralPath $OutputDirectory).Path 'ghostty-test.log'), $false, [System.Text.UTF8Encoding]::new($false))
+$log.AutoFlush = $true
+try {
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $lines = [System.Collections.Generic.List[object]]::new()
+    while ($null -ne ($line = $process.StandardError.ReadLine())) {
+        $lines.Add(@{ Seconds = $clock.Elapsed.TotalSeconds; Text = $line })
+        $log.WriteLine($line)
+    }
+    $process.WaitForExit()
+    [void] $stdoutTask.Result
+    $total = $clock.Elapsed.TotalSeconds
 }
-$process.WaitForExit()
-[void] $stdoutTask.Result
-$total = $clock.Elapsed.TotalSeconds
-# Before any check that can throw, so a failing run still leaves its log for the skip budget.
-[System.IO.File]::WriteAllLines((Join-Path (Resolve-Path -LiteralPath $OutputDirectory).Path 'ghostty-test.log'), [string[]]@($lines | ForEach-Object { $_.Text }), [System.Text.UTF8Encoding]::new($false))
+finally {
+    $log.Dispose()
+}
 
 $tests = @(ConvertFrom-ZigTestLines -Lines $lines.ToArray())
 $slowest = @($tests | Sort-Object Seconds -Descending | Select-Object -First $Top)
