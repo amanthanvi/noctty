@@ -282,7 +282,7 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows package managers
 
-- WinGet package id: `AmanThanvi.koreterm` (published; `winget install --id AmanThanvi.koreterm -e`).
+- WinGet package id: `Richardsonvix.koreterm` (published; `winget install --id Richardsonvix.koreterm -e`).
 - Chocolatey package id: `koreterm` (published; `choco install koreterm`).
   community.chocolatey.org approved 1.3.134 on 2026-10-23. The release
   workflow builds the package and its last step, after WinGet, pushes it; the
@@ -290,13 +290,13 @@ Win32-validated VT protocol coverage is tracked in
   step runs on every release. Chocolatey reviews each version before listing
   it, so a release can reach it after the other channels. The community
   maintainer `virtualex`, who submitted `koreterm` 1.3.131 on 2026-10-16, added
-  `amanthanvi` as a maintainer on 2026-10-20 and stays on as a co-maintainer.
+  `richardsonvix` as a maintainer on 2026-10-20 and stays on as a co-maintainer.
   The install script asks the CPU which installer to use, because Chocolatey
   runs as an emulated x64 process on ARM64 Windows; that ships with the first
   release built after 1.3.134, whose package installs the x64 build there. See
   [chocolatey-publishing.md](chocolatey-publishing.md). A released version is
   pushed with the manual Chocolatey Publish workflow.
-- Scoop bucket: `https://github.com/amanthanvi/scoop-noctty`.
+- Scoop bucket: `https://github.com/richardsonvix/scoop-koreterm`.
 
 ### Crash reports
 
@@ -417,7 +417,7 @@ incrementally.
   certificates, so no release uses it yet.
 - GitHub Issues are for reproducible bugs. For questions, feature
   discussion, and feedback, use
-  [Discussions](https://github.com/amanthanvi/noctty/discussions).
+  [Discussions](https://github.com/richardsonvix/noctty_terminal/discussions).
 - OpenGL 4.3 through WGL is a floor for the default renderer. Below it, or
   when WGL fails, koreterm falls back to the D3D11 beta (hardware, then WARP)
   with a banner; custom shaders, background images and Kitty images still need

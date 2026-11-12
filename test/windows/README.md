@@ -720,7 +720,7 @@ directly and fails when a test in the guarded family (`font.`) skips and is
 not on the runner's allowlist in `test-skip-budget.json`, when the total is above
 the runner's budget, or when the log is incomplete.
 The `windows-2022` ceiling of 76 and its nine font skip names were measured from
-run [39027272717](https://github.com/amanthanvi/noctty/actions/runs/39027272717).
+run [39027272717](https://github.com/richardsonvix/noctty_terminal/actions/runs/39027272717).
 `-Report` drafts an allowlist for a new runner, but still rejects incomplete,
 inconsistent or failed output. CI runs without `-Report` to enforce the budget.
 

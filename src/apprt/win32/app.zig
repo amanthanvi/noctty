@@ -1251,7 +1251,7 @@ pub const App = struct {
         // attributes toasts to our AUMID. A test build never creates one, so
         // no test can reach Action Center; tests give `notifications` a
         // recorder as its sink instead.
-        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
+        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");
         self.winrt_toast = if (builtin.is_test) null else win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16) catch |err| blk: {
             std.log.warn("winrt toast init failed err={}; falling back to host notifications", .{err});
             break :blk null;

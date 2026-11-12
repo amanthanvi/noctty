@@ -572,7 +572,7 @@ pub fn innoUninstallRegistryMatchesInstallDir(install_dir: []const u8) bool {
     // dist/windows/koreterm.iss deliberately retains this AppId. Inno appends
     // `_is1` to AppId for its uninstall key and records InstallLocation there.
     const uninstall_subkey = std.unicode.utf8ToUtf16LeStringLiteral(
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\io.github.amanthanvi.winghostty_is1",
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\io.github.richardsonvix.koreterm_is1",
     );
     const install_location_name = std.unicode.utf8ToUtf16LeStringLiteral("InstallLocation");
     var registered_buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://noctty.com/schemas/benchmark/windows-evidence.v1.json",
+  "$id": "https://github.com/richardsonvix/noctty_terminal/schemas/benchmark/windows-evidence.v1.json",
   "title": "koreterm Windows benchmark evidence v1",
   "type": "object",
   "additionalProperties": false,
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "io.github.amanthanvi.koreterm.bench-evidence.v1"
+      "const": "io.github.richardsonvix.koreterm.bench-evidence.v1"
     },
     "generated_at": {
       "type": "string",

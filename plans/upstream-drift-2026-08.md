@@ -1,7 +1,7 @@
 # Upstream drift analysis — August 2026
 
 - **Analysis date:** 2026-08-22
-- **Fork:** `amanthanvi/koreterm`
+- **Fork:** `richardsonvix/noctty_terminal`
 - **Issue:** #141, C33 — upstream merge cadence and published merge policy
 - **Scope:** drift analysis plus the bounded 2026-08 merge window slice
 

@@ -45,8 +45,8 @@ $layout = Get-InteractiveWin11MeasureLayout $fixtureRoot -Head $script:measureCo
 $script:measureContractDirty = $false
 $script:measureContractOriginal = [Text.Encoding]::UTF8.GetBytes(@'
 const std = @import("std");
-const aumid_wide = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
-pub const aumid_utf8 = "io.github.amanthanvi.koreterm";
+const aumid_wide = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");
+pub const aumid_utf8 = "io.github.richardsonvix.koreterm";
 pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
     _ = alloc;
     _ = portable;
@@ -54,7 +54,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
 '@.Replace("`r`n", "`n"))
 $originalPath = Join-Path $fixtureRoot 'src\apprt\win32_aumid.zig'
 [IO.File]::WriteAllBytes($originalPath, $script:measureContractOriginal)
-$script:measureContractNotifier = [Text.Encoding]::UTF8.GetBytes('const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");' + "`n" + 'win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16)' + "`n")
+$script:measureContractNotifier = [Text.Encoding]::UTF8.GetBytes('const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");' + "`n" + 'win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16)' + "`n")
 $originalNotifierPath = Join-Path $fixtureRoot 'src\apprt\win32\app.zig'
 [IO.File]::WriteAllBytes($originalNotifierPath, $script:measureContractNotifier)
 $archiveStream = New-Object IO.MemoryStream
@@ -79,7 +79,7 @@ $archiveStream.Dispose()
 [IO.Compression.ZipFile]::ExtractToDirectory($layout.Archive, $layout.Source)
 $patched = Get-InteractiveWin11MeasurePatchedBytes $script:measureContractOriginal
 $patchedText = [Text.Encoding]::UTF8.GetString($patched)
-if ([regex]::Matches($patchedText, 'io\.github\.amanthanvi\.koreterm\.measure').Count -ne 2 -or
+if ([regex]::Matches($patchedText, 'io\.github\.richardsonvix\.koreterm\.measure').Count -ne 2 -or
     -not $patchedText.Contains("void {`n    if (true) return; // MEASUREMENT ONLY`n")) {
     throw 'The explicit measurement patch is incomplete.'
 }
@@ -89,7 +89,7 @@ $measuredNotifierPath = Join-Path $layout.Source 'src\apprt\win32\app.zig'
 Assert-InteractiveWin11MeasureProductNotifierSource $script:measureContractNotifier
 $sourceReceipt = [ordered]@{
     Schema = 2; Head = $script:measureContractHead; Patch = 'aumid-isolate-product-toast-v2'
-    NotifierAumid = 'io.github.amanthanvi.koreterm'
+    NotifierAumid = 'io.github.richardsonvix.koreterm'
     ArchiveSHA256 = Get-InteractiveWin11MeasureHash $script:measureContractArchive
     OriginalAumidSHA256 = Get-InteractiveWin11MeasureHash $script:measureContractOriginal
     PatchedAumidSHA256 = Get-InteractiveWin11MeasureHash $patched
@@ -107,7 +107,7 @@ if ($measureBuildArguments -cne '-Demit-exe=true -Dcustom-shaders=true -Doptimiz
 $buildReceipt = [ordered]@{
     Schema = 3; State = 'complete'; Head = $script:measureContractHead; RepoRoot = $layout.Repo
     BuildArguments = $measureBuildArguments
-    Patch = $sourceReceipt.Patch; Aumid = 'io.github.amanthanvi.koreterm.measure'
+    Patch = $sourceReceipt.Patch; Aumid = 'io.github.richardsonvix.koreterm.measure'
     NotifierAumid = $sourceReceipt.NotifierAumid
     ArchiveSHA256 = $sourceReceipt.ArchiveSHA256
     OriginalAumidSHA256 = $sourceReceipt.OriginalAumidSHA256
@@ -179,7 +179,7 @@ $withoutReturn = [Text.Encoding]::UTF8.GetBytes($patchedText.Replace("    if (tr
 [IO.File]::WriteAllBytes($measuredSourcePath, $withoutReturn)
 Assert-MeasureContractRejected 'measurement constants without registration suppression' { Assert-MeasureFixture }
 [IO.File]::WriteAllBytes($measuredSourcePath, $patched)
-[IO.File]::WriteAllBytes($measuredNotifierPath, [Text.Encoding]::UTF8.GetBytes(([Text.Encoding]::UTF8.GetString($script:measureContractNotifier)).Replace('io.github.amanthanvi.koreterm', 'io.github.amanthanvi.koreterm.measure')))
+[IO.File]::WriteAllBytes($measuredNotifierPath, [Text.Encoding]::UTF8.GetBytes(([Text.Encoding]::UTF8.GetString($script:measureContractNotifier)).Replace('io.github.richardsonvix.koreterm', 'io.github.richardsonvix.koreterm.measure')))
 Assert-MeasureContractRejected 'measurement notifier replacing the product notifier' { Assert-MeasureFixture }
 [IO.File]::WriteAllBytes($measuredNotifierPath, $script:measureContractNotifier)
 $buildReceipt.MeasuredNotifierSHA256 = '0000000000000000000000000000000000000000000000000000000000000000'
@@ -240,10 +240,10 @@ $buildReceipt.State = 'building'
 [IO.File]::WriteAllText($layout.Receipt, ($buildReceipt | ConvertTo-Json))
 Assert-MeasureContractRejected 'incomplete build' { Assert-MeasureFixture }
 $buildReceipt.State = 'complete'
-$buildReceipt.Aumid = 'io.github.amanthanvi.koreterm'
+$buildReceipt.Aumid = 'io.github.richardsonvix.koreterm'
 [IO.File]::WriteAllText($layout.Receipt, ($buildReceipt | ConvertTo-Json))
 Assert-MeasureContractRejected 'product identity receipt' { Assert-MeasureFixture }
-$buildReceipt.Aumid = 'io.github.amanthanvi.koreterm.measure'
+$buildReceipt.Aumid = 'io.github.richardsonvix.koreterm.measure'
 $buildReceipt.BuildArguments = '-Demit-exe=true -Doptimize=Debug'
 [IO.File]::WriteAllText($layout.Receipt, ($buildReceipt | ConvertTo-Json))
 Assert-MeasureContractRejected 'build without custom shaders' { Assert-MeasureFixture }

@@ -13,7 +13,7 @@ param(
 
     [string]$Tag,
 
-    [string]$Repo = "amanthanvi/koreterm",
+    [string]$Repo = "richardsonvix/noctty_terminal",
 
     [string[]]$Architectures = @("x64"),
 
@@ -28,7 +28,7 @@ param(
 
     [int]$FirstForkPatch = 0,
 
-    [string]$WingetPackageIdentifier = "AmanThanvi.koreterm",
+    [string]$WingetPackageIdentifier = "Richardsonvix.koreterm",
 
     [string]$ScoopPackageName = "koreterm",
 
@@ -72,7 +72,7 @@ $iconUrl = "$releaseBaseUrl/$iconName"
 # Chocolatey's validator rejects an icon served from GitHub (CPMR0076), so the
 # package points at the website's copy of the square mark
 # (site/assets/favicon.svg) instead of the release asset.
-$chocolateyIconUrl = "https://noctty.com/assets/favicon.svg"
+$chocolateyIconUrl = "https://github.com/richardsonvix/noctty_terminal/assets/favicon.svg"
 $packageDescription = @"
 koreterm is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end.
 "@.Trim()
@@ -293,8 +293,8 @@ $chocolateyNuspec = @"
     <version>$Version</version>
     <packageSourceUrl>$projectUrl/blob/$(if ($PackageSourceRef) { $PackageSourceRef } else { $tagValue })/scripts/package-package-managers.ps1</packageSourceUrl>
     <title>Koreterm</title>
-    <authors>Aman Thanvi</authors>
-    <owners>Aman Thanvi</owners>
+    <authors>Richardson</authors>
+    <owners>Richardson</owners>
     <projectUrl>$projectUrl</projectUrl>
     <projectSourceUrl>$projectUrl/tree/$tagValue</projectSourceUrl>
     <docsUrl>$projectUrl/blob/$tagValue/docs/getting-started.md</docsUrl>
@@ -334,7 +334,7 @@ function Get-KoretermInstallDirectory {
     # Setup reuses the previous directory, so a custom location is recorded in its uninstall key.
     # Setup installs in 64-bit mode, so the machine-wide key is in the 64-bit registry view, which
     # the HKLM: drive of a 32-bit PowerShell does not show. HKCU\SOFTWARE is the same in both views.
-    $uninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.amanthanvi.winghostty_is1'
+    $uninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.richardsonvix.koreterm_is1'
     $location = $null
     try {
         $machine = Open-KoretermRegistryBaseKey -Hive LocalMachine -View Registry64

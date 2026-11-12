@@ -34,7 +34,7 @@
 //!      per install, so a bare copy of the exe writing its own path
 //!      would strip the icon from every other koreterm on the machine.
 //!
-//! The AUMID string `io.github.amanthanvi.koreterm` lives in a namespace
+//! The AUMID string `io.github.richardsonvix.koreterm` lives in a namespace
 //! we own (matching the instance/bundle id) rather than any
 //! Ghostty-owned reverse-DNS prefix, so it cannot collide with — or
 //! imply affiliation with — an upstream Ghostty install.
@@ -70,8 +70,8 @@ const REG_SZ: DWORD = 1;
 const REG_DWORD: DWORD = consts.REG_DWORD;
 const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;
 
-const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
-pub const aumid_utf8 = "io.github.amanthanvi.koreterm";
+const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");
+pub const aumid_utf8 = "io.github.richardsonvix.koreterm";
 
 /// Set the AUMID for the current process. Must run before any HWND is
 /// created; Windows copies the identity into the process's taskbar-
@@ -343,7 +343,7 @@ test "aumid icon uri is absent when the sibling icon is missing" {
 
 test "aumid string shape" {
     const testing = std.testing;
-    try testing.expectEqualStrings("io.github.amanthanvi.koreterm", aumid_utf8);
+    try testing.expectEqualStrings("io.github.richardsonvix.koreterm", aumid_utf8);
 }
 
 const TestRegistry = struct {

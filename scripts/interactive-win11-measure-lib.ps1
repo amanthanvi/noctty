@@ -130,7 +130,7 @@ function Assert-InteractiveWin11MeasureProductNotifierSource {
 
     $utf8 = New-Object Text.UTF8Encoding($false, $true)
     $text = $utf8.GetString($Original)
-    $anchor = 'const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");'
+    $anchor = 'const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");'
     if ([regex]::Matches($text, [regex]::Escape($anchor)).Count -ne 1) { throw 'Measurement toast notifier anchor changed.' }
     $call = 'win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16)'
     if ([regex]::Matches($text, [regex]::Escape($call)).Count -ne 1) { throw 'Product toast notifier call changed.' }
@@ -141,15 +141,15 @@ function Get-InteractiveWin11MeasurePatchedBytes {
 
     $utf8 = New-Object Text.UTF8Encoding($false, $true)
     $text = $utf8.GetString($Original)
-    $old = 'pub const aumid_utf8 = "io.github.amanthanvi.koreterm";'
-    $oldWide = 'utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");'
+    $old = 'pub const aumid_utf8 = "io.github.richardsonvix.koreterm";'
+    $oldWide = 'utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");'
     foreach ($anchor in @($old, $oldWide)) {
         if ([regex]::Matches($text, [regex]::Escape($anchor)).Count -ne 1) { throw 'Measurement AUMID constant anchor changed.' }
     }
     $signature = 'pub fn registerAumidDisplayName\(alloc: std\.mem\.Allocator(?:, portable: bool)?\) void \{\n'
     if ([regex]::Matches($text, $signature).Count -ne 1) { throw 'Measurement registration signature changed.' }
-    $text = $text.Replace($old, 'pub const aumid_utf8 = "io.github.amanthanvi.koreterm.measure";')
-    $text = $text.Replace($oldWide, 'utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm.measure");')
+    $text = $text.Replace($old, 'pub const aumid_utf8 = "io.github.richardsonvix.koreterm.measure";')
+    $text = $text.Replace($oldWide, 'utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm.measure");')
     $text = [regex]::Replace($text, $signature, ('$0' + "    if (true) return; // MEASUREMENT ONLY`n"))
     return ,$utf8.GetBytes($text)
 }
@@ -180,7 +180,7 @@ function Assert-InteractiveWin11MeasureSource {
     Assert-InteractiveWin11MeasurePlainPath $Layout.Archive
     $sourceReceipt = Get-Content -LiteralPath $Layout.SourceReceipt -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($sourceReceipt.Schema -ne 2 -or $sourceReceipt.Head -cne $Head -or
-        $sourceReceipt.Patch -cne 'aumid-isolate-product-toast-v2' -or $sourceReceipt.NotifierAumid -cne 'io.github.amanthanvi.koreterm') {
+        $sourceReceipt.Patch -cne 'aumid-isolate-product-toast-v2' -or $sourceReceipt.NotifierAumid -cne 'io.github.richardsonvix.koreterm') {
         throw 'Stale or unrecognized measurement source receipt; use a fresh task directory.'
     }
     # Recreate the archive from the live git object, so a modified manifest or
@@ -270,7 +270,7 @@ function Assert-InteractiveWin11MeasureBuildCore {
     $receipt = Get-Content -LiteralPath $Layout.Receipt -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($receipt.Schema -ne 3 -or $receipt.State -cne 'complete' -or $receipt.Head -cne $head -or
         $receipt.BuildArguments -cne ((Get-InteractiveWin11MeasureBuildArguments ([string] $receipt.Optimize)) -join ' ') -or
-        $receipt.Aumid -cne 'io.github.amanthanvi.koreterm.measure' -or $receipt.Patch -cne $source.Patch -or
+        $receipt.Aumid -cne 'io.github.richardsonvix.koreterm.measure' -or $receipt.Patch -cne $source.Patch -or
         $receipt.NotifierAumid -cne $source.NotifierAumid -or
         $receipt.ArchiveSHA256 -cne $source.ArchiveSHA256 -or
         $receipt.OriginalAumidSHA256 -cne $source.OriginalAumidSHA256 -or
@@ -337,7 +337,7 @@ function Invoke-InteractiveWin11MeasureBuild {
             Assert-InteractiveWin11MeasureProductNotifierSource $originalNotifier
             $sourceReceipt = [ordered]@{
                 Schema = 2; Head = $head; Patch = 'aumid-isolate-product-toast-v2'
-                NotifierAumid = 'io.github.amanthanvi.koreterm'
+                NotifierAumid = 'io.github.richardsonvix.koreterm'
                 ArchiveSHA256 = Get-InteractiveWin11MeasureHash $archive
                 OriginalAumidSHA256 = Get-InteractiveWin11MeasureHash $original
                 PatchedAumidSHA256 = Get-InteractiveWin11MeasureHash $patched
@@ -394,7 +394,7 @@ exit /b %errorlevel%
         $receipt = [ordered]@{
             Schema = 3; State = 'complete'; Head = $head; RepoRoot = $layout.Repo
             BuildArguments = $buildArguments
-            Aumid = 'io.github.amanthanvi.koreterm.measure'; Patch = $source.Patch
+            Aumid = 'io.github.richardsonvix.koreterm.measure'; Patch = $source.Patch
             NotifierAumid = $source.NotifierAumid
             ArchiveSHA256 = $source.ArchiveSHA256
             OriginalAumidSHA256 = $source.OriginalAumidSHA256

@@ -28,18 +28,18 @@ is; Koreterm never reads it.
 ## 2. Install and verify Koreterm
 
 ```powershell
-scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop bucket add koreterm https://github.com/richardsonvix/scoop-koreterm
 scoop install koreterm/koreterm
 ```
 
-Or install with WinGet: `winget install --id AmanThanvi.koreterm -e`.
+Or install with WinGet: `winget install --id Richardsonvix.koreterm -e`.
 
 The installer does not add `koreterm` to `PATH`. To run the `koreterm +...` commands
 below from a shell, add the install folder to `PATH` or run `.\koreterm.com`
 from that folder.
 
 For a direct download, run the checksum and signature checks on the
-[Why Koreterm and verification page](https://noctty.com/why-koreterm.html#verify).
+[Why Koreterm and verification page](https://github.com/richardsonvix/noctty_terminal/why-koreterm.html#verify).
 The release signing certificate is self-signed, so SmartScreen warns even when
 every check passes.
 

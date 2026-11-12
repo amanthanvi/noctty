@@ -3,7 +3,7 @@ project(c-vt-cmake-static LANGUAGES C)
 
 include(FetchContent)
 FetchContent_Declare(koreterm
-    GIT_REPOSITORY https://github.com/amanthanvi/noctty.git
+    GIT_REPOSITORY https://github.com/richardsonvix/noctty_terminal.git
     GIT_TAG main
 )
 set(GHOSTTY_ZIG_BUILD_FLAGS "-Dsimd=false" CACHE STRING "" FORCE)

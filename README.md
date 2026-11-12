@@ -12,9 +12,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/amanthanvi/noctty/releases/latest">Download</a>
+  <a href="https://github.com/richardsonvix/noctty_terminal/releases/latest">Download</a>
   ·
-  <a href="https://noctty.com">Website</a>
+  <a href="https://github.com/richardsonvix/noctty_terminal">Website</a>
   ·
   <a href="docs/getting-started.md">Getting started</a>
   ·
@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <sub>Formerly <strong>winghostty</strong>. Renamed in August 2026 after a <a href="https://github.com/amanthanvi/noctty/issues/119">trademark request from the Ghostty team</a>.</sub>
+  <sub>Formerly <strong>winghostty</strong>. Renamed in August 2026 after a <a href="https://github.com/richardsonvix/noctty_terminal/issues/119">trademark request from the Ghostty team</a>.</sub>
 </p>
 
 <p align="center">
@@ -81,19 +81,19 @@ supports OpenGL 4.3 or later.
   or use the Direct3D 11 renderer (beta). The ARM64 build includes it.
 
 The latest release is
-[koreterm 1.3.137](https://github.com/amanthanvi/noctty/releases/tag/v1.3.137),
+[koreterm 1.3.137](https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.137),
 published 2026-11-09.
 
 ### With WinGet
 
 ```powershell
-winget install --id AmanThanvi.koreterm -e
+winget install --id Richardsonvix.koreterm -e
 ```
 
 ### With Scoop
 
 ```powershell
-scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop bucket add koreterm https://github.com/richardsonvix/scoop-koreterm
 scoop install koreterm/koreterm
 ```
 
@@ -114,8 +114,8 @@ any folder without installing.
 
 | Your PC                        | Installer                                                                                                                                          | Portable                                                                                                                                                 |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **x64** (Intel and AMD)        | [`koreterm-1.3.137-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-x64-setup.exe)     | [`koreterm-1.3.137-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-x64-portable.zip)     |
-| **ARM64** (Windows on Arm PCs) | [`koreterm-1.3.137-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-arm64-setup.exe) | [`koreterm-1.3.137-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.137/koreterm-1.3.137-windows-arm64-portable.zip) |
+| **x64** (Intel and AMD)        | [`koreterm-1.3.137-windows-x64-setup.exe`](https://github.com/richardsonvix/noctty_terminal/releases/download/v1.3.137/koreterm-1.3.137-windows-x64-setup.exe)     | [`koreterm-1.3.137-windows-x64-portable.zip`](https://github.com/richardsonvix/noctty_terminal/releases/download/v1.3.137/koreterm-1.3.137-windows-x64-portable.zip)     |
+| **ARM64** (Windows on Arm PCs) | [`koreterm-1.3.137-windows-arm64-setup.exe`](https://github.com/richardsonvix/noctty_terminal/releases/download/v1.3.137/koreterm-1.3.137-windows-arm64-setup.exe) | [`koreterm-1.3.137-windows-arm64-portable.zip`](https://github.com/richardsonvix/noctty_terminal/releases/download/v1.3.137/koreterm-1.3.137-windows-arm64-portable.zip) |
 
 > [!NOTE]
 > Releases are signed with a self-signed certificate, so Windows SmartScreen
@@ -225,7 +225,7 @@ You need:
 - Git for Windows
 
 ```powershell
-git clone https://github.com/amanthanvi/noctty.git
+git clone https://github.com/richardsonvix/noctty_terminal.git
 cd koreterm
 zig build -Demit-exe=true
 ```
@@ -256,8 +256,8 @@ Koreterm is an independent project and is not affiliated with Ghostty.
 Bug reports and focused pull requests are welcome. Please read
 [CONTRIBUTING.md](CONTRIBUTING.md) and [AI_POLICY.md](AI_POLICY.md) first.
 
-- **Questions and ideas:** [Discussions](https://github.com/amanthanvi/noctty/discussions)
-- **Bugs you can reproduce:** [Issues](https://github.com/amanthanvi/noctty/issues)
+- **Questions and ideas:** [Discussions](https://github.com/richardsonvix/noctty_terminal/discussions)
+- **Bugs you can reproduce:** [Issues](https://github.com/richardsonvix/noctty_terminal/issues)
 
 Pull requests are reviewed automatically by Greptile.
 

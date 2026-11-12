@@ -270,8 +270,8 @@ Assert-InteractiveWin11ExeExists -ExePath $conptyExe
 Remove-Item -LiteralPath $conptyScratch -Recurse -Force -ErrorAction SilentlyContinue
 
 $env:KORETERM_INTERACTIVE_MEASURE_AUMID = '1'
-Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.koreterm.measure' 'measurement process identity should follow the executable'
-Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.koreterm' 'measurement mode must retain the product notifier gate'
+Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.richardsonvix.koreterm.measure' 'measurement process identity should follow the executable'
+Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.richardsonvix.koreterm' 'measurement mode must retain the product notifier gate'
 $measureExe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 Assert-Equal $measureExe (Get-InteractiveWin11MeasureExePath $repoRoot) 'measurement mode should route the executable'
 Assert-Equal (Get-InteractiveWin11MeasureRepoForExe $measureExe) $repoRoot 'raw measurement executable should recover its repository'
@@ -334,8 +334,8 @@ try {
     foreach ($entry in $savedRoutingEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
 }
 $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $null
-Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.koreterm' 'standalone normal mode should retain product process identity'
-Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.koreterm' 'standalone normal mode should retain product notifier identity'
+Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.richardsonvix.koreterm' 'standalone normal mode should retain product process identity'
+Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.richardsonvix.koreterm' 'standalone normal mode should retain product notifier identity'
 Write-Host 'interactive-win11 helper tests: PASS'
 } finally {
     $env:KORETERM_INTERACTIVE_MEASURE_AUMID = $savedMeasureAumid

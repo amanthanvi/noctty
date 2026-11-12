@@ -303,9 +303,9 @@ jobs:
           ATTEST_SERVER_URL: ${{ github.server_url }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          if ($env:ATTEST_REPOSITORY -ne "amanthanvi/koreterm" -or
+          if ($env:ATTEST_REPOSITORY -ne "richardsonvix/noctty_terminal" -or
               $env:ATTEST_SERVER_URL -ne "https://github.com") {
-            throw "Release publication is restricted to amanthanvi/koreterm on https://github.com."
+            throw "Release publication is restricted to richardsonvix/noctty_terminal on https://github.com."
           }
           if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL -or
               -not $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN) {

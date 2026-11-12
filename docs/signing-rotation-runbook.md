@@ -166,7 +166,7 @@ certificate profile name, and OIDC federation described in ADR 0006 are set
 instead.
 
 ```powershell
-$repo = "amanthanvi/koreterm"
+$repo = "richardsonvix/noctty_terminal"
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\secure\koreterm-next.pfx")) |
   gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
 gh secret set WINDOWS_CODESIGN_PFX_PASSWORD --repo $repo --env release

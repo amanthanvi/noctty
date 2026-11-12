@@ -29,7 +29,7 @@ param(
         } elseif (-not [string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
             $env:GITHUB_REPOSITORY
         } else {
-            'amanthanvi/koreterm'
+            'richardsonvix/noctty_terminal'
         }
     ),
 

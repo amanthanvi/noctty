@@ -78,7 +78,7 @@ function Start-InteractiveWin11StateGuard {
     $paths = [ordered]@{
         Startup = Join-Path $LocalAppDataRoot 'koreterm\startup-attempts.json'
         ProductJumpList = Join-Path $destinations 'c2214d6ebc43ff3f.customDestinations-ms'
-        # Observed for io.github.amanthanvi.koreterm.measure in PR #393's
+        # Observed for io.github.richardsonvix.koreterm.measure in PR #393's
         # private-desktop batches (PR body, Validation). This exact file was
         # created and removed after those batches; never glob this directory.
         MeasureJumpList = Join-Path $destinations '251fcb42973017e3.customDestinations-ms'

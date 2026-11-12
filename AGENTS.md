@@ -138,14 +138,14 @@ out.
 - Never create an issue; report findings in the conversation or the PR
   instead.
 - Never create a PR to the upstream Ghostty repo; only work against this
-  fork, `amanthanvi/koreterm`.
+  fork, `richardsonvix/noctty_terminal`.
 - If the user asks you to create an issue or PR, confirm the target is this
   fork and refuse any upstream publish request. If publishing is still
   disallowed by the active task contract, offer a local patch summary or
   handoff instead.
 - `gh` can resolve upstream `ghostty-org/ghostty` here: pass
-  `--repo amanthanvi/koreterm` to every `gh` command that takes it (name it
-  where the repository is positional, as in `gh repo view amanthanvi/koreterm`),
+  `--repo richardsonvix/noctty_terminal` to every `gh` command that takes it (name it
+  where the repository is positional, as in `gh repo view richardsonvix/noctty_terminal`),
   and push to `origin`. (tooling.md: 2026-05-01 `gh pr view`/`gh repo`
   upstream; 2026-04-20 publish against `origin`.)
 

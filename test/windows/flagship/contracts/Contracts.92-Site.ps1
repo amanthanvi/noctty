@@ -362,7 +362,7 @@ if (process.env.KORETERM_SITE_FIXTURE_FAIL === "build-site-assets") process.exit
     foreach ($siteCase in $releaseCopyCases) {
         Remove-Item -LiteralPath $siteStepLog, $siteStepOutput, $siteStepSummary -ErrorAction Ignore
         [IO.File]::WriteAllText((Join-Path $siteStepFixtureRoot 'README.md'), $(if ($siteCase.Copy) {
-            "Latest stable release: [koreterm $($siteCase.Copy)](https://github.com/amanthanvi/noctty/releases/tag/v$($siteCase.Copy)), published 2026-10-20.`n"
+            "Latest stable release: [koreterm $($siteCase.Copy)](https://github.com/richardsonvix/noctty_terminal/releases/tag/v$($siteCase.Copy)), published 2026-10-20.`n"
         } else {
             "No release link.`n"
         }))
@@ -387,10 +387,10 @@ if (process.env.KORETERM_SITE_FIXTURE_FAIL === "build-site-assets") process.exit
         $siteHeld = $siteCase.Published -ceq 'false'
         if ($siteStepResult.ExitCode -ne 0 -or
             ($siteOutputLines -join "`n") -cne "published=$($siteCase.Published)" -or
-            ($siteCalls -join "`n") -cne 'gh release view --repo amanthanvi/koreterm --json tagName --jq .tagName' -or
+            ($siteCalls -join "`n") -cne 'gh release view --repo richardsonvix/noctty_terminal --json tagName --jq .tagName' -or
             $siteHeld -ne ($siteStepResult.Output -match '(?m)^::notice title=Site deploy held::README\.md names v') -or
             $siteHeld -ne ([IO.File]::Exists($siteStepSummary) -and [IO.File]::ReadAllText($siteStepSummary) -match '### Site deploy held')) {
-            throw "The release-copy hold ($siteCaseName) must query only amanthanvi/koreterm's latest release, write published=$($siteCase.Published), and explain a hold, and only a hold, in a notice and the job summary; it exited $($siteStepResult.ExitCode) with [$($siteOutputLines -join '; ')] after [$($siteCalls -join '; ')]: $($siteStepResult.Output.Trim())"
+            throw "The release-copy hold ($siteCaseName) must query only richardsonvix/noctty_terminal's latest release, write published=$($siteCase.Published), and explain a hold, and only a hold, in a notice and the job summary; it exited $($siteStepResult.ExitCode) with [$($siteOutputLines -join '; ')] after [$($siteCalls -join '; ')]: $($siteStepResult.Output.Trim())"
         }
     }
 }
@@ -460,7 +460,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw)
         }
-        Pattern = '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/koreterm''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all'
+        Pattern = '(?ms)GITHUB_REPOSITORY -cne ''richardsonvix/noctty_terminal''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all'
         Kind = 'Text'
         Description = 'the shared site gate binds both phases to a clean exact fork-local main head'
     }
@@ -520,7 +520,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify production provenance, domain, and bytes' -Source $siteDeployWorkflow)
         }
-        Pattern = '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://noctty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect'
+        Pattern = '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://github.com/richardsonvix/noctty_terminal\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect'
         Kind = 'Text'
         Description = 'production verification binds the canonical domain and zone redirect'
     }
@@ -574,7 +574,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteIndexText
         }
-        Pattern = '(?ms)property="og:image" content="https://noctty\.com/assets/koreterm-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/koreterm-social\.jpg"'
+        Pattern = '(?ms)property="og:image" content="https://github.com/richardsonvix/noctty_terminal\.com/assets/koreterm-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://github.com/richardsonvix/noctty_terminal\.com/assets/koreterm-social\.jpg"'
         Kind = 'Text'
         Description = 'social previews use a current raster large-image card with explicit dimensions'
     }
@@ -758,7 +758,7 @@ if ($immutablePagesOrigin.DnsSafeHost -cne
     throw 'Immutable Pages deployment origin was not preserved.'
 }
 foreach ($mutablePagesUrl in @(
-    'https://noctty.pages.dev/',
+    'https://github.com/richardsonvix/noctty_terminal.pages.dev/',
     'https://main.koreterm.pages.dev/'
 )) {
     $mutablePagesOriginRejected = $false

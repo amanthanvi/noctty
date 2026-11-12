@@ -246,7 +246,7 @@ Suggested state shape:
     "asset_kind": "installer",
     "asset_name": "koreterm-1.3.110-windows-x64-setup.exe",
     "asset_sha256": "<hex>",
-    "release_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.110",
+    "release_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.110",
     "stage_dir": "C:\\Users\\...\\updates\\1.3.110",
     "status": "ready",
     "downloaded_at": 0,

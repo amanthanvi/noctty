@@ -68,11 +68,11 @@ jobs:
           $path = Join-Path $PWD 'src/apprt/win32_aumid.zig'
           $text = [IO.File]::ReadAllText($path)
           if ($text.Contains('MEASUREMENT ONLY') -or $text.Contains('koreterm.measure')) { throw 'The AUMID measurement patch is already in the committed source.' }
-          $literal = '"io.github.amanthanvi.koreterm"'
+          $literal = '"io.github.richardsonvix.koreterm"'
           # aumid_wide, aumid_utf8 and the aumid_utf8 unit test; a new literal needs a decision here.
           $count = [regex]::Matches($text, [regex]::Escape($literal)).Count
           if ($count -ne 3) { throw "AUMID literal count changed: expected 3, found $count." }
-          $text = $text.Replace($literal, '"io.github.amanthanvi.koreterm.measure"')
+          $text = $text.Replace($literal, '"io.github.richardsonvix.koreterm.measure"')
           $signature = 'pub fn registerAumidDisplayName\(alloc: std\.mem\.Allocator, portable: bool\) void \{'
           if ([regex]::Matches($text, $signature).Count -ne 1) { throw 'AUMID isolation signature changed.' }
           $text = [regex]::Replace($text, $signature, '$0' + "`n    if (true) return; // MEASUREMENT ONLY")

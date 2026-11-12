@@ -88,11 +88,11 @@ In the app, **Certificates & secrets**, **Federated credentials**, **Add
 credential**:
 
 - scenario **GitHub Actions deploying Azure resources**;
-- organization `amanthanvi`, repository `koreterm`;
+- organization `richardsonvix`, repository `koreterm`;
 - entity type **Environment**, environment name `release`;
 - name `koreterm-release`.
 
-The subject must read `repo:amanthanvi/koreterm:environment:release` and the
+The subject must read `repo:richardsonvix/noctty_terminal:environment:release` and the
 audience `api://AzureADTokenExchange`. Do not create a client secret: the
 federated credential is the only way in, and only a job running in the
 `release` environment of this repository can use it.
@@ -171,7 +171,7 @@ never update in place have to reinstall by hand. This is the overlap step of
 ## 9. Switch the `release` environment
 
 ```powershell
-$repo = "amanthanvi/koreterm"
+$repo = "richardsonvix/noctty_terminal"
 gh variable set ARTIFACT_SIGNING_ENDPOINT --repo $repo --env release --body "https://eus.codesigning.azure.net"
 gh variable set ARTIFACT_SIGNING_ACCOUNT_NAME --repo $repo --env release --body "koretermsigning"
 gh variable set ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME --repo $repo --env release --body "koreterm"

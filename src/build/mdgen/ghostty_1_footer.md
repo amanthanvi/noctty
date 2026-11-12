@@ -4,7 +4,7 @@ _\$XDG_CONFIG_HOME/koreterm/config.ghostty_
 
 : Location of the default configuration file.
 
-_\$HOME/Library/Application Support/io.github.amanthanvi.koreterm/config.ghostty_
+_\$HOME/Library/Application Support/io.github.richardsonvix.koreterm/config.ghostty_
 
 : **On macOS**, location of the default configuration file. This location takes
 precedence over the XDG environment locations.
@@ -28,7 +28,7 @@ for configuration files.
 
 : Default location for configuration files.
 
-**$HOME/Library/Application Support/io.github.amanthanvi.koreterm**
+**$HOME/Library/Application Support/io.github.richardsonvix.koreterm**
 
 : **MACOS ONLY** default location for configuration files. This location takes
 precedence over the XDG environment locations.
@@ -52,11 +52,11 @@ destinations. Setting `GHOSTTY_LOG` to `false` will disable all destinations.
 
 # BUGS
 
-See GitHub issues: <https://github.com/amanthanvi/noctty/issues>
+See GitHub issues: <https://github.com/richardsonvix/noctty_terminal/issues>
 
 # AUTHOR
 
-Aman Thanvi and contributors <https://github.com/amanthanvi/noctty/graphs/contributors>
+Richardson and contributors <https://github.com/richardsonvix/noctty_terminal/graphs/contributors>
 
 # SEE ALSO
 

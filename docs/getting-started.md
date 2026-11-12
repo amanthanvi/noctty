@@ -8,14 +8,14 @@ newer; where there is none, koreterm draws text with its Direct3D 11 renderer
 ## Install with WinGet, Scoop or Chocolatey
 
 ```powershell
-winget install --id AmanThanvi.koreterm -e
+winget install --id Richardsonvix.koreterm -e
 ```
 
 WinGet runs the release installer, which does not add `koreterm` to PATH. Scoop
 uses the same release assets and checksums and does put `koreterm` on PATH:
 
 ```powershell
-scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop bucket add koreterm https://github.com/richardsonvix/scoop-koreterm
 scoop install koreterm/koreterm
 ```
 
@@ -255,4 +255,4 @@ Explorer entry, then delete the folder. Neither removes
 - [windows.md](windows.md): the Windows behavior reference
 - [automation.md](automation.md): drive koreterm from the CLI
 - [HACKING.md](../HACKING.md) and [CONTRIBUTING.md](../CONTRIBUTING.md)
-- [Discussions](https://github.com/amanthanvi/noctty/discussions): questions
+- [Discussions](https://github.com/richardsonvix/noctty_terminal/discussions): questions

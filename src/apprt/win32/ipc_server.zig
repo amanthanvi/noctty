@@ -48,9 +48,9 @@ const ForwardedArgIterator = struct {
 
 fn defaultIpcNamespace() []const u8 {
     return if (builtin.mode == .Debug)
-        "io.github.amanthanvi.koreterm-debug"
+        "io.github.richardsonvix.koreterm-debug"
     else
-        "io.github.amanthanvi.koreterm";
+        "io.github.richardsonvix.koreterm";
 }
 
 fn sanitizeIpcNamespace(alloc: Allocator, raw: ?[]const u8) ![]const u8 {

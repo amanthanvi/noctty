@@ -282,7 +282,7 @@ test("every pending-document exemption is still cited by something", () => {
   const cited = new Set(
     [
       ...trustHtml.matchAll(
-        /https:\/\/github\.com\/amanthanvi\/koreterm\/blob\/main\/([^"#]+)/g,
+        /https:\/\/github\.com\/richardsonvix\/koreterm\/blob\/main\/([^"#]+)/g,
       ),
     ].map((match) => match[1]),
   );
@@ -554,7 +554,7 @@ test("trust page fragment links point at real section ids", () => {
 test("trust page links to repository files that exist", (t) => {
   const linked = [
     ...trustHtml.matchAll(
-      /https:\/\/github\.com\/amanthanvi\/koreterm\/blob\/main\/([^"#]+)/g,
+      /https:\/\/github\.com\/richardsonvix\/koreterm\/blob\/main\/([^"#]+)/g,
     ),
   ].map((match) => match[1]);
   assert.ok(linked.length > 0);

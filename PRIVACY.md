@@ -2,10 +2,10 @@
 
 Last updated: 16 October 2026
 
-This policy covers Koreterm, the Windows terminal published by Aman Thanvi at
-[github.com/amanthanvi/noctty](https://github.com/amanthanvi/noctty): the app
+This policy covers Koreterm, the Windows terminal published by Richardson at
+[github.com/richardsonvix/noctty_terminal](https://github.com/richardsonvix/noctty_terminal): the app
 (installer, portable ZIP, and the `koreterm` command-line actions) and the
-[koreterm.com](https://noctty.com) website. Package managers that install the
+[koreterm.com](https://github.com/richardsonvix/noctty_terminal) website. Package managers that install the
 published release files, such as Scoop or WinGet, install the same app.
 
 ## In short
@@ -206,14 +206,14 @@ dumps, and SSH host cache go there.
 Koreterm writes these registry entries:
 
 - **App identity:**
-  `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm` holds
+  `HKCU\Software\Classes\AppUserModelId\io.github.richardsonvix.koreterm` holds
   the app's name, the path of its icon, and a flag that lists it in Windows'
   notification settings. An installed Koreterm writes it at every start. From
   1.3.133 a portable copy writes it only if the key does not exist yet (and the
   copy has its `koreterm.ico` beside it), and never changes an existing one;
   earlier portable copies write it at every start like an installed one. A
   portable start that is cut off at the wrong moment can leave a
-  `io.github.amanthanvi.koreterm.pending-<hex>` key beside it.
+  `io.github.richardsonvix.koreterm.pending-<hex>` key beside it.
 - **Installer:** Start menu (and optional desktop) shortcuts, the "Open koreterm
   here" Explorer menu, the default-terminal handoff classes, and its uninstall
   entry. The uninstaller removes them.
@@ -252,10 +252,10 @@ installer created. It does not remove your data. To remove everything:
    folders in the same places too if Koreterm is the only program that used
    them.
 3. Delete the registry key
-   `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm`, and
-   any `io.github.amanthanvi.koreterm.pending-<hex>` key beside it.
+   `HKCU\Software\Classes\AppUserModelId\io.github.richardsonvix.koreterm`, and
+   any `io.github.richardsonvix.koreterm.pending-<hex>` key beside it.
    Windows may also keep Koreterm's notification settings under
-   `HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\io.github.amanthanvi.koreterm`.
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\io.github.richardsonvix.koreterm`.
 4. In the `.terminfo` folder in your home directory, delete
    `78\xterm-ghostty`, `67\ghostty`, and `.koreterm-installed`. Other programs
    may use that folder, so do not delete it whole.
@@ -284,7 +284,7 @@ security policy blocks them.
 
 Changes to this policy are made in this file, so its history shows every
 change. Ask questions about it in
-[Discussions](https://github.com/amanthanvi/noctty/discussions), and report a
-privacy problem on the [issue tracker](https://github.com/amanthanvi/noctty/issues).
+[Discussions](https://github.com/richardsonvix/noctty_terminal/discussions), and report a
+privacy problem on the [issue tracker](https://github.com/richardsonvix/noctty_terminal/issues).
 Report security vulnerabilities privately, as described in
 [SECURITY.md](SECURITY.md).

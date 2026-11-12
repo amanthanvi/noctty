@@ -220,8 +220,8 @@ if (-not $Worker) {
         $binaryBytes = [IO.File]::ReadAllBytes($ExePath)
         $binary = [Text.Encoding]::Unicode.GetString($binaryBytes)
         $oddBinary = if ($binaryBytes.Length -gt 1) { [Text.Encoding]::Unicode.GetString($binaryBytes, 1, $binaryBytes.Length - 1) } else { '' }
-        if ((-not $binary.Contains("io.github.amanthanvi.koreterm.measure`0") -and -not $oddBinary.Contains("io.github.amanthanvi.koreterm.measure`0")) -or
-            $binary.Contains("io.github.amanthanvi.koreterm`0") -or $oddBinary.Contains("io.github.amanthanvi.koreterm`0")) {
+        if ((-not $binary.Contains("io.github.richardsonvix.koreterm.measure`0") -and -not $oddBinary.Contains("io.github.richardsonvix.koreterm.measure`0")) -or
+            $binary.Contains("io.github.richardsonvix.koreterm`0") -or $oddBinary.Contains("io.github.richardsonvix.koreterm`0")) {
             throw 'Measurement AUMID required, with no product AUMID literal; no launch performed.'
         }
         $binary = $null; $oddBinary = $null; $binaryBytes = $null
@@ -234,7 +234,7 @@ if (-not $Worker) {
     }
     # Measurement builds promise to suppress registration; ordinary product
     # builds can legitimately create their display-name registration.
-    $registrationIds = if ($RequireMeasurementAumid) { @('io.github.amanthanvi.koreterm', 'io.github.amanthanvi.koreterm.measure') } else { @() }
+    $registrationIds = if ($RequireMeasurementAumid) { @('io.github.richardsonvix.koreterm', 'io.github.richardsonvix.koreterm.measure') } else { @() }
     $registrationsBefore = @{}; foreach ($id in $registrationIds) { $registrationsBefore[$id] = Get-AumidRegistrationFingerprint $id }
     # GetFolderPath deliberately ignores redirected APPDATA, as PSReadLine does.
     $historyRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)

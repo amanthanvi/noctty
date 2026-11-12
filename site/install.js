@@ -5,8 +5,8 @@
 
 const COPY_RESET_MS = 1400;
 export const INSTALL_COMMANDS = {
-  winget: 'winget install --id AmanThanvi.koreterm -e',
-  'scoop-bucket': 'scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty',
+  winget: 'winget install --id Richardsonvix.koreterm -e',
+  'scoop-bucket': 'scoop bucket add koreterm https://github.com/richardsonvix/scoop-koreterm',
   'scoop-install': 'scoop install koreterm/koreterm',
   choco: 'choco install koreterm',
 };

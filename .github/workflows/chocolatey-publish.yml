@@ -58,8 +58,8 @@ jobs:
           VERSION_INPUT: ${{ inputs.version }}
         shell: pwsh
         run: |
-          if ($env:GH_REPOSITORY -cne 'amanthanvi/koreterm') {
-            throw 'Chocolatey publishing is restricted to amanthanvi/koreterm.'
+          if ($env:GH_REPOSITORY -cne 'richardsonvix/noctty_terminal') {
+            throw 'Chocolatey publishing is restricted to richardsonvix/noctty_terminal.'
           }
           if ($env:WORKFLOW_REF -cne "refs/heads/$env:DEFAULT_BRANCH") {
             throw "Run this workflow from $env:DEFAULT_BRANCH, not $env:WORKFLOW_REF."

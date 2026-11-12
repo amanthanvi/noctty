@@ -3,7 +3,7 @@
 // below the compiled version.
 
 const DEFAULT_NC_VERSION = '1.3.137';
-const NC_REPO = 'amanthanvi/koreterm';
+const NC_REPO = 'richardsonvix/noctty_terminal';
 const CACHE_KEY = 'nc-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const RELEASE_FETCH_TIMEOUT_MS = 4000;

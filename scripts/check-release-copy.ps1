@@ -135,7 +135,7 @@ $readme = Get-Text -RelativePath "README.md"
 $latestVersion = $null
 if ($null -eq $readme) {
     # Get-Text already recorded the missing-file failure.
-} elseif ($readme -match 'koreterm\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/koreterm/releases/tag/v\1\)') {
+} elseif ($readme -match 'koreterm\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/richardsonvix/noctty_terminal/releases/tag/v\1\)') {
     $latestVersion = $Matches[1]
 } else {
     Add-Failure "README.md: could not find a self-consistent latest stable release link."
@@ -229,7 +229,7 @@ if ($CheckRemoteLatest) {
     } elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Add-Failure "Cannot check remote latest release because gh is not installed."
     } else {
-        $ghOutput = & gh release view --repo amanthanvi/koreterm --json tagName,publishedAt,assets
+        $ghOutput = & gh release view --repo richardsonvix/noctty_terminal --json tagName,publishedAt,assets
         if ($LASTEXITCODE -ne 0) {
             Add-Failure "gh release view failed: $ghOutput"
         } else {

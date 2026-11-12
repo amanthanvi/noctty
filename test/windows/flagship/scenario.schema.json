@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://noctty.com/schemas/verification/scenario.v1.json",
+  "$id": "https://github.com/richardsonvix/noctty_terminal/schemas/verification/scenario.v1.json",
   "title": "koreterm verification scenario v1",
   "type": "object",
   "additionalProperties": false,

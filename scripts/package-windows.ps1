@@ -110,7 +110,7 @@ $signingDescription = if ($env:WINDOWS_CODESIGN_DESCRIPTION) {
 $signingUrl = if ($env:WINDOWS_CODESIGN_URL) {
     $env:WINDOWS_CODESIGN_URL
 } else {
-    "https://github.com/amanthanvi/noctty"
+    "https://github.com/richardsonvix/noctty_terminal"
 }
 $trustSelfSignedSigningCert = if ($env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED) {
     $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED

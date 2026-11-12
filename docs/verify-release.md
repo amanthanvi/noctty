@@ -43,8 +43,8 @@ release workflow:
 
 ```powershell
 gh attestation verify .\koreterm-<version>-windows-<arch>-portable.zip `
-  --repo amanthanvi/koreterm `
-  --signer-workflow amanthanvi/koreterm/.github/workflows/release.yml
+  --repo richardsonvix/noctty_terminal `
+  --signer-workflow richardsonvix/noctty_terminal/.github/workflows/release.yml
 ```
 
 ## 3. Was it signed by the pinned publisher key?
@@ -60,7 +60,7 @@ It accepts v1.3.124 and later. Run it in PowerShell 7:
 
 ```powershell
 $version = "<1.3.124-or-later>"
-git clone --branch "v$version" --depth 1 https://github.com/amanthanvi/noctty.git
+git clone --branch "v$version" --depth 1 https://github.com/richardsonvix/noctty_terminal.git
 Set-Location .\koreterm
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 -Version $version
@@ -137,7 +137,7 @@ try {
   }
   if ($targets.Count -eq 0) { throw "Download an installer or portable ZIP first." }
   $verifierRoot = Join-Path $workRoot "repository"
-  git clone --no-checkout https://github.com/amanthanvi/noctty.git $verifierRoot
+  git clone --no-checkout https://github.com/richardsonvix/noctty_terminal.git $verifierRoot
   git -C $verifierRoot checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10
   . (Join-Path $verifierRoot "scripts\signing-trust.ps1")
   $expectedSpki = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"

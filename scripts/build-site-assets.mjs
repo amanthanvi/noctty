@@ -39,7 +39,7 @@ const sha256Hex = (text) =>
   crypto.createHash("sha256").update(text, "utf8").digest("hex");
 const sha256Base64 = (text) =>
   crypto.createHash("sha256").update(text, "utf8").digest("base64");
-const siteOrigin = "https://noctty.com";
+const siteOrigin = "https://github.com/richardsonvix/noctty_terminal";
 
 function readSiteFile(relativePath, directory = siteRoot) {
   const text = fs.readFileSync(path.join(directory, relativePath), "utf8");

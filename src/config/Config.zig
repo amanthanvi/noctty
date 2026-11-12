@@ -1660,7 +1660,7 @@ title: ?[:0]const u8 = null,
 /// `koreterm +new-window` will only target processes launched with the same
 /// `class` value.
 ///
-/// The default is `io.github.amanthanvi.koreterm`.
+/// The default is `io.github.richardsonvix.koreterm`.
 class: ?[:0]const u8 = null,
 
 /// If `true`, koreterm will prefer reusing an existing instance namespace and

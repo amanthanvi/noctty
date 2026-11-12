@@ -1297,7 +1297,7 @@ per-user state alone. It builds no taskbar jump list, so the list Windows
 keeps for the AppUserModelID stays the installed app's (whose entries start
 the installed `koreterm.exe`; inferred from the design, not observed). It
 writes the
-`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm`
+`HKCU\Software\Classes\AppUserModelId\io.github.richardsonvix.koreterm`
 registration only when that key does not exist, with the same values an
 installed copy writes (its own `koreterm.ico` as the icon). Microsoft documents
 that registration as required for toasts from an unpackaged app without a
@@ -1908,7 +1908,7 @@ With `window-show-tab-bar = never` and the OpenGL renderer, a fullscreen
 window covers its monitor plus one physical pixel. Windows can take a window
 whose OpenGL surface covers a monitor exactly out of desktop composition, and
 then every switch back into it (Alt+Tab, an IME candidate window) flashes the
-screen black ([#598](https://github.com/amanthanvi/noctty/issues/598)). The
+screen black ([#598](https://github.com/richardsonvix/noctty_terminal/issues/598)). The
 extra pixel goes past the first of the bottom, right, top and left edges that
 has no other monitor next to it, so it lands on no screen. A monitor that
 touches only at a corner does not count. With a monitor on every side, or

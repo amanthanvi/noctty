@@ -49,7 +49,7 @@ try {
     # fails this one. (A rebuild of the same commit, or of a commit the tag was
     # moved to, still passes both; the WinGet manifest's InstallerSha256 values are
     # the independent record to compare.)
-    $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) { 'amanthanvi/koreterm' } else { $env:GITHUB_REPOSITORY }
+    $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) { 'richardsonvix/noctty_terminal' } else { $env:GITHUB_REPOSITORY }
     $tagCommit = ((& gh api "repos/$repository/commits/v$Version" --jq .sha) | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $tagCommit -cnotmatch '\A[0-9a-f]{40}\z') {
         throw "Could not resolve the commit of tag v$Version in $repository."

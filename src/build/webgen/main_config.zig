@@ -15,7 +15,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         \\---
         \\title: Reference
         \\description: Reference of all koreterm configuration options.
-        \\editOnGithubLink: https://github.com/amanthanvi/noctty/edit/main/src/config/Config.zig
+        \\editOnGithubLink: https://github.com/richardsonvix/noctty_terminal/edit/main/src/config/Config.zig
         \\---
         \\
         \\This is a reference of all koreterm configuration options. These

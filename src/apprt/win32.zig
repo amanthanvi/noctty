@@ -9970,7 +9970,7 @@ test "win32 App delivery validates owned tokens by kind HWND and single consumpt
 /// registered with COM: the tests call `Activate` through the class factory
 /// the way COM does, with the App's own sink bound.
 const ToastActivatorDeliveryTest = struct {
-    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
+    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");
 
     fn launchFor(alloc: Allocator, target: win32_toast_activation.ActivationTarget) ![:0]u16 {
         const launch = try win32_toast_activation.buildLaunchArg(alloc, target);

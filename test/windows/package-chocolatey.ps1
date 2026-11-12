@@ -116,11 +116,11 @@ try {
     if ($iconUri.Host -match '(?i)(^|\.)(github\.com|githubusercontent\.com|rawgit\.com)$') {
         throw "Generated nuspec iconUrl must not be served from GitHub: $iconUri"
     }
-    if ($iconUri.AbsoluteUri -ceq 'https://noctty.com/assets/favicon.svg' -and
+    if ($iconUri.AbsoluteUri -ceq 'https://github.com/richardsonvix/noctty_terminal/assets/favicon.svg' -and
         -not (Test-Path -LiteralPath (Join-Path $repoRoot 'site/assets/favicon.svg') -PathType Leaf)) {
         throw 'Generated nuspec iconUrl names site/assets/favicon.svg, which the site no longer ships.'
     }
-    $releaseSourceUrl = "https://github.com/amanthanvi/noctty/blob/v$Version/scripts/package-package-managers.ps1"
+    $releaseSourceUrl = "https://github.com/richardsonvix/noctty_terminal/blob/v$Version/scripts/package-package-managers.ps1"
     if ($metadataNode.SelectSingleNode('n:packageSourceUrl', $namespaceManager).InnerText -cne $releaseSourceUrl) {
         throw "Generated nuspec packageSourceUrl must name the release tag's generator: $releaseSourceUrl"
     }
@@ -147,7 +147,7 @@ try {
     }
 
     $installScript = Get-Content -LiteralPath $installScriptPath -Raw
-    $expectedSetupUrl = "https://github.com/amanthanvi/noctty/releases/download/v$Version/$setupName"
+    $expectedSetupUrl = "https://github.com/richardsonvix/noctty_terminal/releases/download/v$Version/$setupName"
     foreach ($expectedText in @(
         $setupSha256,
         $expectedSetupUrl,
@@ -192,7 +192,7 @@ try {
             "$dualPortableSha256 *$dualPortableName"
         )
         $dualInstallers[$dualArchitecture] = @{
-            Url = "https://github.com/amanthanvi/noctty/releases/download/v$dualVersion/$dualSetupName"
+            Url = "https://github.com/richardsonvix/noctty_terminal/releases/download/v$dualVersion/$dualSetupName"
             Checksum = $dualSetupSha256
         }
     }
@@ -256,7 +256,7 @@ try {
         function Get-ItemProperty {
             [CmdletBinding()]
             param([string] $Path, [string] $LiteralPath, [string[]] $Name)
-            if ($Path -ceq 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.amanthanvi.winghostty_is1') {
+            if ($Path -ceq 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.richardsonvix.koreterm_is1') {
                 if ($Koreterm.InstallLocationUser) { [pscustomobject] @{ InstallLocation = $Koreterm.InstallLocationUser } }
             }
             elseif ($LiteralPath -eq 'HKCU:\Console\%%Startup') {
@@ -276,7 +276,7 @@ try {
             $base | Add-Member -MemberType ScriptMethod -Name Close -Value { }
             $base | Add-Member -MemberType ScriptMethod -Name OpenSubKey -Value {
                 param([string] $SubKey)
-                if ($SubKey -cne 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.amanthanvi.winghostty_is1') {
+                if ($SubKey -cne 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\io.github.richardsonvix.koreterm_is1') {
                     $script:ops += "registry read of $SubKey"
                     return
                 }
@@ -513,11 +513,11 @@ try {
     $resubmitNamespaces = [System.Xml.XmlNamespaceManager]::new($resubmitNuspec.NameTable)
     $resubmitNamespaces.AddNamespace('n', $nuspecNamespace)
     $resubmitSourceUrl = $resubmitNuspec.SelectSingleNode('/n:package/n:metadata/n:packageSourceUrl', $resubmitNamespaces).InnerText
-    if ($resubmitSourceUrl -cne 'https://github.com/amanthanvi/noctty/blob/0123456789abcdef0123456789abcdef01234567/scripts/package-package-managers.ps1') {
+    if ($resubmitSourceUrl -cne 'https://github.com/richardsonvix/noctty_terminal/blob/0123456789abcdef0123456789abcdef01234567/scripts/package-package-managers.ps1') {
         throw "A repacked nuspec must name the generator commit it was built with, got: $resubmitSourceUrl"
     }
     if ($resubmitNuspec.SelectSingleNode('/n:package/n:metadata/n:releaseNotes', $resubmitNamespaces).InnerText -cne
-        "https://github.com/amanthanvi/noctty/releases/tag/v$Version") {
+        "https://github.com/richardsonvix/noctty_terminal/releases/tag/v$Version") {
         throw 'A repacked nuspec must keep pointing at the original release.'
     }
 

@@ -12,7 +12,7 @@ at `$XDG_CONFIG_HOME/koreterm/config.ghostty`, which defaults to `~/.config/kore
 if the [XDG environment is not set](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html).
 
 **If you are using macOS, the configuration file can also be placed at
-`$HOME/Library/Application Support/io.github.amanthanvi.koreterm/config.ghostty`.** This is the
+`$HOME/Library/Application Support/io.github.richardsonvix.koreterm/config.ghostty`.** This is the
 default configuration location for macOS. It will be searched before any of the
 XDG environment locations listed above.
 
@@ -98,11 +98,11 @@ logs sent to `stderr` may be stored by the system and made available for later
 retrieval.
 
 On Linux if koreterm is launched by the default `systemd` user service, you can use
-`journald` to see logs: `journalctl --user --unit app-io.github.amanthanvi.koreterm.service`.
+`journald` to see logs: `journalctl --user --unit app-io.github.richardsonvix.koreterm.service`.
 
 On macOS logging to the macOS unified log is available and enabled by default.
 --Use the system `log` CLI to view koreterm logs: `sudo log stream --level debug
---predicate 'subsystem=="io.github.amanthanvi.koreterm"'`.
+--predicate 'subsystem=="io.github.richardsonvix.koreterm"'`.
 
 koreterm logging can be configured in two ways. The first is by what
 optimization level koreterm is compiled with. If koreterm is compiled with `Debug`

@@ -343,7 +343,7 @@ taskbar button); close it. Then end koreterm's
 process in Task Manager while one of its toasts is in Action Center, and click
 that entry: one koreterm window opens (with the session restored if that is
 on) and comes forward. Uninstall, then check that
-`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.koreterm` has no
+`HKCU\Software\Classes\AppUserModelId\io.github.richardsonvix.koreterm` has no
 `CustomActivator` value and `Software\Classes\CLSID\{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}`
 exists under neither HKLM nor HKCU. Then revert to the clean snapshot and repeat with the portable copy only:
 it creates the AppUserModelID registration where none exists

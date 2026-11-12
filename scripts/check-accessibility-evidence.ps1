@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Get-RepoRoot
 $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
-    'amanthanvi/koreterm'
+    'richardsonvix/noctty_terminal'
 } else {
     $env:GITHUB_REPOSITORY
 }

@@ -18,8 +18,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/koreterm') {
-    throw 'Site deployment is restricted to amanthanvi/koreterm.'
+if ($env:GITHUB_REPOSITORY -cne 'richardsonvix/noctty_terminal') {
+    throw 'Site deployment is restricted to richardsonvix/noctty_terminal.'
 }
 $originOutput = git remote get-url origin
 if ($LASTEXITCODE -ne 0) {
@@ -27,8 +27,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 $origin = ([string]($originOutput -join "`n")).Trim()
 if ($origin -cnotin @(
-    'https://github.com/amanthanvi/noctty',
-    'https://github.com/amanthanvi/noctty.git'
+    'https://github.com/richardsonvix/noctty_terminal',
+    'https://github.com/richardsonvix/noctty_terminal.git'
 )) {
     throw 'Unexpected origin remote for production site deployment.'
 }

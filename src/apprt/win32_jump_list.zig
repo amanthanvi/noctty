@@ -3320,5 +3320,5 @@ test "jump_list property keys and AUMID match Windows shell contracts" {
         GUID.parse("{F29F85E0-4FF9-1068-AB91-08002B27B3D9}"),
         PKEY_Title.fmtid,
     );
-    try std.testing.expectEqualStrings("io.github.amanthanvi.koreterm", win32_aumid.aumid_utf8);
+    try std.testing.expectEqualStrings("io.github.richardsonvix.koreterm", win32_aumid.aumid_utf8);
 }

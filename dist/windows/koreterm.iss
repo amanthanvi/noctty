@@ -3,8 +3,8 @@
 ; users). It intentionally keeps the pre-rename WingHostty value so
 ; existing installs upgrade in-place instead of installing side-by-side.
 ; Do not "fix" this to the new brand.
-#define AppId "io.github.amanthanvi.winghostty"
-#define AppUserModelId "io.github.amanthanvi.koreterm"
+#define AppId "io.github.richardsonvix.koreterm"
+#define AppUserModelId "io.github.richardsonvix.koreterm"
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
 #endif
@@ -25,10 +25,10 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVersion={#MyAppVersion}
-AppPublisher=Aman Thanvi
-AppPublisherURL=https://github.com/amanthanvi/noctty
-AppSupportURL=https://github.com/amanthanvi/noctty/issues
-AppUpdatesURL=https://github.com/amanthanvi/noctty/releases
+AppPublisher=Richardson
+AppPublisherURL=https://github.com/richardsonvix/noctty_terminal
+AppSupportURL=https://github.com/richardsonvix/noctty_terminal/issues
+AppUpdatesURL=https://github.com/richardsonvix/noctty_terminal/releases
 DefaultDirName={autopf}\koreterm
 DefaultGroupName=koreterm
 DisableProgramGroupPage=yes
@@ -65,7 +65,7 @@ VersionInfoVersion={#MyAppVersion}
 VersionInfoTextVersion={#MyAppVersion}
 VersionInfoProductVersion={#MyAppVersion}
 VersionInfoProductTextVersion={#MyAppVersion}
-VersionInfoCompany=Aman Thanvi
+VersionInfoCompany=Richardson
 VersionInfoDescription=koreterm Setup
 VersionInfoProductName=koreterm
 VersionInfoOriginalFileName=koreterm-{#MyAppVersion}-windows-{#PackageArch}-setup.exe

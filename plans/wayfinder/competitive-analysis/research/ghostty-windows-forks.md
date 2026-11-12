@@ -141,7 +141,7 @@ mitchellh says libghostty "backs more than a dozen terminal projects"
 and predicts libghostty users "will dwarf" GUI users by mid-2027
 ([HN](https://news.ycombinator.com/item?id=47207472)).
 
-**Trademark (load-bearing).** In #12371, Crypto-Spartan asked (Jul 12, 2026) "has anyone used github.com/amanthanvi/noctty?" and
+**Trademark (load-bearing).** In #12371, Crypto-Spartan asked (Jul 12, 2026) "has anyone used github.com/richardsonvix/noctty_terminal?" and
 collaborator pluiedev replied the same day: "Note that projects
 unaffiliated with the Ghostty project must not use 'Ghostty' as a part
 of their branding, since it's a trademark owned by our nonprofit and

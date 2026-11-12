@@ -7,7 +7,7 @@ yet carried out, it says so.
 
 ## Who may sign
 
-Aman Thanvi (GitHub `amanthanvi`), the sole maintainer, is the only person who
+Richardson (GitHub `richardsonvix`), the sole maintainer, is the only person who
 may sign a Koreterm release. No other person, organisation, or automated system
 is authorised to sign anything under the Koreterm name.
 

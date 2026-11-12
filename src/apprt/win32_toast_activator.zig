@@ -406,7 +406,7 @@ test "toast activator Activate hands the launch string to the bound sink only" {
     try std.testing.expectEqual(com.E_NOINTERFACE, factory.vtbl.CreateInstance(&factory, null, &IID_IClassFactory, &unknown));
     try std.testing.expectEqual(CLASS_E_NOAGGREGATION, factory.vtbl.CreateInstance(&factory, @ptrCast(&factory), &com.IID_IUnknown, &unknown));
 
-    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.koreterm");
+    const aumid = std.unicode.utf8ToUtf16LeStringLiteral("io.github.richardsonvix.koreterm");
     const launch = std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=7&pid=12&action=focus");
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, launch, null, 0));
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, null, null, 0));

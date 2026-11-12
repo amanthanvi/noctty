@@ -13,7 +13,7 @@
 
         // Example of what a URL-based dependency looks like:
         // .ghostty = .{
-        //     .url = "https://github.com/amanthanvi/noctty/archive/COMMIT.tar.gz",
+        //     .url = "https://github.com/richardsonvix/noctty_terminal/archive/COMMIT.tar.gz",
         //     .hash = "N-V-__8AAMVLTABmYkLqhZPLXnMl-KyN38R8UVYqGrxqO36s",
         // },
     },

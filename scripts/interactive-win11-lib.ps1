@@ -5,8 +5,8 @@ function Test-InteractiveWin11MeasureMode {
 }
 
 function Get-InteractiveWin11ProcessAumid {
-    if (Test-InteractiveWin11MeasureMode) { return 'io.github.amanthanvi.koreterm.measure' }
-    return 'io.github.amanthanvi.koreterm'
+    if (Test-InteractiveWin11MeasureMode) { return 'io.github.richardsonvix.koreterm.measure' }
+    return 'io.github.richardsonvix.koreterm'
 }
 
 function Get-InteractiveWin11ToastAumid {
@@ -14,7 +14,7 @@ function Get-InteractiveWin11ToastAumid {
     # when the process/jump-list identity is isolated. Keep the release gate's
     # product notifier and product notification setting; do not substitute a
     # potentially unregistered measurement notifier or accept its fallback.
-    return 'io.github.amanthanvi.koreterm'
+    return 'io.github.richardsonvix.koreterm'
 }
 
 function Get-InteractiveWin11MeasureRepoForExe {

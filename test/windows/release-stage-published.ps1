@@ -123,7 +123,7 @@ exit 2
     $result = Invoke-Stager -SourceRef 'abcdef0'
     $attestations = @($result.GhCalls | Where-Object { $_ -like 'attestation verify *' })
     Assert-Case 'both installers are verified against the tag commit' ($result.ExitCode -eq 0 -and $attestations.Count -eq 2 -and
-        @($attestations | Where-Object { $_ -match ('--source-digest ' + $tagCommit + '$') -and $_ -match '--signer-workflow amanthanvi/koreterm/\.github/workflows/release\.yml' }).Count -eq 2 -and
+        @($attestations | Where-Object { $_ -match ('--source-digest ' + $tagCommit + '$') -and $_ -match '--signer-workflow richardsonvix/noctty_terminal/\.github/workflows/release\.yml' }).Count -eq 2 -and
         ($attestations -join "`n") -match 'windows-x64-setup\.exe' -and ($attestations -join "`n") -match 'windows-arm64-setup\.exe') $result
     $stagedFiles = foreach ($architecture in @('x64', 'arm64')) {
         foreach ($kind in @('setup', 'portable', 'checksums')) {

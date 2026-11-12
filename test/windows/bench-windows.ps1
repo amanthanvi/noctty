@@ -2413,7 +2413,7 @@ else { 'pass' }
 
 $exeHash = if ($script:adapter.Installed) { Get-BenchFileSha256 -Path $script:adapter.ExePath } else { $null }
 $evidence = [pscustomobject][ordered]@{
-    schema_version = 'io.github.amanthanvi.koreterm.bench-evidence.v1'
+    schema_version = 'io.github.richardsonvix.koreterm.bench-evidence.v1'
     generated_at = [DateTime]::UtcNow.ToString('o')
     status = $topStatus
     machine = $machine

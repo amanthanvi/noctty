@@ -583,8 +583,8 @@ if (-not $WorkerDesktop) {
     }
     # A build identity check, not a substitute for the caller's measurement-patch verification.
     $binary = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($PortableExe))
-    Assert-Contract ($binary.Contains("io.github.amanthanvi.koreterm.measure`0")) 'Measurement AUMID literal missing.'
-    Assert-Contract (-not $binary.Contains("io.github.amanthanvi.koreterm`0")) `
+    Assert-Contract ($binary.Contains("io.github.richardsonvix.koreterm.measure`0")) 'Measurement AUMID literal missing.'
+    Assert-Contract (-not $binary.Contains("io.github.richardsonvix.koreterm`0")) `
         'Product AUMID literal remains (check the measurement toast AUMID as well).'
     $binary = $null
     Assert-Contract (-not $OutputDirectory.StartsWith($stage.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) `

@@ -294,7 +294,7 @@ function ConvertTo-PublicBaseUri {
         throw 'Deployment URL is not an immutable koreterm Pages origin.'
     }
     if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'koreterm.com') {
-        throw 'Canonical URL must be https://noctty.com/.'
+        throw 'Canonical URL must be https://github.com/richardsonvix/noctty_terminal/.'
     }
     return $uri
 }
@@ -573,15 +573,15 @@ function Assert-WwwRedirectContract {
 
     $suffix = "/__koreterm_redirect_$($Commit.Substring(0, 12))" +
         "?koreterm_deployment=$([Uri]::EscapeDataString($Id))"
-    $source = [Uri]::new("https://www.noctty.com$suffix")
-    $expected = [Uri]::new("https://noctty.com$suffix")
+    $source = [Uri]::new("https://github.com/richardsonvix/noctty_terminal$suffix")
+    $expected = [Uri]::new("https://github.com/richardsonvix/noctty_terminal$suffix")
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $source)
     $response = $null
     try {
         $response = $publicClient.SendAsync($request).GetAwaiter().GetResult()
         if ([int]$response.StatusCode -ne 301 -or
             $null -eq $response.Headers.Location) {
-            throw 'www.noctty.com is not configured with the required zone-level 301 redirect.'
+            throw 'github.com/richardsonvix/noctty_terminal is not configured with the required zone-level 301 redirect.'
         }
         $location = if ($response.Headers.Location.IsAbsoluteUri) {
             $response.Headers.Location
@@ -589,11 +589,11 @@ function Assert-WwwRedirectContract {
             [Uri]::new($source, $response.Headers.Location)
         }
         if ($location.AbsoluteUri -cne $expected.AbsoluteUri) {
-            throw 'www.noctty.com redirect does not preserve the path and query at the apex.'
+            throw 'github.com/richardsonvix/noctty_terminal redirect does not preserve the path and query at the apex.'
         }
     }
     catch {
-        if ($_.Exception.Message -like 'www.noctty.com*') { throw }
+        if ($_.Exception.Message -like 'github.com/richardsonvix/noctty_terminal*') { throw }
         throw 'Unable to verify the www zone-level redirect.'
     }
     finally {
@@ -717,7 +717,7 @@ try {
                     throw 'www redirect verification requires CanonicalBaseUrl.'
                 }
                 Assert-WwwRedirectContract -Id $DeploymentId -Commit $ExpectedCommit
-                [void]$verifiedHosts.Add('www.noctty.com')
+                [void]$verifiedHosts.Add('github.com/richardsonvix/noctty_terminal')
             }
 
             $manifestHash = Get-FileSha256Lower `

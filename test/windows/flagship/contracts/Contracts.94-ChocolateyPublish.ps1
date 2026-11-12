@@ -115,7 +115,7 @@ function Test-ChocolateyPublishWorkflow {
     }
     $metaStep = $steps['Check the version and the workflow commit']
     foreach ($required in @(
-            "if (`$env:GH_REPOSITORY -cne 'amanthanvi/koreterm')",
+            "if (`$env:GH_REPOSITORY -cne 'richardsonvix/noctty_terminal')",
             'if ($env:WORKFLOW_REF -cne "refs/heads/$env:DEFAULT_BRANCH")',
             "if (`$env:VERSION_INPUT -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+\z')",
             'if ($head -ne $env:WORKFLOW_SHA -or $head -ne $defaultHead)',

@@ -746,7 +746,7 @@ function Test-ReleaseInteractiveResultSelectionContract {
     try {
         [System.IO.Directory]::CreateDirectory($probeRoot) | Out-Null
         $env:RUNNER_TEMP = $probeRoot
-        $env:GH_REPOSITORY = 'amanthanvi/koreterm'
+        $env:GH_REPOSITORY = 'richardsonvix/noctty_terminal'
         $single = Invoke-SelectionFixture -DuplicateComposite $false
         $duplicate = Invoke-SelectionFixture -DuplicateComposite $true
         return $null -eq $single.Message -and

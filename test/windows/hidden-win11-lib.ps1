@@ -518,9 +518,9 @@ function Get-RealStateFingerprints {
 # build carries ".measure" after it (apply_aumid_isolate.py, never committed).
 function Assert-MeasureAumid([string] $Exe, [switch] $AllowProductAumid) {
     if ($AllowProductAumid) { return }
-    $needle = [Text.Encoding]::Unicode.GetBytes('io.github.amanthanvi.koreterm.measure')
+    $needle = [Text.Encoding]::Unicode.GetBytes('io.github.richardsonvix.koreterm.measure')
     if (-not [HiddenWin]::ContainsBytes([IO.File]::ReadAllBytes($Exe), $needle)) {
-        throw 'koreterm.exe does not carry the measurement AppUserModelID (io.github.amanthanvi.koreterm.measure). A launch would replace the real taskbar jump list. Build with scripts that apply the measurement patch, or pass -AllowProductAumid on an ephemeral machine.'
+        throw 'koreterm.exe does not carry the measurement AppUserModelID (io.github.richardsonvix.koreterm.measure). A launch would replace the real taskbar jump list. Build with scripts that apply the measurement patch, or pass -AllowProductAumid on an ephemeral machine.'
     }
 }
 

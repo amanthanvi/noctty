@@ -51,7 +51,7 @@ pub const renderer_test_tools: bool = config.renderer_test_tools;
 /// Stable application identifier used by the Windows-only fork for
 /// instance naming and shared resource identity. It remains hardcoded
 /// because many paths assume a compile-time constant.
-pub const bundle_id = "io.github.amanthanvi.koreterm";
+pub const bundle_id = "io.github.richardsonvix.koreterm";
 
 /// True if we should have "slow" runtime safety checks. The initial motivation
 /// for this was terminal page/pagelist integrity checks. These were VERY

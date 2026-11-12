@@ -10,7 +10,7 @@ Upstream-derived changes must follow the [upstream merge policy](docs/upstream-m
 
 For usage questions, design discussion, or anything that isn't a
 reproducible bug, use
-[Discussions](https://github.com/amanthanvi/noctty/discussions).
+[Discussions](https://github.com/richardsonvix/noctty_terminal/discussions).
 GitHub Issues on this repo are reserved for reproducible bugs so real
 bugs don't get buried.
 

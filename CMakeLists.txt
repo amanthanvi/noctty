@@ -24,7 +24,7 @@
 #
 #   include(FetchContent)
 #   FetchContent_Declare(koreterm
-#       GIT_REPOSITORY https://github.com/amanthanvi/noctty.git
+#       GIT_REPOSITORY https://github.com/richardsonvix/noctty_terminal.git
 #       GIT_TAG main
 #   )
 #   FetchContent_MakeAvailable(koreterm)

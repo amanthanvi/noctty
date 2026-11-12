@@ -1,7 +1,7 @@
-//! "Create shortcuts": a noctty.lnk on the Desktop and in the Start menu's
-//! Programs folder, pointing at the running noctty.exe (a portable copy's
+//! "Create shortcuts": a koreterm.lnk on the Desktop and in the Start menu's
+//! Programs folder, pointing at the running koreterm.exe (a portable copy's
 //! own path), with its icon, its folder as the working directory, and
-//! noctty's AppUserModelID so the taskbar groups its windows under it.
+//! koreterm's AppUserModelID so the taskbar groups its windows under it.
 
 const std = @import("std");
 const windows = std.os.windows;
@@ -109,14 +109,14 @@ fn linkPath(alloc: std.mem.Allocator, where: Where) !?[:0]u16 {
     if (SHGetKnownFolderPath(id, 0, null, &folder) < 0 or folder == null) return null;
     defer CoTaskMemFree(folder);
     const dir = std.mem.span(folder.?);
-    const name = std.unicode.utf8ToUtf16LeStringLiteral("\\noctty.lnk");
+    const name = std.unicode.utf8ToUtf16LeStringLiteral("\\koreterm.lnk");
     const out = try alloc.allocSentinel(u16, dir.len + name.len, 0);
     @memcpy(out[0..dir.len], dir);
     @memcpy(out[dir.len..], name);
     return out;
 }
 
-/// Write noctty.lnk in `where`, replacing one already there.
+/// Write koreterm.lnk in `where`, replacing one already there.
 pub fn create(alloc: std.mem.Allocator, where: Where) !void {
     // The UI thread has an apartment already; this only makes sure.
     _ = CoInitializeEx(null, 0x2);
@@ -143,7 +143,7 @@ pub fn create(alloc: std.mem.Allocator, where: Where) !void {
     if (link.vtbl.SetPath(link.raw(), exe.ptr) < 0) return error.ShellLinkFailed;
     _ = link.vtbl.SetWorkingDirectory(link.raw(), dir.ptr);
     _ = link.vtbl.SetIconLocation(link.raw(), exe.ptr, 0);
-    _ = link.vtbl.SetDescription(link.raw(), std.unicode.utf8ToUtf16LeStringLiteral("noctty terminal"));
+    _ = link.vtbl.SetDescription(link.raw(), std.unicode.utf8ToUtf16LeStringLiteral("koreterm terminal"));
 
     var store_raw: ?*anyopaque = null;
     if (link.vtbl.QueryInterface(link.raw(), &IID_IPropertyStore, &store_raw) >= 0 and store_raw != null) {

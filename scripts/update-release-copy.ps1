@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Get-RepoRoot
 $readmePath = Join-Path $repoRoot 'README.md'
 $readme = [System.IO.File]::ReadAllText($readmePath)
-if ($readme -notmatch 'koreterm\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/amanthanvi/koreterm/releases/tag/v\k<version>\)') {
+if ($readme -notmatch 'koreterm\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/richardsonvix/noctty_terminal/releases/tag/v\k<version>\)') {
     throw 'Could not determine the current release version from README.md.'
 }
 $previous = $Matches.version

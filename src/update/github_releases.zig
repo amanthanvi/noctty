@@ -16,8 +16,8 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const log = std.log.scoped(.update_github_releases);
 
-pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/koreterm/releases/latest";
-pub const releases_url = "https://github.com/amanthanvi/noctty/releases";
+pub const latest_stable_api_url = "https://api.github.com/repos/richardsonvix/noctty_terminal/releases/latest";
+pub const releases_url = "https://github.com/richardsonvix/noctty_terminal/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
 // Microsoft PE/COFF Machine values, mirrored by
 // scripts/windows-architecture.ps1.
@@ -6006,7 +6006,7 @@ test "release parser does not invent a portable payload manifest" {
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -6121,7 +6121,7 @@ test "release parser selects windows install candidate when checksum metadata is
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -6171,7 +6171,7 @@ test "release parser ignores the symbols zip among the release assets" {
         alloc,
         \\{{
         \\  "tag_name": "v1.3.133",
-        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.133",
+        \\  "html_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.133",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -6215,7 +6215,7 @@ test "release parser prefers architecture checksum metadata over legacy x64 meta
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -6260,7 +6260,7 @@ test "release parser accepts legacy checksum metadata for x64 install candidate"
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -6309,7 +6309,7 @@ test "release parser accepts long semver tags for windows install candidate" {
         alloc,
         \\{{
         \\  "tag_name": "v{s}",
-        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v{s}",
+        \\  "html_url": "https://github.com/richardsonvix/noctty_terminal/releases/tag/v{s}",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",

@@ -826,7 +826,7 @@ const Preview = struct {
                     "",
                     "For more details on configuration and themes, visit the koreterm repository:",
                     "",
-                    "https://github.com/amanthanvi/noctty/blob/main/src/config/config-template",
+                    "https://github.com/richardsonvix/noctty_terminal/blob/main/src/config/config-template",
                 };
 
                 for (save_instructions, 0..) |instruction, captured_i| {

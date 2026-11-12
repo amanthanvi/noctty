@@ -117,14 +117,14 @@ test("the generated CSP rejects divergent index and not-found bootstraps", (t) =
 
 test("same-origin absolute assets are local and receive cache keys", () => {
   const html = [
-    '<script src="https://noctty.com/install.js"></script>',
+    '<script src="https://github.com/richardsonvix/noctty_terminal/install.js"></script>',
     '<script src="https://example.com/external.js"></script>',
   ].join("");
   assert.deepEqual([...referencedLocalAssets(html)], ["install.js"]);
   assert.equal(
     withAssetCacheKeys(html, "test.html", { "install.js": "digest" }),
     [
-      '<script src="https://noctty.com/install.js?v=digest"></script>',
+      '<script src="https://github.com/richardsonvix/noctty_terminal/install.js?v=digest"></script>',
       '<script src="https://example.com/external.js"></script>',
     ].join(""),
   );

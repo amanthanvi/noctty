@@ -78,7 +78,7 @@ stdenv.mkDerivation (finalAttrs: {
   '';
 
   meta = {
-    homepage = "https://github.com/amanthanvi/noctty";
+    homepage = "https://github.com/richardsonvix/noctty_terminal";
     license = lib.licenses.mit;
     platforms = zig_0_15.meta.platforms;
   };

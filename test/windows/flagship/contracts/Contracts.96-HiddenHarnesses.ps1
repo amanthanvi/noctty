@@ -25,7 +25,7 @@ $hiddenContracts = @(
     @{
         File = $hiddenLib
         Content = { $hiddenLibText }
-        Pattern = '(?s)function Assert-MeasureAumid.*?io\.github\.amanthanvi\.koreterm\.measure.*?throw'
+        Pattern = '(?s)function Assert-MeasureAumid.*?io\.github\.richardsonvix\.koreterm\.measure.*?throw'
         Kind = 'Text'
         Description = 'a launch is refused unless the binary carries the measurement AUMID, or the caller says it is an ephemeral runner'
     }

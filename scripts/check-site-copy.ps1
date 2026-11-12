@@ -18,7 +18,7 @@ $textFiles = Get-ChildItem -Path $siteRoot -Recurse -File | Where-Object {
 
 $forbiddenRules = @(
     @{ Pattern = "(?i)\bscoop install koreterm\b(?!/)"; Regex = $true; Reason = "Official Scoop installs should use the bucket-qualified command: scoop install koreterm/koreterm." },
-    @{ Pattern = "winget install koreterm"; Reason = "Official WinGet installs should use the package id: winget install --id AmanThanvi.koreterm -e." },
+    @{ Pattern = "winget install koreterm"; Reason = "Official WinGet installs should use the package id: winget install --id Richardsonvix.koreterm -e." },
     @{ Pattern = "D3D11"; Reason = "The shipping Windows renderer is OpenGL 4.3 via WGL." },
     @{ Pattern = "DirectX 11"; Reason = "The shipping Windows renderer is OpenGL 4.3 via WGL." },
     @{ Pattern = "%APPDATA%\koreterm\config"; Reason = "Windows docs use %LOCALAPPDATA%\\koreterm\\config.ghostty." },
@@ -49,29 +49,29 @@ $forbiddenRules = @(
     @{ Pattern = "(?i)\b(?:than|versus|vs\.?|compared to|compared with)\s+(?:windows terminal|conhost|alacritty|wezterm|mintty|conemu|cmder|putty|iterm)\b"; Regex = $true; Reason = "No terminal has been measured at the same causal endpoint on the same machine; no comparison may be published." },
     @{ Pattern = "(?i)\b(?:twice|thrice|double|triple|\d+(?:\.\d+)?x)\s+the\s+(?:throughput|speed|performance|frame\s?rate)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
     @{ Pattern = "(?i)blazing"; Regex = $true; Reason = "Performance copy must cite a measured figure, not an adjective." },
-    @{ Pattern = "noctty.dev"; Reason = "The project domain is koreterm.com; noctty.dev is not owned by this project." }
+    @{ Pattern = "github.com/richardsonvix/noctty_terminal"; Reason = "The project domain is koreterm.com; github.com/richardsonvix/noctty_terminal is not owned by this project." }
 )
 
 $requiredRules = @(
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/releases/latest"; Reason = "Primary download CTA should point to latest release." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/richardsonvix/noctty_terminal/releases/latest"; Reason = "Primary download CTA should point to latest release." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "%LOCALAPPDATA%\koreterm\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty"; Reason = "Landing page should keep a repo link." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install --id AmanThanvi.koreterm -e"; Reason = "The hero install command should be the published WinGet command (WinGet is the default install path)." },
-    @{ Path = Join-Path $siteRoot "install.js"; Pattern = "winget install --id AmanThanvi.koreterm -e"; Reason = "Copied install text should match the hero's WinGet command." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/richardsonvix/noctty_terminal"; Reason = "Landing page should keep a repo link." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install --id Richardsonvix.koreterm -e"; Reason = "The hero install command should be the published WinGet command (WinGet is the default install path)." },
+    @{ Path = Join-Path $siteRoot "install.js"; Pattern = "winget install --id Richardsonvix.koreterm -e"; Reason = "Copied install text should match the hero's WinGet command." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Formerly winghostty"; CaseSensitive = $true; Reason = "Footer should keep the rename note so former winghostty users recognize the project." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "scoop install koreterm/koreterm"; Reason = "The install section should keep the official Scoop command as the alternate." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/scoop-noctty"; Reason = "The install section should name the official Scoop bucket source." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/richardsonvix/scoop-koreterm"; Reason = "The install section should name the official Scoop bucket source." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Native settings"; Reason = "Landing page should describe the current native settings window." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Universal palette"; Reason = "Landing page should describe the current universal palette." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "partial, not complete"; Reason = "Landing page must keep Windows accessibility status explicitly partial." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = '<link rel="canonical" href="https://noctty.com/"'; Reason = "Landing page should publish its canonical URL." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = '<link rel="canonical" href="https://github.com/richardsonvix/noctty_terminal/"'; Reason = "Landing page should publish its canonical URL." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "<noscript>"; Reason = "Landing page should retain a useful no-JavaScript fallback." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/discussions"; Reason = "Footer should link to project Discussions." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/richardsonvix/noctty_terminal/discussions"; Reason = "Footer should link to project Discussions." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-koreterm.html"; Reason = "The landing page should expose the identity and trust page." }
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The landing page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
-    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The trust page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/richardsonvix/noctty_terminal/blob/main/PRIVACY.md"; Reason = "The landing page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
+    @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "https://github.com/richardsonvix/noctty_terminal/blob/main/PRIVACY.md"; Reason = "The trust page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
     @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
     @{ Path = Join-Path $siteRoot "why-koreterm.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
     @{ Path = $verifyDoc; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
@@ -98,13 +98,13 @@ $requiredRules = @(
 
 $failures = New-Object System.Collections.Generic.List[string]
 
-# The WinGet package AmanThanvi.koreterm is published, so neither the site nor the
+# The WinGet package Richardsonvix.koreterm is published, so neither the site nor the
 # docs may describe it as pending, planned or unpublished again. Matched on the
 # whole file (the docs are hard-wrapped), within one sentence, and not on
 # winget-pkgs, wingetcreate or WINGET_PACKAGE_IDENTIFIER.
 $wingetStateWords = "pending|planned|unpublished|coming\s+soon|not\s+(?:yet\s+)?(?:been\s+)?(?:published|available)|awaiting"
 $wingetPendingPattern = "(?is)\bwinget\b(?![-_]|create)[^.;,]{0,80}?\b(?:$wingetStateWords)\b|\b(?:$wingetStateWords)\b[^.;,]{0,80}?\bwinget\b(?![-_]|create)"
-$wingetPendingReason = "The WinGet package AmanThanvi.koreterm is published; do not describe it as pending, planned or unpublished."
+$wingetPendingReason = "The WinGet package Richardsonvix.koreterm is published; do not describe it as pending, planned or unpublished."
 $wingetCopyFiles = @($textFiles.FullName) + @(
     (Join-Path $repoRoot "README.md"),
     (Join-Path $repoRoot "PACKAGING.md")

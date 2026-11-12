@@ -10,12 +10,12 @@ the Chocolatey Publish workflow on 2026-10-17 and the 1.3.133 release's push on
 
 On 2026-10-20, as agreed in
 [virtualex-itv/chocolatey-packages#35](https://github.com/virtualex-itv/chocolatey-packages/issues/35),
-`virtualex` added `amanthanvi` as a maintainer of the package, stayed on as a
+`virtualex` added `richardsonvix` as a maintainer of the package, stayed on as a
 co-maintainer, and rejected 1.3.131
 ([its page](https://community.chocolatey.org/packages/koreterm/1.3.131)). On
 2026-10-21 the Chocolatey Publish workflow pushed 1.3.134 (dry run
-[39578632348](https://github.com/amanthanvi/noctty/actions/runs/39578632348),
-push [39578893616](https://github.com/amanthanvi/noctty/actions/runs/39578893616):
+[39578632348](https://github.com/richardsonvix/noctty_terminal/actions/runs/39578632348),
+push [39578893616](https://github.com/richardsonvix/noctty_terminal/actions/runs/39578893616):
 `koreterm.1.3.134.nupkg was pushed successfully`). Read at 10:21 UTC that day,
 the feed's
 [entry for it](https://community.chocolatey.org/api/v2/Packages(Id='koreterm',Version='1.3.134'))
@@ -48,7 +48,7 @@ variable, so that a release does not end red for a refusal nothing in this
 repository can fix:
 
 ```powershell
-gh variable set CHOCOLATEY_PUBLISH --body off --repo amanthanvi/koreterm
+gh variable set CHOCOLATEY_PUBLISH --body off --repo richardsonvix/noctty_terminal
 ```
 
 The `Release` workflow then skips its **Publish Chocolatey package** step (the
@@ -60,11 +60,11 @@ way to try a push while the release step is off. To turn the push back on,
 delete the variable:
 
 ```powershell
-gh variable delete CHOCOLATEY_PUBLISH --repo amanthanvi/koreterm
+gh variable delete CHOCOLATEY_PUBLISH --repo richardsonvix/noctty_terminal
 ```
 
 Chocolatey accepts a push only when this repository's account owns (or
-co-maintains) the id; `amanthanvi` has maintained it since 2026-10-20. It also
+co-maintains) the id; `richardsonvix` has maintained it since 2026-10-20. It also
 refuses every new version while the package has a version in moderation and
 none approved, which was the case from the push of 1.3.134 on 2026-10-21 until
 its approval. (A corrected package that a moderator asks for keeps the version
@@ -93,20 +93,20 @@ script cannot read which processes started it, it stops too and asks to close
 koreterm. The package
 contains no binaries, so it needs no `VERIFICATION.txt`. The id is `koreterm`,
 the title `Koreterm`, the license is the repository's MIT `LICENSE` at the release
-tag, and the icon is the website's `https://noctty.com/assets/favicon.svg`,
+tag, and the icon is the website's `https://github.com/richardsonvix/noctty_terminal/assets/favicon.svg`,
 because the validator rejects an icon served from GitHub. The package has its
 own description for its Chocolatey page, which names the packaged architectures
 ("on x64 or ARM64").
 
 The CPU question and the description came with
-[#526](https://github.com/amanthanvi/noctty/pull/526) and
-[#525](https://github.com/amanthanvi/noctty/pull/525), both merged on
+[#526](https://github.com/richardsonvix/noctty_terminal/pull/526) and
+[#525](https://github.com/richardsonvix/noctty_terminal/pull/525), both merged on
 2026-10-23 after 1.3.134 was built, so they ship with the first release built
 after them. The 1.3.134 package asks the process only: #526's author measured
 it installing the x64 build on a Windows 11 ARM64 machine, where it runs under
 emulation. An upgrade over such an install is expected to switch to the ARM64
 build; that was not tested. The refusals came later, with
-[#524](https://github.com/amanthanvi/noctty/pull/524), and ship with the first
+[#524](https://github.com/richardsonvix/noctty_terminal/pull/524), and ship with the first
 release built after it; the 1.3.134 and 1.3.135 packages do not have them.
 
 ## The account and the key
@@ -118,7 +118,7 @@ key, copy a new one from the account page
 than on the command line:
 
 ```powershell
-gh secret set CHOCO_API_KEY --repo amanthanvi/koreterm --env release
+gh secret set CHOCO_API_KEY --repo richardsonvix/noctty_terminal --env release
 ```
 
 ## Publishing a version that is already released
@@ -129,8 +129,8 @@ Run the **Chocolatey Publish** workflow
 the push:
 
 ```powershell
-gh workflow run chocolatey-publish.yml --repo amanthanvi/koreterm --ref main -f version=1.3.133
-gh workflow run chocolatey-publish.yml --repo amanthanvi/koreterm --ref main -f version=1.3.133 -f push=true
+gh workflow run chocolatey-publish.yml --repo richardsonvix/noctty_terminal --ref main -f version=1.3.133
+gh workflow run chocolatey-publish.yml --repo richardsonvix/noctty_terminal --ref main -f version=1.3.133 -f push=true
 ```
 
 Do not rerun that version's `Release` run instead. A rerun rebuilds the
@@ -147,7 +147,7 @@ runner, where Chocolatey is preinstalled
 ([Windows Server 2025 image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md):
 Chocolatey 2.7.4 in image 20261013.288.2), and builds nothing:
 
-1. It refuses to run unless the repository is `amanthanvi/koreterm`, the
+1. It refuses to run unless the repository is `richardsonvix/noctty_terminal`, the
    version is plain three-part semver such as `1.3.132`, and the workflow
    commit is the head of `main`.
 2. `scripts/release-stage-published.ps1` downloads the published release and
@@ -180,7 +180,7 @@ except the Scoop and WinGet manifests, so before the first push of a version,
 compare the
 `Installer <arch> SHA-256` lines the build step prints with `InstallerSha256`
 in the WinGet manifest of that version (`microsoft/winget-pkgs`,
-`manifests/a/AmanThanvi/koreterm/<version>`), which was published from the
+`manifests/a/Richardsonvix/koreterm/<version>`), which was published from the
 original build. For 1.3.132 the release's installers and that manifest were
 identical on 2026-10-17 for both x64 (`b59f99a3...`) and arm64
 (`f7c465e1...`).
@@ -223,7 +223,7 @@ run the **Chocolatey Publish** workflow again for that version, with
 `resubmit` so that the listed version is not skipped:
 
 ```powershell
-gh workflow run chocolatey-publish.yml --repo amanthanvi/koreterm --ref main -f version=<version> -f push=true -f resubmit=true
+gh workflow run chocolatey-publish.yml --repo richardsonvix/noctty_terminal --ref main -f version=<version> -f push=true -f resubmit=true
 ```
 
 Do not rerun the release instead: it would rebuild its installers.

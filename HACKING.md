@@ -127,7 +127,7 @@ Differences from an installed copy:
   `startup-attempts.json`, `jump-list-recents.json` and `shell-integration\`
   stay under `%LOCALAPPDATA%\koreterm` whatever the XDG variables say, so they
   cannot be separated that way. It also rewrites the
-  `AppUserModelId\io.github.amanthanvi.koreterm` registration at every start so
+  `AppUserModelId\io.github.richardsonvix.koreterm` registration at every start so
   that toasts take their icon from its `koreterm.ico`, and replaces the taskbar
   jump list with entries that start its own exe. If you also run an installed
   copy, add an empty `koreterm.portable` file beside the exe (`portable.txt` or
@@ -136,7 +136,7 @@ Differences from an installed copy:
   and jump list stay alone. See
   [App identity](docs/windows.md#app-identity).
 - Portable mode does not separate the running instance. The single-instance
-  pipe is named from the `class` setting (default `io.github.amanthanvi.koreterm`
+  pipe is named from the `class` setting (default `io.github.richardsonvix.koreterm`
   in every build but Debug) and the process's elevation, not from the install
   or the portable root (`src/apprt/win32/ipc_server.zig`, `allocIpcPipeName`),
   so any build with the default class forwards a launch to a running koreterm
@@ -147,7 +147,7 @@ Differences from an installed copy:
   AppUserModelID (a fixed string) or the window class names, so taskbar
   grouping and the jump list are unaffected.
 - This shortcut has no AppUserModelID. The installer sets
-  `io.github.amanthanvi.koreterm` on its shortcuts, and `WScript.Shell` has no
+  `io.github.richardsonvix.koreterm` on its shortcuts, and `WScript.Shell` has no
   property for one (inferred). The running exe still sets the ID for its own
   process, so a pinned shortcut may not group with the running window
   (inferred, not measured). A click on a toast in Action Center is delivered

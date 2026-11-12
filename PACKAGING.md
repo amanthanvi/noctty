@@ -18,7 +18,7 @@ Releases. The public packaging targets are:
 Primary distribution URL:
 
 ```text
-https://github.com/amanthanvi/noctty/releases
+https://github.com/richardsonvix/noctty_terminal/releases
 ```
 
 ## Release inputs
@@ -262,7 +262,7 @@ Recommended setup:
 Example `gh` commands:
 
 ```powershell
-$repo = "amanthanvi/koreterm"
+$repo = "richardsonvix/noctty_terminal"
 $pfxPath = "C:\secure\koreterm-signing.pfx"
 $pfxBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($pfxPath))
 
@@ -341,13 +341,13 @@ on first publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-The WinGet package identifier is `AmanThanvi.koreterm` and the package is
-published (`microsoft/winget-pkgs/manifests/a/AmanThanvi/koreterm`, first version
+The WinGet package identifier is `Richardsonvix.koreterm` and the package is
+published (`microsoft/winget-pkgs/manifests/a/Richardsonvix/koreterm`, first version
 1.3.131). The repository variable `WINGET_PACKAGE_IDENTIFIER` is set to it, and
 stable preflight verifies that the manifest folder exists and that the latest
 public manifest covers x64 and arm64. Users install with
-`winget install --id AmanThanvi.koreterm -e`. The old
-`AmanThanvi.winghostty` identifier is retired. Keep CI on the truthful
+`winget install --id Richardsonvix.koreterm -e`. The old
+`Richardsonvix.winghostty` identifier is retired. Keep CI on the truthful
 `update` path; do not switch to `wingetcreate new` for automated releases.
 
 ### Scoop
@@ -363,7 +363,7 @@ is review-driven and should stay explicit.
 The official Scoop track is the fork-owned bucket:
 
 ```powershell
-scoop bucket add koreterm https://github.com/amanthanvi/scoop-noctty
+scoop bucket add koreterm https://github.com/richardsonvix/scoop-koreterm
 scoop install koreterm/koreterm
 ```
 

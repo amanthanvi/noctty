@@ -1,7 +1,7 @@
 # Upstream drift analysis — October 2026
 
 - **Analysis date:** 2026-10-30
-- **Fork:** `amanthanvi/koreterm`
+- **Fork:** `richardsonvix/noctty_terminal`
 - **Issue:** #141, C33 — upstream merge cadence and published merge policy
 - **Scope:** the 2026-10 merge window for Ghostty v1.4.0: drift analysis,
   security review, ten subsystem sync PRs, and the deferred list

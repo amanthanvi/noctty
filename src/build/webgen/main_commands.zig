@@ -18,7 +18,7 @@ pub fn genActions(writer: *std.Io.Writer) !void {
         \\---
         \\title: Reference
         \\description: Reference of all koreterm action subcommands.
-        \\editOnGithubLink: https://github.com/amanthanvi/noctty/tree/main/src/cli
+        \\editOnGithubLink: https://github.com/richardsonvix/noctty_terminal/tree/main/src/cli
         \\---
         \\koreterm includes a number of utility actions that can be accessed as subcommands.
         \\Actions provide utilities to work with config, list keybinds, list fonts, demo themes,
