@@ -637,7 +637,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)const SITE_PAGES = new Map\(\[\s*\[\s*"index\.html",\s*\["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\],\s*\],\s*\["404\.html", \["styles\.css", "app\.js"\]\],\s*\["why-noctty\.html", \["styles\.css", "app\.js", "version\.js"\]\],\s*\]\);.*?for \(const asset of new Set\(\[\.\.\.SITE_PAGES\.values\(\)\]\.flat\(\)\)\).*?for \(const \[htmlName, assets\] of SITE_PAGES\).*?withAssetCacheKeys\('
+        Pattern = '(?ms)const SITE_PAGES = new Map\(\[\s*\[\s*"index\.html",\s*\["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\],\s*\],\s*\["404\.html", \["styles\.css", "app\.js"\]\],\s*\["why-noctty\.html", \["styles\.css", "app\.js", "version\.js", "install\.js"\]\],\s*\]\);.*?for \(const asset of new Set\(\[\.\.\.SITE_PAGES\.values\(\)\]\.flat\(\)\)\).*?for \(const \[htmlName, assets\] of SITE_PAGES\).*?withAssetCacheKeys\('
         Kind = 'Text'
         Description = 'SHA-256 cache keys cover every local script and stylesheet referenced by each page'
     }
