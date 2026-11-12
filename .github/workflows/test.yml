@@ -517,10 +517,11 @@ jobs:
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
-      # Two test executables (the Zig and the C API module), each in two
-      # shards: four processes for the runner's four cores.
+      # Not sharded: its two test executables already run side by side, and
+      # two shards each (four processes) left the step's time unchanged
+      # (TEST-SHARDS-01 in docs/agents/log/test-harnesses.md).
       - name: Run libghostty-vt and C API tests
-        run: zig build test-lib-vt -Demit-lib-vt=true -Dtest-shards=2 --summary all
+        run: zig build test-lib-vt -Demit-lib-vt=true --summary all
 
   windows-conpty-probes:
     name: Windows ConPTY Probes (experimental)

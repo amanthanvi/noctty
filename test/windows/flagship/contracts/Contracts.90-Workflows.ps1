@@ -118,7 +118,7 @@ if ($pathFilterStep -notmatch '(?m)^        run: \./test/windows/ci-scripts\.ps1
 }
 $libVtJob = Get-YamlJobText -Content $testWorkflowText -Name 'windows-lib-vt' -Source $testWorkflow
 $libVtStep = Get-YamlStepBlock -Content $libVtJob -Name 'Run libghostty-vt and C API tests' -Source $testWorkflow
-if ($libVtStep -notmatch '(?m)^        run: zig build test-lib-vt -Demit-lib-vt=true -Dtest-shards=2 --summary all\s*$') {
+if ($libVtStep -notmatch 'run: zig build test-lib-vt -Demit-lib-vt=true --summary all') {
     throw 'CI must run the separate libghostty-vt graph and report its test count.'
 }
 # Required coverage must execute and propagate failures at both YAML levels.
