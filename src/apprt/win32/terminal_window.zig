@@ -166,6 +166,7 @@ const win32_undo = @import("../win32_undo.zig");
 const window_state = @import("window_state.zig");
 const windows = win32.windows;
 const windows_shell = @import("../../config/windows_shell.zig");
+const tab_style = @import("tab_style.zig");
 const rdp_pane_mod = @import("rdp_pane.zig");
 const profile_credentials = @import("profile_credentials.zig");
 const writeImeWindowFormsTrace = win32.writeImeWindowFormsTrace;
@@ -427,6 +428,9 @@ pub const Surface = struct {
     /// was launched with (`pane_launch.Stamp.user`), kept with
     /// `launch_command` so an inheriting tab or split runs the same launch.
     launch_user: ?windows_shell.UserLaunch = null,
+    /// The tab icon drawn for this pane (`tabIcon`), loaded once per size.
+    tab_icon: ?tab_style.IconHandle = null,
+    tab_icon_px: i32 = 0,
     /// A Remote Desktop session covering the pane (`rdp_pane.zig`): the
     /// launch was an `mstsc.exe /v:` profile, so the core runs a placeholder
     /// shell under it, with `rdp_config` (the config with that shell as its
@@ -2222,6 +2226,57 @@ pub const Surface = struct {
     pub fn launchCommandLine(self: *const Surface) ?[]const u8 {
         const launch = self.launch_user orelse return null;
         return launch.command_line;
+    }
+
+    /// One of the profile's own variables (`windows_shell.reservedEnv`).
+    fn profileVariable(self: *const Surface, name: []const u8) ?[]const u8 {
+        const launch = self.launch_user orelse return null;
+        return windows_shell.reservedEnv(launch.env, name);
+    }
+
+    /// The profile's tab color (`KORETERM_TAB_COLOR`), a COLORREF.
+    pub fn tabColor(self: *const Surface) ?u32 {
+        return tab_style.parseColor(self.profileVariable(windows_shell.tab_color_env) orelse return null);
+    }
+
+    pub const TabIcon = union(enum) {
+        none,
+        icon: tab_style.IconHandle,
+        glyph: []const u8,
+    };
+
+    /// What the tab shows before its title, `px` pixels square: the
+    /// profile's icon (`KORETERM_TAB_ICON`), or the program it runs.
+    pub fn tabIconAt(self: *Surface, px: i32) TabIcon {
+        const spec = tab_style.parseIcon(self.profileVariable(windows_shell.tab_icon_env));
+        const file: struct { path: []const u8, index: i32 } = switch (spec) {
+            .none => return .none,
+            .glyph => |text| return .{ .glyph = text },
+            .file => |f| .{ .path = f.path, .index = f.index },
+            .auto => .{ .path = self.launchProgram() orelse return .none, .index = 0 },
+        };
+        if (px <= 0) return .none;
+        if (self.tab_icon_px != px) {
+            if (self.tab_icon) |icon| _ = tab_style.DestroyIcon(icon);
+            self.tab_icon = tab_style.loadIcon(self.app.core_app.alloc, file.path, file.index, px);
+            self.tab_icon_px = px;
+        }
+        return if (self.tab_icon) |icon| .{ .icon = icon } else .none;
+    }
+
+    /// The program this pane's launch runs (its profile's line, else the
+    /// command), for the tab's automatic icon.
+    fn launchProgram(self: *const Surface) ?[]const u8 {
+        if (self.launch_user) |user| return nonEmpty(tab_style.programOf(user.command_line));
+        const command = self.launch_command orelse return null;
+        return switch (command) {
+            .direct => |argv| if (argv.len == 0) null else nonEmpty(argv[0]),
+            .shell => |line| nonEmpty(tab_style.programOf(line)),
+        };
+    }
+
+    fn nonEmpty(text: []const u8) ?[]const u8 {
+        return if (text.len == 0) null else text;
     }
 
     pub fn consoleOwner(self: *Surface) ?*anyopaque {
@@ -4677,6 +4732,10 @@ pub const Surface = struct {
         if (self.rdp_pane) |pane| {
             self.rdp_pane = null;
             pane.destroy();
+        }
+        if (self.tab_icon) |icon| {
+            self.tab_icon = null;
+            _ = tab_style.DestroyIcon(icon);
         }
 
         if (self.terminal_accessibility) |session| {

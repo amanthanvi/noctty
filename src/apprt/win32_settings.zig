@@ -43,6 +43,7 @@ const profile_credentials = @import("win32/profile_credentials.zig");
 const rdp_dialog = @import("win32/rdp_connection_dialog.zig");
 const settings_backup = @import("win32/settings_backup.zig");
 const profile_dialog = @import("win32/profile_dialog.zig");
+const tab_appearance = @import("win32/tab_style.zig");
 extern "user32" fn MessageBoxW(hwnd: ?HWND, text: [*:0]const u16, caption: [*:0]const u16, kind: u32) callconv(.winapi) i32;
 
 /// A path a file dialog returned (`C:\...`, plain Win32 form) as WTF-8 for
@@ -8304,10 +8305,12 @@ pub const SettingsWindow = struct {
                 const size = std.fmt.parseFloat(f32, p.font_size) catch return .{ .field = .font_size, .message = "Type the font size as a number of points, or leave it blank." };
                 if (size < 4 or size > 200) return .{ .field = .font_size, .message = "The font size is from 4 to 200 points." };
             }
+            if (p.tab_color.len != 0 and tab_appearance.parseColor(p.tab_color) == null) return .{ .field = .tab_color, .message = "Type the tab color as #RRGGBB (for example #3A7BD5), or leave it blank." };
+            if (!tab_appearance.validIcon(p.tab_icon)) return .{ .field = .tab_icon, .message = "The tab icon is a .ico, .exe or .dll file, a short text such as an emoji, or none." };
             var it = profile_dialog.VariableIterator.init(p.variables);
             while (it.next()) |variable| {
                 if (variable.name.len == 0) return .{ .field = .variables, .message = "Type each variable as NAME=VALUE, one a line." };
-                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "KORETERM_FONT_SIZE and KORETERM_ELEVATED are the window's own fields: set them above." };
+                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "KORETERM_FONT_SIZE, KORETERM_TAB_COLOR, KORETERM_TAB_ICON and KORETERM_ELEVATED are the window's own fields: set them above." };
                 if (variable.value.len == 0) return .{ .field = .variables, .message = "A variable needs a value after its =." };
             }
             return null;
@@ -8315,7 +8318,10 @@ pub const SettingsWindow = struct {
     };
 
     fn isReservedVariable(name: []const u8) bool {
-        return std.ascii.eqlIgnoreCase(name, windows_shell.font_size_env) or std.ascii.eqlIgnoreCase(name, windows_shell.elevated_env);
+        return std.ascii.eqlIgnoreCase(name, windows_shell.font_size_env) or
+            std.ascii.eqlIgnoreCase(name, windows_shell.elevated_env) or
+            std.ascii.eqlIgnoreCase(name, windows_shell.tab_color_env) or
+            std.ascii.eqlIgnoreCase(name, windows_shell.tab_icon_env);
     }
 
     /// The command line the profile `key` starts, as the app lists it (a
@@ -8367,6 +8373,10 @@ pub const SettingsWindow = struct {
                     fields.font_size = a.dupe(u8, variable.value) catch return self.profileChangeFailed();
                 } else if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.elevated_env)) {
                     fields.elevated = std.mem.eql(u8, variable.value, "1");
+                } else if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.tab_color_env)) {
+                    fields.tab_color = a.dupe(u8, variable.value) catch return self.profileChangeFailed();
+                } else if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.tab_icon_env)) {
+                    fields.tab_icon = a.dupe(u8, variable.value) catch return self.profileChangeFailed();
                 } else {
                     variables.writer.print("{s}={s}\n", .{ variable.name, variable.value }) catch return self.profileChangeFailed();
                 }
@@ -8379,6 +8389,8 @@ pub const SettingsWindow = struct {
             .command = a.dupe(u8, given.command) catch return self.profileChangeFailed(),
             .folder = a.dupe(u8, given.folder) catch return self.profileChangeFailed(),
             .font_size = a.dupe(u8, given.font_size) catch return self.profileChangeFailed(),
+            .tab_color = a.dupe(u8, given.tab_color) catch return self.profileChangeFailed(),
+            .tab_icon = a.dupe(u8, given.tab_icon) catch return self.profileChangeFailed(),
             .elevated = given.elevated,
             .variables = a.dupe(u8, given.variables) catch return self.profileChangeFailed(),
         };
@@ -8415,6 +8427,16 @@ pub const SettingsWindow = struct {
         if (fields.elevated) {
             settings_profiles.setVariable(draft, id, windows_shell.elevated_env, "1") catch return self.profileChangeFailed();
             kept.append(a, windows_shell.elevated_env) catch return self.profileChangeFailed();
+        }
+        if (fields.tab_color.len != 0) {
+            var color_buf: [7]u8 = undefined;
+            const color = tab_appearance.formatColor(&color_buf, tab_appearance.parseColor(fields.tab_color) orelse return self.profileChangeFailed());
+            settings_profiles.setVariable(draft, id, windows_shell.tab_color_env, color) catch return self.profileChangeFailed();
+            kept.append(a, windows_shell.tab_color_env) catch return self.profileChangeFailed();
+        }
+        if (fields.tab_icon.len != 0) {
+            settings_profiles.setVariable(draft, id, windows_shell.tab_icon_env, fields.tab_icon) catch return self.profileChangeFailed();
+            kept.append(a, windows_shell.tab_icon_env) catch return self.profileChangeFailed();
         }
         for (old_variables.items) |name| {
             const still = for (kept.items) |other| {

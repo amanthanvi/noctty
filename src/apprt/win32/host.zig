@@ -230,6 +230,7 @@ const win32_uia = @import("../win32_uia/mod.zig");
 const win32_undo = @import("../win32_undo.zig");
 const window_state = @import("window_state.zig");
 const windows_shell = @import("../../config/windows_shell.zig");
+const tab_style = @import("tab_style.zig");
 
 // Test dependencies.
 const builtin = @import("builtin");
@@ -8668,6 +8669,35 @@ pub const Host = struct {
         self.drawTitlebarGlyph(draw.hDC, draw.rcItem, glyph, visual.glyph, false);
     }
 
+    /// The tab's icon at the left of `text_rect`, which then starts after
+    /// it: an icon file's (or the program's), or a short text in `fg`.
+    fn drawTabIcon(self: *Host, hdc: anytype, text_rect: *RECT, surface: *Surface, fg: u32) void {
+        const px = self.scaled(16);
+        const gap = self.scaled(6);
+        if (text_rect.right - text_rect.left < px * 3) return;
+        switch (surface.tabIconAt(px)) {
+            .none => {},
+            .icon => |icon| {
+                const top = text_rect.top + @divTrunc(text_rect.bottom - text_rect.top - px, 2);
+                _ = tab_style.DrawIconEx(hdc, text_rect.left, top, icon, px, px, 0, null, tab_style.DI_NORMAL);
+                text_rect.left += px + gap;
+            },
+            .glyph => |text| {
+                var wide: [tab_style.max_glyph_len + 1]u16 = undefined;
+                const len = std.unicode.utf8ToUtf16Le(wide[0..tab_style.max_glyph_len], text) catch return;
+                wide[len] = 0;
+                var measure = text_rect.*;
+                _ = sys.DrawTextW(hdc, @ptrCast(&wide), @intCast(len), &measure, c.DT_CALCRECT | c.DT_SINGLELINE | c.DT_NOPREFIX);
+                const width = @min(measure.right - measure.left, px * 2);
+                var rect = text_rect.*;
+                rect.right = rect.left + width;
+                _ = sys.SetTextColor(hdc, fg);
+                _ = sys.DrawTextW(hdc, @ptrCast(&wide), @intCast(len), &rect, c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX);
+                text_rect.left += width + gap;
+            },
+        }
+    }
+
     pub fn drawButton(self: *Host, draw: *const DRAWITEMSTRUCT) void {
         if (draw.CtlType != c.ODT_BUTTON) return;
         self.ensureThemeBrushes() catch return;
@@ -8793,7 +8823,20 @@ pub const Host = struct {
         } else {
             drawRoundedRect(draw.hDC, draw.rcItem, bg, border, self.scaled(4));
         }
-        if (tab_button and !overlay and !disabled and hovered and !active) {
+        // The pane's profile: its tab color, a stripe along the top of the
+        // tab, and its icon before the title (`tab_style.zig`).
+        const tab_surface: ?*Surface = if (tab_button and !overlay)
+            if (self.tabIndexForButton(draw.hwndItem)) |index| self.tabs.items[index].focusedSurface() else null
+        else
+            null;
+        const tab_color: ?u32 = if (tab_surface != null and !disabled and !is_hc) tab_surface.?.tabColor() else null;
+        if (tab_color) |color| fillSolidRect(draw.hDC, .{
+            .left = draw.rcItem.left + self.scaled(4),
+            .top = draw.rcItem.top + content_top_inset + self.scaled(1),
+            .right = draw.rcItem.right - self.scaled(4),
+            .bottom = draw.rcItem.top + content_top_inset + self.scaled(4),
+        }, color);
+        if (tab_color == null and tab_button and !overlay and !disabled and hovered and !active) {
             fillSolidRect(draw.hDC, .{
                 .left = draw.rcItem.left + self.scaled(5),
                 .top = draw.rcItem.top + content_top_inset + self.scaled(3),
@@ -8898,6 +8941,7 @@ pub const Host = struct {
                 isHighContrastActive(),
             );
         } else {
+            if (tab_surface) |surface| self.drawTabIcon(draw.hDC, &text_rect, surface, fg);
             if (tab_button and !overlay) {
                 if (self.tabIndexForButton(draw.hwndItem)) |index| {
                     const status = self.tabs.items[index].status_indicator;

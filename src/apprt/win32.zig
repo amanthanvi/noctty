@@ -435,6 +435,8 @@ test {
     _ = @import("win32/settings_backup.zig");
     _ = @import("win32/local_update.zig");
     _ = @import("win32/desktop_shortcuts.zig");
+    _ = @import("win32/tab_style.zig");
+    _ = @import("win32/env_refresh.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
@@ -11696,6 +11698,11 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         c.WM_SETTINGCHANGE => {
+            // `setx` and System Properties changed the environment: the
+            // next pane starts with it (`env_refresh.zig`).
+            if (@import("win32/env_refresh.zig").namesEnvironment(settingChangeName(lParam))) {
+                _ = @import("win32/env_refresh.zig").refresh();
+            }
             if (host) |v| {
                 v.app.refreshSystemWheelSettings();
                 v.app.refreshSystemScrollbarPreference();

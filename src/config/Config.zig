@@ -2620,13 +2620,14 @@ keybind: Keybinds = .{},
 /// has no effect.
 @"window-step-resize": bool = false,
 
-/// The position where new tabs are created. Valid values:
+/// The position where new tabs are created: a tab the + button, the
+/// profile picker or a key opens. Valid values:
+///
+///   * `end` - Insert the new tab at the end of the tab list. The default.
 ///
 ///   * `current` - Insert the new tab after the currently focused tab,
 ///     or at the end if there are no focused tabs.
-///
-///   * `end` - Insert the new tab at the end of the tab list.
-@"window-new-tab-position": WindowNewTabPosition = .current,
+@"window-new-tab-position": WindowNewTabPosition = .end,
 
 /// Whether to show the tab bar.
 ///

@@ -76,16 +76,21 @@ extern "comctl32" fn InitCommonControlsEx(init: *const INITCOMMONCONTROLSEX) cal
 /// The path of the file the person picked, or null when they cancelled (or
 /// the dialog failed). `buf` holds it.
 pub fn pickFile(owner: ?HWND, buf: []u16) ?[:0]const u16 {
+    return pickFileWith(owner, buf, L("Terminals export (*.xml)\x00*.xml\x00All files (*.*)\x00*.*\x00"), L("Import profiles from a Terminals export"));
+}
+
+/// `pickFile` with its own filter (`Name\0pattern\0...\0`) and title.
+pub fn pickFileWith(owner: ?HWND, buf: []u16, filter: LPCWSTR, title: LPCWSTR) ?[:0]const u16 {
     std.debug.assert(buf.len > 1);
     buf[0] = 0;
     var ofn: OPENFILENAMEW = std.mem.zeroes(OPENFILENAMEW);
     ofn.lStructSize = @sizeOf(OPENFILENAMEW);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L("Terminals export (*.xml)\x00*.xml\x00All files (*.*)\x00*.*\x00");
+    ofn.lpstrFilter = filter;
     ofn.nFilterIndex = 1;
     ofn.lpstrFile = buf.ptr;
     ofn.nMaxFile = @intCast(@min(buf.len, std.math.maxInt(DWORD)));
-    ofn.lpstrTitle = L("Import profiles from a Terminals export");
+    ofn.lpstrTitle = title;
     // NOCHANGEDIR: the app's current directory stays where it was.
     ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
     if (GetOpenFileNameW(&ofn) == 0) return null;

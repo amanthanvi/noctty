@@ -335,5 +335,5 @@ test "rdp connection dialog: the template is DWORD aligned and counts its items"
     const template = try buildTemplate(std.testing.allocator);
     defer std.testing.allocator.free(template);
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(template.ptr) % 4);
-    try std.testing.expectEqual(@as(u16, 19), std.mem.readInt(u16, template[8..10], .little));
+    try std.testing.expectEqual(@as(u16, 9 * 2 + 1 + 2), std.mem.readInt(u16, template[8..10], .little));
 }

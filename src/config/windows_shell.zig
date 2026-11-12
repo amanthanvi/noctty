@@ -176,9 +176,14 @@ pub const EnvEntry = struct {
 
 /// The variables Settings' profile window keeps a user profile's own
 /// options in (`profile-env`, so they save, export and back up with it):
-/// its zoom, a font size in points, and `1` to open it as administrator.
+/// its zoom, a font size in points, `1` to open it as administrator, and
+/// its tab color and icon.
 pub const font_size_env = "KORETERM_FONT_SIZE";
 pub const elevated_env = "KORETERM_ELEVATED";
+/// The profile's tab color (`#RRGGBB`) and tab icon (a file, a short text
+/// such as an emoji, or `none`): `src/apprt/win32/tab_style.zig`.
+pub const tab_color_env = "KORETERM_TAB_COLOR";
+pub const tab_icon_env = "KORETERM_TAB_ICON";
 
 /// The value of the variable `name` (any case) among `env`, if set.
 pub fn reservedEnv(env: []const EnvEntry, name: []const u8) ?[]const u8 {

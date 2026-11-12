@@ -333,6 +333,25 @@ pub const Options = struct {
     trust_certificates: bool = false,
 };
 
+/// Reconnects a dropped session gets before the tab says it ended. Each one
+/// signs in again, so a password gone stale costs one failed logon per
+/// attempt: kept well under an account lockout threshold.
+const max_reconnects: u32 = 2;
+/// Polls (seconds) between a drop and each reconnect.
+const reconnect_delay_polls: u32 = 15;
+
+const Drop = enum { wait, reconnect, end };
+
+/// What the poll does once the control reports no connection. A session
+/// that never connected is not retried (its login failed, or the server is
+/// wrong), nor one the server or the person ended (`reason` other than 0).
+fn afterDrop(was_connected: bool, reason: i32, reconnects: u32, idle_polls: u32) Drop {
+    if (!was_connected or reason != 0) return .end;
+    if (reconnects >= max_reconnects) return .end;
+    if (idle_polls < reconnect_delay_polls) return .wait;
+    return .reconnect;
+}
+
 pub const Pane = struct {
     alloc: Allocator,
     hwnd: HWND,
@@ -351,9 +370,11 @@ pub const Pane = struct {
     seen_connecting: bool = false,
     /// It reported a full connection, and the surface was told.
     told_connected: bool = false,
-    /// Polls in a row that found the session not connected after it was
-    /// under way: auto-reconnect gets time before the pane gives up.
+    /// Polls in a row that found the session dropped, waiting for the
+    /// next reconnect.
     idle_polls: u32 = 0,
+    /// Reconnects tried since the session was last connected.
+    reconnects: u32 = 0,
     /// The remote desktop's resolution, fixed when it connects.
     desk_w: i32,
     desk_h: i32,
@@ -461,9 +482,12 @@ pub const Pane = struct {
             // an idle session, as in a tab in the background, then loses
             // its NAT or firewall state and drops. One a minute keeps it.
             _ = putI4(adv, L("keepAliveInterval"), 60_000);
-            // A dropped link reconnects by itself, as mstsc.exe does.
-            _ = putBool(adv, L("EnableAutoReconnect"), true);
-            _ = putI4(adv, L("MaxReconnectAttempts"), 20);
+            // The control's own auto-reconnect stays off: with CredSSP each
+            // of its attempts signs in again, and with a password that has
+            // gone stale 20 of them locked the account. The pane reconnects
+            // itself instead, a few times at most (`afterDrop`).
+            _ = putBool(adv, L("EnableAutoReconnect"), false);
+            _ = putI4(adv, L("MaxReconnectAttempts"), 0);
             // No client-side idle disconnect.
             _ = putI4(adv, L("MinutesToIdleTimeout"), 0);
         }
@@ -507,10 +531,15 @@ pub const Pane = struct {
         if (self.started) return;
         self.started = true;
         if (self.password == null) self.askCredentials();
+        self.connect();
+        _ = SetTimer(self.hwnd, poll_timer, 1000, &tick);
+    }
+
+    /// Hand the control the login and connect.
+    fn connect(self: *Pane) void {
         if (self.user.len != 0) _ = putText(self.control, L("UserName"), self.alloc, self.user);
         if (self.password) |text| if (text.len != 0) self.setPassword(text);
         if (!call(self.control, L("Connect"))) log.warn("rdp pane: Connect failed", .{});
-        _ = SetTimer(self.hwnd, poll_timer, 1000, &tick);
     }
 
     fn askCredentials(self: *Pane) void {
@@ -572,36 +601,49 @@ pub const Pane = struct {
         if (state != 0) {
             self.idle_polls = 0;
             self.seen_connecting = true;
-            if (state == 1 and !self.told_connected) {
-                self.told_connected = true;
-                self.events.connected(self.events.ctx);
+            if (state == 1) {
+                self.reconnects = 0;
+                if (!self.told_connected) {
+                    self.told_connected = true;
+                    self.events.connected(self.events.ctx);
+                }
             }
             return;
         }
-        // Not connected: over once it was under way, or when it never
-        // started (a bad server name fails before Connect returns).
+        // Not connected. A bad server name fails before Connect returns, so
+        // a session never under way gets a few polls first.
         if (!self.seen_connecting and self.ticks < 5) return;
-        // Once under way, a short gap is the control reconnecting.
-        if (self.seen_connecting) {
-            self.idle_polls +|= 1;
-            if (self.idle_polls < 30) return;
+        const reason = disconnectReason(self.control);
+        switch (afterDrop(self.told_connected, reason, self.reconnects, self.idle_polls)) {
+            .wait => {
+                self.idle_polls +|= 1;
+                return;
+            },
+            .reconnect => {
+                self.idle_polls = 0;
+                self.reconnects += 1;
+                log.info("rdp pane: reconnecting attempt={d} reason={d}", .{ self.reconnects, reason });
+                self.connect();
+                return;
+            },
+            .end => {},
         }
-        logDisconnectReason(self.control);
+        log.info("rdp pane: session ended extended_reason={d} reconnects={d}", .{ reason, self.reconnects });
         const events = self.events;
         self.destroy();
         events.ended(events.ctx);
     }
 
-    /// Why the session ended, in the log (`ExtendedDisconnectReason`).
-    fn logDisconnectReason(disp: *IDispatch) void {
-        var v = get(disp, L("ExtendedDisconnectReason")) orelse return;
+    /// Why the session ended (`ExtendedDisconnectReason`, 0 when the
+    /// control knows nothing more, as for a dropped link), -1 unread.
+    fn disconnectReason(disp: *IDispatch) i32 {
+        var v = get(disp, L("ExtendedDisconnectReason")) orelse return -1;
         defer _ = VariantClear(&v);
-        const reason: i32 = switch (v.vt) {
+        return switch (v.vt) {
             VT_I2 => v.data.iVal,
             VT_I4 => v.data.lVal,
             else => -1,
         };
-        log.info("rdp pane: session ended extended_reason={d}", .{reason});
     }
 
     /// The pane whose control holds `hwnd` (the control's own windows are
@@ -713,6 +755,18 @@ fn promptCredentials(alloc: Allocator, owner: HWND, user: []const u8) ?Typed {
         return null;
     };
     return .{ .user = user_text, .password = password_text, .save = save != 0 };
+}
+
+test "rdp pane: a drop reconnects a few times at most, and a failed first login never" {
+    // Never connected: the login or the server failed; retrying a wrong
+    // password locks the account.
+    try std.testing.expectEqual(Drop.end, afterDrop(false, 0, 0, 100));
+    // Ended by the server or the person.
+    try std.testing.expectEqual(Drop.end, afterDrop(true, 12, 0, 100));
+    try std.testing.expectEqual(Drop.wait, afterDrop(true, 0, 0, 0));
+    try std.testing.expectEqual(Drop.reconnect, afterDrop(true, 0, 0, reconnect_delay_polls));
+    try std.testing.expectEqual(Drop.reconnect, afterDrop(true, 0, max_reconnects - 1, reconnect_delay_polls));
+    try std.testing.expectEqual(Drop.end, afterDrop(true, 0, max_reconnects, reconnect_delay_polls));
 }
 
 test "rdp pane: targetOf takes mstsc /v: command lines only" {

@@ -1,9 +1,11 @@
 //! The modal window that edits one terminal profile of the Profiles page:
-//! its name, command line, starting folder, zoom (font size), whether it
-//! opens as administrator, and its variables (one `NAME=VALUE` a line).
-//! Settings checks what it returns and writes it into the draft; the zoom
-//! and the administrator choice are kept as the profile's reserved
-//! variables (`windows_shell.font_size_env`, `elevated_env`).
+//! its name, command line, starting folder, zoom (font size), its tab's
+//! color and icon, whether it opens as administrator, and its variables
+//! (one `NAME=VALUE` a line). Settings checks what it returns and writes it
+//! into the draft; the zoom, the tab color and icon and the administrator
+//! choice are kept as the profile's reserved variables
+//! (`windows_shell.font_size_env`, `tab_color_env`, `tab_icon_env`,
+//! `elevated_env`).
 //!
 //! Nothing here logs a value the person typed.
 const std = @import("std");
@@ -21,6 +23,8 @@ const UINT = win32_types.UINT;
 const WPARAM = win32_types.WPARAM;
 
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
+const tab_style = @import("tab_style.zig");
+const terminals_import_dialog = @import("terminals_import_dialog.zig");
 
 /// What the window edits. In: the profile as it is (or a preset's command
 /// line for a new one). Out, after OK: what was typed, in the `alloc` given
@@ -32,6 +36,11 @@ pub const Profile = struct {
     folder: []const u8 = "",
     /// Points; empty for the config's.
     font_size: []const u8 = "",
+    /// `#RRGGBB`; empty for none.
+    tab_color: []const u8 = "",
+    /// A file, a short text such as an emoji, or `none`; empty for the
+    /// program's icon (`tab_style.parseIcon`).
+    tab_icon: []const u8 = "",
     elevated: bool = false,
     variables: []const u8 = "",
 };
@@ -43,7 +52,7 @@ pub const Check = struct {
     run: *const fn (ctx: *anyopaque, profile: *const Profile) ?Refusal,
 };
 pub const Refusal = struct { field: Field, message: []const u8 };
-pub const Field = enum { name, command, folder, font_size, variables };
+pub const Field = enum { name, command, folder, font_size, tab_color, tab_icon, variables };
 
 extern "user32" fn DialogBoxIndirectParamW(hInstance: ?HINSTANCE, template: *const anyopaque, parent: ?HWND, proc: *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) isize, init: LPARAM) callconv(.winapi) isize;
 extern "user32" fn EndDialog(hDlg: HWND, result: isize) callconv(.winapi) BOOL;
@@ -58,6 +67,24 @@ extern "user32" fn MessageBoxW(hwnd: ?HWND, text: [*:0]const u16, caption: [*:0]
 extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "kernel32" fn GetModuleHandleW(name: ?LPCWSTR) callconv(.winapi) ?HINSTANCE;
 
+// commdlg.h: natural alignment on x64 (72 bytes, pinned below).
+const CHOOSECOLORW = extern struct {
+    lStructSize: u32,
+    hwndOwner: ?HWND,
+    hInstance: ?*anyopaque,
+    rgbResult: u32,
+    lpCustColors: *[16]u32,
+    Flags: u32,
+    lCustData: LPARAM,
+    lpfnHook: ?*anyopaque,
+    lpTemplateName: ?LPCWSTR,
+};
+const CC_RGBINIT: u32 = 0x1;
+const CC_FULLOPEN: u32 = 0x2;
+extern "comdlg32" fn ChooseColorW(cc: *CHOOSECOLORW) callconv(.winapi) BOOL;
+/// The color dialog's custom colors, kept while koreterm runs.
+var custom_colors: [16]u32 = [_]u32{0x00FFFFFF} ** 16;
+
 const IDOK: u16 = 1;
 const IDCANCEL: u16 = 2;
 const id_name: u16 = 120;
@@ -66,6 +93,10 @@ const id_folder: u16 = 122;
 const id_font_size: u16 = 123;
 const id_elevated: u16 = 124;
 const id_variables: u16 = 125;
+const id_tab_color: u16 = 126;
+const id_tab_color_pick: u16 = 127;
+const id_tab_icon: u16 = 128;
+const id_tab_icon_browse: u16 = 129;
 
 const DWLP_USER: i32 = @sizeOf(usize) * 2;
 const WM_INITDIALOG: UINT = 0x0110;
@@ -140,11 +171,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
     const static: u16 = 0x0082;
 
     const w: i16 = 320;
-    const h: i16 = 236;
+    const h: i16 = 282;
     const label_w: i16 = 86;
     const field_x: i16 = 7 + label_w + 4;
     const field_w: i16 = w - field_x - 7;
-    const count: u16 = 4 * 2 + 1 + 1 + 3 + 2;
+    const count: u16 = 6 * 2 + 1 + 1 + 3 + 2 + 2 + 2;
     try t.int(u32, 0x80000000 | 0x00C00000 | 0x00080000 | 0x80 | 0x40 | 0x800);
     try t.int(u32, 0);
     try t.int(u16, count);
@@ -165,6 +196,8 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
         .{ .label = L("&Command line"), .id = id_command, .width = field_w },
         .{ .label = L("Starting &folder"), .id = id_folder, .width = field_w },
         .{ .label = L("Font si&ze (zoom)"), .id = id_font_size, .width = 50 },
+        .{ .label = L("&Tab color"), .id = id_tab_color, .width = 50 },
+        .{ .label = L("Tab &icon"), .id = id_tab_icon, .width = field_w - 56 },
     };
     for (rows) |row| {
         try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, row.label);
@@ -172,6 +205,11 @@ fn buildTemplate(alloc: Allocator) Allocator.Error![]align(4) u8 {
         y += 18;
     }
     try t.item(child, field_x + 56, 9 + 18 * 3 + 2, field_w - 56, 9, 0xFFFF, static, L("points; blank for the Settings size"));
+    try t.item(child | WS_TABSTOP, field_x + 54, 9 + 18 * 4, 50, 13, id_tab_color_pick, button, L("C&hoose..."));
+    try t.item(child, field_x + 110, 9 + 18 * 4 + 2, field_w - 110, 9, 0xFFFF, static, L("#RRGGBB; blank for none"));
+    try t.item(child | WS_TABSTOP, field_x + field_w - 52, 9 + 18 * 5, 52, 13, id_tab_icon_browse, button, L("&Browse..."));
+    try t.item(child, field_x, 9 + 18 * 5 + 14, field_w, 9, 0xFFFF, static, L("Blank: the program's icon. A .ico/.exe/.dll file, an emoji, or none."));
+    y += 10;
     try t.item(child | WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX, field_x, y, field_w, 12, id_elevated, button, L("Open as &administrator (in its own window)"));
     y += 18;
     try t.item(child, 7, y + 2, label_w, 9, 0xFFFF, static, L("&Variables"));
@@ -225,6 +263,8 @@ fn controlId(field: Field) u16 {
         .command => id_command,
         .folder => id_folder,
         .font_size => id_font_size,
+        .tab_color => id_tab_color,
+        .tab_icon => id_tab_icon,
         .variables => id_variables,
     };
 }
@@ -241,6 +281,8 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
             setText(hwnd, id_command, a, p.command);
             setText(hwnd, id_folder, a, p.folder);
             setText(hwnd, id_font_size, a, p.font_size);
+            setText(hwnd, id_tab_color, a, p.tab_color);
+            setText(hwnd, id_tab_icon, a, p.tab_icon);
             setText(hwnd, id_variables, a, p.variables);
             if (GetDlgItem(hwnd, id_elevated)) |box| _ = SendMessageW(box, BM_SETCHECK, @intFromBool(p.elevated), 0);
             return 1;
@@ -256,6 +298,8 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                         .command = readText(hwnd, id_command, a) orelse return 1,
                         .folder = readText(hwnd, id_folder, a) orelse return 1,
                         .font_size = readText(hwnd, id_font_size, a) orelse return 1,
+                        .tab_color = readText(hwnd, id_tab_color, a) orelse return 1,
+                        .tab_icon = readText(hwnd, id_tab_icon, a) orelse return 1,
                         .elevated = if (GetDlgItem(hwnd, id_elevated)) |box| SendMessageW(box, BM_GETCHECK, 0, 0) == 1 else false,
                         .variables = readText(hwnd, id_variables, a) orelse return 1,
                     };
@@ -273,6 +317,16 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
                     _ = EndDialog(hwnd, IDCANCEL);
                     return 1;
                 },
+                id_tab_color_pick => {
+                    pickColor(hwnd);
+                    return 1;
+                },
+                id_tab_icon_browse => {
+                    var buf: [1024]u16 = undefined;
+                    const path = terminals_import_dialog.pickFileWith(hwnd, &buf, L("Icons (*.ico;*.exe;*.dll)\x00*.ico;*.exe;*.dll\x00All files (*.*)\x00*.*\x00"), L("Tab icon")) orelse return 1;
+                    if (GetDlgItem(hwnd, id_tab_icon)) |control| _ = SetWindowTextW(control, path.ptr);
+                    return 1;
+                },
                 else => return 0,
             }
         },
@@ -282,6 +336,39 @@ fn dialogProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.w
         },
         else => return 0,
     }
+}
+
+/// Windows' color dialog, opened on the Tab color field's color; the pick
+/// is written there as `#RRGGBB`.
+fn pickColor(hwnd: HWND) void {
+    const control = GetDlgItem(hwnd, id_tab_color) orelse return;
+    var wide: [16]u16 = undefined;
+    const got = GetWindowTextW(control, &wide, wide.len);
+    var narrow: [16]u8 = undefined;
+    var n: usize = 0;
+    for (wide[0..@intCast(@max(0, got))]) |unit| {
+        if (unit > 0x7F or n == narrow.len) break;
+        narrow[n] = @intCast(unit);
+        n += 1;
+    }
+    var cc: CHOOSECOLORW = .{
+        .lStructSize = @sizeOf(CHOOSECOLORW),
+        .hwndOwner = hwnd,
+        .hInstance = null,
+        .rgbResult = tab_style.parseColor(narrow[0..n]) orelse 0x00D77800,
+        .lpCustColors = &custom_colors,
+        .Flags = CC_RGBINIT | CC_FULLOPEN,
+        .lCustData = 0,
+        .lpfnHook = null,
+        .lpTemplateName = null,
+    };
+    if (ChooseColorW(&cc) == 0) return;
+    var buf: [7]u8 = undefined;
+    const text = tab_style.formatColor(&buf, cc.rgbResult);
+    var out: [8]u16 = undefined;
+    for (text, 0..) |byte, i| out[i] = byte;
+    out[text.len] = 0;
+    _ = SetWindowTextW(control, @ptrCast(&out));
 }
 
 /// The `NAME=VALUE` lines of the Variables field: each trimmed, empty lines
@@ -309,7 +396,13 @@ test "profile dialog: the template is DWORD aligned and counts its items" {
     const template = try buildTemplate(std.testing.allocator);
     defer std.testing.allocator.free(template);
     try std.testing.expectEqual(@as(usize, 0), @intFromPtr(template.ptr) % 4);
-    try std.testing.expectEqual(@as(u16, 15), std.mem.readInt(u16, template[8..10], .little));
+    try std.testing.expectEqual(@as(u16, 23), std.mem.readInt(u16, template[8..10], .little));
+}
+
+test "profile dialog: CHOOSECOLORW matches the SDK" {
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(CHOOSECOLORW));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(CHOOSECOLORW, "rgbResult"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(CHOOSECOLORW, "Flags"));
 }
 
 test "profile dialog: variables are one NAME=VALUE a line" {
