@@ -2000,6 +2000,13 @@ kbd,
   margin: 0;
 }
 
+@media (pointer: coarse) {
+  .nc-proof__bar {
+    min-height: 44px;
+    padding-block: 2px;
+  }
+}
+
 .nc-proof:has(.nc-proof-code:focus-visible) {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
