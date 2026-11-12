@@ -678,6 +678,19 @@ function Get-TestShardProblems {
         $BuildText -notmatch '(?m)^        run\.addArg\(b\.fmt\("--shard=\{d\}/\{d\}", \.\{ k, shards \}\)\);\r?$') {
         $problems.Add('build.zig addTestRuns must add one --shard=K/N run for each K in 1..N')
     }
+    # Each shard's run, and the one run without shards, must be a dependency of
+    # the step, or the step passes on the tests it still has (test-shard's 3).
+    if ($BuildText -notmatch '(?m)^        step\.dependOn\(&run\.step\);\r?$' -or
+        $BuildText -notmatch '(?m)^        step\.dependOn\(&b\.addRunArtifact\(test_exe\)\.step\);\r?$') {
+        $problems.Add('build.zig addTestRuns must make the step depend on every run it adds')
+    }
+    if ($BuildText -notmatch '(?m)^        addTestRuns\(b, test_step, test_exe, test_shards\);\r?$') {
+        $problems.Add('build.zig must run the main test executable through addTestRuns')
+    }
+    # A parse whose result is dropped leaves every shard running every test.
+    if ($RunnerText -notmatch '(?m)^            shard = Shard\.parse\(arg\["--shard="\.len\.\.\]\) orelse\r?$') {
+        $problems.Add('src/test_runner.zig must keep the parsed --shard')
+    }
     $runnerUses = [regex]::Matches($BuildText, '(?m)^            \.test_runner = test_runner,\r?$').Count
     if ($runnerUses -ne 3) {
         $problems.Add("build.zig must give its 3 test executables the shard runner ($runnerUses do)")
@@ -696,6 +709,10 @@ $testShardMutations = @(
     @{ Runner = $testRunnerText; Build = $buildZigText.Replace('for (1..shards + 1) |k| {', 'for (1..shards) |k| {') }
     @{ Runner = $testRunnerText; Build = $buildZigText.Replace('run.addArg(b.fmt("--shard={d}/{d}", .{ k, shards }));', '// run.addArg(b.fmt("--shard={d}/{d}", .{ k, shards }));') }
     @{ Runner = $testRunnerText; Build = ([regex]'(?m)^            \.test_runner = test_runner,\r?\n').Replace($buildZigText, '', 1) }
+    @{ Runner = $testRunnerText; Build = ([regex]'(?m)^        step\.dependOn\(&run\.step\);\r?\n').Replace($buildZigText, '', 1) }
+    @{ Runner = $testRunnerText; Build = $buildZigText.Replace('        step.dependOn(&b.addRunArtifact(test_exe).step);', '        _ = b.addRunArtifact(test_exe);') }
+    @{ Runner = $testRunnerText; Build = $buildZigText.Replace('        addTestRuns(b, test_step, test_exe, test_shards);', '        test_step.dependOn(&b.addRunArtifact(test_exe).step);') }
+    @{ Runner = $testRunnerText.Replace('            shard = Shard.parse(arg["--shard=".len..]) orelse', '            _ = Shard.parse(arg["--shard=".len..]) orelse'); Build = $buildZigText }
 )
 foreach ($mutation in $testShardMutations) {
     if ($mutation.Runner -ceq $testRunnerText -and $mutation.Build -ceq $buildZigText) {
