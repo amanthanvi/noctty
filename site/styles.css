@@ -35,6 +35,8 @@
   --foreground: light-dark(#09090b, #fafafa);
   --muted: light-dark(#f4f4f5, #18181b);
   --muted-foreground: light-dark(#71717a, #a1a1aa);
+  /* Running prose on the reading page: one step stronger than muted. */
+  --prose: light-dark(#3f3f46, #d4d4d8);
   --border: light-dark(#e4e4e7, #27272a);
   --border-strong: light-dark(#d4d4d8, #3f3f46);
   --ring: light-dark(#52525b, #a1a1aa);
@@ -123,6 +125,40 @@ code {
   font-size: 0.875em;
 }
 
+/* JetBrains Mono joins "->", "--" and "-<" into single glyphs. Outside a
+   terminal window a command or a file name has to read character for
+   character, so commands get no ligatures. The terminal windows keep them,
+   as the app draws them. */
+code,
+pre,
+.nc-cmd {
+  font-feature-settings: "calt" 0;
+  font-variant-ligatures: none;
+}
+
+/* A command token that must not split across lines (a flag, a file name
+   with hyphens in it). */
+.nc-nobr {
+  white-space: nowrap;
+}
+
+/* Inline code reads as foreground wherever it sits in running text, and a
+   short token (a config key, a file name) stays on one line. A long path
+   may still wrap. */
+p code,
+dd code,
+li code,
+figcaption code {
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
+code.nc-path,
+code.nc-pin {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 kbd,
 .nc-kbd {
   display: inline-block;
@@ -202,6 +238,32 @@ kbd,
 
 /* shared */
 
+/* Drawn by app.js under anything that scrolls sideways: the thumb is the
+   part in view. */
+.nc-track {
+  display: none;
+}
+
+.nc-track.is-panning {
+  position: relative;
+  display: block;
+  height: 2px;
+  margin-top: 8px;
+  border-radius: 1px;
+  background: var(--border);
+}
+
+.nc-track span {
+  position: absolute;
+  inset-block: 0;
+  border-radius: 1px;
+  background: var(--muted-foreground);
+}
+
+.nc-proof .nc-track.is-panning {
+  margin: 0 16px 12px;
+}
+
 .nc-frame {
   width: var(--shell);
   margin-inline: auto;
@@ -233,8 +295,17 @@ kbd,
   transition: top 150ms var(--ease-out);
 }
 
+/* Shown under the sticky header, at the column's text edge, so it never
+   covers the wordmark. */
 .nc-skip-link:focus {
-  top: 12px;
+  top: 64px;
+  left: calc((100% - var(--shell)) / 2 + 1px + var(--gutter));
+}
+
+@media (max-width: 720px) {
+  .nc-skip-link:focus {
+    left: var(--gutter);
+  }
 }
 
 .nc-clipboard-stage {
@@ -295,8 +366,21 @@ kbd,
   background: var(--hover);
 }
 
+.nc-nav__link[aria-current="page"] {
+  color: var(--foreground);
+  background: var(--hover);
+}
+
+/* On a phone the header keeps the way to Install; Features goes first, then
+   GitHub (it is in the footer too). */
 @media (max-width: 640px) {
   .nc-nav__link--optional {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .nc-nav__link--wide {
     display: none;
   }
 }
@@ -379,8 +463,9 @@ kbd,
 /* copyable command */
 
 .nc-cmd {
+  position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   min-width: 0;
   min-height: 44px;
@@ -395,16 +480,21 @@ kbd,
 
 .nc-cmd__sigil {
   flex: none;
+  padding-block: 11px;
   color: var(--muted-foreground);
   user-select: none;
 }
 
+/* A command that has to wrap hangs its later lines under the first word, so
+   it still reads as one command. */
 .nc-cmd code {
   flex: 1;
   min-width: 0;
-  padding-block: 10px;
+  padding-block: 11px 11px;
+  padding-left: 2ch;
+  text-indent: -2ch;
   font-size: inherit;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .nc-copy {
@@ -413,6 +503,7 @@ kbd,
   place-items: center;
   width: 32px;
   height: 32px;
+  margin-top: 6px;
   padding: 0;
   border: 0;
   border-radius: 999px;
@@ -449,6 +540,69 @@ kbd,
   outline: 1px solid var(--border-strong);
 }
 
+/* When the clipboard refuses, the command is left selected and the button
+   says how to finish by hand, in space the command makes for it below
+   itself (in a command block's bar, beside the button). */
+.nc-cmd.has-copy-note {
+  margin-bottom: 30px;
+}
+
+.nc-copy.is-failed::after {
+  content: "Selected. Press Ctrl+C";
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 6px);
+  right: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* In a command block's bar the note takes the shell label's place while it
+   shows. */
+.nc-proof__bar .nc-copy.is-failed::after {
+  top: 50%;
+  right: auto;
+  left: 20px;
+  max-width: calc(100% - 72px);
+  padding-block: 2px;
+  transform: translateY(-50%);
+  text-align: left;
+  text-wrap: balance;
+  white-space: normal;
+}
+
+.nc-proof__bar:has(.nc-copy.is-failed) > span {
+  visibility: hidden;
+}
+
+@media (pointer: coarse) {
+  .nc-copy.is-failed::after {
+    content: "Selected. Copy from the selection menu";
+  }
+}
+
+/* On a touch screen the small round controls grow to a comfortable target;
+   they keep their look. */
+@media (pointer: coarse) {
+  .nc-theme-toggle,
+  .nc-copy {
+    width: 40px;
+    height: 40px;
+  }
+
+  .nc-copy {
+    margin-top: 2px;
+  }
+}
+
 /* hero */
 
 .nc-hero {
@@ -470,10 +624,12 @@ kbd,
   line-height: 1.55;
 }
 
+/* Top-aligned: both items are 44 px tall, and when a failed copy makes room
+   under the command, Download stays where it is. */
 .nc-hero__actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   margin-top: 32px;
 }
@@ -523,9 +679,9 @@ kbd,
 }
 
 .nc-section__intro {
-  max-width: 60ch;
+  max-width: 64ch;
   margin-top: 14px;
-  color: var(--muted-foreground);
+  color: var(--prose);
   font-size: 1.06rem;
 }
 
@@ -541,20 +697,38 @@ kbd,
   container-type: inline-size;
 }
 
+/* The step buttons run in a row under the window. Each one is padded on both
+   sides so its focus ring has room, and the row is pulled out by the same
+   amount so the text still lines up with the window's edges. Titles and
+   bodies share two grid rows, so they line up whatever wraps. */
 .nc-demo__controls {
+  --step-pad: 12px;
+
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
-  margin-top: 16px;
-  border-top: 1px solid var(--border);
+  grid-template-rows: auto auto;
+  margin: 16px calc(-1 * var(--step-pad)) 0;
+}
+
+.nc-demo__controls::before {
+  content: "";
+  position: absolute;
+  inset: 0 var(--step-pad) auto;
+  height: 1px;
+  background: var(--border);
 }
 
 .nc-step {
   position: relative;
   display: grid;
-  gap: 6px;
+  grid-row: span 2;
+  grid-template-rows: subgrid;
+  row-gap: 6px;
   align-content: start;
-  padding: 16px 16px 4px 0;
+  padding: 16px var(--step-pad) 8px;
   border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-foreground);
   font-family: var(--font-sans);
@@ -565,14 +739,10 @@ kbd,
   transition: color 150ms var(--ease-out);
 }
 
-.nc-step + .nc-step {
-  padding-left: 16px;
-}
-
 .nc-step::before {
   content: "";
   position: absolute;
-  inset: -1px 0 auto;
+  inset: 0 var(--step-pad) auto;
   height: 1px;
   background: var(--foreground);
   transform: scaleX(0);
@@ -609,34 +779,53 @@ kbd,
   }
 }
 
+/* Titles sit on the bottom of their shared row, so a step whose key chip
+   wraps above its title still lines its title up with the others. */
 .nc-step__title {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  align-self: end;
+  gap: 6px 8px;
+  min-height: 22px;
   font-weight: 500;
+  text-wrap: balance;
 }
 
-.nc-step__body {
+.nc-step__body,
+.nc-demo__caption {
   color: var(--muted-foreground);
   font-size: 13.5px;
+  line-height: 1.45;
 }
 
-.nc-step .nc-kbd {
+.nc-step .nc-kbd,
+.nc-demo__caption .nc-kbd {
   transition: background-color 120ms var(--ease-out), color 120ms var(--ease-out),
     border-color 120ms var(--ease-out);
 }
 
 /* The key the demo is "pressing" right now. */
-.nc-step .nc-kbd.is-pressed {
+.nc-step .nc-kbd.is-pressed,
+.nc-demo__caption .nc-kbd.is-pressed {
   border-color: var(--foreground);
   background: var(--foreground);
   color: var(--background);
 }
 
+/* The selected step's explanation, repeated under the row where the row is
+   too narrow to hold it (phones). Screen readers hear it in the button. */
+.nc-demo__caption {
+  display: none;
+}
+
 .nc-demo__motion {
+  grid-column: 4;
+  grid-row: 1;
   align-self: start;
-  margin: 12px 0 0 12px;
+  min-width: 64px;
+  text-align: center;
+  margin: 12px var(--step-pad) 0 12px;
   padding: 4px 12px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -652,33 +841,75 @@ kbd,
   background: var(--hover);
 }
 
+@media (pointer: coarse) {
+  .nc-demo__motion {
+    min-width: 72px;
+    min-height: 36px;
+    padding-inline: 16px;
+  }
+}
+
 .nc-demo__note {
   margin-top: 14px;
   color: var(--muted-foreground);
   font-size: 13px;
 }
 
+/* On a phone the three steps sit side by side right under the window, as
+   compact tabs, and the selected one's explanation shows below them. */
 @media (max-width: 760px) {
   .nc-demo__controls {
-    grid-template-columns: minmax(0, 1fr);
+    --step-pad: 8px;
+
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 8px;
   }
 
-  .nc-step,
-  .nc-step + .nc-step {
-    padding: 14px 0 12px;
+  .nc-step {
+    grid-row: 1;
+    grid-template-rows: auto;
+    align-content: end;
+    padding-block: 12px 10px;
   }
 
-  .nc-step + .nc-step {
-    border-top: 1px solid var(--border);
+  .nc-step__title {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-end;
+    font-size: 13.5px;
+    line-height: 1.3;
   }
 
   .nc-step__body {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .nc-demo__caption {
+    display: grid;
+    grid-column: 1 / 3;
+    grid-row: 2;
+    padding: 6px var(--step-pad) 0;
+  }
+
+  .nc-demo__caption > span {
+    grid-area: 1 / 1;
+    visibility: hidden;
+  }
+
+  .nc-demo__caption > span.is-active {
+    visibility: visible;
   }
 
   .nc-demo__motion {
-    justify-self: start;
-    margin: 4px 0 0;
+    grid-column: 3;
+    grid-row: 2;
+    justify-self: end;
+    margin: 6px var(--step-pad) 0 0;
   }
 }
 
@@ -696,7 +927,9 @@ kbd,
   --term-bright-yellow: light-dark(#633c01, #e7c547);
   --term-green: light-dark(#116329, #b5bd68);
   --term-cyan: light-dark(#1b7c83, #8abeb7);
-  --term-red: light-dark(#cf222e, #cc6666);
+  /* Lifted from the default palette's #cc6666 (3.8:1 on this background) so
+     the 404 page's error line reads at better than 4.5:1. */
+  --term-red: light-dark(#cf222e, #ff8484);
   --term-cursor: light-dark(#0969da, #ffffff);
 
   --chrome-font: "Segoe UI Variable Text", "Segoe UI", var(--font-sans);
@@ -716,7 +949,7 @@ kbd,
   --list-bg: light-dark(#f9f9f9, #1a1a1c);
   --list-selected: light-dark(#cce4f7, #323c52);
 
-  --term-font-size: clamp(8px, 1.3333cqi, 16px);
+  --term-font-size: clamp(12px, 1.3333cqi, 16px);
   --px: calc(var(--term-font-size) / 16);
 
   position: relative;
@@ -740,14 +973,24 @@ kbd,
   transform: scale(0.985);
 }
 
-/* On a narrow column a fixed height keeps the window readable without
-   letting the aspect ratio push it wider than the page. */
-@container (max-width: 640px) {
+/* The window scales with its column down to a 12 px terminal font (a
+   900 px column). Narrower than that it stops scaling: the type holds at a
+   size you can read and the window takes a fixed height, so a tablet or a
+   half-screen laptop never shows smaller text than a phone. */
+@container (max-width: 900px) {
   .nc-term {
-    --term-font-size: 10px;
+    --term-font-size: 12px;
 
     aspect-ratio: auto;
-    height: 320px;
+    height: 360px;
+  }
+}
+
+@container (max-width: 520px) {
+  .nc-term {
+    --term-font-size: 11px;
+
+    height: 340px;
   }
 }
 
@@ -835,6 +1078,16 @@ kbd,
 .nc-term__caption svg {
   width: calc(10 * var(--px));
   height: calc(10 * var(--px));
+}
+
+/* The maximize square keeps all four sides at small, fractional sizes. */
+.nc-term__caption svg {
+  overflow: visible;
+}
+
+.nc-term__caption rect {
+  shape-rendering: crispEdges;
+  vector-effect: non-scaling-stroke;
 }
 
 /* The command bar docks under the tab strip and pushes the panes down. */
@@ -959,6 +1212,70 @@ kbd,
   color: inherit;
 }
 
+/* Where the window stops scaling, its chrome text (tabs, the command bar,
+   the result list) stops scaling too and holds at 12 px, the result list
+   spans the window, and the status line wraps instead of cutting off. On a
+   phone each row keeps its title and shortcut; the status line still reads
+   out the selected row's description. */
+@container (max-width: 900px) {
+  .nc-term__bar,
+  .nc-cmdbar,
+  .nc-cmdlist,
+  .nc-cmdbar__input {
+    font-size: 12px;
+  }
+
+  .nc-cmdbar__row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .nc-cmdbar__input {
+    height: 24px;
+    padding-inline: 10px;
+  }
+
+  .nc-cmdbar__close {
+    height: 24px;
+    padding-inline: 12px;
+  }
+
+  .nc-cmdbar__status {
+    white-space: normal;
+  }
+
+  .nc-cmdlist {
+    inset-inline: 0;
+  }
+
+  .nc-cmdlist li {
+    height: 30px;
+  }
+}
+
+@container (max-width: 560px) {
+  /* Two lines whichever row is selected, so the list does not jump as the
+     selection moves. */
+  .nc-cmdbar__status {
+    min-height: calc(2 * 1.3em);
+  }
+
+  .nc-term__tab {
+    padding-inline: 8px;
+  }
+
+  .nc-term__close {
+    display: none;
+  }
+
+  .nc-cmdlist li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .nc-cmdlist li span:nth-child(2) {
+    display: none;
+  }
+}
+
 /* panes */
 
 .nc-term__panes {
@@ -1001,9 +1318,12 @@ kbd,
   border-left-color: var(--chrome-accent);
 }
 
+/* Lines wrap at the pane's last column, as a terminal reflows them, not at
+   word boundaries. */
 .nc-term__line {
   min-height: 1.3333em;
   white-space: pre-wrap;
+  word-break: break-all;
   overflow-wrap: anywhere;
 }
 
@@ -1072,6 +1392,12 @@ kbd,
   margin-top: 0;
 }
 
+.nc-feature__head {
+  display: grid;
+  align-content: start;
+  gap: 20px;
+}
+
 .nc-feature + .nc-feature {
   margin-top: clamp(56px, 7vw, 88px);
   padding-top: clamp(56px, 7vw, 88px);
@@ -1102,7 +1428,7 @@ kbd,
   display: flex;
   flex-wrap: wrap;
   gap: 8px 16px;
-  margin: 20px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
   color: var(--muted-foreground);
@@ -1115,9 +1441,50 @@ kbd,
   gap: 8px;
 }
 
+/* The palette's filter prefixes: the character to type, then what it keeps. */
+.nc-prefixes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted-foreground);
+}
+
+.nc-prefixes li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nc-prefixes code {
+  display: inline-grid;
+  place-items: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.nc-prefixes + .nc-feature__body {
+  margin-top: 16px;
+}
+
+@media (max-width: 560px) {
+  .nc-prefixes {
+    display: grid;
+    grid-template-columns: repeat(2, max-content);
+    column-gap: 32px;
+  }
+}
+
 .nc-feature code {
-  color: var(--foreground);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .nc-figure {
@@ -1153,18 +1520,32 @@ kbd,
   }
 }
 
-/* On a phone a whole window shrinks its text past reading, so show its
-   top-left corner (the left pane, the palette's titles, the Settings
-   sidebar) at a size you can read. */
-@media (max-width: 640px) {
-  .nc-figure__frame img {
-    aspect-ratio: 4 / 3;
-    object-fit: cover;
-    object-position: left top;
+/* Below a 900 px frame a whole window shrinks its text past reading. There
+   the capture keeps a 900 px width (about 12 px text), starts from its
+   top-left corner, and the frame pans sideways to the rest of the window, so
+   the split, the palette's descriptions and the Settings fields are all
+   still there. */
+.nc-figure__hint {
+  display: none;
+}
+
+@media (max-width: 980px) {
+  .nc-figure__frame {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
   }
 
-  .nc-figure--window .nc-figure__frame img {
-    aspect-ratio: 1;
+  .nc-figure__frame img {
+    width: 900px;
+    max-width: none;
+  }
+
+  .nc-figure--window {
+    max-width: none;
+  }
+
+  .nc-figure__hint {
+    display: block;
   }
 }
 
@@ -1198,10 +1579,6 @@ kbd,
   font-size: 14.5px;
 }
 
-.nc-list code {
-  color: var(--foreground);
-}
-
 @media (max-width: 900px) {
   .nc-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1211,6 +1588,12 @@ kbd,
 @media (max-width: 600px) {
   .nc-list {
     grid-template-columns: minmax(0, 1fr);
+    border-left: 0;
+  }
+
+  .nc-list > li {
+    padding-inline: 0;
+    border-right: 0;
   }
 }
 
@@ -1240,8 +1623,13 @@ kbd,
   margin-top: 32px;
 }
 
-.nc-split a {
+.nc-split a,
+.nc-split strong {
   color: var(--foreground);
+}
+
+.nc-split strong {
+  font-weight: 500;
 }
 
 @media (max-width: 820px) {
@@ -1296,26 +1684,51 @@ kbd,
 }
 
 .nc-install__note code {
+  overflow-wrap: break-word;
+}
+
+.nc-install__smartscreen {
+  max-width: 68ch;
+  margin-top: 32px;
+}
+
+.nc-install__smartscreen h3 {
+  font-size: 1.05rem;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.nc-install__smartscreen p {
+  margin-top: 6px;
+  color: var(--muted-foreground);
+  font-size: 15px;
+}
+
+.nc-install__smartscreen a {
   color: var(--foreground);
-  overflow-wrap: anywhere;
 }
 
 .nc-install__meta {
   display: grid;
   gap: 8px;
   margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
   color: var(--muted-foreground);
   font-size: 14px;
 }
 
-.nc-install__meta code {
-  color: var(--foreground);
-}
-
+/* On a phone the card's side borders and padding cost the commands a fifth
+   of their width, so the rows run edge to edge between hairlines. */
 @media (max-width: 680px) {
+  .nc-install {
+    border-inline: 0;
+    border-radius: 0;
+  }
+
   .nc-install__row {
     grid-template-columns: minmax(0, 1fr);
-    padding: 18px;
+    padding: 18px 0;
   }
 }
 
@@ -1387,6 +1800,7 @@ kbd,
 .nc-page-hero .nc-hero__meta {
   max-width: 62ch;
   margin-top: 20px;
+  text-wrap: balance;
 }
 
 .nc-page-hero .nc-hero__meta strong {
@@ -1396,7 +1810,7 @@ kbd,
 
 .nc-prose {
   max-width: 68ch;
-  color: var(--muted-foreground);
+  color: var(--prose);
 }
 
 .nc-prose p + p {
@@ -1415,9 +1829,45 @@ kbd,
 
 .nc-proof-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
-  gap: clamp(32px, 6vw, 88px);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(32px, 4vw, 48px);
+}
+
+/* The project facts, as a hairline grid like "Also in the box": three
+   across, the label over its value. */
+.nc-facts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+
+.nc-facts-table.nc-facts-grid > div {
+  display: block;
+  padding: 20px clamp(18px, 2vw, 24px) 24px;
+  border-top: 0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.nc-facts-table.nc-facts-grid dt {
+  font-size: 13px;
+}
+
+.nc-facts-table.nc-facts-grid dd {
+  margin-top: 6px;
+  color: var(--prose);
+  font-size: 15px;
+}
+
+/* Rows of 3, 2 and 1: the fifth fact spans two columns and Network, the
+   longest, the whole last row. */
+.nc-facts-grid > div:nth-child(5) {
+  grid-column: span 2;
+}
+
+.nc-facts-grid > div:nth-child(6) {
+  grid-column: 1 / -1;
 }
 
 .nc-facts-table {
@@ -1472,8 +1922,9 @@ kbd,
 .nc-migration-grid p,
 .nc-verify-steps p,
 .nc-trust-limit p {
+  max-width: 68ch;
   margin-top: 10px;
-  color: var(--muted-foreground);
+  color: var(--prose);
   font-size: 15.5px;
 }
 
@@ -1494,9 +1945,9 @@ kbd,
 
 .nc-verify-steps > li {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: clamp(24px, 4vw, 56px);
+  gap: 20px;
   padding: 32px 0;
   border-top: 1px solid var(--border);
   counter-increment: verify-step;
@@ -1516,15 +1967,87 @@ kbd,
   background: var(--muted);
   color: var(--foreground);
   font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.nc-proof-code code {
+  font-size: inherit;
+}
+
+/* A verification block: a bar naming the shell, with the copy button, over
+   the code. */
+.nc-proof {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.nc-proof__bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 4px 0 20px;
+  border-bottom: 1px solid var(--border);
+  color: var(--prose);
   font-size: 12.5px;
-  line-height: 1.75;
+}
+
+.nc-proof__bar .nc-copy {
+  margin: 0;
+}
+
+@media (pointer: coarse) {
+  .nc-proof__bar {
+    min-height: 44px;
+    padding-block: 2px;
+  }
+}
+
+.nc-proof:has(.nc-proof-code:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.nc-proof .nc-proof-code:focus-visible {
+  outline: none;
+}
+
+.nc-proof .nc-proof-code {
+  border: 0;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: transparent;
+}
+
+/* Each line wraps only at its spaces and hangs under itself; a token too
+   long for the line scrolls the block (it is focusable) instead of
+   splitting. */
+.nc-proof-line {
+  display: block;
+  padding-left: 2ch;
+  text-indent: -2ch;
+  white-space: pre-wrap;
+  overflow-wrap: normal;
+}
+
+/* A checksum line's file name is longer than a phone line: that line stays
+   whole and the block scrolls, rather than leaving the flag on a line of
+   its own. */
+.nc-proof-line.nc-proof-line--whole {
+  white-space: pre;
 }
 
 .nc-trust-limit {
-  max-width: 78ch;
   margin-top: 40px;
   padding-top: 32px;
   border-top: 1px solid var(--border);
+}
+
+.nc-trust-limit > .nc-facts-table {
+  max-width: 78ch;
 }
 
 .nc-trust-limit .nc-facts-table {
@@ -1541,7 +2064,6 @@ kbd,
 
 @media (max-width: 820px) {
   .nc-proof-grid,
-  .nc-verify-steps > li,
   .nc-evidence-grid,
   .nc-migration-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -1555,12 +2077,48 @@ kbd,
   .nc-verify-steps > li {
     gap: 16px;
   }
+
+  .nc-proof-code {
+    padding: 14px 16px;
+    font-size: 13px;
+  }
+
+  .nc-proof__bar {
+    padding-left: 16px;
+  }
+
+  .nc-proof__bar .nc-copy.is-failed::after {
+    left: 16px;
+  }
+}
+
+@media (max-width: 820px) {
+  .nc-facts-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 560px) {
   .nc-facts-table > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
+  }
+
+  .nc-facts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nc-facts-grid > div:nth-child(5) {
+    grid-column: auto;
+  }
+
+  .nc-facts-grid {
+    border-left: 0;
+  }
+
+  .nc-facts-table.nc-facts-grid > div {
+    padding-inline: 0;
+    border-right: 0;
   }
 }
 
@@ -1590,6 +2148,17 @@ kbd,
 
 .nc-lost .nc-term__pane {
   padding: 14px 16px;
+}
+
+@media (max-width: 640px) {
+  .nc-lost {
+    align-content: start;
+    min-height: 0;
+  }
+
+  .nc-lost .nc-term {
+    --term-font-size: 13px;
+  }
 }
 
 .nc-lost__body {

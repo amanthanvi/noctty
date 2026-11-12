@@ -32,7 +32,7 @@ const SITE_PAGES = new Map([
     ["styles.css", "app.js", "version.js", "install.js", "terminal.js"],
   ],
   ["404.html", ["styles.css", "app.js"]],
-  ["why-noctty.html", ["styles.css", "app.js", "version.js"]],
+  ["why-noctty.html", ["styles.css", "app.js", "version.js", "install.js"]],
 ]);
 
 const sha256Hex = (text) =>

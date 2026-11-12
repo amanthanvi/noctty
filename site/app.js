@@ -50,6 +50,70 @@
     for (var i = 0; i < lostPaths.length; i += 1) lostPaths[i].textContent = requested;
   }
 
+  // Anything that scrolls sideways (a capture wider than its frame, a
+  // command block on a phone) gets a track under it whose thumb is the part
+  // in view. A capture also starts on its subject (data-nc-pan:
+  // "left:<fraction>" puts that point of the image at the frame's left edge,
+  // "center:<fraction>" in its middle). Either is a tab stop only while it
+  // scrolls (the markup keeps a command block's tabindex for pages without
+  // JavaScript).
+  var panFrames = document.querySelectorAll("[data-nc-pan]");
+  for (var p = 0; p < panFrames.length; p += 1) setUpPan(panFrames[p]);
+
+  function setUpPan(frame) {
+    var isCapture = frame.tagName !== "PRE";
+    var spec = (frame.getAttribute("data-nc-pan") || "left:0").split(":");
+    var mode = spec[0];
+    var at = Number(spec[1]) || 0;
+    var track = document.createElement("div");
+    var thumb = document.createElement("span");
+    var started = false;
+    track.className = "nc-track";
+    track.setAttribute("aria-hidden", "true");
+    track.appendChild(thumb);
+    frame.insertAdjacentElement("afterend", track);
+
+    function update() {
+      var range = frame.scrollWidth - frame.clientWidth;
+      var panning = range > 1;
+      track.classList.toggle("is-panning", panning);
+      if (panning) {
+        frame.setAttribute("tabindex", "0");
+        if (isCapture) {
+          frame.setAttribute("role", "region");
+          // Each capture is named by its own caption.
+          var labelledBy = frame.getAttribute("data-nc-labelledby");
+          if (labelledBy) frame.setAttribute("aria-labelledby", labelledBy);
+          else frame.setAttribute("aria-label", "Screenshot, scrolls sideways");
+        }
+        if (!started) {
+          started = true;
+          var x = at * frame.scrollWidth - (mode === "center" ? frame.clientWidth / 2 : 0);
+          frame.scrollLeft = Math.max(0, Math.min(range, x));
+        }
+        thumb.style.left = (frame.scrollLeft / frame.scrollWidth) * 100 + "%";
+        thumb.style.width = (frame.clientWidth / frame.scrollWidth) * 100 + "%";
+      } else if (isCapture) {
+        started = false;
+        frame.removeAttribute("tabindex");
+        frame.removeAttribute("role");
+        frame.removeAttribute("aria-label");
+        frame.removeAttribute("aria-labelledby");
+      } else {
+        // A command block that fits has nothing to scroll to.
+        frame.removeAttribute("tabindex");
+      }
+    }
+
+    frame.addEventListener("scroll", update, { passive: true });
+    if (typeof ResizeObserver === "function") new ResizeObserver(update).observe(frame);
+    else window.addEventListener("resize", update);
+    // A web font that loads late changes a command's width without resizing
+    // its frame, which the observer would miss.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(update);
+    update();
+  }
+
   // Until the visitor picks a theme, follow the system when it changes.
   if (media) {
     var followSystem = function (event) {
