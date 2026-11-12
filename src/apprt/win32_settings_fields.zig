@@ -69,6 +69,9 @@ pub const SettingField = enum {
     padding_balance,
     auto_update,
     auto_update_channel,
+    rdp_color_depth,
+    rdp_compression,
+    rdp_experience,
 
     pub fn label(self: SettingField) []const u8 {
         if (projection(self)) |part| return part.label;
@@ -264,6 +267,9 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .command, .native = .{ .binding = "edit_command", .id = 414, .order = 0, .form_label = "Default command (blank = Default profile or auto-detect)", .accessible_name = "Default command" }, .label = "Default command", .help = "Command for new terminals. It wins over Default profile; leave it blank to start that profile, or to detect a shell when Default profile is Automatic.", .placeholder = "Default profile or automatic shell", .section = .shell, .kind = .command, .apply = .new_terminals, .validation = .command, .keywords = "settings preferences configuration command", .default_display = .automatic },
     .{ .key = .@"default-profile", .native = .{ .binding = "combo_default_profile", .id = 427, .order = 1, .form_label = "Default profile (Default command wins when set)", .accessible_name = "Default profile" }, .label = "Default profile", .help = "The profile new terminals start when Default command is blank: a detected shell, a Visual Studio shell or a profile from the config file. A Default command wins over it. Automatic removes the setting.", .section = .shell, .kind = .profile, .apply = .new_terminals, .keywords = "settings preferences configuration default-profile profile shell", .default_display = .automatic },
     .{ .key = .@"working-directory", .native = .{ .binding = "edit_working_dir", .id = 428, .order = 3, .form_label = "Starting folder (blank = your home folder)", .accessible_name = "Starting folder" }, .label = "Starting folder", .help = "The folder new terminals start in: a path such as C:\\Projects, home for your home folder, or inherit for the folder noctty was started from. A profile's own starting folder wins over it.", .placeholder = "Your home folder", .section = .shell, .kind = .directory, .apply = .new_terminals, .keywords = "settings preferences configuration working-directory starting folder start directory cwd path", .default_display = .automatic },
+    .{ .key = .@"rdp-color-depth", .native = .{ .binding = "combo_rdp_colors", .id = 429, .order = 4, .form_label = "Remote Desktop colors", .accessible_name = "Remote Desktop colors" }, .field = .rdp_color_depth, .label = "Remote Desktop colors", .help = "The colors a Remote Desktop tab asks the server for. Fewer colors send less over a slow link. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-color-depth remote desktop colors palette bits quality" },
+    .{ .key = .@"rdp-compression", .native = .{ .binding = "combo_rdp_compression", .id = 430, .order = 5, .form_label = "Remote Desktop compression", .accessible_name = "Remote Desktop compression" }, .field = .rdp_compression, .label = "Remote Desktop compression", .help = "Whether a Remote Desktop tab compresses what the server sends. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-compression remote desktop compression stream bandwidth quality" },
+    .{ .key = .@"rdp-experience", .native = .{ .binding = "combo_rdp_experience", .id = 431, .order = 6, .form_label = "Remote Desktop visual quality", .accessible_name = "Remote Desktop visual quality" }, .field = .rdp_experience, .label = "Remote Desktop visual quality", .help = "How much of the remote desktop's look to send: wallpaper, themes, animations and font smoothing. A connection can set its own.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration rdp-experience remote desktop wallpaper themes animations font smoothing quality" },
 };
 
 pub const FormField = struct {
@@ -290,6 +296,8 @@ pub const FormField = struct {
 };
 
 pub const form_fields = rows: {
+    // The pairwise identity check below grows with the square of the rows.
+    @setEvalBranchQuota(4000);
     var count: usize = 0;
     for (descriptors) |spec| count += if (spec.native != null) 1 else spec.projections.len;
     var result: [count]FormField = undefined;
@@ -505,6 +513,21 @@ pub fn Combo(comptime field: SettingField) type {
             .{ .value = .stable, .label = "Stable" },
             .{ .value = .tip, .label = "Tip (no automatic checks)" },
         },
+        .rdp_color_depth => &.{
+            .{ .value = .@"32", .label = "32 bits (true color)" },
+            .{ .value = .@"24", .label = "24 bits" },
+            .{ .value = .@"16", .label = "16 bits (high color)" },
+            .{ .value = .@"15", .label = "15 bits" },
+        },
+        .rdp_compression => &.{
+            .{ .value = true, .label = "On" },
+            .{ .value = false, .label = "Off" },
+        },
+        .rdp_experience => &.{
+            .{ .value = .fast, .label = "Fast (least data)" },
+            .{ .value = .balanced, .label = "Balanced" },
+            .{ .value = .rich, .label = "Rich (everything)" },
+        },
         else => @compileError("Not a Settings dropdown"),
     };
     comptime {
@@ -687,6 +710,9 @@ pub const round_trip_config =
     \\command = direct:pwsh.exe -NoLogo -Command "echo #; literal"
     \\default-profile = user:py312
     \\working-directory = C:\Projects
+    \\rdp-color-depth = 16
+    \\rdp-compression = false
+    \\rdp-experience = fast
 ;
 /// Behavioral round trips use Config's real grammar and formatter, including
 /// composite/owned keys, rather than checking source text or pointer equality.
@@ -767,7 +793,7 @@ test "settings model validates scalar ranges with the form's exact types" {
 
 test "settings model separates saved apply timing from edit previews and Windows support" {
     for (descriptors) |spec| {
-        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile" or spec.key == .@"working-directory";
+        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile" or spec.key == .@"working-directory" or spec.key == .@"rdp-color-depth" or spec.key == .@"rdp-compression" or spec.key == .@"rdp-experience";
         try std.testing.expectEqual(if (new_terminal) ApplyPolicy.new_terminals else ApplyPolicy.live, spec.apply);
         const unavailable = spec.key == .@"background-blur" or spec.key == .@"link-previews";
         try std.testing.expectEqual(if (unavailable) Support.unsupported_on_windows else Support.available, spec.support);

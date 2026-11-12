@@ -429,10 +429,13 @@ pub const CTX_TAB_CLOSE: usize = 4021;
 pub const CTX_TAB_CLOSE_OTHERS: usize = 4022;
 pub const CTX_TAB_MOVE_LEFT: usize = 4023;
 pub const CTX_TAB_MOVE_RIGHT: usize = 4024;
+pub const CTX_TAB_NEW_PROFILE: usize = 4025;
 pub const CTX_PROFILE_BASE: usize = 4100; // profile dropdown items: CTX_PROFILE_BASE + index
 pub const CTX_SETTINGS: usize = 4013;
 pub const CTX_ABOUT: usize = 4014;
 pub const CTX_IMPORT_TERMINALS: usize = 4015;
+pub const CTX_EDIT_CONNECTIONS: usize = 4016;
+pub const CTX_BACKUP: usize = 4017;
 /// "Run as administrator" items: CTX_ELEVATED_BASE + profile index.
 pub const CTX_ELEVATED_BASE: usize = 4300;
 pub const SEARCH_BG_ID: usize = 2100;

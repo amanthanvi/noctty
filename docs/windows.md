@@ -1114,6 +1114,41 @@ noctty's command line is shown and not changed. `profile-order` and
 `profile-hidden` are not edited there: a hidden profile is marked, and both
 are changed in the config file.
 
+### The profile window
+
+The Profiles page lists one row a profile. Enter (or a double click) on a
+profile of yours opens its window: name, command line, starting folder, font
+size (its zoom), **Open as administrator** and its variables, one
+`NAME=VALUE` a line. On a profile noctty finds (a shell, a WSL distribution,
+an SSH host), Enter opens a new profile's window based on it: its command
+line, to keep or change. The list's menu also has **New profile based on
+this one** and **Delete profile**: a profile of yours is deleted after a
+Windows dialog asks; one noctty finds cannot be, so Delete hides it from the
+picker (Show in the picker brings it back). Insert or Ctrl+N opens a blank
+new profile. Everything is a draft until you Save.
+
+The window keeps the font size and the administrator choice as the
+profile's own variables, `NOCTTY_FONT_SIZE` (points) and `NOCTTY_ELEVATED`
+(`1`), so they save, export and back up with it. A profile set to open as
+administrator opens from the picker in an elevated window, after Windows' UAC
+prompt, unless noctty already runs elevated.
+
+A tab's menu (right click on the tab) has **Create Profile from This Tab**:
+Settings opens a new profile's window filled in from the tab: its title as
+the name, the command line it runs, the folder its shell reported last and its
+zoom. A Remote Desktop tab has none; its connection is edited on the Profiles
+page.
+
+### Backing up all settings
+
+**Back up all settings (.zip)**, on the window menu (▾) and on the Profiles
+list's menu, writes one ZIP where you pick: noctty's config and state folders
+(in portable mode, the data files beside `noctty.exe`, the logins under
+`credentials\` included; executables, libraries, bundled resources and the
+cache are left out) and `profiles-terminals.xml`, the Terminals export of the
+SSH and RDP profiles with their passwords in plain text. Keep it somewhere
+safe.
+
 ### Importing and exporting Terminals connections
 
 The Profiles list's menu (Shift+F10, the menu key or a right click) offers
@@ -1165,6 +1200,19 @@ splits, undo, close confirmation and session restore.
   be checked (a self-signed certificate) without asking. With the default,
   `false`, Windows asks as `mstsc.exe` does.
 - When the session ends, the tab says so; close it, or open the profile again.
+- The tab is named after the connection (its profile's name).
+- Quality: Settings > Shell sets the defaults, `rdp-color-depth` (15, 16, 24
+  or 32 bits), `rdp-compression` and `rdp-experience` (`fast`, `balanced`,
+  `rich`: wallpaper, themes, animations and font smoothing). A connection can
+  set its own on its command line, after `/v:`, as `/colors:16`,
+  `/compression:off` and `/experience:fast`; noctty never starts that
+  `mstsc.exe`, so the options are noctty's own.
+- Edit a connection on Settings > Profiles: Enter (or a double click) on its
+  row opens a window with its name, server, port, user name, password and
+  quality settings, each "Default" to follow Settings. The list's menu (and
+  the window menu's Remote Desktop > Edit connections) adds a new one. The
+  changes are a draft until you Save; the login is kept apart from the config
+  as for an import.
 
 ### Listing profiles
 

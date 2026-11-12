@@ -153,6 +153,39 @@ extern "user32" fn RemovePropW(hwnd: HWND, name: LPCWSTR) callconv(.winapi) ?*an
 extern "user32" fn GetWindowLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) isize;
 extern "user32" fn SetWindowLongPtrW(hwnd: HWND, index: i32, value: isize) callconv(.winapi) isize;
 
+extern "ole32" fn CLSIDFromProgID(progid: [*:0]const u16, clsid: *GUID) callconv(.winapi) HRESULT;
+extern "ole32" fn StringFromGUID2(guid: *const GUID, buf: [*]u16, len: i32) callconv(.winapi) i32;
+extern "ole32" fn CoCreateInstance(clsid: *const GUID, outer: ?*anyopaque, context: u32, iid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT;
+
+const IID_IUnknown: GUID = .{ .Data1 = 0, .Data2 = 0, .Data3 = 0, .Data4 = .{ 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
+
+/// Whether `unk` is the Remote Desktop control: only it answers
+/// `IMsTscNonScriptable`.
+fn isRemoteDesktop(unk: *IUnknown) bool {
+    var raw: ?*anyopaque = null;
+    if (!succeeded(unk.vtbl.QueryInterface(unk, &IID_IMsTscNonScriptable, &raw)) or raw == null) return false;
+    const ns: *INonScriptable = @ptrCast(@alignCast(raw.?));
+    _ = ns.vtbl.Release(ns);
+    return true;
+}
+
+/// `progid`'s CLSID as `{...}` text in `buf`, when this machine serves that
+/// class as the Remote Desktop control; null otherwise.
+fn servedClass(progid: [:0]const u16, buf: *[40]u16) ?[:0]const u16 {
+    var clsid: GUID = undefined;
+    if (!succeeded(CLSIDFromProgID(progid.ptr, &clsid))) return null;
+    const CLSCTX_INPROC_SERVER: u32 = 0x1;
+    var raw: ?*anyopaque = null;
+    if (!succeeded(CoCreateInstance(&clsid, null, CLSCTX_INPROC_SERVER, &IID_IUnknown, &raw)) or raw == null) return null;
+    const unk: *IUnknown = @ptrCast(@alignCast(raw.?));
+    defer _ = unk.vtbl.Release(unk);
+    if (!isRemoteDesktop(unk)) return null;
+    const len = StringFromGUID2(&clsid, buf, buf.len);
+    if (len <= 1) return null;
+    const end: usize = @intCast(len - 1);
+    return buf[0..end :0];
+}
+
 const AtlAxWinInitFn = *const fn () callconv(.winapi) BOOL;
 const AtlAxGetControlFn = *const fn (HWND, *?*IUnknown) callconv(.winapi) HRESULT;
 
@@ -250,6 +283,23 @@ pub fn fitRect(scaling: Scaling, width: i32, height: i32, desk_w: i32, desk_h: i
     return .{ .left = x, .top = y, .right = x + @max(1, fit_w), .bottom = y + @max(1, fit_h) };
 }
 
+/// The `PerformanceFlags` (TS_PERF_*) of an `rdp-experience`: what the
+/// server leaves out of the desktop it sends.
+pub fn performanceFlags(experience: terminals_import.Experience) i32 {
+    const disable_wallpaper: i32 = 0x1;
+    const disable_full_window_drag: i32 = 0x2;
+    const disable_menu_animations: i32 = 0x4;
+    const disable_theming: i32 = 0x8;
+    const disable_cursor_shadow: i32 = 0x20;
+    const enable_font_smoothing: i32 = 0x80;
+    const enable_desktop_composition: i32 = 0x100;
+    return switch (experience) {
+        .fast => disable_wallpaper | disable_full_window_drag | disable_menu_animations | disable_theming | disable_cursor_shadow,
+        .balanced => disable_wallpaper | disable_full_window_drag | disable_menu_animations | enable_font_smoothing,
+        .rich => enable_font_smoothing | enable_desktop_composition,
+    };
+}
+
 /// What the pane tells its surface.
 pub const Events = struct {
     ctx: *anyopaque,
@@ -272,6 +322,11 @@ pub const Login = struct {
 };
 
 pub const Options = struct {
+    /// Bits per pixel the server is asked for (15, 16, 24 or 32).
+    colors: i32 = 32,
+    /// The server compresses what it sends.
+    compression: bool = true,
+    experience: terminals_import.Experience = .balanced,
     scaling: Scaling = .proportional,
     /// Connect to a server whose identity cannot be checked without asking
     /// (`rdp-trust-certificates`).
@@ -326,12 +381,21 @@ pub const Pane = struct {
         var hwnd: ?HWND = null;
         var unknown: ?*IUnknown = null;
         for (control_names) |name| {
-            const made = CreateWindowExW(0, L("AtlAxWin"), name.ptr, style, 0, 0, @max(1, width), @max(1, height), parent, null, GetModuleHandleW(null), null) orelse continue;
+            // A ProgID can be registered while mstscax.dll does not serve its
+            // class (`MsTscAx.MsTscAx.13` answers CLASS_E_CLASSNOTAVAILABLE),
+            // and AtlAxWin then hosts a web browser for the text instead. So
+            // the class is made once here first, and AtlAxWin gets its CLSID.
+            var clsid_buf: [40]u16 = undefined;
+            const clsid_text = servedClass(name, &clsid_buf) orelse continue;
+            const made = CreateWindowExW(0, L("AtlAxWin"), clsid_text.ptr, style, 0, 0, @max(1, width), @max(1, height), parent, null, GetModuleHandleW(null), null) orelse continue;
             var unk: ?*IUnknown = null;
             if (succeeded(loaded.get_control(made, &unk)) and unk != null) {
-                hwnd = made;
-                unknown = unk;
-                break;
+                if (isRemoteDesktop(unk.?)) {
+                    hwnd = made;
+                    unknown = unk;
+                    break;
+                }
+                _ = unk.?.vtbl.Release(unk.?);
             }
             _ = DestroyWindow(made);
         }
@@ -373,7 +437,7 @@ pub const Pane = struct {
         _ = putText(disp, L("Server"), alloc, target.server);
         _ = putI4(disp, L("DesktopWidth"), desk_w);
         _ = putI4(disp, L("DesktopHeight"), desk_h);
-        _ = putI4(disp, L("ColorDepth"), 32);
+        _ = putI4(disp, L("ColorDepth"), options.colors);
         const advanced = getDispatch(disp, L("AdvancedSettings9")) orelse getDispatch(disp, L("AdvancedSettings2"));
         if (advanced) |adv| {
             defer _ = adv.vtbl.Release(adv);
@@ -381,6 +445,8 @@ pub const Pane = struct {
             _ = putBool(adv, L("SmartSizing"), true);
             _ = putBool(adv, L("EnableCredSspSupport"), true);
             _ = putBool(adv, L("RedirectClipboard"), true);
+            _ = putI4(adv, L("Compress"), @intFromBool(options.compression));
+            _ = putI4(adv, L("PerformanceFlags"), performanceFlags(options.experience));
             // 0: connect without asking about a server whose identity
             // cannot be checked. 2: warn and let the person decide, as
             // mstsc.exe does.

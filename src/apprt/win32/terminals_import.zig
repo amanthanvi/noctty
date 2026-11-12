@@ -218,10 +218,7 @@ pub fn writeCommand(writer: *std.Io.Writer, favorite: Favorite) std.Io.Writer.Er
             if (favorite.port) |port| if (port != 22) try writer.print(" -p {d}", .{port});
             try writer.print(" {s}", .{favorite.server});
         },
-        .rdp => {
-            try writer.print("mstsc.exe /v:{s}", .{favorite.server});
-            if (favorite.port) |port| if (port != 3389) try writer.print(":{d}", .{port});
-        },
+        .rdp => try writeRdpCommand(writer, favorite.server, favorite.port orelse 3389, .{}),
         .other => unreachable,
     }
 }
@@ -303,7 +300,44 @@ pub const Connection = struct {
     server: []const u8,
     port: u16,
     user: []const u8 = "",
+    /// RDP only: this connection's own quality settings, written after
+    /// `/v:` as `/colors:<bits>`, `/compression:on|off` and
+    /// `/experience:fast|balanced|rich`; null takes the config's
+    /// (`rdp-color-depth`, `rdp-compression`, `rdp-experience`).
+    rdp: RdpOptions = .{},
 };
+
+pub const ColorDepth = enum(u8) { @"15" = 15, @"16" = 16, @"24" = 24, @"32" = 32 };
+pub const Experience = enum { fast, balanced, rich };
+
+pub const RdpOptions = struct {
+    colors: ?ColorDepth = null,
+    compression: ?bool = null,
+    experience: ?Experience = null,
+};
+
+/// The command line of an RDP connection: `mstsc.exe /v:<server>[:<port>]`
+/// and its own options. noctty never starts it: a Remote Desktop tab reads
+/// it back (`parseCommand`).
+pub fn writeRdpCommand(writer: *std.Io.Writer, server: []const u8, port: u16, options: RdpOptions) std.Io.Writer.Error!void {
+    try writer.print("mstsc.exe /v:{s}", .{server});
+    if (port != 3389) try writer.print(":{d}", .{port});
+    if (options.colors) |colors| try writer.print(" /colors:{d}", .{@intFromEnum(colors)});
+    if (options.compression) |on| try writer.print(" /compression:{s}", .{if (on) "on" else "off"});
+    if (options.experience) |experience| try writer.print(" /experience:{t}", .{experience});
+}
+
+/// Whether `server` can go on a command line as a host (`safeHost`).
+pub fn validServer(server: []const u8) bool {
+    return server.len != 0 and safeHost(server);
+}
+
+/// `/name:value` when `arg` is that option (any case), else null.
+fn optionValue(arg: []const u8, comptime name: []const u8) ?[]const u8 {
+    const prefix = "/" ++ name ++ ":";
+    if (arg.len <= prefix.len or !std.ascii.eqlIgnoreCase(arg[0..prefix.len], prefix)) return null;
+    return arg[prefix.len..];
+}
 
 pub fn parseCommand(command: []const u8) ?Connection {
     var it = std.mem.tokenizeAny(u8, command, " \t");
@@ -333,6 +367,22 @@ pub fn parseCommand(command: []const u8) ?Connection {
     if (std.ascii.eqlIgnoreCase(base, "mstsc") or std.ascii.eqlIgnoreCase(base, "mstsc.exe")) {
         var conn: Connection = .{ .protocol = .rdp, .server = "", .port = 3389 };
         while (it.next()) |arg| {
+            if (optionValue(arg, "colors")) |value| {
+                const bits = std.fmt.parseInt(u8, value, 10) catch continue;
+                conn.rdp.colors = std.enums.fromInt(ColorDepth, bits);
+                continue;
+            }
+            if (optionValue(arg, "compression")) |value| {
+                if (std.ascii.eqlIgnoreCase(value, "on")) conn.rdp.compression = true;
+                if (std.ascii.eqlIgnoreCase(value, "off")) conn.rdp.compression = false;
+                continue;
+            }
+            if (optionValue(arg, "experience")) |value| {
+                inline for (comptime std.enums.values(Experience)) |experience| {
+                    if (std.ascii.eqlIgnoreCase(value, @tagName(experience))) conn.rdp.experience = experience;
+                }
+                continue;
+            }
             if (arg.len > 3 and std.ascii.eqlIgnoreCase(arg[0..3], "/v:")) {
                 const target = arg[3..];
                 // `host:port`; an unbracketed IPv6 address has many colons.
@@ -401,6 +451,22 @@ fn escape(writer: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
         '\'' => try writer.writeAll("&apos;"),
         else => try writer.writeByte(byte),
     };
+}
+
+test "an RDP command line carries the connection's own quality settings" {
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writeRdpCommand(&writer, "srv", 5589, .{ .colors = .@"16", .compression = false, .experience = .fast });
+    try std.testing.expectEqualStrings("mstsc.exe /v:srv:5589 /colors:16 /compression:off /experience:fast", writer.buffered());
+    const conn = parseCommand(writer.buffered()).?;
+    try std.testing.expectEqualStrings("srv", conn.server);
+    try std.testing.expectEqual(@as(u16, 5589), conn.port);
+    try std.testing.expectEqual(@as(?ColorDepth, .@"16"), conn.rdp.colors);
+    try std.testing.expectEqual(@as(?bool, false), conn.rdp.compression);
+    try std.testing.expectEqual(@as(?Experience, .fast), conn.rdp.experience);
+    // None given: the config decides; an unknown value is ignored.
+    const plain = parseCommand("mstsc.exe /v:srv /colors:7").?;
+    try std.testing.expect(plain.rdp.colors == null and plain.rdp.compression == null and plain.rdp.experience == null);
 }
 
 test "parseCommand reads back what writeCommand writes" {

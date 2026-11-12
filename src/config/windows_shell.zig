@@ -174,6 +174,25 @@ pub const EnvEntry = struct {
     value: [:0]const u8,
 };
 
+/// The variables Settings' profile window keeps a user profile's own
+/// options in (`profile-env`, so they save, export and back up with it):
+/// its zoom, a font size in points, and `1` to open it as administrator.
+pub const font_size_env = "NOCTTY_FONT_SIZE";
+pub const elevated_env = "NOCTTY_ELEVATED";
+
+/// The value of the variable `name` (any case) among `env`, if set.
+pub fn reservedEnv(env: []const EnvEntry, name: []const u8) ?[]const u8 {
+    for (env) |entry| if (std.ascii.eqlIgnoreCase(entry.key, name)) return entry.value;
+    return null;
+}
+
+/// Whether `profile` asks to open as administrator (`elevated_env`).
+pub fn opensElevated(profile: *const Profile) bool {
+    const user = profile.user orelse return false;
+    const value = reservedEnv(user.env, elevated_env) orelse return false;
+    return std.mem.eql(u8, value, "1");
+}
+
 /// `profile-working-directory`, resolved: `inherit` keeps the ordinary
 /// new-tab rules, a path is used as given.
 pub const WorkingDirectory = union(enum) {

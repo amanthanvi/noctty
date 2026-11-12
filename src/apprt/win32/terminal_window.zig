@@ -4075,13 +4075,27 @@ pub const Surface = struct {
                 break;
             }
         }
+        // The tab is named after the connection (its profile's name).
+        if (profile_id) |id| {
+            const label = config.@"profile-name".get(id) orelse id;
+            self.setTabTitleOverride(label) catch |err| log.warn("rdp tab title failed err={}", .{err});
+        }
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) rect = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
+        // The connection's own quality settings, else the config's.
+        const own = target.rdp;
         self.rdp_pane = rdp_pane_mod.Pane.create(alloc, hwnd, target, .{
             .profile_id = profile_id,
             .user = if (kept) |entry| entry.user else target.user,
             .password = if (kept) |entry| entry.password else null,
         }, rect.right, rect.bottom, .{
+            .colors = if (own.colors) |colors| @intFromEnum(colors) else config.@"rdp-color-depth".bits(),
+            .compression = own.compression orelse config.@"rdp-compression",
+            .experience = own.experience orelse switch (config.@"rdp-experience") {
+                .fast => .fast,
+                .balanced => .balanced,
+                .rich => .rich,
+            },
             .scaling = switch (config.@"rdp-scaling") {
                 .proportional => .proportional,
                 .fill => .fill,
@@ -4093,6 +4107,7 @@ pub const Surface = struct {
             .released = &rdpReleased,
             .connected = &rdpConnected,
         });
+        if (self.rdp_pane == null) self.showRdpNotice("Remote Desktop could not start: this Windows has no Remote Desktop control noctty can host.");
     }
 
     /// The Remote Desktop session is over and its control gone: the pane

@@ -263,6 +263,13 @@ fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell
     var env = try pane.env.clone(alloc);
     try windows_shell.layerEnv(alloc, &env, launch.env);
     pane.env = env;
+    // The profile's own zoom (Settings' profile window keeps it as
+    // `NOCTTY_FONT_SIZE`).
+    if (windows_shell.reservedEnv(launch.env, windows_shell.font_size_env)) |text| {
+        if (std.fmt.parseFloat(f32, text)) |size| {
+            if (size >= 4 and size <= 200) pane.@"font-size" = size;
+        } else |_| {}
+    }
     return try launch.clone(alloc);
 }
 

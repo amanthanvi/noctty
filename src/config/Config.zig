@@ -1079,6 +1079,26 @@ palette: Palette = .{},
 /// asking. With `false`, Windows asks each time, as mstsc.exe does.
 @"rdp-trust-certificates": bool = false,
 
+/// The colors a Remote Desktop pane asks the server for, in bits per pixel:
+/// `15`, `16`, `24` or `32`. Fewer colors send less over a slow link. A
+/// connection can set its own with `/colors:<bits>` on its command line.
+@"rdp-color-depth": RdpColorDepth = .@"32",
+
+/// Whether a Remote Desktop pane compresses what the server sends. A
+/// connection can set its own with `/compression:on` or `/compression:off`.
+@"rdp-compression": bool = true,
+
+/// How much of the remote desktop's look a Remote Desktop pane asks for:
+///
+///   * `fast` - no wallpaper, themes, animations, window contents while
+///     dragging, cursor shadow or font smoothing: the least to send.
+///   * `balanced` - themes and font smoothing; no wallpaper, animations or
+///     window contents while dragging.
+///   * `rich` - everything, desktop composition included.
+///
+/// A connection can set its own with `/experience:<value>`.
+@"rdp-experience": RdpExperience = .balanced,
+
 /// The opacity level (opposite of transparency) of the background. A value of
 /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
 /// or greater than 1 will be clamped to the nearest valid value.
@@ -7148,6 +7168,30 @@ pub const ConfirmCloseSurface = enum(c_int) {
 pub const RdpScaling = enum {
     proportional,
     fill,
+};
+
+/// Valid values for rdp-color-depth, in bits per pixel.
+pub const RdpColorDepth = enum {
+    @"15",
+    @"16",
+    @"24",
+    @"32",
+
+    pub fn bits(self: RdpColorDepth) i32 {
+        return switch (self) {
+            .@"15" => 15,
+            .@"16" => 16,
+            .@"24" => 24,
+            .@"32" => 32,
+        };
+    }
+};
+
+/// Valid values for rdp-experience.
+pub const RdpExperience = enum {
+    fast,
+    balanced,
+    rich,
 };
 
 /// Valid values for custom-shader-animation

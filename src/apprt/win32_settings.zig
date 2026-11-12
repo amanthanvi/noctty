@@ -40,6 +40,10 @@ const settings_patch = @import("win32/settings_patch.zig");
 const terminals_import = @import("win32/terminals_import.zig");
 const terminals_dialog = @import("win32/terminals_import_dialog.zig");
 const profile_credentials = @import("win32/profile_credentials.zig");
+const rdp_dialog = @import("win32/rdp_connection_dialog.zig");
+const settings_backup = @import("win32/settings_backup.zig");
+const profile_dialog = @import("win32/profile_dialog.zig");
+extern "user32" fn MessageBoxW(hwnd: ?HWND, text: [*:0]const u16, caption: [*:0]const u16, kind: u32) callconv(.winapi) i32;
 
 /// A path a file dialog returned (`C:\...`, plain Win32 form) as WTF-8 for
 /// `std.fs`: its `...W` calls want an NT-prefixed path and stop at a plain
@@ -733,6 +737,9 @@ const field_adapters = .{
     .chk_app_notify_config = checkboxAdapter(.app_notify_config),
     .combo_clipboard_read = comboAdapter(.clipboard_read),
     .combo_clipboard_write = comboAdapter(.clipboard_write),
+    .combo_rdp_colors = comboAdapter(.rdp_color_depth),
+    .combo_rdp_compression = comboAdapter(.rdp_compression),
+    .combo_rdp_experience = comboAdapter(.rdp_experience),
 };
 
 comptime {
@@ -781,7 +788,8 @@ pub const editable_keys = .{
     Config.Key.@"shell-integration",      Config.Key.@"cursor-style",      Config.Key.@"background-blur",
     Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
     Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
-    Config.Key.@"default-profile",        Config.Key.@"working-directory",
+    Config.Key.@"default-profile",        Config.Key.@"working-directory", Config.Key.@"rdp-color-depth",
+    Config.Key.@"rdp-compression",        Config.Key.@"rdp-experience",
 };
 
 /// A control that goes with a number field and writes the field as typing
@@ -1476,6 +1484,8 @@ const settings_header_control_count = settings_action_controls.len;
 const settings_clipped_control_count = settings_control_count - settings_header_control_count;
 
 comptime {
+    // The pairwise check grows with the square of the controls.
+    @setEvalBranchQuota(8000);
     for (settings_control_specs, 0..) |spec, i| {
         if (spec.id <= 1) @compileError("Settings control ID is reserved for static/default dialog controls");
         for (settings_control_specs[0..i]) |other| {
@@ -2021,6 +2031,9 @@ pub const ProfileChoice = struct {
     /// Studio under `visual-studio-profiles = newest`): the Profiles page
     /// cannot show it.
     found_hidden: bool = false,
+    /// The command line it starts, which a new profile based on it begins
+    /// with. Null when the app did not say.
+    command: ?[]const u8 = null,
 };
 
 /// What a list value names (`ProfileChoices.order_refs`, `hidden_refs`).
@@ -2059,6 +2072,7 @@ pub const ProfileChoices = struct {
         for (self.items) |item| {
             alloc.free(item.key);
             alloc.free(item.label);
+            if (item.command) |command| alloc.free(command);
         }
         alloc.free(self.items);
         if (self.saved_label) |label| alloc.free(label);
@@ -2528,6 +2542,10 @@ pub const SettingsWindow = struct {
     /// Which of `profile_model`'s rows the search found, and how many.
     profile_found: []bool = &.{},
     profile_found_count: u16 = 0,
+    /// The Profiles page also lists each profile's field rows and edits
+    /// them in place. Off: one title row a profile, and its window edits it
+    /// (`profileEditWindow`). The tests of the in-place editor turn it on.
+    profile_fields_shown: bool = @import("builtin").is_test,
     /// The field of the Profiles page being typed into, while one is
     /// (`beginProfileEdit`).
     profile_edit: ?ProfileEdit = null,
@@ -8106,7 +8124,7 @@ pub const SettingsWindow = struct {
         return switch (row.kind) {
             .new_profile => .{ .enter = "New profile (Enter)" },
             .profile => .{
-                .enter = "Edit command line (Enter)",
+                .enter = if (self.profile_model.profileOf(row)) |profile| (if (self.profileIsRdp(profile.id)) "Edit connection (Enter)" else "Edit command line (Enter)") else "Edit command line (Enter)",
                 .delete = if (self.profile_remove_armed == row.identity) "Remove: press Delete again" else "Remove profile (Delete)",
             },
             .command => .{ .enter = "Edit (Enter)" },
@@ -8148,6 +8166,24 @@ pub const SettingsWindow = struct {
         if (!self.draftTakesEdits()) return false;
         if (!self.profileEditDone()) return false;
         const row = self.selectedProfileRow() orelse return false;
+        // One title row a profile: its window edits it. A profile noctty
+        // finds is a preset: Enter starts a new profile based on it.
+        if (!self.profile_fields_shown) {
+            if (row.kind == .new_profile) {
+                self.profileEditWindow(null, null, null);
+                return true;
+            }
+            if (self.profile_model.profileOf(row)) |profile| {
+                if (profile.detected and !profile.found_hidden) {
+                    self.profileEditWindow(null, row.profile, null);
+                    return true;
+                }
+                if (!profile.detected and !profile.read_only) {
+                    if (self.profileIsRdp(profile.id)) self.profileEditRdp(profile.id) else self.profileEditWindow(profile.id, null, null);
+                    return true;
+                }
+            }
+        }
         if (self.profile_model.profileOf(row)) |profile| if (profile.detected) {
             // Answered: the note says what can be done with it.
             if (profile.found_hidden) {
@@ -8160,6 +8196,11 @@ pub const SettingsWindow = struct {
             self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
             return true;
         };
+        // A Remote Desktop connection opens its own window.
+        if (row.kind == .profile or row.kind == .command) if (self.profile_model.profileOf(row)) |profile| if (self.profileIsRdp(profile.id)) {
+            self.profileEditRdp(profile.id);
+            return true;
+        };
         self.beginProfileEdit(switch (row.kind) {
             .new_profile => .new_id,
             .profile, .command => .command,
@@ -8170,6 +8211,266 @@ pub const SettingsWindow = struct {
         }, row, null);
         // Should the field not be made (no memory, no window), none is open.
         return self.profile_edit != null;
+    }
+
+    /// Whether the user profile `id` of the draft is a Remote Desktop
+    /// connection (`mstsc.exe /v:`), which its own window edits.
+    fn profileIsRdp(self: *const SettingsWindow, id: []const u8) bool {
+        const draft = if (self.pending) |*config| config else return false;
+        const command = draft.@"profile-command".get(id) orelse return false;
+        const target = terminals_import.parseCommand(command) orelse return false;
+        return target.protocol == .rdp;
+    }
+
+    /// The Remote Desktop connection window (`rdp_connection_dialog`) for
+    /// the user profile `existing_id`, or for a new connection: what it
+    /// returns goes into the draft (the command line with the connection's
+    /// own quality settings, and the name), and the login is kept apart from
+    /// the config (`profile_credentials`). Save writes the draft.
+    fn profileEditRdp(self: *SettingsWindow, existing_id: ?[]const u8) void {
+        if (!self.draftTakesEdits()) return;
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var conn: rdp_dialog.Connection = .{};
+        var kept: ?profile_credentials.Entry = null;
+        defer if (kept) |entry| entry.deinit(alloc);
+        var id: ?[]const u8 = null;
+        if (existing_id) |given| {
+            const draft = if (self.pending) |*config| config else return;
+            id = a.dupe(u8, given) catch return self.profileChangeFailed();
+            const command = draft.@"profile-command".get(given) orelse return;
+            const target = terminals_import.parseCommand(command) orelse return;
+            conn.server = a.dupe(u8, target.server) catch return self.profileChangeFailed();
+            conn.port = target.port;
+            conn.options = target.rdp;
+            conn.name = a.dupe(u8, draft.@"profile-name".get(given) orelse given) catch return self.profileChangeFailed();
+            kept = profile_credentials.readEntry(alloc, given) catch null;
+            if (kept) |entry| {
+                conn.user = entry.user;
+                conn.has_password = entry.password.len != 0;
+            }
+        }
+        const title = if (existing_id == null) std.unicode.utf8ToUtf16LeStringLiteral("New Remote Desktop connection") else std.unicode.utf8ToUtf16LeStringLiteral("Edit Remote Desktop connection");
+        const accepted = rdp_dialog.edit(a, self.hwnd, &conn, title) catch return self.profileChangeFailed();
+        if (!accepted) return;
+        // The dialog's loop may have let an external reload replace the draft.
+        if (!self.draftTakesEdits()) return;
+        const draft = if (self.pending) |*config| config else return;
+        var command_buf: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&command_buf);
+        terminals_import.writeRdpCommand(&writer, conn.server, conn.port, conn.options) catch
+            return self.setProfileNote(.refused, "Error: that connection is too long for one line of the config file.", .{});
+        const command = writer.buffered();
+        const saved_id: []const u8 = if (id) |existing| saved: {
+            if (settings_profiles.checkCommand(existing, command)) |message| return self.setProfileNote(.refused, "Error: {s}", .{message});
+            settings_profiles.setCommand(draft, existing, command) catch return self.profileChangeFailed();
+            if (settings_profiles.checkText(.name, existing, conn.name) == null)
+                settings_profiles.setField(draft, .name, existing, conn.name) catch return self.profileChangeFailed();
+            break :saved existing;
+        } else added: {
+            var base_buf: [terminals_import.max_base_len]u8 = undefined;
+            const base = terminals_import.baseId(&base_buf, conn.name, "rdp");
+            const added = (settings_profiles.addImported(draft, base, conn.name, command) catch return self.profileChangeFailed()) orelse
+                return self.setProfileNote(.refused, "Error: the connection could not be added.", .{});
+            break :added added;
+        };
+        // The login: a password typed in, or the kept one under a new user.
+        const password: []const u8 = conn.password orelse if (kept) |entry| entry.password else "";
+        if (conn.password != null or (kept == null and conn.user.len != 0) or (kept != null and !std.mem.eql(u8, kept.?.user, conn.user))) {
+            profile_credentials.store(saved_id, conn.user, password) catch
+                self.setProfileNote(.refused, "Error: the login could not be kept.", .{});
+        }
+        if (conn.password) |typed| @memset(@constCast(typed), 0);
+        self.profileDraftChanged(settings_profiles.identity(.profile, saved_id, null));
+        self.setProfileNote(.said, "Remote Desktop connection {s} changed in the draft. Save to keep it.", .{conn.name});
+    }
+
+    /// What a profile window's OK checks (`profile_dialog.Check`): what
+    /// Settings or the loader would refuse, said without the value.
+    const ProfileWindowCheck = struct {
+        id: []const u8,
+
+        fn run(ctx: *anyopaque, p: *const profile_dialog.Profile) ?profile_dialog.Refusal {
+            const self: *const ProfileWindowCheck = @ptrCast(@alignCast(ctx));
+            if (p.name.len == 0) return .{ .field = .name, .message = "Type a name for the profile." };
+            if (settings_profiles.checkText(.name, self.id, p.name)) |message| return .{ .field = .name, .message = message };
+            if (settings_profiles.checkCommand(self.id, p.command)) |message| return .{ .field = .command, .message = message };
+            if (p.folder.len != 0) if (settings_profiles.checkText(.text, self.id, p.folder)) |message| return .{ .field = .folder, .message = message };
+            if (p.font_size.len != 0) {
+                const size = std.fmt.parseFloat(f32, p.font_size) catch return .{ .field = .font_size, .message = "Type the font size as a number of points, or leave it blank." };
+                if (size < 4 or size > 200) return .{ .field = .font_size, .message = "The font size is from 4 to 200 points." };
+            }
+            var it = profile_dialog.VariableIterator.init(p.variables);
+            while (it.next()) |variable| {
+                if (variable.name.len == 0) return .{ .field = .variables, .message = "Type each variable as NAME=VALUE, one a line." };
+                if (isReservedVariable(variable.name)) return .{ .field = .variables, .message = "NOCTTY_FONT_SIZE and NOCTTY_ELEVATED are the window's own fields: set them above." };
+                if (variable.value.len == 0) return .{ .field = .variables, .message = "A variable needs a value after its =." };
+            }
+            return null;
+        }
+    };
+
+    fn isReservedVariable(name: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(name, windows_shell.font_size_env) or std.ascii.eqlIgnoreCase(name, windows_shell.elevated_env);
+    }
+
+    /// The command line the profile `key` starts, as the app lists it (a
+    /// detected shell's, for a profile based on it), in `alloc`.
+    fn presetCommand(self: *SettingsWindow, alloc: std.mem.Allocator, key: []const u8) ?[]u8 {
+        const get = self.handle.profileChoices orelse return null;
+        var choices = get(self.handle.ctx, alloc, null, null, false) catch return null;
+        defer choices.deinit(alloc);
+        for (choices.items) |item| if (std.mem.eql(u8, item.key, key)) {
+            const command = item.command orelse return null;
+            return alloc.dupe(u8, command) catch null;
+        };
+        return null;
+    }
+
+    /// The profile window (`profile_dialog`) for the user profile
+    /// `existing_id`, or for a new profile: blank, or `based_on` a listed
+    /// profile (its command line, folder, zoom and variables). What it
+    /// returns goes into the draft; Save writes it.
+    fn profileEditWindow(self: *SettingsWindow, existing_id_in: ?[]const u8, based_on: ?u32, prefill: ?profile_dialog.Profile) void {
+        if (!self.draftTakesEdits()) return;
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        // A copy: the dialog's loop may rebuild the page's model.
+        const existing_id: ?[]const u8 = if (existing_id_in) |id| (a.dupe(u8, id) catch return self.profileChangeFailed()) else null;
+        var fields: profile_dialog.Profile = .{};
+        var old_variables: std.ArrayListUnmanaged([]const u8) = .empty;
+        const source_index: ?u32 = if (existing_id) |id| found: {
+            for (self.profile_model.profiles, 0..) |profile, i| {
+                if (!profile.detected and std.ascii.eqlIgnoreCase(profile.id, id)) break :found @intCast(i);
+            }
+            break :found null;
+        } else based_on;
+        if (source_index) |index| {
+            const profile = &self.profile_model.profiles[index];
+            if (profile.detected) {
+                fields.command = self.presetCommand(a, profile.key) orelse
+                    return self.setProfileNote(.said, "noctty has not said what {s} runs yet: try again in a moment.", .{profile.key});
+            } else fields.command = a.dupe(u8, profile.command) catch return self.profileChangeFailed();
+            const label = profile.label orelse profile.id;
+            fields.name = if (existing_id != null) a.dupe(u8, label) catch return self.profileChangeFailed() else std.fmt.allocPrint(a, "{s} (copy)", .{label}) catch return self.profileChangeFailed();
+            fields.folder = a.dupe(u8, profile.folder orelse "") catch return self.profileChangeFailed();
+            var variables: std.Io.Writer.Allocating = .init(a);
+            for (profile.variables) |variable| {
+                if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.font_size_env)) {
+                    fields.font_size = a.dupe(u8, variable.value) catch return self.profileChangeFailed();
+                } else if (std.ascii.eqlIgnoreCase(variable.name, windows_shell.elevated_env)) {
+                    fields.elevated = std.mem.eql(u8, variable.value, "1");
+                } else {
+                    variables.writer.print("{s}={s}\n", .{ variable.name, variable.value }) catch return self.profileChangeFailed();
+                }
+                if (existing_id != null) old_variables.append(a, a.dupe(u8, variable.name) catch return self.profileChangeFailed()) catch return self.profileChangeFailed();
+            }
+            fields.variables = variables.written();
+        }
+        if (prefill) |given| fields = .{
+            .name = a.dupe(u8, given.name) catch return self.profileChangeFailed(),
+            .command = a.dupe(u8, given.command) catch return self.profileChangeFailed(),
+            .folder = a.dupe(u8, given.folder) catch return self.profileChangeFailed(),
+            .font_size = a.dupe(u8, given.font_size) catch return self.profileChangeFailed(),
+            .elevated = given.elevated,
+            .variables = a.dupe(u8, given.variables) catch return self.profileChangeFailed(),
+        };
+        var check: ProfileWindowCheck = .{ .id = existing_id orelse "profile" };
+        const title = if (existing_id == null) std.unicode.utf8ToUtf16LeStringLiteral("New profile") else std.unicode.utf8ToUtf16LeStringLiteral("Edit profile");
+        const accepted = profile_dialog.edit(a, self.hwnd, &fields, title, .{ .ctx = &check, .run = ProfileWindowCheck.run }) catch return self.profileChangeFailed();
+        if (!accepted) return;
+        if (!self.draftTakesEdits()) return;
+        const draft = if (self.pending) |*config| config else return;
+        const id: []const u8 = if (existing_id) |given| existing: {
+            const copy = a.dupe(u8, given) catch return self.profileChangeFailed();
+            settings_profiles.setCommand(draft, copy, fields.command) catch return self.profileChangeFailed();
+            settings_profiles.setField(draft, .name, copy, fields.name) catch return self.profileChangeFailed();
+            break :existing copy;
+        } else added: {
+            var base_buf: [terminals_import.max_base_len]u8 = undefined;
+            const base = terminals_import.baseId(&base_buf, fields.name, "profile");
+            break :added (settings_profiles.addImported(draft, base, fields.name, fields.command) catch return self.profileChangeFailed()) orelse
+                return self.setProfileNote(.refused, "Error: the profile could not be added.", .{});
+        };
+        settings_profiles.setField(draft, .folder, id, fields.folder) catch return self.profileChangeFailed();
+        // Variables: the ones typed, then the window's own two; any the
+        // profile had and the field left out go.
+        var kept: std.ArrayListUnmanaged([]const u8) = .empty;
+        var it = profile_dialog.VariableIterator.init(fields.variables);
+        while (it.next()) |variable| {
+            settings_profiles.setVariable(draft, id, variable.name, variable.value) catch return self.profileChangeFailed();
+            kept.append(a, variable.name) catch return self.profileChangeFailed();
+        }
+        if (fields.font_size.len != 0) {
+            settings_profiles.setVariable(draft, id, windows_shell.font_size_env, fields.font_size) catch return self.profileChangeFailed();
+            kept.append(a, windows_shell.font_size_env) catch return self.profileChangeFailed();
+        }
+        if (fields.elevated) {
+            settings_profiles.setVariable(draft, id, windows_shell.elevated_env, "1") catch return self.profileChangeFailed();
+            kept.append(a, windows_shell.elevated_env) catch return self.profileChangeFailed();
+        }
+        for (old_variables.items) |name| {
+            const still = for (kept.items) |other| {
+                if (std.ascii.eqlIgnoreCase(other, name)) break true;
+            } else false;
+            if (!still) settings_profiles.removeVariable(draft, id, name) catch return self.profileChangeFailed();
+        }
+        self.profileDraftChanged(settings_profiles.identity(.profile, id, null));
+        self.setProfileNote(.said, "Profile {s} changed in the draft. Save to keep it.", .{fields.name});
+    }
+
+    /// The list menu's Delete profile: a user profile is removed (after a
+    /// Windows dialog asks), one noctty finds is hidden from the picker,
+    /// which is as far as it can go.
+    fn profileDeleteFromMenu(self: *SettingsWindow) void {
+        if (!self.draftTakesEdits()) return;
+        if (!self.profileEditDone()) return;
+        const row = self.selectedProfileRow() orelse return;
+        const profile = self.profile_model.profileOf(row) orelse return;
+        if (profile.detected) {
+            if (profile.hidden) return self.setProfileNote(.said, "{s} is hidden already; Show in the picker brings it back.", .{profile.key});
+            return self.profileToggleHidden();
+        }
+        if (profile.read_only) return self.setProfileNote(.said, "Profile {s} comes from noctty's command line, so Settings does not change it.", .{profile.id});
+        const alloc = self.handle.alloc;
+        var id_buf: [profile_map.max_id_len]u8 = undefined;
+        const id = id_buf[0..profile.id.len];
+        @memcpy(id, profile.id);
+        const label = profile.label orelse profile.id;
+        const question = std.fmt.allocPrint(alloc, "Delete profile {s}? Save writes the change.", .{label}) catch return self.profileChangeFailed();
+        defer alloc.free(question);
+        const question_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, question) catch return self.profileChangeFailed();
+        defer alloc.free(question_w);
+        const IDYES: i32 = 6;
+        if (MessageBoxW(self.hwnd, question_w.ptr, std.unicode.utf8ToUtf16LeStringLiteral("Delete profile"), 0x4 | 0x30) != IDYES) return;
+        if (!self.draftTakesEdits()) return;
+        const pending = if (self.pending) |*config| config else return;
+        const original = if (self.original) |*config| config else return;
+        settings_profiles.removeProfile(original, pending, id) catch return self.profileChangeFailed();
+        self.profileDraftChanged(null);
+        self.setProfileNote(.said, "Profile {s} deleted from the draft. Save to keep the change.", .{id});
+    }
+
+    /// A tab's Create profile from this tab: the Profiles page, and a new
+    /// profile's window filled with what the tab runs (`prefill`). Settings
+    /// must be open already.
+    pub fn newProfileFrom(self: *SettingsWindow, prefill: profile_dialog.Profile) void {
+        if (self.hwnd == null) return;
+        self.setActiveSection(.profiles);
+        self.profileEditWindow(null, null, prefill);
+    }
+
+    /// The window menu's Remote Desktop > Edit connections: the Profiles
+    /// page of an open Settings window.
+    pub fn showProfilesPage(self: *SettingsWindow) void {
+        if (self.hwnd == null) return;
+        self.setActiveSection(.profiles);
     }
 
     /// The window menu's Remote Desktop > Import from Terminals: the
@@ -8283,29 +8584,44 @@ pub const SettingsWindow = struct {
     /// a Terminals favorites file the person picks, with the password the
     /// Credential Manager keeps for it, in plain text as Terminals writes
     /// it. Nothing is logged.
-    fn profileExportTerminals(self: *SettingsWindow) void {
-        if (!self.profileEditDone()) return;
-        const alloc = self.handle.alloc;
+    /// The Terminals favorites file of every profile that runs `ssh` or
+    /// `mstsc.exe`, each with its kept login (passwords in plain text), in
+    /// `a`. Null when no profile does.
+    const TerminalsExport = struct { xml: []const u8, count: usize, with_password: usize };
+
+    fn terminalsExport(self: *SettingsWindow, a: std.mem.Allocator) std.mem.Allocator.Error!?TerminalsExport {
         const config: *const Config = if (self.pending) |*draft| draft else self.handle.currentConfig(self.handle.ctx);
-        var arena: std.heap.ArenaAllocator = .init(alloc);
-        defer arena.deinit();
-        const a = arena.allocator();
         var entries: std.ArrayListUnmanaged(terminals_import.ExportEntry) = .empty;
         var with_password: usize = 0;
         for (config.@"profile-command".entries.items) |entry| {
             if (entry.removed) continue;
-            const connection = terminals_import.parseCommand(entry.value) orelse continue;
-            const password = (profile_credentials.read(a, entry.id) catch return self.profileChangeFailed()) orelse "";
+            var connection = terminals_import.parseCommand(entry.value) orelse continue;
+            const login = try profile_credentials.readEntry(a, entry.id);
+            const password = if (login) |kept| kept.password else "";
+            if (login) |kept| if (kept.user.len != 0) {
+                connection.user = kept.user;
+            };
             if (password.len != 0) with_password += 1;
-            entries.append(a, .{
+            try entries.append(a, .{
                 .name = config.@"profile-name".get(entry.id) orelse entry.id,
                 .connection = connection,
                 .password = password,
-            }) catch return self.profileChangeFailed();
+            });
         }
-        if (entries.items.len == 0) return self.setProfileNote(.said, "No profile runs ssh or mstsc.exe, so there is nothing to export.", .{});
+        if (entries.items.len == 0) return null;
         var out: std.Io.Writer.Allocating = .init(a);
-        terminals_import.writeXml(&out.writer, entries.items) catch return self.profileChangeFailed();
+        terminals_import.writeXml(&out.writer, entries.items) catch return error.OutOfMemory;
+        return .{ .xml = out.written(), .count = entries.items.len, .with_password = with_password };
+    }
+
+    fn profileExportTerminals(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const exported = (self.terminalsExport(a) catch return self.profileChangeFailed()) orelse
+            return self.setProfileNote(.said, "No profile runs ssh or mstsc.exe, so there is nothing to export.", .{});
         const path_buf = a.alloc(u16, 32768) catch return self.profileChangeFailed();
         const path = terminals_dialog.pickSaveFile(
             self.hwnd,
@@ -8315,9 +8631,42 @@ pub const SettingsWindow = struct {
             std.unicode.utf8ToUtf16LeStringLiteral("xml"),
             std.unicode.utf8ToUtf16LeStringLiteral("noctty-profiles.xml"),
         ) orelse return;
-        writeWholeFile(path, out.written()) catch
+        writeWholeFile(path, exported.xml) catch
             return self.setProfileNote(.refused, "Error: the export could not be written.", .{});
-        self.setProfileNote(.said, "Exported {d} profile(s) to a Terminals file, {d} with a password in plain text. Keep the file somewhere safe.", .{ entries.items.len, with_password });
+        self.setProfileNote(.said, "Exported {d} profile(s) to a Terminals file, {d} with a password in plain text. Keep the file somewhere safe.", .{ exported.count, exported.with_password });
+    }
+
+    /// The list menu's (and the window menu's) Back up all settings: one ZIP
+    /// where the person picks, of noctty's config and state folders (in
+    /// portable mode, the data files beside the executable, logins
+    /// included; `settings_backup.collect`) and `profiles-terminals.xml`, the
+    /// Terminals export of the connections with their passwords.
+    pub fn backupAllSettings(self: *SettingsWindow) void {
+        if (!self.profileEditDone()) return;
+        const alloc = self.handle.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var entries: std.ArrayListUnmanaged(settings_backup.Entry) = .empty;
+        settings_backup.collect(a, &entries) catch return self.setProfileNote(.refused, "Error: noctty's folders could not be read.", .{});
+        if (self.terminalsExport(a) catch return self.profileChangeFailed()) |exported|
+            entries.append(a, .{ .name = "profiles-terminals.xml", .data = exported.xml }) catch return self.profileChangeFailed();
+        if (entries.items.len == 0) return self.setProfileNote(.said, "There are no settings to back up yet.", .{});
+        var out: std.Io.Writer.Allocating = .init(a);
+        settings_backup.writeZip(&out.writer, entries.items, std.time.timestamp()) catch
+            return self.setProfileNote(.refused, "Error: the backup is too large for one ZIP.", .{});
+        const path_buf = a.alloc(u16, 32768) catch return self.profileChangeFailed();
+        const path = terminals_dialog.pickSaveFile(
+            self.hwnd,
+            path_buf,
+            std.unicode.utf8ToUtf16LeStringLiteral("Back up all noctty settings (passwords included)"),
+            std.unicode.utf8ToUtf16LeStringLiteral("ZIP archive (*.zip)\x00*.zip\x00"),
+            std.unicode.utf8ToUtf16LeStringLiteral("zip"),
+            std.unicode.utf8ToUtf16LeStringLiteral("noctty-backup.zip"),
+        ) orelse return;
+        writeWholeFile(path, out.written()) catch
+            return self.setProfileNote(.refused, "Error: the backup could not be written.", .{});
+        self.setProfileNote(.said, "Backed up {d} file(s), passwords included. Keep the ZIP somewhere safe.", .{entries.items.len});
     }
 
     /// The list menu's Back up config file: a copy of noctty's config file
@@ -9110,6 +9459,8 @@ pub const SettingsWindow = struct {
     /// The Profiles list's menu (Shift+F10, the menu key, a right click): what
     /// Enter and Delete do on the row, a new profile, and the config file.
     fn showProfileMenu(self: *SettingsWindow, menu: HMENU, at: POINT, frame: HWND) void {
+        // Its menu labels are UTF-16 literals made at compile time.
+        @setEvalBranchQuota(20000);
         const row = self.selectedProfileRow() orelse return;
         const actions = self.profileActions(row);
         var item_w: [96]u16 = undefined;
@@ -9138,9 +9489,20 @@ pub const SettingsWindow = struct {
                 std.unicode.utf8ToUtf16LeStringLiteral("&Hide in the picker\tCtrl+H"));
         };
         if (row.kind != .new_profile) _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_new, std.unicode.utf8ToUtf16LeStringLiteral("&New profile\tInsert"));
+        if (self.profile_model.profileOf(row)) |profile| if (!profile.found_hidden) {
+            const takes: UINT = if (self.draftTakesEdits()) 0 else MF_GRAYED;
+            if (profile.detected or !self.profileIsRdp(profile.id))
+                _ = sys.AppendMenuW(menu, MF_STRING | takes, profile_menu_based, std.unicode.utf8ToUtf16LeStringLiteral("New profile &based on this one..."));
+            if (!profile.read_only)
+                _ = sys.AppendMenuW(menu, MF_STRING | takes, profile_menu_delete, if (profile.detected)
+                    std.unicode.utf8ToUtf16LeStringLiteral("&Delete (hide from the picker)")
+                else
+                    std.unicode.utf8ToUtf16LeStringLiteral("&Delete profile..."));
+        };
+        _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_new_rdp, std.unicode.utf8ToUtf16LeStringLiteral("New &Remote Desktop connection..."));
         _ = sys.AppendMenuW(menu, MF_STRING | @as(UINT, if (self.draftTakesEdits()) 0 else MF_GRAYED), profile_menu_import, std.unicode.utf8ToUtf16LeStringLiteral("&Import from Terminals...\tCtrl+I"));
         _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_export, std.unicode.utf8ToUtf16LeStringLiteral("E&xport to Terminals file (with passwords)..."));
-        _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_backup, std.unicode.utf8ToUtf16LeStringLiteral("&Back up config file..."));
+        _ = sys.AppendMenuW(menu, MF_STRING, profile_menu_backup, std.unicode.utf8ToUtf16LeStringLiteral("&Back up all settings (.zip)..."));
         _ = sys.AppendMenuW(menu, MF_STRING, reference_menu_open, std.unicode.utf8ToUtf16LeStringLiteral("&Open config file"));
         const picked: usize = if (self.context_menu_pick) |pick|
             pick(menu)
@@ -9154,8 +9516,11 @@ pub const SettingsWindow = struct {
             profile_menu_down => self.profileMove(1),
             profile_menu_hide => self.profileToggleHidden(),
             profile_menu_import => self.profileImportTerminals(),
+            profile_menu_new_rdp => self.profileEditRdp(null),
+            profile_menu_based => self.profileEditWindow(null, row.profile, null),
+            profile_menu_delete => self.profileDeleteFromMenu(),
             profile_menu_export => self.profileExportTerminals(),
-            profile_menu_backup => self.profileBackupConfig(),
+            profile_menu_backup => self.backupAllSettings(),
             reference_menu_open => self.handle.openInEditor(self.handle.ctx),
             else => {},
         }
@@ -9349,6 +9714,9 @@ pub const SettingsWindow = struct {
                 .profiles => id < self.profile_found.len and self.profile_found[id],
             };
             if (filtering and !found) continue;
+            // The Profiles page lists one title row a profile; its fields
+            // are edited in the profile's window (`profileEditWindow`).
+            if (list.kind == .profiles and !self.profile_fields_shown and self.profile_model.rows[id].kind.isField()) continue;
             list.shown[count] = @intCast(id);
             count += 1;
         }
@@ -11364,7 +11732,7 @@ test "settings open and a first visit create each window once in its final form"
             // Every section shown: the whole form, the All settings list (its
             // page is shown last), and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 79), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 85), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -11432,7 +11800,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 78), states[0].len);
+            try std.testing.expectEqual(@as(usize, 84), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -17037,7 +17405,7 @@ test "settings display-only text row needs no persistence adapter" {
             try std.testing.expectEqual(@as(LONG_PTR, 499), sys.GetWindowLongPtrW(control, -12));
             try std.testing.expect(sys.GetWindowLongPtrW(control, GWL_STYLE) & WS_TABSTOP == 0);
             try std.testing.expect(sys.IsWindowEnabled(fixture.settings.btn_save.?) == 0);
-            try std.testing.expectEqual(@as(usize, 26), editable_keys.len);
+            try std.testing.expectEqual(@as(usize, 29), editable_keys.len);
         }
     }.body);
 }
@@ -18597,7 +18965,7 @@ test "settings UIA checkbox and combo actions update the draft and discard resto
                 }
             }
             try std.testing.expectEqual(@as(usize, 5), checks);
-            try std.testing.expectEqual(@as(usize, 13), combos);
+            try std.testing.expectEqual(@as(usize, 16), combos);
             const retired = settings.control_uia_providers[settings.controlIndex(settings.fields.chk_trim_trail.?).?].?;
             retired.detach();
             try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, retired.toggle_iface.vtbl.Toggle(&retired.toggle_iface));
@@ -21872,6 +22240,9 @@ const profile_menu_hide: usize = 8;
 const profile_menu_import: usize = 9;
 const profile_menu_export: usize = 10;
 const profile_menu_backup: usize = 11;
+const profile_menu_new_rdp: usize = 12;
+const profile_menu_based: usize = 13;
+const profile_menu_delete: usize = 14;
 /// What the Profiles list's UIA help text says: the keys it takes.
 const profile_list_help = "Up and Down move through the profiles, in the picker's order, and your profiles' fields: command line, name, starting folder and variables. " ++
     "Enter edits the selected field, Delete removes it (a profile asks twice), Insert or Ctrl+N adds a profile, Ctrl+I imports profiles from a Terminals export, Alt+Up and Alt+Down move a profile, Ctrl+H hides it or shows it, and Shift+F10 offers these. " ++

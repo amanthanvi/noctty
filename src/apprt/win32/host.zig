@@ -5327,6 +5327,13 @@ pub const Host = struct {
         if (!profiles_ready) return false;
         const profiles = self.shownProfiles().?;
         if (index >= profiles.len) return false;
+        // A profile set to open as administrator opens in an elevated
+        // window (after Windows' UAC prompt), unless this one already is.
+        if (windows_shell.opensElevated(&profiles[index]) and !(win32_elevation.isProcessElevated() catch false)) {
+            const key = self.app.core_app.alloc.dupe(u8, profiles[index].key) catch return false;
+            defer self.app.core_app.alloc.free(key);
+            return self.app.performAction(.app, .new_window_elevated, .{ .profile_key = key }) catch false;
+        }
         if (self.setSelectedProfileIndex(index) catch return false) {
             self.refreshProfileChrome();
         }
@@ -7989,6 +7996,10 @@ pub const Host = struct {
         defer _ = sys.DestroyMenu(menu);
 
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RENAME, std.unicode.utf8ToUtf16LeStringLiteral("Rename Tab"));
+        // A terminal tab can become a profile; a Remote Desktop one is
+        // edited as a connection instead.
+        const is_rdp = if (self.tabs.items[tab_index].focusedSurface()) |surface| surface.rdp_config != null else true;
+        if (!is_rdp) _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_NEW_PROFILE, std.unicode.utf8ToUtf16LeStringLiteral("Create Profile from This Tab..."));
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Left"));
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_RIGHT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Right"));
@@ -8017,6 +8028,10 @@ pub const Host = struct {
             if (surface.core_initialized) switch (@as(usize, @intCast(cmd))) {
                 c.CTX_TAB_RENAME => {
                     runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
+                },
+                c.CTX_TAB_NEW_PROFILE => {
+                    newProfileFromSurface(live.app, surface);
+                    return true;
                 },
                 c.CTX_TAB_CLOSE => {
                     if (tabCloseAction(live.tabs.items.len) == .close_window) {
@@ -8205,6 +8220,7 @@ pub const Host = struct {
         // Always offered: with no Remote Desktop profile yet, its only item
         // imports them.
         if (rdp_count > 0) _ = sys.AppendMenuW(rdp_menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_EDIT_CONNECTIONS, std.unicode.utf8ToUtf16LeStringLiteral("Edit connections..."));
         _ = sys.AppendMenuW(rdp_menu, c.MF_STRING, c.CTX_IMPORT_TERMINALS, std.unicode.utf8ToUtf16LeStringLiteral("Import from Terminals..."));
         _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(rdp_menu), std.unicode.utf8ToUtf16LeStringLiteral("Remote Desktop"));
         if (admin_count > 0)
@@ -8219,6 +8235,7 @@ pub const Host = struct {
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
         _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SETTINGS, std.unicode.utf8ToUtf16LeStringLiteral("Settings...\tCtrl+,"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_BACKUP, std.unicode.utf8ToUtf16LeStringLiteral("Back up all settings (.zip)..."));
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_ABOUT, std.unicode.utf8ToUtf16LeStringLiteral("About noctty"));
 
         _ = sys.SetForegroundWindow(hwnd);
@@ -8277,6 +8294,18 @@ pub const Host = struct {
                 self.showAbout();
                 return;
             },
+            c.CTX_BACKUP => {
+                const app = self.app;
+                runUiActionOrLog("overflow settings failed", app.performAction(.app, .open_config, {}));
+                app.settings_window.backupAllSettings();
+                return;
+            },
+            c.CTX_EDIT_CONNECTIONS => {
+                const app = self.app;
+                runUiActionOrLog("overflow settings failed", app.performAction(.app, .open_config, {}));
+                app.settings_window.showProfilesPage();
+                return;
+            },
             c.CTX_IMPORT_TERMINALS => {
                 const app = self.app;
                 runUiActionOrLog("overflow settings failed", app.performAction(.app, .open_config, {}));
@@ -8301,6 +8330,38 @@ pub const Host = struct {
             },
             else => {},
         }
+    }
+
+    /// A tab's Create profile from this tab: Settings opens on its Profiles
+    /// page with a new profile's window filled in from the tab: its title as
+    /// the name, the command line it runs, the folder its shell reported
+    /// last and its zoom.
+    fn newProfileFromSurface(app: *App, surface: *Surface) void {
+        const alloc = app.core_app.alloc;
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const command: []const u8 = if (surface.launch_user) |user| user.command_line else if (surface.launch_command) |launch| switch (launch) {
+            .shell => |line| line,
+            .direct => |argv| joined: {
+                var out: std.Io.Writer.Allocating = .init(a);
+                for (argv, 0..) |arg, i| {
+                    if (i != 0) out.writer.writeByte(' ') catch return;
+                    configpkg.Config.Command.writeDirectArg(&out.writer, arg) catch return;
+                }
+                break :joined out.written();
+            },
+        } else "";
+        const folder = (surface.core_surface.pwd(a) catch null) orelse "";
+        const font_size = std.fmt.allocPrint(a, "{d}", .{surface.core_surface.font_size.points}) catch "";
+        const title = surface.effectiveTitle() orelse "New profile";
+        runUiActionOrLog("tab context settings failed", app.performAction(.app, .open_config, {}));
+        app.settings_window.newProfileFrom(.{
+            .name = title,
+            .command = command,
+            .folder = folder,
+            .font_size = font_size,
+        });
     }
 
     /// Whether `profile` opens a Remote Desktop tab (`rdp_pane.targetOf`).

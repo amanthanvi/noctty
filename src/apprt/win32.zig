@@ -430,6 +430,9 @@ test {
     _ = @import("win32/terminals_import_dialog.zig");
     _ = @import("win32/profile_credentials.zig");
     _ = @import("win32/rdp_pane.zig");
+    _ = @import("win32/rdp_connection_dialog.zig");
+    _ = @import("win32/profile_dialog.zig");
+    _ = @import("win32/settings_backup.zig");
     _ = clipboard_write;
     _ = @import("win32_aumid.zig");
     _ = @import("win32_toast_activator.zig");
@@ -5717,6 +5720,22 @@ pub fn settingsDraftProfileLabel(
 /// value it did not look up gets what `referenceProfileIndex` finds in the
 /// list, else the label a `wsl:` or `ssh:` value starts under, else not
 /// found once the list is complete.
+/// The command line `profile` starts, as a profile's `profile-command`
+/// takes it: a user profile's own line, else its command written out.
+fn settingsProfileCommandText(alloc: Allocator, profile: *const windows_shell.Profile) Allocator.Error!?[]const u8 {
+    if (profile.user) |user| return try alloc.dupe(u8, user.command_line);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    switch (profile.command) {
+        .shell => |line| out.writer.writeAll(line) catch return error.OutOfMemory,
+        .direct => |argv| for (argv, 0..) |arg, i| {
+            if (i != 0) out.writer.writeByte(' ') catch return error.OutOfMemory;
+            configpkg.Config.Command.writeDirectArg(&out.writer, arg) catch return error.OutOfMemory;
+        },
+    }
+    return try out.toOwnedSlice();
+}
+
 fn settingsProfileChoices(
     alloc: Allocator,
     profiles: []const windows_shell.Profile,
@@ -5730,6 +5749,7 @@ fn settingsProfileChoices(
         for (items[0..made]) |item| {
             alloc.free(item.key);
             alloc.free(item.label);
+            if (item.command) |command| alloc.free(command);
         }
         alloc.free(items);
     }
@@ -5739,7 +5759,12 @@ fn settingsProfileChoices(
             alloc.free(key);
             return err;
         };
-        item.* = .{ .key = key, .label = label, .hidden = profile.hidden };
+        const command = settingsProfileCommandText(alloc, &profile) catch |err| {
+            alloc.free(key);
+            alloc.free(label);
+            return err;
+        };
+        item.* = .{ .key = key, .label = label, .hidden = profile.hidden, .command = command };
         made += 1;
     }
     var result: win32_settings.ProfileChoices = .{ .items = items, .complete = complete };
