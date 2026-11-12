@@ -1544,8 +1544,9 @@ function Test-SkipNightlyWorkflow([string] $Code) {
     $nightly = "        if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
     $timing = Get-YamlStepBlock -Content $job -Name 'Per-test timing (report only)' -Source 'test.yml tests'
     # The log's directory is the timing script's default, which the budget and the upload read.
+    # Whole lines: a clause appended to an `if:` keeps the old text as a substring.
     if ($timing -notmatch '(?m)^          \./scripts/ci-test-timing\.ps1 -TestExe \./zig-out/bin/ghostty-test\.exe\r?$' -or
-        -not $timing.Contains($nightly)) {
+        $timing -notmatch ('(?m)^' + [regex]::Escape($nightly) + '\r?$')) {
         throw 'The nightly timing run must leave its per-test log in test-timing.'
     }
     # The nightly, and a dispatch other than the release evidence run, whose
@@ -1553,7 +1554,7 @@ function Test-SkipNightlyWorkflow([string] $Code) {
     $budgetWhen = "        if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))"
     $budget = Get-YamlStepBlock -Content $job -Name 'Skip budget (windows-2025)' -Source 'test.yml tests'
     if ($budget -notmatch '(?m)^        run: \./scripts/check-test-skips\.ps1 -TestLog test-timing/ghostty-test\.log -Runner windows-2025\r?$' -or
-        -not $budget.Contains($budgetWhen) -or
+        $budget -notmatch ('(?m)^' + [regex]::Escape($budgetWhen) + '\r?$') -or
         $budget -match '(?m)^        continue-on-error:') {
         throw 'The nightly must enforce the windows-2025 skip budget on the timing run''s log.'
     }
@@ -1565,6 +1566,7 @@ foreach ($mutation in @(
         @{ Name = 'nightly budget removed'; Code = $skipNightlyWorkflow.Replace('      - name: Skip budget (windows-2025)', '      - name: Skip budget (windows-2025, disabled)') }
         @{ Name = 'nightly budget never runs'; Code = $skipNightlyWorkflow.Replace("        if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "        if: false`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
         @{ Name = 'nightly budget blocks the release evidence run'; Code = $skipNightlyWorkflow.Replace("(github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "github.event_name == 'workflow_dispatch')`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
+        @{ Name = 'nightly budget widened by an appended clause'; Code = $skipNightlyWorkflow.Replace("!inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "!inputs.run_interactive_win11)) || github.event_name == 'workflow_dispatch'`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
         @{ Name = 'nightly budget ignores failure'; Code = $skipNightlyWorkflow.Replace("      - name: Skip budget (windows-2025)`n", "      - name: Skip budget (windows-2025)`n        continue-on-error: true`n") }
         @{ Name = 'nightly budget reads another log'; Code = $skipNightlyWorkflow.Replace('-TestLog test-timing/ghostty-test.log', '-TestLog ghostty-test.log') }
         @{ Name = 'nightly timing log moved'; Code = $skipNightlyWorkflow.Replace('./scripts/ci-test-timing.ps1 -TestExe ./zig-out/bin/ghostty-test.exe', './scripts/ci-test-timing.ps1 -TestExe ./zig-out/bin/ghostty-test.exe -OutputDirectory elsewhere') }
