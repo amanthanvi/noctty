@@ -108,6 +108,9 @@
     frame.addEventListener("scroll", update, { passive: true });
     if (typeof ResizeObserver === "function") new ResizeObserver(update).observe(frame);
     else window.addEventListener("resize", update);
+    // A web font that loads late changes a command's width without resizing
+    // its frame, which the observer would miss.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(update);
     update();
   }
 

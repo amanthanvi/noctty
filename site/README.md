@@ -76,9 +76,10 @@ button, on the landing page and in About's verification blocks, copies the
 command shown beside it.
 
 The demo window scales with its column down to a 12 px terminal font; below a
-900 px column it holds that size at a fixed height, its chrome text stays at
-12 px, and on a phone the step buttons sit under it as tabs with the selected
-step explained below. Below a 980 px viewport the captures keep a 900 px width
+900 px column it holds that size at a fixed height (11 px under a 520 px
+column, so a phone's split panes keep a usable width), its chrome text stays
+at 12 px, and on a phone the step buttons sit under it as tabs with the
+selected step explained below. Below a 980 px viewport the captures keep a 900 px width
 (about 12 px text) and scroll sideways. Anything that scrolls sideways, a
 capture or a command block, gets a 2 px track from `app.js` showing the part in
 view, and is a tab stop only while it scrolls.

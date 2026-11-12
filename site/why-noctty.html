@@ -26,7 +26,7 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="/assets/fonts/geist.woff2" crossorigin />
-  <link rel="stylesheet" href="/styles.css?v=a51855e7301c070d24b9df7a0cdf50aed3084dd4773c629f76707c65dd33e6c8" />
+  <link rel="stylesheet" href="/styles.css?v=d72bd3ff0f71fd78b3a2bb39b8093d07f398268c630057f60f5a5fb273d03ce4" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -214,8 +214,9 @@
       <p class="nc-section__intro">
         Download the installer or portable ZIP and the checksum file from the
         same GitHub release, then run these checks before you install. The
-        commands are templates: replace <code>&lt;version&gt;</code> with the
-        release number without its leading <code>v</code>, and
+        commands are templates: replace <code>&lt;version&gt;</code>, and the
+        verifier's <code>&lt;1.3.124-or-later&gt;</code>, with the release
+        number without its leading <code>v</code>, and
         <code>&lt;arch&gt;</code> with <code>x64</code> or <code>arm64</code>.
       </p>
 
@@ -225,7 +226,7 @@
             <h3>Compare the checksum</h3>
             <p>
               Hash the file you downloaded, installer or portable ZIP (the
-              first line is for the installer, the second for the ZIP), and
+              first command is for the installer, the second for the ZIP), and
               compare it with the line for that file in
               <code>SHA256SUMS-windows-&lt;arch&gt;.txt</code>. If it differs,
               stop. A matching checksum shows the file is the one on the
@@ -386,7 +387,7 @@
     </p>
   </footer>
 
-  <script type="module" src="/app.js?v=41691a86507f7b47e47d905cd2381c7a06ec577be5c362f4171ca81d702832b1"></script>
+  <script type="module" src="/app.js?v=e2daa0c9103a7c417661e8aaca6bf711edb1fc28a1aba9a5ea1cd9bb6d0b8091"></script>
   <script type="module" src="/version.js?v=4e3807b381b8d133d45c4ed24c6f44794e8b06961b878c9228330e191eaae363"></script>
   <script type="module" src="/install.js?v=becfa5780040e396f293a59c70d421d0904b66a00f1986796193f3796e71f9b4"></script>
 </body>

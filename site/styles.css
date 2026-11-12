@@ -565,15 +565,26 @@ kbd,
   pointer-events: none;
 }
 
+/* In a command block's bar the note takes the shell label's place while it
+   shows. */
 .nc-proof__bar .nc-copy.is-failed::after {
   top: 50%;
-  right: 44px;
+  right: auto;
+  left: 20px;
+  max-width: calc(100% - 84px);
+  padding-block: 2px;
   transform: translateY(-50%);
+  text-align: left;
+  white-space: normal;
+}
+
+.nc-proof__bar:has(.nc-copy.is-failed) > span {
+  visibility: hidden;
 }
 
 @media (pointer: coarse) {
   .nc-copy.is-failed::after {
-    content: "Selected, ready to copy";
+    content: "Selected. Copy from the selection menu";
   }
 }
 
@@ -2066,6 +2077,10 @@ kbd,
 
   .nc-proof__bar {
     padding-left: 16px;
+  }
+
+  .nc-proof__bar .nc-copy.is-failed::after {
+    left: 16px;
   }
 }
 
