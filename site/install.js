@@ -81,6 +81,9 @@ function selectCommand(button) {
 
 function initCopyButtons() {
   const status = document.getElementById('nc-copy-status');
+  // The page has one selection, so only one failed copy can claim it: a new
+  // failure clears the previous button's note.
+  let clearActiveFailure = null;
 
   for (const button of document.querySelectorAll('[data-nc-copy]')) {
     const text = COMMANDS[button.dataset.ncCopy];
@@ -92,10 +95,18 @@ function initCopyButtons() {
     let copyTimer = null;
     let announced = '';
 
+    const clearFailure = () => setCopyState('idle');
+
     function setCopyState(state) {
       if (copyTimer !== null) {
         clearTimeout(copyTimer);
         copyTimer = null;
+      }
+      if (state === 'failed') {
+        if (clearActiveFailure && clearActiveFailure !== clearFailure) clearActiveFailure();
+        clearActiveFailure = clearFailure;
+      } else if (clearActiveFailure === clearFailure) {
+        clearActiveFailure = null;
       }
       button.classList.toggle('is-copied', state === 'copied');
       button.classList.toggle('is-failed', state === 'failed');

@@ -299,7 +299,7 @@ kbd,
    covers the wordmark. */
 .nc-skip-link:focus {
   top: 64px;
-  left: calc((100% - var(--shell)) / 2 + var(--gutter));
+  left: calc((100% - var(--shell)) / 2 + 1px + var(--gutter));
 }
 
 @media (max-width: 720px) {
@@ -571,10 +571,11 @@ kbd,
   top: 50%;
   right: auto;
   left: 20px;
-  max-width: calc(100% - 84px);
+  max-width: calc(100% - 72px);
   padding-block: 2px;
   transform: translateY(-50%);
   text-align: left;
+  text-wrap: balance;
   white-space: normal;
 }
 
