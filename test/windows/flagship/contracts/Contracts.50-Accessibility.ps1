@@ -378,6 +378,14 @@ public static class FlagshipAccessibilityNativeProbe {
     public static void ResetNotificationCount() { Record("native-reset-capture"); }
     public static void StartNotificationCapture(IntPtr hwnd) { Record("native-start-capture:" + hwnd.ToInt64()); }
     public static void StopNotificationCapture() { Record("native-stop-capture"); }
+    // The owning process of each stand-in window; 0 for any other window.
+    public static System.Collections.Generic.Dictionary<long, uint> WindowOwners =
+        new System.Collections.Generic.Dictionary<long, uint>();
+    public static uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId) {
+        uint owner;
+        processId = WindowOwners.TryGetValue(hwnd.ToInt64(), out owner) ? owner : 0u;
+        return processId == 0u ? 0u : 1u;
+    }
 }
 '@
 }
@@ -576,7 +584,14 @@ $notificationSuccessOutputs = @(
         -FocusRecoveryCount 1 `
         -StolenForegroundHwnds @(41, 42) `
         -LastForegroundHwnd 43 `
-        -LastFocusedHwnd 44
+        -LastFocusedHwnd 44 `
+        -FocusMismatchElapsedMilliseconds @(120, 340) `
+        -WaitStartedUtc ([DateTime]::new(2026, 11, 12, 1, 2, 3, [DateTimeKind]::Utc)) `
+        -StolenForegroundProcessIds @(51, 52) `
+        -FocusMismatchUtc @(
+            [DateTime]::new(2026, 11, 12, 1, 2, 3, 120, [DateTimeKind]::Utc),
+            [DateTime]::new(2026, 11, 12, 1, 2, 3, 340, [DateTimeKind]::Utc)
+        )
 )
 $notificationRawFailureFixture = @()
 $notificationRawFailureFixture += ,([object[]]@(
@@ -608,7 +623,11 @@ $notificationRequiredProperties = @(
     'focus_recovery_count',
     'stolen_foreground_hwnds',
     'last_foreground_hwnd',
-    'last_focused_hwnd'
+    'last_focused_hwnd',
+    'focus_mismatch_elapsed_ms',
+    'wait_started_utc',
+    'stolen_foreground_process_ids',
+    'focus_mismatch_utc'
 )
 if ($notificationSuccessOutputs.Count -ne 1 -or
     @($notificationRequiredProperties | Where-Object {
@@ -626,12 +645,24 @@ if ($notificationSuccessOutputs.Count -ne 1 -or
     @($notificationSuccessOutputs[0].stolen_foreground_hwnds).Count -ne 2 -or
     $notificationSuccessOutputs[0].last_foreground_hwnd -ne 43 -or
     $notificationSuccessOutputs[0].last_focused_hwnd -ne 44 -or
+    (@($notificationSuccessOutputs[0].focus_mismatch_elapsed_ms) -join ',') -cne '120,340' -or
+    $notificationSuccessOutputs[0].wait_started_utc -isnot [DateTime] -or
+    $notificationSuccessOutputs[0].wait_started_utc -ne
+        [DateTime]::new(2026, 11, 12, 1, 2, 3, [DateTimeKind]::Utc) -or
+    (@($notificationSuccessOutputs[0].stolen_foreground_process_ids) -join ',') -cne '51,52' -or
+    @($notificationSuccessOutputs[0].focus_mismatch_utc).Count -ne 2 -or
+    @($notificationSuccessOutputs[0].focus_mismatch_utc)[1] -ne
+        [DateTime]::new(2026, 11, 12, 1, 2, 3, 340, [DateTimeKind]::Utc) -or
     $notificationFailureOutputs.Count -ne 1 -or
+    @($notificationFailureOutputs[0].focus_mismatch_elapsed_ms).Count -ne 0 -or
+    $null -ne $notificationFailureOutputs[0].wait_started_utc -or
+    @($notificationFailureOutputs[0].stolen_foreground_process_ids).Count -ne 0 -or
+    @($notificationFailureOutputs[0].focus_mismatch_utc).Count -ne 0 -or
     @($notificationFailureOutputs[0].raw_notification_history).Count -ne 2 -or
     @($notificationFailureOutputs[0].notification_history).Count -ne 1 -or
     $notificationFailureOutputs[0].notification_text -cne 'different' -or
     $notificationFailureOutputs[0].matched -ne $false) {
-    throw 'Accessibility output notification diagnostic must atomically shape raw, matching, text, focus, success, and failure evidence without stray output.'
+    throw 'Accessibility output notification diagnostic must atomically shape raw, matching, text, focus, focus timing, success, and failure evidence without stray output.'
 }
 $ownedWarmNotificationFunctions = @(
     Get-NamedFunctionDefinitions `
@@ -653,8 +684,26 @@ $coldFirstReadCalls = @(
         -Ast $accessibilityHarnessAst `
         -Name 'Invoke-AccessibilityColdFirstReadProof'
 )
-$coldOwnedNotificationCalls = if ($coldFirstReadFunctions.Count -eq 1) {
-    @($coldFirstReadFunctions[0].Body.FindAll({
+# The proof (retry policy) runs the attempt (one marker, one final read).
+$coldAttemptFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityColdFirstReadAttempt'
+)
+$coldAttemptCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityColdFirstReadAttempt'
+)
+$coldAttemptCallsInProof = if ($coldFirstReadFunctions.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'Invoke-AccessibilityColdFirstReadAttempt')
+} else {
+    @()
+}
+$coldOwnedNotificationCalls = if ($coldAttemptFunctions.Count -eq 1) {
+    @($coldAttemptFunctions[0].Body.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -eq 'Wait-AccessibilityOwnedOutputNotification'
@@ -662,8 +711,15 @@ $coldOwnedNotificationCalls = if ($coldFirstReadFunctions.Count -eq 1) {
 } else {
     @()
 }
-$coldCleanupTries = if ($coldFirstReadFunctions.Count -eq 1) {
-    @($coldFirstReadFunctions[0].Body.FindAll({
+$coldProofDirectOperations = if ($coldFirstReadFunctions.Count -eq 1) {
+    @(Get-NamedCommands -Ast $coldFirstReadFunctions[0].Body -Name 'Wait-AccessibilityOwnedOutputNotification') +
+    @(Get-NamedMemberExpressions -Ast $coldFirstReadFunctions[0].Body -Name 'GetText' -InvocationOnly) +
+    @(Get-NamedMemberExpressions -Ast $coldFirstReadFunctions[0].Body -Name 'WriteAllText' -InvocationOnly)
+} else {
+    @()
+}
+$coldCleanupTries = if ($coldAttemptFunctions.Count -eq 1) {
+    @($coldAttemptFunctions[0].Body.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.TryStatementAst] -and
             $null -ne $node.Finally
@@ -675,9 +731,13 @@ if ($ownedWarmNotificationFunctions.Count -ne 1 -or
     $ownedWarmNotificationCalls.Count -ne 3 -or
     $coldFirstReadFunctions.Count -ne 1 -or
     $coldFirstReadCalls.Count -ne 2 -or
+    $coldAttemptFunctions.Count -ne 1 -or
+    $coldAttemptCalls.Count -ne 2 -or
+    $coldAttemptCallsInProof.Count -ne 2 -or
+    $coldProofDirectOperations.Count -ne 0 -or
     $coldOwnedNotificationCalls.Count -ne 1 -or
     $coldCleanupTries.Count -lt 1) {
-    throw 'Warm and cold accessibility evidence must share one owner-aware notification wait, one cold proof, and fail-closed cleanup.'
+    throw 'Warm and cold accessibility evidence must share one owner-aware notification wait, one cold proof that runs at most two cold attempts, and fail-closed cleanup.'
 }
 . ([scriptblock]::Create($ownedWarmNotificationFunctions[0].Extent.Text))
 function Wait-AccessibilityCondition {
@@ -740,12 +800,222 @@ finally {
         -LiteralPath Function:\Wait-AccessibilityCondition `
         -ErrorAction SilentlyContinue
 }
+
+# Run the real wait's poll. The cold retry gate reads the mismatch count, the
+# stolen windows' owners and the steal times this poll produces, so they are
+# checked from a run, not from the text. A stand-in Wait-AccessibilityCondition
+# calls the condition once per schedule entry, 40 ms apart: 'own' (this
+# process's window in the foreground with the expected focus), 'outside' (window
+# 4242 of another process), 'noctty' (window 4343 of this same process) or
+# 'focus' (own foreground, another focused window). It records when it called
+# each poll, the stand-in recovery records when it started and then takes 30 ms,
+# and the stand-in times out unless the condition matched.
+$ownedPollProbeSource = $ownedWarmNotificationFunctions[0].Extent.Text.Replace(
+    '[NocttyAccessibilityNative]',
+    '[FlagshipAccessibilityNativeProbe]'
+)
+. ([scriptblock]::Create($ownedPollProbeSource))
+$ownedPollProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+$ownedPollFocus = [IntPtr] 88
+$ownedPollMarkerHistory = [object[]] @(
+    ,([object[]] @('ActionCompleted', 'MARKER', 2, 'TerminalTextOutput'))
+)
+$ownedPollOtherFocus = [IntPtr] 99
+# Terminal output that is not the marker: it must not end the wait.
+$ownedPollOtherHistory = [object[]] @(
+    ,([object[]] @('ActionCompleted', 'other output', 2, 'TerminalTextOutput'))
+)
+$script:ownedPollSchedule = @()
+$script:ownedPollMatchFrom = -1
+$script:ownedPollOtherFrom = -1
+$script:ownedPollBadRecoveries = 0
+$script:ownedPollCalledUtc = [System.Collections.Generic.List[DateTime]]::new()
+$script:ownedPollRecoveryUtc = [System.Collections.Generic.List[DateTime]]::new()
+function Wait-AccessibilityCondition {
+    param($Deadline, [string] $Description, [scriptblock] $Condition)
+    for ($poll = 0; $poll -lt $script:ownedPollSchedule.Count; $poll++) {
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 40
+        switch ($script:ownedPollSchedule[$poll]) {
+            'own' {
+                [FlagshipAccessibilityNativeProbe]::ForegroundHwnd = $ownedPollProcess.MainWindowHandle
+                [FlagshipAccessibilityNativeProbe]::FocusedHwnd = $ownedPollFocus
+            }
+            'outside' {
+                [FlagshipAccessibilityNativeProbe]::ForegroundHwnd = [IntPtr] 4242
+                [FlagshipAccessibilityNativeProbe]::FocusedHwnd = $ownedPollFocus
+            }
+            'noctty' {
+                [FlagshipAccessibilityNativeProbe]::ForegroundHwnd = [IntPtr] 4343
+                [FlagshipAccessibilityNativeProbe]::FocusedHwnd = $ownedPollFocus
+            }
+            'focus' {
+                [FlagshipAccessibilityNativeProbe]::ForegroundHwnd = $ownedPollProcess.MainWindowHandle
+                [FlagshipAccessibilityNativeProbe]::FocusedHwnd = $ownedPollOtherFocus
+            }
+            default { throw "Unknown poll schedule entry: $_" }
+        }
+        if ($script:ownedPollMatchFrom -ge 0 -and $poll -ge $script:ownedPollMatchFrom) {
+            [FlagshipAccessibilityNativeProbe]::NotificationHistorySnapshot = $ownedPollMarkerHistory
+        } elseif ($script:ownedPollOtherFrom -ge 0 -and $poll -ge $script:ownedPollOtherFrom) {
+            [FlagshipAccessibilityNativeProbe]::NotificationHistorySnapshot = $ownedPollOtherHistory
+        } else {
+            [FlagshipAccessibilityNativeProbe]::NotificationHistorySnapshot = [object[]] @()
+        }
+        $script:ownedPollCalledUtc.Add([DateTime]::UtcNow)
+        if (& $Condition) { return }
+    }
+    throw "Timed out waiting for $Description."
+}
+function Assert-AccessibilityInputOwner {
+    param($Process, [string] $Description, [IntPtr] $ExpectedFocusedHwnd)
+    $script:ownedPollRecoveryUtc.Add([DateTime]::UtcNow)
+    if (-not [object]::ReferenceEquals($Process, $ownedPollProcess) -or
+        $ExpectedFocusedHwnd -ne $ownedPollFocus) {
+        $script:ownedPollBadRecoveries++
+    }
+    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 30
+}
+# Whether every steal time lies between the stand-in's call into the poll that
+# saw it and that poll's recovery, and the elapsed times count from the start.
+function Test-OwnedPollTimes($Diagnostic, [int[]] $MismatchPolls) {
+    $stealUtc = @($Diagnostic.focus_mismatch_utc)
+    $elapsed = @($Diagnostic.focus_mismatch_elapsed_ms)
+    if ($stealUtc.Count -ne $MismatchPolls.Count -or
+        $elapsed.Count -ne $MismatchPolls.Count -or
+        $script:ownedPollRecoveryUtc.Count -ne $MismatchPolls.Count) {
+        return $false
+    }
+    for ($steal = 0; $steal -lt $MismatchPolls.Count; $steal++) {
+        $seen = [DateTime] $stealUtc[$steal]
+        if ($seen -lt $script:ownedPollCalledUtc[$MismatchPolls[$steal]] -or
+            $seen -gt $script:ownedPollRecoveryUtc[$steal] -or
+            $elapsed[$steal] -ne [long]($seen - [DateTime] $Diagnostic.wait_started_utc).TotalMilliseconds) {
+            return $false
+        }
+    }
+    return $true
+}
+try {
+    [FlagshipAccessibilityNativeProbe]::WindowOwners.Clear()
+    [FlagshipAccessibilityNativeProbe]::WindowOwners[4242] = [uint32] 999001
+    [FlagshipAccessibilityNativeProbe]::WindowOwners[4343] = [uint32] $ownedPollProcess.Id
+
+    # Steals by another program (twice by the same window), a focus move
+    # inside the window, and one of this process's own windows, then a timeout:
+    # every mismatching poll counts, each stolen window once, with its owner.
+    $script:ownedPollSchedule = @('own', 'outside', 'own', 'outside', 'focus', 'noctty', 'own')
+    $script:ownedPollMatchFrom = -1
+    $script:ownedPollOtherFrom = -1
+    $script:ownedPollBadRecoveries = 0
+    $script:ownedPollCalledUtc.Clear()
+    $script:ownedPollRecoveryUtc.Clear()
+    $ownedPollDiagnostic = $null
+    $ownedPollError = ''
+    $ownedPollBefore = [DateTime]::UtcNow
+    try {
+        $null = Wait-AccessibilityOwnedOutputNotification `
+            -Process $ownedPollProcess `
+            -ExpectedFocusedHwnd $ownedPollFocus `
+            -Marker 'MARKER' `
+            -Description 'contract poll steals' `
+            -Diagnostic ([ref] $ownedPollDiagnostic)
+    }
+    catch { $ownedPollError = $_.Exception.Message }
+    $ownedPollAfter = [DateTime]::UtcNow
+    if ($ownedPollError -notlike 'Timed out waiting for contract poll steals. Diagnostic=*' -or
+        $null -eq $ownedPollDiagnostic -or
+        $ownedPollDiagnostic.matched -ne $false -or
+        $ownedPollDiagnostic.focus_mismatch_polls -ne 4 -or
+        $ownedPollDiagnostic.focus_recovery_count -ne 4 -or
+        (@($ownedPollDiagnostic.stolen_foreground_hwnds) -join ',') -cne '4242,4343' -or
+        (@($ownedPollDiagnostic.stolen_foreground_process_ids) -join ',') -cne "999001,$($ownedPollProcess.Id)" -or
+        -not (Test-OwnedPollTimes $ownedPollDiagnostic @(1, 3, 4, 5)) -or
+        $script:ownedPollBadRecoveries -ne 0 -or
+        $ownedPollDiagnostic.wait_started_utc -isnot [DateTime] -or
+        $ownedPollDiagnostic.wait_started_utc -lt $ownedPollBefore -or
+        $ownedPollDiagnostic.wait_started_utc -gt $ownedPollAfter) {
+        throw 'The owner-aware wait must count every mismatching poll, keep each stolen window once with its owning process, read each steal''s time in the poll that saw it, recover with its own process and focus, and report all of it when it times out.'
+    }
+
+    # Terminal output that is not the marker does not end the wait.
+    $script:ownedPollSchedule = @('own', 'own', 'own')
+    $script:ownedPollMatchFrom = -1
+    $script:ownedPollOtherFrom = 0
+    $script:ownedPollCalledUtc.Clear()
+    $script:ownedPollRecoveryUtc.Clear()
+    $ownedPollDiagnostic = $null
+    $ownedPollError = ''
+    try {
+        $null = Wait-AccessibilityOwnedOutputNotification `
+            -Process $ownedPollProcess `
+            -ExpectedFocusedHwnd $ownedPollFocus `
+            -Marker 'MARKER' `
+            -Description 'contract poll other output' `
+            -Diagnostic ([ref] $ownedPollDiagnostic)
+    }
+    catch { $ownedPollError = $_.Exception.Message }
+    if ($ownedPollError -notlike 'Timed out waiting for contract poll other output. Diagnostic=*' -or
+        $null -eq $ownedPollDiagnostic -or
+        $ownedPollDiagnostic.matched -ne $false -or
+        $ownedPollDiagnostic.count -ne 1 -or
+        $ownedPollDiagnostic.text -cne 'other output' -or
+        $ownedPollDiagnostic.focus_mismatch_polls -ne 0) {
+        throw 'The owner-aware wait must keep waiting through terminal output that is not its marker.'
+    }
+
+    # A steal, then the notification: the wait returns its evidence with the steal.
+    $script:ownedPollSchedule = @('outside', 'own')
+    $script:ownedPollMatchFrom = 1
+    $script:ownedPollOtherFrom = -1
+    $script:ownedPollBadRecoveries = 0
+    $script:ownedPollCalledUtc.Clear()
+    $script:ownedPollRecoveryUtc.Clear()
+    $ownedPollDiagnostic = $null
+    $ownedPollResult = @(
+        Wait-AccessibilityOwnedOutputNotification `
+            -Process $ownedPollProcess `
+            -ExpectedFocusedHwnd $ownedPollFocus `
+            -Marker 'MARKER' `
+            -Description 'contract poll match' `
+            -Diagnostic ([ref] $ownedPollDiagnostic)
+    )
+    if ($ownedPollResult.Count -ne 1 -or
+        $ownedPollResult[0].matched -ne $true -or
+        $ownedPollResult[0].count -ne 1 -or
+        $ownedPollResult[0].focus_mismatch_polls -ne 1 -or
+        (@($ownedPollResult[0].stolen_foreground_hwnds) -join ',') -cne '4242' -or
+        (@($ownedPollResult[0].stolen_foreground_process_ids) -join ',') -cne '999001' -or
+        -not (Test-OwnedPollTimes $ownedPollResult[0] @(0)) -or
+        $script:ownedPollBadRecoveries -ne 0 -or
+        $null -eq $ownedPollDiagnostic -or
+        $ownedPollDiagnostic.matched -ne $true) {
+        throw 'The owner-aware wait must return its matched evidence with the steal it polled before the notification.'
+    }
+}
+finally {
+    [FlagshipAccessibilityNativeProbe]::ForegroundHwnd = [IntPtr]::Zero
+    [FlagshipAccessibilityNativeProbe]::FocusedHwnd = [IntPtr]::Zero
+    [FlagshipAccessibilityNativeProbe]::NotificationHistorySnapshot = [object[]] @()
+    [FlagshipAccessibilityNativeProbe]::WindowOwners.Clear()
+    foreach ($name in @(
+        'Wait-AccessibilityOwnedOutputNotification',
+        'Wait-AccessibilityCondition',
+        'Assert-AccessibilityInputOwner',
+        'Test-OwnedPollTimes'
+    )) {
+        Remove-Item -LiteralPath "Function:\$name" -ErrorAction SilentlyContinue
+    }
+    Remove-Variable -Scope Script -Name ownedPollSchedule, ownedPollMatchFrom, ownedPollOtherFrom, ownedPollBadRecoveries, ownedPollCalledUtc, ownedPollRecoveryUtc -ErrorAction SilentlyContinue
+}
 Assert-NoUnreachableStatements `
     -Ast $ownedWarmNotificationFunctions[0].Body `
     -Context 'Wait-AccessibilityOwnedOutputNotification'
 Assert-NoUnreachableStatements `
     -Ast $coldFirstReadFunctions[0].Body `
     -Context 'Invoke-AccessibilityColdFirstReadProof'
+Assert-NoUnreachableStatements `
+    -Ast $coldAttemptFunctions[0].Body `
+    -Context 'Invoke-AccessibilityColdFirstReadAttempt'
 $coldRequirements = @(
     @{ Kind = 'Command'; Name = 'Wait-AccessibilityCondition' },
     @{ Kind = 'Command'; Name = 'Start-Sleep' },
@@ -758,17 +1028,17 @@ $coldRequirements = @(
 )
 foreach ($requirement in $coldRequirements) {
     $operationMatches = if ($requirement.Kind -eq 'Command') {
-        @(Get-NamedCommands -Ast $coldFirstReadFunctions[0].Body -Name $requirement.Name)
+        @(Get-NamedCommands -Ast $coldAttemptFunctions[0].Body -Name $requirement.Name)
     } else {
-        @(Get-NamedMemberExpressions -Ast $coldFirstReadFunctions[0].Body -Name $requirement.Name -InvocationOnly)
+        @(Get-NamedMemberExpressions -Ast $coldAttemptFunctions[0].Body -Name $requirement.Name -InvocationOnly)
     }
     if ($operationMatches.Count -lt 1) {
-        throw "Cold first-read proof must retain observable operation '$($requirement.Name)'."
+        throw "Cold first-read attempt must retain observable operation '$($requirement.Name)'."
     }
 }
 $coldFinalReads = @(
     Get-NamedMemberExpressions `
-        -Ast $coldFirstReadFunctions[0].Body `
+        -Ast $coldAttemptFunctions[0].Body `
         -Name 'GetText' `
         -InvocationOnly
 )
@@ -777,12 +1047,70 @@ if ($coldFinalReads.Count -ne 1 -or
         'TextPattern') {
     throw 'Cold output proof must perform exactly one final TextPattern GetText call.'
 }
+# The attempt's clock is the trigger file's own timestamp, read right after the
+# trigger is written (the helper's ack is stamped by the same clock).
+$coldTriggerClockAssignments = @($coldAttemptFunctions[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$triggerWrittenUtc'
+}, $true))
+$coldTriggerClockFollowsWrite = $false
+if ($coldTriggerClockAssignments.Count -eq 1 -and
+    $coldTriggerClockAssignments[0].Right.Extent.Text -ceq
+        '[System.IO.File]::GetLastWriteTimeUtc($triggerPath)') {
+    # The trigger is written under another name and renamed into place, so the
+    # helper never sees it before its write has finished.
+    $coldTriggerSiblings = @($coldTriggerClockAssignments[0].Parent.Statements)
+    for ($coldSiblingIndex = 2; $coldSiblingIndex -lt $coldTriggerSiblings.Count; $coldSiblingIndex++) {
+        if ([object]::ReferenceEquals($coldTriggerSiblings[$coldSiblingIndex], $coldTriggerClockAssignments[0]) -and
+            $coldTriggerSiblings[$coldSiblingIndex - 1].Extent.Text -ceq
+                '[System.IO.File]::Move($triggerTempPath, $triggerPath)' -and
+            $coldTriggerSiblings[$coldSiblingIndex - 2].Extent.Text -ceq
+                "[System.IO.File]::WriteAllText(`$triggerTempPath, 'trigger')") {
+            $coldTriggerClockFollowsWrite = $true
+        }
+    }
+}
+if (-not $coldTriggerClockFollowsWrite) {
+    throw 'Cold first-read attempt must write the trigger under another name, rename it into place, then read its clock from the trigger file''s timestamp.'
+}
+# The generated helper writes ready, waits for the trigger, prints and flushes
+# its marker, then writes its ack: the retry reads an ack as "the marker was written".
+$coldHelperLines = @(
+    "`"[System.IO.File]::WriteAllText('`$readyLiteral', 'ready')`"",
+    "`"while (-not [System.IO.File]::Exists('`$triggerLiteral')) {`"",
+    "`"[Console]::Out.WriteLine('`$markerLiteral')`"",
+    "'[Console]::Out.Flush()'",
+    "`"[System.IO.File]::WriteAllText('`$ackLiteral', 'ack')`""
+)
+$coldAttemptText = $coldAttemptFunctions[0].Extent.Text
+$coldHelperOffsets = @($coldHelperLines | ForEach-Object {
+    if (([regex]::Matches($coldAttemptText, [regex]::Escape($_))).Count -eq 1) {
+        $coldAttemptText.IndexOf($_)
+    } else {
+        -1
+    }
+})
+$coldHelperInOrder = @($coldHelperOffsets | Where-Object { $_ -lt 0 }).Count -eq 0
+for ($coldHelperIndex = 1; $coldHelperIndex -lt $coldHelperOffsets.Count; $coldHelperIndex++) {
+    if ($coldHelperOffsets[$coldHelperIndex] -le $coldHelperOffsets[$coldHelperIndex - 1]) {
+        $coldHelperInOrder = $false
+    }
+}
+if (-not $coldHelperInOrder) {
+    throw 'Cold-output helper must write ready, wait for the trigger, print and flush its marker, then write its ack, each once and in that order.'
+}
 
-$coldProbeSource = $coldFirstReadFunctions[0].Extent.Text.Replace(
+$coldProbeSource = $coldAttemptFunctions[0].Extent.Text.Replace(
     '[NocttyAccessibilityNative]',
     '[FlagshipAccessibilityNativeProbe]'
 )
 . ([scriptblock]::Create($coldProbeSource))
+$coldProofProbeSource = $coldFirstReadFunctions[0].Extent.Text.Replace(
+    '[NocttyAccessibilityNative]',
+    '[FlagshipAccessibilityNativeProbe]'
+)
+. ([scriptblock]::Create($coldProofProbeSource))
 $coldProbeRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'noctty-cold-proof-' + [Guid]::NewGuid().ToString('N')
 )
@@ -790,7 +1118,66 @@ $coldProbeRoot = Join-Path ([IO.Path]::GetTempPath()) (
 $script:coldProbeLog = [Collections.Generic.List[string]]::new()
 $script:coldProbeOwnerCalls = [Collections.Generic.List[object]]::new()
 $script:coldProbeMarker = 'COLDMARKER_001'
-$script:coldProbeFailure = $false
+# What the stand-in notification wait does on each call, in order (then
+# 'pass'): 'pass'; 'steal-pass' (passes, with one recorded focus steal);
+# 'quiet' (no notification, no focus change, helper ack); 'steal' (no
+# notification, a window of another process took the foreground, helper ack);
+# 'steal-no-ack' (the same, but the helper never acknowledged its marker);
+# 'steal-own' (the same, but the window is this process's own); 'focus-only'
+# (a mismatch with no stolen window); 'steal-omitted' (a steal, helper ack, and
+# the transport's omission notice among the notifications instead of the marker).
+$script:coldProbeOutcomes = [Collections.Generic.Queue[string]]::new()
+# The text the final TextPattern read returns after 'prompt '.
+$script:coldProbeText = 'COLDMARKER_001'
+# When set, the stand-ins run the launcher file the attempt's lines produce
+# (written by the stand-in launcher writer above, not by the real one) and the
+# generated helper, hidden with output redirected, instead of writing its ready
+# and ack files. The ready-file wait starts the launcher before the trigger
+# exists and checks that the helper writes no ack and keeps running, and the
+# notification wait collects what it printed.
+$script:coldProbeRunHelper = $false
+$script:coldProbeLauncherPath = $null
+$script:coldProbeHelper = $null
+$script:coldProbeHelperRun = $null
+function Stop-ColdProofContractHelper($Helper) {
+    if (-not $Helper.process.HasExited) {
+        try { $Helper.process.Kill($true) } catch { $Helper.process.Kill() }
+    }
+}
+function Start-ColdProofContractHelper([string] $LauncherPath) {
+    # The launcher file the attempt wrote, run as the terminal's cmd would,
+    # with echo off so only the helper's own output is read.
+    $start = [System.Diagnostics.ProcessStartInfo]::new('cmd.exe')
+    $start.Arguments = '/d /q /c "' + $LauncherPath + '"'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $helperProcess = [System.Diagnostics.Process]::Start($start)
+    [pscustomobject]@{
+        process = $helperProcess
+        stdout = $helperProcess.StandardOutput.ReadToEndAsync()
+        stderr = $helperProcess.StandardError.ReadToEndAsync()
+        early = $null
+    }
+}
+function Complete-ColdProofContractHelper($Helper) {
+    try {
+        if (-not $Helper.process.WaitForExit(30000)) {
+            Stop-ColdProofContractHelper $Helper
+            throw 'The generated cold-output helper did not exit within 30 s.'
+        }
+        [pscustomobject]@{
+            exit_code = $Helper.process.ExitCode
+            stdout_lines = @($Helper.stdout.Result -split "`r?`n" | Where-Object { $_ -ne '' })
+            stderr = $Helper.stderr.Result
+            early = $Helper.early
+        }
+    }
+    finally {
+        $Helper.process.Dispose()
+    }
+}
 [FlagshipAccessibilityNativeProbe]::Recorder = [Action[string]] {
     param([string] $entry)
     $script:coldProbeLog.Add($entry)
@@ -802,6 +1189,7 @@ function New-AccessibilityTempCmdLauncher {
     )
     [IO.File]::WriteAllText($launcherPath, ($Lines -join "`r`n"))
     $script:coldProbeLog.Add("launcher:$Description")
+    $script:coldProbeLauncherPath = $launcherPath
     [pscustomobject]@{
         path = $launcherPath
         command = 'call contract-cold-launcher.cmd'
@@ -839,7 +1227,25 @@ function Wait-AccessibilityCondition {
     $script:coldProbeLog.Add("condition:$Description")
     $helperPath = @(Get-ChildItem -LiteralPath $coldProbeRoot -Filter 'cold-output-*.ps1')[0].FullName
     $readyPath = [IO.Path]::ChangeExtension($helperPath, '.ready')
-    [IO.File]::WriteAllText($readyPath, 'ready')
+    if ($script:coldProbeRunHelper) {
+        # No trigger exists yet: the helper must write its ready file, then
+        # neither print nor ack until the attempt writes the trigger.
+        $script:coldProbeHelper = Start-ColdProofContractHelper $script:coldProbeLauncherPath
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        while (-not [IO.File]::Exists($readyPath)) {
+            if ([DateTime]::UtcNow -gt $readyDeadline -or $script:coldProbeHelper.process.HasExited) {
+                Stop-ColdProofContractHelper $script:coldProbeHelper
+                throw 'The generated cold-output helper never wrote its ready file.'
+            }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 25
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 300
+        $script:coldProbeHelper.early =
+            [IO.File]::Exists([IO.Path]::ChangeExtension($helperPath, '.ack')) -or
+            $script:coldProbeHelper.process.HasExited
+    } else {
+        [IO.File]::WriteAllText($readyPath, 'ready')
+    }
     if (-not (& $Condition)) {
         throw "Cold proof condition did not observe its controlled ready file: $Description"
     }
@@ -857,23 +1263,77 @@ function Wait-AccessibilityOwnedOutputNotification {
         [System.Management.Automation.PSReference] $Diagnostic
     )
     $script:coldProbeLog.Add("notification:${Description}:$Marker")
-    $helperPath = @(Get-ChildItem -LiteralPath $coldProbeRoot -Filter 'cold-output-*.ps1')[0].FullName
-    $ackPath = [IO.Path]::ChangeExtension($helperPath, '.ack')
-    [IO.File]::WriteAllText($ackPath, 'ack')
+    if (-not [object]::ReferenceEquals($Process, $coldProbeProcess) -or
+        $ExpectedFocusedHwnd -ne $coldProbeExpectedFocus) {
+        throw "Cold proof notification wait got the wrong process or expected focus: $Description"
+    }
+    $outcome = if ($script:coldProbeOutcomes.Count -gt 0) {
+        $script:coldProbeOutcomes.Dequeue()
+    } else {
+        'pass'
+    }
+    $helperPaths = @(Get-ChildItem -LiteralPath $coldProbeRoot -Filter 'cold-output-*.ps1')
+    if ($helperPaths.Count -ne 1) {
+        throw "Cold proof attempt left $($helperPaths.Count) helpers behind for: $Description"
+    }
+    $triggerStamp = [IO.File]::GetLastWriteTimeUtc(
+        [IO.Path]::ChangeExtension($helperPaths[0].FullName, '.trigger')
+    )
+    if ($script:coldProbeRunHelper) {
+        # The trigger now exists, so the helper writes its marker and ack and exits.
+        $script:coldProbeHelperRun = Complete-ColdProofContractHelper $script:coldProbeHelper
+    } elseif ($outcome -ne 'steal-no-ack') {
+        $ackPath = [IO.Path]::ChangeExtension($helperPaths[0].FullName, '.ack')
+        [IO.File]::WriteAllText($ackPath, 'ack')
+        # Stamped 1234 ms after the trigger, so the attempt's ack time is exact.
+        [IO.File]::SetLastWriteTimeUtc($ackPath, $triggerStamp.AddMilliseconds(1234))
+    }
+    # The stand-in says its clock started 5 s after the trigger's timestamp and
+    # that it saw a mismatch 300 ms in, 5300 ms after the trigger, whatever the
+    # host's speed. A steal is by window 77 of another process ('steal-own': of
+    # this process); 'focus-only' is a mismatch with no stolen window.
+    $stolen = $outcome -like 'steal*'
+    $mismatched = $stolen -or $outcome -eq 'focus-only'
+    $stolenOwner = if ($outcome -eq 'steal-own') {
+        [long] $coldProbeProcess.Id
+    } elseif ($outcome -eq 'steal-alt') {
+        [long] 999002
+    } else {
+        [long] 999001
+    }
+    # 'steal-alt' differs from 'steal' in every value, so a case can tell
+    # which attempt's evidence was kept.
+    $stolenHwnd = if ($outcome -eq 'steal-alt') { 78 } else { 77 }
+    $mismatchMs = if ($outcome -eq 'steal-alt') { 600 } else { 300 }
+    $passes = $outcome -in @('pass', 'steal-pass')
+    $omitted = $outcome -eq 'steal-omitted'
+    # The omission notice sits between two other notifications, as in a real history.
+    $omittedHistory = [System.Collections.Generic.List[object]]::new()
+    foreach ($omittedText in @('x', 'terminal output omitted', 'y')) {
+        $omittedHistory.Add([object[]] @('ActionCompleted', $omittedText, 2, 'TerminalTextOutput'))
+    }
     $value = [pscustomobject]@{
-        raw_notification_history = @('raw')
-        notification_history = @('matched')
-        notification_text = $Marker
-        text = $Marker
-        count = 1
-        matched = $true
-        focus_mismatch_polls = 0
-        focus_recovery_count = 0
-        stolen_foreground_hwnds = @()
+        raw_notification_history = @(
+            if ($omitted) { $omittedHistory.ToArray() } elseif ($passes) { 'raw' }
+        )
+        notification_history = @(
+            if ($omitted) { $omittedHistory.ToArray() } elseif ($passes) { 'matched' }
+        )
+        notification_text = if ($passes) { $Marker } elseif ($omitted) { 'xterminal output omittedy' } else { '' }
+        text = if ($passes) { $Marker } elseif ($omitted) { 'xterminal output omittedy' } else { '' }
+        count = if ($omitted) { 3 } elseif ($passes) { 1 } else { 0 }
+        matched = $passes
+        focus_mismatch_polls = if ($mismatched) { 1 } else { 0 }
+        focus_recovery_count = if ($mismatched) { 1 } else { 0 }
+        stolen_foreground_hwnds = @(if ($stolen) { $stolenHwnd })
+        stolen_foreground_process_ids = @(if ($stolen) { $stolenOwner })
+        focus_mismatch_elapsed_ms = @(if ($mismatched) { $mismatchMs })
+        focus_mismatch_utc = @(if ($mismatched) { $triggerStamp.AddMilliseconds(5000 + $mismatchMs) })
+        wait_started_utc = $triggerStamp.AddMilliseconds(5000)
     }
     $Diagnostic.Value = $value
-    if ($script:coldProbeFailure) {
-        throw 'injected cold notification failure'
+    if (-not $passes) {
+        throw "injected cold notification failure ($outcome)"
     }
     $value
 }
@@ -881,7 +1341,7 @@ $coldProbeRange = [pscustomobject]@{}
 $coldProbeRange | Add-Member -MemberType ScriptMethod -Name GetText -Value {
     param($MaximumLength)
     $script:coldProbeLog.Add("gettext:$MaximumLength")
-    "prompt $($script:coldProbeMarker)"
+    "prompt $($script:coldProbeText)"
 }
 $coldProbeTextPattern = [pscustomobject]@{ DocumentRange = $coldProbeRange }
 $coldProbeProcess = [System.Diagnostics.Process]::GetCurrentProcess()
@@ -889,14 +1349,97 @@ $coldProbeExpectedFocus = [IntPtr]88
 [FlagshipAccessibilityNativeProbe]::ForegroundHwnd =
     $coldProbeProcess.MainWindowHandle
 [FlagshipAccessibilityNativeProbe]::FocusedHwnd = $coldProbeExpectedFocus
+$coldProbeMainHwnd = $coldProbeProcess.MainWindowHandle.ToInt64()
+# The operations of one stand-in attempt that ends in the final read ('read')
+# or in a failed notification wait ('fail'). With -CaptureActive (as both real
+# callers run it) the attempt reuses the caller's capture: no start, no stop.
+$coldAttemptOperations = {
+    param([string] $Description, [string] $Marker, [string] $Ending, [switch] $CaptureActive)
+    $operations = @("launcher:$Description", 'native-reset-capture')
+    if (-not $CaptureActive) { $operations += 'native-start-capture:88' }
+    $operations += @(
+        "owner:$Description text",
+        'native-send:call contract-cold-launcher.cmd',
+        "echo:$Description",
+        "owner:$Description pre-Enter",
+        "chord:$Description Enter:13",
+        "condition:$Description helper ready file",
+        'sleep:1200',
+        'native-foreground',
+        "native-focus:$coldProbeMainHwnd",
+        "owner:$Description pre-trigger owner",
+        'native-foreground',
+        "native-focus:$coldProbeMainHwnd",
+        'native-reset-capture',
+        "notification:$Description direct output notification:$Marker"
+    )
+    if ($Ending -eq 'read') {
+        $operations += 'gettext:-1'
+    } else {
+        $operations += @('native-foreground', "native-focus:$coldProbeMainHwnd")
+    }
+    if (-not $CaptureActive) { $operations += 'native-stop-capture' }
+    $operations
+}
+function Invoke-ColdProofContractCase {
+    param([string] $Marker, [string] $Description, [string[]] $Outcomes, [string] $Text, [switch] $CaptureActive)
+    $script:coldProbeLog.Clear()
+    $script:coldProbeOwnerCalls.Clear()
+    $script:coldProbeOutcomes.Clear()
+    foreach ($outcome in $Outcomes) { $script:coldProbeOutcomes.Enqueue($outcome) }
+    $script:coldProbeText = $Text
+    $case = [ordered]@{ result = $null; output_count = 0; information = @(); error = '' }
+    try {
+        $output = @(Invoke-AccessibilityColdFirstReadProof `
+            -Process $coldProbeProcess `
+            -TextPattern $coldProbeTextPattern `
+            -Marker $Marker `
+            -Description $Description `
+            -ExpectedFocusedHwnd $coldProbeExpectedFocus `
+            -HelperDirectory $coldProbeRoot `
+            -NotificationCaptureActive:$CaptureActive 6>&1)
+        $case.information = @($output |
+            Where-Object { $_ -is [System.Management.Automation.InformationRecord] } |
+            ForEach-Object { [string] $_.MessageData })
+        $results = @($output |
+            Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
+        $case.output_count = $results.Count
+        if ($results.Count -eq 1) { $case.result = $results[0] }
+    }
+    catch { $case.error = $_.Exception.Message }
+    [pscustomobject] $case
+}
+function Test-ColdProofContractLog([string[]] $Expected) {
+    return ($script:coldProbeLog -join '|') -ceq ($Expected -join '|') -and
+        @($script:coldProbeOwnerCalls | Where-Object {
+            -not [object]::ReferenceEquals($_.Process, $coldProbeProcess) -or
+                $_.ExpectedFocusedHwnd -ne $coldProbeExpectedFocus
+        }).Count -eq 0 -and
+        @(Get-ChildItem -LiteralPath $coldProbeRoot -Force).Count -eq 0
+}
 try {
-    $coldProbeResult = Invoke-AccessibilityColdFirstReadProof `
-        -Process $coldProbeProcess `
-        -TextPattern $coldProbeTextPattern `
-        -Marker $script:coldProbeMarker `
-        -Description 'contract cold marker' `
-        -ExpectedFocusedHwnd $coldProbeExpectedFocus `
-        -HelperDirectory $coldProbeRoot
+    # This case runs the launcher file and generated helper: the helper must
+    # wait for the trigger, then print exactly its marker and write its ack.
+    $script:coldProbeRunHelper = $true
+    try {
+        $coldProbeCase = Invoke-ColdProofContractCase `
+            -Marker $script:coldProbeMarker `
+            -Description 'contract cold marker' `
+            -Outcomes @() `
+            -Text 'COLDMARKER_001'
+    }
+    finally {
+        $script:coldProbeRunHelper = $false
+    }
+    $coldProbeHelperRun = $script:coldProbeHelperRun
+    if ($null -eq $coldProbeHelperRun -or
+        $coldProbeHelperRun.early -ne $false -or
+        $coldProbeHelperRun.exit_code -ne 0 -or
+        ($coldProbeHelperRun.stdout_lines -join '|') -cne 'COLDMARKER_001' -or
+        -not [string]::IsNullOrWhiteSpace($coldProbeHelperRun.stderr)) {
+        throw 'The generated cold-output helper, run from its launcher file, must write no ack and keep running until the trigger, then print exactly its marker, write its ack and exit 0.'
+    }
+    $coldProbeResult = $coldProbeCase.result
     $expectedColdOperations = @(
         'launcher:contract cold marker',
         'native-reset-capture',
@@ -925,45 +1468,349 @@ try {
             -not [object]::ReferenceEquals($_.Process, $coldProbeProcess) -or
                 $_.ExpectedFocusedHwnd -ne $coldProbeExpectedFocus
         }).Count -ne 0 -or
+        $coldProbeCase.error -cne '' -or
+        $coldProbeCase.output_count -ne 1 -or
+        $coldProbeCase.information.Count -ne 0 -or
         $coldProbeResult.final_text_pattern_reads -ne 1 -or
         -not $coldProbeResult.marker_visible -or
         -not $coldProbeResult.output_ack_observed -or
+        $coldProbeResult.ack_after_trigger_ms -lt 0 -or
+        @($coldProbeResult.notification_focus_mismatch_after_trigger_ms).Count -ne 0 -or
+        $coldProbeResult.marker -cne 'COLDMARKER_001' -or
+        $coldProbeResult.attempts -ne 1 -or
+        $null -ne $coldProbeResult.interrupted_attempt -or
         @(Get-ChildItem -LiteralPath $coldProbeRoot -Force).Count -ne 0) {
-        throw 'Valid cold first-read behavior must preserve operation/argument identity, one final read, owned notification evidence, and cleanup.'
+        throw 'Valid cold first-read behavior must preserve operation/argument identity, one attempt, one final read, owned notification evidence, and cleanup.'
     }
 
+    # A failed wait with no recorded focus steal fails at once, with its diagnostic.
+    $coldProbeCase = Invoke-ColdProofContractCase `
+        -Marker 'COLDMARKER_002' `
+        -Description 'contract cold failure' `
+        -Outcomes @('quiet') `
+        -Text 'COLDMARKER_002'
+    if ($coldProbeCase.error -notlike
+            'injected cold notification failure (quiet) Diagnostic=*' -or
+        $coldProbeCase.error -like '*InterruptedAttempt=*' -or
+        -not (Test-ColdProofContractLog (& $coldAttemptOperations 'contract cold failure' 'COLDMARKER_002' 'fail'))) {
+        throw 'Cold first-read injected failure must propagate diagnostic context, stop capture/delete files in finally, and not retry without a recorded focus steal.'
+    }
+
+    # A failed wait that recorded a focus steal, with the helper's ack present,
+    # earns one fresh attempt with a new marker, whose own final read must see
+    # that marker. Both real callers reuse their notification capture
+    # (-CaptureActive), so the case runs that way too, and then the attempts
+    # must neither start nor stop a capture. The stand-in sees its steal 300 ms
+    # into a wait whose clock it says started 5 s after the trigger, so the
+    # steal is exactly 5300 ms after the trigger, and the retry line is
+    # compared with the values the attempt returned.
+    foreach ($captureActive in @($false, $true)) {
+        $coldProbeCase = Invoke-ColdProofContractCase `
+            -Marker 'COLDMARKER_003' `
+            -Description 'contract cold retry' `
+            -Outcomes @('steal', 'pass') `
+            -Text 'COLDMARKER_003 COLDMARKER_003_retry' `
+            -CaptureActive:$captureActive
+        $coldProbeResult = $coldProbeCase.result
+        $coldProbeInterrupted = if ($null -ne $coldProbeResult) {
+            $coldProbeResult.interrupted_attempt
+        } else {
+            $null
+        }
+        if ($coldProbeCase.error -cne '' -or
+            $coldProbeCase.output_count -ne 1 -or
+            -not (Test-ColdProofContractLog (
+                @(& $coldAttemptOperations 'contract cold retry' 'COLDMARKER_003' 'fail' -CaptureActive:$captureActive) +
+                @(& $coldAttemptOperations 'contract cold retry retry' 'COLDMARKER_003_retry' 'read' -CaptureActive:$captureActive))) -or
+            $script:coldProbeOwnerCalls.Count -ne 6 -or
+            $coldProbeResult.attempts -ne 2 -or
+            $coldProbeResult.marker -cne 'COLDMARKER_003_retry' -or
+            $coldProbeResult.final_text_pattern_reads -ne 1 -or
+            $coldProbeResult.notification_capture_reused -ne $captureActive -or
+            $null -eq $coldProbeInterrupted -or
+            $coldProbeInterrupted.marker -cne 'COLDMARKER_003' -or
+            $coldProbeInterrupted.error -cne 'injected cold notification failure (steal)' -or
+            $coldProbeInterrupted.diagnostic.ack_exists -ne $true -or
+            $coldProbeInterrupted.diagnostic.ack_after_trigger_ms -ne 1234 -or
+            $coldProbeInterrupted.diagnostic.notification_focus_mismatch_count -ne 1 -or
+            (@($coldProbeInterrupted.diagnostic.notification_stolen_foreground_hwnds) -join ',') -cne '77' -or
+            (@($coldProbeInterrupted.diagnostic.notification_stolen_foreground_process_ids) -join ',') -cne '999001' -or
+            @($coldProbeInterrupted.diagnostic.notification_focus_mismatch_after_trigger_ms).Count -ne 1 -or
+            @($coldProbeInterrupted.diagnostic.notification_focus_mismatch_after_trigger_ms)[0] -ne 5300 -or
+            $coldProbeCase.information.Count -ne 1 -or
+            $coldProbeCase.information[0] -cne (
+                'interactive Win11 accessibility: contract cold retry lost focus during its direct notification wait (seen {0} ms after the trigger, foreground 77 (process 999001); ack {1} ms after the trigger; {2} notifications); one fresh attempt with a new marker.' -f
+                    @($coldProbeInterrupted.diagnostic.notification_focus_mismatch_after_trigger_ms)[0],
+                    $coldProbeInterrupted.diagnostic.ack_after_trigger_ms,
+                    $coldProbeInterrupted.diagnostic.notification_count)) {
+            throw "A cold first-read attempt whose failed wait recorded a focus steal, with the helper's ack present, must get exactly one fresh attempt with a new marker, report it, and keep the interrupted attempt's evidence (capture reused: $captureActive)."
+        }
+    }
+
+    # A steal recorded by a wait that still succeeded needs no retry, and the
+    # proof keeps its time.
+    $coldProbeCase = Invoke-ColdProofContractCase `
+        -Marker 'COLDMARKER_009' `
+        -Description 'contract cold kept' `
+        -Outcomes @('steal-pass') `
+        -Text 'COLDMARKER_009' `
+        -CaptureActive
+    $coldProbeResult = $coldProbeCase.result
+    if ($coldProbeCase.error -cne '' -or
+        $coldProbeCase.output_count -ne 1 -or
+        $coldProbeCase.information.Count -ne 0 -or
+        -not (Test-ColdProofContractLog (& $coldAttemptOperations 'contract cold kept' 'COLDMARKER_009' 'read' -CaptureActive)) -or
+        $coldProbeResult.attempts -ne 1 -or
+        $null -ne $coldProbeResult.interrupted_attempt -or
+        $coldProbeResult.notification_focus_mismatch_count -ne 1 -or
+        $coldProbeResult.ack_after_trigger_ms -ne 1234 -or
+        (@($coldProbeResult.notification_stolen_foreground_process_ids) -join ',') -cne '999001' -or
+        @($coldProbeResult.notification_focus_mismatch_after_trigger_ms).Count -ne 1 -or
+        @($coldProbeResult.notification_focus_mismatch_after_trigger_ms)[0] -ne 5300) {
+        throw 'A cold first-read attempt whose wait succeeded after a recorded steal must pass on its first attempt and keep the steal and ack times.'
+    }
+
+    # A second interrupted attempt, a steal before any helper ack, a final read
+    # without the marker (also after a steal the wait survived), the
+    # transport's omission notice, and a retry whose read sees only the first
+    # marker all fail, and nothing runs a third attempt.
+    $coldProbeFailureCases = @(
+        @{
+            Marker = 'COLDMARKER_004'; Description = 'contract cold twice'
+            Outcomes = @('steal', 'steal-alt'); Text = 'COLDMARKER_004'; Retried = $true
+            Error = 'injected cold notification failure (steal-alt) Diagnostic=*InterruptedAttempt=*"marker":"COLDMARKER_004"*'
+            Log = @(& $coldAttemptOperations 'contract cold twice' 'COLDMARKER_004' 'fail') +
+                @(& $coldAttemptOperations 'contract cold twice retry' 'COLDMARKER_004_retry' 'fail')
+        },
+        @{
+            Marker = 'COLDMARKER_005'; Description = 'contract cold no ack'
+            Outcomes = @('steal-no-ack'); Text = 'COLDMARKER_005'; Retried = $false
+            Error = 'injected cold notification failure (steal-no-ack) Diagnostic=*'
+            Log = @(& $coldAttemptOperations 'contract cold no ack' 'COLDMARKER_005' 'fail')
+        },
+        @{
+            Marker = 'COLDMARKER_006'; Description = 'contract cold unread'
+            Outcomes = @('pass'); Text = 'no marker here'; Retried = $false
+            Error = 'Cold first TextPattern read did not contain contract cold unread marker*'
+            Log = @(& $coldAttemptOperations 'contract cold unread' 'COLDMARKER_006' 'read')
+        },
+        @{
+            Marker = 'COLDMARKER_007'; Description = 'contract cold stale'
+            Outcomes = @('steal', 'pass'); Text = 'COLDMARKER_007'; Retried = $true
+            Error = 'Cold first TextPattern read did not contain contract cold stale retry marker*InterruptedAttempt=*'
+            Log = @(& $coldAttemptOperations 'contract cold stale' 'COLDMARKER_007' 'fail') +
+                @(& $coldAttemptOperations 'contract cold stale retry' 'COLDMARKER_007_retry' 'read')
+        },
+        @{
+            Marker = 'COLDMARKER_010'; Description = 'contract cold unread steal'
+            Outcomes = @('steal-pass'); Text = 'no marker here'; Retried = $false
+            Error = 'Cold first TextPattern read did not contain contract cold unread steal marker*'
+            Log = @(& $coldAttemptOperations 'contract cold unread steal' 'COLDMARKER_010' 'read')
+        },
+        @{
+            Marker = 'COLDMARKER_011'; Description = 'contract cold omitted'
+            Outcomes = @('steal-omitted'); Text = 'COLDMARKER_011'; Retried = $false
+            Error = 'injected cold notification failure (steal-omitted) Diagnostic=*'
+            Log = @(& $coldAttemptOperations 'contract cold omitted' 'COLDMARKER_011' 'fail')
+        },
+        @{
+            Marker = 'COLDMARKER_012'; Description = 'contract cold focus only'
+            Outcomes = @('focus-only'); Text = 'COLDMARKER_012'; Retried = $false
+            Error = 'injected cold notification failure (focus-only) Diagnostic=*'
+            Log = @(& $coldAttemptOperations 'contract cold focus only' 'COLDMARKER_012' 'fail')
+        },
+        @{
+            Marker = 'COLDMARKER_013'; Description = 'contract cold own window'
+            Outcomes = @('steal-own'); Text = 'COLDMARKER_013'; Retried = $false
+            Error = 'injected cold notification failure (steal-own) Diagnostic=*'
+            Log = @(& $coldAttemptOperations 'contract cold own window' 'COLDMARKER_013' 'fail')
+        }
+    )
+    foreach ($failureCase in $coldProbeFailureCases) {
+        $coldProbeCase = Invoke-ColdProofContractCase `
+            -Marker $failureCase.Marker `
+            -Description $failureCase.Description `
+            -Outcomes $failureCase.Outcomes `
+            -Text $failureCase.Text
+        if ($coldProbeCase.error -notlike $failureCase.Error -or
+            ((-not $failureCase.Retried) -and $coldProbeCase.error -like '*InterruptedAttempt=*') -or
+            -not (Test-ColdProofContractLog $failureCase.Log)) {
+            throw "Cold first-read case '$($failureCase.Description)' must fail without a further attempt, stop capture and delete its files."
+        }
+        if ($failureCase.Retried) {
+            # The error of a failed retry carries the whole interrupted attempt.
+            $coldInterrupted = $null
+            try {
+                $coldInterrupted = ($coldProbeCase.error -split ' InterruptedAttempt=', 2)[1] |
+                    ConvertFrom-Json
+            }
+            catch {}
+            if ($null -eq $coldInterrupted -or
+                $coldInterrupted.marker -cne $failureCase.Marker -or
+                $coldInterrupted.error -cne 'injected cold notification failure (steal)' -or
+                $coldInterrupted.diagnostic.ack_exists -ne $true -or
+                $coldInterrupted.diagnostic.ack_after_trigger_ms -ne 1234 -or
+                $coldInterrupted.diagnostic.notification_focus_mismatch_count -ne 1 -or
+                $coldInterrupted.diagnostic.notification_stolen_foreground_process_ids -isnot [array] -or
+                (@($coldInterrupted.diagnostic.notification_stolen_foreground_process_ids) -join ',') -cne '999001' -or
+                $coldInterrupted.diagnostic.notification_focus_mismatch_after_trigger_ms -isnot [array] -or
+                (@($coldInterrupted.diagnostic.notification_focus_mismatch_after_trigger_ms) -join ',') -cne '5300' -or
+                $coldInterrupted.diagnostic.command_echo.observed -ne $true) {
+                throw "Cold first-read case '$($failureCase.Description)' must keep the interrupted attempt's whole diagnostic in its error."
+            }
+        }
+    }
+
+    # The attempt takes its diagnostic only as a [ref].
     $script:coldProbeLog.Clear()
-    $script:coldProbeOwnerCalls.Clear()
-    $script:coldProbeMarker = 'COLDMARKER_002'
-    $script:coldProbeFailure = $true
-    $coldProbeFailureMessage = ''
+    $coldProbeScalarMessage = ''
     try {
-        Invoke-AccessibilityColdFirstReadProof `
+        $null = Invoke-AccessibilityColdFirstReadAttempt `
             -Process $coldProbeProcess `
             -TextPattern $coldProbeTextPattern `
-            -Marker $script:coldProbeMarker `
-            -Description 'contract cold failure' `
+            -Marker 'COLDMARKER_008' `
+            -Description 'contract cold scalar' `
             -ExpectedFocusedHwnd $coldProbeExpectedFocus `
-            -HelperDirectory $coldProbeRoot | Out-Null
+            -HelperDirectory $coldProbeRoot `
+            -Diagnostic 'not-a-reference'
     }
-    catch { $coldProbeFailureMessage = $_.Exception.Message }
-    if ($coldProbeFailureMessage -notlike
-            'injected cold notification failure*Diagnostic=*' -or
-        $script:coldProbeLog[-1] -cne 'native-stop-capture' -or
+    catch { $coldProbeScalarMessage = $_.Exception.Message }
+    if ($coldProbeScalarMessage -cne 'Diagnostic must be a [ref] value when supplied.' -or
+        $script:coldProbeLog.Count -ne 0 -or
         @(Get-ChildItem -LiteralPath $coldProbeRoot -Force).Count -ne 0) {
-        throw 'Cold first-read injected failure must propagate diagnostic context and stop capture/delete files in finally.'
+        throw 'Cold first-read attempt must reject a scalar diagnostic before it starts.'
+    }
+
+    # The gate's process rules, against a fake attempt that fails once as an
+    # interrupted wait would, its stolen windows owned by $script:coldGateOwners.
+    # A noctty that has exited is not retried (its windows going away reads as
+    # a focus change). Nor is a steal by a window of noctty's own process, in
+    # either order with another program's, checked with a live process other
+    # than this one, so noctty's id cannot be confused with the harness's own
+    # ($PID). A window whose owner could not be read (0) does not count as a
+    # steal: alone it earns no retry, and beside another program's window it
+    # does not block one. A steal by another program against a live noctty is
+    # retried, and the retry is logged before the second attempt starts, even
+    # when that attempt fails: a stand-in Write-Host records the line, and the
+    # fake second attempt notes whether it was already there.
+    $script:coldGateAttempts = 0
+    $script:coldGateOwners = @(999001)
+    $script:coldGateSecondFails = $false
+    $script:coldGateHostLines = [System.Collections.Generic.List[string]]::new()
+    $script:coldGateLoggedBeforeRetry = $false
+    function Write-Host {
+        param([Parameter(Position = 0)] $Object)
+        $script:coldGateHostLines.Add([string] $Object)
+    }
+    function Invoke-AccessibilityColdFirstReadAttempt {
+        param(
+            $Process, $TextPattern, [string] $Marker, [string] $Description,
+            [IntPtr] $ExpectedFocusedHwnd, [string] $HelperDirectory,
+            [switch] $NotificationCaptureActive, $Diagnostic = $null
+        )
+        $script:coldGateAttempts++
+        if ($script:coldGateAttempts -gt 1) {
+            $script:coldGateLoggedBeforeRetry = $script:coldGateHostLines.Count -eq 1
+            if ($script:coldGateSecondFails) { throw 'fake retry failure' }
+            return [pscustomobject]@{ marker = $Marker }
+        }
+        $Diagnostic.Value = [pscustomobject]@{
+            ack_exists = $true
+            ack_after_trigger_ms = 0
+            notification_count = 0
+            raw_notification_history = @()
+            notification_focus_mismatch_count = 1
+            notification_stolen_foreground_hwnds = @(77, 78)[0..($script:coldGateOwners.Count - 1)]
+            notification_stolen_foreground_process_ids = @($script:coldGateOwners | ForEach-Object { [long] $_ })
+            notification_focus_mismatch_after_trigger_ms = @(300)
+        }
+        throw 'fake interrupted attempt Diagnostic={}'
+    }
+    $coldGateStart = [System.Diagnostics.ProcessStartInfo]::new('cmd.exe', '/d /c exit 0')
+    $coldGateStart.UseShellExecute = $false
+    $coldGateStart.CreateNoWindow = $true
+    $coldGateExited = [System.Diagnostics.Process]::Start($coldGateStart)
+    # A hidden cmd that waits on its redirected input until the case ends.
+    $coldGateLiveStart = [System.Diagnostics.ProcessStartInfo]::new('cmd.exe', '/d /q /k')
+    $coldGateLiveStart.UseShellExecute = $false
+    $coldGateLiveStart.CreateNoWindow = $true
+    $coldGateLiveStart.RedirectStandardInput = $true
+    $coldGateLiveStart.RedirectStandardOutput = $true
+    $coldGateLive = [System.Diagnostics.Process]::Start($coldGateLiveStart)
+    try {
+        if (-not $coldGateExited.WaitForExit(10000)) {
+            throw 'The exited-process fixture did not exit.'
+        }
+        if ($coldGateLive.HasExited -or $coldGateLive.Id -eq $PID) {
+            throw 'The live-process fixture is not a running process other than this one.'
+        }
+        foreach ($gateCase in @(
+            @{ Name = 'exited'; Process = $coldGateExited; Owners = @(999001); Attempts = 1; Error = 'fake interrupted attempt*' },
+            @{ Name = 'own window'; Process = $coldGateLive; Owners = @($coldGateLive.Id); Attempts = 1; Error = 'fake interrupted attempt*' },
+            @{ Name = 'own window, then another program'; Process = $coldGateLive; Owners = @($coldGateLive.Id, 999001); Attempts = 1; Error = 'fake interrupted attempt*' },
+            @{ Name = 'another program, then own window'; Process = $coldGateLive; Owners = @(999001, $coldGateLive.Id); Attempts = 1; Error = 'fake interrupted attempt*' },
+            @{ Name = 'unknown owner'; Process = $coldProbeProcess; Owners = @(0); Attempts = 1; Error = 'fake interrupted attempt*' },
+            @{ Name = 'unknown owner, then another program'; Process = $coldGateLive; Owners = @(0, 999001); Attempts = 2; Error = '' },
+            @{ Name = 'another program, then unknown owner'; Process = $coldGateLive; Owners = @(999001, 0); Attempts = 2; Error = '' },
+            @{ Name = 'another program, live noctty'; Process = $coldGateLive; Owners = @(999001); Attempts = 2; Error = '' },
+            @{ Name = 'another program, retry fails'; Process = $coldGateLive; Owners = @(999001); Attempts = 2; SecondFails = $true; Error = 'fake retry failure InterruptedAttempt=*' }
+        )) {
+            $script:coldGateAttempts = 0
+            $script:coldGateOwners = @($gateCase.Owners)
+            $script:coldGateSecondFails = [bool] $gateCase.SecondFails
+            $script:coldGateHostLines.Clear()
+            $script:coldGateLoggedBeforeRetry = $false
+            $coldGateError = ''
+            $coldGateResult = $null
+            try {
+                $coldGateResult = Invoke-AccessibilityColdFirstReadProof `
+                    -Process $gateCase.Process `
+                    -TextPattern $coldProbeTextPattern `
+                    -Marker 'COLDGATE_0001' `
+                    -Description 'contract cold gate' `
+                    -ExpectedFocusedHwnd $coldProbeExpectedFocus `
+                    -HelperDirectory $coldProbeRoot
+            }
+            catch { $coldGateError = $_.Exception.Message }
+            $retried = $gateCase.Attempts -eq 2
+            if ($script:coldGateAttempts -ne $gateCase.Attempts -or
+                ($gateCase.Error -ne '' -and $coldGateError -notlike $gateCase.Error) -or
+                ($gateCase.Error -eq '' -and ($coldGateError -cne '' -or $coldGateResult.attempts -ne 2)) -or
+                $script:coldGateHostLines.Count -ne $(if ($retried) { 1 } else { 0 }) -or
+                ($retried -and -not $script:coldGateLoggedBeforeRetry)) {
+                throw "Cold first-read proof must retry only a steal by another program against a live noctty, logging the retry before the second attempt starts (case: $($gateCase.Name))."
+            }
+        }
+    }
+    finally {
+        $coldGateExited.Dispose()
+        try { $coldGateLive.StandardInput.Close() } catch {}
+        if (-not $coldGateLive.WaitForExit(10000)) {
+            try { $coldGateLive.Kill() } catch {}
+        }
+        $coldGateLive.Dispose()
     }
 }
 finally {
     [FlagshipAccessibilityNativeProbe]::Recorder = $null
+    if ($null -ne $script:coldProbeHelper -and $null -ne $script:coldProbeHelper.process) {
+        try { Stop-ColdProofContractHelper $script:coldProbeHelper } catch {}
+    }
     foreach ($name in @(
         'Invoke-AccessibilityColdFirstReadProof',
+        'Invoke-AccessibilityColdFirstReadAttempt',
+        'Invoke-ColdProofContractCase',
+        'Start-ColdProofContractHelper',
+        'Complete-ColdProofContractHelper',
+        'Stop-ColdProofContractHelper',
+        'Test-ColdProofContractLog',
         'New-AccessibilityTempCmdLauncher',
         'Assert-AccessibilityInputOwner',
         'Wait-AccessibilityTerminalCommandEcho',
         'Send-AccessibilityChord',
         'Wait-AccessibilityCondition',
         'Start-Sleep',
+        'Write-Host',
         'Wait-AccessibilityOwnedOutputNotification'
     )) {
         Remove-Item -LiteralPath "Function:\$name" -ErrorAction SilentlyContinue
@@ -971,7 +1818,7 @@ finally {
     if ([IO.Directory]::Exists($coldProbeRoot)) {
         [IO.Directory]::Delete($coldProbeRoot, $true)
     }
-    Remove-Variable -Scope Script -Name coldProbeLog, coldProbeOwnerCalls, coldProbeMarker, coldProbeFailure -ErrorAction SilentlyContinue
+    Remove-Variable -Scope Script -Name coldProbeLog, coldProbeOwnerCalls, coldProbeMarker, coldProbeOutcomes, coldProbeText, coldProbeRunHelper, coldProbeHelperRun, coldProbeLauncherPath, coldProbeHelper, coldGateAttempts, coldGateOwners, coldGateSecondFails, coldGateHostLines, coldGateLoggedBeforeRetry -ErrorAction SilentlyContinue
 }
 
 $ownedDiagnosticCalls = @(
@@ -995,7 +1842,74 @@ $ownedDiagnosticValueAssignments = @(
             [object]::ReferenceEquals($_.Parent.Left, $_)
         }
 )
+# The poll and failure diagnostics carry the steal times, the stolen windows'
+# owners and their UTC times.
+$ownedTimedDiagnosticCalls = @(
+    $ownedDiagnosticCalls | Where-Object {
+        $parameterNames = @($_.CommandElements |
+            Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } |
+            ForEach-Object { $_.ParameterName })
+        @('FocusMismatchElapsedMilliseconds', 'StolenForegroundProcessIds', 'FocusMismatchUtc' |
+            Where-Object { $parameterNames -notcontains $_ }).Count -eq 0
+    }
+)
+$ownedElapsedRecords = @(
+    Get-NamedMemberExpressions `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'Add' `
+        -InvocationOnly |
+        Where-Object {
+            ($_.Expression.Extent.Text -ceq '$state.focus_mismatch_elapsed_ms' -and
+                $_.Arguments.Count -eq 1 -and
+                $_.Arguments[0].Extent.Text -ceq '[long]($pollUtc - $waitStartedUtc).TotalMilliseconds') -or
+            ($_.Expression.Extent.Text -ceq '$state.focus_mismatch_utc' -and
+                $_.Arguments.Count -eq 1 -and
+                $_.Arguments[0].Extent.Text -ceq '$pollUtc')
+        }
+)
+$ownedStartedDiagnosticCalls = @(
+    $ownedDiagnosticCalls | Where-Object {
+        $elements = @($_.CommandElements)
+        $passesStart = $false
+        for ($elementIndex = 0; $elementIndex + 1 -lt $elements.Count; $elementIndex++) {
+            if ($elements[$elementIndex] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $elements[$elementIndex].ParameterName -eq 'WaitStartedUtc' -and
+                $elements[$elementIndex + 1].Extent.Text -ceq '$waitStartedUtc') {
+                $passesStart = $true
+            }
+        }
+        $passesStart
+    }
+)
+# Each poll reads its UTC time first, right before it looks at the foreground,
+# so a steal's time is never later than the look that saw it; the wait's start
+# is read once, on the same clock.
+$ownedWaitStatements = @($ownedWarmNotificationFunctions[0].Body.EndBlock.Statements)
+$ownedStartReads = @($ownedWaitStatements | Where-Object {
+    $_.Extent.Text -ceq '$waitStartedUtc = [DateTime]::UtcNow'
+})
+$ownedPollConditions = @(
+    Get-NamedCommands -Ast $ownedWarmNotificationFunctions[0].Body -Name 'Wait-AccessibilityCondition' |
+        ForEach-Object {
+            $_.CommandElements | Where-Object {
+                $_ -is [System.Management.Automation.Language.ScriptBlockExpressionAst]
+            }
+        }
+)
+$ownedPollReadsClockFirst = $false
+if ($ownedPollConditions.Count -eq 1) {
+    $ownedPollStatements = @($ownedPollConditions[0].ScriptBlock.EndBlock.Statements)
+    $ownedPollReadsClockFirst = $ownedPollStatements.Count -ge 2 -and
+        $ownedPollStatements[0].Extent.Text -ceq '$pollUtc = [DateTime]::UtcNow' -and
+        $ownedPollStatements[1].Extent.Text -ceq
+            '$foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()'
+}
 if ($ownedDiagnosticCalls.Count -ne 3 -or
+    $ownedTimedDiagnosticCalls.Count -ne 2 -or
+    $ownedStartedDiagnosticCalls.Count -ne 3 -or
+    $ownedStartReads.Count -ne 1 -or
+    -not $ownedPollReadsClockFirst -or
+    $ownedElapsedRecords.Count -ne 2 -or
     $ownedRawHistorySnapshots.Count -ne 2 -or
     $ownedDiagnosticValueAssignments.Count -ne 2 -or
     (Get-NamedCommands -Ast $ownedWarmNotificationFunctions[0].Body -Name 'Wait-AccessibilityCondition').Count -ne 1 -or
