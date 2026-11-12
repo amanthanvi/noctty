@@ -19,7 +19,8 @@
       ]
     },
     "windows-2025": {
-      "maxTotalSkipped": 74,
+      "comment": "2026-11-12: 77 measured in run 43157845768 (workflow_dispatch of Test, the per-test log of the nightly's timing run, artifact zig-test-results-43157845768). Nothing checked this entry before (only windows10-branches.yml runs check-test-skips.ps1, with windows-2022), so 74, set on 2026-10-17 with PKG-76, had gone stale. The three added since are the ones the windows-2022 comment names, from #638 and #635 on 2026-10-31, and skip by design: os.local_path.test.link target: no text in the full sweep aborts or leaks (runs only with NOCTTY_RUN_LOCAL_PATH_SWEEP=1); terminal.kitty.graphics_image.test.image load: windows file path that is not drive-absolute is refused (needs the temporary directory on the current directory's drive, and the runner checks out on D:); terminal.search.pattern.test.forQuery rejects non-default options without oniguruma (the build has oniguruma). The nine font skips are unchanged. The Test workflow's nightly now checks this entry.",
+      "maxTotalSkipped": 77,
       "allowedSkips": [
         "font.shaper.harfbuzz.test.shape Devanagari string",
         "font.shaper.harfbuzz.test.shape Tai Tham vowels (position differs from advance)",
