@@ -1862,49 +1862,21 @@ test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
-    const Fixture = struct {
-        fn moveAside(path: []const u8, backup: []const u8) !bool {
-            std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
-                error.FileNotFound => return false,
-                else => return err,
-            };
-            try std.fs.renameAbsolute(path, backup);
-            return true;
-        }
-
-        fn restore(path: []const u8, backup: []const u8, moved: bool) void {
-            std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => std.debug.panic("failed to remove ConPTY test fixture: {}", .{err}),
-            };
-            if (moved) std.fs.renameAbsolute(backup, path) catch |err| {
-                std.debug.panic("failed to restore staged ConPTY file: {}", .{err});
-            };
-        }
-    };
-
     WindowsConPty.resetForTest();
     defer WindowsConPty.resetForTest();
 
-    var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_dir = try std.fs.selfExeDirPath(&exe_dir_buf);
-    const conpty_path = try std.fs.path.join(testing.allocator, &.{ exe_dir, "conpty.dll" });
+    // The pair goes in a directory of the test's own, not beside the test
+    // executable: `-Dtest-shards` runs several processes of that executable
+    // at once, and a sibling shard opening a pseudo console would load the
+    // stand-in (and keep the cleanup from deleting a mapped image).
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir);
+    const conpty_path = try std.fs.path.join(testing.allocator, &.{ dir, "conpty.dll" });
     defer testing.allocator.free(conpty_path);
-    const open_console_path = try std.fs.path.join(testing.allocator, &.{ exe_dir, "OpenConsole.exe" });
+    const open_console_path = try std.fs.path.join(testing.allocator, &.{ dir, "OpenConsole.exe" });
     defer testing.allocator.free(open_console_path);
-    const suffix = try std.fmt.allocPrint(testing.allocator, ".noctty-test-backup-{d}", .{windows.GetCurrentProcessId()});
-    defer testing.allocator.free(suffix);
-    const conpty_backup = try std.mem.concat(testing.allocator, u8, &.{ conpty_path, suffix });
-    defer testing.allocator.free(conpty_backup);
-    const open_console_backup = try std.mem.concat(testing.allocator, u8, &.{ open_console_path, suffix });
-    defer testing.allocator.free(open_console_backup);
-
-    var conpty_moved = false;
-    var open_console_moved = false;
-    defer Fixture.restore(open_console_path, open_console_backup, open_console_moved);
-    defer Fixture.restore(conpty_path, conpty_backup, conpty_moved);
-    conpty_moved = try Fixture.moveAside(conpty_path, conpty_backup);
-    open_console_moved = try Fixture.moveAside(open_console_path, open_console_backup);
 
     const system_root = try std.process.getEnvVarOwned(testing.allocator, "SystemRoot");
     defer testing.allocator.free(system_root);
@@ -1913,7 +1885,7 @@ test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     try std.fs.copyFileAbsolute(known_bad, conpty_path, .{});
     try std.fs.copyFileAbsolute(known_bad, open_console_path, .{});
 
-    try testing.expectError(error.CreateSymbolMissing, WindowsConPty.loadBundled());
+    try testing.expectError(error.CreateSymbolMissing, WindowsConPty.loadBundledFrom(dir));
 }
 
 test {

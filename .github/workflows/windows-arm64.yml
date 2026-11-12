@@ -103,8 +103,10 @@ jobs:
         # tests (src/main.zig has since been fixed so a filter runs what it
         # matches), so this job reported ARM64 coverage it never had. A filter
         # is still only a subset; the full suite is what this job should run.
+        # -Dtest-shards=4 runs it as four processes on the runner's four cores
+        # (src/test_runner.zig), as test.yml's Full Zig test suite does.
         run: |
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline --summary all
+          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-shards=4 --summary all
 
   arm64-build:
     name: Native Windows ARM64 Build

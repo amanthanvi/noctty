@@ -640,3 +640,72 @@ foreach ($judgeCase in $judgeCases) {
 if (@(Get-ZigFixtureProblems -Fixtures $judgeFixtures -Output '' -ExitCode 0).Count -eq 0) {
     throw 'Zig fixture judge accepted a run that listed no tests.'
 }
+# TEST-SHARDS-01 (docs/agents/log/test-harnesses.md). The copied test runner
+# picks every test it runs or names through `shard.testIndex`, because counts
+# cannot catch a miss: a runner that listed a shard's tests but ran tests
+# 0..len-1 would run a quarter of the suite four times with every count right.
+# And `addTestRuns` gives each of the N shards a run step, and every test
+# executable takes the runner.
+function Get-TestShardProblems {
+    param(
+        [Parameter(Mandatory)] [string] $RunnerText,
+        [Parameter(Mandatory)] [string] $BuildText
+    )
+
+    $problems = [Collections.Generic.List[string]]::new()
+    # mainSimple serves backends that cannot parse arguments; it never shards.
+    $simple = [regex]::Match($RunnerText, '(?ms)^pub fn mainSimple\(\)[^\n]*\{.*?^\}')
+    if (-not $simple.Success) {
+        $problems.Add('src/test_runner.zig has no mainSimple to set aside')
+        return , $problems.ToArray()
+    }
+    $sharded = $RunnerText.Remove($simple.Index, $simple.Length)
+    $lookups = [regex]::Matches($sharded, 'builtin\.test_functions\[').Count
+    $throughShard = [regex]::Matches($sharded, 'builtin\.test_functions\[shard\.testIndex\((?:i|index)\)\]').Count
+    # Test metadata, run_test, start_fuzzing and the terminal loop.
+    if ($lookups -ne 4 -or $throughShard -ne 4) {
+        $problems.Add("src/test_runner.zig must look up its 4 tests through shard.testIndex ($throughShard of $lookups do)")
+    }
+    $lengths = [regex]::Matches($sharded, 'builtin\.test_functions\.len').Count
+    $shardLengths = [regex]::Matches($sharded, 'shard\.len\(builtin\.test_functions\.len\)').Count
+    if ($lengths -ne 2 -or $shardLengths -ne 2) {
+        $problems.Add("src/test_runner.zig must count its tests through shard.len ($shardLengths of $lengths do)")
+    }
+    if ($sharded -match 'for \(builtin\.test_functions') {
+        $problems.Add('src/test_runner.zig iterates builtin.test_functions outside mainSimple')
+    }
+    if ($BuildText -notmatch '(?m)^    for \(1\.\.shards \+ 1\) \|k\| \{\r?$' -or
+        $BuildText -notmatch '(?m)^        run\.addArg\(b\.fmt\("--shard=\{d\}/\{d\}", \.\{ k, shards \}\)\);\r?$') {
+        $problems.Add('build.zig addTestRuns must add one --shard=K/N run for each K in 1..N')
+    }
+    $runnerUses = [regex]::Matches($BuildText, '(?m)^            \.test_runner = test_runner,\r?$').Count
+    if ($runnerUses -ne 3) {
+        $problems.Add("build.zig must give its 3 test executables the shard runner ($runnerUses do)")
+    }
+    return , $problems.ToArray()
+}
+$testRunnerText = Get-Content -LiteralPath (Join-Path $repoRoot 'src\test_runner.zig') -Raw
+$buildZigText = Get-Content -LiteralPath (Join-Path $repoRoot 'build.zig') -Raw
+$testShardProblems = Get-TestShardProblems -RunnerText $testRunnerText -BuildText $buildZigText
+if ($testShardProblems.Count -ne 0) { throw ($testShardProblems -join '; ') }
+$testShardMutations = @(
+    @{ Runner = $testRunnerText.Replace('builtin.test_functions[shard.testIndex(index)]; // noctty', 'builtin.test_functions[index]; // noctty'); Build = $buildZigText }
+    @{ Runner = $testRunnerText.Replace('const test_fn = builtin.test_functions[shard.testIndex(i)];' + "`n", 'const test_fn = builtin.test_functions[i];' + "`n").Replace('const test_fn = builtin.test_functions[shard.testIndex(i)];' + "`r`n", 'const test_fn = builtin.test_functions[i];' + "`r`n"); Build = $buildZigText }
+    @{ Runner = $testRunnerText.Replace('const test_fn = builtin.test_functions[shard.testIndex(i)]; // noctty', 'const test_fn = builtin.test_functions[i]; // noctty'); Build = $buildZigText }
+    @{ Runner = $testRunnerText.Replace('.len = shard.len(builtin.test_functions.len)', '.len = builtin.test_functions.len'); Build = $buildZigText }
+    @{ Runner = $testRunnerText; Build = $buildZigText.Replace('for (1..shards + 1) |k| {', 'for (1..shards) |k| {') }
+    @{ Runner = $testRunnerText; Build = $buildZigText.Replace('run.addArg(b.fmt("--shard={d}/{d}", .{ k, shards }));', '// run.addArg(b.fmt("--shard={d}/{d}", .{ k, shards }));') }
+    @{ Runner = $testRunnerText; Build = ([regex]'(?m)^            \.test_runner = test_runner,\r?\n').Replace($buildZigText, '', 1) }
+)
+foreach ($mutation in $testShardMutations) {
+    if ($mutation.Runner -ceq $testRunnerText -and $mutation.Build -ceq $buildZigText) {
+        throw 'A test-shard mutation control changed nothing.'
+    }
+    # Not @(...): the function returns its array with the unary comma, and
+    # @() would wrap it, so an empty list would count as one problem.
+    $mutationProblems = Get-TestShardProblems -RunnerText $mutation.Runner -BuildText $mutation.Build
+    if ($mutationProblems.Count -eq 0) {
+        throw 'The test-shard contract accepted a runner or build that does not shard every test.'
+    }
+}
+Write-Host "Test shard contract: $($testShardMutations.Count)/$($testShardMutations.Count) mutations rejected"
