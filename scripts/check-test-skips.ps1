@@ -4,7 +4,7 @@ Budget for the Zig tests that skip themselves (PKG-76, F207).
 
 Some tests return error.SkipZigTest when the machine lacks something: the complex-script shaping tests
 load system fonts such as "Arial Unicode MS", which a hosted runner does not have. `zig build test`
-reports only a total ("74 skipped"), so a test that starts skipping in CI looks the same as one that
+reports only a total ("N skipped"), so a test that starts skipping in CI looks the same as one that
 always did, and shaping regressions for Devanagari, Tibetan or Bengali pass unobserved.
 
 This reads the per-test output of the test executable (`ghostty-test.exe`, run directly, prints

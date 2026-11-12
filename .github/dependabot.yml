@@ -7,10 +7,10 @@ updates:
   # A pull request that moves a pin in release.yml, release-readiness.yml or
   # chocolatey-publish.yml fails the flagship contracts until their digests in
   # Contracts.80-Release.ps1 and Contracts.94-ChocolateyPublish.ps1 are
-  # recomputed, and one that moves setup-node, or checkout or wrangler-action
-  # in deploy-site.yml, until the pins in Contracts.90 and Contracts.92 are
-  # moved too. That review is intended (docs/agents/log/build-release-ci.md,
-  # DEPENDABOT-NEVER-RAN).
+  # recomputed, and one that moves setup-node, checkout or wrangler-action in
+  # deploy-site.yml, or attest-build-provenance in release.yml, until the pins
+  # in Contracts.90, Contracts.92 and Contracts.80 are moved too. That review
+  # is intended (docs/agents/log/build-release-ci.md, DEPENDABOT-NEVER-RAN).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

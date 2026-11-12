@@ -179,7 +179,9 @@ $chocolateyPublishCanonical = ConvertTo-CanonicalText -Text $chocolateyPublishWo
 # the digest cannot be what rejects it.
 $chocolateyPublishMutants = @(
     @{ Label = 'extra push trigger'; Target = "on:`n  workflow_dispatch:"; Replacement = "on:`n  push:`n    branches: [main]`n  workflow_dispatch:" },
-    @{ Label = 'unpinned checkout'; Target = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1'; Replacement = 'actions/checkout@v6' },
+    # The pin as the workflow has it now, so a Dependabot bump of checkout
+    # does not leave this mutant without a target.
+    @{ Label = 'unpinned checkout'; Target = [regex]::Match($chocolateyPublishWorkflowText, 'actions/checkout@[0-9a-f]{40} # v[0-9.]+').Value; Replacement = 'actions/checkout@v7' },
     @{ Label = 'unconditional push'; Target = 'if: ${{ inputs.push }}'; Replacement = 'if: ${{ true }}' },
     @{ Label = 'dry run that pushes'; Target = '-Version $env:RELEASE_VERSION -PackOnly'; Replacement = '-Version $env:RELEASE_VERSION' },
     @{ Label = 'key readable while building'; Target = '          GH_TOKEN: ${{ github.token }}'; Replacement = "          GH_TOKEN: `${{ github.token }}`n          CHOCO_API_KEY: `${{ secrets.CHOCO_API_KEY }}" },

@@ -228,9 +228,9 @@ jobs:
       - name: Full Zig test suite
         # -Dcustom-shaders=true because that is what ships: every release
         # binary is built with it (scripts/build-package-windows.ps1), so the
-        # default-off config is one no user runs. It is also a superset,
-        # 4495 tests against 4491, the difference being the shadertoy tests
-        # that used to have a step of their own. That step ran
+        # default-off config is one no user runs. It is also a superset: the
+        # difference is the shadertoy tests (4495 tests against 4491 when
+        # measured, 2026-10-17), which used to have a step of their own. That step ran
         # -Dtest-filter=shadertoy, which executed 0 of them (measured, before
         # the src/main.zig filter fix); replacing it with a second full-suite
         # run would have doubled this job's time to collect 4 tests.
@@ -246,7 +246,9 @@ jobs:
       # executable runs once more under a timestamper. `zig build test` does not
       # install it; the install step does, from the compile the suite just
       # cached. It costs a few minutes, so it runs on the nightly and on demand,
-      # not on pull requests.
+      # not on pull requests. The timing is report-only; the per-test log it
+      # leaves is not: the skip budget below reads it, and fails when the run
+      # left none or cut it off.
       - name: Per-test timing (report only)
         if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
@@ -262,9 +264,12 @@ jobs:
       # skipping here, a font shaping test above all, fails the nightly instead
       # of passing as green CI. `zig build test` prints only a skip total, so
       # this needs the run above. Not report-only: a missing or cut-off log
-      # fails it too.
+      # fails it too. Not on the release evidence dispatch
+      # (run_interactive_win11), whose Test run the Release workflow requires
+      # to succeed: a budget that drifted since the last nightly would block
+      # the release, and fixing it would mean a new SHA and new evidence.
       - name: Skip budget (windows-2025)
-        if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))
         shell: pwsh
         run: ./scripts/check-test-skips.ps1 -TestLog test-timing/ghostty-test.log -Runner windows-2025
 
