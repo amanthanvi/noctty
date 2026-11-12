@@ -12,8 +12,10 @@ skipped while its flag is 'true' (because something it needs failed) or that
 succeeded while its flag is 'false' is a problem too, so a skip can never stand
 in for a failure.
 
-The gate is the one check a branch rule would need to require. It keeps the old
-job's name, so a rule written against that name keeps its meaning.
+The gate is the check the `main: CI gates` ruleset requires, one per workflow.
+It keeps the old job's name, so a rule written against that name keeps its
+meaning. Its job runs under `always()`: under `!cancelled()` a cancelled run
+skips it, and a skipped required check counts as passing.
 #>
 [CmdletBinding()]
 param(

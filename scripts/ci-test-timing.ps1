@@ -11,7 +11,8 @@ line for a quiet test, on a line of its own after whatever the test logged.
 This runs the executable that `-Demit-test-exe=true` installs, timestamps each
 line as it arrives, and gives a test the time from the previous test's end to
 its own end. The slowest go to the job summary and to
-<OutputDirectory>\test-timing.json.
+<OutputDirectory>\test-timing.json, and the runner's lines, untimed, to
+<OutputDirectory>\ghostty-test.log, which scripts/check-test-skips.ps1 reads.
 
 The first 70 or so entries are the unnamed reference tests every filter keeps;
 they cost nothing.
@@ -95,6 +96,8 @@ while ($null -ne ($line = $process.StandardError.ReadLine())) {
 $process.WaitForExit()
 [void] $stdoutTask.Result
 $total = $clock.Elapsed.TotalSeconds
+# Before any check that can throw, so a failing run still leaves its log for the skip budget.
+[System.IO.File]::WriteAllLines((Join-Path (Resolve-Path -LiteralPath $OutputDirectory).Path 'ghostty-test.log'), [string[]]@($lines | ForEach-Object { $_.Text }), [System.Text.UTF8Encoding]::new($false))
 
 $tests = @(ConvertFrom-ZigTestLines -Lines $lines.ToArray())
 $slowest = @($tests | Sort-Object Seconds -Descending | Select-Object -First $Top)
