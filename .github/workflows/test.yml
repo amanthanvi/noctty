@@ -237,12 +237,17 @@ jobs:
         # Compiling the default-off config is still covered by the "Build
         # executable" and "Verify default source-build shader mode" steps of
         # the build job.
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all
+        # -Dtest-shards=4: the stock test runner runs one test at a time, and
+        # here running took 15 of the step's 20 minutes on one of the runner's
+        # four cores, most of it in a few long tests. Four shards of the one
+        # executable (src/test_runner.zig) run side by side, each test once,
+        # and the Build Summary adds their counts up as before.
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
 
-      # Report only: the stock test runner prints no durations, so the suite's
+      # Report only: the test runner prints no durations, so the suite's
       # executable runs once more under a timestamper. `zig build test` does not
       # install it; the install step does, from the compile the suite just
       # cached. It costs a few minutes, so it runs on the nightly and on demand,
@@ -538,6 +543,9 @@ jobs:
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+      # Not sharded: its two test executables already run side by side, and
+      # two shards each (four processes) left the step's time unchanged
+      # (TEST-SHARDS-01 in docs/agents/log/test-harnesses.md).
       - name: Run libghostty-vt and C API tests
         run: zig build test-lib-vt -Demit-lib-vt=true --summary all
 

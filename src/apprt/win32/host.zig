@@ -7324,8 +7324,10 @@ pub const Host = struct {
                 result.* = body();
             }
         };
-        var name_buf: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "noctty-banner-test-{x}-{d}", .{ @intFromPtr(&name_buf), sys.GetTickCount64() });
+        // The process id keeps concurrent test processes (`-Dtest-shards`) off
+        // each other's desktop: CreateDesktopW opens an existing one.
+        var name_buf: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "noctty-banner-test-{d}-{x}-{d}", .{ sys.GetCurrentProcessId(), @intFromPtr(&name_buf), sys.GetTickCount64() });
         const wide_name = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
         defer std.testing.allocator.free(wide_name);
         const desktop = Desktop.CreateDesktopW(wide_name.ptr, null, null, 0, 0x10000000, null) orelse return error.SkipZigTest;

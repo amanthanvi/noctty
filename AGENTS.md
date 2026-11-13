@@ -10,9 +10,12 @@ reading step under [Self-Correction Log](#self-correction-log).
   `OpenConsole.exe` beside the exe; staging traps: the 2026-10-10 bundled
   ConPTY entry in `docs/agents/log/conpty.md`)
 - **Test (Zig):** `zig build test -Demit-test-exe=true --summary all`
-  (full suite, ~4.5k tests, about a minute). This is the only invocation that
+  (full suite, ~6.8k tests, several minutes). This is the only invocation that
   is trustworthy on its own, and `--summary all` is part of it: the count is
   the evidence.
+  - `-Dtest-shards=4` runs it as four concurrent processes with the same
+    count, about a third of the time (test-harnesses.md: 2026-11-11
+    TEST-SHARDS-01).
   - Bare `zig build test` errors in this fork.
   - `-Dtest-filter=<token>` (one token: quote it or use a no-space
     substring, or `zig build` reads the rest as step names) runs the tests
@@ -598,7 +601,9 @@ that govern each symbol you change, or that none does.
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
   `origin/*-measurement-harness` branches), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
-  `win32/sys.zig`'s imports to `src/apprt`), the Zig
+  `win32/sys.zig`'s imports to `src/apprt`), the Zig test runner and its
+  shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
+  `addTestRuns` in `build.zig`, and the names tests share across processes), the
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
   `std.Progress.lockStdErr`, the search-thread tests in
   `src/terminal/search/Thread.zig`), the shared Win32 test fixtures

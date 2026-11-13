@@ -4,7 +4,8 @@
 Per-test timing of the Zig test executable, for the job summary (report only).
 
 .DESCRIPTION
-The stock Zig test runner prints no durations under `zig build test`. Run by
+The test runner (src/test_runner.zig, a copy of Zig's stock one) prints no
+durations under `zig build test`. Run by
 hand (no --listen) with stderr not a terminal, it prints `N/M <qualified name>...`
 as a test starts and `OK`, `SKIP` or `FAIL (<error>)` when it ends: on the same
 line for a quiet test, on a line of its own after whatever the test logged.

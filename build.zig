@@ -64,6 +64,28 @@ pub fn build(b: *std.Build) !void {
         "Filter for test. Only applies to Zig tests.",
     ) orelse &[0][]const u8{};
 
+    // Each Zig test executable runs as this many processes side by side, each
+    // a disjoint shard of its tests (src/test_runner.zig), and the build
+    // summary counts them together. The stock runner runs one test at a time,
+    // so on CI's four-core runners one process left three cores idle.
+    // Not with --fuzz: the build runner would rebuild the one test compile
+    // concurrently for each sharded run step, and a build script cannot see
+    // --fuzz to refuse it (Zig 0.15.2's libfuzzer does not build for Windows
+    // anyway).
+    const test_shards = b.option(
+        u32,
+        "test-shards",
+        "Run each Zig test executable as this many concurrent shards (default 1; not with --fuzz)",
+    ) orelse 1;
+    if (test_shards == 0 or test_shards > 64) {
+        std.debug.print("-Dtest-shards must be between 1 and 64, not {d}\n", .{test_shards});
+        std.process.exit(1);
+    }
+    const test_runner: std.Build.Step.Compile.TestRunner = .{
+        .path = b.path("src/test_runner.zig"),
+        .mode = .server,
+    };
+
     const want_lib_vt_graph = config.emit_lib_vt or config.is_dep;
     const want_test_graph =
         config.emit_test_exe or
@@ -229,18 +251,20 @@ pub fn build(b: *std.Build) !void {
         );
 
         const mod_vt_test = b.addTest(.{
+            .name = "ghostty-vt-test",
             .root_module = mod.vt,
             .filters = test_filters,
+            .test_runner = test_runner,
         });
-        const mod_vt_test_run = b.addRunArtifact(mod_vt_test);
-        test_lib_vt_step.dependOn(&mod_vt_test_run.step);
+        addTestRuns(b, test_lib_vt_step, mod_vt_test, test_shards);
 
         const mod_vt_c_test = b.addTest(.{
+            .name = "ghostty-vt-c-test",
             .root_module = mod.vt_c,
             .filters = test_filters,
+            .test_runner = test_runner,
         });
-        const mod_vt_c_test_run = b.addRunArtifact(mod_vt_c_test);
-        test_lib_vt_step.dependOn(&mod_vt_c_test_run.step);
+        addTestRuns(b, test_lib_vt_step, mod_vt_c_test, test_shards);
     } else {
         try test_lib_vt_step.addError(
             "test-lib-vt requires -Demit-lib-vt=true in the Windows-only fork",
@@ -264,6 +288,7 @@ pub fn build(b: *std.Build) !void {
             }),
             // Crash on x86_64 without this
             .use_llvm = true,
+            .test_runner = test_runner,
         });
         if (config.emit_test_exe) b.installArtifact(test_exe);
         _ = try deps.add(test_exe);
@@ -292,8 +317,20 @@ pub fn build(b: *std.Build) !void {
         }
 
         // Normal test running
-        const test_run = b.addRunArtifact(test_exe);
-        test_step.dependOn(&test_run.step);
+        addTestRuns(b, test_step, test_exe, test_shards);
+
+        // The runner's shard selection (src/test_shard.zig). The runner is not
+        // part of the tested module, so no test executable runs its tests.
+        const shard_test = b.addTest(.{
+            .name = "test-shard",
+            .filters = test_filters,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/test_shard.zig"),
+                .target = config.baselineTarget(),
+                .optimize = .Debug,
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(shard_test).step);
 
         // Normal tests always test our libghostty modules
         //test_step.dependOn(test_lib_vt_step);
@@ -344,6 +381,28 @@ pub fn build(b: *std.Build) !void {
                 b.fmt("bench:{s} requires an application runtime", .{bench.name}),
             ).step);
         }
+    }
+}
+
+/// Makes `step` run the tests of `test_exe`, as `shards` processes side by
+/// side when it is above 1. Each process runs a disjoint shard (`--shard=K/N`,
+/// src/test_runner.zig), and the build runner runs independent steps in
+/// parallel and adds their counts into the one `Build Summary` line.
+fn addTestRuns(
+    b: *std.Build,
+    step: *std.Build.Step,
+    test_exe: *std.Build.Step.Compile,
+    shards: u32,
+) void {
+    if (shards == 1) {
+        step.dependOn(&b.addRunArtifact(test_exe).step);
+        return;
+    }
+    for (1..shards + 1) |k| {
+        const run = b.addRunArtifact(test_exe);
+        run.setName(b.fmt("run test {s} {d}/{d}", .{ test_exe.name, k, shards }));
+        run.addArg(b.fmt("--shard={d}/{d}", .{ k, shards }));
+        step.dependOn(&run.step);
     }
 }
 

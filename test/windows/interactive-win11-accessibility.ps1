@@ -1036,7 +1036,14 @@ function Get-AccessibilityOutputNotificationDiagnostic(
     [int] $FocusRecoveryCount = 0,
     [long[]] $StolenForegroundHwnds = @(),
     [long] $LastForegroundHwnd = 0,
-    [long] $LastFocusedHwnd = 0
+    [long] $LastFocusedHwnd = 0,
+    [long[]] $FocusMismatchElapsedMilliseconds = @(),
+    # The UTC time the elapsed times count from; $null when there is no wait.
+    $WaitStartedUtc = $null,
+    # The process owning each stolen foreground window, in the same order.
+    [long[]] $StolenForegroundProcessIds = @(),
+    # When each mismatching poll looked, in UTC.
+    [object[]] $FocusMismatchUtc = @()
 ) {
     $rawHistory = @($RawNotificationHistory)
     $matchingHistory = @(
@@ -1065,6 +1072,10 @@ function Get-AccessibilityOutputNotificationDiagnostic(
         stolen_foreground_hwnds = @($StolenForegroundHwnds)
         last_foreground_hwnd = $LastForegroundHwnd
         last_focused_hwnd = $LastFocusedHwnd
+        focus_mismatch_elapsed_ms = @($FocusMismatchElapsedMilliseconds)
+        wait_started_utc = $WaitStartedUtc
+        stolen_foreground_process_ids = @($StolenForegroundProcessIds)
+        focus_mismatch_utc = @($FocusMismatchUtc)
     }
 }
 
@@ -1083,18 +1094,30 @@ function Wait-AccessibilityOwnedOutputNotification(
         focus_mismatch_polls = 0
         focus_recovery_count = 0
         stolen_foreground_hwnds = [System.Collections.Generic.List[long]]::new()
+        stolen_foreground_process_ids = [System.Collections.Generic.List[long]]::new()
         last_foreground_hwnd = 0
         last_focused_hwnd = 0
+        # When each poll that found another owner looked, in UTC, and in
+        # milliseconds since this wait began (the same clock). Polls are about
+        # 100 ms apart (more after a recovery), so these bound when focus left;
+        # they do not time it.
+        focus_mismatch_utc = [System.Collections.Generic.List[DateTime]]::new()
+        focus_mismatch_elapsed_ms = [System.Collections.Generic.List[long]]::new()
     }
+    $waitStartedUtc = [DateTime]::UtcNow
     $diagnosticValue = Get-AccessibilityOutputNotificationDiagnostic `
         -RawNotificationHistory @() `
-        -Marker $Marker
+        -Marker $Marker `
+        -WaitStartedUtc $waitStartedUtc
     $diagnosticState = [ref] $diagnosticValue
     if ($null -ne $Diagnostic) {
         $Diagnostic.Value = $diagnosticState.Value
     }
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description $Description -Condition {
+            # Read before the foreground, so a steal's time is never later than
+            # the look that saw it.
+            $pollUtc = [DateTime]::UtcNow
             $foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
             $focusedHwnd =
                 [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
@@ -1104,12 +1127,26 @@ function Wait-AccessibilityOwnedOutputNotification(
                 $focusedHwnd -ne $ExpectedFocusedHwnd
             if ($focusMismatch) {
                 $state.focus_mismatch_polls++
+                $state.focus_mismatch_utc.Add($pollUtc)
+                $state.focus_mismatch_elapsed_ms.Add(
+                    [long]($pollUtc - $waitStartedUtc).TotalMilliseconds
+                )
                 if ($foregroundHwnd -ne $Process.MainWindowHandle -and
                     -not $state.stolen_foreground_hwnds.Contains(
                         $foregroundHwnd.ToInt64()
                     )) {
+                    # Which process took the foreground: the cold proof retries
+                    # only a steal by another program.
+                    $foregroundOwner = [uint32] 0
+                    [void] [NocttyAccessibilityNative]::GetWindowThreadProcessId(
+                        $foregroundHwnd,
+                        [ref] $foregroundOwner
+                    )
                     [void] $state.stolen_foreground_hwnds.Add(
                         $foregroundHwnd.ToInt64()
+                    )
+                    [void] $state.stolen_foreground_process_ids.Add(
+                        [long] $foregroundOwner
                     )
                 }
                 $state.focus_recovery_count++
@@ -1125,7 +1162,11 @@ function Wait-AccessibilityOwnedOutputNotification(
                     -FocusRecoveryCount $state.focus_recovery_count `
                     -StolenForegroundHwnds @($state.stolen_foreground_hwnds) `
                     -LastForegroundHwnd $state.last_foreground_hwnd `
-                    -LastFocusedHwnd $state.last_focused_hwnd
+                    -LastFocusedHwnd $state.last_focused_hwnd `
+                    -FocusMismatchElapsedMilliseconds @($state.focus_mismatch_elapsed_ms) `
+                    -WaitStartedUtc $waitStartedUtc `
+                    -StolenForegroundProcessIds @($state.stolen_foreground_process_ids) `
+                    -FocusMismatchUtc @($state.focus_mismatch_utc)
             if ($null -ne $Diagnostic) {
                 $Diagnostic.Value = $diagnosticState.Value
             }
@@ -1151,7 +1192,11 @@ function Wait-AccessibilityOwnedOutputNotification(
                 -FocusRecoveryCount $state.focus_recovery_count `
                 -StolenForegroundHwnds @($state.stolen_foreground_hwnds) `
                 -LastForegroundHwnd $state.last_foreground_hwnd `
-                -LastFocusedHwnd $state.last_focused_hwnd
+                -LastFocusedHwnd $state.last_focused_hwnd `
+                -FocusMismatchElapsedMilliseconds @($state.focus_mismatch_elapsed_ms) `
+                -WaitStartedUtc $waitStartedUtc `
+                -StolenForegroundProcessIds @($state.stolen_foreground_process_ids) `
+                -FocusMismatchUtc @($state.focus_mismatch_utc)
         if ($null -ne $Diagnostic) {
             $Diagnostic.Value = $diagnosticState.Value
         }
@@ -1160,15 +1205,23 @@ function Wait-AccessibilityOwnedOutputNotification(
     return $diagnosticState.Value
 }
 
-function Invoke-AccessibilityColdFirstReadProof(
+function Invoke-AccessibilityColdFirstReadAttempt(
     [System.Diagnostics.Process] $Process,
     $TextPattern,
     [string] $Marker,
     [string] $Description,
     [IntPtr] $ExpectedFocusedHwnd,
     [string] $HelperDirectory,
-    [switch] $NotificationCaptureActive
+    [switch] $NotificationCaptureActive,
+    $Diagnostic = $null
 ) {
+    # One attempt: the helper writes its marker once. When the direct
+    # notification wait fails, $Diagnostic (a [ref]) receives the same
+    # diagnostic the error message carries, for Invoke-AccessibilityColdFirstReadProof.
+    if ($null -ne $Diagnostic -and
+        $Diagnostic -isnot [System.Management.Automation.PSReference]) {
+        throw 'Diagnostic must be a [ref] value when supplied.'
+    }
     if ($Marker -notmatch '^[A-Za-z0-9_]{12,}$') {
         throw "Cold output marker for $Description must be at least 12 command-safe alphanumeric/underscore characters."
     }
@@ -1176,6 +1229,7 @@ function Invoke-AccessibilityColdFirstReadProof(
     $helperPath = Join-Path $HelperDirectory "cold-output-$token.ps1"
     $readyPath = Join-Path $HelperDirectory "cold-output-$token.ready"
     $triggerPath = Join-Path $HelperDirectory "cold-output-$token.trigger"
+    $triggerTempPath = Join-Path $HelperDirectory "cold-output-$token.trigger-tmp"
     $ackPath = Join-Path $HelperDirectory "cold-output-$token.ack"
     $readyLiteral = $readyPath.Replace("'", "''")
     $triggerLiteral = $triggerPath.Replace("'", "''")
@@ -1260,8 +1314,34 @@ function Invoke-AccessibilityColdFirstReadProof(
         $preTriggerFocusAfter =
             [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
         [NocttyAccessibilityNative]::ResetNotificationCount()
-        [System.IO.File]::WriteAllText($triggerPath, 'trigger')
+        # Written under another name and renamed into place, so the helper
+        # cannot see the trigger before its write has finished and stamped it
+        # (a rename keeps the write time).
+        [System.IO.File]::WriteAllText($triggerTempPath, 'trigger')
+        [System.IO.File]::Move($triggerTempPath, $triggerPath)
+        # The trigger file's own timestamp is this attempt's clock: the ack time
+        # and the focus-steal times are milliseconds after it. The helper's ack
+        # file is stamped by the same file-system clock, so the ack can never
+        # look earlier than the trigger. [DateTime]::UtcNow cannot be the base:
+        # under pwsh 7 it is a finer clock, and it can read ahead of the file
+        # timestamp taken just after it.
+        $triggerWrittenUtc = [System.IO.File]::GetLastWriteTimeUtc($triggerPath)
         $coldNotificationDiagnostic = $null
+        # The wait reads each steal's UTC time in the poll that saw it, just
+        # before that poll looks at the foreground. Under pwsh 7 that clock is
+        # finer than the trigger's file timestamp, so a steal can read up to one
+        # system timer tick late; under Windows PowerShell 5.1 both are coarse,
+        # so up to a tick either way.
+        $stealsAfterTrigger = {
+            param($NotificationDiagnostic)
+            return ,@(
+                @($NotificationDiagnostic.focus_mismatch_utc) |
+                    Where-Object { $null -ne $_ } |
+                    ForEach-Object {
+                        [long]([DateTime] $_ - $triggerWrittenUtc).TotalMilliseconds
+                    }
+            )
+        }
         try {
             $coldOutputNotification = Wait-AccessibilityOwnedOutputNotification `
                 -Process $Process `
@@ -1271,10 +1351,21 @@ function Invoke-AccessibilityColdFirstReadProof(
                 -Diagnostic ([ref] $coldNotificationDiagnostic)
         }
         catch {
-            $diagnostic = [ordered]@{
+            $ackExists = [System.IO.File]::Exists($ackPath)
+            # Not $diagnostic: PowerShell names ignore case, so that would
+            # overwrite the $Diagnostic parameter.
+            $failureDiagnostic = [ordered]@{
                 ready_exists = [System.IO.File]::Exists($readyPath)
                 trigger_exists = [System.IO.File]::Exists($triggerPath)
-                ack_exists = [System.IO.File]::Exists($ackPath)
+                ack_exists = $ackExists
+                # When the helper wrote its ack, which follows its marker
+                # write, in milliseconds after the trigger; $null without one.
+                ack_after_trigger_ms = if ($ackExists) {
+                    [long]([System.IO.File]::GetLastWriteTimeUtc($ackPath) -
+                        $triggerWrittenUtc).TotalMilliseconds
+                } else {
+                    $null
+                }
                 notification_count = [NocttyAccessibilityNative]::NotificationCount
                 raw_notification_history =
                     $coldNotificationDiagnostic.raw_notification_history
@@ -1296,9 +1387,16 @@ function Invoke-AccessibilityColdFirstReadProof(
                 notification_focus_recovery_count = $coldNotificationDiagnostic.focus_recovery_count
                 notification_stolen_foreground_hwnds =
                     $coldNotificationDiagnostic.stolen_foreground_hwnds
+                notification_stolen_foreground_process_ids =
+                    $coldNotificationDiagnostic.stolen_foreground_process_ids
+                notification_focus_mismatch_after_trigger_ms =
+                    & $stealsAfterTrigger $coldNotificationDiagnostic
                 command_echo = $echoEvidence
             }
-            throw "$($_.Exception.Message) Diagnostic=$($diagnostic | ConvertTo-Json -Depth 6 -Compress)"
+            if ($null -ne $Diagnostic) {
+                $Diagnostic.Value = [pscustomobject] $failureDiagnostic
+            }
+            throw "$($_.Exception.Message) Diagnostic=$($failureDiagnostic | ConvertTo-Json -Depth 6 -Compress)"
         }
 
         $finalTextPatternReads = 1
@@ -1307,6 +1405,7 @@ function Invoke-AccessibilityColdFirstReadProof(
             throw "Cold first TextPattern read did not contain $Description marker (text='$($finalText.Replace("`r", '\r').Replace("`n", '\n'))')."
         }
 
+        $outputAckObserved = [System.IO.File]::Exists($ackPath)
         return [pscustomobject][ordered]@{
             marker = $Marker
             marker_visible = $true
@@ -1319,7 +1418,13 @@ function Invoke-AccessibilityColdFirstReadProof(
             query_inactivity_milliseconds = $queryInactivityMilliseconds
             notification_history_cleared_before_trigger = $true
             notification_capture_reused = [bool]$NotificationCaptureActive
-            output_ack_observed = [System.IO.File]::Exists($ackPath)
+            output_ack_observed = $outputAckObserved
+            ack_after_trigger_ms = if ($outputAckObserved) {
+                [long]([System.IO.File]::GetLastWriteTimeUtc($ackPath) -
+                    $triggerWrittenUtc).TotalMilliseconds
+            } else {
+                $null
+            }
             pre_trigger_foreground_before = $preTriggerForegroundBefore.ToInt64()
             pre_trigger_focus_before = $preTriggerFocusBefore.ToInt64()
             pre_trigger_recovery_count = $preTriggerRecoveryCount
@@ -1329,6 +1434,10 @@ function Invoke-AccessibilityColdFirstReadProof(
             notification_focus_recovery_count = $coldOutputNotification.focus_recovery_count
             notification_stolen_foreground_hwnds =
                 $coldOutputNotification.stolen_foreground_hwnds
+            notification_stolen_foreground_process_ids =
+                $coldOutputNotification.stolen_foreground_process_ids
+            notification_focus_mismatch_after_trigger_ms =
+                & $stealsAfterTrigger $coldOutputNotification
             output_raw_notification_history =
                 $coldOutputNotification.raw_notification_history
             output_notification_history =
@@ -1351,11 +1460,121 @@ function Invoke-AccessibilityColdFirstReadProof(
             -not [System.IO.File]::Exists($triggerPath)) {
             [System.IO.File]::WriteAllText($triggerPath, 'cleanup')
         }
-        foreach ($path in @($launcherPath, $helperPath, $readyPath, $triggerPath, $ackPath)) {
+        foreach ($path in @($launcherPath, $helperPath, $readyPath, $triggerTempPath, $triggerPath, $ackPath)) {
             if ($null -eq $path) { continue }
             try { [System.IO.File]::Delete($path) } catch {}
         }
     }
+}
+
+function Invoke-AccessibilityColdFirstReadProof(
+    [System.Diagnostics.Process] $Process,
+    $TextPattern,
+    [string] $Marker,
+    [string] $Description,
+    [IntPtr] $ExpectedFocusedHwnd,
+    [string] $HelperDirectory,
+    [switch] $NotificationCaptureActive
+) {
+    # When its terminal loses focus, noctty drops output it has not spoken yet
+    # (TerminalAccessibilitySession.focusChanged clears pending speech; focus
+    # coming back refreshes the document without speaking it), and an attempt
+    # writes its marker once. So if another program takes the foreground
+    # during the direct notification wait, getting focus back cannot bring the
+    # announcement back, and that attempt proves nothing either way. So run one
+    # fresh attempt, with its own marker and helper, only when the failed wait
+    # saw a window of another process take the foreground and the helper had
+    # acknowledged writing its marker. The poll record cannot say which of the
+    # two came first. A focus move inside noctty's window does not count as a
+    # steal, and neither does a window whose owner could not be read; neither
+    # blocks a retry that another program's window earns (focus inside noctty
+    # often moves too while focus is taken back from that program). These are
+    # never retried, as different faults: any of noctty's own windows taking
+    # the foreground, even alongside another program's (one of its windows
+    # closing can hand the foreground on); a history holding the transport's
+    # omission notice (output dropped while focused); and a noctty that has
+    # exited (its windows going away reads as a focus change). Any other
+    # failure, or a second interrupted attempt, still fails the run.
+    $attemptDiagnostic = $null
+    try {
+        $proof = Invoke-AccessibilityColdFirstReadAttempt `
+            -Process $Process `
+            -TextPattern $TextPattern `
+            -Marker $Marker `
+            -Description $Description `
+            -ExpectedFocusedHwnd $ExpectedFocusedHwnd `
+            -HelperDirectory $HelperDirectory `
+            -NotificationCaptureActive:$NotificationCaptureActive `
+            -Diagnostic ([ref] $attemptDiagnostic)
+        $proof | Add-Member -NotePropertyName attempts -NotePropertyValue 1
+        $proof | Add-Member -NotePropertyName interrupted_attempt -NotePropertyValue $null
+        return $proof
+    }
+    catch {
+        # Read before the pipeline below, which has its own $_.
+        $interruptedError = ($_.Exception.Message -split ' Diagnostic=', 2)[0]
+        # src/apprt/win32_terminal_accessibility.zig omitted_output_notice.
+        $omissionNoticed = @(
+            @($attemptDiagnostic.raw_notification_history) | Where-Object {
+                $_ -is [System.Array] -and
+                    $_.Count -ge 2 -and
+                    [string]$_[1] -eq 'terminal output omitted'
+            }
+        ).Count -gt 0
+        # Another program took the foreground: at least one stolen window's
+        # owner was read (0 means it could not be), and none is noctty itself.
+        $stealOwners = @(
+            @($attemptDiagnostic.notification_stolen_foreground_process_ids) |
+                Where-Object { $null -ne $_ } |
+                ForEach-Object { [long] $_ }
+        )
+        $outsideSteal =
+            @($stealOwners | Where-Object { $_ -ne 0 }).Count -gt 0 -and
+            @($stealOwners | Where-Object { $_ -eq [long] $Process.Id }).Count -eq 0
+        # A stolen window is only ever recorded by a mismatching poll.
+        if ($null -eq $attemptDiagnostic -or
+            $attemptDiagnostic.ack_exists -ne $true -or
+            -not $outsideSteal -or
+            $omissionNoticed -or
+            $Process.HasExited) {
+            throw
+        }
+    }
+    $interruptedAttempt = [pscustomobject][ordered]@{
+        marker = $Marker
+        error = $interruptedError
+        diagnostic = $attemptDiagnostic
+    }
+    $stolenHwnds = @($attemptDiagnostic.notification_stolen_foreground_hwnds)
+    $stolenOwners = @($attemptDiagnostic.notification_stolen_foreground_process_ids)
+    $foregroundText = @(
+        for ($stolenIndex = 0; $stolenIndex -lt $stolenHwnds.Count; $stolenIndex++) {
+            "$($stolenHwnds[$stolenIndex]) (process $($stolenOwners[$stolenIndex]))"
+        }
+    ) -join ', '
+    Write-Host ("interactive Win11 accessibility: $Description lost focus during its " +
+        'direct notification wait (seen ' +
+        "$(@($attemptDiagnostic.notification_focus_mismatch_after_trigger_ms) -join ',') ms " +
+        "after the trigger, foreground $foregroundText; " +
+        "ack $($attemptDiagnostic.ack_after_trigger_ms) ms after the trigger; " +
+        "$($attemptDiagnostic.notification_count) notifications); " +
+        'one fresh attempt with a new marker.')
+    try {
+        $proof = Invoke-AccessibilityColdFirstReadAttempt `
+            -Process $Process `
+            -TextPattern $TextPattern `
+            -Marker "${Marker}_retry" `
+            -Description "$Description retry" `
+            -ExpectedFocusedHwnd $ExpectedFocusedHwnd `
+            -HelperDirectory $HelperDirectory `
+            -NotificationCaptureActive:$NotificationCaptureActive
+    }
+    catch {
+        throw "$($_.Exception.Message) InterruptedAttempt=$($interruptedAttempt | ConvertTo-Json -Depth 7 -Compress)"
+    }
+    $proof | Add-Member -NotePropertyName attempts -NotePropertyValue 2
+    $proof | Add-Member -NotePropertyName interrupted_attempt -NotePropertyValue $interruptedAttempt
+    return $proof
 }
 
 function Invoke-AccessibilityInactiveTabFirstReadProof(

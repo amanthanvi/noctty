@@ -8,6 +8,7 @@ Corrected in other files:
 - 2026-09-15 "Triaging a scrambled TUI report" (#243), trap (2), "every portable release ZIP already ships one for its own version": Setup no longer installs `ghostty-vt.dll`, and from 1.3.137 the portable ZIP's `ghostty-vt.dll` is a placeholder that exports nothing and fails to load, not the library; build the library with `zig build -Demit-lib-vt=true`. See the 2026-11-08 GHOSTTY-VT-RETIRE and GHOSTTY-VT-STUB entries in build-release-ci.md.
 
 See also:
+- A test that stages a stand-in `conpty.dll` or `OpenConsole.exe` builds it in a temp dir of its own and calls `loadBundledFrom`, never beside the test executable, which every `-Dtest-shards` process runs from: item (4) of the 2026-11-11 TEST-SHARDS-01 entry in test-harnesses.md.
 - 2026-09-15 "Triaging a scrambled TUI report": its "2026-09-14 PowerShell entry below" is the 2026-09-14 "OSC 133 D in `integration.ps1`" entry in shell-integration.md.
 - A log line must not carry a command, an argument, an environment value or a directory (`Exec.zig`'s `windows launch` and `starting command` lines print them through `os/redact.zig`): the 2026-10-25 LIST-PROFILES entry in launch-and-paths.md.
 - The history erase in the no-scrollback branch of `Screen.resize` (like ED 3) now marks the pins of erased rows garbage, and every path that marks pins garbage must clear the viewport pin's flag: traps (2) and (3) of the 2026-10-30 core-slice entry (#623) in terminal-core.md.
