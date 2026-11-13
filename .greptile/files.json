@@ -391,6 +391,8 @@
         "src/apprt/win32/registry.zig",
         "src/apprt/win32_compositor_native.zig",
         "src/apprt/win32/sys.zig",
+        "scripts/check-test-skips.ps1",
+        "scripts/ci-test-timing.ps1",
         "src/test_runner.zig",
         "src/test_shard.zig"
       ]

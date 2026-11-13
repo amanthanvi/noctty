@@ -154,7 +154,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Checkout the deployment README' -Source $siteDeployWorkflow)
         }
-        Pattern = '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ \(github\.event_name == ''release'' \|\| github\.event_name == ''workflow_run''\) && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false.*?sparse-checkout: README\.md.*?sparse-checkout-cone-mode: false'
+        Pattern = '(?ms)uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1.*?ref: \$\{\{ \(github\.event_name == ''release'' \|\| github\.event_name == ''workflow_run''\) && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false.*?sparse-checkout: README\.md.*?sparse-checkout-cone-mode: false'
         Kind = 'Text'
         Description = 'the hold reads the README of the commit the deploy job checks out'
     }
@@ -163,7 +163,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Checkout exact event commit' -Source $siteDeployWorkflow)
         }
-        Pattern = '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ \(github\.event_name == ''release'' \|\| github\.event_name == ''workflow_run''\) && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false'
+        Pattern = '(?ms)uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1.*?ref: \$\{\{ \(github\.event_name == ''release'' \|\| github\.event_name == ''workflow_run''\) && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false'
         Kind = 'Text'
         Description = 'site checkout uses exact event commits for pushes and current main for release publication and Release completion'
     }
@@ -414,7 +414,7 @@ $wranglerUses = @($siteActionUses | Where-Object {
 })
 if ($wranglerUses.Count -ne 2 -or
     @($wranglerUses | Where-Object {
-        $_.Groups['ref'].Value -cne 'ebbaa1584979971c8614a24965b4405ff95890e0'
+        $_.Groups['ref'].Value -cne '953926a2e2182532811c01a25e53647d93bf07c0'
     }).Count -ne 0) {
     throw 'Canary and production must use the pinned official Wrangler action v4 commit.'
 }

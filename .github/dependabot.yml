@@ -1,8 +1,27 @@
 version: 2
 updates:
-  # Maintain dependencies for GitHub Actions
+  # The SHA-pinned actions in .github/workflows (the one composite action,
+  # .github/actions/release-preflight, uses none). Dependabot moves each pin
+  # and the version comment beside it.
+  #
+  # A pull request that moves a pin in release.yml, release-readiness.yml or
+  # chocolatey-publish.yml fails the flagship contracts until their digests in
+  # Contracts.80-Release.ps1 and Contracts.94-ChocolateyPublish.ps1 are
+  # recomputed, and one that moves setup-node, checkout or wrangler-action in
+  # deploy-site.yml, or attest-build-provenance in release.yml, until the pins
+  # in Contracts.90, Contracts.92 and Contracts.80 are moved too. That review
+  # is intended (docs/agents/log/build-release-ci.md, DEPENDABOT-NEVER-RAN).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      # Check for updates to GitHub Actions every weekday
-      interval: "daily"
+      interval: "weekly"
+    # One pull request for every action that moved, not one each.
+    groups:
+      actions:
+        patterns: ["*"]
+    # A release waits a week before it is proposed: a bad or compromised
+    # release is usually withdrawn within days.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "ci"

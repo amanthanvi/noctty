@@ -580,7 +580,10 @@ that govern each symbol you change, or that none does.
   `scripts/ghostty-vt-stub.ps1` `Assert-GhosttyVtStub`, and its packaged
   smoke `test/windows/test_dll_init.c`), release workflows
   and package managers (WinGet, Scoop,
-  Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and
+  Chocolatey), GitHub Actions CI (path filter, caching, runners, the gates
+  the `main: CI gates` ruleset requires and their `always()`, Dependabot's
+  `.github/dependabot.yml`, the action pins and the workflow digests the
+  contracts pin), CRLF and
   `.gitattributes` in shipped files.
 - [docs-and-site.md](docs/agents/log/docs-and-site.md): site edits (`site/`,
   including styles, scripts and the generated CSP/asset hashes); changing
@@ -609,7 +612,10 @@ that govern each symbol you change, or that none does.
   keyboard they pin), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), a bash
   probe's `HISTFILE`, a failing test's error name (the installed test
-  executable), and a test count or result that contradicts the code.
+  executable), the skip budget (`scripts/check-test-skips.ps1`,
+  `test/windows/test-skip-budget.json`) and the nightly per-test log it reads
+  (`scripts/ci-test-timing.ps1`), and a test count or result that
+  contradicts the code.
 - [tooling.md](docs/agents/log/tooling.md): declaring `extern` functions or
   structs, casting Win32 handles and `LPARAM`/`LRESULT` (`@intCast`,
   `@bitCast`, `@ptrFromInt`), passing `[:0]u16` to text APIs, renaming or moving

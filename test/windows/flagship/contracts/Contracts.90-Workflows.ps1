@@ -283,8 +283,9 @@ $knownFlags = & {
 }
 foreach ($gated in @(
         @{ Workflow = $testWorkflow; Text = $testWorkflowText; Gate = 'windows'; GateName = 'Windows Build And Tests'
-            # Their own checks; the gate covers what the single serial job used to.
-            Own = @('windows-lib-vt', 'windows-conpty-probes', 'windows-portable-smoke') }
+            # The one filtered job the required gate leaves out: the
+            # experimental probes, which may fail (continue-on-error).
+            Own = @('windows-conpty-probes') }
         @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Gate = 'native-arm64'; GateName = 'Native Windows ARM64 Tests'; Own = @() }
     )) {
     $changesJob = Get-YamlJobText -Content $gated.Text -Name 'changes' -Source $gated.Workflow
@@ -301,11 +302,14 @@ foreach ($gated in @(
         if ($output -cnotin $knownFlags) { throw "$($gated.Workflow): changes output '$output' is not a flag of scripts/ci-changed-paths.ps1." }
     }
     $gateJob = Get-YamlJobText -Content $gated.Text -Name $gated.Gate -Source $gated.Workflow
+    # always(): the `main: CI gates` ruleset requires the gate, and under
+    # !cancelled() a cancelled run skips it, which a required check reads as
+    # passing.
     if ($gateJob -notmatch ("(?m)^    name: " + [regex]::Escape($gated.GateName) + "\s*$") -or
-        $gateJob -notmatch '(?m)^    if: \$\{\{ !cancelled\(\) \}\}\s*$' -or
+        $gateJob -notmatch '(?m)^    if: \$\{\{ always\(\) \}\}\s*$' -or
         $gateJob -notmatch '(?m)^    runs-on: ubuntu-' -or
         $gateJob -match '(?m)^    continue-on-error:') {
-        throw "$($gated.Workflow): the gate job '$($gated.Gate)' must keep the name '$($gated.GateName)', run when not cancelled and never ignore failure."
+        throw "$($gated.Workflow): the gate job '$($gated.Gate)' must keep the name '$($gated.GateName)', run always (a cancelled run included) and never ignore failure."
     }
     if (-not (Test-GateJobShape -JobText $gateJob)) {
         throw "$($gated.Workflow): the gate job '$($gated.Gate)' must run scripts/ci-gate.ps1 on toJSON(needs) in an unconditional step that cannot ignore failure."
@@ -675,7 +679,7 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $testWorkflow
-        Pattern = '(?ms)- name: Setup Node\.js\s+uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903.*?node-version: 22.*?- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\).*?- name: Site unit tests.*?node --test "site/tests/\*\*/\*\.test\.mjs".*?if \(\$LASTEXITCODE -ne 0\)'
+        Pattern = '(?ms)- name: Setup Node\.js\s+uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1.*?node-version: 22.*?- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\).*?- name: Site unit tests.*?node --test "site/tests/\*\*/\*\.test\.mjs".*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Workflow'
         Description = 'site checks use a pinned supported Node version and retain fail-closed command guards'
     }

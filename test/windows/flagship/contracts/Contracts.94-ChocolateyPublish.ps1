@@ -3,7 +3,7 @@
 # workflow is. The whole file carries a digest (any edit is a review event, which
 # also catches what a pattern cannot, such as a decoy in a comment), and a
 # function states the properties that matter and must reject each mutant.
-$chocolateyPublishWorkflowSha256 = '8b14690bf70342fcf44596cd09f3b40aec55ecce30587511bcfd46a64cd37784'
+$chocolateyPublishWorkflowSha256 = '9be80e619aa588840a85fb24aab4020ca7f93a2077dcde0626ce14be5d4988f8'
 $chocolateyPublishWorkflow = Join-Path $repoRoot '.github\workflows\chocolatey-publish.yml'
 $chocolateyPublisherScript = Join-Path $repoRoot 'scripts\release-publish-chocolatey.ps1'
 $chocolateyStagerScript = Join-Path $repoRoot 'scripts\release-stage-published.ps1'
@@ -179,7 +179,9 @@ $chocolateyPublishCanonical = ConvertTo-CanonicalText -Text $chocolateyPublishWo
 # the digest cannot be what rejects it.
 $chocolateyPublishMutants = @(
     @{ Label = 'extra push trigger'; Target = "on:`n  workflow_dispatch:"; Replacement = "on:`n  push:`n    branches: [main]`n  workflow_dispatch:" },
-    @{ Label = 'unpinned checkout'; Target = 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2'; Replacement = 'actions/checkout@v6' },
+    # The pin as the workflow has it now, so a Dependabot bump of checkout
+    # does not leave this mutant without a target.
+    @{ Label = 'unpinned checkout'; Target = [regex]::Match($chocolateyPublishWorkflowText, 'actions/checkout@[0-9a-f]{40} # v[0-9.]+').Value; Replacement = 'actions/checkout@v7' },
     @{ Label = 'unconditional push'; Target = 'if: ${{ inputs.push }}'; Replacement = 'if: ${{ true }}' },
     @{ Label = 'dry run that pushes'; Target = '-Version $env:RELEASE_VERSION -PackOnly'; Replacement = '-Version $env:RELEASE_VERSION' },
     @{ Label = 'key readable while building'; Target = '          GH_TOKEN: ${{ github.token }}'; Replacement = "          GH_TOKEN: `${{ github.token }}`n          CHOCO_API_KEY: `${{ secrets.CHOCO_API_KEY }}" },

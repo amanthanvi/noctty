@@ -48,7 +48,7 @@ jobs:
       portable_smoke: ${{ steps.filter.outputs.portable_smoke }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The diff needs the merge base.
           fetch-depth: 0
@@ -72,7 +72,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -150,7 +150,7 @@ jobs:
         run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
 
       - name: Setup Node.js
-        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -195,7 +195,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -213,7 +213,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -228,9 +228,9 @@ jobs:
       - name: Full Zig test suite
         # -Dcustom-shaders=true because that is what ships: every release
         # binary is built with it (scripts/build-package-windows.ps1), so the
-        # default-off config is one no user runs. It is also a superset,
-        # 4495 tests against 4491, the difference being the shadertoy tests
-        # that used to have a step of their own. That step ran
+        # default-off config is one no user runs. It is also a superset: the
+        # difference is the shadertoy tests (4495 tests against 4491 when
+        # measured, 2026-10-17), which used to have a step of their own. That step ran
         # -Dtest-filter=shadertoy, which executed 0 of them (measured, before
         # the src/main.zig filter fix); replacing it with a second full-suite
         # run would have doubled this job's time to collect 4 tests.
@@ -251,7 +251,9 @@ jobs:
       # executable runs once more under a timestamper. `zig build test` does not
       # install it; the install step does, from the compile the suite just
       # cached. It costs a few minutes, so it runs on the nightly and on demand,
-      # not on pull requests.
+      # not on pull requests. The timing is report-only; the per-test log it
+      # leaves is not: the skip budget below reads it, and fails when the run
+      # left none or cut it off.
       - name: Per-test timing (report only)
         if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
@@ -261,6 +263,30 @@ jobs:
           zig build -Demit-test-exe=true -Demit-exe=false -Dcustom-shaders=true
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ci-test-timing.ps1 -TestExe ./zig-out/bin/ghostty-test.exe
+
+      # The per-test results the timing run left, against this image's skip
+      # budget (test/windows/test-skip-budget.json, PKG-76): a test that starts
+      # skipping here, a font shaping test above all, fails the nightly instead
+      # of passing as green CI. `zig build test` prints only a skip total, so
+      # this needs the run above. Not report-only: a missing or cut-off log
+      # fails it too. Not on the release evidence dispatch
+      # (run_interactive_win11), whose Test run the Release workflow requires
+      # to succeed: a budget that drifted since the last nightly would block
+      # the release, and fixing it would mean a new SHA and new evidence.
+      - name: Skip budget (windows-2025)
+        if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))
+        shell: pwsh
+        run: ./scripts/check-test-skips.ps1 -TestLog test-timing/ghostty-test.log -Runner windows-2025
+
+      # The budget names only totals; the log names every test that skipped.
+      - name: Upload per-test results
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zig-test-results-${{ github.run_id }}
+          path: test-timing
+          if-no-files-found: ignore
+          retention-days: 14
 
   bench:
     name: Windows Headless Benchmarks
@@ -274,7 +300,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -291,7 +317,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -336,7 +362,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -353,7 +379,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -399,7 +425,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -416,7 +442,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -438,7 +464,7 @@ jobs:
 
       - name: Upload x64 renderer evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: renderer-x64-${{ github.run_id }}
           path: renderer-smoke/evidence
@@ -453,7 +479,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -470,7 +496,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -498,7 +524,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Setup Zig
@@ -513,7 +539,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -532,7 +558,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Setup Zig
@@ -547,7 +573,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -568,7 +594,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
@@ -584,7 +610,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -595,7 +621,7 @@ jobs:
 
       - name: Upload portable smoke evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flagship-portable-x64-${{ github.run_id }}
           if-no-files-found: warn
@@ -620,7 +646,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
 
@@ -636,7 +662,7 @@ jobs:
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
       - name: Cache Zig dependency packages
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
@@ -650,25 +676,29 @@ jobs:
 
       - name: Upload benchmark trend
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-trend-${{ github.run_id }}
           path: bench-trend
           if-no-files-found: ignore
           retention-days: 90
 
-  # The check a branch rule would require. It keeps the name of the single
-  # serial job this workflow used to have.
+  # The check the `main: CI gates` ruleset requires. It keeps the name of the
+  # single serial job this workflow used to have, and needs every job a pull
+  # request can need, so this one check covers them (the experimental ConPTY
+  # probes, and the report-only and dispatch-only jobs, aside).
   windows:
     name: Windows Build And Tests
-    needs: [changes, checks, tests, bench, build, renderer-smoke, cross-arm64]
-    # Not always(): a cancelled run (a newer push) must stay cancelled.
-    if: ${{ !cancelled() }}
+    needs: [changes, checks, tests, bench, build, renderer-smoke, cross-arm64, windows-lib-vt, windows-portable-smoke]
+    # always(), not !cancelled(): under !cancelled() a cancelled run skips the
+    # gate, and a skipped required check counts as passing. The gate runs
+    # anyway and fails on the cancelled jobs (scripts/ci-gate.ps1).
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout the gate script
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           sparse-checkout: scripts/ci-gate.ps1
@@ -678,7 +708,7 @@ jobs:
         shell: pwsh
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: ./scripts/ci-gate.ps1 -NeedsJson $env:NEEDS_JSON -Expect checks:always,tests:tests,bench:bench,build:build,renderer-smoke:renderer_smoke,cross-arm64:cross_arm64
+        run: ./scripts/ci-gate.ps1 -NeedsJson $env:NEEDS_JSON -Expect checks:always,tests:tests,bench:bench,build:build,renderer-smoke:renderer_smoke,cross-arm64:cross_arm64,windows-lib-vt:lib_vt,windows-portable-smoke:portable_smoke
 
   windows-interactive:
     name: Windows 11 Interactive Composite
@@ -692,7 +722,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
@@ -721,7 +751,7 @@ jobs:
 
       - name: Upload interactive evidence
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flagship-interactive-win11-${{ github.run_id }}
           if-no-files-found: warn
