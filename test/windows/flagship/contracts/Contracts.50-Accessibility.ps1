@@ -2836,3 +2836,390 @@ finally {
     Remove-Item -LiteralPath Function:\Get-InteractiveWin11MessageTimeoutMs -ErrorAction SilentlyContinue
     Remove-Variable -Scope Script -Name statefulPostProbeCalls, statefulPostProbe -ErrorAction SilentlyContinue
 }
+
+# A chord another program holds as a global hotkey never reaches noctty
+# (A11Y-GLOBAL-HOTKEY-01 in test-harnesses.md): the leaf names the conflict
+# before it sends the chord, instead of timing out on what the chord should do.
+$hotkeyConflictFunctions = @(
+    Get-NamedFunctionDefinitions -Ast $accessibilityHarnessAst -Name 'Get-AccessibilityGlobalHotkeyConflict'
+)
+$hotkeyChordFunctions = @(
+    Get-NamedFunctionDefinitions -Ast $accessibilityHarnessAst -Name 'Send-AccessibilityChord'
+)
+if ($hotkeyConflictFunctions.Count -ne 1 -or $hotkeyChordFunctions.Count -ne 1) {
+    throw 'Accessibility evidence must define one global-hotkey conflict check and one chord sender.'
+}
+# Without SetLastError=true, GetLastWin32Error no longer reports why RegisterHotKey
+# failed, and a held chord reads as free.
+if ($accessibilityHarnessText -notmatch 'public static int ProbeGlobalHotkey\(uint modifiers, uint virtualKey\)' -or
+    $accessibilityHarnessText -notmatch '\[DllImport\("user32\.dll", SetLastError=true\)\]\s+static extern bool RegisterHotKey\(IntPtr hwnd, int id, uint modifiers, uint virtualKey\);' -or
+    # The whole method, so no statement can slip in that changes what it probes.
+    $accessibilityHarnessText -notmatch 'public static int ProbeGlobalHotkey\(uint modifiers, uint virtualKey\) \{\s+const int id = 0x6E11;\s+if \(!RegisterHotKey\(IntPtr\.Zero, id, modifiers, virtualKey\)\) \{\s+return Marshal\.GetLastWin32Error\(\);\s+\}\s+return UnregisterHotKey\(IntPtr\.Zero, id\) \? 0 : -1;\s+\}') {
+    throw 'Accessibility global-hotkey probe must register the chord it is given, return RegisterHotKey''s error, or release the chord at once and return 0 (-1 when it cannot).'
+}
+# Ctrl+Comma opens Settings through direct SendChord calls, which skip the check
+# in Send-AccessibilityChord, so the leaf checks it once, in the statement list
+# that then sets up the sandbox and starts noctty, and before that setup. The cold
+# diagnostic never opens Settings, so it skips the check.
+$hotkeySandboxSetups = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -eq '$harness' -and
+        $node.Right.Extent.Text -like 'Initialize-InteractiveWin11Sandbox *'
+}, $true))
+$hotkeySettingsChecks = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Clauses.Count -eq 1 -and
+        $node.Clauses[0].Item1.Extent.Text -eq '-not $ColdDiagnosticOnly' -and
+        $node.Clauses[0].Item2.Extent.Text -match 'Get-AccessibilityGlobalHotkeyConflict'
+}, $true))
+# Both must be statements of the leaf's outer body: the `try` the whole leaf
+# runs in, at the top of the script, so neither can sit in a branch that never runs.
+$hotkeyOuterBody = if ($hotkeySandboxSetups.Count -eq 1) { $hotkeySandboxSetups[0].Parent } else { $null }
+$hotkeyOuterTry = if ($null -ne $hotkeyOuterBody) { $hotkeyOuterBody.Parent } else { $null }
+if ($hotkeySandboxSetups.Count -ne 1 -or $hotkeySettingsChecks.Count -ne 1 -or
+    $hotkeyOuterBody -isnot [System.Management.Automation.Language.StatementBlockAst] -or
+    $hotkeyOuterTry -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    -not [object]::ReferenceEquals($hotkeyOuterTry.Body, $hotkeyOuterBody) -or
+    $hotkeyOuterTry.Parent -isnot [System.Management.Automation.Language.NamedBlockAst] -or
+    -not [object]::ReferenceEquals($hotkeyOuterTry.Parent.Parent, $accessibilityHarnessAst) -or
+    -not [object]::ReferenceEquals($hotkeySettingsChecks[0].Parent, $hotkeyOuterBody) -or
+    $hotkeySettingsChecks[0].Extent.StartOffset -gt $hotkeySandboxSetups[0].Extent.StartOffset) {
+    throw 'Accessibility evidence must check Ctrl+Comma for a global-hotkey conflict in its outer body, beside the sandbox setup and before it.'
+}
+# Every direct SendChord, which skips the check in Send-AccessibilityChord, sends
+# a literal bare key or Ctrl+Comma, the one chord checked up front.
+$hotkeyDirectSends = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $node.Static -and
+        $node.Expression.Extent.Text -eq '[NocttyAccessibilityNative]' -and
+        $node.Member.Extent.Text -eq 'SendChord'
+}, $true) | Where-Object {
+    $owner = $_.Parent
+    while ($null -ne $owner -and $owner -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
+    $null -eq $owner -or $owner.Name -ne 'Send-AccessibilityChord'
+})
+if ($hotkeyDirectSends.Count -lt 1) { throw 'Accessibility direct-send check must find the leaf''s direct SendChord calls.' }
+foreach ($hotkeyDirect in $hotkeyDirectSends) {
+    $hotkeyDirectText = if ($hotkeyDirect.Arguments.Count -eq 1) { $hotkeyDirect.Arguments[0].Extent.Text } else { '' }
+    $hotkeyDirectKeys = @([regex]::Matches($hotkeyDirectText, '0x[0-9A-Fa-f]+') | ForEach-Object { [Convert]::ToInt32($_.Value.Substring(2), 16) })
+    $hotkeyDirectBare = $hotkeyDirectText -match '^@\(\s*\[uint16\]0x[0-9A-Fa-f]+\s*\)$' -and
+        $hotkeyDirectKeys[0] -notin @(0x10, 0xA0, 0xA1, 0x11, 0xA2, 0xA3, 0x12, 0xA4, 0xA5, 0x5B, 0x5C)
+    if (-not $hotkeyDirectBare -and $hotkeyDirectText -cne '@([uint16]0x11, [uint16]0xBC)') {
+        throw "Accessibility evidence must send a modifier chord through Send-AccessibilityChord, which checks it, not with SendChord directly ($hotkeyDirectText at line $($hotkeyDirect.Extent.StartLineNumber)); only Ctrl+Comma, checked up front, may go direct."
+    }
+}
+# Its throw must end the run: no `trap` anywhere in the leaf, and no `catch` on
+# the outer `try` it runs in (that `try` has only its `finally`).
+$hotkeyTraps = @($accessibilityHarnessAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.TrapStatementAst] }, $true))
+if ($hotkeyTraps.Count -ne 0 -or $hotkeyOuterTry.CatchClauses.Count -ne 0 -or $null -eq $hotkeyOuterTry.Finally) {
+    throw 'Accessibility evidence must let the Ctrl+Comma check''s throw end the run: no trap in the leaf, and no catch on its outer try.'
+}
+$hotkeySettingsCheckText = $hotkeySettingsChecks[0].Extent.Text
+$script:hotkeySettingsCalls = [Collections.Generic.List[string]]::new()
+$script:hotkeySettingsHeld = $true
+try {
+    # An advanced function, so an extra argument (a `-Probe { 0 }`) fails the call.
+    function Get-AccessibilityGlobalHotkeyConflict {
+        [CmdletBinding()]
+        param([uint16[]] $Keys, [string] $Description)
+        $script:hotkeySettingsCalls.Add("${Description}:$($Keys -join ',')")
+        if ($script:hotkeySettingsHeld) { return "held:$Description" }
+        return $null
+    }
+    # The theme diagnostic opens Settings with Ctrl+Comma too, so it must stop on a held one.
+    foreach ($hotkeySettingsCase in @(
+        @{ Cold = $true; Theme = $false; Held = $true; Error = $null; Calls = '' },
+        @{ Cold = $false; Theme = $false; Held = $true; Error = 'held:Ctrl+Comma Settings open'; Calls = 'Ctrl+Comma Settings open:17,188' },
+        @{ Cold = $false; Theme = $true; Held = $true; Error = 'held:Ctrl+Comma Settings open'; Calls = 'Ctrl+Comma Settings open:17,188' },
+        @{ Cold = $false; Theme = $false; Held = $false; Error = $null; Calls = 'Ctrl+Comma Settings open:17,188' }
+    )) {
+        $script:hotkeySettingsCalls.Clear()
+        $script:hotkeySettingsHeld = $hotkeySettingsCase.Held
+        $ColdDiagnosticOnly = $hotkeySettingsCase.Cold
+        $ThemeDiagnosticOnly = $hotkeySettingsCase.Theme
+        $hotkeySettingsError = $null
+        try { . ([scriptblock]::Create($hotkeySettingsCheckText)) }
+        catch { $hotkeySettingsError = $_.Exception.Message }
+        if ($hotkeySettingsError -ne $hotkeySettingsCase.Error -or ($script:hotkeySettingsCalls -join '|') -ne $hotkeySettingsCase.Calls) {
+            throw "Accessibility Ctrl+Comma check must run outside the cold diagnostic and stop on a held chord (cold=$($hotkeySettingsCase.Cold) theme=$($hotkeySettingsCase.Theme) held=$($hotkeySettingsCase.Held): error '$hotkeySettingsError', calls '$($script:hotkeySettingsCalls -join '|')')."
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Get-AccessibilityGlobalHotkeyConflict -ErrorAction SilentlyContinue
+    Remove-Variable -Name ColdDiagnosticOnly, ThemeDiagnosticOnly, settingsChordConflict -ErrorAction SilentlyContinue
+    Remove-Variable -Scope Script -Name hotkeySettingsCalls, hotkeySettingsHeld -ErrorAction SilentlyContinue
+}
+if (-not ('FlagshipAccessibilityHotkeyChordProbe' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+public static class FlagshipAccessibilityHotkeyChordProbe {
+    public static Action<string> Recorder;
+    public static bool SendChord(ushort[] keys) {
+        if (Recorder != null) Recorder("send:" + string.Join(",", keys));
+        return true;
+    }
+}
+'@
+}
+$script:hotkeyProbeCalls = [Collections.Generic.List[string]]::new()
+$script:hotkeyProbeResult = 1409
+$script:hotkeySenderLog = [Collections.Generic.List[string]]::new()
+$script:hotkeySenderHeld = $false
+$hotkeyHadSettle = $null -ne (Get-Variable -Scope Script -Name ACCESSIBILITY_SETTLE_MS -ErrorAction SilentlyContinue)
+$hotkeyProbe = {
+    param([uint32] $Modifiers, [uint32] $VirtualKey)
+    $script:hotkeyProbeCalls.Add(('{0:X}:{1:X}' -f $Modifiers, $VirtualKey))
+    return $script:hotkeyProbeResult
+}
+try {
+    . ([scriptblock]::Create($hotkeyConflictFunctions[0].Extent.Text))
+    $hotkeyChordE = [uint16[]] @(0x11, 0x10, 0x45)
+
+    # Held by another program: the message names the step and the chord's keys
+    # (a step's description need not say them), and the probe asked for
+    # MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT with 'E'.
+    $hotkeyHeld = Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyChordE -Description 'inactive-output new tab B' -Probe $hotkeyProbe
+    if ($hotkeyHeld -cne ('inactive-output new tab B cannot reach noctty: another program in this Windows session has registered Ctrl+Shift+E as a global hotkey ' +
+            '(RegisterHotKey: ERROR_HOTKEY_ALREADY_REGISTERED), so Windows gives that program the key press. Free Ctrl+Shift+E in that program, or close it, and run again.') -or
+        ($script:hotkeyProbeCalls -join ',') -ne '4006:45') {
+        throw "Accessibility global-hotkey check must name the step and the held chord's keys after probing MOD_CONTROL|MOD_SHIFT|MOD_NOREPEAT (got '$hotkeyHeld', probes '$($script:hotkeyProbeCalls -join ',')')."
+    }
+    # Keys are named in the order Ctrl, Shift, Alt, Win, then the key: a letter
+    # or digit as itself, a named key by name, anything else by its code.
+    foreach ($hotkeyNamed in @(
+        @{ Keys = [uint16[]] @(0x12, 0x25); Chord = 'Alt+Left' },
+        @{ Keys = [uint16[]] @(0x5B, 0xA4, 0xA1, 0xA2, 0x37); Chord = 'Ctrl+Shift+Alt+Win+7' },
+        @{ Keys = [uint16[]] @(0x11, 0x10, 0xDC); Chord = 'Ctrl+Shift+Backslash' },
+        @{ Keys = [uint16[]] @(0x11, 0xBC); Chord = 'Ctrl+Comma' },
+        @{ Keys = [uint16[]] @(0x12, 0x27); Chord = 'Alt+Right' },
+        @{ Keys = [uint16[]] @(0x12, 0x26); Chord = 'Alt+Up' },
+        @{ Keys = [uint16[]] @(0x12, 0x28); Chord = 'Alt+Down' },
+        @{ Keys = [uint16[]] @(0x11, 0x10, 0x0D); Chord = 'Ctrl+Shift+Enter' },
+        @{ Keys = [uint16[]] @(0x11, 0x21); Chord = 'Ctrl+PageUp' },
+        @{ Keys = [uint16[]] @(0x11, 0x22); Chord = 'Ctrl+PageDown' },
+        @{ Keys = [uint16[]] @(0x11, 0x10, 0x75); Chord = 'Ctrl+Shift+F6' },
+        @{ Keys = [uint16[]] @(0x12, 0x87); Chord = 'Alt+F24' },
+        @{ Keys = [uint16[]] @(0x11, 0xDE); Chord = 'Ctrl+VK 0xDE' }
+    )) {
+        $hotkeyNamedMessage = Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyNamed.Keys -Description 'step' -Probe $hotkeyProbe
+        if ($hotkeyNamedMessage -notlike "step cannot reach noctty: * has registered $($hotkeyNamed.Chord) as a global hotkey *Free $($hotkeyNamed.Chord) in that program*") {
+            throw "Accessibility global-hotkey check must name the chord $($hotkeyNamed.Chord) (got '$hotkeyNamedMessage')."
+        }
+    }
+    # Every literal chord with a modifier that the leaf hands Send-AccessibilityChord
+    # gets a name for each key, so a failure always says which shortcut to free.
+    $hotkeyLiteralChords = @($accessibilityHarnessAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Send-AccessibilityChord'
+    }, $true) | ForEach-Object {
+        $elements = @($_.CommandElements)
+        for ($i = 0; $i -lt $elements.Count - 1; $i++) {
+            if ($elements[$i] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $elements[$i].ParameterName -eq 'Keys' -and
+                $elements[$i + 1].Extent.Text -match '^@\((\s*\[uint16\]0x[0-9A-Fa-f]+\s*,?)+\)$') {
+                , [uint16[]] @([regex]::Matches($elements[$i + 1].Extent.Text, '0x[0-9A-Fa-f]+') | ForEach-Object { [Convert]::ToUInt16($_.Value.Substring(2), 16) })
+            }
+        }
+    })
+    if ($hotkeyLiteralChords.Count -lt 15) {
+        throw "Accessibility global-hotkey naming must find the leaf's literal chords (found $($hotkeyLiteralChords.Count))."
+    }
+    # An oracle written apart from the leaf's tables: each literal chord's exact
+    # probe (flags | MOD_NOREPEAT, then the key) and the exact name it must give.
+    # A key the leaf starts sending with a modifier must be added here.
+    $hotkeyOracleFlags = @{ 0x10 = 4; 0xA0 = 4; 0xA1 = 4; 0x11 = 2; 0xA2 = 2; 0xA3 = 2; 0x12 = 1; 0xA4 = 1; 0xA5 = 1; 0x5B = 8; 0x5C = 8 }
+    $hotkeyOracleNames = @{
+        0x0D = 'Enter'; 0x21 = 'PageUp'; 0x22 = 'PageDown'; 0x25 = 'Left'; 0x26 = 'Up'; 0x27 = 'Right'; 0x28 = 'Down'
+        0x75 = 'F6'; 0xBC = 'Comma'; 0xDC = 'Backslash'
+    }
+    $script:hotkeyProbeResult = 1409
+    foreach ($hotkeyLiteral in $hotkeyLiteralChords) {
+        $script:hotkeyProbeCalls.Clear()
+        $hotkeyLiteralMessage = Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyLiteral -Description 'step' -Probe $hotkeyProbe
+        [int] $hotkeyOracleBits = 0
+        $hotkeyOracleMain = @()
+        foreach ($hotkeyKey in $hotkeyLiteral) {
+            if ($hotkeyOracleFlags.ContainsKey([int] $hotkeyKey)) { $hotkeyOracleBits = $hotkeyOracleBits -bor $hotkeyOracleFlags[[int] $hotkeyKey] }
+            else { $hotkeyOracleMain += [int] $hotkeyKey }
+        }
+        if ($hotkeyOracleBits -eq 0) {
+            if ($script:hotkeyProbeCalls.Count -ne 0 -or $null -ne $hotkeyLiteralMessage) {
+                throw "Accessibility global-hotkey check must leave the leaf's bare key $($hotkeyLiteral -join ',') alone."
+            }
+            continue
+        }
+        if ($hotkeyOracleMain.Count -ne 1) {
+            throw "Accessibility global-hotkey oracle expects one key after the modifiers in the leaf's chord $($hotkeyLiteral -join ',')."
+        }
+        $hotkeyOracleKey = $hotkeyOracleMain[0]
+        $hotkeyOracleKeyName = if (($hotkeyOracleKey -ge 0x30 -and $hotkeyOracleKey -le 0x39) -or ($hotkeyOracleKey -ge 0x41 -and $hotkeyOracleKey -le 0x5A)) {
+            [string][char] $hotkeyOracleKey
+        } elseif ($hotkeyOracleNames.ContainsKey($hotkeyOracleKey)) {
+            $hotkeyOracleNames[$hotkeyOracleKey]
+        } else {
+            throw ("Accessibility global-hotkey oracle has no name for key 0x{0:X2}, which the leaf sends with a modifier; add it." -f $hotkeyOracleKey)
+        }
+        $hotkeyOracleChord = (@(@(@(2, 'Ctrl'), @(4, 'Shift'), @(1, 'Alt'), @(8, 'Win')) | Where-Object { $hotkeyOracleBits -band $_[0] } | ForEach-Object { $_[1] }) + $hotkeyOracleKeyName) -join '+'
+        $hotkeyOracleProbe = '{0:X}:{1:X}' -f (0x4000 -bor $hotkeyOracleBits), $hotkeyOracleKey
+        if (($script:hotkeyProbeCalls -join ',') -ne $hotkeyOracleProbe -or
+            $hotkeyLiteralMessage -notlike "step cannot reach noctty: * has registered $hotkeyOracleChord as a global hotkey *Free $hotkeyOracleChord in that program*") {
+            throw "Accessibility global-hotkey check must probe $hotkeyOracleProbe and name $hotkeyOracleChord for the leaf's chord $($hotkeyLiteral -join ',') (probes '$($script:hotkeyProbeCalls -join ',')', got '$hotkeyLiteralMessage')."
+        }
+    }
+    $script:hotkeyProbeCalls.Clear()
+
+    # Free (0), or a probe that failed for another reason (5): no conflict
+    # reported, and only the other failure leaves a line naming the chord.
+    foreach ($hotkeyCode in @(0, 5)) {
+        $script:hotkeyProbeResult = $hotkeyCode
+        $script:hotkeyProbeCalls.Clear()
+        $hotkeyOutput = @(Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyChordE -Description 'split down' -Probe $hotkeyProbe 6>&1)
+        # Write-Host's records carry the PSHOST tag; Write-Information's would be
+        # silent in a run, where $InformationPreference is SilentlyContinue.
+        $hotkeyInfo = @($hotkeyOutput | Where-Object { $_ -is [System.Management.Automation.InformationRecord] -and $_.Tags -contains 'PSHOST' } | ForEach-Object { [string] $_.MessageData })
+        # `return $null` writes one $null to the pipeline; only something else counts.
+        $hotkeyReturned = @($hotkeyOutput | Where-Object { $null -ne $_ -and $_ -isnot [System.Management.Automation.InformationRecord] })
+        $hotkeyInfoExpected = if ($hotkeyCode -eq 0) { @() } else {
+            @('interactive Win11 accessibility: the global-hotkey probe for Ctrl+Shift+E (split down) failed with error 5; going on as if no other program holds it.')
+        }
+        if ($hotkeyReturned.Count -ne 0 -or $script:hotkeyProbeCalls.Count -ne 1 -or
+            ($hotkeyInfo -join '|') -cne ($hotkeyInfoExpected -join '|')) {
+            throw "Accessibility global-hotkey check must report no conflict when the probe returns $hotkeyCode (returned '$($hotkeyReturned -join '|')', lines '$($hotkeyInfo -join '|')')."
+        }
+    }
+
+    # A probe that registered the chord but could not release it (-1) stops the
+    # run: the harness itself would hold the chord, and later probes would blame
+    # another program.
+    $script:hotkeyProbeResult = -1
+    $hotkeyUnreleased = $null
+    try { [void] (Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyChordE -Description 'split down' -Probe $hotkeyProbe) }
+    catch { $hotkeyUnreleased = $_.Exception.Message }
+    if ($hotkeyUnreleased -cne 'The global-hotkey probe for Ctrl+Shift+E (split down) registered it and could not release it, so this harness now holds it; end this run.') {
+        throw "Accessibility global-hotkey check must stop when its probe cannot release the chord (got '$hotkeyUnreleased')."
+    }
+
+    # Every modifier key, generic, left and right, maps to its RegisterHotKey flag
+    # on its own, and several combine.
+    $script:hotkeyProbeResult = 0
+    $script:hotkeyProbeCalls.Clear()
+    # Pairs of a virtual key and its RegisterHotKey flag: Shift, Ctrl and Alt as
+    # the generic, left and right keys, then left and right Win.
+    $hotkeyModifierTable = @(
+        @(0x10, 0x4), @(0xA0, 0x4), @(0xA1, 0x4),
+        @(0x11, 0x2), @(0xA2, 0x2), @(0xA3, 0x2),
+        @(0x12, 0x1), @(0xA4, 0x1), @(0xA5, 0x1),
+        @(0x5B, 0x8), @(0x5C, 0x8)
+    )
+    foreach ($hotkeyModifier in $hotkeyModifierTable) {
+        $script:hotkeyProbeCalls.Clear()
+        [void] (Get-AccessibilityGlobalHotkeyConflict -Keys ([uint16[]] @($hotkeyModifier[0], 0x45)) -Description 'modifier map' -Probe $hotkeyProbe)
+        $hotkeyExpected = '{0:X}:45' -f (0x4000 -bor $hotkeyModifier[1])
+        if (($script:hotkeyProbeCalls -join ',') -ne $hotkeyExpected) {
+            throw ("Accessibility global-hotkey check must map modifier key 0x{0:X2} to its flag (expected '{1}', probes '{2}')." -f $hotkeyModifier[0], $hotkeyExpected, ($script:hotkeyProbeCalls -join ','))
+        }
+    }
+    $script:hotkeyProbeCalls.Clear()
+    [void] (Get-AccessibilityGlobalHotkeyConflict -Keys ([uint16[]] @(0xA1, 0xA4, 0x5B, 0xA2, 0x50)) -Description 'modifier map' -Probe $hotkeyProbe)
+    if (($script:hotkeyProbeCalls -join ',') -ne '400F:50') {
+        throw "Accessibility global-hotkey check must combine every modifier flag (probes '$($script:hotkeyProbeCalls -join ',')')."
+    }
+
+    # A key without a modifier (Enter, Escape, Down) is not probed.
+    $script:hotkeyProbeResult = 1409
+    $script:hotkeyProbeCalls.Clear()
+    foreach ($hotkeyBare in @(0x0D, 0x1B, 0x28)) {
+        if ($null -ne (Get-AccessibilityGlobalHotkeyConflict -Keys ([uint16[]] @($hotkeyBare)) -Description 'bare key' -Probe $hotkeyProbe)) {
+            throw 'Accessibility global-hotkey check must not report a bare key.'
+        }
+    }
+    if ($script:hotkeyProbeCalls.Count -ne 0) {
+        throw 'Accessibility global-hotkey check must not probe a key without a modifier.'
+    }
+
+    # Without -Probe, the check asks the native probe, modifiers first, and reads
+    # its result: the bridge the leaf uses.
+    $hotkeyBridgeCall = '[NocttyAccessibilityNative]::ProbeGlobalHotkey($Modifiers, $VirtualKey)'
+    $hotkeyBridgeText = $hotkeyConflictFunctions[0].Extent.Text
+    if (([regex]::Matches($hotkeyBridgeText, [regex]::Escape('[NocttyAccessibilityNative]'))).Count -ne 1 -or
+        -not $hotkeyBridgeText.Contains($hotkeyBridgeCall)) {
+        throw 'Accessibility global-hotkey check must reach the native probe once, through its default probe.'
+    }
+    if (-not ('FlagshipAccessibilityHotkeyNativeProbe' -as [type])) {
+        Add-Type -TypeDefinition @'
+public static class FlagshipAccessibilityHotkeyNativeProbe {
+    public static System.Collections.Generic.List<string> Calls = new System.Collections.Generic.List<string>();
+    public static int Result = 1409;
+    public static int ProbeGlobalHotkey(uint modifiers, uint virtualKey) {
+        Calls.Add(modifiers.ToString("X") + ":" + virtualKey.ToString("X"));
+        return Result;
+    }
+}
+'@
+    }
+    . ([scriptblock]::Create($hotkeyBridgeText.Replace('[NocttyAccessibilityNative]', '[FlagshipAccessibilityHotkeyNativeProbe]')))
+    [FlagshipAccessibilityHotkeyNativeProbe]::Calls.Clear()
+    [FlagshipAccessibilityHotkeyNativeProbe]::Result = 1409
+    $hotkeyBridgeHeld = Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyChordE -Description 'bridge'
+    [FlagshipAccessibilityHotkeyNativeProbe]::Result = 0
+    $hotkeyBridgeFree = Get-AccessibilityGlobalHotkeyConflict -Keys $hotkeyChordE -Description 'bridge'
+    if ($hotkeyBridgeHeld -notlike 'bridge cannot reach noctty: * has registered Ctrl+Shift+E as a global hotkey *' -or
+        $null -ne $hotkeyBridgeFree -or
+        ([FlagshipAccessibilityHotkeyNativeProbe]::Calls -join ',') -ne '4006:45,4006:45') {
+        throw "Accessibility global-hotkey check must forward (modifiers, key) to the native probe and read 1409 as held, 0 as free (calls '$([FlagshipAccessibilityHotkeyNativeProbe]::Calls -join ',')', held '$hotkeyBridgeHeld')."
+    }
+
+    # The sender checks the very keys it sends, first, and a held chord is never sent.
+    $hotkeySenderSource = $hotkeyChordFunctions[0].Extent.Text.Replace(
+        '[NocttyAccessibilityNative]',
+        '[FlagshipAccessibilityHotkeyChordProbe]'
+    )
+    . ([scriptblock]::Create($hotkeySenderSource))
+    # An advanced function, so any parameter beyond these two (a `-Probe { 0 }`
+    # that would read every chord as free) fails the call.
+    function Get-AccessibilityGlobalHotkeyConflict {
+        [CmdletBinding()]
+        param([uint16[]] $Keys, [string] $Description)
+        $script:hotkeySenderLog.Add("check:${Description}:$($Keys -join ',')")
+        if ($script:hotkeySenderHeld) { return "held:$Description" }
+        return $null
+    }
+    function Assert-AccessibilityInputOwner {
+        param($Process, [string] $Description, [IntPtr] $ExpectedFocusedHwnd)
+        $script:hotkeySenderLog.Add("owner:$Description")
+    }
+    if (-not $hotkeyHadSettle) { $script:ACCESSIBILITY_SETTLE_MS = 0 }
+    [FlagshipAccessibilityHotkeyChordProbe]::Recorder = [Action[string]] {
+        param([string] $entry)
+        $script:hotkeySenderLog.Add($entry)
+    }
+    $hotkeyProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+
+    $script:hotkeySenderHeld = $true
+    $hotkeySenderError = $null
+    try { Send-AccessibilityChord -Keys $hotkeyChordE -Description 'chord under test' -Process $hotkeyProcess }
+    catch { $hotkeySenderError = $_.Exception.Message }
+    if ($hotkeySenderError -ne 'held:chord under test' -or ($script:hotkeySenderLog -join '|') -ne 'check:chord under test:17,16,69') {
+        throw "Accessibility chord sender must stop on a held chord before checking focus or sending it (error '$hotkeySenderError', log '$($script:hotkeySenderLog -join '|')')."
+    }
+
+    $script:hotkeySenderHeld = $false
+    $script:hotkeySenderLog.Clear()
+    Send-AccessibilityChord -Keys $hotkeyChordE -Description 'chord under test' -Process $hotkeyProcess
+    if (($script:hotkeySenderLog -join '|') -ne 'check:chord under test:17,16,69|owner:chord under test|send:17,16,69|owner:post-chord under test') {
+        throw "Accessibility chord sender must check the chord, then focus, send it once, and check focus again (log '$($script:hotkeySenderLog -join '|')')."
+    }
+}
+finally {
+    [FlagshipAccessibilityHotkeyChordProbe]::Recorder = $null
+    Remove-Item -LiteralPath Function:\Get-AccessibilityGlobalHotkeyConflict -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Send-AccessibilityChord -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Assert-AccessibilityInputOwner -ErrorAction SilentlyContinue
+    if (-not $hotkeyHadSettle) { Remove-Variable -Scope Script -Name ACCESSIBILITY_SETTLE_MS -ErrorAction SilentlyContinue }
+    Remove-Variable -Scope Script -Name hotkeyProbeCalls, hotkeyProbeResult, hotkeySenderLog, hotkeySenderHeld -ErrorAction SilentlyContinue
+}

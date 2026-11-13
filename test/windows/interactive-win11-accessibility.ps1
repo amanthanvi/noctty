@@ -169,6 +169,10 @@ public static class NocttyAccessibilityNative {
     public static extern bool BringWindowToTop(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern uint SendInput(uint count, INPUT[] inputs, int size);
+    [DllImport("user32.dll", SetLastError=true)]
+    static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint virtualKey);
+    [DllImport("user32.dll", SetLastError=true)]
+    static extern bool UnregisterHotKey(IntPtr hwnd, int id);
     [DllImport("user32.dll")]
     public static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr data);
     [DllImport("user32.dll")]
@@ -612,6 +616,17 @@ public static class NocttyAccessibilityNative {
     public static bool SendMouseClick() {
         return Submit(new INPUT[] { Mouse(MOUSEEVENTF_LEFTDOWN), Mouse(MOUSEEVENTF_LEFTUP) });
     }
+    // 0 when no program holds the chord as a global hotkey: it was registered
+    // and released at once. -1 when it was registered and could not be
+    // released. Otherwise RegisterHotKey's error, ERROR_HOTKEY_ALREADY_REGISTERED
+    // (1409) when another program holds it.
+    public static int ProbeGlobalHotkey(uint modifiers, uint virtualKey) {
+        const int id = 0x6E11;
+        if (!RegisterHotKey(IntPtr.Zero, id, modifiers, virtualKey)) {
+            return Marshal.GetLastWin32Error();
+        }
+        return UnregisterHotKey(IntPtr.Zero, id) ? 0 : -1;
+    }
     public static int VisibleTerminalChildCount(IntPtr parent) {
         int count = 0;
         EnumProc callback = delegate(IntPtr hwnd, IntPtr data) {
@@ -843,12 +858,79 @@ function Assert-AccessibilityInputOwner(
     throw "noctty does not own expected foreground keyboard focus before $Description (attempts=$attempts/$maxAttempts foreground_hwnd=$foregroundHwnd foreground_owner=$foregroundOwner focused_hwnd=$focusedHwnd focused_owner=$focusedOwner expected_process=$($Process.Id) expected_focused_hwnd=$ExpectedFocusedHwnd)."
 }
 
+# Another program can register a chord as a global hotkey. Windows then hands
+# the key press to that program, and noctty sees only the modifiers and the key
+# release: its binding never fires, though noctty holds the foreground and the
+# focus. Returns a message naming the step and the chord's keys when
+# RegisterHotKey reports the chord held (ERROR_HOTKEY_ALREADY_REGISTERED),
+# otherwise $null. A probe that cannot release its own registration stops the
+# run; any other probe error is logged and read as no conflict. Only chords
+# with a modifier are probed; the leaf's noctty registers no global hotkey of
+# its own.
+function Get-AccessibilityGlobalHotkeyConflict(
+    [uint16[]] $Keys,
+    [string] $Description,
+    [scriptblock] $Probe = { param([uint32] $Modifiers, [uint32] $VirtualKey) [NocttyAccessibilityNative]::ProbeGlobalHotkey($Modifiers, $VirtualKey) }
+) {
+    $modifierFlags = @{
+        0x10 = 0x4; 0xA0 = 0x4; 0xA1 = 0x4   # Shift: MOD_SHIFT
+        0x11 = 0x2; 0xA2 = 0x2; 0xA3 = 0x2   # Ctrl: MOD_CONTROL
+        0x12 = 0x1; 0xA4 = 0x1; 0xA5 = 0x1   # Alt: MOD_ALT
+        0x5B = 0x8; 0x5C = 0x8               # Win: MOD_WIN
+    }
+    $keyNames = @{
+        0x08 = 'Backspace'; 0x09 = 'Tab'; 0x0D = 'Enter'; 0x1B = 'Escape'; 0x20 = 'Space'
+        0x21 = 'PageUp'; 0x22 = 'PageDown'; 0x23 = 'End'; 0x24 = 'Home'
+        0x25 = 'Left'; 0x26 = 'Up'; 0x27 = 'Right'; 0x28 = 'Down'; 0x2D = 'Insert'; 0x2E = 'Delete'
+        0xBB = 'Plus'; 0xBC = 'Comma'; 0xBD = 'Minus'; 0xBE = 'Period'; 0xDC = 'Backslash'
+    }
+    # F1 to F24.
+    for ($functionKey = 1; $functionKey -le 24; $functionKey++) { $keyNames[0x6F + $functionKey] = "F$functionKey" }
+    [uint32] $modifiers = 0
+    $mainKeys = [Collections.Generic.List[uint32]]::new()
+    foreach ($key in $Keys) {
+        if ($modifierFlags.ContainsKey([int] $key)) { $modifiers = $modifiers -bor [uint32] $modifierFlags[[int] $key] }
+        else { $mainKeys.Add([uint32] $key) }
+    }
+    if ($modifiers -eq 0) { return $null }
+    foreach ($virtualKey in $mainKeys) {
+        $chordNames = @(foreach ($flag in 0x2, 0x4, 0x1, 0x8) {
+            if ($modifiers -band $flag) { @{ 0x2 = 'Ctrl'; 0x4 = 'Shift'; 0x1 = 'Alt'; 0x8 = 'Win' }[$flag] }
+        })
+        $chordNames += if (($virtualKey -ge 0x30 -and $virtualKey -le 0x39) -or ($virtualKey -ge 0x41 -and $virtualKey -le 0x5A)) {
+            [string][char] $virtualKey
+        } elseif ($keyNames.ContainsKey([int] $virtualKey)) {
+            $keyNames[[int] $virtualKey]
+        } else {
+            'VK 0x{0:X2}' -f $virtualKey
+        }
+        $chord = $chordNames -join '+'
+        # MOD_NOREPEAT (0x4000): a key held down during the probe's brief
+        # registration posts at most one WM_HOTKEY, not one per repeat.
+        $probeResult = & $Probe ($modifiers -bor 0x4000) $virtualKey
+        if ($probeResult -eq 1409) {
+            return ("$Description cannot reach noctty: another program in this Windows session has registered $chord as a global hotkey " +
+                '(RegisterHotKey: ERROR_HOTKEY_ALREADY_REGISTERED), so Windows gives that program the key press. ' +
+                "Free $chord in that program, or close it, and run again.")
+        }
+        if ($probeResult -eq -1) {
+            throw "The global-hotkey probe for $chord ($Description) registered it and could not release it, so this harness now holds it; end this run."
+        }
+        if ($probeResult -ne 0) {
+            Write-Host "interactive Win11 accessibility: the global-hotkey probe for $chord ($Description) failed with error $probeResult; going on as if no other program holds it."
+        }
+    }
+    return $null
+}
+
 function Send-AccessibilityChord(
     [uint16[]] $Keys,
     [string] $Description,
     [System.Diagnostics.Process] $Process,
     [IntPtr] $ExpectedFocusedHwnd = [IntPtr]::Zero
 ) {
+    $hotkeyConflict = Get-AccessibilityGlobalHotkeyConflict -Keys $Keys -Description $Description
+    if ($null -ne $hotkeyConflict) { throw $hotkeyConflict }
     Assert-AccessibilityInputOwner -Process $Process -Description $Description -ExpectedFocusedHwnd $ExpectedFocusedHwnd
     if (-not [NocttyAccessibilityNative]::SendChord($Keys)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
@@ -3853,6 +3935,14 @@ $explorerBeforeIdentity = "{0}/{1:o}" -f $explorerBefore[0].Id, $explorerBefore[
 $nocttyBeforeIdentities = @($machineProcesses | Where-Object ProcessName -eq 'noctty' | ForEach-Object {
     try { "{0}/{1:o}" -f $_.Id, $_.StartTime.ToUniversalTime() } catch { "pid=$($_.Id)/unavailable" }
 })
+
+# Ctrl+Comma opens Settings through direct SendChord calls, which skip the check
+# in Send-AccessibilityChord, so check it once before noctty starts. The cold
+# diagnostic never opens Settings.
+if (-not $ColdDiagnosticOnly) {
+    $settingsChordConflict = Get-AccessibilityGlobalHotkeyConflict -Keys @([uint16]0x11, [uint16]0xBC) -Description 'Ctrl+Comma Settings open'
+    if ($null -ne $settingsChordConflict) { throw $settingsChordConflict }
+}
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'accessibility' -ResetState:$ResetState
 $layout = $harness.Layout
