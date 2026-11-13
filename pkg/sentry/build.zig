@@ -43,6 +43,11 @@ pub fn build(b: *std.Build) !void {
         .inproc => try flags.append(b.allocator, "-DSENTRY_BACKEND_INPROC"),
         .none => {},
     }
+    // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig 0.15.2
+    // bundles Clang 20. The define only silences that version check.
+    if (target.result.abi == .msvc) {
+        try flags.append(b.allocator, "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
+    }
 
     if (b.lazyDependency("sentry", .{})) |upstream| {
         module.addIncludePath(upstream.path("include"));
