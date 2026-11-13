@@ -30,6 +30,12 @@ pub fn build(b: *std.Build) !void {
     var flags: std.ArrayList([]const u8) = .empty;
     defer flags.deinit(b.allocator);
 
+    // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig 0.15.2
+    // bundles Clang 20. The define only silences that version check.
+    if (target.result.abi == .msvc) {
+        try flags.append(b.allocator, "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
+    }
+
     if (b.lazyDependency("breakpad", .{})) |upstream| {
         lib.addIncludePath(upstream.path("src"));
         lib.addCSourceFiles(.{

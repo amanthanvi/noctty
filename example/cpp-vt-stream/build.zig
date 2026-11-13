@@ -10,9 +10,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig 0.15.2
+    // bundles Clang 20. The define only silences that version check.
+    const cpp_flags: []const []const u8 = if (target.result.abi == .msvc)
+        &.{"-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"}
+    else
+        &.{};
     exe_mod.addCSourceFiles(.{
         .root = b.path("src"),
         .files = &.{"main.cpp"},
+        .flags = cpp_flags,
     });
 
     // You'll want to use a lazy dependency here so that ghostty is only

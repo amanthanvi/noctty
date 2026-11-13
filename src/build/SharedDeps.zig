@@ -684,6 +684,9 @@ pub fn addSimd(
         if (target.result.abi == .msvc) try flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",
+            // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig
+            // 0.15.2 bundles Clang 20. This only silences that version check.
+            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         });
 
         m.addCSourceFiles(.{
