@@ -15638,7 +15638,8 @@ const TabMoveFixture = struct {
     }
 };
 
-/// The index of `host`'s split tab (two leaves), the one these tests move.
+/// The index of `host`'s split tab (two leaves), the one the divider-hover
+/// test moves.
 fn testSplitTabIndex(host: *Host) ?usize {
     for (host.tabs.items, 0..) |*tab, i| {
         if (tab.leafCount() == 2) return i;

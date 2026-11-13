@@ -32,7 +32,11 @@ reading step under [Self-Correction Log](#self-correction-log).
 - **Formatting (other):** `prettier -w .`
 - Run `zig build*` through `scripts/dev-windows.cmd` (or an equivalent
   VS-dev + Zig 0.15.2 shell); the ambient shell can miss the native toolchain
-  and fail with misleading dependency errors. A direct `zig test <file>`
+  and fail with misleading dependency errors. A build root on another drive
+  than the effective Zig global cache (a review clone under `H:\scratch`
+  with the default `%LOCALAPPDATA%\zig`) asserts in the build runner: set
+  `ZIG_GLOBAL_CACHE_DIR` on the build root's drive first (build-release-ci.md:
+  2026-11-13 BUILD-CROSS-DRIVE-CACHE). A direct `zig test <file>`
   misses the build graph's generated modules (`build_options` and others).
   For code that needs those modules, use the full-suite command above or
   `zig build test -Dtest-filter=<token>` for iteration. Pure helpers may use
@@ -562,10 +566,10 @@ that govern each symbol you change, or that none does.
   Sentry, the COM apartment, default-terminal handoff, the CLI and the
   `noctty.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
-  (including the `bench:*` steps' `addBenchCoreImport`), the Zig global
-  cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which `scripts/dev-windows.cmd`
-  keeps when set and otherwise sets to `%LOCALAPPDATA%\zig`)
-  and resources, the Windows target floor (`src/build/Config.zig`,
+  (including the `bench:*` steps' `addBenchCoreImport`) and resources, the
+  Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
+  `scripts/dev-windows.cmd` keeps when set and otherwise sets to
+  `%LOCALAPPDATA%\zig`), the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
   `CloseApplications` closes, and what it installs and deletes; the
