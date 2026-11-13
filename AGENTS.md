@@ -61,9 +61,11 @@ reading step under [Self-Correction Log](#self-correction-log).
 - Run a scratch portable copy (`noctty.portable` beside the exe) with
   `--window-save-state=never` and `LOCALAPPDATA` redirected for that noctty;
   that isolates session and startup state. If a `zig build` runs under the
-  redirect, pin `ZIG_GLOBAL_CACHE_DIR` to the real Zig cache, or for a build
-  root on another drive to a cache on that drive (build-release-ci.md:
-  2026-11-13 BUILD-CROSS-DRIVE-CACHE). A test that
+  redirect, pin `ZIG_GLOBAL_CACHE_DIR` to the real Zig cache (the one under
+  the original `LOCALAPPDATA`), or, for a build root on another drive than
+  that cache, to a cache on the build root's drive: a build root and its
+  effective cache must share a drive (build-release-ci.md: 2026-11-13
+  BUILD-CROSS-DRIVE-CACHE). A test that
   reached the real `%LOCALAPPDATA%\noctty` once put the user's launches into
   safe mode. (window-frame.md: 2026-09-23 "Item (b) of the #262 entry";
   test-harnesses.md: 2026-09-23 #261 trap 2.) Give each PowerShell you type
@@ -562,7 +564,7 @@ that govern each symbol you change, or that none does.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   (including the `bench:*` steps' `addBenchCoreImport`), the Zig global
   cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which `scripts/dev-windows.cmd`
-  defaults to `%LOCALAPPDATA%\zig`)
+  keeps when set and otherwise sets to `%LOCALAPPDATA%\zig`)
   and resources, the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
