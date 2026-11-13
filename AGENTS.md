@@ -523,8 +523,10 @@ that govern each symbol you change, or that none does.
   notifiable properties); UIA providers under `src/apprt/win32_uia/` (COM
   identity and refcounts, BSTR and VARIANT ownership, `events.zig`); terminal
   text (`win32_terminal_accessibility.zig`, TextPattern, ScrollIntoView, the
-  echo queue), palette and tab-list UIA (a tab's name: `uiaName` and
-  `Key.sameUiaName` in `win32/tab_label.zig`).
+  echo queue, and the output transport that feeds it:
+  `TerminalOutputTransport` in `apprt/surface.zig`), palette and tab-list
+  UIA (a tab's name: `uiaName` and `Key.sameUiaName` in
+  `win32/tab_label.zig`).
 - [config.md](docs/agents/log/config.md): config loading and reload outside
   the Settings window: the config file reader (`cli/args.zig` `LineIterator`,
   `streamDelimiterEnding`, `parseIntoField`, `ProfileMap`,

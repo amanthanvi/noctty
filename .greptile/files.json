@@ -291,6 +291,7 @@
       "scope": [
         "src/apprt/win32_uia/**",
         "src/apprt/win32_terminal_accessibility.zig",
+        "src/apprt/surface.zig",
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
         "src/apprt/win32/host.zig",

@@ -1823,6 +1823,66 @@ test "a screen switch makes the echo check forget typed input at that point of t
     try std.testing.expect(try Consumer.deliver(session, false, true));
 }
 
+test "a typing burst's echo stays the echo when it arrives one byte per PTY read" {
+    // A typed command echoes one byte per PTY read, and a burst can bring more
+    // reads than the output transport has chunks before the UI drains it. Each
+    // read used to take a chunk of its own: the overflow became an omission,
+    // which cleared the echo queue, so the echo after the next drain was
+    // spoken as output (the accessibility leaf of visible Test 43134347745).
+    const TerminalOutputTransport = @import("surface.zig").TerminalOutputTransport;
+    const Consumer = struct {
+        session: *TerminalAccessibilitySession,
+        spoken: bool = false,
+        omitted: bool = false,
+
+        fn callback(raw: *anyopaque, item: TerminalOutputTransport.Item) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (item) {
+                .reset => self.session.resetSemanticOutputContinuity(),
+                .data => |output| {
+                    self.session.noteSemanticOutput(output);
+                    self.spoken = self.spoken or self.session.announcement_normalizer.has_text;
+                },
+                .omitted => {
+                    self.omitted = true;
+                    self.session.noteOutputOmitted();
+                },
+            }
+        }
+    };
+
+    var ctx: u8 = 0;
+    const session = try TerminalAccessibilitySession.create(
+        std.testing.allocator,
+        TestOps.ops(&ctx),
+        0,
+        0,
+    );
+    defer session.deinit();
+    var transport: TerminalOutputTransport = .{};
+    transport.setInterested(true);
+    const epoch = transport.captureEpoch().?;
+
+    // Two bursts, each of more one-byte reads than there are chunks, with a
+    // drain between them, as the UI catches up between two runs of typing.
+    const typed = "printf noctty-marker-0123456789";
+    const split = 20;
+    comptime std.debug.assert(split > TerminalOutputTransport.max_chunks);
+    comptime std.debug.assert(typed.len - split > TerminalOutputTransport.max_chunks);
+    session.noteInput(typed);
+    var consumer: Consumer = .{ .session = session };
+    var all_enqueued = true;
+    for (0..typed.len) |index| {
+        if (index == split) transport.drain(&consumer, Consumer.callback);
+        const result = transport.pushSemanticCapture(epoch, typed[index .. index + 1], false, null);
+        all_enqueued = all_enqueued and result == .enqueued;
+    }
+    transport.drain(&consumer, Consumer.callback);
+    try std.testing.expect(!consumer.spoken);
+    try std.testing.expect(!consumer.omitted);
+    try std.testing.expect(all_enqueued);
+}
+
 test "terminal bell is announced only once a reader has the provider" {
     var ctx: MutableTestOps.Context = .{ .focused = true, .text = "", .name = "Terminal" };
     const session = try TerminalAccessibilitySession.create(

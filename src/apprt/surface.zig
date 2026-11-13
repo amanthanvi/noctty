@@ -15,7 +15,9 @@ const MessageData = @import("../datastruct/main.zig").MessageData;
 /// thread. Producers never block: lock contention and capacity exhaustion
 /// become one ordered omission barrier. While that barrier is pending, newer
 /// bytes are rejected until the UI consumes all retained chunks and the
-/// omission marker.
+/// omission marker. A push fills the newest chunk before it starts another,
+/// unless a reset has to come between, so between resets the capacity is
+/// `capacity` bytes however many pushes bring them; each reset takes a chunk.
 pub const TerminalOutputTransport = struct {
     pub const chunk_bytes = semantic_output.transport_chunk_bytes;
     pub const max_chunks = semantic_output.transport_max_chunks;
@@ -124,6 +126,15 @@ pub const TerminalOutputTransport = struct {
         var remaining = output;
         var reset_pending = reset_before or self.trailing_reset;
         if (remaining.len == 0 and reset_pending) self.trailing_reset = true;
+        // Top up the newest chunk first. A pending reset belongs before these
+        // bytes, so they start a chunk of their own instead.
+        if (remaining.len != 0 and !reset_pending and self.count != 0) {
+            const tail = (self.head + self.count - 1) % max_chunks;
+            const fit = utf8FitLen(remaining, chunk_bytes - self.lengths[tail]);
+            @memcpy(self.chunks[tail][self.lengths[tail]..][0..fit], remaining[0..fit]);
+            self.lengths[tail] += fit;
+            remaining = remaining[fit..];
+        }
         while (remaining.len != 0) {
             if (self.count == max_chunks) {
                 _ = self.markOmissionForEpoch(epoch);
@@ -204,14 +215,22 @@ pub const TerminalOutputTransport = struct {
         return false;
     }
 
-    fn utf8PrefixLen(output: []const u8, max_len: usize) usize {
-        if (output.len <= max_len) return output.len;
-
-        var len = max_len;
+    /// The longest prefix of `output` that fits in `room` bytes without
+    /// splitting a UTF-8 sequence, possibly 0. It tops up a chunk that
+    /// already holds bytes, so it needs no progress guarantee: what does not
+    /// fit starts the next chunk.
+    fn utf8FitLen(output: []const u8, room: usize) usize {
+        if (output.len <= room) return output.len;
+        var len = room;
         while (len > 0 and output[len] & 0xc0 == 0x80) len -= 1;
+        return len;
+    }
+
+    fn utf8PrefixLen(output: []const u8, max_len: usize) usize {
+        const len = utf8FitLen(output, max_len);
         // Semantic producers always provide valid UTF-8. Keep the historical
         // progress guarantee for generic callers if malformed bytes arrive.
-        return if (len == 0) max_len else len;
+        return if (len == 0 and output.len != 0) max_len else len;
     }
 
     pub fn drain(
@@ -503,17 +522,11 @@ test "terminal output transport saturation is nonblocking and ordered" {
 
     var transport: TerminalOutputTransport = .{};
     transport.setInterested(true);
-    const retained = [_][]const u8{
-        "old-0|",
-        "old-1|",
-        "old-2|",
-        "old-3|",
-        "old-4|",
-        "old-5|",
-        "old-6|",
-        "old-7|",
-    };
-    for (retained) |chunk| {
+    // The capacity is bytes: once every chunk is full, the next byte has
+    // nowhere to go.
+    var retained: [TerminalOutputTransport.max_chunks][TerminalOutputTransport.chunk_bytes]u8 = undefined;
+    for (&retained, 0..) |*chunk, index| {
+        @memset(chunk, 'a' + @as(u8, @intCast(index)));
         try std.testing.expectEqual(
             TerminalOutputTransport.PushResult.enqueued,
             transport.push(chunk),
@@ -531,10 +544,7 @@ test "terminal output transport saturation is nonblocking and ordered" {
     var ctx: Context = .{};
     defer ctx.bytes.deinit(std.testing.allocator);
     transport.drain(&ctx, Context.callback);
-    try std.testing.expectEqualStrings(
-        "old-0|old-1|old-2|old-3|old-4|old-5|old-6|old-7|",
-        ctx.bytes.items,
-    );
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&retained), ctx.bytes.items);
     try std.testing.expectEqual(@as(usize, 1), ctx.omissions);
 
     try std.testing.expectEqual(
@@ -546,6 +556,154 @@ test "terminal output transport saturation is nonblocking and ordered" {
     transport.drain(&ctx, Context.callback);
     try std.testing.expectEqualStrings("accepted-after-omission", ctx.bytes.items);
     try std.testing.expectEqual(@as(usize, 0), ctx.omissions);
+}
+
+test "terminal output transport counts its capacity in bytes, not pushes" {
+    const Context = struct {
+        items: usize = 0,
+        bytes: std.ArrayList(u8) = .empty,
+        omissions: usize = 0,
+
+        fn callback(raw: *anyopaque, item: TerminalOutputTransport.Item) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (item) {
+                .reset => {},
+                .data => |data| {
+                    self.items += 1;
+                    self.bytes.appendSlice(std.testing.allocator, data) catch unreachable;
+                },
+                .omitted => self.omissions += 1,
+            }
+        }
+    };
+
+    // A typing burst: each echoed byte is a PTY read of its own, and more of
+    // them arrive before the UI drains than there are chunks.
+    var burst: [TerminalOutputTransport.max_chunks * 4]u8 = undefined;
+    for (&burst, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+
+    var transport: TerminalOutputTransport = .{};
+    transport.setInterested(true);
+    for (0..burst.len) |index| {
+        try std.testing.expectEqual(
+            TerminalOutputTransport.PushResult.enqueued,
+            transport.push(burst[index .. index + 1]),
+        );
+    }
+
+    var ctx: Context = .{};
+    defer ctx.bytes.deinit(std.testing.allocator);
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqual(@as(usize, 1), ctx.items);
+    try std.testing.expectEqualSlices(u8, &burst, ctx.bytes.items);
+    try std.testing.expectEqual(@as(usize, 0), ctx.omissions);
+
+    // The last chunk tops up too: after seven full chunks and one short of a
+    // full eighth, one more byte fits, and only the byte after it is dropped.
+    const chunk_bytes = TerminalOutputTransport.chunk_bytes;
+    var filler: [chunk_bytes]u8 = undefined;
+    @memset(&filler, 'y');
+    for (0..TerminalOutputTransport.max_chunks - 1) |_| {
+        try std.testing.expectEqual(
+            TerminalOutputTransport.PushResult.enqueued,
+            transport.push(&filler),
+        );
+    }
+    try std.testing.expectEqual(
+        TerminalOutputTransport.PushResult.enqueued,
+        transport.push(filler[0 .. chunk_bytes - 1]),
+    );
+    try std.testing.expectEqual(
+        TerminalOutputTransport.PushResult.enqueued,
+        transport.push("z"),
+    );
+    try std.testing.expectEqual(
+        TerminalOutputTransport.PushResult.omitted,
+        transport.push("!"),
+    );
+    ctx.items = 0;
+    ctx.bytes.clearRetainingCapacity();
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqual(@as(usize, TerminalOutputTransport.max_chunks), ctx.items);
+    try std.testing.expectEqual(@as(usize, TerminalOutputTransport.capacity), ctx.bytes.items.len);
+    try std.testing.expectEqual(@as(u8, 'z'), ctx.bytes.items[ctx.bytes.items.len - 1]);
+    try std.testing.expectEqual(@as(usize, 1), ctx.omissions);
+}
+
+test "terminal output transport tops up a chunk only behind its reset and on utf8 boundaries" {
+    const Context = struct {
+        items: std.ArrayList([]u8) = .empty,
+
+        fn callback(raw: *anyopaque, item: TerminalOutputTransport.Item) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const text: []const u8 = switch (item) {
+                .reset => "<reset>",
+                .data => |data| data,
+                .omitted => "<omitted>",
+            };
+            const copy = std.testing.allocator.dupe(u8, text) catch unreachable;
+            self.items.append(std.testing.allocator, copy) catch unreachable;
+        }
+
+        fn clear(self: *@This()) void {
+            for (self.items.items) |text| std.testing.allocator.free(text);
+            self.items.clearRetainingCapacity();
+        }
+
+        fn deinit(self: *@This()) void {
+            self.clear();
+            self.items.deinit(std.testing.allocator);
+        }
+    };
+
+    const chunk_bytes = TerminalOutputTransport.chunk_bytes;
+    const E = TerminalOutputTransport.PushResult.enqueued;
+    var transport: TerminalOutputTransport = .{};
+    transport.setInterested(true);
+    const epoch = transport.captureEpoch().?;
+    var ctx: Context = .{};
+    defer ctx.deinit();
+
+    // Bytes behind a reset start a chunk of their own, and later bytes top
+    // that chunk up, behind the same reset.
+    try std.testing.expectEqual(E, transport.push("a"));
+    try std.testing.expectEqual(E, transport.pushSemanticBatchForEpoch(epoch, "b", false, true));
+    try std.testing.expectEqual(E, transport.push("c"));
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqual(@as(usize, 3), ctx.items.items.len);
+    try std.testing.expectEqualStrings("a", ctx.items.items[0]);
+    try std.testing.expectEqualStrings("<reset>", ctx.items.items[1]);
+    try std.testing.expectEqualStrings("bc", ctx.items.items[2]);
+
+    var filler: [chunk_bytes]u8 = undefined;
+    @memset(&filler, 'x');
+
+    // A sequence that does not fit whole in the newest chunk starts the next.
+    ctx.clear();
+    try std.testing.expectEqual(E, transport.push(filler[0 .. chunk_bytes - 1]));
+    try std.testing.expectEqual(E, transport.push("🙂"));
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqual(@as(usize, 2), ctx.items.items.len);
+    try std.testing.expectEqualSlices(u8, filler[0 .. chunk_bytes - 1], ctx.items.items[0]);
+    try std.testing.expectEqualStrings("🙂", ctx.items.items[1]);
+
+    // One that fits exactly tops the chunk up to full.
+    ctx.clear();
+    try std.testing.expectEqual(E, transport.push(filler[0 .. chunk_bytes - 4]));
+    try std.testing.expectEqual(E, transport.push("🙂"));
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqual(@as(usize, 1), ctx.items.items.len);
+    try std.testing.expectEqual(chunk_bytes, ctx.items.items[0].len);
+    try std.testing.expectEqualStrings("🙂", ctx.items.items[0][chunk_bytes - 4 ..]);
+
+    // ASCII splits wherever the chunk fills.
+    ctx.clear();
+    try std.testing.expectEqual(E, transport.push(filler[0 .. chunk_bytes - 2]));
+    try std.testing.expectEqual(E, transport.push("abc"));
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqual(@as(usize, 2), ctx.items.items.len);
+    try std.testing.expectEqualStrings("ab", ctx.items.items[0][chunk_bytes - 2 ..]);
+    try std.testing.expectEqualStrings("c", ctx.items.items[1]);
 }
 
 test "terminal output transport keeps utf8 chunks before batch omission marker" {
