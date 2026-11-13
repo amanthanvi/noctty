@@ -134,7 +134,15 @@ foreach ($rule in $requiredRules) {
         continue
     }
 
-    $match = Select-String -Path $rule.Path -Pattern $rule.Pattern -SimpleMatch -CaseSensitive:([bool]$rule.CaseSensitive)
+    # Read the text as a visitor sees it: the .nc-nobr spans that keep a flag
+    # whole and the <wbr> hints that break a long URL are markup, not part of
+    # the command.
+    $text = (Get-Content -LiteralPath $rule.Path -Raw) -replace '<span class="nc-nobr">([^<]*)</span>', '$1' -replace '<wbr\s*/?>', ''
+    $match = if ($rule.CaseSensitive) {
+        $text.Contains($rule.Pattern)
+    } else {
+        $text.IndexOf($rule.Pattern, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    }
     if (-not $match) {
         $failures.Add(('{0}: missing required pattern "{1}" - {2}' -f $rule.Path, $rule.Pattern, $rule.Reason))
     }

@@ -10,9 +10,9 @@ dependencies.
 | `why-noctty.html` | About page: identity, measurements, verification      |
 | `404.html`        | Not-found page                                        |
 | `styles.css`      | Whole stylesheet, `nc-` prefixed classes              |
-| `app.js`          | Theme toggle; the 404 page's requested-path text      |
+| `app.js`          | Theme toggle; 404 path text; sideways-scroll tracks   |
 | `version.js`      | Latest-release fetch for the version text             |
-| `install.js`      | Clipboard copy for the install commands               |
+| `install.js`      | Clipboard copy for install and verification commands  |
 | `terminal.js`     | Scripted hero demo (also imported by the tests)       |
 | `assets/`         | Favicon, self-hosted fonts, app captures, social card |
 | `tests/`          | `node --test` units                                   |
@@ -72,7 +72,21 @@ every key chip on the landing page against `src/input/command.zig`,
 `src/apprt/win32/overlay_view.zig`; `tests/demo.test.mjs` runs the demo itself
 against a fake DOM and a hand-advanced clock (pause, resume, step switches,
 a hidden page, reduced motion); `tests/install.test.mjs` checks that each copy
-button copies the command shown beside it.
+button, on the landing page and in About's verification blocks, copies the
+command shown beside it.
+
+The demo window scales with its column down to a 12 px terminal font; below a
+900 px column it holds that size at a fixed height (11 px under a 520 px
+column, so a phone's split panes keep a usable width), its chrome text stays
+at 12 px, and on a phone the step buttons sit under it as tabs with the
+selected step explained below. Below a 980 px viewport the captures keep a 900 px width
+(about 12 px text) and scroll sideways. Anything that scrolls sideways, a
+capture or a command block, gets a 2 px track from `app.js` showing the part in
+view, and is a tab stop only while it scrolls.
+
+Commands read character for character: no ligatures outside terminal windows,
+and they wrap only at spaces and `<wbr>`, with flags and file names kept whole
+by `.nc-nobr` spans. A token wider than a phone line scrolls inside its block.
 
 The `shot-*.webp` files are real captures of the app, one per theme, from a
 build with renderer test tools on a private desktop: the panes come from the

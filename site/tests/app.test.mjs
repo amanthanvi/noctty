@@ -34,7 +34,10 @@ function runApp({
         setAttribute: (key, value) => attributes.set(key, value),
       },
       getElementById: (id) => (id === "theme-toggle" ? toggle : null),
-      querySelectorAll: () => slots,
+      // Only the 404 page's path slots; no page in these tests has a
+      // sideways-scrolling capture or command block ([data-nc-pan]).
+      querySelectorAll: (selector) =>
+        selector === "[data-nc-lost-path]" ? slots : [],
     },
     window: {
       location: { pathname },
