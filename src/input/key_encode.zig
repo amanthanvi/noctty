@@ -406,7 +406,7 @@ fn kitty(
 
                 // Set the base layout key. We only report this if this codepoint
                 // differs from our pressed key.
-                if (event.key.codepoint()) |base| {
+                if (baseLayoutKey(event.key)) |base| {
                     if (base != seq.key and
                         (cp1 != base and !has_cp2))
                     {
@@ -416,7 +416,7 @@ fn kitty(
             } else {
                 // No UTF-8 so we can't report a shifted key but we can still
                 // report a base layout key.
-                if (event.key.codepoint()) |base| {
+                if (baseLayoutKey(event.key)) |base| {
                     if (base != seq.key) seq.alternates[1] = base;
                 }
             }
@@ -1027,6 +1027,24 @@ fn ctrlSeq(
 }
 
 /// Returns true if this is an ASCII control character, matches libc implementation.
+/// The key the Kitty protocol reports as a key's base layout key: the key
+/// at the same position on a US layout, reported when it differs from the
+/// key code. Null when the key has none.
+///
+/// A keypad key has none. It sits at its own position on every layout and
+/// is reported by its own code (57399 and up), while `Key.codepoint` gives
+/// the character it types, which names the main block's key: without this,
+/// the release of numpad 2 was `CSI 57401::50;129:3u`, a claim that the
+/// physical key is the digit row's 2, where its press with text reports no
+/// alternate. Those four bytes also took the report past 16, and OpenSSH
+/// for Windows before 9.8.2 forwards console input 16 characters to a
+/// read, so a program over ssh received the report in two parts
+/// (input.md: 2026-11-13 KITTY-NUMPAD-BASE).
+fn baseLayoutKey(k: key.Key) ?u21 {
+    if (k.keypad()) return null;
+    return k.codepoint();
+}
+
 fn isControl(cp: u21) bool {
     return cp < 0x20 or cp == 0x7F;
 }
@@ -2139,6 +2157,86 @@ test "kitty: keypad number" {
     });
     const actual = writer.buffered();
     try testing.expectEqualStrings("[57400;;49u", actual[1..]);
+}
+
+test "kitty: a keypad key reports no base layout key" {
+    // The flags herdr asks its host for (`CSI >7u`), with NumLock on.
+    const herdr: KittyFlags = .{
+        .disambiguate = true,
+        .report_events = true,
+        .report_alternates = true,
+    };
+    const all: KittyFlags = .{
+        .disambiguate = true,
+        .report_events = true,
+        .report_alternates = true,
+        .report_all = true,
+        .report_associated = true,
+    };
+    const num_lock: key.Mods = .{ .num_lock = true };
+    const cases = [_]struct { flags: KittyFlags, event: key.KeyEvent, output: []const u8 }{
+        // A digit's press is its text, and its release is the keypad key
+        // alone: it was `CSI 57401::50;129:3u`, the digit row's 2.
+        .{ .flags = herdr, .event = .{ .key = .numpad_2, .mods = num_lock, .utf8 = "2", .unshifted_codepoint = '2' }, .output = "2" },
+        .{ .flags = herdr, .event = .{ .action = .release, .key = .numpad_2, .mods = num_lock, .unshifted_codepoint = '2' }, .output = "\x1b[57401;129:3u" },
+        .{ .flags = herdr, .event = .{ .action = .release, .key = .numpad_add, .mods = num_lock, .unshifted_codepoint = '+' }, .output = "\x1b[57413;129:3u" },
+        // Whatever the layout types there (',' on German).
+        .{ .flags = herdr, .event = .{ .action = .release, .key = .numpad_decimal, .mods = num_lock, .unshifted_codepoint = ',' }, .output = "\x1b[57409;129:3u" },
+        // A press without text (Ctrl held) had the alternate too.
+        .{ .flags = herdr, .event = .{ .key = .numpad_2, .mods = .{ .num_lock = true, .ctrl = true }, .unshifted_codepoint = '2' }, .output = "\x1b[57401;133u" },
+        // Every flag set: the text is still reported as text.
+        .{ .flags = all, .event = .{ .key = .numpad_2, .mods = num_lock, .utf8 = "2", .unshifted_codepoint = '2' }, .output = "\x1b[57401;129;50u" },
+        .{ .flags = all, .event = .{ .action = .release, .key = .numpad_2, .mods = num_lock, .unshifted_codepoint = '2' }, .output = "\x1b[57401;129:3u" },
+        // A main block key keeps its base layout key: the digit row's 2 on
+        // a French layout, which types 'é' unshifted.
+        .{ .flags = herdr, .event = .{ .action = .release, .key = .digit_2, .mods = num_lock, .unshifted_codepoint = 0xE9 }, .output = "\x1b[233::50;129:3u" },
+    };
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try kitty(&writer, case.event, .{ .kitty_flags = case.flags });
+        try testing.expectEqualStrings(case.output, writer.buffered());
+    }
+}
+
+test "kitty: a keypad key's release fits one 16-character console read" {
+    // OpenSSH for Windows before 9.8.2 reads console input 16 records at a
+    // time (`ReadConsoleForTermEmul`), one record per character of a report
+    // ConPTY passed through, and sends each read on its own. A report of
+    // 17 characters or more therefore reaches a program over ssh in two
+    // parts: with the base layout alternate, the release of numpad 2 under
+    // herdr's flags was 18, and herdr typed the second part, `3u`. Every
+    // modifier a keypad key can carry is covered: the field is at most
+    // three digits.
+    const flags: KittyFlags = .{
+        .disambiguate = true,
+        .report_events = true,
+        .report_alternates = true,
+    };
+    const mods = [_]key.Mods{
+        .{ .num_lock = true },
+        .{ .num_lock = true, .caps_lock = true },
+        .{ .num_lock = true, .caps_lock = true, .shift = true, .ctrl = true, .alt = true, .super = true },
+    };
+    var keypad_keys: usize = 0;
+    for (std.meta.tags(key.Key)) |k| {
+        if (!k.keypad()) continue;
+        keypad_keys += 1;
+        for (mods) |m| for ([_]key.Action{ .release, .repeat }) |action| {
+            var buf: [128]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buf);
+            try kitty(&writer, .{
+                .action = action,
+                .key = k,
+                .mods = m,
+                .unshifted_codepoint = k.codepoint() orelse 0,
+            }, .{ .kitty_flags = flags });
+            const actual = writer.buffered();
+            try testing.expect(actual.len <= 16);
+            try testing.expect(std.mem.indexOf(u8, actual, "::") == null);
+        };
+    }
+    try testing.expect(keypad_keys >= 29);
 }
 
 test "kitty: backspace with utf8 (dead key state)" {
