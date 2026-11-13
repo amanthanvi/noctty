@@ -390,7 +390,9 @@
         "src/apprt/win32/host.zig",
         "src/apprt/win32/registry.zig",
         "src/apprt/win32_compositor_native.zig",
-        "src/apprt/win32/sys.zig"
+        "src/apprt/win32/sys.zig",
+        "src/test_runner.zig",
+        "src/test_shard.zig"
       ]
     },
     {

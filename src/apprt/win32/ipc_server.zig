@@ -2295,9 +2295,11 @@ test "win32 SDDL auto-inherit normalization keeps every access-bearing field" {
     }
 }
 
-/// A pipe name no other test uses: `\\.\pipe\noctty-ipc-<tag>-<tick>`.
+/// A pipe name no other test uses: `\\.\pipe\noctty-ipc-<tag>-<pid>-<tick>`.
+/// The process id keeps two test processes (`-Dtest-shards`) apart within
+/// one tick.
 fn testUniquePipeName(alloc: Allocator, comptime tag: []const u8) ![:0]u16 {
-    const name = try std.fmt.allocPrint(alloc, "\\\\.\\pipe\\noctty-ipc-" ++ tag ++ "-{d}", .{sys.GetTickCount64()});
+    const name = try std.fmt.allocPrint(alloc, "\\\\.\\pipe\\noctty-ipc-" ++ tag ++ "-{d}-{d}", .{ sys.GetCurrentProcessId(), sys.GetTickCount64() });
     defer alloc.free(name);
     return std.unicode.utf8ToUtf16LeAllocZ(alloc, name);
 }
