@@ -1026,7 +1026,6 @@ fn ctrlSeq(
     };
 }
 
-/// Returns true if this is an ASCII control character, matches libc implementation.
 /// The key the Kitty protocol reports as a key's base layout key: the key
 /// at the same position on a US layout, reported when it differs from the
 /// key code. Null when the key has none.
@@ -1045,6 +1044,7 @@ fn baseLayoutKey(k: key.Key) ?u21 {
     return k.codepoint();
 }
 
+/// Returns true if this is an ASCII control character, matches libc implementation.
 fn isControl(cp: u21) bool {
     return cp < 0x20 or cp == 0x7F;
 }
