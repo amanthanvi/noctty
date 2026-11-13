@@ -423,7 +423,9 @@ that govern each symbol you change, or that none does.
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), the
   bytes ConPTY's input parser gets with 9001 off (`windows_legacy` in
-  `src/input/key_encode.zig`, the `function_keys.zig` rows it reads), IME
+  `src/input/key_encode.zig`, the `function_keys.zig` rows it reads), the
+  Kitty encoder's alternate keys (`kitty` and `baseLayoutKey` in the same
+  file) and the 16-byte parts a report reaches a program over ssh in, IME
   (the composition string, its caret and target clause:
   `win32_input.imeTargetCodepointRange`, `Surface.imePosAt`), mouse buttons
   (the X buttons: `win32_input.xMouseButton`, and the button codes
