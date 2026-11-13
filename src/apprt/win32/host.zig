@@ -11585,7 +11585,7 @@ pub const Host = struct {
         const tab = self.paneDividerTab() orelse return null;
         // Both are needed. A tree's generation changes whenever the tree is
         // rebuilt (`SplitTree.nextGeneration`), but a tab moved to another
-        // window and back (`prepareGiveTab`, `giveTab`) keeps its tree, and
+        // window and back (`App.moveTabToWindow`) keeps its tree, and
         // so its generation, while each window gives it a new id: the
         // hover cached before the move then names the same generation under
         // the old id (Sol, council round 2 on #702).

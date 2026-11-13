@@ -8284,7 +8284,7 @@ pub const App = struct {
                 .host = .{
                     // The window it was to join is gone.
                     .host = self.registry.findHostById(over.host_id) orelse {
-                        self.tabMoveDeclined(host_id, request);
+                        self.tabMoveDeclined(host_id, request.tab_id);
                         return;
                     },
                     .index = over.index,
@@ -8293,10 +8293,10 @@ pub const App = struct {
         };
         const moved = self.moveTabToWindow(host, index, dest) catch |err| {
             log.warn("tab move failed err={}", .{err});
-            self.tabMoveDeclined(host_id, request);
+            self.tabMoveDeclined(host_id, request.tab_id);
             return;
         };
-        if (!moved) self.tabMoveDeclined(host_id, request);
+        if (!moved) self.tabMoveDeclined(host_id, request.tab_id);
     }
 
     /// An accepted tab move that did not happen: what asked for it (a drop,
@@ -8310,12 +8310,12 @@ pub const App = struct {
     /// (#703 round 2, Sol; CodeRabbit r4536317953, r4536737315). A request
     /// refused up front (a window's only tab) is never accepted and says
     /// nothing.
-    fn tabMoveDeclined(self: *App, host_id: u32, request: Host.TabMoveRequest) void {
+    fn tabMoveDeclined(self: *App, host_id: u32, tab_id: u32) void {
         const source = self.registry.findHostById(host_id) orelse return;
         // A window whose `WM_DESTROY` has run has no `hwnd` before it is
         // removed (`revalidateTabMove`): nowhere to show it.
         if (source.hwnd == null) return;
-        if (source.findTabIndexById(request.tab_id) == null) return;
+        if (source.findTabIndexById(tab_id) == null) return;
         source.setBanner(.err, "The tab could not be moved.") catch {};
     }
 
@@ -15638,6 +15638,15 @@ const TabMoveFixture = struct {
     }
 };
 
+/// The index of `host`'s split tab (two leaves), the one the divider-hover
+/// test moves.
+fn testSplitTabIndex(host: *Host) ?usize {
+    for (host.tabs.items, 0..) |*tab, i| {
+        if (tab.leafCount() == 2) return i;
+    }
+    return null;
+}
+
 test "win32 a split tab moved to another window and back does not bring back the divider hover cached before the move" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -15665,16 +15674,18 @@ test "win32 a split tab moved to another window and back does not bring back the
             const set_cursor: LPARAM = c.HTCLIENT | (c.WM_MOUSEMOVE << 16);
             try std.testing.expect(source.handlePaneDividerMessage(c.WM_SETCURSOR, @intFromPtr(source.hwnd.?), set_cursor));
 
-            // B goes to the other window and comes back, as a tab move hands
-            // it over (`prepareGiveTab`, then `giveTab`), with its tree.
-            source.prepareGiveTab(old_id, target.id);
-            try target.tabs.ensureUnusedCapacity(app.core_app.alloc, 1);
-            const there = source.giveTab(source.findTabIndexById(old_id).?, target, target.tabs.items.len);
-            const there_id = target.tabs.items[there].id;
-            target.prepareGiveTab(there_id, source.id);
-            try source.tabs.ensureUnusedCapacity(app.core_app.alloc, 1);
-            const back = target.giveTab(target.findTabIndexById(there_id).?, source, source.tabs.items.len);
-            _ = source.activateTabIndex(back);
+            // B goes to the other window and comes back through the move
+            // itself (`App.moveTabToWindow`), with its tree.
+            try std.testing.expect(try app.moveTabToWindow(source, source.findTabIndexById(old_id).?, .{ .host = .{ .host = target, .index = target.tabs.items.len } }));
+            try app.validateShellNativeMapping();
+            const there = testSplitTabIndex(target) orelse return error.TestTabNotMoved;
+            try std.testing.expect(try app.moveTabToWindow(target, there, .{ .host = .{ .host = source, .index = source.tabs.items.len } }));
+            try app.validateShellNativeMapping();
+            const back = testSplitTabIndex(source) orelse return error.TestTabNotMoved;
+            // The move shows it in front, and the hover cached before the
+            // move is still there for the check below to refuse.
+            try std.testing.expectEqual(back, source.active_tab);
+            try std.testing.expect(source.pane_divider_hover != null);
             const returned = &source.tabs.items[back];
 
             // The same tree, so the same generation, under a new id: the
