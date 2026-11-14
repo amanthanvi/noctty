@@ -2187,6 +2187,10 @@ test "kitty: a keypad key reports no base layout key" {
         // Every flag set: the text is still reported as text.
         .{ .flags = all, .event = .{ .key = .numpad_2, .mods = num_lock, .utf8 = "2", .unshifted_codepoint = '2' }, .output = "\x1b[57401;129;50u" },
         .{ .flags = all, .event = .{ .action = .release, .key = .numpad_2, .mods = num_lock, .unshifted_codepoint = '2' }, .output = "\x1b[57401;129:3u" },
+        // A press whose text is not `Key.codepoint` (German types ',' where
+        // the keypad decimal's codepoint is '.') reaches the alternate with
+        // text: it was `CSI 57409::46;129;44u`.
+        .{ .flags = all, .event = .{ .key = .numpad_decimal, .mods = num_lock, .utf8 = ",", .unshifted_codepoint = ',' }, .output = "\x1b[57409;129;44u" },
         // A main block key keeps its base layout key: the digit row's 2 on
         // a French layout, which types 'é' unshifted.
         .{ .flags = herdr, .event = .{ .action = .release, .key = .digit_2, .mods = num_lock, .unshifted_codepoint = 0xE9 }, .output = "\x1b[233::50;129:3u" },
