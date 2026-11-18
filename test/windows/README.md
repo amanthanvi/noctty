@@ -456,14 +456,19 @@ safety and measurement properties in two ways:
 
 - **Checks and mutations.** It checks each launch's desktop and job, the
   isolation flags and guards, the bindings' bytes, the step plan, the
-  predictions, the verdicts and the exit policy. It then applies 105 mutations
-  (the council's from rounds 1 to 3, and its own) and refuses each one.
-- **A closed set of pins.** Every block that decides or feeds an exit or a
-  verdict is pinned by SHA-256: the regions between `# pin-begin:` and
-  `# pin-end:` comments in the harness (the reader list, the whole outer
-  phase, case 7, the driver's results), the functions the contract lists, and
-  the whole reader. Any edit to a pinned block fails the contract until the
-  pin there is updated in the same change, so a reviewer sees it.
+  predictions, the verdicts and the exit policy. It then applies 126 mutations
+  (the council's from rounds 1 to 4, and its own). Each must be refused, by
+  the whole-file pin and by the pin of every pinned region or function it
+  changes.
+- **A closed set of pins.** The harness, the reader and the listed regions are
+  pinned whole, by SHA-256 with LF line ends. The whole harness and the whole
+  reader are pinned, so any edit to either fails the contract until its pin
+  there is updated in the same change, and a reviewer sees it. The regions
+  between `# pin-begin:` and `# pin-end:` comments in the harness (the reader
+  list, the whole outer phase, case 7, the driver's results) and the functions
+  the contract lists are pinned again, so a failure also names the block that
+  changed. Not pinned: `console-attach-info.c`, which case 7 reads the prompt
+  with and four other harnesses share.
 
 ## interactive-win11-ime-candidate.ps1
 
