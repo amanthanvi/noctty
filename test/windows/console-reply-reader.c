@@ -39,7 +39,10 @@
 //   BYTES,<ticks>,<count>,<hex>      one ReadFile (c)
 //   CMD,<ticks>,<code>,<hex>         what the reader wrote for a command
 // The ready file holds
-//   pid,inputModeBefore,inputMode,outputMode,inputCodePage,qpcFrequency
+//   pid,inputModeBefore,inputMode,outputMode,inputCodePage,qpcFrequency,localAppDataInRun
+// where localAppDataInRun is 1 when %LOCALAPPDATA% lies inside the run
+// directory (the log's grandparent), 0 when it does not, 2 when it is unset.
+// Only that answer is written, never the value.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -124,6 +127,24 @@ static void log_record(const INPUT_RECORD *r, int ansi) {
     }
 }
 
+// Whether %LOCALAPPDATA% is inside the run: the directory two levels above
+// the log (Run\reader-<mode>\reader.log).
+static int local_app_data_in_run(const wchar_t *log_path) {
+    wchar_t run[MAX_PATH], value[MAX_PATH];
+    size_t len;
+    int level;
+    DWORD got = GetEnvironmentVariableW(L"LOCALAPPDATA", value, MAX_PATH);
+    if (got == 0 || got >= MAX_PATH) return 2;
+    if (wcscpy_s(run, MAX_PATH, log_path) != 0) return 0;
+    for (level = 0; level < 2; ++level) {
+        wchar_t *slash = wcsrchr(run, L'\\');
+        if (!slash) return 0;
+        *slash = 0;
+    }
+    len = wcslen(run);
+    return _wcsnicmp(value, run, len) == 0 && (value[len] == L'\\' || value[len] == 0) ? 1 : 0;
+}
+
 static unsigned record_unit(const INPUT_RECORD *r, int ansi) {
     if (r->EventType != KEY_EVENT || !r->Event.KeyEvent.bKeyDown) return 0;
     return ansi ? (unsigned)(unsigned char)r->Event.KeyEvent.uChar.AsciiChar : (unsigned)r->Event.KeyEvent.uChar.UnicodeChar;
@@ -153,8 +174,8 @@ int wmain(int argc, wchar_t **argv) {
     if (!g_log) return 7;
     QueryPerformanceFrequency(&frequency);
     if (_wfopen_s(&ready, argv[3], L"wb") || !ready) return 8;
-    fprintf(ready, "%lu,%lu,%lu,%lu,%u,%lld\n", GetCurrentProcessId(), before, mode, out_mode, GetConsoleCP(),
-        frequency.QuadPart);
+    fprintf(ready, "%lu,%lu,%lu,%lu,%u,%lld,%d\n", GetCurrentProcessId(), before, mode, out_mode, GetConsoleCP(),
+        frequency.QuadPart, local_app_data_in_run(argv[2]));
     fclose(ready);
     while (GetTickCount64() < deadline && GetFileAttributesW(argv[4]) == INVALID_FILE_ATTRIBUTES) {
         INPUT_RECORD batch[256];

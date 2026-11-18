@@ -3,44 +3,71 @@
 The ConPTY reply path (the kitty report's shortlist #0): which terminal replies
 reach a console program through the bundled ConPTY's input, and in what shape,
 with Win32 input mode (DEC 9001) on. Supply a built Bin and a NEW Run directory.
-noctty is copied into Run as a portable copy with both AppData roots
+noctty is copied into Run as a portable copy, without the noctty.ico a portable
+copy needs before it registers the product AUMID, with both AppData roots
 redirected; the driver and every window live on a private desktop. Input is
 posted key messages only (WM_KEYDOWN/WM_KEYUP pairs, the target's keyboard
-state set explicitly); nothing touches the clipboard or the foreground.
+state set explicitly), and only to a window on that desktop; nothing touches
+the clipboard or the foreground. The real startup ledger, the PowerShell
+history, the AUMID registration and the clipboard sequence number are compared
+before and after.
 
 Phase 1 runs console-reply-reader.c as noctty's `-e` child once per reader
-state (a, a16, b, c; see the C file). Each run first types keys, so conhost has
-seen 9001 records (reader b shows them as records with their virtual keys; for
-the others DECRQM 9001 must come back set), and readers a and a16 then push
-Kitty keyboard flags, as yazi does. Every reply then crosses noctty's own
-write path:
+state (see the C file). Each run first types keys, so conhost has seen 9001
+records (reader b shows them as records with their virtual keys; for the
+others DECRQM 9001 must come back set), and readers a and a16 then push Kitty
+keyboard flags, as yazi does. Every reply then crosses noctty's own write path:
   - real replies: the reader sends DA1, OSC 11 and two kitty graphics queries
     and noctty answers them (cases 6 and 1);
   - injected replies: noctty `text:` bindings write the exact bytes the kitty
     report's cases name, one binding per write, so a split is two bindings
-    posted 300 ms apart (cases 1-4, and injected DA1/OSC 11 as controls).
+    posted 300 ms apart (cases 1-4, and injected DA1/OSC 11/OSC 4 as controls).
 In-band C0 bytes (written by bindings too, never part of a reply) trigger the
 reader's queries and delimit the cases.
 
-Two more reader states, each opt-in:
-  c-inbox  reader c behind the in-box conhost (NOCTTY_CONPTY=inbox), the
-           control for d's far end;
-  d        Windows OpenSSH: noctty runs System32's ssh.exe, which connects to
-           a one-connection sshd (System32's sshd.exe in debug mode, run as
-           this user, on 127.0.0.1 only, with a key pair, host key and config
-           made for the run in Run\sshd; no service is installed or touched),
-           and reader c runs on the far side, behind the pseudo console sshd
-           makes for the session (the in-box conhost).
+Reader states, -Readers (a list, or one comma-separated string):
+  a, a16, b, c   the default: bundled ConPTY
+  c-inbox        reader c behind the in-box conhost (NOCTTY_CONPTY=inbox), the
+                 control for d's far end
+  d, d-notiming  Windows OpenSSH: noctty runs System32's ssh.exe (no agent,
+                 X11 or port forwarding, no GSSAPI delegation), which connects
+                 to a one-connection sshd (System32's sshd.exe -d, run as this
+                 user on 127.0.0.1 only, keys only, forwarding off, with keys,
+                 host key and config made for the run in Run\sshd and deleted
+                 after it); reader c runs on the far side, behind the pseudo
+                 console sshd makes for the session (the in-box conhost).
+                 d-notiming adds -o ObscureKeystrokeTiming=no. The far side
+                 runs through sshd's DefaultShell (HKLM\SOFTWARE\OpenSSH) as
+                 this user, which loads the user's own PowerShell profile and
+                 uses the real LOCALAPPDATA, not the run's; both readers are
+                 refused without -AllowSshFarSideUserProfileAndLocalAppData.
 
-Phase 2 (case 7) types into PSReadLine inside noctty, with its history
-redirected into Run and set to SaveNothing before its first read: a stale
-2033 report (as noctty would send it on a tab switch) and the other case
-shapes are injected at the prompt, and a real tab switch is made after the
-shell set `?2033h`. The prompt row is read back from the console buffer.
+Phase 2 (case 7) types into PSReadLine inside noctty (pwsh -NoProfile), with
+its history redirected into Run and set to SaveNothing before its first read:
+a stale 2033 report (as noctty would send it on a tab switch) and the other
+case shapes are injected at the prompt, and a real tab switch is made after
+the shell set `?2033h`.
+
+Not measured here (named in the results too): case 7's half after the
+prompt-time reset, and stale extra cursors left drawn, both deferred to
+Phase 3, when mode 2033 and multiple cursors exist; reader (a') Neovim; reader
+(e) WSL, which the user's standing no-WSL rule excludes; case 5, deferred with
+OSC 5522; cmd and [Console]::ReadKey as readers; real keyboard input.
 
 -CompileOnly builds the C helpers and the C# and launches nothing.
-Results: Run\results.json and Run\results.md. Exit 0 when the run completed
-(observations are recorded, not judged), 2 for an infrastructure failure.
+Results: Run\results.json and Run\results.md. Exit codes:
+  0  complete: every requested reader ran every step, case 7 ran (unless
+     -SkipPSReadLine) with its controls, and every positive control came back
+     as predicted (other rows are observations, recorded, not judged);
+  1  incomplete: a reader failed or died, a delimiter or readiness wait
+     failed, case 7 failed, or a positive control differed from its
+     prediction;
+  2  infrastructure failure;
+  3  an isolation guard changed (startup ledger, history, AUMID key,
+     clipboard sequence number).
+-Sabotage is for the harness's own controls: it breaks one thing on purpose
+(the delimiter, the reader mid-run, or the DA1 control), and the run must
+then exit 1.
 #>
 [CmdletBinding()]
 param(
@@ -48,14 +75,23 @@ param(
     [Parameter(Mandatory)] [string] $Run,
     [switch] $CompileOnly,
     [switch] $Driver,
-    [ValidateSet('a','a16','b','c','c-inbox','d')] [string[]] $Readers = @('a','a16','b','c'),
-    # The driver's copy of -Readers: pwsh -File passes it as one comma-separated string.
-    [ValidatePattern('^(a|a16|b|c|c-inbox|d)(,(a|a16|b|c|c-inbox|d))*$')] [string] $ReaderList,
+    [string[]] $Readers = @('a','a16','b','c'),
+    [switch] $AllowSshFarSideUserProfileAndLocalAppData,
     [switch] $SkipPSReadLine,
+    [ValidateSet('none','delimiter','reader','control')] [string] $Sabotage = 'none',
     [ValidateRange(60,1800)] [int] $DriverTimeoutSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
+# pwsh -File passes a list as one string; accept "a,b" and @('a','b') alike.
+$readerStates = @('a','a16','b','c','c-inbox','d','d-notiming')
+$Readers = @($Readers | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach($r in $Readers) { if($r -notin $readerStates) { throw "Unknown reader '$r'; known: $($readerStates -join ', ')." } }
+if($Readers.Count -eq 0) { throw 'No reader requested.' }
+$sshReaders = @($Readers | Where-Object { $_ -in @('d','d-notiming') })
+if($sshReaders.Count -gt 0 -and -not $AllowSshFarSideUserProfileAndLocalAppData) {
+    throw 'Readers d and d-notiming run the far side through sshd''s DefaultShell (HKLM\SOFTWARE\OpenSSH) as this user, which loads the user''s own PowerShell profile and uses the real LOCALAPPDATA, not the run''s. Pass -AllowSshFarSideUserProfileAndLocalAppData to accept that.'
+}
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -92,6 +128,7 @@ public static class ReplyPath {
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h,StringBuilder s,int n);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out int pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a,uint b,bool attach);
     [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] state);
     [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
@@ -117,6 +154,12 @@ public static class ReplyPath {
     [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr j,uint code);
     [DllImport("kernel32.dll")] static extern bool QueryInformationJobObject(IntPtr j,int t,out JobAccounting a,uint size,IntPtr r);
     [DllImport("kernel32.dll")] static extern bool QueryPerformanceCounter(out long t);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+    // The dead-reader control: one process, by the exact PID the caller identified.
+    public static void KillExact(int pid) {
+        var h=OpenProcess(0x0001|0x00100000,false,pid); if(h==IntPtr.Zero) throw new Exception("OpenProcess failed: "+Marshal.GetLastWin32Error());
+        try { if(!TerminateProcess(h,1)) throw new Exception("TerminateProcess failed"); WaitForSingleObject(h,5000); } finally { CloseHandle(h); }
+    }
     public static long Ticks() { long t; QueryPerformanceCounter(out t); return t; }
     public static IntPtr CreateOwnedJob() {
         var j=CreateJobObjectW(IntPtr.Zero,null); if(j==IntPtr.Zero) throw new Exception("CreateJobObject failed");
@@ -175,7 +218,9 @@ public static class ReplyPath {
     // keyboard state set to exactly that key (and Shift when asked), held
     // holdMs past the last stroke so the target's own pump translates it.
     // No WM_CHAR is posted: the target's TranslateMessage makes the characters.
+    // Nothing is posted to a window this thread's desktop does not list.
     public static void Keys(IntPtr h,uint target,Stroke[] strokes,int strokeGapMs,int holdMs) {
+        if(!OnCallerDesktop(h)) throw new Exception("Refusing to post keys to a window that is not on this private desktop");
         uint current=GetCurrentThreadId(); Message message;
         PeekMessageW(out message,IntPtr.Zero,0,0,0);
         if(target==0 || !AttachThreadInput(current,target,true)) throw new Exception("AttachThreadInput failed");
@@ -240,12 +285,15 @@ $bindings = [ordered]@{
     f7  = @{ Name='kitty query, error'; Bytes="$([char]14)" }
     f8  = @{ Name='APC OK'; Bytes="${esc}_Gi=31;OK${esc}\" }
     f9  = @{ Name='APC error'; Bytes="${esc}_Gi=31;ENOENT:No such file${esc}\" }
-    f10 = @{ Name='APC split mid-body, 1st'; Bytes="${esc}_Gi=31;O" }
-    f11 = @{ Name='APC split mid-body, 2nd'; Bytes="K${esc}\" }
-    f12 = @{ Name='APC split ESC|_, 1st'; Bytes="${esc}" }
-    f13 = @{ Name='APC split ESC|_, 2nd'; Bytes="_Gi=31;OK${esc}\" }
-    f14 = @{ Name='APC split ESC|\, 1st'; Bytes="${esc}_Gi=31;OK${esc}" }
-    f15 = @{ Name='APC split ESC|\, 2nd'; Bytes='\' }
+    f10 = @{ Name='APC OK split mid-body, 1st'; Bytes="${esc}_Gi=31;O" }
+    f11 = @{ Name='APC OK split mid-body, 2nd'; Bytes="K${esc}\" }
+    f12 = @{ Name='APC split ESC|_, 1st (OK and error)'; Bytes="${esc}" }
+    f13 = @{ Name='APC OK split ESC|_, 2nd'; Bytes="_Gi=31;OK${esc}\" }
+    f14 = @{ Name='APC OK split ESC|\, 1st'; Bytes="${esc}_Gi=31;OK${esc}" }
+    f15 = @{ Name='APC OK split ESC|\, 2nd'; Bytes='\' }
+    insert = @{ Name='APC error split mid-body, 1st'; Bytes="${esc}_Gi=31;ENOENT:" }
+    home = @{ Name='APC error split mid-body, 2nd'; Bytes="No such file${esc}\" }
+    end = @{ Name='APC error split ESC|_, 2nd'; Bytes="_Gi=31;ENOENT:No such file${esc}\" }
     f16 = @{ Name='APC feature-shaped'; Bytes="${esc}_Gi=31,e=T,U=1;OK${esc}\" }
     f17 = @{ Name='2033 report, visible'; Bytes="${esc}[?999;1n" }
     f18 = @{ Name='DECRPM 2033'; Bytes="${esc}[?2033;2`$y" }
@@ -258,6 +306,55 @@ $bindings = [ordered]@{
     pause = @{ Name='DECRQM 9001 query'; Bytes="$([char]16)" }
     scroll_lock = @{ Name='Kitty flags query'; Bytes="$([char]18)" }
 }
+# -Sabotage's controls: a delimiter that is not one, and a DA1 trigger that triggers nothing.
+if($Sabotage -eq 'delimiter') { $bindings.f1.Bytes="$([char]23)" }
+if($Sabotage -eq 'control') { $bindings.f4.Bytes="$([char]23)" }
+
+# The steps of a reader session, in order. Keys are bindings (posted as
+# bare keys); Typed are keys typed for real (9001 records); Gap is the
+# pause between the two writes of a split; Kitty marks the steps only the
+# readers that push Kitty flags (a, a16) run.
+$stepPlan = @(
+    @{ Name='typed: Shift tap, h, i (9001 records)'; Keys=@(); Typed=@(@{Vk=0x10;Shift=$true},@{Vk=0x48},@{Vk=0x49}) }
+    @{ Name='mode 9001: DECRQM'; Keys=@('pause') }
+    @{ Name='push Kitty flags (CSI > 1 u)'; Keys=@('f2'); Kitty=$true }
+    @{ Name='Kitty flags: CSI ? u'; Keys=@('scroll_lock'); Kitty=$true }
+    @{ Name='typed after the push: Shift tap, h'; Keys=@(); Typed=@(@{Vk=0x10;Shift=$true},@{Vk=0x48}); Kitty=$true }
+    @{ Name='case 6: DA1 (before)'; Keys=@('f4') }
+    @{ Name='case 6: OSC 11 (before)'; Keys=@('f5') }
+    @{ Name='case 1: noctty kitty reply, OK'; Keys=@('f6') }
+    @{ Name='case 1: noctty kitty reply, error'; Keys=@('f7') }
+    @{ Name='case 1: APC OK, one write'; Keys=@('f8') }
+    @{ Name='case 1: APC error, one write'; Keys=@('f9') }
+    @{ Name='case 1: APC OK, split mid-body'; Keys=@('f10','f11'); Gap=300 }
+    @{ Name='case 1: APC OK, split ESC|_'; Keys=@('f12','f13'); Gap=300 }
+    @{ Name='case 1: APC OK, split ESC|\'; Keys=@('f14','f15'); Gap=300 }
+    @{ Name='case 1: APC error, split mid-body'; Keys=@('insert','home'); Gap=300 }
+    @{ Name='case 1: APC error, split ESC|_'; Keys=@('f12','end'); Gap=300 }
+    @{ Name='case 2: APC feature-shaped'; Keys=@('f16') }
+    @{ Name='case 3: 2033 report, visible'; Keys=@('f17') }
+    @{ Name='case 3: DECRPM 2033'; Keys=@('f18') }
+    @{ Name='case 4: multiple-cursors reply'; Keys=@('f19') }
+    @{ Name='case 6: injected OSC 11 reply'; Keys=@('f20') }
+    @{ Name='case 6: injected OSC 4 reply'; Keys=@('print_screen') }
+    @{ Name='case 6: injected DA1 reply'; Keys=@('f21') }
+    @{ Name='case 7 shape: 2033 report, hidden'; Keys=@('f22') }
+    @{ Name='case 6: DA1 (after)'; Keys=@('f4') }
+    @{ Name='case 6: OSC 11 (after)'; Keys=@('f5') }
+    @{ Name='pop Kitty flags (CSI < u)'; Keys=@('f3'); Kitty=$true }
+)
+function Get-PlannedSteps([string] $Mode) { @($stepPlan | Where-Object { -not $_.Kitty -or $Mode -in @('a','a16') }) }
+
+$notMeasured = @(
+    'case 7, after the prompt-time reset: deferred to Phase 3 (PLAN.md section 9.1), when mode 2033 and its reset exist'
+    'case 7, stale extra cursors left drawn: deferred to Phase 3, when multiple cursors (kitty shortlist #2) exist'
+    'reader (a''), Neovim: not installed on the measuring machine'
+    'reader (e), WSL: not used, the user''s standing no-WSL rule'
+    'case 5: deferred with OSC 5522'
+    'cmd and [Console]::ReadKey as readers: not measured; inferred to read with VT input off, as reader b does'
+    'real keyboard input and a visible desktop: posted input on a private desktop only'
+)
+
 function Binding-Line([string] $Key, [string] $Bytes) {
     # Every byte as \xNN, so nothing in a reply (=, ;, spaces) meets the config parser.
     'keybind = {0}=text:{1}' -f $Key, (-join ([Text.Encoding]::ASCII.GetBytes($Bytes) | ForEach-Object { '\x{0:x2}' -f $_ }))
@@ -274,12 +371,24 @@ function Startup-Fingerprint {
     if(-not (Test-Path -LiteralPath $path)) { return @{ Exists=$false; Hash=$null; Modified=$null } }
     return @{ Exists=$true; Hash=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant(); Modified=(Get-Item -LiteralPath $path).LastWriteTimeUtc.ToString('o') }
 }
+# The product AUMID's registration (and any key a portable copy publishes it
+# from): names, value names, kinds and data, hashed. Nothing is printed.
+function Aumid-Fingerprint {
+    $parent='HKCU:\Software\Classes\AppUserModelId'
+    $keys=@(Get-ChildItem -LiteralPath $parent -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'io.github.amanthanvi.noctty*' } | Sort-Object PSChildName)
+    $text=foreach($k in $keys) {
+        $k.PSChildName
+        foreach($n in @($k.GetValueNames() | Sort-Object)) { '{0}={1}:{2}' -f $n,$k.GetValueKind($n),(@($k.GetValue($n,$null,'DoNotExpandEnvironmentNames')) -join ',') }
+    }
+    return @{ Keys=@($keys | ForEach-Object { $_.PSChildName }); Sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($text -join "`n")))) }
+}
 
 if(-not $Driver) {
     $Bin=(Resolve-Path -LiteralPath $Bin).Path; $Run=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain a built noctty.exe.' }
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'conpty.dll'))) { throw 'Bin must hold the bundled conpty.dll: this measures the bundled ConPTY.' }
+    if($sshReaders.Count -gt 0 -and $Run -match '\s') { throw 'Readers d and d-notiming need a Run path without spaces: the far side gets the reader command unquoted.' }
     [void](New-Item -ItemType Directory -Path $Run)
     $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $compile=Join-Path $Run 'compile.cmd'
@@ -293,6 +402,7 @@ if(-not $Driver) {
     $lines | Set-Content -LiteralPath $compile -Encoding ascii
     $compileJob=[ReplyPath]::CreateOwnedJob(); $cp=$null
     try {
+        # The compiler is the one launch without a desktop: it opens no window and runs before the private one exists.
         $cp=[ReplyPath]::Launch($env:ComSpec,('"{0}" /d /c ""{1}""' -f $env:ComSpec,$compile),$root,$null,$compileJob,0x08000000)
         if([ReplyPath]::WaitForSingleObject($cp.process,120000) -ne 0) { throw 'Helper compilation timed out.' }
         [uint32]$compileCode=0; [void][ReplyPath]::GetExitCodeProcess($cp.process,[ref]$compileCode)
@@ -302,10 +412,12 @@ if(-not $Driver) {
         if($cp) { [void][ReplyPath]::CloseHandle($cp.thread); [void][ReplyPath]::CloseHandle($cp.process) }
     }
     if($CompileOnly) { Write-Host 'ConPTY reply-path harness C/C# compilation: PASS; no launches.'; exit 0 }
-    if($Readers -contains 'd') {
-        # Reader d's far end: keys, host key and config for one loopback sshd,
-        # all inside Run. The private keys are readable by this user only.
-        $sshDir=Join-Path $Run 'sshd'; [void](New-Item -ItemType Directory -Path $sshDir)
+    $sshDir=Join-Path $Run 'sshd'; $sshSecrets=@('host_ed25519','host_ed25519.pub','client_ed25519','client_ed25519.pub','authorized_keys')
+    if($sshReaders.Count -gt 0) {
+        # The far end of d and d-notiming: keys, host key and config for one
+        # loopback sshd, all inside Run, deleted after the run. The private
+        # keys are readable by this user only.
+        [void](New-Item -ItemType Directory -Path $sshDir)
         $openssh=Join-Path ([Environment]::GetFolderPath('System')) 'OpenSSH'
         foreach($tool in @('ssh.exe','sshd.exe','ssh-keygen.exe')) { if(-not (Test-Path -LiteralPath (Join-Path $openssh $tool))) { throw "Reader d needs $tool in $openssh." } }
         foreach($name in @('host_ed25519','client_ed25519')) {
@@ -319,13 +431,24 @@ if(-not $Driver) {
         $port=Get-Random -Minimum 47000 -Maximum 49000; while($listening -contains $port) { $port=Get-Random -Minimum 47000 -Maximum 49000 }
         $user=[Environment]::UserName
         @("Port $port",'ListenAddress 127.0.0.1',"HostKey $(Join-Path $sshDir 'host_ed25519')","AuthorizedKeysFile $(Join-Path $sshDir 'authorized_keys')",
-          'PubkeyAuthentication yes','PasswordAuthentication no','KbdInteractiveAuthentication no','StrictModes no',"PidFile $(Join-Path $sshDir 'sshd.pid')","AllowUsers $user") |
+          'PubkeyAuthentication yes','PasswordAuthentication no','KbdInteractiveAuthentication no','DisableForwarding yes','PermitUserRC no','StrictModes no',
+          "PidFile $(Join-Path $sshDir 'sshd.pid')","AllowUsers $user") |
             Set-Content -LiteralPath (Join-Path $sshDir 'sshd_config') -Encoding ascii
-        @{Port=$port;SshVersion=((& (Join-Path $openssh 'ssh.exe') -V 2>&1) -join ' ')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sshDir 'ssh.json')
+        # The far side's facts: which shell sshd runs, and whether it can load a profile there (existence only).
+        $openSshKey=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\OpenSSH' -ErrorAction SilentlyContinue
+        $documents=[Environment]::GetFolderPath('MyDocuments')
+        @{Port=$port;SshVersion=((& (Join-Path $openssh 'ssh.exe') -V 2>&1) -join ' ');
+          DefaultShell=$(if($openSshKey -and $openSshKey.DefaultShell){[string]$openSshKey.DefaultShell}else{'(unset: cmd.exe)'});
+          DefaultShellCommandOption=$(if($openSshKey -and $openSshKey.DefaultShellCommandOption){[string]$openSshKey.DefaultShellCommandOption}else{'(unset)'});
+          PwshCurrentUserProfilesExist=@((Test-Path -LiteralPath (Join-Path $documents 'PowerShell\profile.ps1')),(Test-Path -LiteralPath (Join-Path $documents 'PowerShell\Microsoft.PowerShell_profile.ps1')))} |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sshDir 'ssh.json')
     }
-    $before=Startup-Fingerprint; $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-conpty-reply-path.ps1'
+    $before=Startup-Fingerprint; $aumidBefore=Aumid-Fingerprint; $clipboardBefore=[ReplyPath]::GetClipboardSequenceNumber()
+    $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-conpty-reply-path.ps1'
     $portable=Join-Path $Run 'source\bin'; [void](New-Item -ItemType Directory -Path $portable)
-    Get-ChildItem -LiteralPath $Bin -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $portable }
+    # No noctty.ico: a portable copy publishes the product AUMID's registration only with the icon beside it.
+    Get-ChildItem -LiteralPath $Bin -File | Where-Object { $_.Name -ne 'noctty.ico' } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $portable }
+    if(Test-Path -LiteralPath (Join-Path $portable 'noctty.ico')) { throw 'The portable copy must not hold noctty.ico.' }
     $share=Join-Path (Split-Path -Parent $Bin) 'share'
     if(Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path $Run 'source\share') -Recurse }
     Set-Content -LiteralPath (Join-Path $portable 'noctty.portable') -Value '' -NoNewline
@@ -333,47 +456,62 @@ if(-not $Driver) {
     $desktopName='noctty-replypath-'+[guid]::NewGuid().ToString('N')
     $desktop=[ReplyPath]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
-    $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA; $job=[IntPtr]::Zero; $pi=$null; $code=1
+    $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA; $job=[IntPtr]::Zero; $pi=$null; [uint32]$code=2
     try {
         $job=[ReplyPath]::CreateOwnedJob()
         $env:LOCALAPPDATA=Join-Path $Run 'localappdata'; $env:APPDATA=Join-Path $Run 'appdata'
         $pwsh=(Get-Command pwsh.exe).Source
-        $command='"{0}" -NoProfile -NonInteractive -File "{1}" -Bin "{2}" -Run "{3}" -Driver -ReaderList {4}' -f $pwsh,$PSCommandPath,$portable,$Run,($Readers -join ',')
+        $command='"{0}" -NoProfile -NonInteractive -File "{1}" -Bin "{2}" -Run "{3}" -Driver -Readers {4} -Sabotage {5}' -f $pwsh,$PSCommandPath,$portable,$Run,($Readers -join ','),$Sabotage
         if($SkipPSReadLine) { $command+=' -SkipPSReadLine' }
+        if($AllowSshFarSideUserProfileAndLocalAppData) { $command+=' -AllowSshFarSideUserProfileAndLocalAppData' }
         $pi=[ReplyPath]::Launch($pwsh,$command,$Run,"WinSta0\$desktopName",$job,0x08000000)
         Write-Host "Hidden driver PID=$($pi.pid); evidence=$Run"
         $deadline=[datetime]::UtcNow.AddSeconds($DriverTimeoutSeconds)
         while([ReplyPath]::WaitForSingleObject($pi.process,500) -eq 258) {
             if([datetime]::UtcNow -ge $deadline) { throw 'Hidden driver timeout; owned job will be stopped.' }
         }
-        [uint32]$code=0; [void][ReplyPath]::GetExitCodeProcess($pi.process,[ref]$code)
+        [void][ReplyPath]::GetExitCodeProcess($pi.process,[ref]$code)
+    } catch {
+        Write-Host "Infrastructure: $($_.Exception.Message)"; $code=2
     } finally {
         $env:LOCALAPPDATA=$oldLocal; $env:APPDATA=$oldRoaming
         $cleanupError=$null; $owned=0
-        if($job -ne [IntPtr]::Zero) { try { $owned=[ReplyPath]::StopOwnedJob($job) } catch { $cleanupError=$_ } }
+        if($job -ne [IntPtr]::Zero) { try { $owned=[ReplyPath]::StopOwnedJob($job) } catch { $cleanupError=$_.Exception.Message } }
         if($pi) { [void][ReplyPath]::CloseHandle($pi.thread); [void][ReplyPath]::CloseHandle($pi.process) }
         [void][ReplyPath]::CloseDesktop($desktop)
-        $after=Startup-Fingerprint
+        # The run's ssh keys go once the run is over; each by its exact path.
+        $keysDeleted=$true
+        foreach($name in $sshSecrets) { $path=Join-Path $sshDir $name; if(Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force; if(Test-Path -LiteralPath $path) { $keysDeleted=$false } } }
+        $after=Startup-Fingerprint; $aumidAfter=Aumid-Fingerprint; $clipboardAfter=[ReplyPath]::GetClipboardSequenceNumber()
         $unchanged=$before.Exists -eq $after.Exists -and $before.Hash -eq $after.Hash -and $before.Modified -eq $after.Modified
+        $aumidUnchanged=($aumidBefore.Keys -join '|') -ceq ($aumidAfter.Keys -join '|') -and $aumidBefore.Sha256 -ceq $aumidAfter.Sha256
+        $clipboardUnchanged=$clipboardBefore -eq $clipboardAfter
         $historyFailure=$null
-        try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure=$_ }
-        @{Unchanged=$unchanged;HistoryUnchanged=($null -eq $historyFailure);OwnedJobCleanedUp=($null -eq $cleanupError);OwnedProcessCount=$owned} |
-            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'startup-state.json')
-        if($historyFailure) { throw $historyFailure }
-        if(-not $unchanged) { throw 'Real startup state changed; stop launches.' }
-        if($cleanupError) { throw $cleanupError }
+        try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure=$_.Exception.Message }
+        $guards=[ordered]@{Unchanged=$unchanged;HistoryUnchanged=($null -eq $historyFailure);AumidKeysBefore=$aumidBefore.Keys;AumidKeysAfter=$aumidAfter.Keys;AumidUnchanged=$aumidUnchanged;
+            ClipboardSequenceBefore=$clipboardBefore;ClipboardSequenceAfter=$clipboardAfter;ClipboardUnchanged=$clipboardUnchanged;
+            SshKeysDeleted=$keysDeleted;OwnedJobCleanedUp=($null -eq $cleanupError);OwnedProcessCount=$owned;DriverExit=$code}
+        $guards | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'startup-state.json')
     }
-    if($code -ne 0) { throw "ConPTY reply-path driver failed ($code); inspect results.json in Run." }
-    Write-Host "ConPTY reply-path harness completed; see $(Join-Path $Run 'results.md')."; exit 0
+    if($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged -or -not $keysDeleted) {
+        Write-Host ('ISOLATION GUARD CHANGED: startup ledger unchanged={0}, history unchanged={1}, AUMID key unchanged={2}, clipboard sequence unchanged={3}, ssh keys deleted={4}; stop launches.' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted)
+        exit 3
+    }
+    if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 2 }
+    switch($code) {
+        0 { Write-Host "ConPTY reply-path harness: COMPLETE; see $(Join-Path $Run 'results.md')."; exit 0 }
+        1 { Write-Host "ConPTY reply-path harness: INCOMPLETE (a reader, case 7 or a positive control failed); see $(Join-Path $Run 'results.md')."; exit 1 }
+        default { Write-Host "ConPTY reply-path harness: infrastructure failure ($code); inspect results.json and driver-error.txt in Run."; exit 2 }
+    }
 }
 
 # Driver: on the private desktop, with sandboxed AppData. Its own console is
 # hidden, so a failure before the results are written goes to driver-error.txt.
 trap { if(-not $Driver) { break }; Set-Content -LiteralPath (Join-Path $Run 'driver-error.txt') -Value ("{0}`n{1}" -f $_.Exception.Message,$_.InvocationInfo.PositionMessage); exit 2 }
-if($ReaderList) { $Readers=$ReaderList.Split(',') }
 $driverDesktop=[ReplyPath]::DesktopName()
 if(-not $driverDesktop.StartsWith('noctty-replypath-',[StringComparison]::Ordinal)) { throw 'Driver is not on the task private desktop.' }
 if(-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable'))) { throw 'Driver requires portable marker.' }
+if(Test-Path -LiteralPath (Join-Path $Bin 'noctty.ico')) { throw 'Driver refuses a portable copy that holds noctty.ico.' }
 foreach($dir in @('LOCALAPPDATA','APPDATA')) {
     $value=[Environment]::GetEnvironmentVariable($dir)
     if(-not $value -or -not [IO.Path]::GetFullPath($value).StartsWith($Run.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Driver AppData isolation failed.' }
@@ -386,11 +524,11 @@ $configLines=@('shell-integration = none','single-instance = false','window-save
 foreach($key in $bindings.Keys) { $configLines+=(Binding-Line $key $bindings[$key].Bytes) }
 $configLines | Set-Content -LiteralPath $config -Encoding ascii
 $job=[ReplyPath]::CreateOwnedJob(); $sessions=[Collections.Generic.List[object]]::new(); $failures=[Collections.Generic.List[string]]::new()
-$frequency=[Diagnostics.Stopwatch]::Frequency
+$case7=$null
 
 function Fkey([string] $Key) {
     $s=[ReplyPath+Stroke]::new()
-    $s.Vk=switch($Key) { 'pause' { 0x13 } 'scroll_lock' { 0x91 } 'print_screen' { 0x2C } default { 0x6F+[int]$Key.Substring(1) } }
+    $s.Vk=switch($Key) { 'pause' { 0x13 } 'scroll_lock' { 0x91 } 'print_screen' { 0x2C } 'insert' { 0x2D } 'home' { 0x24 } 'end' { 0x23 } default { 0x6F+[int]$Key.Substring(1) } }
     return $s
 }
 function Vk([int] $Vk, [switch] $Shift) { $s=[ReplyPath+Stroke]::new(); $s.Vk=$Vk; $s.Shift=$Shift.IsPresent; return $s }
@@ -418,32 +556,37 @@ function Wait-Ready([string] $Path, $Process, [int] $Seconds) {
 function Invoke-ReaderSession([string] $Mode) {
     $dir=Join-Path $Run "reader-$Mode"; [void](New-Item -ItemType Directory -Path $dir)
     $log=Join-Path $dir 'reader.log'; $ready=Join-Path $dir 'ready.txt'; $stop=Join-Path $dir 'stop.txt'
-    $steps=[Collections.Generic.List[object]]::new(); $session=@{Mode=$Mode;Steps=$steps;Dir=$dir}
-    $readerMode=if($Mode -in @('c-inbox','d')) { 'c' } else { $Mode }
+    $steps=[Collections.Generic.List[object]]::new(); $session=@{Mode=$Mode;Steps=$steps;Dir=$dir;Planned=@(Get-PlannedSteps $Mode).Count}
+    $sessions.Add($session)
+    $readerMode=if($Mode -in @('c-inbox','d','d-notiming')) { 'c' } else { $Mode }
     $readerArgs='{0} "{1}" "{2}" "{3}"' -f $readerMode,$log,$ready,$stop
-    $sshd=$null
-    if($Mode -eq 'd') {
-        # One connection (-d), loopback only, this run's config; its debug log stays in Run.
-        if($Run -match '\s') { throw 'Reader d needs a Run path without spaces: the far side gets the reader command unquoted.' }
-        $sshDir=Join-Path $Run 'sshd'; $ssh=Get-Content -LiteralPath (Join-Path $sshDir 'ssh.json') -Raw | ConvertFrom-Json
-        $openssh=Join-Path ([Environment]::GetFolderPath('System')) 'OpenSSH'
-        $sshd=[ReplyPath]::Launch((Join-Path $openssh 'sshd.exe'),('"{0}" -d -f "{1}" -E "{2}"' -f (Join-Path $openssh 'sshd.exe'),(Join-Path $sshDir 'sshd_config'),(Join-Path $sshDir 'sshd-debug.log')),$sshDir,"WinSta0\$driverDesktop",$job,0x08000000)
-        $deadline=[datetime]::UtcNow.AddSeconds(15)
-        while(-not (Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort $ssh.Port -ErrorAction SilentlyContinue)) {
-            if([datetime]::UtcNow -ge $deadline -or [ReplyPath]::WaitForSingleObject($sshd.process,0) -eq 0) { throw 'The run''s sshd did not start listening.' }
-            Start-Sleep -Milliseconds 100
-        }
-        $session.Ssh=@{Version=$ssh.SshVersion;SshdPid=$sshd.pid}
-        $sshArgs='-tt -F none -p {0} -i "{1}" -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o UserKnownHostsFile="{2}" -o StrictHostKeyChecking=accept-new 127.0.0.1' -f $ssh.Port,(Join-Path $sshDir 'client_ed25519'),(Join-Path $sshDir 'known_hosts')
-        $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" {3} {4} {5}' -f $exe,$config,(Join-Path $openssh 'ssh.exe'),$sshArgs,$reader,$readerArgs.Replace('"','')
-    } else {
-        $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" {3}' -f $exe,$config,$reader,$readerArgs
-    }
-    if($Mode -eq 'c-inbox') { $env:NOCTTY_CONPTY='inbox' }
-    try { $terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000) }
-    finally { if($Mode -eq 'c-inbox') { Remove-Item Env:NOCTTY_CONPTY } }
+    $sshd=$null; $terminal=$null
     $layout=$null; $surface=[IntPtr]::Zero; $thread=0
     try {
+        if($Mode -in @('d','d-notiming')) {
+            # One connection (-d), loopback only, this run's config; its debug log stays in Run.
+            $sshDir=Join-Path $Run 'sshd'; $ssh=Get-Content -LiteralPath (Join-Path $sshDir 'ssh.json') -Raw | ConvertFrom-Json
+            $openssh=Join-Path ([Environment]::GetFolderPath('System')) 'OpenSSH'
+            $sshd=[ReplyPath]::Launch((Join-Path $openssh 'sshd.exe'),('"{0}" -d -f "{1}" -E "{2}"' -f (Join-Path $openssh 'sshd.exe'),(Join-Path $sshDir 'sshd_config'),(Join-Path $sshDir "sshd-debug-$Mode.log")),$sshDir,"WinSta0\$driverDesktop",$job,0x08000000)
+            # Connect only once this run's sshd, by its PID, owns the listening port.
+            $deadline=[datetime]::UtcNow.AddSeconds(15)
+            while($true) {
+                $listener=@(Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort $ssh.Port -ErrorAction SilentlyContinue)
+                if($listener.Count -gt 0 -and @($listener | Where-Object { $_.OwningProcess -ne $sshd.pid }).Count -gt 0) { throw 'Another process listens on the run''s sshd port; nothing connects.' }
+                if($listener.Count -gt 0) { break }
+                if([datetime]::UtcNow -ge $deadline -or [ReplyPath]::WaitForSingleObject($sshd.process,0) -eq 0) { throw 'The run''s sshd did not start listening.' }
+                Start-Sleep -Milliseconds 100
+            }
+            $session.Ssh=@{Version=$ssh.SshVersion;SshdPid=$sshd.pid;DefaultShell=$ssh.DefaultShell;DefaultShellCommandOption=$ssh.DefaultShellCommandOption;PwshCurrentUserProfilesExist=$ssh.PwshCurrentUserProfilesExist}
+            $timing=if($Mode -eq 'd-notiming') { ' -o ObscureKeystrokeTiming=no' } else { '' }
+            $sshArgs='-tt -a -x -k -F none -p {0} -i "{1}" -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o ClearAllForwardings=yes -o UserKnownHostsFile="{2}" -o StrictHostKeyChecking=accept-new{3} 127.0.0.1' -f $ssh.Port,(Join-Path $sshDir 'client_ed25519'),(Join-Path $sshDir 'known_hosts'),$timing
+            $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" {3} {4} {5}' -f $exe,$config,(Join-Path $openssh 'ssh.exe'),$sshArgs,$reader,$readerArgs.Replace('"','')
+        } else {
+            $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" {3}' -f $exe,$config,$reader,$readerArgs
+        }
+        if($Mode -eq 'c-inbox') { $env:NOCTTY_CONPTY='inbox' }
+        try { $terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000) }
+        finally { if($Mode -eq 'c-inbox') { Remove-Item Env:NOCTTY_CONPTY } }
         $deadline=[datetime]::UtcNow.AddSeconds(60)
         do {
             $all=[ReplyPath]::Surfaces($terminal.pid); if($all.Count -gt 0) { $surface=$all[0] }
@@ -454,8 +597,9 @@ function Invoke-ReaderSession([string] $Mode) {
         if($surface -eq [IntPtr]::Zero) { throw "No noctty surface ($Mode)." }
         if(-not [ReplyPath]::OnCallerDesktop($surface)) { throw 'The noctty surface is not on the private desktop; nothing is posted to it.' }
         $probe=Wait-Ready $ready $terminal 30
-        $session.Ready=@{Pid=[int]$probe[0];InputModeBefore=('0x{0:x}' -f [uint32]$probe[1]);InputMode=('0x{0:x}' -f [uint32]$probe[2]);OutputMode=('0x{0:x}' -f [uint32]$probe[3]);InputCodePage=[int]$probe[4]}
-        if($Mode -eq 'd') {
+        $session.Ready=@{Pid=[int]$probe[0];InputModeBefore=('0x{0:x}' -f [uint32]$probe[1]);InputMode=('0x{0:x}' -f [uint32]$probe[2]);OutputMode=('0x{0:x}' -f [uint32]$probe[3]);InputCodePage=[int]$probe[4];
+            LocalAppDataInRun=$(switch($probe[6]) { '1' { $true } '0' { $false } default { 'unset' } })}
+        if($Mode -in @('d','d-notiming')) {
             # ssh.exe's own console input mode, read from its pseudo console (noctty's bundled one).
             $sshPid=@(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" | Where-Object { $_.ParentProcessId -eq $terminal.pid } | Select-Object -ExpandProperty ProcessId)
             if($sshPid.Count -eq 1) {
@@ -469,64 +613,42 @@ function Invoke-ReaderSession([string] $Mode) {
         $layout=[ReplyPath]::UseLayout($surface,$thread,'00000409')
         if($null -eq $layout) { throw 'The surface thread US layout could not be set.' }
         Start-Sleep -Milliseconds 800
-
-        function Step([string] $Name, [string[]] $Keys, [int] $GapMs=0, [object[]] $Typed=@()) {
+        foreach($planned in @(Get-PlannedSteps $Mode)) {
             $count=Delimiters $log
             $start=[ReplyPath]::Ticks()
-            if($Typed.Count -gt 0) { [ReplyPath]::Keys($surface,$thread,[ReplyPath+Stroke[]]$Typed,60,150) }
+            if($planned.Typed) { [ReplyPath]::Keys($surface,$thread,[ReplyPath+Stroke[]]@($planned.Typed | ForEach-Object { Vk $_.Vk -Shift:([bool]$_.Shift) }),60,150) }
             $first=$true
-            foreach($k in $Keys) {
-                if(-not $first -and $GapMs -gt 0) { Start-Sleep -Milliseconds $GapMs }
+            foreach($k in $planned.Keys) {
+                if(-not $first -and $planned.Gap) { Start-Sleep -Milliseconds $planned.Gap }
                 [ReplyPath]::Keys($surface,$thread,[ReplyPath+Stroke[]]@((Fkey $k)),20,60); $first=$false
             }
             Start-Sleep -Milliseconds 400 # a reply to a query arrives before the delimiter
             [ReplyPath]::Keys($surface,$thread,[ReplyPath+Stroke[]]@((Fkey 'f1')),20,60)
             $deadline=[datetime]::UtcNow.AddSeconds(5)
             while((Delimiters $log) -le $count) {
-                if([datetime]::UtcNow -ge $deadline) { $steps.Add(@{Name=$Name;Keys=$Keys;Start=$start;Barrier='TIMEOUT'}); throw "Delimiter after '$Name' never reached the reader ($Mode)." }
+                if([datetime]::UtcNow -ge $deadline) { $steps.Add(@{Name=$planned.Name;Keys=$planned.Keys;Start=$start;Barrier='TIMEOUT'}); throw "Delimiter after '$($planned.Name)' never reached the reader ($Mode)." }
                 Start-Sleep -Milliseconds 20
             }
-            $steps.Add(@{Name=$Name;Keys=$Keys;Start=$start;Barrier='OK'})
+            $steps.Add(@{Name=$planned.Name;Keys=$planned.Keys;Start=$start;Barrier='OK'})
+            if($Sabotage -eq 'reader' -and $planned.Name -eq 'mode 9001: DECRQM') {
+                # The dead-reader control: stop this session's reader, by its own PID, once it is identified.
+                $victim=Get-Process -Id $session.Ready.Pid -ErrorAction SilentlyContinue
+                if($victim -and $victim.Path -ieq $reader) { [ReplyPath]::KillExact($session.Ready.Pid) } else { throw 'Sabotage reader: the reader PID did not identify the reader.' }
+            }
         }
-        # Real state: typed keys go to conhost as 9001 records first.
-        Step 'typed: Shift tap, h, i (9001 records)' @() 0 @((Vk 0x10 -Shift),(Vk 0x48),(Vk 0x49))
-        Step 'mode 9001: DECRQM' @('pause')
-        if($Mode -in @('a','a16')) {
-            Step 'push Kitty flags (CSI > 1 u)' @('f2')
-            Step 'Kitty flags: CSI ? u' @('scroll_lock')
-            Step 'typed after the push: Shift tap, h' @() 0 @((Vk 0x10 -Shift),(Vk 0x48))
-        }
-        Step 'case 6: DA1 (before)' @('f4')
-        Step 'case 6: OSC 11 (before)' @('f5')
-        Step 'case 1: noctty kitty reply, OK' @('f6')
-        Step 'case 1: noctty kitty reply, error' @('f7')
-        Step 'case 1: APC OK, one write' @('f8')
-        Step 'case 1: APC error, one write' @('f9')
-        Step 'case 1: APC OK, split mid-body' @('f10','f11') 300
-        Step 'case 1: APC OK, split ESC|_' @('f12','f13') 300
-        Step 'case 1: APC OK, split ESC|\' @('f14','f15') 300
-        Step 'case 2: APC feature-shaped' @('f16')
-        Step 'case 3: 2033 report, visible' @('f17')
-        Step 'case 3: DECRPM 2033' @('f18')
-        Step 'case 4: multiple-cursors reply' @('f19')
-        Step 'case 6: injected OSC 11 reply' @('f20')
-        Step 'case 6: injected OSC 4 reply' @('print_screen')
-        Step 'case 6: injected DA1 reply' @('f21')
-        Step 'case 7 shape: 2033 report, hidden' @('f22')
-        Step 'case 6: DA1 (after)' @('f4')
-        Step 'case 6: OSC 11 (after)' @('f5')
-        if($Mode -in @('a','a16')) { Step 'pop Kitty flags (CSI < u)' @('f3') }
     } catch {
         $failures.Add("reader ${Mode}: $($_.Exception.Message)")
     } finally {
         if($layout) { try { [ReplyPath]::RestoreLayout($surface,$thread,$layout) } catch { $failures.Add("reader ${Mode}: layout restore: $($_.Exception.Message)") } }
         Set-Content -LiteralPath $stop -Value '' -NoNewline
-        if([ReplyPath]::WaitForSingleObject($terminal.process,10000) -ne 0) {
-            # Only this launch's own process handle, which the run's job owns.
-            $session.Stopped='terminated after the reader stopped'
-            [void][ReplyPath]::TerminateProcess($terminal.process,1); [void][ReplyPath]::WaitForSingleObject($terminal.process,5000)
-        } else { $session.Stopped='exited after the reader stopped' }
-        [void][ReplyPath]::CloseHandle($terminal.thread); [void][ReplyPath]::CloseHandle($terminal.process)
+        if($terminal) {
+            if([ReplyPath]::WaitForSingleObject($terminal.process,10000) -ne 0) {
+                # Only this launch's own process handle, which the run's job owns.
+                $session.Stopped='terminated after the reader stopped'
+                [void][ReplyPath]::TerminateProcess($terminal.process,1); [void][ReplyPath]::WaitForSingleObject($terminal.process,5000)
+            } else { $session.Stopped='exited after the reader stopped' }
+            [void][ReplyPath]::CloseHandle($terminal.thread); [void][ReplyPath]::CloseHandle($terminal.process)
+        }
         if($sshd) {
             # sshd -d serves one connection and exits; otherwise stop this launch's own handle.
             if([ReplyPath]::WaitForSingleObject($sshd.process,10000) -ne 0) { $session.SshdStopped='terminated'; [void][ReplyPath]::TerminateProcess($sshd.process,1); [void][ReplyPath]::WaitForSingleObject($sshd.process,5000) }
@@ -535,7 +657,6 @@ function Invoke-ReaderSession([string] $Mode) {
         }
     }
     $session.Log=@(Read-Log $log)
-    $sessions.Add($session)
 }
 
 # Splits a reader log at its delimiters: segment i is what arrived for step i.
@@ -543,7 +664,7 @@ function Get-Segments($Session) {
     $segments=[Collections.Generic.List[object]]::new()
     $current=@{Records=[Collections.Generic.List[string]]::new();Units=[Text.StringBuilder]::new();Reads=[Collections.Generic.List[string]]::new();Commands=[Collections.Generic.List[string]]::new()}
     $control=@(1,2,4,5,6,14,15,16,18)
-    $byteMode=$Session.Mode -in @('c','c-inbox','d')
+    $byteMode=$Session.Mode -in @('c','c-inbox','d','d-notiming')
     foreach($line in $Session.Log) {
         $f=$line.Split(',')
         switch($f[0]) {
@@ -569,30 +690,68 @@ function Get-Segments($Session) {
 }
 
 # What the source predicts (kitty report section 3) for a step and reader.
-# Readers c-inbox and d have the in-box conhost for a pseudo console, which
-# answers DA1 and DECRQM itself and returns no OSC 11 or kitty reply
-# (docs/windows-vt-conformance.md, the measured query ownership differential);
-# for injected replies the prediction is reader c's, from the 1.24 source.
+# Control marks a positive control: the run is incomplete unless it comes back
+# as predicted. Readers c-inbox, d and d-notiming have the in-box conhost for a
+# pseudo console, which answers DA1 and DECRQM itself and returns no OSC 11 or
+# kitty reply (docs/windows-vt-conformance.md, the measured query ownership
+# differential); for their injected replies the prediction is reader c's, from
+# the 1.24 source, except d-notiming's, where ssh.exe forwards its 16-record
+# reads unmerged and the in-box far end keeps only the last (council round 1).
 function Get-Prediction([string] $Step, [string] $Mode, [string] $Written) {
     $vtInput=$Mode -ne 'b'
-    $inbox=$Mode -in @('c-inbox','d')
-    if($Step -eq 'mode 9001: DECRQM') { if($inbox) { return @{Text='answered by the in-box conhost';Regex='^\x1b\[\?9001;[0-4]\$y$'} } else { return @{Text='set (1)';Regex='^\x1b\[\?9001;1\$y$'} } }
-    if($Step -eq 'Kitty flags: CSI ? u') { return @{Text='flags 1';Regex='^\x1b\[\?1u$'} }
-    if($inbox -and $Step -like 'case 6: DA1*' -and $Step -notlike '*injected*') { return @{Text='the in-box conhost''s own DA1';Regex='^\x1b\[\?61;[0-9;]+c$'} }
-    if($inbox -and (($Step -like 'case 6: OSC 11*' -and $Step -notlike '*injected*') -or $Step -like 'case 1: noctty kitty*')) { return @{Text='no reply (in-box conhost)';Exact=''} }
-    if($Step -like 'case 1: noctty kitty reply, OK') { if($vtInput) { return @{Text='whole';Regex='^\x1b_Gi=31;OK\x1b\\$'} } else { return @{Text='lone \';Regex='^\\$'} } }
-    if($Step -like 'case 1: noctty kitty reply, error') { if($vtInput) { return @{Text='whole';Regex='^\x1b_Gi=32;E[A-Z]+:[^\x1b]*\x1b\\$'} } else { return @{Text='lone \';Regex='^\\$'} } }
-    if($Step -like 'case 6: DA1*' -and $Step -notlike '*injected*') { return @{Text='a DA1 reply';Regex='^\x1b\[\?[0-9;]+c$'} }
-    if($Step -like 'case 6: OSC 11*' -and $Step -notlike '*injected*') { return @{Text='an OSC 11 reply';Regex='^\x1b\]11;rgb:[0-9a-f]+/[0-9a-f]+/[0-9a-f]+(\x1b\\|\x07)$'} }
-    if($Step -like 'case 1: APC*' -or $Step -like 'case 2:*') {
+    $inbox=$Mode -in @('c-inbox','d','d-notiming')
+    if($Step -eq 'mode 9001: DECRQM') { if($inbox) { return @{Text='answered by the in-box conhost';Regex='^\x1b\[\?9001;[0-4]\$y$';Control=$true} } else { return @{Text='set (1)';Regex='^\x1b\[\?9001;1\$y$';Control=$true} } }
+    if($Step -eq 'Kitty flags: CSI ? u') { return @{Text='flags 1';Regex='^\x1b\[\?1u$';Control=$true} }
+    if($Step -like 'case 6: DA1 (*') {
+        if($inbox) { return @{Text='the in-box conhost''s own DA1';Regex='^\x1b\[\?61;[0-9;]+c$';Control=$true} }
+        return @{Text='noctty''s DA1';Regex='^\x1b\[\?62;[0-9;]+c$';Control=$true}
+    }
+    if($Step -like 'case 6: OSC 11 (*') {
+        if($inbox) { return @{Text='no reply (in-box conhost)';Exact=''} }
+        return @{Text='noctty''s OSC 11 reply';Regex='^\x1b\]11;rgb:[0-9a-f]{4}/[0-9a-f]{4}/[0-9a-f]{4}(\x1b\\|\x07)$';Control=$true}
+    }
+    if($Step -like 'case 1: noctty kitty reply, *') {
+        if($inbox) { return @{Text='no reply (in-box conhost)';Exact=''} }
         if(-not $vtInput) { return @{Text='lone \';Exact='\'} }
-        if($Step -like '*ESC|_*') { return @{Text='the run without its ESC';Exact=$Written.Substring(1)} }
-        return @{Text='whole';Exact=$Written}
+        if($Step -like '*, OK') { return @{Text='whole';Regex='^\x1b_Gi=31;OK\x1b\\$'} }
+        return @{Text='whole';Regex='^\x1b_Gi=32;E[A-Z]+:[^\x1b]*\x1b\\$'}
     }
-    if($Step -like 'case 3:*' -or $Step -like 'case 4:*' -or $Step -like 'case 6: injected*' -or $Step -like 'case 7 shape:*') {
-        if($vtInput) { return @{Text='whole, as an escape';Exact=$Written} } else { return @{Text='whole, as typed text';Exact=$Written} }
+    $prediction=$null
+    if($Step -like 'case 1: APC*' -or $Step -like 'case 2:*') {
+        if(-not $vtInput) { $prediction=@{Text='lone \';Exact='\'} }
+        elseif($Step -like '*ESC|_*') { $prediction=@{Text='the run without its ESC';Exact=$Written.Substring(1)} }
+        else { $prediction=@{Text='whole';Exact=$Written} }
+    } elseif($Step -like 'case 3:*' -or $Step -like 'case 4:*' -or $Step -like 'case 6: injected*' -or $Step -like 'case 7 shape:*') {
+        if($vtInput) { $prediction=@{Text='whole, as an escape';Exact=$Written} } else { $prediction=@{Text='whole, as typed text';Exact=$Written} }
+        # The injected controls: an OSC and a DA1 reply must reach a bundled reader, and a DA1 reply an in-box one.
+        if(($Step -like 'case 6: injected*' -and -not $inbox) -or $Step -eq 'case 6: injected DA1 reply') { $prediction.Control=$true }
     }
-    return $null
+    if($prediction -and $Mode -eq 'd-notiming' -and $prediction.Exact.Length -gt 16) {
+        $prediction=@{Text='its last read only (16-record reads, unmerged)';Exact=$prediction.Exact.Substring(16)}
+    }
+    return $prediction
+}
+
+# The run's exit: 2 for infrastructure, 1 when the run is incomplete or a
+# positive control differs, 0 when every requested reader ran every planned
+# step, case 7 ran with its controls (unless skipped), and every control held.
+function Get-RunExit($Failures, $Rows, $Sessions, $Requested, $Case7, [bool] $Case7Requested) {
+    $why=[Collections.Generic.List[string]]::new()
+    if(@($Failures | Where-Object { $_ -like 'infrastructure*' -or $_ -like 'owned job*' }).Count -gt 0) { return @{Code=2;Why=@($Failures)} }
+    foreach($f in $Failures) { $why.Add($f) }
+    foreach($mode in $Requested) {
+        $s=@($Sessions | Where-Object { $_.Mode -eq $mode })
+        if($s.Count -ne 1) { $why.Add("reader ${mode}: no session"); continue }
+        $done=@($s[0].Steps | Where-Object { $_.Barrier -eq 'OK' }).Count
+        if($done -ne $s[0].Planned) { $why.Add("reader ${mode}: $done of $($s[0].Planned) steps") }
+    }
+    foreach($r in @($Rows | Where-Object { $_.Control -and $_.Verdict -ne 'as predicted' })) { $why.Add("control failed: $($r.Reader) / $($r.Step)") }
+    if($Case7Requested) {
+        if(-not $Case7 -or -not $Case7.Complete) { $why.Add('case 7: incomplete') }
+        elseif(-not $Case7.InjectedReportShown) { $why.Add('case 7: the injected 2033 report did not show at the prompt (positive control)') }
+        elseif(-not $Case7.TabSwitched) { $why.Add('case 7: the tab switch did not happen (positive control)') }
+    }
+    return @{Code=$(if($why.Count -gt 0) { 1 } else { 0 });Why=@($why)}
 }
 
 try {
@@ -601,13 +760,13 @@ try {
     if(-not $SkipPSReadLine) {
         # Case 7: PSReadLine. History goes to a run-local file, never saved, before the first read;
         # the ready file is written only once both options read back. The shell then sets ?2033h.
+        $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;NotMeasured=@($notMeasured | Select-Object -First 2)}
         $dir=Join-Path $Run 'psreadline'; [void](New-Item -ItemType Directory -Path $dir)
         $shellReady=Join-Path $dir 'ready.txt'; $shellHistory=Join-Path $dir 'history.txt'
         $pwshExe=(Get-Command pwsh.exe).Source
         $startup="Set-PSReadLineOption -HistorySavePath '$shellHistory' -HistorySaveStyle SaveNothing; if((Get-PSReadLineOption).HistorySaveStyle -eq 'SaveNothing' -and (Get-PSReadLineOption).HistorySavePath -ceq '$shellHistory') { [Console]::Write([char]27+'[?2033h'); Set-Content -LiteralPath '$shellReady' -Value ready }"
         $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" -NoLogo -NoProfile -NoExit -Command "{3}"' -f $exe,$config,$pwshExe,$startup
         $shell=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)
-        $case7=@{Steps=[Collections.Generic.List[object]]::new()}
         $layout=$null
         try {
             $deadline=[datetime]::UtcNow.AddSeconds(60); $surface=[IntPtr]::Zero
@@ -618,7 +777,7 @@ try {
                 Start-Sleep -Milliseconds 100
             } while([datetime]::UtcNow -lt $deadline)
             if($surface -eq [IntPtr]::Zero -or -not (Test-Path -LiteralPath $shellReady)) { throw 'pwsh inside noctty did not become ready (history isolation not confirmed); nothing typed.' }
-            if(-not [ReplyPath]::OnCallerDesktop($surface)) { throw 'The pwsh surface is not on the private desktop.' }
+            if(-not [ReplyPath]::OnCallerDesktop($surface)) { throw 'The pwsh surface is not on the private desktop; nothing is posted to it.' }
             $thread=[ReplyPath]::WindowThread($surface)
             $layout=[ReplyPath]::UseLayout($surface,$thread,'00000409')
             if($null -eq $layout) { throw 'pwsh surface US layout could not be set.' }
@@ -629,7 +788,7 @@ try {
                 $out=Join-Path $dir ("screen-{0}.txt" -f $Label)
                 $p=[ReplyPath]::Launch($attachInfo,('"{0}" {1} "{2}" dump' -f $attachInfo,$shellPids[0],$out),$dir,"WinSta0\$driverDesktop",$job,0x08000000)
                 try {
-                    if([ReplyPath]::WaitForSingleObject($p.process,10000) -ne 0) { return @{Error='attach timeout'} }
+                    if([ReplyPath]::WaitForSingleObject($p.process,10000) -ne 0) { throw "attach timeout ($Label)" }
                     $text=@(Get-Content -LiteralPath $out -Encoding utf8)
                     $head=$text[0].Split(',')
                     $rows=@($text | Select-Object -Skip 1 | Where-Object { $_ -ne '' })
@@ -651,6 +810,8 @@ try {
                 [ReplyPath]::Keys($surface,$thread,[ReplyPath+Stroke[]]@((Vk 0x1B)),20,60)
                 Start-Sleep -Milliseconds 500
             }
+            # The positive control for the null below: the injected report shows as typed text.
+            $case7.InjectedReportShown=[bool](@($case7.Steps[0].Prompt) -join '' -cmatch '\[\?999;2n$')
             # The real thing today: ?2033h was set by the shell's startup; switch away and back.
             $before=Read-Shell 'before-tab-switch'
             [ReplyPath]::Keys($surface,$thread,[ReplyPath+Stroke[]]@((Fkey 'f23')),20,60)
@@ -662,6 +823,8 @@ try {
             $visibleAfter=[ReplyPath]::IsWindowVisible($surface)
             $afterSwitch=Read-Shell 'after-tab-switch'
             $case7.TabSwitch=@{SurfacesDuring=$surfacesDuring;PwshSurfaceVisibleDuring=$visibleDuring;PwshSurfaceVisibleAfter=$visibleAfter;PromptBefore=$before.Prompt;PromptAfter=$afterSwitch.Prompt}
+            $case7.TabSwitched=($surfacesDuring -ge 2 -and -not $visibleDuring -and $visibleAfter)
+            $case7.Complete=$true
         } catch {
             $failures.Add("case 7: $($_.Exception.Message)")
         } finally {
@@ -687,26 +850,47 @@ foreach($session in $sessions) {
         $prediction=Get-Prediction $step.Name $session.Mode $written
         $verdict='-'
         if($prediction) {
+            # Ordinal: pwsh 7's -ceq compares in the invariant culture, where ICU gives ESC and the other controls no weight.
             if($prediction.Regex) { $verdict=if($observed -cmatch $prediction.Regex) { 'as predicted' } else { 'DIFFERS' } }
-            else { $verdict=if($observed -ceq $prediction.Exact) { 'as predicted' } else { 'DIFFERS' } }
+            else { $verdict=if([string]::Equals($observed,[string]$prediction.Exact,[StringComparison]::Ordinal)) { 'as predicted' } else { 'DIFFERS' } }
         }
         $rows.Add([ordered]@{Reader=$session.Mode;Step=$step.Name;Written=(Show $written);WrittenHex=(Hex $written);Observed=(Show $observed);ObservedHex=(Hex $observed);
-            Predicted=$(if($prediction){$prediction.Text}else{'-'});Verdict=$verdict;Reads=@($(if($segment){$segment.Reads}));Records=@($(if($segment){$segment.Records}));Commands=@($(if($segment){$segment.Commands}))})
+            Predicted=$(if($prediction){$prediction.Text}else{'-'});Control=[bool]($prediction -and $prediction.Control);Verdict=$verdict;
+            Reads=@($(if($segment){$segment.Reads}));Records=@($(if($segment){$segment.Records}));Commands=@($(if($segment){$segment.Commands}))})
     }
 }
+$exit=Get-RunExit $failures $rows $sessions $Readers $case7 (-not $SkipPSReadLine)
+$os=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$inboxConhost=Join-Path ([Environment]::GetFolderPath('System')) 'conhost.exe'
+$controls=@($rows | Where-Object { $_.Control })
 $result=[ordered]@{
     Harness='hidden-win11-conpty-reply-path.ps1'
+    Exit=$exit.Code
+    Why=$exit.Why
+    Sabotage=$Sabotage
+    Controls=('{0}/{1} as predicted' -f @($controls | Where-Object { $_.Verdict -eq 'as predicted' }).Count,$controls.Count)
+    Windows=[ordered]@{CurrentBuild=$os.CurrentBuild;UBR=$os.UBR;DisplayVersion=$os.DisplayVersion;InBoxConhost=(Get-Item -LiteralPath $inboxConhost).VersionInfo.FileVersion}
     ConPty=[ordered]@{File=(Join-Path $Bin 'conpty.dll');FileVersion=(Get-Item -LiteralPath (Join-Path $Bin 'conpty.dll')).VersionInfo.FileVersion;OpenConsole=(Get-Item -LiteralPath (Join-Path $Bin 'OpenConsole.exe')).VersionInfo.FileVersion;Sha256=(Get-FileHash -LiteralPath (Join-Path $Bin 'conpty.dll')).Hash.ToLowerInvariant()}
-    Readers=@($sessions | ForEach-Object { [ordered]@{Mode=$_.Mode;Ready=$_.Ready;Steps=$_.Steps.Count;Stopped=$_.Stopped;Ssh=$_.Ssh;SshdStopped=$_.SshdStopped} })
+    Readers=@($sessions | ForEach-Object { [ordered]@{Mode=$_.Mode;Ready=$_.Ready;Steps=$_.Steps.Count;Planned=$_.Planned;Stopped=$_.Stopped;Ssh=$_.Ssh;SshdStopped=$_.SshdStopped} })
     Rows=$rows
     Case7=$case7
+    NotMeasured=$notMeasured
     OwnedProcessCount=$owned
     Failures=$failures
 }
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Run 'results.json') -Encoding utf8
 $md=[Collections.Generic.List[string]]::new()
-$md.Add('| Reader | Step | Written | Observed (key-down units / bytes) | Predicted | Verdict |'); $md.Add('|---|---|---|---|---|---|')
-foreach($r in $rows) { $md.Add(('| {0} | {1} | `{2}` | `{3}` | {4} | {5} |' -f $r.Reader,$r.Step,$r.Written,$r.Observed,$r.Predicted,$r.Verdict)) }
+$md.Add(('Exit {0}; controls {1}; sabotage {2}.' -f $exit.Code,$result.Controls,$Sabotage))
+foreach($w in $exit.Why) { $md.Add("- $w") }
+$md.Add('')
+$md.Add('| Reader | Step | Written | Observed (key-down units / bytes) | Predicted | Control | Verdict |'); $md.Add('|---|---|---|---|---|---|---|')
+foreach($r in $rows) { $md.Add(('| {0} | {1} | `{2}` | `{3}` | {4} | {5} | {6} |' -f $r.Reader,$r.Step,$r.Written,$r.Observed,$r.Predicted,$(if($r.Control){'yes'}else{''}),$r.Verdict)) }
+if($case7) {
+    $md.Add(''); $md.Add('Case 7 (PSReadLine):'); $md.Add('')
+    $md.Add('| Injected | Prompt line |'); $md.Add('|---|---|')
+    foreach($s in $case7.Steps) { $md.Add(('| `{0}` | `{1}` |' -f $s.Written,(@($s.Prompt) -join ''))) }
+    if($case7.TabSwitch) { $md.Add(''); $md.Add(('Tab switch with ?2033h set: surfaces during {0}, pwsh hidden during {1}, visible after {2}; prompt before `{3}`, after `{4}`.' -f $case7.TabSwitch.SurfacesDuring,(-not $case7.TabSwitch.PwshSurfaceVisibleDuring),$case7.TabSwitch.PwshSurfaceVisibleAfter,(@($case7.TabSwitch.PromptBefore) -join ''),(@($case7.TabSwitch.PromptAfter) -join ''))) }
+}
+$md.Add(''); $md.Add('Not measured:'); foreach($n in $notMeasured) { $md.Add("- $n") }
 $md | Set-Content -LiteralPath (Join-Path $Run 'results.md') -Encoding utf8
-if(@($failures | Where-Object { $_ -like 'infrastructure*' -or $_ -like 'owned job*' }).Count -gt 0) { exit 2 }
-exit 0
+exit $exit.Code

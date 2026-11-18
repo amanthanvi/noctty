@@ -403,6 +403,43 @@ reuses process numbers, found a cycle and spun at 100% CPU.
 `flagship/contracts/Contracts.97-ConptySync.ps1` drives that walk, and the dump
 reader's retry, with synthetic input.
 
+## hidden-win11-conpty-reply-path.ps1
+
+Which terminal replies reach a console program through ConPTY's input, and in
+what shape (the kitty report's shortlist #0; log entry REPLY-PATH-01 in
+`docs/agents/log/conpty.md`). On a private desktop, a portable copy of noctty
+(without `noctty.ico`, with its own AppData) runs `console-reply-reader.c` as
+its `-e` child in one reader state at a time, types keys so conhost has seen
+Win32 input mode records, then has noctty write each case's reply: its own
+answers to the reader's queries, and `text:` bindings with the exact bytes,
+a split as two writes. Case 7 injects the same shapes at a PSReadLine prompt
+with its history isolated. Results go to `results.json` and `results.md` in
+the run directory, each row observed against the source's prediction.
+
+```powershell
+pwsh -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir>
+pwsh -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir> `
+    -Readers a,a16,b,c,c-inbox,d,d-notiming -AllowSshFarSideUserProfileAndLocalAppData
+```
+
+The default readers are a, a16, b and c, all behind the bundled ConPTY.
+c-inbox puts reader c behind the in-box conhost. d and d-notiming run System32's
+`ssh.exe` to a one-connection `sshd.exe -d` on 127.0.0.1, run as you with keys
+made for the run and deleted after it, forwarding off on both ends;
+d-notiming adds `-o ObscureKeystrokeTiming=no`. Their far side runs through
+sshd's `DefaultShell` (`HKLM\SOFTWARE\OpenSSH`) as you, which loads your own
+PowerShell profile and uses your real `LOCALAPPDATA`, so they run only with
+`-AllowSshFarSideUserProfileAndLocalAppData`.
+
+Exit 0 means every requested reader ran every step, case 7 ran with its
+controls, and every positive control came back as predicted; other rows are
+observations, recorded either way. Exit 1 is an incomplete run or a failed
+control, 2 infrastructure, 3 a changed isolation guard (the startup ledger,
+the PowerShell history, the product AUMID's registration, the clipboard
+sequence number). `-Sabotage delimiter|reader|control` breaks one thing on
+purpose and must exit 1. `flagship/contracts/Contracts.98-ConptyReplyPath.ps1`
+pins the harness and refuses the round-1 council's mutations.
+
 ## interactive-win11-ime-candidate.ps1
 
 Interactive Win11 validation for IME candidate anchoring. It launches
