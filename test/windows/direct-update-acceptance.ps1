@@ -639,7 +639,7 @@ try {
     $result.ErrorLine=$_.InvocationInfo.ScriptLineNumber
     $rawStartup=Join-Path $Run 'app-raw.log'
     if(Test-Path -LiteralPath $rawStartup){
-        $startupText=Get-Content -LiteralPath $rawStartup -Raw
+        $startupText=[string](Get-Content -LiteralPath $rawStartup -Raw)
         $result.StartupErrorKinds=@{EnvironmentVariableNotFound=$startupText.Contains('EnvironmentVariableNotFound');FontFailure=($startupText -match '(?i)(font.*(?:fail|error)|(?:fail|error).*font)');RendererFailure=($startupText -match '(?i)(renderer.*(?:fail|error)|(?:fail|error).*renderer)')}
     }
     if($app){
