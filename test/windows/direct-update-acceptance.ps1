@@ -20,6 +20,7 @@ param(
     [ValidateSet('x64','arm64')] [string] $Architecture = 'x64',
     [ValidateSet('Stub','Rejected','Removed')] [string] $Expected = 'Stub',
     [ValidateRange(30,1800)] [int] $TimeoutSeconds = 300,
+    [switch] $HostedMesa,
     [switch] $Driver,
     [string] $DesktopName
 )
@@ -48,6 +49,41 @@ function Get-Listing([string] $Root) {
     @(Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName | ForEach-Object {
         @{ Name=[IO.Path]::GetRelativePath($Root,$_.FullName); Bytes=$_.Length }
     })
+}
+function Add-HostedMesa([string] $Root) {
+    # Static llvmpipe build: only this WGL DLL enters the portable folder.
+    # Upstream build source: mmozeiko/build-mesa@68725fb5d8e12c25efbb655780747bda417a53c1.
+    $pins=@{
+        x64='11dc079e356f33ce2ff84aa399c975da1a7bdd4c470f6eef4cf359ad8b9ca80f'
+        arm64='067f3aca687fbf5afc8a1f41487bd051487d964d6c1686757a4d8ee6a2d3b901'
+    }
+    $destination=Join-Path $Run 'mesa-26.3.0'
+    if(Test-Path -LiteralPath $destination){throw 'Mesa download directory must be new'}
+    $null=New-Item -ItemType Directory -Path $destination
+    $asset="mesa-llvmpipe-$Architecture-26.3.0.7z"
+    $url="https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/$asset"
+    $archive=Join-Path $destination $asset
+    Invoke-WebRequest -Uri $url -OutFile $archive
+    if((Get-Sha $archive) -cne $pins[$Architecture]){throw 'Mesa archive SHA-256 mismatch'}
+    $expanded=Join-Path $destination 'expanded'
+    $null=New-Item -ItemType Directory -Path $expanded
+    $seven=(Get-Command 7z.exe -ErrorAction Stop).Source
+    & $seven e $archive 'opengl32.dll' "-o$expanded" '-y' | Out-Null
+    if($LASTEXITCODE -ne 0){throw 'Mesa WGL extraction failed'}
+    $dll=Join-Path $expanded 'opengl32.dll'
+    $null=Get-PeDataDirectories $dll
+    $bytes=[IO.File]::ReadAllBytes($dll)
+    $machine=[BitConverter]::ToUInt16($bytes,([BitConverter]::ToInt32($bytes,0x3c)+4))
+    $expectedMachine=if($Architecture -ceq 'x64'){0x8664}else{0xaa64}
+    if($machine -ne $expectedMachine){throw 'Mesa PE machine mismatch'}
+    $injected=Join-Path $Root 'opengl32.dll'
+    if(Test-Path -LiteralPath $injected){throw 'Mesa injection would overwrite an existing file'}
+    $before=@(Get-Listing $Root)
+    Copy-Item -LiteralPath $dll -Destination $injected
+    $after=@(Get-Listing $Root)
+    $changes=@(Compare-Object @($before | ForEach-Object {"$($_.Name):$($_.Bytes)"}) @($after | ForEach-Object {"$($_.Name):$($_.Bytes)"}))
+    if($after.Count -ne $before.Count+1 -or $changes.Count -ne 1 -or $changes[0].SideIndicator -cne '=>' -or $changes[0].InputObject -cnotmatch '^opengl32\.dll:'){throw 'Mesa injection changed more than one extra file'}
+    Save-Receipt 'mesa-input.json' @{ Source=$url; Tag='26.3.0'; SourceCommit='68725fb5d8e12c25efbb655780747bda417a53c1'; Architecture=$Architecture; ArchiveSha256=$pins[$Architecture]; VerifiedBeforeExtraction=$true; DllSha256=Get-Sha $injected; DllBytes=$bytes.Length; PeMachine=$machine; AddedFiles=@('opengl32.dll'); BeforeFileCount=$before.Count; AfterFileCount=$after.Count; ManagedEntry=$false }
 }
 function Get-ReleaseCopy([string] $Version) {
     $destination = Join-Path $Run "download-$Version"
@@ -130,6 +166,7 @@ $processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchit
 if ($native -cne $Architecture -or $processArchitecture -cne $Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }
 $ephemeral=$env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
 if ([version]$FromVersion -lt [version]'1.3.136' -and -not $ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }
+if($HostedMesa -and (-not $ephemeral -or $FromVersion -cne '1.3.125' -or $TargetVersion -cne '1.3.137' -or $Expected -cne 'Stub')){throw 'Mesa fixture requires hosted 1.3.125 to 1.3.137 stub acceptance'}
 if (-not $Driver) {
     $Run=[IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new' }
@@ -143,6 +180,7 @@ if (-not $Driver) {
     $null=New-Item -ItemType Directory -Path $Run
     $source=Get-ReleaseCopy $FromVersion
     $target=Get-ReleaseCopy $TargetVersion
+    if($HostedMesa){Add-HostedMesa $source}
     Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral }
     foreach ($directory in @('localappdata','appdata','temp')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
     $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'
@@ -156,6 +194,7 @@ if (-not $Driver) {
         $env:LOCALAPPDATA=Join-Path $Run 'localappdata'; $env:APPDATA=Join-Path $Run 'appdata'; $env:TEMP=Join-Path $Run 'temp'; $env:TMP=$env:TEMP
         $pwsh=(Get-Process -Id $PID).Path
         $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Run "{2}" -FromVersion {3} -TargetVersion {4} -Architecture {5} -Expected {6} -TimeoutSeconds {7} -DesktopName {8} -Driver' -f $pwsh,$PSCommandPath,$Run,$FromVersion,$TargetVersion,$Architecture,$Expected,$TimeoutSeconds,$DesktopName
+        if($HostedMesa){$line+=' -HostedMesa'}
         $launch=[HiddenWin]::Launch($pwsh,$line,$Run,"WinSta0\$DesktopName",$job,(Join-Path $Run 'driver-raw.log'))
         $deadline=[datetime]::UtcNow.AddSeconds(3*$TimeoutSeconds+120)
         do {
@@ -213,6 +252,7 @@ try {
     $script:install=Join-Path $Run $inputs.SourceRelative
     $target=Join-Path $Run $inputs.TargetRelative
     $exe=Join-Path $script:install 'noctty.exe'
+    if($HostedMesa){$env:GALLIUM_DRIVER='llvmpipe'; $result.Mesa=Get-Content -LiteralPath (Join-Path $Run 'mesa-input.json') -Raw | ConvertFrom-Json}
     Set-Content -LiteralPath (Join-Path $script:install 'noctty.portable') -Value '' -NoNewline
     $result.BeforeVersion=Get-Version $exe 'before'
     if($result.BeforeVersion -cne "noctty $FromVersion"){throw 'Wrong source version'}
@@ -228,8 +268,19 @@ try {
     Wait-Check 'source window' { $windows=@([HiddenWin]::Hosts($app.pid)); if($windows.Count -eq 1){$script:hostWindow=$windows[0];return $true};return $false }
     Wait-Check 'source pane ready' { @([HiddenWin]::Surfaces($script:hostWindow)).Count -eq 1 } ([Math]::Min(60,$TimeoutSeconds))
     $panes=@([HiddenWin]::Surfaces($script:hostWindow))
-    # Force the check through the old app's normal binding dispatch.
-    [DirectUpdateUi]::CheckKey($panes[0]); $result.Steps.Add('Posted F7 check_for_updates')
+    $legacyPainted=$FromVersion -ceq '1.3.125'
+    if($HostedMesa){
+        $ownedProcess=[Diagnostics.Process]::GetProcessById($app.pid)
+        try{
+            $modules=@($ownedProcess.Modules | Where-Object ModuleName -IEQ 'opengl32.dll')
+            if($modules.Count -ne 1 -or $modules[0].FileName -ine (Join-Path $script:install 'opengl32.dll') -or (Get-Sha $modules[0].FileName) -cne $result.Mesa.DllSha256){throw 'Mesa module backing mismatch'}
+            $result.Mesa | Add-Member -NotePropertyName LoadedModuleMatches -NotePropertyValue $true
+        }finally{$ownedProcess.Dispose()}
+    }
+    # 1.3.125's manual completion masks its painted update notice with an info
+    # banner. Its configured automatic download uses the same pinned tag feed.
+    if($legacyPainted){$result.Steps.Add('Automatic check through configured tag feed')}
+    else{[DirectUpdateUi]::CheckKey($panes[0]); $result.Steps.Add('Posted F7 check_for_updates')}
     if($Expected -ceq 'Rejected') {
         Wait-Check 'incomplete payload banner' { (Read-ControlName $script:hostWindow 1913) -match 'portable ZIP payload is incomplete' }
         $result.Banner=Read-ControlName $script:hostWindow 1913
@@ -240,10 +291,15 @@ try {
         if($result.NoticeButton -cnotmatch '^Open Release(?::|$)'){throw 'Rejected update does not offer Open Release'}
         if((Get-Sha $exe) -cne $result.BeforeExeSha256){throw 'Rejected update changed the source executable'}
     } else {
-        Wait-Check 'verified portable stage' { $s=Get-UpdateState $script:install; $s -and $s.StagedVersion -ceq $TargetVersion -and $s.StagedKind -ceq 'portable' -and $s.FeedMatches -and (Read-ControlName $script:hostWindow 1914) -cmatch '^Install(?::|$)' }
-        $result.Banner=Read-ControlName $script:hostWindow 1913
-        $result.NoticeButton=Read-ControlName $script:hostWindow 1914
-        [DirectUpdateUi]::Click([DirectUpdateUi]::Child($script:hostWindow,1914)); $result.Steps.Add('Posted Install notification')
+        Wait-Check 'verified portable stage' { $s=Get-UpdateState $script:install; $s -and $s.StagedVersion -ceq $TargetVersion -and $s.StagedKind -ceq 'portable' -and $s.FeedMatches -and ($legacyPainted -or (Read-ControlName $script:hostWindow 1914) -cmatch '^Install(?::|$)') }
+        if($legacyPainted){
+            $result.LegacyInstall=[DirectUpdateUi]::LegacyInstall($script:hostWindow,$panes[0],$app.pid)
+            $result.Steps.Add('Posted host-only 1.3.125 painted Install pair')
+        }else{
+            $result.Banner=Read-ControlName $script:hostWindow 1913
+            $result.NoticeButton=Read-ControlName $script:hostWindow 1914
+            [DirectUpdateUi]::Click([DirectUpdateUi]::Child($script:hostWindow,1914)); $result.Steps.Add('Posted Install notification')
+        }
         # Some historical releases apply immediately; later releases ask first.
         Wait-Check 'pending or confirmation' { ([HiddenWin]::WaitForSingleObject($app.process,0) -eq 0) -or [HiddenWin]::IsWindowVisible([DirectUpdateUi]::Child($script:hostWindow,2003)) }
         if([HiddenWin]::WaitForSingleObject($app.process,0) -ne 0){
@@ -264,6 +320,10 @@ try {
         } elseif(Test-Path -LiteralPath (Join-Path $script:install 'ghostty-vt.dll')){throw 'Update did not remove the stub'}
     }
     $result.AfterVersion=Get-Version $exe 'after'
+    if($HostedMesa){
+        if((Get-Sha (Join-Path $script:install 'opengl32.dll')) -cne $result.Mesa.DllSha256){throw 'Mesa extra file was not preserved'}
+        $result.Mesa | Add-Member -NotePropertyName PreservedAfterUpdate -NotePropertyValue $true
+    }
     $expectedVersion=if($Expected -ceq 'Rejected'){$FromVersion}else{$TargetVersion}
     if($result.AfterVersion -cne "noctty $expectedVersion"){throw 'Wrong final version'}
     $result.FinalState=Get-UpdateState $script:install

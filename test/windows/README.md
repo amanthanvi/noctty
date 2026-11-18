@@ -862,6 +862,17 @@ architectures must both match `-Architecture`; x64 emulation proves no ARM64 run
 The historical self-signed publisher is verified cryptographically against the
 updater pin through the existing release verifier, without a trust-store import.
 
+For the 1.3.125 to 1.3.137 stub case, `-HostedMesa` explicitly opts a disposable
+hosted runner into Mesa 26.3.0 llvmpipe from `mmozeiko/build-mesa`. It is off by
+default and refused for other source/target cases. Both native archive hashes
+are pinned and checked before extraction. Only `opengl32.dll` is added beside
+the 1.3.125 executable; the receipt proves one extra file, its PE architecture,
+the loaded module's backing file, and preservation through the update. The
+candidate ZIP remains unchanged. This version uses its automatic check and a
+posted pair to the source-defined painted Install rectangle on the host window.
+No terminal mouse message or real input is used. This proves the updater path;
+it does not establish composed rendering or physical mouse behavior.
+
 For the v1.4.100 boundary, `-Expected Rejected` checks that a source on 1.3.136
 stays on its original executable and runs, reports the incomplete portable ZIP,
 and offers Open Release. `-Expected Removed`, from the previous stub-bearing
@@ -869,7 +880,7 @@ and offers Open Release. `-Expected Removed`, from the previous stub-bearing
 page and checking its manual instructions is a separate browser check. Neither
 future boundary is established by the 1.3.137 acceptance run.
 
-Run `direct-update-contract.ps1` for the admission baseline and its thirteen
+Run `direct-update-contract.ps1` for the admission baseline and its twenty-three
 parse-checked refusal controls; the flagship contracts include it. Public
 artifacts should contain only the named JSON receipts, never the raw child logs,
 copied profiles or binaries. The hosted workflow used to gather W10 evidence is

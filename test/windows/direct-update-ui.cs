@@ -12,6 +12,14 @@ public static class DirectUpdateUi {
     [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr w, IntPtr l);
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct Point { public int X, Y; }
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hwnd, ref Point point);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr region, uint flags);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr w, StringBuilder text, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int process);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint current, uint target, bool attach);
@@ -80,6 +88,45 @@ public static class DirectUpdateUi {
         if (hwnd == IntPtr.Zero || !IsWindowVisible(hwnd)) throw new Exception("Owned button is not visible");
         if (!PostMessageW(GetParent(hwnd), 0x0111, new IntPtr(GetDlgCtrlID(hwnd)), hwnd))
             throw new Exception("Owned button notification failed");
+    }
+    public sealed class LegacyInstallFact {
+        public string TargetClass;
+        public uint Dpi;
+        public int X, Y, PaneTop;
+    }
+    static int Scale(int value, uint dpi) { return dpi <= 96 ? value : checked(value * (int)dpi) / 96; }
+    public static LegacyInstallFact LegacyInstall(IntPtr host, IntPtr pane, int ownedProcess) {
+        int hostPid, panePid;
+        GetWindowThreadProcessId(host, out hostPid); GetWindowThreadProcessId(pane, out panePid);
+        if (hostPid != ownedProcess || panePid != ownedProcess || ClassName(host) != "noctty.win32.host" ||
+            ClassName(pane) != "noctty.win32" || GetParent(pane) != host || !IsWindowVisible(pane))
+            throw new Exception("Owned legacy host identity mismatch");
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        if (previous == IntPtr.Zero) throw new Exception("Owned legacy DPI context failed");
+        try {
+            Rect client, surface;
+            if (!GetClientRect(host, out client) || !GetWindowRect(pane, out surface))
+                throw new Exception("Owned legacy geometry failed");
+            var origin = new Point { X=surface.Left, Y=surface.Top };
+            if (!ScreenToClient(host, ref origin)) throw new Exception("Owned legacy coordinate mapping failed");
+            uint dpi = GetDpiForWindow(host);
+            if (dpi == 0) throw new Exception("Owned legacy DPI read failed");
+            // v1.3.125 win32.zig paintChrome: pane top == bands.content_top.
+            // Match its truncating Host.scaled and center of the staged Install rect.
+            int x = client.Right - Scale(16, dpi) - Scale(72, dpi) - Scale(8, dpi) - Scale(86, dpi) / 2;
+            int y = origin.Y + Scale(2, dpi) - Scale(4, dpi) + Scale(22, dpi) / 2;
+            if (x < 0 || x >= client.Right || y < 0 || y >= client.Bottom || x > 32767 || y > 32767)
+                throw new Exception("Owned legacy hit point is outside client bounds");
+            // Populate the source-defined hit rect even on the uncomposed desktop.
+            // RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN: host only.
+            if (!RedrawWindow(host, IntPtr.Zero, IntPtr.Zero, 0x0141))
+                throw new Exception("Owned legacy host paint failed");
+            var position = new IntPtr((y << 16) | (x & 0xffff));
+            if (!PostMessageW(host, 0x0201, new IntPtr(1), position) ||
+                !PostMessageW(host, 0x0202, IntPtr.Zero, position))
+                throw new Exception("Owned legacy Install post failed");
+            return new LegacyInstallFact { TargetClass=ClassName(host), Dpi=dpi, X=x, Y=y, PaneTop=origin.Y };
+        } finally { SetThreadDpiAwarenessContext(previous); }
     }
     public static void CheckKey(IntPtr pane) {
         int process; uint target = GetWindowThreadProcessId(pane, out process), current = GetCurrentThreadId();
