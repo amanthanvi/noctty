@@ -859,7 +859,8 @@ variables with separate LOCALAPPDATA, APPDATA and temporary directories, excludi
 workflow credentials and other caller-defined variables. Standard Windows profile
 identity is retained; this is application-state isolation, not a separate OS account.
 The controller must observe Default. Downloads check both system and run-volume
-space, use bounded GitHub CLI calls, and verify the publisher of both noctty.exe
+space (resolving the run's existing ancestor through junctions), use GitHub CLI
+requests bounded by `TimeoutSeconds`, and verify the publisher of both noctty.exe
 and its console shim before either runs. Receipts publish by a sibling-file rename
 after serialization and preserve zero/one/many array shapes. Inventories include
 hidden files and files within hidden directories. Trailing run-path separators
@@ -879,7 +880,8 @@ updater pin through the existing release verifier, without a trust-store import.
 
 For the 1.3.125 to 1.3.137 stub case, `-HostedMesa` explicitly opts a disposable
 hosted runner into Mesa 26.3.0 llvmpipe from `mmozeiko/build-mesa`. It is off by
-default and refused for other source/target cases. Both native archive hashes
+default and refused for other source/target cases. Its HTTP fetch has a separate
+`TimeoutSeconds` cancellation budget covering the response body. Both native archive hashes
 are pinned and checked before extraction. Only `opengl32.dll` is added beside
 the 1.3.125 executable; the receipt proves one extra file, its PE architecture,
 the loaded module's backing file, and preservation through the update. The
@@ -893,7 +895,13 @@ stays on its original executable and runs, reports the incomplete portable ZIP,
 and offers Open Release. `-Expected Removed`, from the previous stub-bearing
 1.3.x, checks that a successful update removes the stub. Opening the release
 page and checking its manual instructions is a separate browser check. Neither
-future boundary is established by the 1.3.137 acceptance run.
+future boundary is established by the 1.3.137 acceptance run. Rejected also checks
+every original file hash and reads its journal strictly: absence and a readable
+clear transaction pass; unreadable, locked or malformed state fails.
+
+Updater diagnostics recognize `update_github_releases` and `update_portable_apply`.
+Receipts retain the level and scope for each matching line and omit its message,
+so paths, URLs and arbitrary release text never enter the exported diagnostic.
 
 Every launch pins a direct absolute System32 cmd with `/D` and denies clipboard
 reads and writes. Local runs additionally use the local harness library's real

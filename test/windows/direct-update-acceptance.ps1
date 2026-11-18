@@ -85,6 +85,21 @@ function Invoke-MinimalDriverEnvironment([scriptblock] $Start) {
         foreach($name in $parent.Keys){[Environment]::SetEnvironmentVariable($name,[string]$parent[$name],'Process')}
     }
 }
+function Test-WorkflowCredentialsAbsent($Environment) {
+    foreach($name in @('GH_TOKEN','GITHUB_TOKEN','ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN')){
+        foreach($key in $Environment.Keys){
+            if([string]::Equals([string]$key,$name,[StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrEmpty([string]$Environment[$key])){return $false}
+        }
+    }
+    return $true
+}
+function Get-UpdaterLogFact([string] $Text) {
+    # Export fixed vocabulary only: raw updater messages can include paths/URLs.
+    if($Text -cmatch '^(info|warning|warn|error)\((update_github_releases|update_portable_apply)\):'){
+        return ('{0}({1}): [message omitted]' -f $Matches[1],$Matches[2])
+    }
+    return $null
+}
 function Invoke-ReleaseGh([string[]] $Arguments,[int] $Seconds=$TimeoutSeconds) {
     $info=[Diagnostics.ProcessStartInfo]::new((Get-Command gh -CommandType Application).Source)
     $info.UseShellExecute=$false; $info.CreateNoWindow=$true
@@ -156,7 +171,9 @@ function Get-SourceSnapshot([string] $Root,$OriginalNames=$null) {
         @{ Name=$entry.Name; Sha256=Get-Sha (Join-Path $Root $entry.Name) }
     })
 }
-function Assert-RejectedCopy($Before,[string] $Root,$State) {
+function Assert-RejectedCopy($Before,[string] $Root) {
+    # Only a genuinely absent journal is clear without a successful parse.
+    $State=Get-UpdateState $Root -RequireReadable
     # Runtime exceptions apply only to files absent from the original snapshot.
     $after=@(Get-SourceSnapshot $Root @($Before.Name))
     $difference=@(Compare-Object @($Before | ForEach-Object {"$($_.Name):$($_.Sha256)"}) @($after | ForEach-Object {"$($_.Name):$($_.Sha256)"}))
@@ -297,7 +314,14 @@ function Add-HostedMesa([string] $Root) {
     $asset="mesa-llvmpipe-$Architecture-26.3.0.7z"
     $url="https://github.com/mmozeiko/build-mesa/releases/download/26.3.0/$asset"
     $archive=Join-Path $destination $asset
-    Invoke-WebRequest -Uri $url -OutFile $archive
+    $cancel=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
+    $client=[Net.Http.HttpClient]::new()
+    try{
+        # GetByteArrayAsync includes the response body in the cancellation budget.
+        $client.Timeout=[TimeSpan]::FromSeconds($TimeoutSeconds)
+        $bytes=$client.GetByteArrayAsync([Uri]$url,$cancel.Token).GetAwaiter().GetResult()
+        [IO.File]::WriteAllBytes($archive,$bytes)
+    }finally{$client.Dispose();$cancel.Dispose()}
     if((Get-Sha $archive) -cne $pins[$Architecture]){throw 'Mesa archive SHA-256 mismatch'}
     $expanded=Join-Path $destination 'expanded'
     $null=New-Item -ItemType Directory -Path $expanded
@@ -350,10 +374,17 @@ function Get-ReleaseCopy([string] $Version) {
     Save-Receipt "$Version-publisher.json" $publishers
     return $executables[0].DirectoryName
 }
-function Get-UpdateState([string] $Root) {
+function Get-UpdateState([string] $Root,[switch] $RequireReadable) {
     $path = Join-Path $Root 'update-state.json'
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    try { $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
+    try {
+        $value = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -ErrorAction Stop
+        if($value -isnot [Management.Automation.PSCustomObject]){throw 'Journal is not a JSON object'}
+    } catch [IO.FileNotFoundException] { return $null
+    } catch [IO.DirectoryNotFoundException] { return $null
+    } catch {
+        if($RequireReadable){throw 'Rejected update journal is unreadable or malformed'}
+        return $null
+    }
     # Explicit nonsecret projection: never export confirmation tokens or arbitrary paths.
     $observed=if([string]$value.last_seen_version -cmatch '^1\.[34]\.[0-9]+$'){[string]$value.last_seen_version}else{$null}
     return @{ Phase=$value.portable_apply_phase; StagedVersion=$value.staged_version; StagedKind=$value.staged_kind; LatestVersion=$observed; ApplyRequestedAt=$value.apply_requested_at; FeedMatches=($value.staged_feed_url -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
@@ -420,7 +451,7 @@ if (-not $Driver) {
     }
     $free=[IO.DriveInfo]::new([IO.Path]::GetPathRoot([Environment]::GetFolderPath('LocalApplicationData'))).AvailableFreeSpace
     if ($free -le 20GB) { throw 'System drive has 20 GB or less free' }
-    $runFree=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($Run)).AvailableFreeSpace
+    $runFree=[DirectUpdateUi]::AvailableRunSpace($Run)
     if($runFree -le 20GB){throw 'Run volume has 20 GB or less free'}
     $null=New-Item -ItemType Directory -Path $Run
     $source=Get-ReleaseCopy $FromVersion
@@ -513,7 +544,7 @@ $result=@{ Passed=$false; FromVersion=$FromVersion; TargetVersion=$TargetVersion
 try {
     if($DesktopName -cnotmatch '^noctty-hw-[a-f0-9]{32}$' -or [HiddenWin]::CurrentDesktopName() -cne $DesktopName){throw 'Driver is not on its private desktop'}
     $isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run
-    $credentialsAbsent=@('GH_TOKEN','GITHUB_TOKEN','ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN' | Where-Object {-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_,'Process'))}).Count -eq 0
+    $credentialsAbsent=Test-WorkflowCredentialsAbsent ([Environment]::GetEnvironmentVariables('Process'))
     if(-not $credentialsAbsent){throw 'Driver workflow credentials were inherited'}
     # EnumDesktopWindows returns false/error 0 on a genuinely empty desktop.
     # This hidden driver-owned window gives the parent's oracle a positive control.
@@ -575,7 +606,7 @@ try {
         Wait-Check 'rejected update notice' { (Read-ControlName $script:hostWindow 1914) -cmatch '^Open Release(?::|$)' }
         $result.NoticeButton=Read-ControlName $script:hostWindow 1914
         if($result.NoticeButton -cnotmatch '^Open Release(?::|$)'){throw 'Rejected update does not offer Open Release'}
-        Assert-RejectedCopy $sourceSnapshot $script:install (Get-UpdateState $script:install)
+        Assert-RejectedCopy $sourceSnapshot $script:install
         $result.SourceCopyIntact=$true
     } else {
         Wait-Check 'verified portable stage' { $s=Get-UpdateState $script:install; $s -and $s.StagedVersion -ceq $TargetVersion -and $s.StagedKind -ceq 'portable' -and $s.FeedMatches -and ($legacyPainted -or (Read-ControlName $script:hostWindow 1914) -cmatch '^Install(?::|$)') }
@@ -629,7 +660,7 @@ try {
     if(-not [HiddenWin]::GetExitCodeProcess($finalHandle,[ref]$finalCode) -or $finalCode -ne 0){throw 'Final application exited unsuccessfully'}
     $result.FinalAppExit=$finalCode
     Wait-Check 'normal final application shutdown' { @([HiddenWin]::JobProcessIds($script:caseJob)).Count -eq 0 } 40
-    if($Expected -ceq 'Rejected'){Assert-RejectedCopy $sourceSnapshot $script:install (Get-UpdateState $script:install)}
+    if($Expected -ceq 'Rejected'){Assert-RejectedCopy $sourceSnapshot $script:install}
     $result.NoRollbackObserved=$true; $result.Passed=$true
 } catch {
     # Fixed stage names above and error types only; never export arbitrary native errors/logs.
@@ -661,10 +692,8 @@ try {
         foreach($file in @('app-raw.log','relaunch-raw.log')){
             $path=Join-Path $Run $file
             if(Test-Path -LiteralPath $path){foreach($text in Get-Content -LiteralPath $path){
-                if($text -match '^(?:info|warning|warn|error)\((?:update|win32)\):.*\b(?:update|portable)\b.*\b(?:check|staged|staging|payload|confirmed|confirmation|rollback|failed|verified|pending|downloaded)\b'){
-                    $sanitized=$text -replace '[A-Za-z]:[\\/][^\s,;]+','[path]' -replace '(?i)(token|authorization|secret|password)=[^\s,;]+','$1=[redacted]'
-                    $lines.Add($sanitized.Substring(0,[Math]::Min(500,$sanitized.Length)))
-                }
+                $projected=Get-UpdaterLogFact $text
+                if($projected){$lines.Add($projected)}
             }}
         }
         $result.RedactedUpdaterLogs=@($lines.ToArray())

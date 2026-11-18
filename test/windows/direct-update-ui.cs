@@ -1,6 +1,7 @@
 // Only controls belonging to the isolated copy are inspected or driven.
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class DirectUpdateUi {
@@ -30,6 +31,39 @@ public static class DirectUpdateUi {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
     [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
     [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetFinalPathNameByHandleW(IntPtr file, StringBuilder path, uint capacity, uint flags);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetDiskFreeSpaceExW(string path, out ulong available, out ulong total, out ulong free);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    public static string ExistingRunDirectory(string path) {
+        string ancestor = Path.GetFullPath(path);
+        while (true) {
+            try {
+                if ((File.GetAttributes(ancestor) & FileAttributes.Directory) == 0)
+                    throw new IOException("Run ancestor is not a directory");
+                break;
+            } catch (FileNotFoundException) {
+            } catch (DirectoryNotFoundException) {
+            }
+            ancestor = Path.GetDirectoryName(ancestor);
+            if (String.IsNullOrEmpty(ancestor)) throw new IOException("Run has no existing ancestor");
+        }
+        // Follow reparse points. Query the resolved handle, not its drive letter.
+        IntPtr handle = CreateFileW(ancestor, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) throw new IOException("Run ancestor open failed");
+        try {
+            var resolved = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandleW(handle, resolved, (uint)resolved.Capacity, 0);
+            if (length == 0 || length >= resolved.Capacity) throw new IOException("Run ancestor resolution failed");
+            return resolved.ToString().TrimEnd('\\') + "\\";
+        } finally { CloseHandle(handle); }
+    }
+    public static ulong AvailableRunSpace(string path) {
+        ulong available, total, free;
+        if (!GetDiskFreeSpaceExW(ExistingRunDirectory(path), out available, out total, out free))
+            throw new IOException("Run volume space query failed");
+        return available;
+    }
     public static IntPtr CreateSentinel() {
         var hwnd = CreateWindowExW(0x08000080, "STATIC", "", 0x80000000, 0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         if (hwnd == IntPtr.Zero) throw new Exception("Driver sentinel creation failed");

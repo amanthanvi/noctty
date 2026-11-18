@@ -86,6 +86,11 @@ function Get-DirectUpdateProblems([string] $Text) {
         StubLoadApi=@('Get-StubLoadError','[DirectUpdateUi]::StubLoadError($Path)')
     }
     foreach($entry in $guardStatements.GetEnumerator()){Need $entry.Key (Direct (Function-Statements $entry.Value[0]) $entry.Value[1])}
+    $functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true))
+    Need FunctionDefinitions (@($functions | Where-Object {-not [object]::ReferenceEquals($_.Parent,$ast.EndBlock)}).Count -eq 0 -and @($functions | Group-Object Name | Where-Object Count -GT 1).Count -eq 0)
+    $traps=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.TrapStatementAst]},$true))
+    Need TrapExit ($traps.Count -eq 1 -and [object]::ReferenceEquals($traps[0].Parent,$ast.EndBlock) -and (Same $traps[0].Body.Statements[-1] 'break') -and @($traps[0].FindAll({param($n) $n -is [Management.Automation.Language.ContinueStatementAst]},$true)).Count -eq 0)
+    Need RejectedJournal (Direct (Function-Statements 'Assert-RejectedCopy') '$State=Get-UpdateState $Root -RequireReadable')
     $clipboardTry=@((Function-Statements 'Invoke-ClipboardPositive') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
     Need ClipboardSupported (Direct $clipboardTry.Body.Statements "if(-not `$fact.Supported -or -not `$fact.IsolatedStation -or -not `$fact.SequenceAdvanced){throw 'Clipboard positive control failed'}")
     $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'New-DriverEnvironment'})
@@ -93,11 +98,24 @@ function Get-DirectUpdateProblems([string] $Text) {
     $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'Invoke-MinimalDriverEnvironment'})
     Need MinimalEnvironmentScope ($node.Count -eq 1 -and (Same $node[0].Body '{ # CreateProcess inherits this explicit whitelist; restore only this controller. # Never log the saved environment or its values. $parent=[Environment]::GetEnvironmentVariables(''Process'') $minimal=New-DriverEnvironment $parent $Run try{ foreach($name in @($parent.Keys)){[Environment]::SetEnvironmentVariable($name,$null,''Process'')} foreach($name in $minimal.Keys){[Environment]::SetEnvironmentVariable($name,$minimal[$name],''Process'')} & $Start }finally{ foreach($name in @([Environment]::GetEnvironmentVariables(''Process'').Keys)){[Environment]::SetEnvironmentVariable($name,$null,''Process'')} foreach($name in $parent.Keys){[Environment]::SetEnvironmentVariable($name,[string]$parent[$name],''Process'')} } }'))
     Need PublisherVerification (Direct (Function-Statements 'Get-ReleaseCopy') '$publishers=@(foreach($name in @(''noctty.exe'',''noctty.com'')){ $binary=Join-Path $executables[0].DirectoryName $name $signature=Assert-ReleaseSignature -Path $binary -Label ''Published portable executable'' -AllowedPins @(Get-StubPublisherPins) -TrustSelfSigned $true @{File=$name;Sha256=Get-Sha $binary;SignerSpkiSha256=$signature.SpkiSha256;CryptographicallyVerified=$true} })')
+    $releaseStatements=@(Function-Statements 'Get-ReleaseCopy')
+    $returns=@($releaseStatements | Where-Object {$_ -is [Management.Automation.Language.ReturnStatementAst]})
+    $publisher=@($releaseStatements | Where-Object {$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$publishers'})
+    $published=@($releaseStatements | Where-Object {Same $_ 'Save-Receipt "$Version-publisher.json" $publishers'})
+    Need PublisherOrder ($returns.Count -eq 1 -and $publisher.Count -eq 1 -and $published.Count -eq 1 -and (Same $releaseStatements[-1] 'return $executables[0].DirectoryName') -and $publisher[0].Extent.EndOffset -lt $published[0].Extent.StartOffset -and $published[0].Extent.EndOffset -lt $returns[0].Extent.StartOffset)
     Need MesaPins (Direct (Function-Statements 'Add-HostedMesa') '$pins=@{ x64=''11dc079e356f33ce2ff84aa399c975da1a7bdd4c470f6eef4cf359ad8b9ca80f'' arm64=''067f3aca687fbf5afc8a1f41487bd051487d964d6c1686757a4d8ee6a2d3b901'' }')
     $mesaParameter=@($ast.ParamBlock.Parameters | Where-Object {$_.Name.VariablePath.UserPath -ieq 'HostedMesa'})
     Need MesaOptIn ($mesaParameter.Count -eq 1 -and $null -eq $mesaParameter[0].DefaultValue -and @($mesaParameter[0].Attributes | Where-Object {$_.TypeName.FullName -ieq 'switch'}).Count -eq 1)
-    $definitions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -imatch '(^|:)ephemeral$'},$true))
+    $definitions=@($ast.FindAll({param($n)
+        ($n -is [Management.Automation.Language.AssignmentStatementAst] -and @($n.Left.FindAll({param($v) $v -is [Management.Automation.Language.VariableExpressionAst] -and $v.VariablePath.UserPath -imatch '(^|:)ephemeral$'},$true)).Count -gt 0) -or
+        ($n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Variable.VariablePath.UserPath -imatch '(^|:)ephemeral$') -or
+        ($n -is [Management.Automation.Language.ParameterAst] -and $n.Name.VariablePath.UserPath -imatch '(^|:)ephemeral$') -or
+        ($n -is [Management.Automation.Language.UnaryExpressionAst] -and $n.TokenKind -in @('PostfixPlusPlus','PostfixMinusMinus','PlusPlus','MinusMinus') -and $n.Child.Extent.Text -imatch 'ephemeral')
+    },$true))
     Need EphemeralDefinition ($definitions.Count -eq 1 -and [object]::ReferenceEquals($definitions[0].Parent,$ast.EndBlock) -and (Same $definitions[0] "`$ephemeral=`$env:GITHUB_ACTIONS -ceq 'true' -and `$env:RUNNER_ENVIRONMENT -ceq 'github-hosted'"))
+    # The harness has no variable-mutator cmdlets/provider or PSVariable/ref use.
+    # Refuse these indirect write mechanisms rather than guessing their arguments.
+    Need EphemeralWrites ($code -inotmatch '\b(?:Set|New|Clear|Remove)-Variable\b|\b(?:sv|set|nv|clv|rv)\s+|\bPSVariable\b|variable:|\[ref\]\s*\$(?:(?:script|global|local|private):)?ephemeral\b' -and @($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandParameterAst] -and $n.ParameterName -imatch '^(?:OutVariable|PipelineVariable|ErrorVariable|WarningVariable|InformationVariable|ov|pv|ev|wv|iv)$'},$true)).Count -eq 0)
     Need LegacyStatement (Direct $ast.EndBlock.Statements "if ([version]`$FromVersion -lt [version]'1.3.136' -and -not `$ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }")
     Need MesaStatement (Direct $ast.EndBlock.Statements "if(`$HostedMesa -and (-not `$ephemeral -or `$FromVersion -cne '1.3.125' -or `$TargetVersion -cne '1.3.137' -or `$Expected -cne 'Stub')){throw 'Mesa fixture requires hosted 1.3.125 to 1.3.137 stub acceptance'}")
     Need NativeStatement (Direct (Function-Statements 'Assert-NativeArchitecture') "if (`$native -cne `$Architecture -or `$processArchitecture -cne `$Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }")
@@ -105,6 +123,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     Need RunPathCall (Direct $controller.Clauses[0].Item2.Statements '$Run=Get-RunPath $Run')
     Need ParentDesktop (Direct $controller.Clauses[0].Item2.Statements "if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}")
     Need RunVolume (Direct $controller.Clauses[0].Item2.Statements "if(`$runFree -le 20GB){throw 'Run volume has 20 GB or less free'}")
+    Need ResolvedRunVolume (Direct $controller.Clauses[0].Item2.Statements '$runFree=[DirectUpdateUi]::AvailableRunSpace($Run)')
     Need HistoryStart (Direct $controller.Clauses[0].Item2.Statements "`$historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'")
     $controllerTry=@($controller.Clauses[0].Item2.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
     $positive=@($controllerTry.Body.Statements | Where-Object {Same $_ 'Invoke-DefaultOraclePositive $pwsh'})
@@ -118,6 +137,9 @@ function Get-DirectUpdateProblems([string] $Text) {
     $networkTry=@((Function-Statements 'Invoke-ReleaseGh') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
     Need NetworkTimeout (Direct $networkTry.Body.Statements "if(-not `$child.WaitForExit(`$Seconds*1000)){throw 'Release request timed out'}")
     Need NetworkHidden (Direct (Function-Statements 'Invoke-ReleaseGh') '$info.CreateNoWindow=$true')
+    Need MesaCancellation (Direct (Function-Statements 'Add-HostedMesa') '$cancel=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))')
+    $mesaTry=@((Function-Statements 'Add-HostedMesa') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need MesaTimeout ((Direct $mesaTry.Body.Statements '$client.Timeout=[TimeSpan]::FromSeconds($TimeoutSeconds)') -and (Direct $mesaTry.Body.Statements '$bytes=$client.GetByteArrayAsync([Uri]$url,$cancel.Token).GetAwaiter().GetResult()'))
     $loops=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.DoWhileStatementAst] -and (OutsideFunction $n)},$true))
     $loop=if($loops.Count -eq 1){$loops[0]}else{$null}
     Need DefaultCall ($null -ne $loop -and (Same $loop.Body.Statements[0] 'Assert-NoDefaultWindows $job'))
@@ -136,6 +158,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     Need MesaPreserved (@($mesaBodies | Where-Object {Direct $_.Statements 'if((Get-Sha (Join-Path $script:install ''opengl32.dll'')) -cne $result.Mesa.DllSha256){throw ''Mesa extra file was not preserved''}'}).Count -eq 1)
     Need DriverProfileCall (Direct $driver.Body.Statements '$isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run')
     Need DriverCredentials (Direct $driver.Body.Statements "if(-not `$credentialsAbsent){throw 'Driver workflow credentials were inherited'}")
+    Need CredentialPredicate (Direct $driver.Body.Statements '$credentialsAbsent=Test-WorkflowCredentialsAbsent ([Environment]::GetEnvironmentVariables(''Process''))')
     $removed=Find-If $driver.Body.Statements "`$Expected -ceq 'Removed'"
     Need SourceStubCall (Direct $removed.Clauses[0].Item2.Statements "`$result.BeforeStub=Assert-SourceStub (Join-Path `$script:install 'ghostty-vt.dll')")
     $rejected=Find-If $driver.Body.Statements "`$Expected -ceq 'Rejected'"
@@ -212,13 +235,14 @@ function Get-ClipboardHelperProblems([string] $Text,[switch] $Hosted) {
         if([regex]::Matches($structure,('\b'+$entry.Key+'\s*\(')).Count -ne $entry.Value){$problems.Add('ClipboardCallCount')}
     }
     if($structure -match '\b(?:GetClipboardData|EnumClipboardFormats)\s*\('){$problems.Add('ClipboardContentRead')}
+    if($structure -match '\bEntryPoint\s*='){$problems.Add('NativeAlias')}
     return @($problems.ToArray())
 }
 function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'Behavioural fixture must parse'}
-    $names=@('Get-RunPath','New-DriverEnvironment','Save-Receipt','Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
+    $names=@('Get-RunPath','New-DriverEnvironment','Test-WorkflowCredentialsAbsent','Get-UpdaterLogFact','Save-Receipt','Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Get-UpdateState','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
     $definitions=foreach($name in $names){
         $found=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
         if($found.Count -ne 1){throw "Verdict definition is absent or ambiguous: $name"}
@@ -258,6 +282,15 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         $caseSensitive.Add('gh_token','fixture-secret')
         $windowsNames=New-DriverEnvironment $caseSensitive $Root
         if($windowsNames.PATH -cne 'fixture-path' -or $windowsNames.WINDIR -cne 'fixture-windir' -or $windowsNames.COMSPEC -cne 'fixture-comspec' -or $windowsNames.Contains('GH_TOKEN')){$failures.Add('WindowsEnvironmentNames')}
+        if(-not (Test-WorkflowCredentialsAbsent @{}) -or -not (Test-WorkflowCredentialsAbsent @{GH_TOKEN=''})){$failures.Add('CredentialsEmpty')}
+        foreach($name in @('GH_TOKEN','GITHUB_TOKEN','ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','gh_token')){
+            if(Test-WorkflowCredentialsAbsent @{$name='fixture-token'}){$failures.Add('CredentialsPresent')}
+        }
+        foreach($scope in @('update_github_releases','update_portable_apply')){
+            $fact=Get-UpdaterLogFact ('info('+ $scope +'): fixture path C:\private token=fixture')
+            if(-not [string]::Equals($fact,('info('+ $scope +'): [message omitted]'),[StringComparison]::Ordinal)){$failures.Add('UpdaterLogScope')}
+        }
+        if($null -ne (Get-UpdaterLogFact 'info(win32): unrelated')){$failures.Add('UpdaterLogOther')}
         Assert-NativeArchitecture x64 x64 x64
         Refuses Native {Assert-NativeArchitecture arm64 x64 x64}
         Refuses NewRun {Assert-NewRun $Root}
@@ -313,12 +346,24 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         [IO.File]::Delete($hiddenFile); [IO.File]::Delete((Join-Path $hiddenDir 'nested')); [IO.Directory]::Delete($hiddenDir)
 
         $before=@(Get-SourceSnapshot $good)
-        Assert-RejectedCopy $before $good $clear
+        Assert-RejectedCopy $before $good
         $runtime=[IO.File]::Open((Join-Path $good 'update-state.json.lock'),[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-        try{try{Assert-RejectedCopy $before $good $clear}catch{$failures.Add('RuntimeHashRead')}}finally{$runtime.Dispose()}
-        Refuses MissingSidecar {Assert-RejectedCopy $before $missing $clear}
-        Refuses ChangedSidecar {Assert-RejectedCopy $before $changed $clear}
-        Refuses RejectedStage {Assert-RejectedCopy $before $good @{Phase='pending';StagedVersion='1.4.100'}}
+        try{try{Assert-RejectedCopy $before $good}catch{$failures.Add('RuntimeHashRead')}}finally{$runtime.Dispose()}
+        Refuses MissingSidecar {Assert-RejectedCopy $before $missing}
+        Refuses ChangedSidecar {Assert-RejectedCopy $before $changed}
+        $journal=Join-Path $good 'update-state.json'
+        [IO.File]::WriteAllText($journal,'{"portable_apply_phase":"pending","staged_version":"1.4.100"}')
+        Refuses RejectedStage {Assert-RejectedCopy $before $good}
+        $locked=[IO.File]::Open($journal,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try{Refuses RejectedLocked {Assert-RejectedCopy $before $good}}finally{$locked.Dispose()}
+        [IO.File]::WriteAllText($journal,'{ malformed')
+        Refuses RejectedMalformed {Assert-RejectedCopy $before $good}
+        foreach($invalid in @('null','[]','"scalar"')){
+            [IO.File]::WriteAllText($journal,$invalid)
+            Refuses RejectedNotObject {Assert-RejectedCopy $before $good}
+        }
+        [IO.File]::WriteAllText($journal,'{"portable_apply_phase":null,"staged_version":null}')
+        Assert-RejectedCopy $before $good
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
         Refuses Startup {Assert-LocalState $fingerprint @{Exists=$true;Hash='b';Modified='t'} @() @()}
@@ -373,6 +418,12 @@ $controls=[ordered]@{
     ClipboardSupported=@('if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw','if($false){throw')
 }
 $sites=[ordered]@{
+    TrapExit=@("    break`n}","    continue`n}")
+    RejectedJournal=@('$State=Get-UpdateState $Root -RequireReadable','$State=Get-UpdateState $Root')
+    ResolvedRunVolume=@('$runFree=[DirectUpdateUi]::AvailableRunSpace($Run)','$runFree=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($Run)).AvailableFreeSpace')
+    CredentialPredicate=@('$credentialsAbsent=Test-WorkflowCredentialsAbsent ([Environment]::GetEnvironmentVariables(''Process''))','$credentialsAbsent=$true')
+    MesaCancellation=@('$cancel=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))','$cancel=[Threading.CancellationTokenSource]::new()')
+    MesaTimeout=@('$client.GetByteArrayAsync([Uri]$url,$cancel.Token)','$client.GetByteArrayAsync([Uri]$url)')
     RunPathCall=@('$Run=Get-RunPath $Run','$Run=[IO.Path]::GetFullPath($Run)')
     ParentDesktop=@("if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}",'')
     RunVolume=@("if(`$runFree -le 20GB){throw 'Run volume has 20 GB or less free'}",'')
@@ -431,6 +482,20 @@ foreach($control in $inert.GetEnumerator()){
 $shapeControls=[ordered]@{}
 $ephemeralLine=@($source -split "`r?`n" | Where-Object {$_ -like '$ephemeral=*'})
 $shapeControls.EphemeralReassignment=@($ephemeralLine[0],($ephemeralLine[0]+"`n`$ephemeral=`$true"),'EphemeralDefinition')
+foreach($write in ([ordered]@{
+    Typed='[bool] $ephemeral=$true'; Multiple='$unused,$ephemeral=0,$true'; Foreach='foreach($ephemeral in @($true)){}'; Increment='$ephemeral++'
+    SetVariable='Set-Variable ephemeral $true'; NewVariable='New-Variable ephemeral $true'; ClearVariable='Clear-Variable ephemeral'; RemoveVariable='Remove-Variable ephemeral'
+    VariableProvider='Set-Item variable:ephemeral $true'; PSVariable='$ExecutionContext.SessionState.PSVariable.Set(''ephemeral'',$true)'
+}).GetEnumerator()){
+    $key=if($write.Key -in @('Typed','Multiple','Foreach','Increment')){'EphemeralDefinition'}else{'EphemeralWrites'}
+    $shapeControls[('Ephemeral'+$write.Key)]=@($ephemeralLine[0],($ephemeralLine[0]+"`n"+$write.Value),$key)
+}
+$shapeControls.NestedDefinition=@('function Get-ReleaseCopy([string] $Version) {','function Get-ReleaseCopy([string] $Version) { function Assert-NativeArchitecture {}','FunctionDefinitions')
+$shapeControls.DuplicateDefinition=@($ephemeralLine[0],($ephemeralLine[0]+"`nfunction Get-ReleaseCopy {}"),'FunctionDefinitions')
+$publisherBlock=[regex]::Match($source,'(?s)    \$publishers=@\(foreach.*?    Save-Receipt "\$Version-publisher.json" \$publishers\r?\n    return \$executables\[0\].DirectoryName').Value
+if(-not $publisherBlock){throw 'Publisher order anchor absent'}
+$publisherOnly=$publisherBlock.Substring(0,$publisherBlock.LastIndexOf('    return '))
+$shapeControls.PublisherAfterReturn=@($publisherBlock,("    return `$executables[0].DirectoryName`n"+$publisherOnly),'PublisherOrder')
 foreach($item in @(@('Legacy','LegacyStatement'),@('Mesa','MesaStatement'),@('Desktop','DriverDesktopStatement'))){
     $needle=switch($item[0]){Legacy{'Historical portable identity requires'} Mesa{'Mesa fixture requires hosted'} Desktop{'Driver is not on its private desktop'}}
     $anchor=@($source -split "`r?`n" | Where-Object {$_.Contains($needle)})[0]
@@ -453,6 +518,10 @@ $baseline=Join-Path $fixtures 'baseline'; $null=New-Item -ItemType Directory -Pa
 $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
+    JournalFailOpen=@("if(`$RequireReadable){throw 'Rejected update journal is unreadable or malformed'}",'')
+    JournalNotStrict=@('$State=Get-UpdateState $Root -RequireReadable','$State=Get-UpdateState $Root')
+    CredentialAlwaysAbsent=@("if([string]::Equals([string]`$key,`$name,[StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrEmpty([string]`$Environment[`$key])){return `$false}",'')
+    DeadUpdaterLogScopes=@('update_github_releases|update_portable_apply','update|win32')
     WindowsEnvironmentNames=@('OrdinalIgnoreCase)){$minimal[$name]', 'Ordinal)){$minimal[$name]')
     HiddenInventory=@('-File -Recurse -Force','-File -Recurse')
     MinimalEnvironment=@("'PATH','PATHEXT'","'PATH','GH_TOKEN','PATHEXT'")
@@ -539,6 +608,9 @@ foreach($kind in @('private','hosted')){
     $extra=$text.Replace('public static Fact Run() {', 'public static Fact Run() { OpenClipboard(IntPtr.Zero); EmptyClipboard(); CloseClipboard();')
     $disabled=$text.Replace($anchor,("`n#if NEVER`n"+$anchor+"`n#endif`n"+$unguarded))
     $literal=$text.Replace($anchor,('string inert="'+$anchor+'"; '+$unguarded))
+    $alias=$text.Replace('public static Fact Run() {','[DllImport("user32.dll", EntryPoint="OpenClipboard")] static extern bool Oc(IntPtr h); public static Fact Run() { Oc(IntPtr.Zero);')
+    if([string]::Equals($alias,$text,[StringComparison]::Ordinal)){throw 'Native alias anchor absent'}
+    if(@(Get-ClipboardHelperProblems $alias -Hosted:($kind -ceq 'hosted')) -cnotcontains 'NativeAlias'){throw 'Native alias escaped'}
     foreach($case in @(@('ExtraCalls',$extra,'ClipboardCallCount'),@('DeadPreprocessor',$disabled,'Preprocessor'),@('StringCopy',$literal,$(if($kind -ceq 'private'){'PrivateOpen'}else{'HostedOpen'})))){
         if(@(Get-ClipboardHelperProblems $case[1] -Hosted:($kind -ceq 'hosted')) -cnotcontains $case[2]){throw "Native inert/extra control escaped: $kind/$($case[0])"}
     }
@@ -552,6 +624,16 @@ foreach($kind in @('private','hosted')){
 $native=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'direct-update-ui.cs') -Raw
 if($native -match '\b(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|OpenClipboard|GetClipboardData|SetClipboardData)\s*\('){throw 'UI seam contains a forbidden real-input or clipboard operation'}
 if($native -cnotmatch 'ClassName\(host\) != "noctty.win32.host"' -or $native -cnotmatch 'ClassName\(pane\) != "noctty.win32"' -or $native -cnotmatch 'PostMessageW\(host, 0x0201' -or $native -cnotmatch 'PostMessageW\(host, 0x0202' -or $native -cmatch 'PostMessageW\(pane, 0x020[12]'){throw 'Legacy Install must post only to its owned host'}
+Add-Type -Path (Join-Path $PSScriptRoot 'direct-update-ui.cs')
+$volumeTarget=Join-Path $fixtures 'volume-target'; $null=New-Item -ItemType Directory -Path $volumeTarget
+$volumeLink=Join-Path $fixtures 'volume-junction'
+$null=New-Item -ItemType Junction -Path $volumeLink -Target $volumeTarget
+try{
+    $throughLink=[DirectUpdateUi]::ExistingRunDirectory((Join-Path $volumeLink 'new\run'))
+    $direct=[DirectUpdateUi]::ExistingRunDirectory($volumeTarget)
+    if(-not [string]::Equals($throughLink,$direct,[StringComparison]::OrdinalIgnoreCase)){throw 'Run volume did not resolve its junction ancestor'}
+    if([DirectUpdateUi]::AvailableRunSpace((Join-Path $volumeLink 'new\run')) -le 0){throw 'Resolved run volume query failed'}
+}finally{[IO.Directory]::Delete($volumeLink)}
 } finally {
     $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
     $owned=[IO.Path]::GetFullPath($fixtures)
@@ -559,5 +641,5 @@ if($native -cnotmatch 'ClassName\(host\) != "noctty.win32.host"' -or $native -cn
     [IO.Directory]::Delete($owned,$true)
     if(Test-Path -LiteralPath $owned){throw 'Contract fixture cleanup failed'}
 }
-Write-Host "direct-update admission contracts: PASS (1 static + 1 behavioural baseline, $($controls.Count) static, $($sites.Count) call-site, $($inert.Count) inert-copy, $($shapeControls.Count) syntax-shape, $($mutants.Count) behavioural, $($privateControls.Count+$hostedControls.Count+6) native clipboard controls, forbidden-operation negatives, native API boundary; fixtures removed)"
+Write-Host "direct-update admission contracts: PASS (1 static + 1 behavioural baseline, $($controls.Count) static, $($sites.Count) call-site, $($inert.Count) inert-copy, $($shapeControls.Count) syntax-shape, $($mutants.Count) behavioural, $($privateControls.Count+$hostedControls.Count+8) native clipboard controls, forbidden-operation negatives, resolved-volume fixture, native API boundary; fixtures removed)"
 $global:LASTEXITCODE=0
