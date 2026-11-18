@@ -603,7 +603,7 @@ function Invoke-SoakDriver {
         Log "first pane shown: $ready"
         $baseWidth = 1000; $baseHeight = 700
         $host0 = @((Get-Mine).Mine)
-        if ($ready -and $host0.Count -ge 1) { [void][SoakNative]::Resize($host0[0].Hwnd, $baseWidth, $baseHeight) }
+        if ($ready -and $host0.Count -ge 1) { [void][SoakNative]::Resize($host0[0].Hwnd, $baseWidth, $baseHeight, $script:ResponseBoundMs) }
         # The baseline's one pane, kept for the whole run: the churn opens from it and never closes it.
         $startPanes = @(Get-AllSurfaces $false)
         $script:soakBase = if ($startPanes.Count -eq 1) { $startPanes[0] } else { [IntPtr]::Zero }

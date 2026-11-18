@@ -266,6 +266,35 @@ $threadRows = @($native::Threads($self, $PID))
 if ($threadRows.Count -lt 1 -or @($threadRows | Where-Object { $_ -cnotmatch '\A\d+\t(?:[^\t]+\+0x[0-9a-f]+|0x[0-9a-f]+|\?)\t[^\t]*\z' }).Count -ne 0) {
     throw 'The soak thread rows are not tid, start address and name.'
 }
+# Every call of the native layer from the script passes as many arguments as the C# method takes: PowerShell
+# finds a wrong count only when the call runs (round 2's first short runs failed that way at the first resize).
+$nativeArity = @{}
+foreach ($m in [regex]::Matches($nativeSource, 'public static (?:extern )?[\w\[\]<>.]+ (?<name>\w+)\((?<params>[^)]*)\)')) {
+    $nativeArity[$m.Groups['name'].Value] = if ($m.Groups['params'].Value.Trim()) { @($m.Groups['params'].Value -split ',').Count } else { 0 }
+}
+function Get-SoakNativeCallProblems([string] $Text) {
+    $problems = [Collections.Generic.List[string]]::new()
+    foreach ($call in [regex]::Matches($Text, '\[SoakNative\]::(?<name>\w+)\(')) {
+        $name = $call.Groups['name'].Value
+        $depth = 1; $i = $call.Index + $call.Length; $commas = 0; $any = $false
+        while ($i -lt $Text.Length -and $depth -gt 0) {
+            $ch = $Text[$i]
+            if ($ch -eq '(' -or $ch -eq '[' -or $ch -eq '{') { $depth++ } elseif ($ch -eq ')' -or $ch -eq ']' -or $ch -eq '}') { $depth-- }
+            elseif ($ch -eq ',' -and $depth -eq 1) { $commas++ }
+            if ($depth -gt 0 -and -not [char]::IsWhiteSpace($ch)) { $any = $true }
+            $i++
+        }
+        $count = if ($any) { $commas + 1 } else { 0 }
+        if (-not $nativeArity.ContainsKey($name)) { $problems.Add("$name is not a public method") }
+        elseif ($nativeArity[$name] -ne $count) { $problems.Add("$name takes $($nativeArity[$name]) arguments, called with $count") }
+    }
+    return , $problems
+}
+$scriptOnly = $soakText.Replace($nativeSource, '')
+$callProblems = Get-SoakNativeCallProblems $scriptOnly
+if ($callProblems.Count -ne 0) { throw "The soak harness calls its native layer wrongly: $($callProblems -join '; ')" }
+$badCall = $scriptOnly.Replace('$baseWidth, $baseHeight, $script:ResponseBoundMs)', '$baseWidth, $baseHeight)')
+if ($badCall -ceq $scriptOnly -or (Get-SoakNativeCallProblems $badCall).Count -ne 1) { throw 'The native-call check accepted a resize called without its bound.' }
 # The SDK's x64 layout (psapi.h, winnt.h, tlhelp32.h, processthreadsapi.h, winbase.h), written out here a
 # second time so the harness's own copy cannot drift with its structs.
 $sdkLayout = 'MemoryCounters=96 workingSet@16 privateUsage@72 sharedCommit@88 JobLimits=144 limitFlags@16 ' +
