@@ -26,6 +26,12 @@ param(
     [string] $DesktopName
 )
 $ErrorActionPreference = 'Stop'
+trap {
+    if($Driver -and (Test-Path -LiteralPath $Run)){
+        try{@{ErrorType=$_.Exception.GetType().Name;Line=$_.InvocationInfo.ScriptLineNumber} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Run 'driver-startup-error.json')}catch{}
+    }
+    break
+}
 . (Join-Path $PSScriptRoot 'hidden-win11-lib.ps1')
 . (Join-Path $PSScriptRoot '..\..\scripts\ghostty-vt-stub.ps1')
 . (Join-Path $PSScriptRoot '..\..\scripts\signing-trust.ps1')
@@ -396,6 +402,14 @@ if (-not $Driver) {
             if([datetime]::UtcNow -ge $deadline) { throw 'Private driver timed out' }
         } while($true)
         [uint32]$code=1; if(-not [HiddenWin]::GetExitCodeProcess($launch.process,[ref]$code)){throw 'Driver exit read failed'}; $exitCode=$code
+        if($exitCode -ne 0 -and -not(Test-Path -LiteralPath (Join-Path $Run 'result.json'))){
+            $raw=Get-Content -LiteralPath (Join-Path $Run 'driver-raw.log') -Raw
+            $plain=$raw -replace '\x1b\[[0-9;]*[A-Za-z]',''
+            Save-Receipt 'driver-error-projection.json' @{ Lines=@([regex]::Matches($plain,'(?m)^\s*(\d+)\s*\|') | ForEach-Object {$_.Groups[1].Value}); CannotBind=$plain.Contains('Cannot bind'); CannotFindType=$plain.Contains('Cannot find type'); CannotAddType=$plain.Contains('Cannot add type'); ArgumentError=$plain.Contains('parameter'); AccessDenied=$plain.Contains('Access is denied') }
+        }
+    } catch {
+        Save-Receipt 'controller-error.json' @{ErrorType=$_.Exception.GetType().Name;Line=$_.InvocationInfo.ScriptLineNumber}
+        throw
     } finally {
         foreach($name in $saved.Keys){[Environment]::SetEnvironmentVariable($name,$saved[$name],'Process')}
         $cleanup=$false
