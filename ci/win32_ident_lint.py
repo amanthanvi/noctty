@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lint_common import added_lines, emit, merge_base, paths, sources
+from lint_common import added_lines, changed_paths, emit, merge_base, paths, sources
 from zig_bindings import Bindings as LiteralBindings
 
 
@@ -22,7 +22,9 @@ class Bindings(LiteralBindings):
                 key = ".".join(parts[:size])
                 if len(parts) >= size and key in removed:
                     span = self.span(start, end, origin)
-                    if added is None or span & added or origin.exports & self.changed_exports:
+                    alias_changed = self.previous is not None and any(
+                        self.declaration_changed(index) for index in origin.declarations)
+                    if added is None or span & added or origin.exports & self.changed_exports or alias_changed:
                         yield key, span, self.tokens[start].line + 1
                     break
 
@@ -68,7 +70,7 @@ def check(repo, base, head, upstream_path, removed_path):
                             for text in (old_module, new_module))
     fork = {name for name in fork_added(repo, head, upstream) if name.endswith(".zig")}
     # A re-export edit can change bindings even in files with no changed lines.
-    names = fork if old_exports != exports else set(added) & fork
+    names = fork if old_exports != exports else set(changed_paths(repo, comparison, head, "*.zig")) & fork
     texts = sources(repo, head, names)
     before = sources(repo, comparison, names & old_paths)
     findings = set()

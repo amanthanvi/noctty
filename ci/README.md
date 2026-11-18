@@ -43,6 +43,10 @@ the fixture by an absolute path outside its cwd, but rejects it in cwd-relative
 layouts and a real `zig build`. The lint still recognizes it conservatively;
 that recognition does not establish native build acceptance. The remaining
 matrix supports output directories both inside and outside the checkout.
+Compiler arguments are quoted for CMD, including paths with spaces and `&`.
+Embedded quotes, line breaks, `%` expansion and `!` delayed expansion are
+rejected before launch. Temporary Git repositories disable commit signing
+locally, independently of the developer's signing defaults.
 
 The `checks` job runs the controls and both lints on every change. The Zig lint
 fails new occurrences of binary array-repeat `**`, `@Type`, `@cImport`,
@@ -59,6 +63,10 @@ names, break labels and payload captures do not complete operands. `**` in an
 operand position is a pointer prefix; after a completed operand it is binary
 repeat. This uses grammatical token context, without evaluating whether a
 value represents a type or enumerating preceding-prefix exceptions.
+Binary-repeat spans include the enclosing delimiter-separated expression,
+including both operands, while the diagnostic and allowance key stay on the
+operator line. Thus an operand-only edit cannot turn an untouched pointer
+prefix into an undetected repeat.
 
 Both lints tokenize complete files before intersecting matches with added diff
 lines. A Win32 use is also rechecked if an alias definition it depends on changes
@@ -70,6 +78,9 @@ same binding do not recheck unchanged uses. Comments and
 string/character literals are opaque. A multiline match
 counts when any of its participating code tokens is on an added line. The
 tokenizer is the plan's measured `zigtok.py`, copied without changes.
+The separate span helper indexes brackets once, peels nested groups without
+repeated suffix scans, and keeps overlapping line spans compact. Malformed
+unclosed `@hasDecl` calls remain review flags; syntax validation belongs to Zig.
 
 The Win32 lint resolves the inventory's namespace binding paths and local const
 aliases, with block scope, literal imports, quoted identifiers, and alias chains.
@@ -86,6 +97,11 @@ conservatively despite the native layout limit described above.
 Filename suffix dots/spaces, directory spaces and repeated
 trailing dots were rejected in those controls. Uses behind pointer/slice qualifiers and bare aliases of leaf
 types (for example `HRESULT`) count. Calls re-homed to fork declarations pass.
+The native `win32/sys.zig`, `win32_types.zig` and `win32.sys` routes resolve
+explicitly; their passing controls assert a native origin. Function parameters
+mask implicit namespace names in their signatures and bodies, so a parameter named `std` is
+not mistaken for the std module. Alias-origin rechecks also include deletion-only
+edits, independently of added-line overlap.
 The generated list covers **1,534 removed names**: the 1,485 root/file-namespace
 names plus 49 nested declarations (including `REG.*`, `ws2_32.SOCK.*` and
 `ws2_32.MSG.ERRQUEUE`), checked against both compiler std trees. The plan's 124 is
@@ -149,6 +165,10 @@ attributes and NUL detection cannot hide added lines. A changed head blob with
 no hunk fails closed; deletions and mode-only changes remain valid.
 PR edits to the lints' code, data, workflow or workflow contract are flagged
 for review in the job summary. This is a review flag, not a self-protection seal.
+Generated allowances and inventories must be reviewed with those flags: reading
+only the base copy would prevent the approved 1A.6 baseline regeneration and
+inventory updates from taking effect. Summary paths are opaque Markdown code
+spans, including paths containing backticks or image syntax.
 
 ## Occurrence-bound baseline
 

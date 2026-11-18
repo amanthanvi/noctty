@@ -2,7 +2,6 @@
 
 import json
 import os
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -87,6 +86,18 @@ test "binary repeat twins" {
 }
 '''
 
+PARAMETER_SOURCE = '''const Native = struct {
+    pub const os = struct { pub const windows = struct { pub const kernel32 = struct {
+        pub fn Sleep(_: u32) void {}
+    }; }; };
+};
+fn call(comptime std: type) void { std.os.windows.kernel32.Sleep(1); }
+fn choose(comptime std: type) @TypeOf(std.os.windows.kernel32.Sleep) {
+    return std.os.windows.kernel32.Sleep;
+}
+test "a parameter named std is not the std module" { call(Native); choose(Native)(1); }
+'''
+
 
 def census_source(names, expected):
     paths = ",\n".join(".{" + ",".join(json.dumps(p) for p in name.split(".")) + "}" for name in names)
@@ -111,19 +122,21 @@ test "removed declaration census" {
 
 def compiler_call(root, output, pause, compiler, operation, source, label):
     env = {**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(output / "global-cache")}
-    bash = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe")
-    # Backslashes keep MSYS from treating drive colons inside cmd's single
-    # command argument as a POSIX path list.
     args = [compiler, operation, str(source)]
     if operation == "test":
         args += ["--cache-dir", str(output / "local-cache"),
                  "--global-cache-dir", str(output / "global-cache")]
-    if any('"' in a for a in args):
-        raise ValueError("unsupported quote in compiler control path")
-    cmd = 'scripts\\dev-windows.cmd ' + " ".join('"' + a + '"' if " " in a else a for a in args)
-    command = ("pwsh -NoProfile -File " + shlex.quote(pause.as_posix()) +
-               " && cmd.exe //c " + shlex.quote(cmd))
-    result = subprocess.run([bash, "-c", command], cwd=root, env=env, capture_output=True)
+    # Quotes protect CMD metacharacters such as & and parentheses. Percent and
+    # delayed expansion remain active inside quotes, so reject those spellings.
+    if any(any(c in a for c in '\"%!\r\n\0') for a in [*args, str(pause)]):
+        raise ValueError("unsupported CMD expansion or quote in compiler control path")
+    cmd = 'scripts\\dev-windows.cmd ' + " ".join('"' + a + '"' for a in args)
+    # Pass a native Windows command line. A Bash/C-argv round trip turns the
+    # embedded quotes into literal backslash-quotes for CMD.
+    command = ('cmd.exe /d /v:off /s /c "pwsh -NoProfile -File "' + str(pause) +
+               '" && ' + cmd + '"')
+    result = subprocess.run(command, cwd=root, env=env, capture_output=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
     (output / (label + ".log")).write_bytes(result.stdout + result.stderr)
     (output / (label + ".exit")).write_text(str(result.returncode) + "\n", encoding="utf-8")
     return result
@@ -163,7 +176,7 @@ def run(root, zig17, output, pause):
     output.mkdir(parents=True)  # retain every earlier attempt; require a fresh directory
     root, output = root.resolve(), output.resolve()
     names = (root / "ci/win32-removed-identifiers.txt").read_text(encoding="utf-8").splitlines()
-    sources = {"types.zig": TYPE_SOURCE, "repeat.zig": REPEAT_SOURCE,
+    sources = {"types.zig": TYPE_SOURCE, "repeat.zig": REPEAT_SOURCE, "parameters.zig": PARAMETER_SOURCE,
                "census15.zig": census_source(names, len(names)), "census17.zig": census_source(names, 0)}
     for name, source in sources.items():
         (output / name).write_text(source, encoding="utf-8", newline="\n")
@@ -171,6 +184,8 @@ def run(root, zig17, output, pause):
     for version, compiler, operation, source, expected in (
         ("015", "zig", "test", "types.zig", 0),
         ("017", str(zig17), "test", "types.zig", 0),
+        ("015", "zig", "test", "parameters.zig", 0),
+        ("017", str(zig17), "test", "parameters.zig", 0),
         ("015", "zig", "test", "repeat.zig", 0),
         ("017", str(zig17), "ast-check", "repeat.zig", 1),
         ("015", "zig", "test", "census15.zig", 0),

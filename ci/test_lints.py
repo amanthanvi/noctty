@@ -175,6 +175,18 @@ class BaselineControls(unittest.TestCase):
                               tip=LINE + "\n" + LINE)
         self.assertTrue(rows)
 
+    def test_large_unmatched_hasdecl_and_grouped_alias_finish(self):
+        directory = str(Path(__file__).resolve().parent)
+        script = ("import sys\nsys.path.insert(0, " + repr(directory) + ")\n"
+                  "import zig017_lint as z\nn = 8000\n"
+                  "assert len(z.matches('@hasDecl(\\n' * n)) == n\n"
+                  "source = 'const heap = ' + '(' * n + 'std.heap' + ')' * n + ';\\n'"
+                  " + 'heap.stackFallback(64, alloc);'\n"
+                  "assert len([r for r in z.matches(source) if r[3] == 'error']) == 1\n")
+        result = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True,
+                                text=True, timeout=20)
+        self.assertEqual(0, result.returncode, result.stderr)
+
 
 class Win32Controls(unittest.TestCase):
     def uses(self, source):
@@ -202,8 +214,20 @@ class Win32Controls(unittest.TestCase):
                 self.assertTrue(self.uses(source))
 
     def test_rehomed_call_passes_and_std_twin_fails(self):
-        self.assertEqual([], self.uses('const sys = @import("win32/sys.zig"); sys.Sleep(1);'))
+        for source in ('const sys = @import("win32/sys.zig"); sys.Sleep(1);', 'win32.sys.Sleep(1);'):
+            bindings = win.Bindings(source, EXPORTS)
+            origins = [origin for _, _, origin in bindings.accesses() if origin.parts == ("Sleep",)]
+            self.assertTrue(origins, "re-home must resolve; an unresolved use is not a passing control")
+            self.assertTrue(all(origin.kind == "native" for origin in origins))
+            self.assertEqual([], list(bindings.uses(REMOVED)))
         self.assertTrue(self.uses('const k32 = std.os.windows.kernel32; k32.Sleep(1);'))
+
+    def test_parameters_shadow_implicit_namespaces_and_keep_hasdecl_unknown(self):
+        from lint_compiler_control import PARAMETER_SOURCE
+        self.assertEqual([], self.uses(PARAMETER_SOURCE))
+        self.assertEqual([], list(zig.matches(PARAMETER_SOURCE)))
+        source = 'const T = struct { pub fn hook() void {} }; fn f(T: anytype) void { _ = @hasDecl(T, "hook"); }'
+        self.assertEqual(1, len(zig.matches(source)))
 
     def test_alias_scope_and_rehomed_shadow(self):
         source = ('const k = std.os.windows.kernel32;\n'
@@ -363,6 +387,7 @@ class GitControls(unittest.TestCase):
         common.git(self.repo, "init", "-q")
         common.git(self.repo, "config", "user.name", "Lint Control")
         common.git(self.repo, "config", "user.email", "lint@example.invalid")
+        common.git(self.repo, "config", "commit.gpgsign", "false")
         common.git(self.repo, "config", "core.autocrlf", "false")
 
     def write(self, name, text):
@@ -391,6 +416,59 @@ class GitControls(unittest.TestCase):
             else:
                 with self.assertRaisesRegex(AssertionError, "not an ancestor of origin/main"):
                     require_main_fixture_history(self.repo, pins)
+
+    def test_operand_only_repeat_edit_and_pointer_twin(self):
+        before = 'const value =\n    **\n    u8;\n'
+        after = 'const value = [_]u8{0}\n    **\n    2;\n'
+        self.write("probe.zig", before)
+        base = self.commit()
+        self.write("probe.zig", after)
+        head = self.commit()
+        added = common.added_lines(self.repo, base, head)["probe.zig"]
+        self.assertEqual({1, 3}, added)
+        self.assertEqual([("probe.zig", 2, "error", "**")], zig.check_file("probe.zig", before, after, added, {}))
+        self.assertEqual([], zig.check_file("probe.zig", before, before.replace("u8;", "u16;"), {3}, {}))
+        # A block operand may itself contain semicolons; its outer initializer
+        # still participates in the repeat when only an operand line changes.
+        block = 'const value = (blk: {\n break :blk [_]u8{0};\n})\n **\n 2;'
+        self.assertTrue(zig.check_file("probe.zig", "", block, {2}, {}))
+
+    def test_summary_paths_are_opaque_markdown_code(self):
+        summary = self.repo / "summary.md"
+        for name, ticks in (("![pixel](https://example.invalid/x).zig", "`"),
+                            ("a`![pixel](https://example.invalid/x).zig", "``"),
+                            ("a```![pixel](https://example.invalid/x).zig", "````")):
+            summary.write_text("", encoding="utf-8")
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_ACTIONS": "true"}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                common.emit("control", [(name, 1, "error", "removed form")])
+            self.assertIn("- " + ticks + ascii(name) + ticks + ":1:", summary.read_text())
+
+    def test_compiler_control_rejects_expansion_before_launch(self):
+        from lint_compiler_control import compiler_call
+        for name in ('percent%PATH%.zig', 'delayed!PATH!.zig', 'quote".zig', 'line\n.zig'):
+            with patch("lint_compiler_control.subprocess.run") as launch:
+                with self.assertRaisesRegex(ValueError, "unsupported CMD"):
+                    compiler_call(self.repo, self.repo, self.repo / "pause.ps1", "zig", "test",
+                                  self.repo / name, "rejected")
+                launch.assert_not_called()
+
+    def test_deletion_only_alias_origin_change_and_same_origin_twin(self):
+        self.write("src/os/windows.zig", 'const windows = @import("std").os.windows;\n'
+                   'pub const kernel32 = windows.kernel32;\npub const Local = struct {};\n')
+        before = ('const w = @import("src/os/windows.zig")\n .Local\n;\n'
+                  'fn call() void { w.kernel32.Sleep(1); }\n// removable comment\n')
+        self.write("probe.zig", before)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        self.write("probe.zig", before.replace(" .Local\n", ""))
+        head = self.commit()
+        self.assertNotIn("probe.zig", common.added_lines(self.repo, base, head))
+        self.assertEqual([("probe.zig", 3)], [(row[0], row[1]) for row in win.check(
+            self.repo, base, head, upstream, removed)])
+        self.write("probe.zig", before.replace("// removable comment\n", ""))
+        same = self.commit()
+        self.assertEqual([], win.check(self.repo, base, same, upstream, removed))
 
     def test_real_diff_added_lines_and_rename(self):
         unchanged = "".join(f"const a{i} = {i};\n" for i in range(10))
@@ -861,7 +939,7 @@ if __name__ == "__main__":
                 from lint_compiler_control import run
                 result = run(Path(__file__).resolve().parent.parent, options.zig017,
                              options.compiler_output, options.pause_script)
-                self.assertEqual(6, len(result["runs"]))
+                self.assertEqual(8, len(result["runs"]))
             def test_windows_import_spellings_on_015(self):
                 from lint_compiler_control import IMPORT_PATHS, run_imports
                 result = run_imports(Path(__file__).resolve().parent.parent,

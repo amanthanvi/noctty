@@ -9,8 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lint_common import added_lines, emit, merge_base, sources
-from zig_bindings import Bindings, identifier
+from zig_bindings import Bindings, identifier, public_members
 from zig_context import binary_repeats
+from zig_spans import CodeSpan, expression_spans
 import zigtok
 
 FAIL_FORMS = frozenset(("**", "@Type", "@cImport", "stackFallback", "errdefer-capture"))
@@ -25,9 +26,12 @@ def _matches(text):
     bindings = Bindings(text)
     tokens = bindings.tokens
     repeats = binary_repeats(tokens)
+    code_lines = frozenset(t.line + 1 for t in tokens)
+    repeat_spans = expression_spans(tokens, repeats, code_lines)
     words = [identifier(t) for t in tokens]
-    scopes, parents = bindings.scopes, bindings.parents
+    scopes = bindings.scopes
     containers = {}
+    public = set(public_members(tokens, scopes))
     for i, token in enumerate(tokens):
         if zigtok.declaration_at(tokens, i):
             opening = i + 4 if words[i + 2:i + 5] == ["=", "struct", "{"] else None
@@ -55,35 +59,26 @@ def _matches(text):
             # This is a review report, not a type checker. Only a local literal
             # container with an explicitly pub member can discharge the report.
             form, level = "@hasDecl (verify target is pub; unresolved targets need review)", "review"
-            end = zigtok.match_paren(tokens, i + 1) if i + 1 < len(tokens) and words[i + 1] == "(" else i
+            end = bindings.brackets.get(i + 1, i)
             width = end - i + 1
-            args = tokens[i + 2:end]
+            args = tokens[i + 2:end] if end - i == 5 else ()
             if len(args) == 3 and args[1].text == "," and args[2].kind == "string":
                 target = identifier(args[0])
                 member = zigtok.unescape(args[2].text[1:-1]).decode("utf-8")
-                scope = scopes[i]
-                while scope is not None and (scope, target) not in containers:
-                    scope = parents[scope]
-                if scope is not None and containers[scope, target] is not None:
-                    opening = containers[scope, target]
-                    close = zigtok.match_paren(tokens, opening)
-                    depth = 0
-                    for k in range(opening + 1, close):
-                        if depth == 0 and words[k:k + 3] in (["pub", "fn", member],
-                                                            ["pub", "const", member],
-                                                            ["pub", "var", member]):
-                            form = None
-                            break
-                        if zigtok.is_op(tokens[k], "{", "(", "["):
-                            depth += 1
-                        elif zigtok.is_op(tokens[k], "}", ")", "]"):
-                            depth -= 1
+                declaration = bindings.lookup(target, i)
+                if declaration and declaration[0] is not None:
+                    opening = containers.get((scopes[declaration[0]], target))
+                    if opening is not None and (opening + 1, member) in public:
+                        form = None
         if form is not None:
             line = token.line + 1
             key = form, line
             if key not in seen:
                 seen.add(key)
-                yield form, line, {t.line + 1 for t in tokens[i:i + width]}, level
+                span = repeat_spans.get(i) if form == "**" else None
+                if span is None:
+                    span = CodeSpan(line, tokens[i + width - 1].line + 1, code_lines)
+                yield form, line, span, level
     for start, end, origin in bindings.accesses():
         if origin.kind == "std" and origin.parts == ("heap", "stackFallback"):
             line = tokens[start].line + 1
@@ -132,8 +127,15 @@ def check_file(path, before, after, added, baseline, fork="", tip=None):
     base_counts, head_counts, fork_counts = map(occurrences, (before, after, fork))
     tip_counts = occurrences(tip) if tip is not None else base_counts
     lines, findings = after.split("\n"), []
+    added_code = None
     for form, line, span, level in matches(after):
-        if not span.intersection(added):
+        if isinstance(span, CodeSpan):
+            if added_code is None:
+                added_code = sorted(set(added) & span.code_lines)
+            touched = span.touches(added_code)
+        else:
+            touched = bool(span.intersection(added))
+        if not touched:
             continue
         if level == "error":
             exact = lines[line - 1].strip()

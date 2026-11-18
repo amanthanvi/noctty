@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import posixpath
 
 import zigtok
+from zig_spans import bracket_pairs, ungroup
 
 
 def identifier(token):
@@ -28,8 +29,7 @@ def scopes(tokens):
 
 
 def chain(tokens):
-    while len(tokens) >= 2 and zigtok.is_op(tokens[0], "(") and zigtok.match_paren(tokens, 0) == len(tokens) - 1:
-        tokens = tokens[1:-1]
+    tokens = ungroup(tokens)
     if not tokens or tokens[0].kind != "identifier":
         return None
     result = [identifier(tokens[0])]
@@ -66,6 +66,7 @@ class Origin:
 class Bindings:
     def __init__(self, text, reexports=None, path=""):
         self.tokens = zigtok.code(text)
+        self.brackets = bracket_pairs(self.tokens)
         self.reexports, self.path = reexports or {}, path
         self.scopes, self.parents = scopes(self.tokens)
         self.decls, self.ends, self.resolved = {}, {}, {}
@@ -91,12 +92,34 @@ class Bindings:
             if equals is not None:
                 self.decls[self.scopes[i], identifier(self.tokens[i + 1])] = (i, self.tokens[equals + 1:end])
                 self.ends[i] = end
+        self.parameters, self.parameter_headers = set(), {}
+        for function in zigtok.functions_of_tokens(self.tokens):
+            if function["params"] is None or function["body"] is None:
+                continue
+            opening, closing = function["params"]
+            depth, names = 0, set()
+            for i in range(opening + 1, min(closing, len(self.tokens))):
+                token = self.tokens[i]
+                if depth == 0 and zigtok.is_op(token, ":") and self.tokens[i - 1].kind == "identifier":
+                    name = identifier(self.tokens[i - 1])
+                    names.add(name)
+                    self.parameters.add((function["body"][0] + 1, name))
+                if zigtok.is_op(token, "(", "[", "{"):
+                    depth += 1
+                elif zigtok.is_op(token, ")", "]", "}"):
+                    depth -= 1
+            for i in range(opening + 1, function["body"][0] + 1):
+                self.parameter_headers[i] = self.parameter_headers.get(i, frozenset()) | names
 
     def lookup(self, name, at):
+        if name in self.parameter_headers.get(at, ()):
+            return None, ()
         scope = self.scopes[at]
         while scope is not None:
             if (scope, name) in self.decls:
                 return self.decls[scope, name]
+            if (scope, name) in self.parameters:
+                return None, ()  # unknown runtime/type value, not an implicit namespace
             scope = self.parents[scope]
         return None
 
@@ -104,6 +127,8 @@ class Bindings:
         kind, parts = origin.kind, origin.parts
         if kind == "win32" and parts[:1] == ("windows",):
             kind, parts = "std", ("os", "windows") + parts[1:]
+        elif kind == "win32" and parts[:1] == ("sys",):
+            kind, parts = "native", parts[1:]
         elif kind == "os" and parts[:1] == ("windows",):
             kind, parts = "fork", parts[1:]
         if kind == "fork" and parts and parts[0] in self.reexports:
@@ -117,19 +142,20 @@ class Bindings:
         module = import_path(module)
         target = import_path(posixpath.join(posixpath.dirname(import_path(self.path)), module))
         routes = {"src/os/windows.zig": "fork", "src/os/main.zig": "os",
-                  "src/os.zig": "os", "src/apprt/win32.zig": "win32"}
+                  "src/os.zig": "os", "src/apprt/win32.zig": "win32",
+                  "src/apprt/win32/sys.zig": "native", "src/apprt/win32_types.zig": "native"}
         if target in routes:
             return Origin(routes[target])
         if not self.path:  # Isolated token controls have no containing source path.
-            for suffix, kind in (("os/windows.zig", "fork"), ("os/main.zig", "os"),
+            for suffix, kind in (("win32/sys.zig", "native"), ("win32_types.zig", "native"),
+                                 ("os/windows.zig", "fork"), ("os/main.zig", "os"),
                                  ("os.zig", "os"), ("win32.zig", "win32")):
                 if module.endswith(suffix):
                     return Origin(kind)
         return None
 
     def expression(self, tokens, at, visiting=frozenset()):
-        while len(tokens) >= 2 and zigtok.is_op(tokens[0], "(") and zigtok.match_paren(tokens, 0) == len(tokens) - 1:
-            tokens = tokens[1:-1]
+        tokens = ungroup(tokens)
         if not tokens:
             return None
         if (len(tokens) >= 4 and tokens[0].kind == "builtin" and tokens[0].text == "@import"
@@ -149,6 +175,8 @@ class Bindings:
         decl = self.lookup(parts[0], at)
         if decl:
             index, expression = decl
+            if index is None:
+                return None
             if index in visiting:
                 return None
             if index not in self.resolved:

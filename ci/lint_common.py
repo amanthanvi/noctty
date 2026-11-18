@@ -141,7 +141,9 @@ def emit(title, findings, mode="enforce"):
             print(f"::{annotation} file={safe_path},line={line}::{rule}")
         else:
             print(f"{ascii(path)}:{line}: {level}: {rule}")
-        lines.append(f"- {ascii(path).replace('`', '&#96;')}:{line}: {level}: {rule}")
+        label = ascii(path)
+        ticks = "`" * (1 + max((len(m.group()) for m in re.finditer(r"`+", label)), default=0))
+        lines.append(f"- {ticks}{label}{ticks}:{line}: {level}: {rule}")
     print(lines[2])
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary).open("a", encoding="utf-8", newline="\n") as stream:
