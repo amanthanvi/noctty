@@ -1,10 +1,40 @@
-# Soak slope thresholds (PLAN.md §3.5), read by ci/soak_judge.py. Provisional until the two clean runs.
-slope	handles	12
-slope	threads	2
-slope	private_bytes	8388608
-slope	working_set	16777216
-slope	commit_charge	8388608
+# Soak thresholds (PLAN.md §3.5), read by ci/soak_judge.py: the most a metric may rise per hour after the
+# 30-minute warm-up (least-squares slope over the live minutes after it), the most threads a sample after
+# it may hold, and the most threads of one named kind.
+#
+# Fixed from two clean hour-long runs of the packaged ReleaseFast portable copy (product sources at
+# 263eacfa0, harness at dd97f38ef, 2026-11-18, private desktops, run in parallel with a ReleaseSafe copy,
+# the handle-injection control and the kill control). Rule, per metric: the ceiling of
+# max(floor, max over the two runs of slope + 4 x standard error), bytes to whole MiB; floors 6/h for the
+# counts (two one-off +1 steps mid-window read as about 6/h in an hour) and 4 MiB/h for bytes. The thread
+# bound is the runs' highest count after the warm-up plus 8 (the thread pool's workers come and go); the
+# kinds are the fork's named threads at the runs' highest count (one pane at the baseline).
+#
+#   metric          run A slope (se)/h         run B slope (se)/h
+#   handles         +0.69 (3.64)               +2.32 (3.01)
+#   threads         +0.41 (0.88)               +0.39 (0.88)
+#   private_bytes   +42.7 MB (5.2 MB)          +46.5 MB (5.1 MB)
+#   working_set     -24.2 MB (5.6 MB)          -22.3 MB (5.9 MB)
+#   commit_charge   +42.7 MB (5.2 MB)          +46.5 MB (5.1 MB)
+#   gdi_objects     0 (0)                      0 (0)
+#   user_objects    -0.48 (0.65)               +0.65 (0.59)
+#   children        0 (0)                      0 (0)
+#   threads max     14                         14
+#
+# The private-bytes and commit-charge thresholds therefore admit the clean runs' own rise of about
+# 45 MB/h (about 0.5 MiB per churn minute, none in idle minutes). Whether that rise levels off past an hour
+# was not measured; a longer clean run, or the rise's cause, should set these two before release coverage.
+# The ReleaseSafe copy beside run B rose +4.7 MB/h (se 5.3 MB). The negative control (one duplicated handle
+# a minute) measured +66.8 handles/h (se 3.5), and fails on handles alone against these thresholds.
+slope	handles	16
+slope	threads	6
+slope	private_bytes	67108864
+slope	working_set	4194304
+slope	commit_charge	67108864
 slope	gdi_objects	6
 slope	user_objects	6
-slope	children	1
-bound	threads	64
+slope	children	6
+bound	threads	22
+kind	renderer	1
+kind	io	1
+kind	io-reader	1
