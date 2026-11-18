@@ -421,8 +421,8 @@ with its history isolated. Results go to `results.json` and `results.md` in
 the run directory, each row observed against the source's prediction.
 
 ```powershell
-pwsh -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir>
-pwsh -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir> `
+pwsh -NoProfile -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir>
+pwsh -NoProfile -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir> `
     -Readers a,a16,b,c,c-inbox,d,d-notiming -AllowSshFarSideUserProfileAndLocalAppData
 ```
 
@@ -431,16 +431,26 @@ c-inbox puts reader c behind the in-box conhost. d and d-notiming run System32's
 `ssh.exe` to a one-connection `sshd.exe -d` on 127.0.0.1, run as you with keys
 made for the run and deleted after it, forwarding off on both ends;
 d-notiming adds `-o ObscureKeystrokeTiming=no`. Their far side runs through
-sshd's `DefaultShell` (`HKLM\SOFTWARE\OpenSSH`) as you, which loads your own
-PowerShell profile and uses your real `LOCALAPPDATA`, so they run only with
-`-AllowSshFarSideUserProfileAndLocalAppData`.
+sshd's `DefaultShell` (`HKLM\SOFTWARE\OpenSSH`; `cmd.exe` when unset) as you,
+with your real `LOCALAPPDATA`, and a PowerShell `DefaultShell` also loads your
+own PowerShell profile. So they run only with
+`-AllowSshFarSideUserProfileAndLocalAppData`, and only with a Run path of
+letters, digits, `_`, `.`, `-` and `\`, since the far side's shell gets the
+reader command unquoted.
+
+The Run directory must be new. The harness makes it with a protected ACL (you,
+SYSTEM and Administrators, inherited by everything in it) and reads that back
+before it writes anything there. It refuses to run with `NOCTTY_CONPTY`
+already set, since it sets that itself for c-inbox.
 
 Exit 0 means every requested reader ran every step, case 7 ran with its
 controls (unless `-SkipPSReadLine`), and every positive control came back as
 predicted; other rows are observations, recorded either way, and a row whose
 step never finished reads INCOMPLETE. Exit 1 is an incomplete run, a failed
-control or a reader in the wrong state; 2 infrastructure, in the driver or the
-outer phase; 3 a changed isolation guard (the startup ledger, the PowerShell
+control, a reader in the wrong state or without a clean stop, or a case 7
+without a prompt row before and after its tab switch; 2 infrastructure, in the
+driver or the outer phase (an inherited `NOCTTY_CONPTY`, or a Run whose ACL
+does not read back as yours alone); 3 a changed isolation guard (the startup ledger, the PowerShell
 history, the product AUMID's registration, the clipboard sequence number), a
 link left in the run directory, or an ssh secret that could not be deleted.
 
@@ -449,26 +459,31 @@ must exit 1. `-Sabotage setup` fails the setup at the point where reader d's
 ssh keys already exist, and must exit 2 with any keys deleted (with no ssh
 reader there are none to make). `-Sabotage key` holds an ssh secret's file open
 through the cleanup, and must exit 3 with the guards compared and the failure
-recorded.
+recorded. `-Sabotage acl` gives Everyone a rule on the Run directory once it is
+made, and must exit 2 with nothing compiled or launched.
 
 `flagship/contracts/Contracts.98-ConptyReplyPath.ps1` holds the harness to its
 safety and measurement properties in two ways:
 
 - **Checks and mutations.** It checks each launch's desktop and job, the
   isolation flags and guards, the bindings' bytes, the step plan, the
-  predictions, the verdicts and the exit policy. It then applies 126 mutations
-  (the council's from rounds 1 to 4, and its own). Each must be refused, by
-  the whole-file pin and by the pin of every pinned region or function it
-  changes.
-- **A closed set of pins.** The harness, the reader and the listed regions are
-  pinned whole, by SHA-256 with LF line ends. The whole harness and the whole
-  reader are pinned, so any edit to either fails the contract until its pin
-  there is updated in the same change, and a reviewer sees it. The regions
+  predictions, the verdicts and the exit policy. It then applies 145 mutations
+  (the council's from rounds 1 to 5, the review bots', and its own). Each must
+  be refused by the whole-file pin and by the pin of every pinned region or
+  function it changes. All but the 39 marked `PinOnly` must also be refused by
+  the content checks alone (`-SkipPins`), so those checks are shown to work
+  once a pin moves. The 39 are edits only a pin can see, and they must get
+  nothing from the content checks, so the mark stays true.
+- **A closed set of pins.** The whole harness and the whole reader are pinned
+  by SHA-256 with LF line ends. Any edit to either fails the contract until its
+  pin there is updated in the same change, so a reviewer sees it. The regions
   between `# pin-begin:` and `# pin-end:` comments in the harness (the reader
   list, the whole outer phase, case 7, the driver's results) and the functions
-  the contract lists are pinned again, so a failure also names the block that
-  changed. Not pinned: `console-attach-info.c`, which case 7 reads the prompt
-  with and four other harnesses share.
+  the contract lists are pinned as well, only so that a failure names the
+  block that changed. Not pinned, since other harnesses share them:
+  `console-attach-info.c` (case 7's prompt reader),
+  `scripts\windows-harness-history.ps1` (its guard decides exit 3's history
+  branch) and `scripts\dev-windows.cmd` (the helper compile, exit 2).
 
 ## interactive-win11-ime-candidate.ps1
 
