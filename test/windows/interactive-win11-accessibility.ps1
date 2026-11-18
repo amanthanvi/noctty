@@ -3677,6 +3677,11 @@ function Invoke-AccessibilitySettingsCloseAction {
     $invoke.Invoke()
 }
 
+# pin-begin: save-functions
+# The functions the two Settings saves depend on. Contracts.90-Workflows.ps1
+# pins this region by SHA-256 (EVIDENCE-TOAST-FOREGROUND): an edit here fails
+# that contract until its pin there is updated in the same change.
+#
 # What a command line's arguments leave noctty's notification settings at,
 # by noctty's rules (`cli/args.zig` `parse`, `parseIntoField`, `parseBool`,
 # `parsePackedStruct`; `Config.parseManuallyHook`): every `--key=value`
@@ -3684,44 +3689,62 @@ function Invoke-AccessibilitySettingsCloseAction {
 # empty value resets the field to its default; the last one wins; a bare
 # `--desktop-notifications` is true; a value noctty cannot parse changes
 # nothing; nothing after `-e`, `-Embedding` or `-ToastActivated` is
-# configuration. `ConfigFile` says whether any `--config-file` appears, whose
-# include noctty reads after the command line (EVIDENCE-TOAST-FOREGROUND;
-# Contracts.90-Workflows.ps1 tests this function).
+# configuration. noctty compares bytes (`mem.eql`, and `std.ascii.eqlIgnoreCase`
+# for the two switches), so this does too: ordinally, never with PowerShell's
+# `-eq` family, which ignores some characters (PWSH-CEQ-ICU). `ConfigFile` says
+# whether any `--config-file` appears, whose include noctty reads after the
+# command line (Contracts.90-Workflows.ps1 tests this function).
 function Get-AccessibilityNotificationSettings {
     param([AllowEmptyCollection()][string[]] $Arguments)
 
+    $ordinal = [StringComparison]::Ordinal
+    # std.ascii.eqlIgnoreCase: only A-Z fold.
+    $asciiFolds = {
+        param([string] $Left, [string] $Right)
+        if ($Left.Length -ne $Right.Length) { return $false }
+        for ($at = 0; $at -lt $Left.Length; $at++) {
+            $l = [int]$Left[$at]
+            $r = [int]$Right[$at]
+            if ($l -ge 0x41 -and $l -le 0x5A) { $l += 0x20 }
+            if ($r -ge 0x41 -and $r -le 0x5A) { $r += 0x20 }
+            if ($l -ne $r) { return $false }
+        }
+        $true
+    }
     $settings = [ordered]@{ Desktop = $true; ClipboardCopy = $true; ConfigReload = $true; ConfigFile = $false }
     foreach ($argument in $Arguments) {
-        if ($argument -ceq '-e' -or $argument -ieq '-Embedding' -or $argument -ieq '-ToastActivated') { break }
-        if (-not $argument.StartsWith('--', [StringComparison]::Ordinal)) { continue }
+        if ([string]::Equals($argument, '-e', $ordinal) -or (& $asciiFolds $argument '-Embedding') -or
+            (& $asciiFolds $argument '-ToastActivated')) { break }
+        if (-not $argument.StartsWith('--', $ordinal)) { continue }
         $key = $argument.Substring(2)
         $value = $null
-        $equals = $key.IndexOf('=')
+        $equals = $key.IndexOf([char]'=')
         if ($equals -ge 0) {
             $value = $key.Substring($equals + 1)
             $key = $key.Substring(0, $equals)
         }
-        if ($key -ieq 'config-file') { $settings.ConfigFile = $true; continue }
+        if (& $asciiFolds $key 'config-file') { $settings.ConfigFile = $true; continue }
         $bool = $null
         if ($null -ne $value) {
-            if ($value -cin @('1', 't', 'T', 'true')) { $bool = $true } elseif ($value -cin @('0', 'f', 'F', 'false')) { $bool = $false }
+            foreach ($word in @('1', 't', 'T', 'true')) { if ([string]::Equals($value, $word, $ordinal)) { $bool = $true } }
+            foreach ($word in @('0', 'f', 'F', 'false')) { if ([string]::Equals($value, $word, $ordinal)) { $bool = $false } }
         }
-        if ($key -ceq 'desktop-notifications') {
+        if ([string]::Equals($key, 'desktop-notifications', $ordinal)) {
             if ($null -eq $value -or $value.Length -eq 0) { $settings.Desktop = $true }
             elseif ($null -ne $bool) { $settings.Desktop = $bool }
         }
-        elseif ($key -ceq 'app-notifications' -and $null -ne $value) {
+        elseif ([string]::Equals($key, 'app-notifications', $ordinal) -and $null -ne $value) {
             if ($value.Length -eq 0) { $settings.ClipboardCopy = $true; $settings.ConfigReload = $true; continue }
             if ($null -ne $bool) { $settings.ClipboardCopy = $bool; $settings.ConfigReload = $bool; continue }
             $clipboardCopy = $true
             $configReload = $true
             $valid = $true
-            foreach ($part in $value.Split(',')) {
-                $part = $part.Trim(' ', "`t")
-                $on = -not $part.StartsWith('no-', [StringComparison]::Ordinal)
+            foreach ($part in $value.Split([char]',')) {
+                $part = $part.Trim([char[]]@(' ', "`t"))
+                $on = -not $part.StartsWith('no-', $ordinal)
                 if (-not $on) { $part = $part.Substring(3) }
-                if ($part -ceq 'clipboard-copy') { $clipboardCopy = $on }
-                elseif ($part -ceq 'config-reload') { $configReload = $on }
+                if ([string]::Equals($part, 'clipboard-copy', $ordinal)) { $clipboardCopy = $on }
+                elseif ([string]::Equals($part, 'config-reload', $ordinal)) { $configReload = $on }
                 else { $valid = $false; break }
             }
             if ($valid) { $settings.ClipboardCopy = $clipboardCopy; $settings.ConfigReload = $configReload }
@@ -3731,26 +3754,33 @@ function Get-AccessibilityNotificationSettings {
 }
 
 # Whether a saving process's own command line leaves every notification off:
-# 'quiet', or why not, never quoting the command line. Its program name is
-# dropped; after it, a quote (which would need noctty's quoting rules to read)
-# is refused, the rest splits on spaces and tabs as noctty's does, and any
-# `--config-file` is refused.
+# 'quiet', or why not, never quoting the command line. The program name ends
+# where Zig's `ArgIteratorWindows` ends it (a quote toggles, a space or tab
+# outside quotes ends it). After it, any character outside printable ASCII
+# (0x20-0x7E, so a tab or a NUL too) and any quote is refused, so what is left
+# splits on spaces exactly as noctty splits it, and any `--config-file` is
+# refused.
 function Get-AccessibilitySaveLaunchVerdict {
     param([AllowNull()][AllowEmptyString()][string] $CommandLine)
 
-    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return 'its command line could not be read' }
-    $rest = $CommandLine.TrimStart(' ', "`t")
-    if ($rest.StartsWith('"', [StringComparison]::Ordinal)) {
-        $close = $rest.IndexOf('"', 1)
-        if ($close -lt 0) { return 'its program name is not closed' }
-        $rest = $rest.Substring($close + 1)
+    if ([string]::IsNullOrEmpty($CommandLine)) { return 'its command line could not be read' }
+    $inside = $false
+    $at = 0
+    while ($at -lt $CommandLine.Length) {
+        $code = [int]$CommandLine[$at]
+        if ($code -eq 0) { return 'its command line holds a NUL' }
+        if ($code -eq 0x22) { $inside = -not $inside }
+        elseif (-not $inside -and ($code -eq 0x20 -or $code -eq 0x09)) { break }
+        $at++
     }
-    else {
-        $end = $rest.IndexOfAny([char[]]@(' ', "`t"))
-        $rest = if ($end -lt 0) { '' } else { $rest.Substring($end) }
+    if ($inside) { return 'its program name is not closed' }
+    $rest = $CommandLine.Substring($at)
+    foreach ($character in $rest.ToCharArray()) {
+        $code = [int]$character
+        if ($code -lt 0x20 -or $code -gt 0x7E) { return 'its arguments hold a character outside printable ASCII' }
+        if ($code -eq 0x22) { return 'its arguments hold a quote' }
     }
-    if ($rest.Contains('"')) { return 'its arguments hold a quote' }
-    $settings = Get-AccessibilityNotificationSettings -Arguments ([string[]]@($rest -split '[ \t]+' | Where-Object { $_.Length -gt 0 }))
+    $settings = Get-AccessibilityNotificationSettings -Arguments ([string[]]@($rest.Split([char[]]@(' '), [StringSplitOptions]::RemoveEmptyEntries)))
     if ($settings.ConfigFile) { return 'it names a --config-file' }
     $on = @(
         if ($settings.Desktop) { 'desktop-notifications' }
@@ -3781,8 +3811,50 @@ function Assert-AccessibilitySaveLaunchQuiet {
     }
     $verdict = Get-AccessibilitySaveLaunchVerdict -CommandLine $commandLine
     $commandLine = $null
-    if ($verdict -cne 'quiet') {
+    if (-not [string]::Equals($verdict, 'quiet', [StringComparison]::Ordinal)) {
         throw "The $Description did not start with every notification off: $verdict."
+    }
+}
+
+# What a saving process's reload reads besides its command line: the default
+# config files in the directory its environment names (`XDG_CONFIG_HOME`,
+# which noctty prefers to `LOCALAPPDATA`; `loadDefaultFiles`), and after the
+# command line any `config-file` include one of them names. Before the first
+# launch (-Empty) that directory holds none of them. Later it holds only
+# noctty's own config.ghostty, the file the saves write, and that names no
+# include. Its bytes must be printable ASCII, tabs and line ends, and every
+# line, split at CR and at LF, is read byte for byte, so no spelling hides a
+# key from this check.
+function Assert-AccessibilitySaveSandboxQuiet {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Environment,
+        [Parameter(Mandatory)][string] $SavedConfigPath,
+        [Parameter(Mandatory)][string] $When,
+        [switch] $Empty
+    )
+
+    $configHome = [string]$Environment['XDG_CONFIG_HOME']
+    if ([string]::IsNullOrEmpty($configHome)) { throw "The settings save environment names no XDG_CONFIG_HOME $When." }
+    if (-not [string]::Equals((Join-Path $configHome 'noctty\config.ghostty'), $SavedConfigPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The settings save environment reads its config from another directory than the leaf checks $When."
+    }
+    foreach ($name in @('noctty\config.ghostty', 'ghostty\config', 'winghostty\config.ghostty')) {
+        $path = Join-Path $configHome $name
+        if (-not [System.IO.File]::Exists($path)) { continue }
+        if ($Empty -or -not [string]::Equals($name, 'noctty\config.ghostty', [StringComparison]::Ordinal)) {
+            throw "The settings save sandbox holds $name $When; the saving processes would read it."
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        foreach ($byte in $bytes) {
+            if ($byte -ne 0x09 -and $byte -ne 0x0A -and $byte -ne 0x0D -and ($byte -lt 0x20 -or $byte -gt 0x7E)) {
+                throw "The saved settings file holds a byte outside printable ASCII $When; its keys are read byte for byte."
+            }
+        }
+        foreach ($line in [System.Text.Encoding]::ASCII.GetString($bytes).Split([char[]]@("`r", "`n"))) {
+            if ($line.TrimStart([char[]]@(' ', "`t")).StartsWith('config-file', [StringComparison]::OrdinalIgnoreCase)) {
+                throw "The saved settings file names a config-file include $When; noctty would read it after the command line."
+            }
+        }
     }
 }
 
@@ -3868,6 +3940,7 @@ function Start-AccessibilityProcessWithEnvironment {
         }
     }
 }
+# pin-end: save-functions
 
 # What a Settings element shows: a form element scrolled partly out of the
 # viewport is still on screen, but only the rows inside the viewport are seen.
@@ -4133,6 +4206,9 @@ $editEventElement = $null
 $editEventsRegistered = $false
 $relaunchProcess = $null
 $ownerProbeProcess = $null
+# pin-begin: save-sandbox
+# The sandbox both Settings saves run in (Contracts.90-Workflows.ps1 pins this
+# region, EVIDENCE-TOAST-FOREGROUND).
 $saveProbeCleanup = $null
 $saveVerifyCleanup = $null
 $settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout `
@@ -4141,6 +4217,7 @@ $settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout `
 New-InteractiveWin11Sandbox -Layout $settingsPersistenceLayout
 $settingsProbeEnvironment = Get-InteractiveWin11Environment -Layout $settingsPersistenceLayout
 $sandboxConfigPath = Join-Path $settingsPersistenceLayout.LocalAppData 'noctty\config.ghostty'
+# pin-end: save-sandbox
 $settingsConfigBaselineCaptured = $false
 $settingsConfigBaselineExisted = $false
 [byte[]]$settingsConfigBaselineBytes = @()
@@ -7136,26 +7213,11 @@ try {
         exit_code = $ownerProbeExitCode
     }
 
+    # pin-begin: save-flow
     # Exercise the third inline outcome end-to-end. Persist through the UIA
     # Invoke provider, terminate the writer, and prove a new process in the
     # same isolated sandbox observes the value before restoring the baseline.
-    # The saving processes read a default config file before their command
-    # lines, and an include it names after them (Config.load), so they start
-    # from none: only their command lines and what the first save writes decide
-    # (EVIDENCE-TOAST-FOREGROUND).
-    $settingsDefaultConfigFiles = @('noctty\config.ghostty', 'ghostty\config', 'winghostty\config.ghostty')
-    foreach ($defaultConfigFile in $settingsDefaultConfigFiles) {
-        if ([System.IO.File]::Exists((Join-Path $settingsPersistenceLayout.LocalAppData $defaultConfigFile))) {
-            throw "The settings save sandbox already holds $defaultConfigFile; the saving processes would read it."
-        }
-    }
-    $settingsConfigBaselineExisted = [System.IO.File]::Exists($sandboxConfigPath)
-    $settingsConfigBaselineBytes = if ($settingsConfigBaselineExisted) {
-        [System.IO.File]::ReadAllBytes($sandboxConfigPath)
-    } else {
-        [byte[]]@()
-    }
-    $settingsConfigBaselineCaptured = $true
+    #
     # Both processes below save Settings. A save raises a real toast, "Settings
     # saved", through the product notifier unless `config-reload` notifications
     # are off and its in-window banner showed (`settingsNotifySuccessThunk`; with
@@ -7166,16 +7228,29 @@ try {
     # with every notification off, the clipboard-copy notice included, which
     # `desktop-notifications` does not gate; this leaf tests none of them.
     # noctty takes the last value of each and resets one to its default on an
-    # empty value, so nothing may follow these, and it reads a config-file
-    # include after the command line. Two layers keep it so. Contracts.90-
-    # Workflows.ps1's static grammar refuses the forms it does not list: the
-    # flags one literal array of single-quoted strings, assigned once and read
-    # only in the two launch arrays; each launch's arguments, class name,
-    # process and probe assigned once, in the forms and order it lists; no
-    # element with whitespace or a quote (Start-Process joins them unquoted);
-    # no --config-file. What static analysis cannot see, a name built at run
-    # time, the run-time check after each launch covers: it reads what the
-    # process was actually given (Assert-AccessibilitySaveLaunchQuiet).
+    # empty value, so nothing may follow these. A save's reload also reads the
+    # default config files and, after the command line, an include one names,
+    # so the sandbox is checked before the first launch, before each save and
+    # before the verifier starts (Assert-AccessibilitySaveSandboxQuiet).
+    # Three layers keep it so. Right after each launch, before its probe opens,
+    # the run-time check reads the command line the process was actually given
+    # (Assert-AccessibilitySaveLaunchQuiet). Contracts.90-Workflows.ps1 pins
+    # this region, the functions it calls and the failure path by SHA-256, so
+    # an edit here fails that contract until its pin is updated in the same
+    # change. Its static grammar names what changed: it refuses the forms it
+    # does not list (the flags one literal array of single-quoted strings,
+    # assigned once and read only in the two launch arrays; each launch's
+    # arguments, class name, process and probe assigned once, in the forms and
+    # order it lists; every element printable ASCII with no space, quote or
+    # backtick; no --config-file).
+    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the first launch' -Empty
+    $settingsConfigBaselineExisted = [System.IO.File]::Exists($sandboxConfigPath)
+    $settingsConfigBaselineBytes = if ($settingsConfigBaselineExisted) {
+        [System.IO.File]::ReadAllBytes($sandboxConfigPath)
+    } else {
+        [byte[]]@()
+    }
+    $settingsConfigBaselineCaptured = $true
     $settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false')
     $saveProbeClass = "noctty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
     $saveProbeArguments = @(
@@ -7240,6 +7315,7 @@ try {
             ).ToInt64() -eq 3 -and
             $saveScrollback.Save.Current.IsEnabled
     }
+    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the probe saves'
     Invoke-AccessibilitySettingsCloseAction `
         -SettingsProbe $saveProbe `
         -ActionName 'Save and close' `
@@ -7257,9 +7333,7 @@ try {
     $saveProbeCleanup = $null
     # The verifier reads what the save wrote, and an include named there after
     # its command line.
-    if ((Get-Content -LiteralPath $sandboxConfigPath -Raw) -match '(?m)^\s*config-file\s*=') {
-        throw 'The saved settings file names a config-file include; the verifier would read it after its command line.'
-    }
+    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the verifier starts'
 
     $saveVerifyClass = "noctty-accessibility-settings-save-verify-$([Guid]::NewGuid().ToString('N'))"
     $saveVerifyArguments = @(
@@ -7360,6 +7434,7 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings persistence restore draft' -Condition {
         return $verifyScrollback.Save.Current.IsEnabled
     }
+    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the verifier saves'
     $restoreInvoke.Invoke()
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings persistence baseline restoration' -Condition {
         if ($verifyScrollback.Save.Current.IsEnabled) { return $false }
@@ -7417,6 +7492,7 @@ try {
     $settingsOwnerLifecycle['persistence_theme_host_backdrop'] = $verifyHostBackdrop
     $settingsOwnerLifecycle['persistence_theme_settings_backdrop'] = $verifySettingsBackdrop
     $settingsOwnerLifecycle['persistence_theme_restored'] = $true
+    # pin-end: save-flow
 
     Send-AccessibilityChord -Keys @([uint16]0x12, [uint16]0x25) -Description 'Alt+Left before sustained output' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'left pane focus before sustained output' -Condition {
@@ -7865,6 +7941,9 @@ try {
     $evidence['relaunch'] = [ordered]@{ marker = $relaunchMarker; visible = $true; process_id = $relaunchProcess.Id }
     }
 }
+# pin-begin: failure-path
+# Contracts.90-Workflows.ps1 pins this region by SHA-256 (EVIDENCE-TOAST-FOREGROUND):
+# a failed check above must reach the final throw.
 catch {
     $runFailure = $_
 }
@@ -8057,6 +8136,7 @@ foreach ($cleanupFailure in $cleanupFailures) { $failureMessages.Add($cleanupFai
 if ($failureMessages.Count -gt 0) {
     throw "Accessibility validation failed: $($failureMessages -join ' | ')"
 }
+# pin-end: failure-path
 
 Write-Host "interactive Win11 accessibility: PASS ($artifact)"
 
