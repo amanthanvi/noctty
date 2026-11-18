@@ -17,9 +17,9 @@ reading step under [Self-Correction Log](#self-correction-log).
     count, about a third of the time (test-harnesses.md: 2026-11-11
     TEST-SHARDS-01).
   - `-Dtest-optimize=ReleaseSafe` builds the test executable in that mode
-    (default Debug); `-Doptimize` does not reach it. The summary's
-    `compile test ghostty-test <mode>` line names the mode
-    (build-release-ci.md: 2026-11-18 TEST-OPTIMIZE-01).
+    (default Debug). `-Doptimize` does not set its mode, and any value but
+    Debug breaks its compile. The summary's `compile test ghostty-test <mode>`
+    line names the mode (build-release-ci.md: 2026-11-18 TEST-OPTIMIZE-01).
   - Bare `zig build test` errors in this fork.
   - `-Dtest-filter=<token>` (one token: quote it or use a no-space
     substring, or `zig build` reads the rest as step names) runs the tests
