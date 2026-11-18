@@ -87,7 +87,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     }
     foreach($entry in $guardStatements.GetEnumerator()){Need $entry.Key (Direct (Function-Statements $entry.Value[0]) $entry.Value[1])}
     $functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true))
-    Need FunctionDefinitions (@($functions | Where-Object {-not [object]::ReferenceEquals($_.Parent,$ast.EndBlock)}).Count -eq 0 -and @($functions | Group-Object Name | Where-Object Count -GT 1).Count -eq 0)
+    Need FunctionDefinitions (@($functions | Where-Object {-not [object]::ReferenceEquals($_.Parent,$ast.EndBlock)}).Count -eq 0 -and @($functions | Group-Object { $_.Name -replace '^(?i:global|script|local|private):','' } | Where-Object Count -GT 1).Count -eq 0)
     $traps=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.TrapStatementAst]},$true))
     Need TrapExit ($traps.Count -eq 1 -and [object]::ReferenceEquals($traps[0].Parent,$ast.EndBlock) -and (Same $traps[0].Body.Statements[-1] 'break') -and @($traps[0].FindAll({param($n) $n -is [Management.Automation.Language.ContinueStatementAst]},$true)).Count -eq 0)
     Need RejectedJournal (Direct (Function-Statements 'Assert-RejectedCopy') '$State=Get-UpdateState $Root -RequireReadable')
@@ -358,7 +358,7 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         try{Refuses RejectedLocked {Assert-RejectedCopy $before $good}}finally{$locked.Dispose()}
         [IO.File]::WriteAllText($journal,'{ malformed')
         Refuses RejectedMalformed {Assert-RejectedCopy $before $good}
-        foreach($invalid in @('null','[]','"scalar"')){
+        foreach($invalid in @('null','[]','[{}]','"scalar"')){
             [IO.File]::WriteAllText($journal,$invalid)
             Refuses RejectedNotObject {Assert-RejectedCopy $before $good}
         }

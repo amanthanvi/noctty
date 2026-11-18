@@ -377,7 +377,7 @@ function Get-ReleaseCopy([string] $Version) {
 function Get-UpdateState([string] $Root,[switch] $RequireReadable) {
     $path = Join-Path $Root 'update-state.json'
     try {
-        $value = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -ErrorAction Stop
+        $value = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -NoEnumerate -ErrorAction Stop
         if($value -isnot [Management.Automation.PSCustomObject]){throw 'Journal is not a JSON object'}
     } catch [IO.FileNotFoundException] { return $null
     } catch [IO.DirectoryNotFoundException] { return $null
