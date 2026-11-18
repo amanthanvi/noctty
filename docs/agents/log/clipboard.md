@@ -6,6 +6,7 @@ Corrected in other files:
 - 2026-04-17 `win32_surface_drop_target.zig` (inline `IDropTarget` storage): superseded by the 2026-10-11 PKG-26 entry in input.md (`DropTarget` is allocated independently and refcounted).
 
 See also:
+- The 2026-11-18 DIRECT-UPDATE-720 entry in test-harnesses.md records the local AutoRun/clipboard isolation failure, missing run-f receipts, direct cmd /D and denied clipboard fixture, and the bounded positive controls.
 - Tests that drive `clipboardRequest` through a seam: #530's 2026-10-22 empty-bracketed-paste entry names `App.test_clipboard_read`; the 2026-10-22 #536 entry's seam is `App.test_clipboard_source`, which replaced it.
 - Copy as HTML's OSC 8 anchor allowlist is in the 2026-10-15 PKG-53 entry in terminal-core.md.
 - 2026-09-23 "After #264": its "previous entry" and "#261" are the 2026-09-23 "Base64 typed into Neovim after an OSC 52 paste" entry in conpty.md.

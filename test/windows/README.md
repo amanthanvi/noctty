@@ -880,8 +880,33 @@ and offers Open Release. `-Expected Removed`, from the previous stub-bearing
 page and checking its manual instructions is a separate browser check. Neither
 future boundary is established by the 1.3.137 acceptance run.
 
-Run `direct-update-contract.ps1` for the admission baseline and its twenty-three
-parse-checked refusal controls; the flagship contracts include it. Public
-artifacts should contain only the named JSON receipts, never the raw child logs,
+Every launch pins a direct absolute System32 cmd with `/D` and denies clipboard
+reads and writes. Local runs additionally use the local harness library's real
+startup-state fingerprint and jump-list metadata guard. These detect mutations;
+they do not establish the absence of reads or identical writes. The receipt
+reports that limit instead of asserting no real-directory access. Private-window
+samples are retained and must contain the driver sentinel. A hidden STATIC helper
+on Default provides a positive control of the job window oracle before noctty
+starts. Hosted runs also attempt a sequence-number positive control in a fresh
+unnamed window station, checked to differ from WinSta0 before every clipboard
+operation. This never writes the user's clipboard; the result cannot establish
+clipboard access rights on WinSta0 itself.
+
+Successful updates must sample `swapped` followed by `confirmed`; a cleared,
+abandoned transaction fails. Rejected mode compares SHA-256 for every original
+source file and permits extra files only for explicitly named generated runtime
+artifacts; it also requires no staged transaction. Removed mode validates the
+source stub before applying and its absence afterwards. Those modes still need
+the actual v1.4.100 candidate; opening the release page stays a separate check.
+Each input receipt records the checkout commit and harness/helper hashes. Keep
+the scratch hosted branch for future native ARM64 runs, with its `windows-2025`
+and `windows-11-arm` runner labels. Add `-HostedMesa` only for the pinned
+1.3.125 to 1.3.137 case.
+
+Run `direct-update-contract.ps1` for static refusal controls and the harness's
+actual verdict functions against synthetic files and receipts. Parse-valid
+here-string, disabled-guard, forged-stub, clipboard, confirmation,
+executable-identity and sidecar mutants must fail; the flagship gate includes it.
+Public artifacts should contain only the named JSON receipts, never the raw child logs,
 copied profiles or binaries. The hosted workflow used to gather W10 evidence is
 scratch-only and is not part of this change.

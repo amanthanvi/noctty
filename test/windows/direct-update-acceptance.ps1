@@ -45,6 +45,131 @@ function Save-Receipt([string] $Name, $Value) {
     $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run $Name) -Encoding utf8
 }
 function Get-Sha([string] $Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Assert-NativeArchitecture($native,$processArchitecture,$Architecture) {
+    if ($native -cne $Architecture -or $processArchitecture -cne $Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }
+}
+function Assert-NewRun([string] $Run) {
+    if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new' }
+}
+function Assert-DriverProfile([string] $ActualLocal,[string] $ActualRoaming,[string] $Run) {
+    $isolated=$ActualLocal -ceq (Join-Path $Run 'localappdata') -and $ActualRoaming -ceq (Join-Path $Run 'appdata')
+    if(-not $isolated){throw 'Driver profile isolation failed'}
+    return $isolated
+}
+function Get-DefaultWindowRows($Job) { @([HiddenWin]::DefaultJobWindows($Job)) }
+function Assert-NoDefaultWindows($Job) {
+    $escaped=@(Get-DefaultWindowRows $Job)
+    if ($escaped.Count -ne 0) { throw 'Owned process has a window on Default; blocking further work' }
+}
+function Assert-ClipboardSequence($clipboardBefore,$clipboardAfter) {
+    if($clipboardBefore -ne $clipboardAfter){throw 'Clipboard sequence changed during run; stop launches'}
+}
+function Add-UpdateSample($state,$states,[string] $Stage) {
+    if ($state -and $state.Phase -ceq 'rollback') { throw 'Observed portable rollback' }
+    if ($state) { $states.Add(@{ At=[datetime]::UtcNow.ToString('o'); Stage=$Stage; State=$state }) }
+}
+function Test-FinalizedUpdate($s,$states,[string] $exe,[string] $targetExe) {
+    $swapped=$false; $confirmed=$false
+    foreach($sample in $states){
+        if($sample.State.Phase -ceq 'rollback'){throw 'Observed portable rollback'}
+        if($sample.State.Phase -ceq 'swapped'){$swapped=$true}
+        if($swapped -and $sample.State.Phase -ceq 'confirmed'){$confirmed=$true}
+    }
+    return $s -and $confirmed -and $null -eq $s.Phase -and $null -eq $s.StagedVersion -and (Get-Sha $exe) -ceq (Get-Sha $targetExe)
+}
+function Assert-InstalledStub($result,[string] $Path) {
+    $result.FinalStub=Get-Stub $Path
+    if($result.FinalStub.Sha256 -cne $result.TargetStub.Sha256){throw 'Final stub differs from the verified candidate ZIP'}
+}
+function Get-StubLoadError([string] $Path) { [DirectUpdateUi]::StubLoadError($Path) }
+function Get-SourceSnapshot([string] $Root) {
+    # Before the first CLI/GUI launch this includes EVERY original file.
+    @(Get-Listing $Root | ForEach-Object {
+        @{ Name=$_.Name; Sha256=Get-Sha (Join-Path $Root $_.Name) }
+    })
+}
+function Assert-RejectedCopy($Before,[string] $Root,$State) {
+    # Runtime exceptions apply only to files absent from the original snapshot.
+    $mutable='^(?:(?:config\.ghostty|startup-attempts\.json|update-state\.json|window-state\.json|session-state\.json|jump-list-recents\.json|palette-mru\.txt)(?:\.lock)?|updates[\\/].*|shell-integration[\\/].*|share[\\/]ghostty[\\/]shell-integration[\\/]cmd[\\/]noctty-shell-integration\.lua|share[\\/]terminfo[\\/](?:67[\\/]ghostty|78[\\/]xterm-ghostty))$'
+    $after=@(Get-SourceSnapshot $Root | Where-Object { $Before.Name -ccontains $_.Name -or $_.Name -cnotmatch $mutable })
+    $difference=@(Compare-Object @($Before | ForEach-Object {"$($_.Name):$($_.Sha256)"}) @($after | ForEach-Object {"$($_.Name):$($_.Sha256)"}))
+    if($difference.Count){throw 'Rejected update changed the source copy'}
+    if($State -and ($null -ne $State.Phase -or $null -ne $State.StagedVersion)){throw 'Rejected update left a staged transaction'}
+}
+function Assert-SourceStub([string] $Path) {
+    if(-not (Test-Path -LiteralPath $Path)){throw 'Expected source stub before Removed update'}
+    return Get-Stub $Path
+}
+function Assert-LocalState($Before,$After,$JumpsBefore,$JumpsAfter) {
+    $unchanged=$Before.Exists -eq $After.Exists -and $Before.Hash -eq $After.Hash -and $Before.Modified -eq $After.Modified
+    $jumpChanges=@(Compare-Object @('begin'; $JumpsBefore | ForEach-Object {"$($_.Path):$($_.Written)"}) @('begin'; $JumpsAfter | ForEach-Object {"$($_.Path):$($_.Written)"}))
+    if(-not $unchanged -or $jumpChanges.Count){throw 'Real startup or jump-list state changed; stop launches'}
+    return $unchanged
+}
+function Invoke-DefaultOraclePositive([string] $Pwsh) {
+    # Hidden STATIC only, never noctty or a terminal shell. An exact owned helper
+    # on Default must be detected and refused by the same production oracle.
+    $control=Join-Path $Run 'default-oracle-control'
+    $null=New-Item -ItemType Directory -Path $control
+    $helper=Join-Path $control 'sentinel.ps1'
+    $ui=(Join-Path $PSScriptRoot 'direct-update-ui.cs').Replace("'","''")
+    $fixture=@'
+param([string] $Root)
+$ErrorActionPreference='Stop'
+Add-Type -Path '__UI__'
+$window=[DirectUpdateUi]::CreateSentinel()
+try {
+    Set-Content -LiteralPath (Join-Path $Root 'ready') -Value ''
+    $deadline=[datetime]::UtcNow.AddSeconds(20)
+    while(-not (Test-Path -LiteralPath (Join-Path $Root 'release'))){
+        if([datetime]::UtcNow -ge $deadline){throw 'Sentinel control timed out'}
+        Start-Sleep -Milliseconds 50
+    }
+}finally{[DirectUpdateUi]::CloseSentinel($window)}
+'@
+    Set-Content -LiteralPath $helper -Value $fixture.Replace('__UI__',$ui)
+    $controlJob=[HiddenWin]::CreateOwnedJob(); $controlLaunch=$null
+    try{
+        $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Root "{2}"' -f $Pwsh,$helper,$control
+        $controlLaunch=[HiddenWin]::Launch($Pwsh,$line,$Run,'WinSta0\Default',$controlJob,'')
+        $deadline=[datetime]::UtcNow.AddSeconds(20)
+        while(-not(Test-Path -LiteralPath (Join-Path $control 'ready'))){
+            if([datetime]::UtcNow -ge $deadline){throw 'Default oracle positive control timed out'}
+            Start-Sleep -Milliseconds 50
+        }
+        $rows=@(Get-DefaultWindowRows $controlJob)
+        $detected=@($rows | Where-Object ProcessId -EQ $controlLaunch.pid).Count -gt 0
+        $refused=$false
+        try{Assert-NoDefaultWindows $controlJob}catch{$refused=$_.Exception.Message -ceq 'Owned process has a window on Default; blocking further work'}
+        if(-not $detected -or -not $refused){throw 'Default oracle positive control failed'}
+        Save-Receipt 'default-positive.json' @{ Detected=$detected; Refused=$refused; Windows=$rows; HiddenStaticOnly=$true }
+        Set-Content -LiteralPath (Join-Path $control 'release') -Value ''
+        if([HiddenWin]::WaitForSingleObject($controlLaunch.process,10000) -ne 0){throw 'Default oracle control did not exit'}
+    }finally{$null=[HiddenWin]::StopOwnedJob($controlJob);Close-Launch $controlLaunch}
+}
+function Invoke-ClipboardPositive([string] $Pwsh,[IntPtr] $Job,[string] $DesktopName) {
+    # No native clipboard write is attempted on a developer machine. The hosted
+    # helper switches to a fresh unnamed station and checks its identity first.
+    if(-not $ephemeral){return @{Supported=$false;FailedApi='HostedOnly';WinSta0WriterNeverInvoked=$true}}
+    $helper=Join-Path $Run 'clipboard-control.ps1'
+    $code=(Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs').Replace("'","''")
+    $fixture=@'
+param([string] $Receipt)
+$ErrorActionPreference='Stop'
+Add-Type -Path '__CODE__'
+[DirectUpdateClipboardControl]::Run() | ConvertTo-Json | Set-Content -LiteralPath $Receipt
+'@
+    Set-Content -LiteralPath $helper -Value $fixture.Replace('__CODE__',$code)
+    $receipt=Join-Path $Run 'clipboard-positive.json'
+    $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Receipt "{2}"' -f $Pwsh,$helper,$receipt
+    $controlLaunch=[HiddenWin]::Launch($Pwsh,$line,$Run,"WinSta0\$DesktopName",$Job,'')
+    try{
+        if([HiddenWin]::WaitForSingleObject($controlLaunch.process,30000) -ne 0){throw 'Clipboard positive helper timed out'}
+        $fact=Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+        if($fact.Supported -and (-not $fact.IsolatedStation -or -not $fact.SequenceAdvanced)){throw 'Clipboard positive control failed'}
+        return $fact
+    }finally{Close-Launch $controlLaunch}
+}
 function Get-Listing([string] $Root) {
     @(Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName | ForEach-Object {
         @{ Name=[IO.Path]::GetRelativePath($Root,$_.FullName); Bytes=$_.Length }
@@ -117,15 +242,14 @@ function Get-UpdateState([string] $Root) {
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try { $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
     # Explicit nonsecret projection: never export confirmation tokens or arbitrary paths.
-    return @{ Phase=$value.portable_apply_phase; StagedVersion=$value.staged_version; StagedKind=$value.staged_kind; LatestVersion=$value.latest_version; ApplyRequestedAt=$value.apply_requested_at; FeedMatches=($value.staged_feed_url -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
+    return @{ Phase=$value.portable_apply_phase; StagedVersion=$value.staged_version; StagedKind=$value.staged_kind; ApplyRequestedAt=$value.apply_requested_at; FeedMatches=($value.staged_feed_url -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
 }
 function Wait-Check([string] $Stage,[scriptblock] $Predicate,[int] $Seconds=$TimeoutSeconds) {
     Save-Receipt 'progress.json' @{ Stage=$Stage; At=[datetime]::UtcNow.ToString('o') }
     $deadline=[datetime]::UtcNow.AddSeconds($Seconds)
     do {
         $state=Get-UpdateState $script:install
-        if ($state -and $state.Phase -ceq 'rollback') { throw 'Observed portable rollback' }
-        if ($state) { $script:states.Add(@{ At=[datetime]::UtcNow.ToString('o'); Stage=$Stage; State=$state }) }
+        Add-UpdateSample $state $script:states $Stage
         if (& $Predicate) { return }
         Start-Sleep -Milliseconds 100
     } while ([datetime]::UtcNow -lt $deadline)
@@ -156,24 +280,27 @@ function Get-Stub([string] $Path) {
     # The published releases use the updater's pinned self-signed publisher.
     # Verify PKCS#7 + file hash and the pin without importing a trust root.
     $signature=Assert-ReleaseSignature -Path $Path -Label 'Portable stub' -AllowedPins $pins -TrustSelfSigned $true
-    $errorCode=[DirectUpdateUi]::StubLoadError($Path)
+    $errorCode=Get-StubLoadError $Path
     if ($errorCode -ne 1114) { throw 'Stub did not refuse loading with ERROR_DLL_INIT_FAILED' }
     return @{ Sha256=Get-Sha $Path; Bytes=(Get-Item -LiteralPath $Path).Length; Description=[Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileDescription; Signature=$signature.Status; SignatureCryptographicallyVerified=$true; SignerThumbprint=$signature.Thumbprint; SignerSpkiSha256=$signature.SpkiSha256; ExportDirectory=@(Get-PeDataDirectories $Path)[0]; ImportDirectory=@(Get-PeDataDirectories $Path)[1]; LoadError=$errorCode }
 }
 
 $native=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 $processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
-if ($native -cne $Architecture -or $processArchitecture -cne $Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }
+Assert-NativeArchitecture $native $processArchitecture $Architecture
 $ephemeral=$env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
 if ([version]$FromVersion -lt [version]'1.3.136' -and -not $ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }
 if($HostedMesa -and (-not $ephemeral -or $FromVersion -cne '1.3.125' -or $TargetVersion -cne '1.3.137' -or $Expected -cne 'Stub')){throw 'Mesa fixture requires hosted 1.3.125 to 1.3.137 stub acceptance'}
 if (-not $Driver) {
     $Run=[IO.Path]::GetFullPath($Run)
-    if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new' }
+    Assert-NewRun $Run
     if (-not $ephemeral) {
         $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\AppUserModelId\io.github.amanthanvi.noctty',$false)
         if ($null -eq $key) { throw 'Product AUMID registration is absent; refusing a portable registration write' }
         $key.Dispose()
+        . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
+        $startupBefore=Startup-Fingerprint
+        $jumpsBefore=@(Jump-List-Files)
     }
     $free=[IO.DriveInfo]::new([IO.Path]::GetPathRoot([Environment]::GetFolderPath('LocalApplicationData'))).AvailableFreeSpace
     if ($free -le 20GB) { throw 'System drive has 20 GB or less free' }
@@ -181,33 +308,39 @@ if (-not $Driver) {
     $source=Get-ReleaseCopy $FromVersion
     $target=Get-ReleaseCopy $TargetVersion
     if($HostedMesa){Add-HostedMesa $source}
-    Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral }
+    $commit=git -C $PSScriptRoot rev-parse HEAD
+    if($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$'){throw 'Harness commit provenance unavailable'}
+    Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral; HarnessCommit=$commit; HarnessSha256=Get-Sha $PSCommandPath; UiSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-ui.cs'); ContractSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-contract.ps1'); ClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs') }
     foreach ($directory in @('localappdata','appdata','temp')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
     $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'
     $clipboardBefore=[HiddenWin]::GetClipboardSequenceNumber()
     $DesktopName='noctty-hw-'+[guid]::NewGuid().ToString('N')
     $desktop=[HiddenWin]::CreateInheritedDesktop($DesktopName)
     $job=[HiddenWin]::CreateOwnedJob()
-    $launch=$null; $exitCode=1; $defaultSamples=0; $privateSamples=0
+    $launch=$null; $exitCode=1; $defaultSamples=0; $privateSamples=[Collections.Generic.List[object]]::new(); $profileObserved=$false
     $saved=@{}; foreach($name in @('LOCALAPPDATA','APPDATA','TEMP','TMP')) { $saved[$name]=[Environment]::GetEnvironmentVariable($name,'Process') }
     try {
         $env:LOCALAPPDATA=Join-Path $Run 'localappdata'; $env:APPDATA=Join-Path $Run 'appdata'; $env:TEMP=Join-Path $Run 'temp'; $env:TMP=$env:TEMP
         $pwsh=(Get-Process -Id $PID).Path
+        Invoke-DefaultOraclePositive $pwsh
+        $clipboardPositive=Invoke-ClipboardPositive $pwsh $job $DesktopName
         $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Run "{2}" -FromVersion {3} -TargetVersion {4} -Architecture {5} -Expected {6} -TimeoutSeconds {7} -DesktopName {8} -Driver' -f $pwsh,$PSCommandPath,$Run,$FromVersion,$TargetVersion,$Architecture,$Expected,$TimeoutSeconds,$DesktopName
         if($HostedMesa){$line+=' -HostedMesa'}
         $launch=[HiddenWin]::Launch($pwsh,$line,$Run,"WinSta0\$DesktopName",$job,(Join-Path $Run 'driver-raw.log'))
         $deadline=[datetime]::UtcNow.AddSeconds(3*$TimeoutSeconds+120)
         do {
-            $escaped=@([HiddenWin]::DefaultJobWindows($job))
+            Assert-NoDefaultWindows $job
             $defaultSamples++
-            if ($escaped.Count -ne 0) { throw 'Owned process has a window on Default; blocking further work' }
             if(Test-Path -LiteralPath (Join-Path $Run 'driver-ready.json')) {
                 $ready=Get-Content -LiteralPath (Join-Path $Run 'driver-ready.json') -Raw | ConvertFrom-Json
                 if($ready.ProcessId -ne $launch.pid -or $ready.Desktop -cne $DesktopName -or -not $ready.IsolatedProfile) { throw 'Private driver receipt mismatch' }
+                $profileObserved=[bool]$ready.IsolatedProfile
                 if(Test-Path -LiteralPath (Join-Path $Run 'driver-done')){
                     Set-Content -LiteralPath (Join-Path $Run 'driver-release') -Value ''
                 }else{
-                    $private=@([HiddenWin]::PrivateJobWindows($job,$DesktopName)); $privateSamples++
+                    $private=@([HiddenWin]::PrivateJobWindows($job,$DesktopName))
+                    if(@($private | Where-Object ProcessId -EQ $launch.pid).Count -eq 0){throw 'Private driver sentinel was not observed'}
+                    $privateSamples.Add(@{ At=[datetime]::UtcNow.ToString('o'); Windows=$private })
                 }
                 if(-not (Test-Path -LiteralPath (Join-Path $Run 'driver-approved'))) { Set-Content -LiteralPath (Join-Path $Run 'driver-approved') -Value '' }
             }
@@ -222,8 +355,13 @@ if (-not $Driver) {
             Close-Launch $launch; $null=[HiddenWin]::CloseDesktop($desktop)
             $clipboardAfter=[HiddenWin]::GetClipboardSequenceNumber()
             Assert-WindowsHarnessHistoryGuard -Guard $historyGuard
-            Save-Receipt 'isolation.json' @{ Desktop=$DesktopName; ExplicitDesktopOnHarnessLaunches=$true; OwnLocalAppData=$true; OwnAppData=$true; RealNocttyDirectoryAccessed=$false; HistoryUnchanged=$true; ClipboardBefore=$clipboardBefore; ClipboardAfter=$clipboardAfter; DefaultWindowSamples=$defaultSamples; PrivateWindowSamples=$privateSamples; OwnedJobCleanedUp=$cleanup; DriverExit=$exitCode }
-            if($clipboardBefore -ne $clipboardAfter){throw 'Clipboard sequence changed during run; stop launches'}
+            $localStateUnchanged=$null
+            $localStateFailure=$null
+            if(-not $ephemeral){try{$localStateUnchanged=Assert-LocalState $startupBefore (Startup-Fingerprint) $jumpsBefore @(Jump-List-Files)}catch{$localStateUnchanged=$false;$localStateFailure=$_}}
+            Save-Receipt 'private-windows.json' @($privateSamples.ToArray())
+            Save-Receipt 'isolation.json' @{ Desktop=$DesktopName; ExplicitDesktopOnHarnessLaunchesByConstruction=$true; OwnLocalAppData=$profileObserved; OwnAppData=$profileObserved; RealNocttyDirectoryAccessed=$(if($localStateUnchanged -eq $false){$true}else{$null}); RealNocttyAccessMeasurement='Startup/jump-list mutation fingerprints only; reads and unchanged writes unobserved'; LocalStateUnchanged=$localStateUnchanged; HistoryUnchanged=$true; ClipboardBefore=$clipboardBefore; ClipboardAfter=$clipboardAfter; ClipboardNativePositiveControl=($clipboardPositive.Supported -and $clipboardPositive.SequenceAdvanced); ClipboardControl=$clipboardPositive; DefaultWindowSamples=$defaultSamples; PrivateWindowSamples=$privateSamples.Count; OwnedJobCleanedUp=$cleanup; DriverExit=$exitCode }
+            Assert-ClipboardSequence $clipboardBefore $clipboardAfter
+            if($localStateFailure){throw $localStateFailure}
         }
     }
     if($exitCode -ne 0){throw 'Acceptance driver failed; read sanitized result.json'}
@@ -240,8 +378,7 @@ $sentinel=[IntPtr]::Zero
 $result=@{ Passed=$false; FromVersion=$FromVersion; TargetVersion=$TargetVersion; Architecture=$Architecture; Expected=$Expected; Steps=[Collections.Generic.List[string]]::new() }
 try {
     if($DesktopName -cnotmatch '^noctty-hw-[a-f0-9]{32}$' -or [HiddenWin]::CurrentDesktopName() -cne $DesktopName){throw 'Driver is not on its private desktop'}
-    $isolated=$env:LOCALAPPDATA -ceq (Join-Path $Run 'localappdata') -and $env:APPDATA -ceq (Join-Path $Run 'appdata')
-    if(-not $isolated){throw 'Driver profile isolation failed'}
+    $isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run
     # EnumDesktopWindows returns false/error 0 on a genuinely empty desktop.
     # This hidden driver-owned window gives the parent's oracle a positive control.
     $sentinel=[DirectUpdateUi]::CreateSentinel()
@@ -254,6 +391,9 @@ try {
     $exe=Join-Path $script:install 'noctty.exe'
     if($HostedMesa){$env:GALLIUM_DRIVER='llvmpipe'; $result.Mesa=Get-Content -LiteralPath (Join-Path $Run 'mesa-input.json') -Raw | ConvertFrom-Json}
     Set-Content -LiteralPath (Join-Path $script:install 'noctty.portable') -Value '' -NoNewline
+    $sourceSnapshot=@(Get-SourceSnapshot $script:install)
+    Save-Receipt 'source-hashes.json' $sourceSnapshot
+    if($Expected -ceq 'Removed'){$result.BeforeStub=Assert-SourceStub (Join-Path $script:install 'ghostty-vt.dll')}
     $result.BeforeVersion=Get-Version $exe 'before'
     if($result.BeforeVersion -cne "noctty $FromVersion"){throw 'Wrong source version'}
     $result.BeforeExeSha256=Get-Sha $exe
@@ -262,7 +402,8 @@ try {
     $feed="https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion"
     $class='noctty-update-'+[guid]::NewGuid().ToString('N')
     $env:GHOSTTY_LOG='stderr'
-    $line='"{0}" --window-save-state=never --command=cmd.exe --single-instance=false --class={1} --auto-update=download --auto-update-feed-url={2} --confirm-close-surface=false --keybind=f7=check_for_updates' -f $exe,$class,$feed
+    $shell=Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    $line='"{0}" --window-save-state=never "--command=direct:{3} /D" --clipboard-write=deny --clipboard-read=deny --single-instance=false --class={1} --auto-update=download --auto-update-feed-url={2} --confirm-close-surface=false --keybind=f7=check_for_updates' -f $exe,$class,$feed,$shell
     $app=[HiddenWin]::Launch($exe,$line,$script:install,"WinSta0\$DesktopName",$script:caseJob,(Join-Path $Run 'app-raw.log'))
     $script:hostWindow=[IntPtr]::Zero
     Wait-Check 'source window' { $windows=@([HiddenWin]::Hosts($app.pid)); if($windows.Count -eq 1){$script:hostWindow=$windows[0];return $true};return $false }
@@ -289,7 +430,8 @@ try {
         Wait-Check 'rejected update notice' { (Read-ControlName $script:hostWindow 1914) -cmatch '^Open Release(?::|$)' }
         $result.NoticeButton=Read-ControlName $script:hostWindow 1914
         if($result.NoticeButton -cnotmatch '^Open Release(?::|$)'){throw 'Rejected update does not offer Open Release'}
-        if((Get-Sha $exe) -cne $result.BeforeExeSha256){throw 'Rejected update changed the source executable'}
+        Assert-RejectedCopy $sourceSnapshot $script:install (Get-UpdateState $script:install)
+        $result.SourceCopyIntact=$true
     } else {
         Wait-Check 'verified portable stage' { $s=Get-UpdateState $script:install; $s -and $s.StagedVersion -ceq $TargetVersion -and $s.StagedKind -ceq 'portable' -and $s.FeedMatches -and ($legacyPainted -or (Read-ControlName $script:hostWindow 1914) -cmatch '^Install(?::|$)') }
         if($legacyPainted){
@@ -313,10 +455,9 @@ try {
         if(-not $s -or $s.Phase -cne 'pending'){throw 'Install did not record a pending portable apply'}
         $result.Pending=$s
         $relaunch=[HiddenWin]::Launch($exe,$line,$script:install,"WinSta0\$DesktopName",$script:caseJob,(Join-Path $Run 'relaunch-raw.log'))
-        Wait-Check 'target confirmed and helper finalized' { $s=Get-UpdateState $script:install; $s -and $null -eq $s.Phase -and $null -eq $s.StagedVersion -and (Get-Sha $exe) -ceq (Get-Sha (Join-Path $target 'noctty.exe')) }
+        Wait-Check 'target confirmed and helper finalized' { Test-FinalizedUpdate (Get-UpdateState $script:install) $script:states $exe (Join-Path $target 'noctty.exe') }
         if($Expected -ceq 'Stub') {
-            $result.FinalStub=Get-Stub (Join-Path $script:install 'ghostty-vt.dll')
-            if($result.FinalStub.Sha256 -cne $result.TargetStub.Sha256){throw 'Final stub differs from the verified candidate ZIP'}
+            Assert-InstalledStub $result (Join-Path $script:install 'ghostty-vt.dll')
         } elseif(Test-Path -LiteralPath (Join-Path $script:install 'ghostty-vt.dll')){throw 'Update did not remove the stub'}
     }
     $result.AfterVersion=Get-Version $exe 'after'
