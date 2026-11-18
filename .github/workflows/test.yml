@@ -89,6 +89,25 @@ jobs:
         shell: pwsh
         run: ./test/windows/flagship/Test-VerificationContracts.ps1
 
+      - name: Setup Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Migration lint controls
+        shell: pwsh
+        run: python -I ci/test_lints.py
+
+      - name: Migration diff lints
+        shell: pwsh
+        env:
+          LINT_EVENT: ${{ github.event_name }}
+          LINT_BASE: ${{ github.event.pull_request.base.sha }}
+          LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          LINT_BEFORE: ${{ github.event.before }}
+        # Phase 0b enables the Win32 lint by changing report to enforce here.
+        run: python -I ci/run_lints.py --win32-mode report
+
       - name: Interactive hints contract checks
         shell: pwsh
         run: ./test/windows/Test-InteractiveWin11HintsContracts.ps1
@@ -587,6 +606,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
       - name: Run opt-in ConPTY transport and key input probes
         timeout-minutes: 15
+        # prettier-ignore
         env:
           NOCTTY_RUN_CONPTY_TRANSPORT_TEST: "1"
           NOCTTY_CONPTY_TRANSPORT_PROBE: "1"

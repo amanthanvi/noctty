@@ -85,6 +85,62 @@ if ($releaseWindowsJob -match 'FORCE_JAVASCRIPT_ACTIONS_TO_NODE24') {
 $windowsArmWorkflow = Join-Path $repoRoot '.github\workflows\windows-arm64.yml'
 $windowsArmWorkflowText = Get-Content -LiteralPath $windowsArmWorkflow -Raw
 $checksJob = Get-YamlJobText -Content $testWorkflowText -Name 'checks' -Source $testWorkflow
+# Pin the interpreter, isolated invocation, event inputs and the one Phase 0b
+# switch. Compare whole steps so extra arguments cannot override enforcement.
+function Test-MigrationLintSteps {
+    param([Parameter(Mandatory)] [string] $JobText)
+    $python = Get-YamlStepBlock -Content $JobText -Name 'Setup Python' -Source 'migration lints'
+    $controls = Get-YamlStepBlock -Content $JobText -Name 'Migration lint controls' -Source 'migration lints'
+    $lints = Get-YamlStepBlock -Content $JobText -Name 'Migration diff lints' -Source 'migration lints'
+    $activeLines = @($python -split '\r?\n' | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' }) -join "`n"
+    $expectedPython = @'
+      - name: Setup Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+'@
+    if ($activeLines -cne $expectedPython.TrimEnd()) { return $false }
+    $activeLines = @($controls -split '\r?\n' | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' }) -join "`n"
+    $expectedControls = @'
+      - name: Migration lint controls
+        shell: pwsh
+        run: python -I ci/test_lints.py
+'@
+    if ($activeLines -cne $expectedControls.TrimEnd()) { return $false }
+    $activeLines = @($lints -split '\r?\n' | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' }) -join "`n"
+    $expectedLints = @'
+      - name: Migration diff lints
+        shell: pwsh
+        env:
+          LINT_EVENT: ${{ github.event_name }}
+          LINT_BASE: ${{ github.event.pull_request.base.sha }}
+          LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          LINT_BEFORE: ${{ github.event.before }}
+        run: python -I ci/run_lints.py --win32-mode report
+'@
+    # The first Phase 0b PR changes only the workflow's report -> enforce.
+    return $activeLines -ceq $expectedLints.TrimEnd() -or
+        $activeLines -ceq $expectedLints.Replace('--win32-mode report', '--win32-mode enforce').TrimEnd()
+}
+if (-not (Test-MigrationLintSteps -JobText $checksJob)) {
+    throw 'Migration lints must pin Python 3.13, use isolated mode and exact event inputs, and retain the Phase 0b switch.'
+}
+$lintMutations = @(
+    $checksJob.Replace('python -I ci/test_lints.py', 'python ci/test_lints.py'),
+    $checksJob.Replace('python -I ci/run_lints.py', 'python ci/run_lints.py'),
+    $checksJob.Replace('python-version: "3.13"', 'python-version: "3.14"'),
+    $checksJob.Replace('actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548', 'actions/setup-python@v6'),
+    $checksJob.Replace('LINT_BASE: ${{ github.event.pull_request.base.sha }}', 'LINT_BASE: ${{ github.sha }}'),
+    $checksJob.Replace('LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}', 'LINT_HEAD: main'),
+    $checksJob.Replace('LINT_BEFORE: ${{ github.event.before }}', 'LINT_BEFORE: main'),
+    $checksJob.Replace('--win32-mode report', '--win32-mode report --win32-mode report')
+)
+foreach ($lintMutation in $lintMutations) {
+    if ($lintMutation -ceq $checksJob -or (Test-MigrationLintSteps -JobText $lintMutation)) {
+        throw 'Migration lint workflow accepted a weakening mutation.'
+    }
+}
+Write-Host "Migration lint workflow: $($lintMutations.Count)/$($lintMutations.Count) weakening mutations rejected"
 foreach ($controlCase in @(
         @{ Name = 'Harness provenance and state controls (PowerShell 7)'; Shell = 'pwsh' },
         @{ Name = 'Harness provenance and state controls (Windows PowerShell 5.1)'; Shell = 'powershell' }
@@ -140,6 +196,9 @@ $coverageMutationCount = 0
 foreach ($coverage in @(
         @{ Job = $checksJob; Steps = @(
                 'Flagship verification contract checks',
+                'Setup Python',
+                'Migration lint controls',
+                'Migration diff lints',
                 'PowerShell shell integration tests (PowerShell 7)',
                 'PowerShell shell integration tests (Windows PowerShell 5.1)',
                 'Harness provenance and state controls (PowerShell 7)',
