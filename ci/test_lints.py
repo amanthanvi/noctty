@@ -3,6 +3,7 @@
 import contextlib
 import argparse
 import io
+import json
 import os
 import subprocess
 import sys
@@ -244,6 +245,26 @@ class Win32Controls(unittest.TestCase):
                 self.assertEqual([], list(win.Bindings(source.replace("Sleep", "Retained"), EXPORTS,
                                                       "src/apprt/win32/probe.zig").uses(REMOVED)))
 
+    def test_windows_import_spellings_and_known_routes(self):
+        from lint_compiler_control import IMPORT_PATHS
+        path = "src/apprt/win32/probe.zig"
+        for label, spelling, accepted in IMPORT_PATHS:
+            source = 'const w = @import(' + json.dumps(spelling) + '); w.kernel32.GetLastError();'
+            with self.subTest(spelling=label):
+                rows = list(win.Bindings(source, EXPORTS, path).uses(REMOVED))
+                self.assertEqual(accepted, bool(rows))
+        for route, tail in (("../../os/windows.zig", "kernel32.GetLastError"),
+                            ("../../os/main.zig", "windows.kernel32.GetLastError"),
+                            ("../../os.zig", "windows.kernel32.GetLastError"),
+                            ("../win32.zig", "windows.kernel32.GetLastError")):
+            for spelling in (route, route.replace("/", "\\"), route.replace("/", "\\", 1)):
+                source = 'const w = @import(' + json.dumps(spelling) + '); w.' + tail + '();'
+                self.assertTrue(list(win.Bindings(source, EXPORTS, path).uses(REMOVED)))
+        wrong = 'const w = @import("../os/windows.zig"); w.kernel32.GetLastError();'
+        rehomed = 'const w = @import("sys.zig"); w.kernel32.GetLastError();'
+        self.assertEqual([], list(win.Bindings(wrong, EXPORTS, path).uses(REMOVED)))
+        self.assertEqual([], list(win.Bindings(rehomed, EXPORTS, path).uses(REMOVED)))
+
     def test_computed_forms_are_a_documented_limit(self):
         for source in ('(std.os.windows.kernel32).Sleep(1);',
                        'const S = struct { const k = std.os.windows.kernel32; }; S.k.Sleep(1);',
@@ -450,6 +471,58 @@ class GitControls(unittest.TestCase):
         twin = self.commit()
         self.assertEqual([], win.check(self.repo, base, twin, upstream, removed))
 
+    def test_full_origin_changes_recheck_all_four_routes(self):
+        self.write("src/os/windows.zig", "pub const kernel32 = windows.kernel32;\n")
+        self.write("src/apprt/win32/sys.zig", 'pub const kernel32 = struct { pub fn Sleep(_: u32) void {} };\n'
+                   'pub const windows = @This();\n')
+        path = "src/apprt/win32/probe.zig"
+        original = ('const k = @import("sys.zig");\n'
+                    'fn direct() void { k.kernel32.Sleep(1); }\n'
+                    'fn indirect() void { k.windows.kernel32.Sleep(1); }\n')
+        self.write(path, original)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        for route, line in (('@import("../../os/windows.zig")', 2), ("internal_os.windows", 2),
+                            ("win32", 3), ("internal_os", 3)):
+            with self.subTest(route=route):
+                self.write(path, original.replace('@import("sys.zig")', route))
+                head = self.commit()
+                rows = win.check(self.repo, base, head, upstream, removed)
+                self.assertEqual([(path, line)], [(r[0], r[1]) for r in rows])
+                self.write(path, original)
+                rehomed = self.commit()
+                self.assertEqual([], win.check(self.repo, head, rehomed, upstream, removed))
+
+    def test_windows_import_spellings_through_ci_entry(self):
+        from lint_compiler_control import IMPORT_PATHS
+        self.write("src/os/windows.zig", 'pub const kernel32 = @import("std").os.windows.kernel32;\n')
+        path = "src/apprt/win32/probe.zig"
+        self.write(path, "// empty probe\n")
+        base = self.commit()
+        for label, spelling, accepted in IMPORT_PATHS:
+            if not accepted:
+                continue
+            self.write(path, 'const w = @import(' + json.dumps(spelling) + ');\n'
+                       'pub fn call() void { _ = w.kernel32.GetLastError(); }\n')
+            head = self.commit()
+            result = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("run_lints.py")),
+                "--win32-mode", "enforce"], cwd=self.repo, capture_output=True, text=True,
+                env={**os.environ, "LINT_EVENT": "pull_request", "LINT_BASE": base, "LINT_HEAD": head,
+                     "GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": "false"})
+            self.assertEqual(1, result.returncode, (label, result.stderr))
+            self.assertIn("kernel32.GetLastError", result.stdout)
+        # Re-spelling only the import must preserve the declaration origin;
+        # the legacy call line itself did not change.
+        forward = ('const w = @import("../../os/windows.zig");\n'
+                   'pub fn call() void { _ = w.kernel32.GetLastError(); }\n')
+        self.write(path, forward)
+        before = self.commit()
+        self.write(path, forward.replace("../../os/windows.zig", r"..\\..\\os\\windows.zig"))
+        after = self.commit()
+        here = Path(__file__).resolve().parent
+        self.assertEqual([], win.check(self.repo, before, after, here / "upstream-paths.txt",
+                                       here / "win32-removed-identifiers.txt"))
+
     def test_alias_move_visibility_comment_and_equivalent_origin_pass(self):
         self.write("src/os/windows.zig", "// reexports\n")
         source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
@@ -633,12 +706,13 @@ class HistoryControls(unittest.TestCase):
         cls.base = "cd61e53395b563335124d4eb0236162ae1d5ce6e"
         cls.ci = cls.source / "ci"
 
-    def fixture(self, path, source):
+    def fixture(self, path, source, parent=None):
+        parent = parent or self.base
         blob = common.git(self.repo, "hash-object", "-w", "--stdin", input=source.encode()).decode().strip()
-        common.git(self.repo, "read-tree", self.base)
+        common.git(self.repo, "read-tree", parent)
         common.git(self.repo, "update-index", "--cacheinfo", "100644," + blob + "," + path)
         tree = common.git(self.repo, "write-tree").decode().strip()
-        return common.git(self.repo, "commit-tree", tree, "-p", self.base, "-m", "alias control").decode().strip()
+        return common.git(self.repo, "commit-tree", tree, "-p", parent, "-m", "alias control").decode().strip()
 
     def check(self, base, head):
         return win.check(self.repo, base, head, self.ci / "upstream-paths.txt", self.ci / "win32-removed-identifiers.txt")
@@ -682,6 +756,38 @@ class HistoryControls(unittest.TestCase):
             print("Historical alias control:", head[:9], "unchanged-use errors", len(unchanged),
                   "genuine added-line errors", len(rows))
 
+    def test_real_pty_alias_revert_rechecks_46_unchanged_uses(self):
+        base = "886bcf177d5b8450f6ad57e29afd398d2ac3ed3f"
+        path = "src/pty_transport_probe.zig"
+        source = common.sources(self.repo, base, {path})[path]
+        before = 'const windows = internal_os.windows;'
+        after = 'const windows = @import("apprt/win32/sys.zig");'
+        self.assertEqual(1, source.count(before))
+        rehomed = self.fixture(path, source.replace(before, after), parent=base)
+        reverted = self.fixture(path, source, parent=rehomed)
+        rows = self.check(rehomed, reverted)
+        self.assertEqual(46, len(rows))
+        added = common.added_lines(self.repo, rehomed, reverted)
+        self.assertTrue(all(row[1] not in added.get(row[0], ()) for row in rows))
+        twin = self.fixture(path, source.replace(before, after), parent=reverted)
+        self.assertEqual([], self.check(reverted, twin))
+        print("Real pty alias revert: 46 unchanged-use errors; re-homed twin: 0")
+
+    def test_documented_safe_side_intermediate_alias_overreport(self):
+        path = "src/apprt/win32/ipc_server.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        variants = (
+            (source.replace('const windows = std.os.windows;',
+                            'const os = std.os;\nconst windows = os.windows;'), 40),
+            (source.replace('const std = @import("std");',
+                            'const zstd = @import("std");\nconst std = zstd;'), 40),
+            (source.replace('const windows = std.os.windows;',
+                            'const windows = @import("../../os/windows.zig");'), 32),
+        )
+        for text, count in variants:
+            self.assertEqual(count, len(self.check(self.base, self.fixture(path, text))))
+        print("Documented safe-side over-report retained: 40 / 40 / 32")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
@@ -709,4 +815,9 @@ if __name__ == "__main__":
                 result = run(Path(__file__).resolve().parent.parent, options.zig017,
                              options.compiler_output, options.pause_script)
                 self.assertEqual(6, len(result["runs"]))
+            def test_windows_import_spellings_on_015(self):
+                from lint_compiler_control import IMPORT_PATHS, run_imports
+                result = run_imports(Path(__file__).resolve().parent.parent,
+                                     options.compiler_output / "imports", options.pause_script)
+                self.assertEqual(len(IMPORT_PATHS), len(result))
     unittest.main(argv=[sys.argv[0], *rest], verbosity=2)

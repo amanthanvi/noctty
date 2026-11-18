@@ -40,6 +40,20 @@ def chain(tokens):
     return result
 
 
+def import_path(path):
+    """Canonical relative file spelling for this Windows-only fork.
+
+    Zig 0.15.2 also accepts case variants and a single trailing directory dot.
+    Keep filename suffixes, spaces and repeated trailing dots intact: native
+    controls reject those spellings.
+    """
+    parts = path.replace("\\", "/").split("/")
+    for i, part in enumerate(parts[:-1]):
+        if part not in (".", "..") and part.endswith(".") and not part.endswith(".."):
+            parts[i] = part[:-1]
+    return posixpath.normpath("/".join(parts)).casefold()
+
+
 @dataclass(frozen=True)
 class Origin:
     kind: str
@@ -99,7 +113,8 @@ class Bindings:
     def imported(self, module):
         if module == "std":
             return Origin("std")
-        target = posixpath.normpath(posixpath.join(posixpath.dirname(self.path), module))
+        module = import_path(module)
+        target = import_path(posixpath.join(posixpath.dirname(import_path(self.path)), module))
         routes = {"src/os/windows.zig": "fork", "src/os/main.zig": "os",
                   "src/os.zig": "os", "src/apprt/win32.zig": "win32"}
         if target in routes:
@@ -213,9 +228,9 @@ class Bindings:
             prior = self.previous.stable_declarations().get(key)
             current = self.resolve([key[1]], index)
             old = self.previous.resolve([key[1]], prior) if prior is not None else None
-            def std_origin(origin):
-                return origin.parts if origin and origin.kind == "std" else None
-            self.changed_declarations[index] = std_origin(current) != std_origin(old)
+            def binding_origin(origin):
+                return (origin.kind, origin.parts) if origin else None
+            self.changed_declarations[index] = binding_origin(current) != binding_origin(old)
         return self.changed_declarations[index]
 
     def span(self, start, end, origin=None):

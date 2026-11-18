@@ -30,6 +30,8 @@ They compile the pointer-expression matrix on both compilers, compile the
 binary-repeat twins on 0.15.2 and verify their rejection on 0.17.1, and check
 every generated removed name by native reflection on both versions. They use
 the repository's dev-windows wrapper and caches in the supplied output directory.
+They also run the Windows 0.15.2 import-spelling matrix: nine spellings compile
+and seven malformed/unaccepted variants fail for their import paths.
 
 The `checks` job runs the controls and both lints on every change. The Zig lint
 fails new occurrences of binary array-repeat `**`, `@Type`, `@cImport`,
@@ -49,7 +51,9 @@ value represents a type or enumerating preceding-prefix exceptions.
 
 Both lints tokenize complete files before intersecting matches with added diff
 lines. A Win32 use is also rechecked if an alias definition it depends on changes
-its resolved std origin relative to the merge base. Declarations are matched
+its full normalized `(kind, parts)` origin relative to the merge base, including
+fork modules, os modules and the Win32 facade before a member reaches std.
+Declarations are matched
 by name within their lexical owner; moves, visibility and comments with the
 same binding do not recheck unchanged uses. Comments and
 string/character literals are opaque. A multiline match
@@ -64,7 +68,11 @@ spelling. A changed re-export's std origin rechecks dependent uses throughout
 the head's fork-added Zig files, including files without a diff. A spelling,
 move or comment with the same origin does not trigger that scan.
 Inline `@import("std").os.windows` and relative imports of `src/os/windows.zig`
-are recognized. Uses behind pointer/slice qualifiers and bare aliases of leaf
+are recognized. Decoded file paths normalize `/` and Windows `\` separators,
+`.`/`..` segments and repeated separators before resolution. Windows file-case
+variants and a single trailing directory dot are also recognized, matching the
+native 0.15.2 controls. Filename suffix dots/spaces, directory spaces and repeated
+trailing dots were rejected in those controls. Uses behind pointer/slice qualifiers and bare aliases of leaf
 types (for example `HRESULT`) count. Calls re-homed to fork declarations pass.
 The generated list covers **1,534 removed names**: the 1,485 root/file-namespace
 names plus 49 nested declarations (including `REG.*`, `ws2_32.SOCK.*` and
@@ -80,6 +88,16 @@ with the reference tool. These computed forms also limit re-export resolution;
 the cross-file recheck is bounded to resolved literal exports of
 `src/os/windows.zig`, not arbitrary module evaluation. They are not evaluated
 by this lint.
+
+**Known conservative over-report:** rechecks compare dependency declarations,
+rather than the final origin of each individual use. Introducing an intermediate
+alias (for example `const os = std.os; const windows = os.windows;`), or routing
+an existing std alias through the fork's re-exports, can recheck uses whose final
+binding stayed the same. This may report existing removed uses even though that
+edit changed no call's meaning. The real IPC fixture retains the measured
+40/40/32 reports for these cases. This safe-side behavior is intentional for now;
+origin-preserving moves, visibility changes and comments on the same declarations
+still pass their controls.
 
 The fork-added file set is computed at each head, by subtracting
 `upstream-paths.txt` from its tree. That list includes upstream rename sources.

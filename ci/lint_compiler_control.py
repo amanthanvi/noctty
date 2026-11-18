@@ -6,6 +6,27 @@ import shlex
 import subprocess
 from pathlib import Path
 
+# Decoded relative paths, measured with Windows Zig 0.15.2. Keep the rejected
+# spellings too, so path-normalization claims remain tied to native behavior.
+IMPORT_PATHS = (
+    ("forward", "../../os/windows.zig", True),
+    ("backslash", r"..\..\os\windows.zig", True),
+    ("mixed", r"..\../os\windows.zig", True),
+    ("dot", "./../../os/./windows.zig", True),
+    ("parent", "../../os/../os/windows.zig", True),
+    ("repeated-slash", "../..//os//windows.zig", True),
+    ("repeated-backslash", r"..\\..\os\\windows.zig", True),
+    ("case", "../../OS/WINDOWS.zig", True),
+    ("directory-trailing-dot", "../../os./windows.zig", True),
+    ("file-trailing-dot", "../../os/windows.zig.", False),
+    ("file-trailing-space", "../../os/windows.zig ", False),
+    ("directory-trailing-space", "../../os /windows.zig", False),
+    ("directory-many-dots", "../../os.../windows.zig", False),
+    ("directory-dot-space", "../../os. /windows.zig", False),
+    ("parent-trailing-space", "../.. /os/windows.zig", False),
+    ("dot-trailing-space", "./../../os/. /windows.zig", False),
+)
+
 TYPE_SOURCE = '''const std = @import("std");
 fn identity(comptime T: type) type { return T; }
 fn choose(comptime flag: bool) type { return if (flag) **const u8 else **const u16; }
@@ -87,6 +108,56 @@ test "removed declaration census" {
 '''
 
 
+def compiler_call(root, output, pause, compiler, operation, source, label):
+    env = {**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(output / "global-cache")}
+    bash = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe")
+    # Backslashes keep MSYS from treating drive colons inside cmd's single
+    # command argument as a POSIX path list.
+    args = [compiler, operation, str(source)]
+    if operation == "test":
+        args += ["--cache-dir", str(output / "local-cache"),
+                 "--global-cache-dir", str(output / "global-cache")]
+    if any('"' in a for a in args):
+        raise ValueError("unsupported quote in compiler control path")
+    cmd = 'scripts\\dev-windows.cmd ' + " ".join('"' + a + '"' if " " in a else a for a in args)
+    command = ("pwsh -NoProfile -File " + shlex.quote(pause.as_posix()) +
+               " && cmd.exe //c " + shlex.quote(cmd))
+    result = subprocess.run([bash, "-c", command], cwd=root, env=env, capture_output=True)
+    (output / (label + ".log")).write_bytes(result.stdout + result.stderr)
+    (output / (label + ".exit")).write_text(str(result.returncode) + "\n", encoding="utf-8")
+    return result
+
+
+def run_imports(root, output, pause):
+    output.mkdir(parents=True)  # keep previous attempts intact
+    root, output = root.resolve(), output.resolve()
+    results = []
+    for label, spelling, accepted in IMPORT_PATHS:
+        fixture = output / label
+        (fixture / "src/os").mkdir(parents=True)
+        (fixture / "src/apprt/win32").mkdir(parents=True)
+        (fixture / "src/os/windows.zig").write_text(
+            'pub const kernel32 = @import("std").os.windows.kernel32;\n', encoding="utf-8", newline="\n")
+        (fixture / "src/apprt/win32/probe.zig").write_text(
+            'const w = @import(' + json.dumps(spelling) + ');\n'
+            'pub fn call() void { _ = w.kernel32.GetLastError(); }\n', encoding="utf-8", newline="\n")
+        source = fixture / "root.zig"
+        source.write_text('test "import spelling" { @import("src/apprt/win32/probe.zig").call(); }\n',
+                          encoding="utf-8", newline="\n")
+        result = compiler_call(root, output, pause, "zig", "test", source, "015-import-" + label)
+        data = result.stdout + result.stderr
+        assert result.returncode == (0 if accepted else 1), (label, result.returncode)
+        if accepted:
+            assert b"All 1 tests passed" in data, label
+        else:
+            assert b"FileNotFound" in data or b"no module named" in data, label
+        results.append(dict(label=label, path=spelling, accepted=accepted, exit=result.returncode))
+    (output / "import-result.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    print("Windows import spellings:", sum(row["accepted"] for row in results), "accepted /",
+          sum(not row["accepted"] for row in results), "rejected as expected")
+    return results
+
+
 def run(root, zig17, output, pause):
     output.mkdir(parents=True)  # retain every earlier attempt; require a fresh directory
     root, output = root.resolve(), output.resolve()
@@ -95,8 +166,6 @@ def run(root, zig17, output, pause):
                "census15.zig": census_source(names, len(names)), "census17.zig": census_source(names, 0)}
     for name, source in sources.items():
         (output / name).write_text(source, encoding="utf-8", newline="\n")
-    env = {**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(output / "global-cache")}
-    bash = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe")
     results = []
     for version, compiler, operation, source, expected in (
         ("015", "zig", "test", "types.zig", 0),
@@ -106,21 +175,8 @@ def run(root, zig17, output, pause):
         ("015", "zig", "test", "census15.zig", 0),
         ("017", str(zig17), "test", "census17.zig", 0),
     ):
-        # Backslashes keep MSYS from treating drive colons inside cmd's single
-        # command argument as a POSIX path list.
-        args = [compiler, operation, str(output / source)]
-        if operation == "test":
-            args += ["--cache-dir", str(output / "local-cache"),
-                     "--global-cache-dir", str(output / "global-cache")]
-        if any('"' in a for a in args):
-            raise ValueError("unsupported quote in compiler control path")
-        cmd = 'scripts\\dev-windows.cmd ' + " ".join('"' + a + '"' if " " in a else a for a in args)
-        command = ("pwsh -NoProfile -File " + shlex.quote(pause.as_posix()) +
-                   " && cmd.exe //c " + shlex.quote(cmd))
-        result = subprocess.run([bash, "-c", command], cwd=root, env=env, capture_output=True)
         label = version + "-" + source.removesuffix(".zig")
-        (output / (label + ".log")).write_bytes(result.stdout + result.stderr)
-        (output / (label + ".exit")).write_text(str(result.returncode) + "\n", encoding="utf-8")
+        result = compiler_call(root, output, pause, compiler, operation, output / source, label)
         assert result.returncode == expected, (label, result.returncode)
         if operation == "test":
             assert b"All 1 tests passed" in result.stdout + result.stderr, label
