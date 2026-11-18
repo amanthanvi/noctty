@@ -423,15 +423,298 @@ $interactiveJobPlanText = @($interactiveJobPlan | ForEach-Object {
     })) -join ' '
 }) -join "`n"
 $expectedInteractiveJobPlan = @'
-test\windows\flagship\Invoke-InteractiveWin11.ps1 -IncludeForegroundHarness -Rebuild -ResetState
+test\windows\flagship\Invoke-InteractiveWin11.ps1 -DeferCommandFinish -IncludeForegroundHarness -Rebuild -ResetState
 test\windows\interactive-win11-shaders.ps1 -ResetState
 test\windows\interactive-win11-shader-pacing.ps1 -ResetState
 test\windows\interactive-win11-accessibility.ps1 -IdleSoakSeconds 600 -ResetState -TimeoutSeconds 120
 test\windows\interactive-win11-palette-theme.ps1 -ExerciseHighContrast -ResetState
 test\windows\interactive-win11-session-restore.ps1 -ResetState
+test\windows\interactive-win11-command-finish.ps1 -ResetState -TimeoutSeconds 12
 '@
 if ($interactiveJobPlanText -cne ($expectedInteractiveJobPlan -replace '\r\n?', "`n").TrimEnd([char[]]"`n")) {
     throw "Interactive job plan drifted from its exact fail-closed snapshot:`n$interactiveJobPlanText"
+}
+# EVIDENCE-TOAST-FOREGROUND. A toast shows on the visible desktop whatever desktop
+# noctty runs on, and its banner can cover a leaf's screen pixels or hold the
+# foreground a leaf needs. In the evidence job the command-finish leaf is the
+# only step that raises one on purpose, so the composite defers it and the job
+# runs it last; every other step's noctty is kept from raising one. Checked
+# here: the order, the composite's deferral, the accessibility leaf's two
+# Settings-saving processes, and an inventory of toast sources over the job's
+# files, each with mutation controls.
+$toastLeaf = 'test\windows\interactive-win11-command-finish.ps1'
+$toastLeafSteps = @($interactiveJobPlan | Where-Object { $_.Script -ceq $toastLeaf })
+if ($toastLeafSteps.Count -ne 1 -or -not [object]::ReferenceEquals($interactiveJobPlan[-1], $toastLeafSteps[0]) -or
+    $interactiveJobPlan[0].Arguments.DeferCommandFinish -ne $true) {
+    throw 'The interactive job must run the command-finish leaf once, as its last step, and its composite must defer that leaf.'
+}
+$validateHarness = Join-Path $repoRoot 'test\windows\interactive-win11-validate.ps1'
+$flagshipInteractive = Join-Path $repoRoot 'test\windows\flagship\Invoke-InteractiveWin11.ps1'
+$parseToastScript = {
+    param([string] $Text, [string] $Name)
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw "$Name does not parse: $($errors[0].Message)" }
+    $ast
+}
+# A command's value for one named parameter (the element after it), or $null.
+$getNamedArgument = {
+    param([System.Management.Automation.Language.CommandAst] $Command, [string] $Parameter)
+    $elements = $Command.CommandElements
+    for ($index = 0; $index + 1 -lt $elements.Count; $index++) {
+        if ($elements[$index] -is [System.Management.Automation.Language.CommandParameterAst] -and
+            $elements[$index].ParameterName -eq $Parameter -and $null -eq $elements[$index].Argument) {
+            return $elements[$index + 1]
+        }
+    }
+    $null
+}
+# The composite's leaves, by the -ScriptName literal of each launch.
+$getLeafLaunches = {
+    param([System.Management.Automation.Language.Ast] $Ast)
+    # The runner functions' own inner calls (`-ScriptName $ScriptName`) are not launches.
+    @($Ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst] -or
+            $node.GetCommandName() -notin @('Invoke-Harness', 'Invoke-HarnessWithPassSentinel', 'Start-Harness')) { return $false }
+        for ($at = $node.Parent; $null -ne $at; $at = $at.Parent) {
+            if ($at -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $false }
+        }
+        $true
+    }, $true) | ForEach-Object {
+        $value = & $getNamedArgument $_ 'ScriptName'
+        [pscustomobject]@{
+            Command = $_
+            Script = if ($value -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $value.Value } else { $null }
+        }
+    })
+}
+$isWithin = {
+    param($Node, $Ancestor)
+    for ($at = $Node; $null -ne $at; $at = $at.Parent) { if ([object]::ReferenceEquals($at, $Ancestor)) { return $true } }
+    $false
+}
+# The composite starts the command-finish leaf once, inside `$parallelRuns`, only
+# under an if whose one clause is `-not $DeferCommandFinish`; the progress leaf
+# beside it under no if; and it declares the switch.
+$testCompositeDeferral = {
+    param([System.Management.Automation.Language.ScriptBlockAst] $Ast)
+    $parameters = @($Ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'DeferCommandFinish' })
+    if ($parameters.Count -ne 1 -or $parameters[0].StaticType -ne [switch]) { return $false }
+    $launches = @(& $getLeafLaunches $Ast)
+    if (@($launches | Where-Object { $null -eq $_.Script }).Count -ne 0) { return $false }
+    $toast = @($launches | Where-Object { $_.Script -ceq 'interactive-win11-command-finish.ps1' })
+    $progress = @($launches | Where-Object { $_.Script -ceq 'interactive-win11-progress.ps1' })
+    if ($toast.Count -ne 1 -or $progress.Count -ne 1 -or $toast[0].Command.GetCommandName() -cne 'Start-Harness') { return $false }
+    $parallel = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '[InteractiveWin11HarnessRun[]] $parallelRuns'
+    }, $true))
+    if ($parallel.Count -ne 1) { return $false }
+    foreach ($toastLaunch in @($toast[0], $progress[0])) {
+        if (-not (& $isWithin $toastLaunch.Command $parallel[0])) { return $false }
+    }
+    $ifs = @(for ($at = $toast[0].Command.Parent; -not [object]::ReferenceEquals($at, $parallel[0]); $at = $at.Parent) {
+        if ($at -is [System.Management.Automation.Language.IfStatementAst]) { $at }
+    })
+    if ($ifs.Count -ne 1 -or $ifs[0].Clauses.Count -ne 1 -or $null -ne $ifs[0].ElseClause -or
+        $ifs[0].Clauses[0].Item1.Extent.Text -cne '-not $DeferCommandFinish' -or
+        -not (& $isWithin $toast[0].Command $ifs[0].Clauses[0].Item2)) { return $false }
+    for ($at = $progress[0].Command.Parent; -not [object]::ReferenceEquals($at, $parallel[0]); $at = $at.Parent) {
+        if ($at -is [System.Management.Automation.Language.IfStatementAst]) { return $false }
+    }
+    $true
+}
+$validateText = Get-Content -LiteralPath $validateHarness -Raw
+if (-not (& $testCompositeDeferral (& $parseToastScript $validateText 'interactive-win11-validate.ps1'))) {
+    throw 'interactive-win11-validate.ps1 must start the command-finish leaf once, in $parallelRuns, only under if (-not $DeferCommandFinish), declare that switch, and start the progress leaf unconditionally.'
+}
+$deferGuardText = "    if (-not `$DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }"
+foreach ($toastControl in @(
+        @{ Name = 'the guard removed'; From = $deferGuardText; To = "    Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12" },
+        @{ Name = 'the guard inverted'; From = $deferGuardText; To = "    if (`$DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }" },
+        @{ Name = 'an else that starts it'; From = $deferGuardText; To = "$deferGuardText else { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }" },
+        @{ Name = 'a second launch after the parallel runs'; From = '$maxTimeoutSeconds = '; To = "Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12`n`$maxTimeoutSeconds = " },
+        @{ Name = 'the progress leaf guarded too'; From = "    Start-Harness -ScriptName 'interactive-win11-progress.ps1' -TimeoutSeconds 20"; To = "    if (-not `$DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-progress.ps1' -TimeoutSeconds 20 }" },
+        @{ Name = 'the switch undeclared'; From = '    [switch] $DeferCommandFinish'; To = '    [string] $DeferCommandFinish' }
+    )) {
+    if (([regex]::Matches($validateText, [regex]::Escape($toastControl.From))).Count -ne 1) {
+        throw "Composite deferral control '$($toastControl.Name)' lost its anchor."
+    }
+    if (& $testCompositeDeferral (& $parseToastScript $validateText.Replace($toastControl.From, $toastControl.To) $toastControl.Name)) {
+        throw "The composite deferral check accepted $($toastControl.Name)."
+    }
+}
+$flagshipInteractiveText = Get-Content -LiteralPath $flagshipInteractive -Raw
+if ([regex]::Matches($flagshipInteractiveText, '(?m)^\s*\[switch\] \$DeferCommandFinish\s*$').Count -ne 1 -or
+    [regex]::Matches($flagshipInteractiveText, [regex]::Escape("if (`$DeferCommandFinish) { `$arguments += '-DeferCommandFinish' }")).Count -ne 1) {
+    throw 'Invoke-InteractiveWin11.ps1 must declare -DeferCommandFinish and pass it on to the composite.'
+}
+
+# Every file the job runs, the composite's leaves and the shared stateful library
+# included. Only the command-finish leaf may hold a toast source; only the
+# accessibility leaf may save Settings, from the processes pinned below.
+$toastSources = [ordered]@{
+    'a notify-on-command-finish setting' = 'notify-on-command-finish'
+    'desktop-notifications = true' = '(?i)desktop-notifications\s*=\s*true'
+    'an OSC 9 notification (text)' = '\]9;(?![49];)'
+    'an OSC 777 notification (text)' = '\]777;'
+    'an OSC 99 notification (text)' = '\]99;'
+    'an OSC 7501 program status (text)' = '\]7501;'
+    'an OSC 9 notification (bytes)' = '(?i)0x5d\s*,\s*0x39\s*,\s*0x3b\s*,\s*0x(?!34\b|39\b)'
+    'an OSC 777 notification (bytes)' = '(?i)0x5d\s*,\s*0x37\s*,\s*0x37\s*,\s*0x37'
+    'an OSC 99 notification (bytes)' = '(?i)0x5d\s*,\s*0x39\s*,\s*0x39\s*,\s*0x3b'
+    'an OSC 7501 program status (bytes)' = '(?i)0x5d\s*,\s*0x37\s*,\s*0x35\s*,\s*0x30\s*,\s*0x31'
+    'a reload_config action' = '[''"]reload_config[''"]'
+}
+$settingsSaves = [ordered]@{
+    'a Settings Save and close' = "-ActionName\s+'Save and close'"
+    'a Settings Save invoke' = '\.Save\.TryGetCurrentPattern\('
+}
+$accessibilityLeaf = 'test\windows\interactive-win11-accessibility.ps1'
+$jobFiles = [Collections.Generic.List[string]]::new()
+foreach ($toastStep in $interactiveJobPlan) {
+    if ($toastStep.Script -ceq 'test\windows\flagship\Invoke-InteractiveWin11.ps1') {
+        $jobFiles.Add('test\windows\interactive-win11-validate.ps1')
+        foreach ($toastLaunch in @(& $getLeafLaunches (& $parseToastScript $validateText 'interactive-win11-validate.ps1'))) {
+            $jobFiles.Add("test\windows\$($toastLaunch.Script)")
+        }
+    }
+    else { $jobFiles.Add($toastStep.Script) }
+}
+$jobFiles.Add('test\windows\interactive-win11-stateful-lib.ps1')
+$jobFiles.Add('test\windows\flagship\Invoke-InteractiveWin11.ps1')
+$jobFiles = @($jobFiles | Sort-Object -Unique)
+$findToastSources = {
+    param([string] $File, [string] $Text)
+    foreach ($toastSource in $toastSources.GetEnumerator()) {
+        if ($File -cne $toastLeaf -and [regex]::IsMatch($Text, $toastSource.Value)) { "$File holds $($toastSource.Key)" }
+    }
+    foreach ($toastSave in $settingsSaves.GetEnumerator()) {
+        if ($File -cne $accessibilityLeaf -and [regex]::IsMatch($Text, $toastSave.Value)) { "$File holds $($toastSave.Key)" }
+    }
+}
+$jobFileTexts = @{}
+foreach ($toastFile in $jobFiles) {
+    $toastPath = Join-Path $repoRoot $toastFile
+    if (-not (Test-Path -LiteralPath $toastPath -PathType Leaf)) { throw "An interactive job file is missing: $toastFile" }
+    $jobFileTexts[$toastFile] = Get-Content -LiteralPath $toastPath -Raw
+}
+foreach ($toastCovered in @($accessibilityLeaf, $toastLeaf, 'test\windows\interactive-win11-shell-command-live.ps1', 'test\windows\interactive-win11-progress.ps1', 'test\windows\interactive-win11-shaders.ps1')) {
+    if ($jobFiles -cnotcontains $toastCovered) { throw "The interactive job file list lost $toastCovered`: $($jobFiles -join ', ')" }
+}
+$toastSourceProblems = @(foreach ($toastFile in $jobFiles) { & $findToastSources $toastFile $jobFileTexts[$toastFile] })
+if ($toastSourceProblems.Count -ne 0) {
+    throw "Only the command-finish leaf may raise a toast in the interactive job: $($toastSourceProblems -join '; ')."
+}
+# The patterns see the sources they were written for: the toast leaf's own
+# config, and both Settings saves.
+if (-not [regex]::IsMatch($jobFileTexts[$toastLeaf], $toastSources['a notify-on-command-finish setting']) -or
+    -not [regex]::IsMatch($jobFileTexts[$toastLeaf], $toastSources['desktop-notifications = true']) -or
+    @($settingsSaves.Values | Where-Object { -not [regex]::IsMatch($jobFileTexts[$accessibilityLeaf], $_) }).Count -ne 0) {
+    throw 'The toast-source inventory no longer matches the sources it was written for.'
+}
+$nonToastLeaf = 'test\windows\interactive-win11-shaders.ps1'
+foreach ($toastControl in @(
+        @{ Name = 'notify-on-command-finish = always'; Text = "'notify-on-command-finish = always'" },
+        @{ Name = 'notify-on-command-finish = never'; Text = "'notify-on-command-finish = never'" },
+        @{ Name = 'desktop-notifications = true'; Text = "'desktop-notifications = true'" },
+        @{ Name = 'an OSC 9 notification as text'; Text = '"`e]9;hello`a"' },
+        @{ Name = 'an OSC 777 notification as text'; Text = '"`e]777;notify;t;b`a"' },
+        @{ Name = 'an OSC 99 notification as text'; Text = '"`e]99;;hi`a"' },
+        @{ Name = 'an OSC 7501 report as text'; Text = '"`e]7501;state=blocked`a"' },
+        @{ Name = 'an OSC 9 notification as bytes'; Text = '[byte[]](0x1b,0x5d,0x39,0x3b,0x68,0x07)' },
+        @{ Name = 'an OSC 777 notification as bytes'; Text = '[byte[]](0x1b, 0x5d, 0x37, 0x37, 0x37, 0x3b)' },
+        @{ Name = 'an OSC 99 notification as bytes'; Text = '[byte[]](0x1b,0x5D,0x39,0x39,0x3b)' },
+        @{ Name = 'an OSC 7501 report as bytes'; Text = '[byte[]](0x1b,0x5d,0x37,0x35,0x30,0x31,0x3b)' },
+        @{ Name = 'a reload_config action'; Text = "Invoke-Action 'reload_config'" },
+        @{ Name = 'a Settings Save and close'; Text = "Invoke-AccessibilitySettingsCloseAction -ActionName 'Save and close'" },
+        @{ Name = 'a Settings Save invoke'; Text = '$probe.Save.TryGetCurrentPattern($pattern, [ref]$invoke)' }
+    )) {
+    if (@(& $findToastSources $nonToastLeaf ($jobFileTexts[$nonToastLeaf] + "`n" + $toastControl.Text)).Count -ne 1) {
+        throw "The toast-source inventory missed $($toastControl.Name) in a non-toast leaf."
+    }
+}
+# OSC 9;4 (progress) and OSC 9;9 (a working directory) raise no toast.
+foreach ($toastAllowed in @('[byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x31,0x07)', '[byte[]](0x1b,0x5d,0x39,0x3b,0x39,0x3b)', '"`e]9;4;1;50`a"', '"`e]9;9;C:\x`a"')) {
+    if (@(& $findToastSources $nonToastLeaf $toastAllowed).Count -ne 0) {
+        throw "The toast-source inventory flagged $toastAllowed, which raises no toast."
+    }
+}
+
+# The accessibility leaf's Settings saves run only in its two probe processes,
+# and each starts with notifications off: a save then shows its banner and,
+# with `config-reload` off and that banner shown, `settingsNotifySuccessThunk`
+# returns before the toast (settings.md PROFILES-4 trap 7).
+$testQuietSettingsSaves = {
+    param([string] $Text)
+    $ast = & $parseToastScript $Text 'interactive-win11-accessibility.ps1'
+    if ([regex]::Matches($Text, [regex]::Escape("`$settingsSaveNotificationArguments = @('--app-notifications=no-config-reload', '--desktop-notifications=false')")).Count -ne 1 -or
+        [regex]::Matches($Text, '\$settingsSaveNotificationArguments\s*[+\-*/]?=(?!=)').Count -ne 1) { return $false }
+    $starts = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Start-AccessibilityProcessWithEnvironment'
+    }, $true))
+    $processes = @{}
+    foreach ($start in $starts) {
+        $assignment = $start.Parent
+        while ($null -ne $assignment -and $assignment -isnot [System.Management.Automation.Language.AssignmentStatementAst]) { $assignment = $assignment.Parent }
+        if ($null -eq $assignment -or $assignment.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+        $argumentList = & $getNamedArgument $start 'ArgumentList'
+        if ($argumentList -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+        $arguments = $argumentList.VariablePath.UserPath
+        $writes = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq $arguments
+        }, $true))
+        if ($writes.Count -ne 1 -or [regex]::Matches($Text, "\`$$([regex]::Escape($arguments))\s*[+\-*/]?=(?!=)").Count -ne 1) { return $false }
+        $array = $writes[0].Right.Expression
+        if ($array -isnot [System.Management.Automation.Language.ArrayExpressionAst]) { return $false }
+        $elements = @($array.SubExpression.Statements | ForEach-Object { $_.Extent.Text })
+        if ($elements -cnotcontains '$settingsSaveNotificationArguments') { return $false }
+        $processes[$assignment.Left.VariablePath.UserPath] = $true
+    }
+    if ($processes.Count -ne 2 -or -not $processes.ContainsKey('saveProbeProcess') -or -not $processes.ContainsKey('saveVerifyProcess')) { return $false }
+    # Each save is made on a Settings window one of those processes opened.
+    foreach ($required in @(
+            '$saveProbe = Open-AccessibilitySettingsProbe -Process $saveProbeProcess -Description',
+            '$saveVerifyProbe = Open-AccessibilitySettingsProbe -Process $saveVerifyProcess -Description',
+            '$verifyScrollback = Get-AccessibilityScrollbackProbe -SettingsProbe $saveVerifyProbe -Description',
+            '$verifyScrollback.Save.TryGetCurrentPattern(')) {
+        if ([regex]::Matches($Text, [regex]::Escape($required)).Count -ne 1) { return $false }
+    }
+    if ([regex]::Matches($Text, $settingsSaves['a Settings Save invoke']).Count -ne 1 -or
+        [regex]::Matches($Text, $settingsSaves['a Settings Save and close']).Count -ne 1 -or
+        [regex]::Matches($Text, "Invoke-AccessibilitySettingsCloseAction\s*``\s*-SettingsProbe \`$saveProbe\s*``\s*-ActionName 'Save and close'").Count -ne 1) { return $false }
+    $true
+}
+$accessibilityText = $jobFileTexts[$accessibilityLeaf]
+if (-not (& $testQuietSettingsSaves $accessibilityText)) {
+    throw 'interactive-win11-accessibility.ps1 must save Settings only in its save probe and verifier processes, each started with $settingsSaveNotificationArguments (--app-notifications=no-config-reload, --desktop-notifications=false).'
+}
+$toastEol = if ($accessibilityText.Contains("`r`n")) { "`r`n" } else { "`n" }
+foreach ($toastControl in @(
+        @{ Name = 'the save probe without the flags'; From = "`"--class=`$saveProbeClass`"`n        '--command=cmd.exe'`n        `$settingsSaveNotificationArguments`n"; To = "`"--class=`$saveProbeClass`"`n        '--command=cmd.exe'`n" },
+        @{ Name = 'the verifier without the flags'; From = "`"--class=`$saveVerifyClass`"`n        '--command=cmd.exe'`n        `$settingsSaveNotificationArguments`n"; To = "`"--class=`$saveVerifyClass`"`n        '--command=cmd.exe'`n" },
+        @{ Name = 'config-reload left on'; From = "'--app-notifications=no-config-reload', "; To = "'--app-notifications=no-clipboard-copy', " },
+        @{ Name = 'desktop notifications left on'; From = ", '--desktop-notifications=false')"; To = ", '--desktop-notifications=true')" },
+        @{ Name = 'the flags emptied later'; From = "    `$saveProbeClass = "; To = "    `$settingsSaveNotificationArguments = @()`n    `$saveProbeClass = " },
+        @{ Name = 'the save probe arguments rewritten'; From = "    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"; To = "    `$saveProbeArguments += @()`n    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment" },
+        @{ Name = 'a second Save invoke'; From = '    $restoreInvoke.Invoke()'; To = "    `$null = `$verifyTheme.Save.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]`$restoreInvoke)`n    `$restoreInvoke.Invoke()" },
+        @{ Name = 'Save and close on another probe'; From = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$saveProbe ``"; To = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$ownerProbe ``" }
+    )) {
+    $toastFrom = $toastControl.From.Replace("`n", $toastEol).Replace("`r`r", "`r")
+    $toastTo = $toastControl.To.Replace("`n", $toastEol).Replace("`r`r", "`r")
+    if (([regex]::Matches($accessibilityText, [regex]::Escape($toastFrom))).Count -ne 1) {
+        throw "Quiet Settings save control '$($toastControl.Name)' lost its anchor."
+    }
+    if (& $testQuietSettingsSaves $accessibilityText.Replace($toastFrom, $toastTo)) {
+        throw "The quiet Settings save check accepted $($toastControl.Name)."
+    }
 }
 foreach ($leafHarness in @($shaderHarness, (Join-Path $repoRoot 'test\windows\interactive-win11-shader-pacing.ps1'))) {
     # A leaf rebuild in measurement mode rebuilds the measurement generation,

@@ -1,6 +1,9 @@
 param(
     [switch] $Rebuild,
-    [switch] $ResetState
+    [switch] $ResetState,
+    # The interactive job runs the command-finish leaf as its own last step
+    # instead (interactive-win11-job.ps1, EVIDENCE-TOAST-FOREGROUND).
+    [switch] $DeferCommandFinish
 )
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
@@ -282,8 +285,14 @@ Invoke-HarnessWithPassSentinel -ScriptName 'cli-automation.ps1' -TimeoutSeconds 
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-resize.ps1' -TimeoutSeconds 15
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-undo.ps1' -TimeoutSeconds 35
 
+# The command-finish leaf raises a real toast on the visible desktop, and its
+# banner can cover or take the foreground from whatever runs next. Run alone,
+# the suite ends with it; the interactive job defers it past its other leaves.
+if ($DeferCommandFinish) {
+    Write-Host 'interactive-win11 command-finish validation: DEFERRED (the interactive job runs it as its last step)'
+}
 [InteractiveWin11HarnessRun[]] $parallelRuns = @(
-    Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12
+    if (-not $DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }
     Start-Harness -ScriptName 'interactive-win11-progress.ps1' -TimeoutSeconds 20
 )
 

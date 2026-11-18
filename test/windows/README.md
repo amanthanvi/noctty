@@ -193,7 +193,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\powershell-shell-integ
 
 Composite Win11 validator. It runs launch-helper checks and startup smoke,
 then runs the command-finish and progress validators in parallel against
-separate sandbox roots.
+separate sandbox roots. `-DeferCommandFinish` leaves the command-finish
+validator out (the suite logs it as deferred) for a caller that runs it
+later, as `interactive-win11-job.ps1` does.
 
 Run with:
 
@@ -232,6 +234,12 @@ command-finished path fired.
   script asserts the runtime logs the explicit
   `error.NotifierDisabled; falling back to banner` path instead of
   silently dropping the notification.
+
+With delivery enabled it raises a real toast, on the visible desktop even
+when noctty runs on a private one, and the banner can cover or take the
+foreground from a later harness. Run nothing that reads screen pixels or
+needs the foreground while that banner is up; the release evidence job runs
+this leaf last for that reason.
 
 Run with:
 
@@ -677,8 +685,13 @@ custom shaders (`-Dcustom-shaders=true`, as releases do) and its receipt binds
 the exact build arguments.
 
 `interactive-win11-job.ps1` is the Test workflow's `windows-interactive` job:
-the composite, then the shader, shader-pacing, accessibility, palette-theme and
-session-restore leaves, all with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
+the composite (with `-DeferCommandFinish`), then the shader, shader-pacing,
+accessibility, palette-theme and session-restore leaves, and last the
+command-finish leaf, the one step that raises a real toast, so that its banner
+has no later leaf to disturb. The accessibility leaf's two processes that save
+Settings run with `--app-notifications=no-config-reload` and
+`--desktop-notifications=false`, so a save shows its in-window banner and no
+toast. All run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
 jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the

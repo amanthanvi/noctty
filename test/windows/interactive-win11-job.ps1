@@ -21,14 +21,20 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 function Get-InteractiveWin11JobPlan {
     # The composite builds the measurement generation of HEAD; every leaf after
-    # it reuses that build, so none of them passes -Rebuild.
+    # it reuses that build, so none of them passes -Rebuild. The command-finish
+    # leaf is the one step that raises a real toast, on the visible desktop
+    # whatever desktop noctty runs on, and its banner can cover or take the
+    # foreground from a leaf that reads screen pixels or needs the foreground.
+    # So the composite defers it and it runs last, with nothing after it that
+    # either can disturb (EVIDENCE-TOAST-FOREGROUND).
     return @(
-        [pscustomobject]@{ Script = 'test\windows\flagship\Invoke-InteractiveWin11.ps1'; Arguments = @{ Rebuild = $true; ResetState = $true; IncludeForegroundHarness = $true } }
+        [pscustomobject]@{ Script = 'test\windows\flagship\Invoke-InteractiveWin11.ps1'; Arguments = @{ Rebuild = $true; ResetState = $true; IncludeForegroundHarness = $true; DeferCommandFinish = $true } }
         [pscustomobject]@{ Script = 'test\windows\interactive-win11-shaders.ps1'; Arguments = @{ ResetState = $true } }
         [pscustomobject]@{ Script = 'test\windows\interactive-win11-shader-pacing.ps1'; Arguments = @{ ResetState = $true } }
         [pscustomobject]@{ Script = 'test\windows\interactive-win11-accessibility.ps1'; Arguments = @{ ResetState = $true; TimeoutSeconds = 120; IdleSoakSeconds = 600 } }
         [pscustomobject]@{ Script = 'test\windows\interactive-win11-palette-theme.ps1'; Arguments = @{ ResetState = $true; ExerciseHighContrast = $true } }
         [pscustomobject]@{ Script = 'test\windows\interactive-win11-session-restore.ps1'; Arguments = @{ ResetState = $true } }
+        [pscustomobject]@{ Script = 'test\windows\interactive-win11-command-finish.ps1'; Arguments = @{ ResetState = $true; TimeoutSeconds = 12 } }
     )
 }
 
