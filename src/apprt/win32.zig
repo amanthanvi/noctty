@@ -7206,6 +7206,27 @@ test "win32 a Settings save toasts unless config-reload notifications are off an
     try w.host.setBanner(.none, null);
 }
 
+test "win32 a Settings save with no window for its banner toasts even with config-reload notifications off" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var recorder: notifications.testing.Recorder = .{};
+    defer recorder.deinit();
+    var session: TestSession = .{};
+    try session.init(.{ .core_app = &core_app, .app = &app });
+    // The session first: its exit removal calls the recorder.
+    defer session.deinit();
+    app.notifications = .init(std.testing.allocator, recorder.sink(), app.notificationPanes());
+
+    // No terminal window, so no banner: the save still says it went through,
+    // as a toast, whatever `config-reload` says. A harness that must not raise
+    // a toast saves only from a process with a terminal window.
+    app.config.@"app-notifications".@"config-reload" = false;
+    settingsNotifySuccessThunk(&app, "Settings saved", "");
+    try std.testing.expectEqual(@as(usize, 1), recorder.shown);
+    try recorder.expect(.title, "Settings saved");
+}
+
 test "win32 settings disk edit is a conflict only for an edited setting the file now says differently" {
     const alloc = std.testing.allocator;
     const light: configpkg.ConditionalState = .{};
