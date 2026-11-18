@@ -74,7 +74,7 @@ public static class DirectUpdateClipboardControl {
             opened=true;
             stage="EmptyClipboard"; RequirePrivate(station); if(!EmptyClipboard()) throw new Win32Exception();
             stage="SetClipboardData"; RequirePrivate(station); if(SetClipboardData(13,memory)==IntPtr.Zero) throw new Win32Exception();
-            memory=IntPtr.Zero; CloseClipboard(); opened=false;
+            memory=IntPtr.Zero; RequirePrivate(station); CloseClipboard(); opened=false;
             RequirePrivate(station); fact.After=GetClipboardSequenceNumber();
             fact.SequenceAdvanced=fact.After!=fact.Before; fact.Supported=fact.SequenceAdvanced;
             if(!fact.Supported) fact.FailedApi="GetClipboardSequenceNumber";

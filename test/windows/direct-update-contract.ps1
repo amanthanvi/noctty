@@ -9,7 +9,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     $null=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'The acceptance harness does not parse'}
     $active=[Text.StringBuilder]::new($Text)
-    foreach($token in @($tokens | Where-Object Kind -EQ 'Comment' | Sort-Object { $_.Extent.StartOffset } -Descending)){
+    foreach($token in @($tokens | Where-Object { $_.Kind -in @('Comment','HereStringLiteral','HereStringExpandable') } | Sort-Object { $_.Extent.StartOffset } -Descending)){
         $null=$active.Remove($token.Extent.StartOffset,$token.Extent.EndOffset-$token.Extent.StartOffset)
     }
     $code=$active.ToString()
@@ -40,21 +40,107 @@ function Get-DirectUpdateProblems([string] $Text) {
         Shell='--command=direct:\{3\} /D.*--clipboard-write=deny --clipboard-read=deny'
         ShellSystem="\`$shell=Join-Path \(\[Environment\]::GetFolderPath\('System'\)\) 'cmd\.exe'"
         StubLoadApi='function Get-StubLoadError\(\[string\] \$Path\) \{ \[DirectUpdateUi\]::StubLoadError\(\$Path\) \}'
+        ClipboardHosted='function Invoke-ClipboardPositive\(\[string\] \$Pwsh,\[IntPtr\] \$Job,\[string\] \$DesktopName\) \{\s*if\(-not \$ephemeral\)\{return'
+        HostedWinSta0='function Invoke-HostedClipboardPositive\(\[string\] \$Pwsh\) \{\s*if\(-not \$ephemeral\)\{throw'
+        ClipboardSupported='if\(-not \$fact.Supported -or -not \$fact.IsolatedStation -or -not \$fact.SequenceAdvanced\)\{throw'
     }
     $problems=[Collections.Generic.List[string]]::new()
     foreach($entry in $requirements.GetEnumerator()){if($code -cnotmatch $entry.Value){$problems.Add($entry.Key)}}
-    if($code -match '(?i)\b(?:Start-Process|Invoke-Item|Set-Clipboard|Get-Clipboard|Import-Certificate|Set-AuthenticodeSignature)\b|--clobber|gh\s+release\s+(?:create|edit|upload)|Remove-Item|\[System\.Windows\.Forms\.Clipboard\]'){ $problems.Add('ForbiddenOperation') }
+    # Fixture here-strings are later written as scripts: scan ALL original text.
+    if($Text -match '(?i)\b(?:Start-Process|Invoke-Item|Set-Clipboard|Get-Clipboard|Import-Certificate|Set-AuthenticodeSignature)\b|--clobber|gh\s+release\s+(?:create|edit|upload)|Remove-Item|\[System\.Windows\.Forms\.Clipboard\]'){ $problems.Add('ForbiddenOperation') }
     $ast=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
+    function Shape($Node) {
+        if($null -eq $Node){return ''}
+        return [regex]::Replace($Node.Extent.Text,'[ \t\r\n]+',' ').Trim([char[]]" `t`r`n")
+    }
+    function Same($Node,[string] $Expected){[string]::Equals((Shape $Node),$Expected,[StringComparison]::Ordinal)}
+    function Direct($Statements,[string] $Expected){@($Statements | Where-Object {Same $_ $Expected}).Count -eq 1}
+    function Find-If($Statements,[string] $Condition){@($Statements | Where-Object {$_ -is [Management.Automation.Language.IfStatementAst] -and (Same $_.Clauses[0].Item1 $Condition)}) | Select-Object -First 1}
+    function OutsideFunction($Node){for($p=$Node.Parent;$p;$p=$p.Parent){if($p -is [Management.Automation.Language.FunctionDefinitionAst]){return $false}};return $true}
+    function InFinally($Pipeline){$block=$Pipeline.Parent;return $block -is [Management.Automation.Language.StatementBlockAst] -and $block.Parent -is [Management.Automation.Language.TryStatementAst] -and [object]::ReferenceEquals($block,$block.Parent.Finally)}
+    function Need([string] $Key,[bool] $Present){if(-not $Present){$problems.Add($Key)}}
+    $controller=Find-If $ast.EndBlock.Statements '-not $Driver'
+    Need HistoryStart (Direct $controller.Clauses[0].Item2.Statements "`$historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'")
+    $controllerTry=@($controller.Clauses[0].Item2.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need PrivateClipboardCall (Direct $controllerTry.Body.Statements '$clipboardPositive=Invoke-ClipboardPositive $pwsh $job $DesktopName')
+    $loops=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.DoWhileStatementAst] -and (OutsideFunction $n)},$true))
+    $loop=if($loops.Count -eq 1){$loops[0]}else{$null}
+    Need DefaultCall ($null -ne $loop -and (Same $loop.Body.Statements[0] 'Assert-NoDefaultWindows $job'))
+    $ready=Find-If $loop.Body.Statements "Test-Path -LiteralPath (Join-Path `$Run 'driver-ready.json')"
+    $done=Find-If $ready.Clauses[0].Item2.Statements "Test-Path -LiteralPath (Join-Path `$Run 'driver-done')"
+    Need PrivateSentinel (Direct $done.ElseClause.Statements "if(@(`$private | Where-Object ProcessId -EQ `$launch.pid).Count -eq 0){throw 'Private driver sentinel was not observed'}")
+    $driver=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need DriverProfileCall (Direct $driver.Body.Statements '$isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run')
+    $removed=Find-If $driver.Body.Statements "`$Expected -ceq 'Removed'"
+    Need SourceStubCall (Direct $removed.Clauses[0].Item2.Statements "`$result.BeforeStub=Assert-SourceStub (Join-Path `$script:install 'ghostty-vt.dll')")
+    $rejected=Find-If $driver.Body.Statements "`$Expected -ceq 'Rejected'"
+    Need FinalizeCall (Direct $rejected.ElseClause.Statements "Wait-Check 'target confirmed and helper finalized' { Test-FinalizedUpdate (Get-UpdateState `$script:install) `$script:states `$exe (Join-Path `$target 'noctty.exe') }")
+    $stub=Find-If $rejected.ElseClause.Statements "`$Expected -ceq 'Stub'"
+    Need InstalledStubCall (Direct $stub.Clauses[0].Item2.Statements "Assert-InstalledStub `$result (Join-Path `$script:install 'ghostty-vt.dll')")
+    $clipboardCalls=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq 'Assert-ClipboardSequence' -and (OutsideFunction $n)},$true))
+    Need ClipboardCall ($clipboardCalls.Count -eq 1 -and (Same $clipboardCalls[0] 'Assert-ClipboardSequence $clipboardBefore $clipboardAfter') -and (InFinally $clipboardCalls[0].Parent))
+    $receiptCalls=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq 'Write-IsolationReceipt' -and (OutsideFunction $n)},$true))
+    Need HistoryReceiptCall ($receiptCalls.Count -eq 1 -and (Same $receiptCalls[0] 'Write-IsolationReceipt $historyGuard $isolation') -and (InFinally $receiptCalls[0].Parent))
+    $writer=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Write-IsolationReceipt'},$true)) | Select-Object -First 1
+    Need HistoryCall (Direct $writer.Body.EndBlock.Statements 'try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure=$_ }')
+    $hostedIfs=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and (Same $n.Clauses[0].Item1 '$ephemeral') -and (OutsideFunction $n)},$true))
+    $hostedIf=if($hostedIfs.Count -eq 1){$hostedIfs[0]}else{$null}
+    Need HostedWinSta0Call ($null -ne $hostedIf -and (InFinally $hostedIf) -and (Direct $hostedIf.Clauses[0].Item2.Statements '$isolation.HostedClipboardPositive=Invoke-HostedClipboardPositive $pwsh'))
+    $hostedFunction=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-HostedClipboardPositive'},$true)) | Select-Object -First 1
+    $hostedTry=@($hostedFunction.Body.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need HostedParentReader ((Direct $hostedTry.Body.Statements '$parentBefore=[HiddenWin]::GetClipboardSequenceNumber()') -and (Direct $hostedTry.Body.Statements '$parentAfter=[HiddenWin]::GetClipboardSequenceNumber()'))
+    Need HostedVerdictCall (Direct $hostedTry.Body.Statements 'Assert-HostedClipboardControl $fact $parentBefore $parentAfter')
     foreach($name in @('Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Assert-RejectedCopy','Assert-SourceStub','Assert-LocalState')){
         if(@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq $name},$true)).Count -eq 0){$problems.Add("MissingCall:$name")}
     }
+    return @($problems.ToArray())
+}
+function Get-ClipboardHelperProblems([string] $Text,[switch] $Hosted) {
+    $code=[regex]::Replace($Text,'(?s)/\*.*?\*/|//[^\r\n]*','')
+    $requirements=if($Hosted){[ordered]@{
+        HostedEnvironment='if\(!String.Equals\(Environment.GetEnvironmentVariable\("GITHUB_ACTIONS"\),"true",StringComparison.Ordinal\) \|\|\s*!String.Equals\(Environment.GetEnvironmentVariable\("RUNNER_ENVIRONMENT"\),"github-hosted",StringComparison.Ordinal\)\)\s*throw'
+        HostedStation='!String.Equals\(ObjectName\(GetProcessWindowStation\(\)\),"WinSta0",StringComparison.OrdinalIgnoreCase\)'
+        HostedDesktop='!desktop.StartsWith\("noctty-hw-",StringComparison.Ordinal\) \|\| !Guid.TryParseExact'
+        HostedOpen='RequireHostedWinSta0\(\); if\(!OpenClipboard\(window\)\)'
+        HostedEmpty='RequireHostedWinSta0\(\); if\(!EmptyClipboard\(\)\)'
+        HostedSet='RequireHostedWinSta0\(\); if\(SetClipboardData\(13,memory\)==IntPtr.Zero\)'
+        HostedClose='memory=IntPtr.Zero; RequireHostedWinSta0\(\); CloseClipboard\(\);'
+        HostedFinallyClose='if\(opened\)\{RequireHostedWinSta0\(\);CloseClipboard\(\);\}'
+        HostedBefore='RequireHostedWinSta0\(\); fact.Before=GetClipboardSequenceNumber\(\);'
+        HostedAfter='RequireHostedWinSta0\(\); fact.After=GetClipboardSequenceNumber\(\);'
+    }}else{[ordered]@{
+        FreshStation='station=CreateWindowStationW\(null,0,0x000F037F,IntPtr.Zero\);'
+        StationIdentity='GetProcessWindowStation\(\) != station'
+        NotWinSta0='String.Equals\(name.ToString\(\), "WinSta0", StringComparison.OrdinalIgnoreCase\)'
+        NonemptyStation='name.Length == 0'
+        StationSwitch='if\(!SetProcessWindowStation\(station\)\) throw'
+        ThreadSwitch='if\(!SetThreadDesktop\(desktop\)\) throw'
+        PrivateOpen='RequirePrivate\(station\); if\(!OpenClipboard\(window\)\)'
+        PrivateEmpty='RequirePrivate\(station\); if\(!EmptyClipboard\(\)\)'
+        PrivateSet='RequirePrivate\(station\); if\(SetClipboardData\(13,memory\)==IntPtr.Zero\)'
+        PrivateClose='memory=IntPtr.Zero; RequirePrivate\(station\); CloseClipboard\(\);'
+        PrivateFinallyClose='if\(opened\) \{ RequirePrivate\(station\); CloseClipboard\(\); \}'
+        PrivateBefore='RequirePrivate\(station\); fact.Before=GetClipboardSequenceNumber\(\);'
+        PrivateAfter='RequirePrivate\(station\); fact.After=GetClipboardSequenceNumber\(\);'
+    }}
+    $problems=[Collections.Generic.List[string]]::new()
+    foreach($entry in $requirements.GetEnumerator()){if($code -cnotmatch $entry.Value){$problems.Add($entry.Key)}}
+    $gatePattern=if($Hosted){'(?s)static void RequireHostedWinSta0\(\) \{.*?\n    \}'}else{'(?s)static void RequirePrivate\(IntPtr station\) \{.*?\n    \}'}
+    $expectedGate=if($Hosted){
+        'static void RequireHostedWinSta0() { if(!String.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"),"true",StringComparison.Ordinal) || !String.Equals(Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT"),"github-hosted",StringComparison.Ordinal)) throw new Exception("Hosted-only clipboard control"); string desktop=ObjectName(GetThreadDesktop(GetCurrentThreadId())); Guid id; if(!String.Equals(ObjectName(GetProcessWindowStation()),"WinSta0",StringComparison.OrdinalIgnoreCase) || !desktop.StartsWith("noctty-hw-",StringComparison.Ordinal) || !Guid.TryParseExact(desktop.Substring(10),"N",out id)) throw new Exception("Hosted private desktop identity check failed"); }'
+    }else{
+        'static void RequirePrivate(IntPtr station) { var name=new StringBuilder(256); int needed; if (station == IntPtr.Zero || GetProcessWindowStation() != station || !GetUserObjectInformationW(station, 2, name, 512, out needed) || name.Length == 0 || String.Equals(name.ToString(), "WinSta0", StringComparison.OrdinalIgnoreCase)) throw new Exception("Private station identity check failed"); }'
+    }
+    $gates=[regex]::Matches($code,$gatePattern)
+    if($gates.Count -ne 1 -or -not [string]::Equals([regex]::Replace($gates[0].Value,'[ \t\r\n]+',' '),$expectedGate,[StringComparison]::Ordinal)){$problems.Add('CompleteStationGate')}
+    if($code -match '\b(?:GetClipboardData|EnumClipboardFormats)\s*\('){$problems.Add('ClipboardContentRead')}
     return @($problems.ToArray())
 }
 function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'Behavioural fixture must parse'}
-    $names=@('Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Assert-RejectedCopy','Assert-SourceStub','Assert-LocalState')
+    $names=@('Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
     $definitions=foreach($name in $names){
         $found=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
         if($found.Count -ne 1){throw "Verdict definition is absent or ambiguous: $name"}
@@ -74,6 +160,8 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         function Get-StubPublisherPins {'fixture-pin'}
         function Assert-ReleaseSignature($Path,$Label,$AllowedPins,$TrustSelfSigned){@{Status='fixture';Thumbprint='fixture';SpkiSha256='fixture'}}
         function Get-PeDataDirectories($Path){@(@{Rva=0;Size=0},@{Rva=0;Size=0})}
+        function Save-Receipt($Name,$Value){$script:savedIsolation=$Value}
+        function Assert-WindowsHarnessHistoryGuard($Guard){if($script:historyShouldFail){throw 'Fixture history changed'}}
         Assert-NativeArchitecture x64 x64 x64
         Refuses Native {Assert-NativeArchitecture arm64 x64 x64}
         Refuses NewRun {Assert-NewRun $Root}
@@ -96,6 +184,8 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         if(Test-FinalizedUpdate $clear $states $exe $other){$failures.Add('FinalExe')}
         if(Test-FinalizedUpdate $clear @(@{State=@{Phase='swapped'}}) $exe $exe){$failures.Add('Confirmed')}
         if(Test-FinalizedUpdate $clear @(@{State=@{Phase='confirmed'}},@{State=@{Phase='swapped'}}) $exe $exe){$failures.Add('ConfirmationOrder')}
+        $locked=[IO.File]::Open($exe,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try{try{if(Test-FinalizedUpdate $clear $states $exe $other){$failures.Add('TransientHash')}}catch{$failures.Add('TransientHash')}}finally{$locked.Dispose()}
         $script:fakeLoadError=1114
         $null=Get-Stub $exe
         $script:fakeLoadError=0
@@ -106,6 +196,7 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         $script:fixtureStubHash='wrong'
         Refuses StubHash {Assert-InstalledStub $result $exe}
         Refuses SourceStub {Assert-SourceStub (Join-Path $Root 'missing-stub.dll')}
+        $null=Assert-SourceStub $exe
         $good=Join-Path $Root 'good'; $missing=Join-Path $Root 'missing'; $changed=Join-Path $Root 'changed'
         foreach($directory in @($good,$missing,$changed)){
             $null=New-Item -ItemType Directory -Path $directory
@@ -115,13 +206,25 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         [IO.File]::WriteAllText((Join-Path $changed 'ghostty-vt.dll'),'changed-stub')
         $before=@(Get-SourceSnapshot $good)
         Assert-RejectedCopy $before $good $clear
+        $runtime=[IO.File]::Open((Join-Path $good 'update-state.json.lock'),[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try{try{Assert-RejectedCopy $before $good $clear}catch{$failures.Add('RuntimeHashRead')}}finally{$runtime.Dispose()}
         Refuses MissingSidecar {Assert-RejectedCopy $before $missing $clear}
         Refuses ChangedSidecar {Assert-RejectedCopy $before $changed $clear}
         Refuses RejectedStage {Assert-RejectedCopy $before $good @{Phase='pending';StagedVersion='1.4.100'}}
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
         Refuses Startup {Assert-LocalState $fingerprint @{Exists=$true;Hash='b';Modified='t'} @() @()}
-        Refuses JumpList {Assert-LocalState $fingerprint $fingerprint @(@{Path='fixture';Written='a'}) @(@{Path='fixture';Written='b'})}
+        Refuses JumpList {Assert-LocalState $fingerprint $fingerprint @(@{Path='c2214d6ebc43ff3f.customDestinations-ms';Written='a'}) @(@{Path='c2214d6ebc43ff3f.customDestinations-ms';Written='b'})}
+        try{$null=Assert-LocalState $fingerprint $fingerprint @(@{Path='another-app.customDestinations-ms';Written='a'}) @(@{Path='another-app.customDestinations-ms';Written='b'})}catch{$failures.Add('UnrelatedJumpList')}
+        $script:historyShouldFail=$false; $script:savedIsolation=$null
+        Write-IsolationReceipt @{} @{}
+        if($script:savedIsolation.HistoryUnchanged -ne $true){$failures.Add('HistoryPositive')}
+        $script:historyShouldFail=$true; $script:savedIsolation=$null
+        Refuses HistoryFailure {Write-IsolationReceipt @{} @{}}
+        if($null -eq $script:savedIsolation -or $script:savedIsolation.HistoryUnchanged -ne $false){$failures.Add('HistoryFailureReceipt')}
+        Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true} 1 2
+        Refuses HostedUnsupported {Assert-HostedClipboardControl @{Supported=$false;HostedWinSta0=$true} 1 2}
+        Refuses HostedDeadReader {Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true} 1 1}
         return @($failures.ToArray())
     } $definitions $Root
 }
@@ -156,9 +259,53 @@ $controls=[ordered]@{
     ShellSystem=@("`$shell=Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'","`$shell='cmd.exe'")
     StubLoadApi=@('[DirectUpdateUi]::StubLoadError($Path)','1114')
     ForbiddenOperation=@("`$ErrorActionPreference = 'Stop'","`$ErrorActionPreference = 'Stop'; Set-Clipboard fixture")
+    ClipboardHosted=@("if(-not `$ephemeral){return @{Supported=`$false;FailedApi='HostedOnly';WinSta0WriterNeverInvoked=`$true}}",'')
+    HostedWinSta0=@("if(-not `$ephemeral){throw 'WinSta0 clipboard control requires a disposable hosted runner'}",'')
+    ClipboardSupported=@('if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw','if($false){throw')
+}
+$sites=[ordered]@{
+    DefaultCall=@('Assert-NoDefaultWindows $job','')
+    ClipboardCall=@('Assert-ClipboardSequence $clipboardBefore $clipboardAfter','Assert-ClipboardSequence $clipboardBefore $clipboardBefore')
+    HistoryCall=@('Assert-WindowsHarnessHistoryGuard -Guard $historyGuard','')
+    HistoryStart=@("`$historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'",'$historyGuard=$null')
+    DriverProfileCall=@('$isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run','$isolated=Assert-DriverProfile (Join-Path $Run ''localappdata'') (Join-Path $Run ''appdata'') $Run')
+    PrivateSentinel=@("{throw 'Private driver sentinel was not observed'}",'{}')
+    FinalizeCall=@('{ Test-FinalizedUpdate (','{ $true; Test-FinalizedUpdate (')
+    InstalledStubCall=@("Assert-InstalledStub `$result (Join-Path `$script:install 'ghostty-vt.dll')","if(`$false){Assert-InstalledStub `$result (Join-Path `$script:install 'ghostty-vt.dll')}")
+    SourceStubCall=@("`$result.BeforeStub=Assert-SourceStub (Join-Path `$script:install 'ghostty-vt.dll')","if(`$false){`$result.BeforeStub=Assert-SourceStub (Join-Path `$script:install 'ghostty-vt.dll')}")
+    HistoryReceiptCall=@('Write-IsolationReceipt $historyGuard $isolation','if($false){Write-IsolationReceipt $historyGuard $isolation}')
+    PrivateClipboardCall=@('$clipboardPositive=Invoke-ClipboardPositive $pwsh $job $DesktopName','if($false){$clipboardPositive=Invoke-ClipboardPositive $pwsh $job $DesktopName}')
+    HostedWinSta0Call=@('if($ephemeral){$isolation.HostedClipboardPositive=','if($false){$isolation.HostedClipboardPositive=')
+    HostedParentReader=@('$parentAfter=[HiddenWin]::GetClipboardSequenceNumber()','$parentAfter=$parentBefore')
+    HostedVerdictCall=@('Assert-HostedClipboardControl $fact $parentBefore $parentAfter','Assert-HostedClipboardControl $fact $parentBefore $parentBefore')
+}
+$inert=[ordered]@{}
+$legacy=@($source -split "`r?`n" | Where-Object {$_ -match "^if \(\[version\].*Historical portable identity"})
+$shell=@($source -split "`r?`n" | Where-Object {$_ -match '--window-save-state=never.*--command=direct:'})
+$desktop=@($source -split "`r?`n" | Where-Object {$_ -match "CurrentDesktopName\(\).*Driver is not on its private desktop"})
+$load=@($source -split "`r?`n" | Where-Object {$_ -match '^function Get-StubLoadError'})
+if($legacy.Count -ne 1 -or $shell.Count -ne 1 -or $desktop.Count -ne 1 -or $load.Count -ne 1){throw 'Inert-copy anchors are not unique'}
+foreach($entry in ([ordered]@{Legacy=($legacy -join '');Shell=($shell -join '');DriverDesktop=($desktop -join '');StubLoadApi=($load -join '')}).GetEnumerator()){
+    $anchor=[string]$entry.Value
+    $replacement="`$unused = @'`n"+$anchor+"`n'@"
+    if($entry.Key -ceq 'Shell'){$replacement+="`n"+$anchor.Replace('--command=direct:{3} /D','--command=cmd.exe').Replace('--clipboard-write=deny --clipboard-read=deny','')}
+    if($entry.Key -ceq 'StubLoadApi'){$replacement+="`nfunction Get-StubLoadError([string] `$Path) { return 1114 }"}
+    $inert[$entry.Key]=@($anchor,$replacement)
+}
+$inert.LegacyExpandable=@([string]$legacy[0],("`$unused = @`"`n"+[string]$legacy[0]+"`n`"@"))
+foreach($control in $sites.GetEnumerator()){
+    if(([regex]::Matches($source,[regex]::Escape($control.Value[0]))).Count -ne 1){throw "Call-site anchor is not unique: $($control.Key)"}
+    $issues=@(Get-DirectUpdateProblems ($source.Replace($control.Value[0],$control.Value[1])))
+    if($issues -cnotcontains $control.Key){throw "Call-site mutant escaped: $($control.Key)"}
+}
+foreach($control in $inert.GetEnumerator()){
+    $expected=if($control.Key -ceq 'LegacyExpandable'){'Legacy'}else{$control.Key}
+    $issues=@(Get-DirectUpdateProblems ($source.Replace($control.Value[0],$control.Value[1])))
+    if($issues -cnotcontains $expected){throw "Inert-copy mutant escaped: $($control.Key)"}
 }
 $fixtures=Join-Path ([IO.Path]::GetTempPath()) ('direct-update-contract-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory -Path $fixtures
+try {
 $baseline=Join-Path $fixtures 'baseline'; $null=New-Item -ItemType Directory -Path $baseline
 $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
@@ -173,6 +320,9 @@ $mutants=[ordered]@{
     MissingExeClause=@(' -and (Get-Sha $exe) -ceq (Get-Sha $targetExe)','')
     ProfileTrue=@("`$isolated=`$ActualLocal -ceq (Join-Path `$Run 'localappdata') -and `$ActualRoaming -ceq (Join-Path `$Run 'appdata')",'$isolated=$true')
     Abandoned=@('$s -and $confirmed -and','$s -and')
+    HistorySave=@("    Save-Receipt 'isolation.json' `$isolation",'')
+    RuntimeFilter=@('if($null -ne $OriginalNames -and','if($false -and $null -ne $OriginalNames -and')
+    BroadJumpList=@("[string]::Equals([IO.Path]::GetFileName(`$_.Path),'c2214d6ebc43ff3f.customDestinations-ms',[StringComparison]::OrdinalIgnoreCase)",'$true')
 }
 foreach($guard in @(
     @('NativeHereString',"if (`$native -cne `$Architecture -or `$processArchitecture -cne `$Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }"),
@@ -198,8 +348,59 @@ foreach($control in $controls.GetEnumerator()){
     $failures=@(Get-DirectUpdateProblems $mutant)
     if($failures -cnotcontains $control.Key){throw "Control did not fail its own admission check: $($control.Key)"}
 }
+$fixtureWriter=$source+"`n`$writer = @'`nSet-Clipboard fixture`n'@"
+if(@(Get-DirectUpdateProblems $fixtureWriter) -cnotcontains 'ForbiddenOperation'){throw 'Here-string writer escaped full-text scan'}
+$privateSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs') -Raw
+$hostedSource=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'direct-update-hosted-clipboard-control.cs') -Raw
+$privateIssues=@(Get-ClipboardHelperProblems $privateSource)
+$hostedIssues=@(Get-ClipboardHelperProblems $hostedSource -Hosted)
+if($privateIssues.Count -or $hostedIssues.Count){throw "Clipboard helper baseline admission failed: private=$($privateIssues -join ','); hosted=$($hostedIssues -join ',')"}
+$privateControls=[ordered]@{
+    FreshStation=@('station=CreateWindowStationW(null,0,0x000F037F,IntPtr.Zero);','station=GetProcessWindowStation();')
+    StationIdentity=@('GetProcessWindowStation() != station','false')
+    NotWinSta0=@('String.Equals(name.ToString(), "WinSta0", StringComparison.OrdinalIgnoreCase)','false')
+    NonemptyStation=@('name.Length == 0','false')
+    StationSwitch=@('if(!SetProcessWindowStation(station)) throw','if(false) throw')
+    ThreadSwitch=@('if(!SetThreadDesktop(desktop)) throw','if(false) throw')
+    PrivateOpen=@('RequirePrivate(station); if(!OpenClipboard(window))','if(!OpenClipboard(window))')
+    PrivateEmpty=@('RequirePrivate(station); if(!EmptyClipboard())','if(!EmptyClipboard())')
+    PrivateSet=@('RequirePrivate(station); if(SetClipboardData(13,memory)==IntPtr.Zero)','if(SetClipboardData(13,memory)==IntPtr.Zero)')
+    PrivateClose=@('memory=IntPtr.Zero; RequirePrivate(station); CloseClipboard();','memory=IntPtr.Zero; CloseClipboard();')
+    PrivateFinallyClose=@('if(opened) { RequirePrivate(station); CloseClipboard(); }','if(opened) { CloseClipboard(); }')
+    PrivateBefore=@('RequirePrivate(station); fact.Before=GetClipboardSequenceNumber();','fact.Before=GetClipboardSequenceNumber();')
+    PrivateAfter=@('RequirePrivate(station); fact.After=GetClipboardSequenceNumber();','fact.After=GetClipboardSequenceNumber();')
+    CompleteStationGate=@('station == IntPtr.Zero ||','false && station == IntPtr.Zero ||')
+}
+$hostedControls=[ordered]@{
+    HostedEnvironment=@('if(!String.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"),"true",StringComparison.Ordinal) ||','if(false ||')
+    HostedStation=@('!String.Equals(ObjectName(GetProcessWindowStation()),"WinSta0",StringComparison.OrdinalIgnoreCase)','false')
+    HostedDesktop=@('!desktop.StartsWith("noctty-hw-",StringComparison.Ordinal)','false')
+    HostedOpen=@('RequireHostedWinSta0(); if(!OpenClipboard(window))','if(!OpenClipboard(window))')
+    HostedEmpty=@('RequireHostedWinSta0(); if(!EmptyClipboard())','if(!EmptyClipboard())')
+    HostedSet=@('RequireHostedWinSta0(); if(SetClipboardData(13,memory)==IntPtr.Zero)','if(SetClipboardData(13,memory)==IntPtr.Zero)')
+    HostedClose=@('memory=IntPtr.Zero; RequireHostedWinSta0(); CloseClipboard();','memory=IntPtr.Zero; CloseClipboard();')
+    HostedFinallyClose=@('if(opened){RequireHostedWinSta0();CloseClipboard();}','if(opened){CloseClipboard();}')
+    HostedBefore=@('RequireHostedWinSta0(); fact.Before=GetClipboardSequenceNumber();','fact.Before=GetClipboardSequenceNumber();')
+    HostedAfter=@('RequireHostedWinSta0(); fact.After=GetClipboardSequenceNumber();','fact.After=GetClipboardSequenceNumber();')
+}
+foreach($kind in @('private','hosted')){
+    $text=if($kind -ceq 'private'){$privateSource}else{$hostedSource}
+    $cases=if($kind -ceq 'private'){$privateControls}else{$hostedControls}
+    foreach($control in $cases.GetEnumerator()){
+        if(([regex]::Matches($text,[regex]::Escape($control.Value[0]))).Count -ne 1){throw "Native clipboard control anchor is not unique: $($control.Key)"}
+        $issues=@(Get-ClipboardHelperProblems ($text.Replace($control.Value[0],$control.Value[1])) -Hosted:($kind -ceq 'hosted'))
+        if($issues -cnotcontains $control.Key){throw "Native clipboard control escaped: $($control.Key)"}
+    }
+}
 $native=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'direct-update-ui.cs') -Raw
 if($native -match '\b(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|OpenClipboard|GetClipboardData|SetClipboardData)\s*\('){throw 'UI seam contains a forbidden real-input or clipboard operation'}
 if($native -cnotmatch 'ClassName\(host\) != "noctty.win32.host"' -or $native -cnotmatch 'ClassName\(pane\) != "noctty.win32"' -or $native -cnotmatch 'PostMessageW\(host, 0x0201' -or $native -cnotmatch 'PostMessageW\(host, 0x0202' -or $native -cmatch 'PostMessageW\(pane, 0x020[12]'){throw 'Legacy Install must post only to its owned host'}
-Write-Host "direct-update admission contracts: PASS (1 static + 1 behavioural baseline, $($controls.Count) parse-checked refusal controls, $($mutants.Count) behavioural mutants, Forms clipboard negative, native API boundary)"
+} finally {
+    $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+    $owned=[IO.Path]::GetFullPath($fixtures)
+    if(-not $owned.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($owned) -cnotmatch '^direct-update-contract-[a-f0-9]{32}$'){throw 'Refusing fixture cleanup outside the owned temp root'}
+    [IO.Directory]::Delete($owned,$true)
+    if(Test-Path -LiteralPath $owned){throw 'Contract fixture cleanup failed'}
+}
+Write-Host "direct-update admission contracts: PASS (1 static + 1 behavioural baseline, $($controls.Count) static, $($sites.Count) call-site, $($inert.Count) inert-copy, $($mutants.Count) behavioural, $($privateControls.Count+$hostedControls.Count) native clipboard controls, forbidden-operation negatives, native API boundary; fixtures removed)"
 $global:LASTEXITCODE=0

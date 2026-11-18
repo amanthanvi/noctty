@@ -9,7 +9,8 @@ link itself remains a separate browser check; this harness never opens a browser
 Historical binaries before portable identity isolation (including 1.3.125)
 are admitted ONLY on a disposable GitHub-hosted runner. Redirecting profile
 directories does not isolate their Shell jump list or AUMID registry writes.
-The harness never reads the real noctty directory or any clipboard contents.
+Local guards read only the real startup-attempts.json hash/mtime and product
+jump-list metadata; they do not write those files or read clipboard contents.
 Raw child logs are local evidence only; upload only the sanitized JSON receipts.
 #>
 [CmdletBinding()]
@@ -75,23 +76,27 @@ function Test-FinalizedUpdate($s,$states,[string] $exe,[string] $targetExe) {
         if($sample.State.Phase -ceq 'swapped'){$swapped=$true}
         if($swapped -and $sample.State.Phase -ceq 'confirmed'){$confirmed=$true}
     }
-    return $s -and $confirmed -and $null -eq $s.Phase -and $null -eq $s.StagedVersion -and (Get-Sha $exe) -ceq (Get-Sha $targetExe)
+    try {
+        return $s -and $confirmed -and $null -eq $s.Phase -and $null -eq $s.StagedVersion -and (Get-Sha $exe) -ceq (Get-Sha $targetExe)
+    } catch [IO.IOException] { return $false } catch [Management.Automation.ItemNotFoundException] { return $false }
 }
 function Assert-InstalledStub($result,[string] $Path) {
     $result.FinalStub=Get-Stub $Path
     if($result.FinalStub.Sha256 -cne $result.TargetStub.Sha256){throw 'Final stub differs from the verified candidate ZIP'}
 }
 function Get-StubLoadError([string] $Path) { [DirectUpdateUi]::StubLoadError($Path) }
-function Get-SourceSnapshot([string] $Root) {
+function Get-SourceSnapshot([string] $Root,$OriginalNames=$null) {
     # Before the first CLI/GUI launch this includes EVERY original file.
-    @(Get-Listing $Root | ForEach-Object {
-        @{ Name=$_.Name; Sha256=Get-Sha (Join-Path $Root $_.Name) }
+    # Later snapshots skip new runtime artifacts BEFORE opening them for hashing.
+    $mutable='^(?:(?:config\.ghostty|startup-attempts\.json|update-state\.json|window-state\.json|session-state\.json|jump-list-recents\.json|palette-mru\.txt)(?:\.lock)?|updates[\\/].*|shell-integration[\\/].*|share[\\/]ghostty[\\/]shell-integration[\\/]cmd[\\/]noctty-shell-integration\.lua|share[\\/]terminfo[\\/](?:67[\\/]ghostty|78[\\/]xterm-ghostty))$'
+    @(foreach($entry in @(Get-Listing $Root)) {
+        if($null -ne $OriginalNames -and $OriginalNames -cnotcontains $entry.Name -and $entry.Name -cmatch $mutable){continue}
+        @{ Name=$entry.Name; Sha256=Get-Sha (Join-Path $Root $entry.Name) }
     })
 }
 function Assert-RejectedCopy($Before,[string] $Root,$State) {
     # Runtime exceptions apply only to files absent from the original snapshot.
-    $mutable='^(?:(?:config\.ghostty|startup-attempts\.json|update-state\.json|window-state\.json|session-state\.json|jump-list-recents\.json|palette-mru\.txt)(?:\.lock)?|updates[\\/].*|shell-integration[\\/].*|share[\\/]ghostty[\\/]shell-integration[\\/]cmd[\\/]noctty-shell-integration\.lua|share[\\/]terminfo[\\/](?:67[\\/]ghostty|78[\\/]xterm-ghostty))$'
-    $after=@(Get-SourceSnapshot $Root | Where-Object { $Before.Name -ccontains $_.Name -or $_.Name -cnotmatch $mutable })
+    $after=@(Get-SourceSnapshot $Root @($Before.Name))
     $difference=@(Compare-Object @($Before | ForEach-Object {"$($_.Name):$($_.Sha256)"}) @($after | ForEach-Object {"$($_.Name):$($_.Sha256)"}))
     if($difference.Count){throw 'Rejected update changed the source copy'}
     if($State -and ($null -ne $State.Phase -or $null -ne $State.StagedVersion)){throw 'Rejected update left a staged transaction'}
@@ -100,11 +105,21 @@ function Assert-SourceStub([string] $Path) {
     if(-not (Test-Path -LiteralPath $Path)){throw 'Expected source stub before Removed update'}
     return Get-Stub $Path
 }
+function Get-NocttyJumpList($Entries) {
+    @($Entries | Where-Object { [string]::Equals([IO.Path]::GetFileName($_.Path),'c2214d6ebc43ff3f.customDestinations-ms',[StringComparison]::OrdinalIgnoreCase) })
+}
 function Assert-LocalState($Before,$After,$JumpsBefore,$JumpsAfter) {
     $unchanged=$Before.Exists -eq $After.Exists -and $Before.Hash -eq $After.Hash -and $Before.Modified -eq $After.Modified
-    $jumpChanges=@(Compare-Object @('begin'; $JumpsBefore | ForEach-Object {"$($_.Path):$($_.Written)"}) @('begin'; $JumpsAfter | ForEach-Object {"$($_.Path):$($_.Written)"}))
+    $jumpChanges=@(Compare-Object @('begin'; Get-NocttyJumpList $JumpsBefore | ForEach-Object {"$($_.Path):$($_.Written)"}) @('begin'; Get-NocttyJumpList $JumpsAfter | ForEach-Object {"$($_.Path):$($_.Written)"}))
     if(-not $unchanged -or $jumpChanges.Count){throw 'Real startup or jump-list state changed; stop launches'}
     return $unchanged
+}
+function Write-IsolationReceipt($historyGuard,$isolation) {
+    $historyFailure=$null
+    try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure=$_ }
+    $isolation.HistoryUnchanged=$null -eq $historyFailure
+    Save-Receipt 'isolation.json' $isolation
+    if($historyFailure){throw $historyFailure}
 }
 function Invoke-DefaultOraclePositive([string] $Pwsh) {
     # Hidden STATIC only, never noctty or a terminal shell. An exact owned helper
@@ -166,9 +181,41 @@ Add-Type -Path '__CODE__'
     try{
         if([HiddenWin]::WaitForSingleObject($controlLaunch.process,30000) -ne 0){throw 'Clipboard positive helper timed out'}
         $fact=Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
-        if($fact.Supported -and (-not $fact.IsolatedStation -or -not $fact.SequenceAdvanced)){throw 'Clipboard positive control failed'}
+        if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw 'Clipboard positive control failed'}
         return $fact
     }finally{Close-Launch $controlLaunch}
+}
+function Assert-HostedClipboardControl($fact,$Before,$After) {
+    if(-not $fact.Supported -or -not $fact.HostedWinSta0 -or $Before -eq $After){throw 'Hosted WinSta0 clipboard oracle positive failed'}
+}
+function Invoke-HostedClipboardPositive([string] $Pwsh) {
+    if(-not $ephemeral){throw 'WinSta0 clipboard control requires a disposable hosted runner'}
+    $name='noctty-hw-'+[guid]::NewGuid().ToString('N')
+    $controlDesktop=[HiddenWin]::CreateInheritedDesktop($name)
+    $controlJob=[HiddenWin]::CreateOwnedJob(); $controlLaunch=$null
+    $helper=Join-Path $Run 'hosted-clipboard-control.ps1'
+    $code=(Join-Path $PSScriptRoot 'direct-update-hosted-clipboard-control.cs').Replace("'","''")
+    $fixture=@'
+param([string] $Receipt)
+$ErrorActionPreference='Stop'
+Add-Type -Path '__CODE__'
+[DirectUpdateHostedClipboardControl]::Run() | ConvertTo-Json | Set-Content -LiteralPath $Receipt
+'@
+    Set-Content -LiteralPath $helper -Value $fixture.Replace('__CODE__',$code)
+    $receipt=Join-Path $Run 'hosted-clipboard-positive.json'
+    $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Receipt "{2}"' -f $Pwsh,$helper,$receipt
+    try{
+        $parentBefore=[HiddenWin]::GetClipboardSequenceNumber()
+        $controlLaunch=[HiddenWin]::Launch($Pwsh,$line,$Run,"WinSta0\$name",$controlJob,'')
+        if([HiddenWin]::WaitForSingleObject($controlLaunch.process,30000) -ne 0){throw 'Hosted clipboard control timed out'}
+        $parentAfter=[HiddenWin]::GetClipboardSequenceNumber()
+        $fact=Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+        $fact | Add-Member -NotePropertyName ParentBefore -NotePropertyValue $parentBefore
+        $fact | Add-Member -NotePropertyName ParentAfter -NotePropertyValue $parentAfter
+        Save-Receipt 'hosted-clipboard-positive.json' $fact
+        Assert-HostedClipboardControl $fact $parentBefore $parentAfter
+        return $fact
+    }finally{$null=[HiddenWin]::StopOwnedJob($controlJob);Close-Launch $controlLaunch;$null=[HiddenWin]::CloseDesktop($controlDesktop)}
 }
 function Get-Listing([string] $Root) {
     @(Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName | ForEach-Object {
@@ -301,7 +348,7 @@ if (-not $Driver) {
         $key.Dispose()
         . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
         $startupBefore=Startup-Fingerprint
-        $jumpsBefore=@(Jump-List-Files)
+        $jumpsBefore=@(Get-NocttyJumpList @(Jump-List-Files))
     }
     $free=[IO.DriveInfo]::new([IO.Path]::GetPathRoot([Environment]::GetFolderPath('LocalApplicationData'))).AvailableFreeSpace
     if ($free -le 20GB) { throw 'System drive has 20 GB or less free' }
@@ -311,7 +358,7 @@ if (-not $Driver) {
     if($HostedMesa){Add-HostedMesa $source}
     $commit=git -C $PSScriptRoot rev-parse HEAD
     if($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$'){throw 'Harness commit provenance unavailable'}
-    Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral; HarnessCommit=$commit; HarnessSha256=Get-Sha $PSCommandPath; UiSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-ui.cs'); ContractSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-contract.ps1'); ClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs') }
+    Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral; HarnessCommit=$commit; HarnessSha256=Get-Sha $PSCommandPath; UiSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-ui.cs'); ContractSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-contract.ps1'); ClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs'); HostedClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-hosted-clipboard-control.cs') }
     foreach ($directory in @('localappdata','appdata','temp')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
     $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'
     $clipboardBefore=[HiddenWin]::GetClipboardSequenceNumber()
@@ -355,19 +402,20 @@ if (-not $Driver) {
         try { $null=[HiddenWin]::StopOwnedJob($job); $cleanup=$true } finally {
             Close-Launch $launch; $null=[HiddenWin]::CloseDesktop($desktop)
             $clipboardAfter=[HiddenWin]::GetClipboardSequenceNumber()
-            Assert-WindowsHarnessHistoryGuard -Guard $historyGuard
             $localStateUnchanged=$null
             $realStartupChanged=$null
             $localStateFailure=$null
             if(-not $ephemeral){
                 $startupAfter=Startup-Fingerprint
                 $realStartupChanged=$startupBefore.Exists -ne $startupAfter.Exists -or $startupBefore.Hash -ne $startupAfter.Hash -or $startupBefore.Modified -ne $startupAfter.Modified
-                try{$localStateUnchanged=Assert-LocalState $startupBefore $startupAfter $jumpsBefore @(Jump-List-Files)}catch{$localStateUnchanged=$false;$localStateFailure=$_}
+                try{$localStateUnchanged=Assert-LocalState $startupBefore $startupAfter $jumpsBefore @(Get-NocttyJumpList @(Jump-List-Files))}catch{$localStateUnchanged=$false;$localStateFailure=$_}
             }
             Save-Receipt 'private-windows.json' @($privateSamples.ToArray())
-            Save-Receipt 'isolation.json' @{ Desktop=$DesktopName; ExplicitDesktopOnHarnessLaunchesByConstruction=$true; OwnLocalAppData=$profileObserved; OwnAppData=$profileObserved; RealNocttyDirectoryAccessed=$(if($realStartupChanged -eq $true){$true}else{$null}); RealNocttyAccessMeasurement='Startup mutation detected; reads and unchanged writes unobserved'; LocalStateUnchanged=$localStateUnchanged; HistoryUnchanged=$true; ClipboardBefore=$clipboardBefore; ClipboardAfter=$clipboardAfter; ClipboardNativePositiveControl=($clipboardPositive.Supported -and $clipboardPositive.SequenceAdvanced); ClipboardControl=$clipboardPositive; DefaultWindowSamples=$defaultSamples; PrivateWindowSamples=$privateSamples.Count; OwnedJobCleanedUp=$cleanup; DriverExit=$exitCode }
+            $isolation=@{ Desktop=$DesktopName; ExplicitDesktopOnHarnessLaunchesByConstruction=$true; OwnLocalAppData=$profileObserved; OwnAppData=$profileObserved; RealNocttyDirectoryAccessed=$(if($realStartupChanged -eq $true){$true}else{$null}); RealNocttyAccessMeasurement='Startup mutation detected; reads and unchanged writes unobserved'; LocalStateUnchanged=$localStateUnchanged; ClipboardBefore=$clipboardBefore; ClipboardAfter=$clipboardAfter; ClipboardNativePositiveControl=($clipboardPositive.Supported -and $clipboardPositive.SequenceAdvanced); ClipboardControl=$clipboardPositive; DefaultWindowSamples=$defaultSamples; PrivateWindowSamples=$privateSamples.Count; OwnedJobCleanedUp=$cleanup; DriverExit=$exitCode }
+            Write-IsolationReceipt $historyGuard $isolation
             Assert-ClipboardSequence $clipboardBefore $clipboardAfter
             if($localStateFailure){throw $localStateFailure}
+            if($ephemeral){$isolation.HostedClipboardPositive=Invoke-HostedClipboardPositive $pwsh;Save-Receipt 'isolation.json' $isolation}
         }
     }
     if($exitCode -ne 0){throw 'Acceptance driver failed; read sanitized result.json'}

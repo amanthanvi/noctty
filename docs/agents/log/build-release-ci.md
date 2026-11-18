@@ -11,6 +11,7 @@ Corrected in other files:
 - 2026-10-25 BENCH-VT-FLOOR-01, its "(11 historical jobs show another profile, UTF-8 margin over its floor 1.47x, CPU not logged, so inferred)": about 6 of the 11 (UTF-8 best of five 52.4-54.0, OSC 6.1-6.45) look like a fifth CPU population, 4 (UTF-8 56.2-57.7) look like the low end of the EPYC 7763, and the lowest (51.56) may be an episode on one. The margin over the floor is 1.47-1.50x either way, and all of it is inferred; see "Runner pool and noise" in docs/windows-benchmark-methodology.md.
 
 See also:
+- The 2026-11-18 DIRECT-UPDATE-720 entry in test-harnesses.md extends GHOSTTY-VT-STUB-CONTROLS with executed verdict mutants and records the native hosted old-updater/stub acceptance procedure and renderer/desktop traps.
 - Installer apply deferral and re-entry (`queueApplyStagedUpdate`, `update_apply_in_flight`): the 2026-10-18 "Item (2) of the 2026-10-11 LIFE-01 entry" entry in terminal-core.md.
 - How the app answers an installer's Restart Manager close (`App.onQueryEndSession`, `App.onEndSession`, the lifecycle window for a process with no terminal window): the 2026-10-23 RMCLOSE-1 and RMCLOSE-2 entries in app-lifecycle.md.
 - A failed manual update check is an `.err` banner that stays until dismissed (`UpdateCheckCompletion.manual_kind`), and the offline seams for testing `checkLatestStableRelease` and `runUpdateCheck` (a directory where the state file belongs, a recent `last_checked_at`): the 2026-10-25 UPDATE-CHECK-FAILURE-SEVERITY entry in chrome-overlays.md.

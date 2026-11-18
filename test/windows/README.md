@@ -853,7 +853,8 @@ the driver inherits separate LOCALAPPDATA, APPDATA and temporary directories.
 The parent samples owned windows on both Default and the named private desktop,
 and checks clipboard sequence and PSReadLine history metadata. A sample cannot
 prove the placement of a window that existed entirely between samples.
-No clipboard contents or real noctty directory are read. Keep failed attempts.
+No clipboard contents are read. Local guards read the real startup-attempts.json
+to compute its hash and inspect its mtime; they do not write it. Keep failed attempts.
 
 Run 1.3.125 only on a disposable GitHub-hosted runner: that historical binary
 writes the product AUMID registration and Shell jump list even in portable mode.
@@ -882,15 +883,21 @@ future boundary is established by the 1.3.137 acceptance run.
 
 Every launch pins a direct absolute System32 cmd with `/D` and denies clipboard
 reads and writes. Local runs additionally use the local harness library's real
-startup-state fingerprint and jump-list metadata guard. These detect mutations;
+startup-state fingerprint and the product AUMID's own jump-list metadata guard.
+Other applications' jump-list changes are ignored. These detect mutations;
 they do not establish the absence of reads or identical writes. The receipt
 reports that limit instead of asserting no real-directory access. Private-window
 samples are retained and must contain the driver sentinel. A hidden STATIC helper
 on Default provides a positive control of the job window oracle before noctty
-starts. Hosted runs also attempt a sequence-number positive control in a fresh
+starts. Hosted runs require a sequence-number positive control in a fresh
 unnamed window station, checked to differ from WinSta0 before every clipboard
-operation. This never writes the user's clipboard; the result cannot establish
-clipboard access rights on WinSta0 itself.
+operation. After noctty exits and its normal before/after counter comparison is
+complete, a second hosted-only helper writes fixed fixture text to WinSta0 and
+requires the parent's actual reader to observe the change. Both the script and
+native helper require a disposable GitHub-hosted runner; the helper also checks
+WinSta0 and its private desktop identity before every clipboard operation. This
+intentional control is recorded separately from the noctty run's counter pair.
+Local runs perform no clipboard write, and no clipboard contents are ever read.
 
 Successful updates must sample `swapped` followed by `confirmed`; a cleared,
 abandoned transaction fails. Rejected mode compares SHA-256 for every original
