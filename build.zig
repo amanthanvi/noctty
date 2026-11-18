@@ -278,7 +278,8 @@ pub fn build(b: *std.Build) !void {
         const test_exe = b.addTest(.{
             .name = "ghostty-test",
             .filters = test_filters,
-            .root_module = b.createModule(.{
+            // -Dtest-optimize sets the mode, not the `.optimize` below.
+            .root_module = config.testModule(b, .{
                 .root_source_file = b.path("src/main.zig"),
                 .target = config.baselineTarget(),
                 .optimize = .Debug,
