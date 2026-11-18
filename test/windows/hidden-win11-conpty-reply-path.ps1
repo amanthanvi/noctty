@@ -435,8 +435,10 @@ if(-not $Driver) {
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain a built noctty.exe.' }
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'conpty.dll'))) { throw 'Bin must hold the bundled conpty.dll: this measures the bundled ConPTY.' }
     if($sshReaders.Count -gt 0 -and $Run -cnotmatch '^[A-Za-z]:\\[A-Za-z0-9_.\\-]*$') { throw 'Readers d and d-notiming need a Run path of letters, digits, _ . - and \ only: the far side''s shell gets the reader command unquoted.' }
-    # The run tree is this user's alone: made with a protected DACL (this user, SYSTEM and Administrators,
-    # inherited by everything in it), then read back, so no other account can replace what runs from it.
+    # Defence in depth for Run's own contents: a protected DACL (this user, SYSTEM and Administrators,
+    # inherited by everything in it), read back before anything is written there. It does not guard against
+    # a principal with rights on Run's parent folders. Other local accounts are outside this harness's threat
+    # model: it runs under the user's own account on a single-user machine.
     $runParent=Split-Path -Parent $Run; if(-not (Test-Path -LiteralPath $runParent)) { [void](New-Item -ItemType Directory -Path $runParent) }
     $runSids=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,'S-1-5-18','S-1-5-32-544')
     $runAcl=[Security.AccessControl.DirectorySecurity]::new(); $runAcl.SetAccessRuleProtection($true,$false)
@@ -1008,11 +1010,13 @@ $md.Add(('Exit {0}; controls {1}; sabotage {2}.' -f $exit.Code,$result.Controls,
 foreach($w in $exit.Why) { $md.Add("- $w") }
 $md.Add('')
 $md.Add('| Reader | Step | Written | Observed (key-down units / bytes) | Predicted | Control | Verdict |'); $md.Add('|---|---|---|---|---|---|---|')
-foreach($r in $rows) { $md.Add(('| {0} | {1} | `{2}` | `{3}` | {4} | {5} | {6} |' -f $r.Reader,$r.Step,$r.Written,$r.Observed,$r.Predicted,$(if($r.Control){'yes'}else{''}),$r.Verdict)) }
+# A cell's own '|' would split its row (three split-APC steps per reader have one): escaped, as GFM reads it.
+function Cell($Text) { ([string]$Text).Replace('|','\|') }
+foreach($r in $rows) { $md.Add(('| {0} | {1} | `{2}` | `{3}` | {4} | {5} | {6} |' -f (Cell $r.Reader),(Cell $r.Step),(Cell $r.Written),(Cell $r.Observed),(Cell $r.Predicted),$(if($r.Control){'yes'}else{''}),(Cell $r.Verdict))) }
 if($case7) {
     $md.Add(''); $md.Add('Case 7 (PSReadLine):'); $md.Add('')
     $md.Add('| Injected | Prompt line |'); $md.Add('|---|---|')
-    foreach($s in $case7.Steps) { $md.Add(('| `{0}` | `{1}` |' -f $s.Written,(@($s.Prompt) -join ''))) }
+    foreach($s in $case7.Steps) { $md.Add(('| `{0}` | `{1}` |' -f (Cell $s.Written),(Cell (@($s.Prompt) -join '')))) }
     if($case7.TabSwitch) { $md.Add(''); $md.Add(('Tab switch with ?2033h set: surfaces during {0}, pwsh hidden during {1}, visible after {2}; prompt before `{3}`, after `{4}`.' -f $case7.TabSwitch.SurfacesDuring,(-not $case7.TabSwitch.PwshSurfaceVisibleDuring),$case7.TabSwitch.PwshSurfaceVisibleAfter,(@($case7.TabSwitch.PromptBefore) -join ''),(@($case7.TabSwitch.PromptAfter) -join ''))) }
 }
 $md.Add(''); $md.Add('Not measured:'); foreach($n in $notMeasured) { $md.Add("- $n") }
