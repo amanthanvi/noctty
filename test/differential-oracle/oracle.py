@@ -12,6 +12,7 @@ import shutil
 import struct
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # Loading the sibling staging helper must not dirty a captured source tree.
@@ -48,7 +49,11 @@ def no_duplicates(pairs):
 
 
 def read_json(path):
-    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicates)
+    return parse_json(path.read_bytes())
+
+
+def parse_json(data):
+    return json.loads(data.decode("utf-8"), object_pairs_hook=no_duplicates)
 
 
 def git(repo, *args):
@@ -116,7 +121,7 @@ def replay(data):
     initial = None
     conpty = False
     expecting = False
-    for raw in data.decode("utf-8").splitlines():
+    for raw in data.decode("utf-8").split("\n"):
         line = raw.strip(" \r")
         if not line or line.startswith("#"):
             continue
@@ -175,8 +180,30 @@ def replay(data):
 def prepare(args):
     repo = args.repo.resolve()
     provenance = source_provenance(repo)
+    revision = provenance["instrumented_revision"]
     args.out.mkdir(parents=True, exist_ok=False)
-    paths = git(repo, "ls-files", "-z", "test/fuzz-libghostty/corpus").split("\0")
+
+    def paths_at(pattern):
+        return (
+            subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "ls-tree",
+                    "-r",
+                    "--name-only",
+                    "-z",
+                    revision,
+                    "--",
+                    pattern,
+                ]
+            )
+            .decode("utf-8")
+            .split("\0")
+        )
+
+    paths = paths_at("test/fuzz-libghostty/corpus")
     paths = sorted(
         path for path in paths if path and not path.endswith("/sanitize-filenames.sh")
     )
@@ -195,7 +222,9 @@ def prepare(args):
         )
 
     for path in paths:
-        data = subprocess.check_output(["git", "-C", str(repo), "show", "HEAD:" + path])
+        data = subprocess.check_output(
+            ["git", "-C", str(repo), "show", revision + ":" + path]
+        )
         # Feed the whole stored file: do not strip the stream fuzzer's mode
         # selector or interpret parser/OSC corpus bytes through a fuzzer ABI.
         add(
@@ -229,8 +258,7 @@ def prepare(args):
         )
     generated.done()
     fixtures = [
-        repo / p
-        for p in git(repo, "ls-files", "src/terminal/testdata/replay/*.vt").splitlines()
+        repo / p for p in paths_at("src/terminal/testdata/replay") if p.endswith(".vt")
     ]
     if not fixtures:
         raise ValueError("no replay fixtures")
@@ -241,7 +269,7 @@ def prepare(args):
                 "-C",
                 str(repo),
                 "show",
-                "HEAD:" + path.relative_to(repo).as_posix(),
+                revision + ":" + path.relative_to(repo).as_posix(),
             ]
         )
         operations, conpty, initial = replay(data)
@@ -316,7 +344,7 @@ def requests(corpus):
 
 def capture(args):
     corpus_bytes = args.corpus.read_bytes()
-    corpus = read_json(args.corpus)
+    corpus = parse_json(corpus_bytes)
     packet, records = requests(corpus)
     source = args.source_root.resolve()
     provenance = source_provenance(source)
@@ -431,8 +459,26 @@ def capture(args):
     print(json.dumps(result, sort_keys=True))
 
 
+@dataclass(frozen=True)
+class LoadedRun:
+    manifest: dict
+    items: dict
+    manifest_sha256: str
+    corpus_source_revision: str
+
+
+@dataclass(frozen=True)
+class LoadedSet:
+    manifest: dict
+    items: dict
+    manifest_sha256s: dict
+    completion_sha256: str
+    corpus_source_revision: str
+
+
 def load_run(root):
-    manifest = read_json(root / "manifest.json")
+    manifest_bytes = (root / "manifest.json").read_bytes()
+    manifest = parse_json(manifest_bytes)
     if manifest["schema"] != 3 or not manifest["items"]:
         raise ValueError("unsupported or empty dump set")
     if not re.fullmatch("[0-9a-f]{40}", manifest["revision"]) or not re.fullmatch(
@@ -456,7 +502,9 @@ def load_run(root):
     ):
         raise ValueError("invalid harness provenance")
     corpus_bytes = (root / "corpus.json").read_bytes()
-    corpus = read_json(root / "corpus.json")
+    corpus = parse_json(corpus_bytes)
+    if not re.fullmatch("[0-9a-f]{40}", corpus["source_revision"]):
+        raise ValueError("invalid corpus source revision")
     packet, _ = requests(corpus)
     if (
         digest(corpus_bytes) != manifest["corpus_sha256"]
@@ -495,7 +543,7 @@ def load_run(root):
         raise ValueError("incomplete input/size/format coverage")
     if {p.name for p in root.iterdir()} != files | {"manifest.json", "corpus.json"}:
         raise ValueError("unmanifested dump files")
-    return manifest, items
+    return LoadedRun(manifest, items, digest(manifest_bytes), corpus["source_revision"])
 
 
 def harness_sources(repo=None):
@@ -677,13 +725,13 @@ def canonical(value):
 
 
 def complete_capture(parent):
-    first, items = load_run(parent / "run-1")
-    second, twin = load_run(parent / "run-2")
-    if first != second or items != twin:
+    first = load_run(parent / "run-1")
+    second = load_run(parent / "run-2")
+    if first.manifest != second.manifest or first.items != second.items:
         raise ValueError("cannot complete a nondeterministic capture")
     hashes = {
-        run: digest((parent / run / "manifest.json").read_bytes())
-        for run in ("run-1", "run-2")
+        "run-1": first.manifest_sha256,
+        "run-2": second.manifest_sha256,
     }
     if len(set(hashes.values())) != 1:
         raise ValueError("cannot complete byte-different manifests")
@@ -692,15 +740,20 @@ def complete_capture(parent):
         {
             "schema": 2,
             "deterministic": True,
-            "manifest_sha256": digest((parent / "run-1/manifest.json").read_bytes()),
+            "manifest_sha256": first.manifest_sha256,
             "manifest_sha256s": hashes,
-            "corpus_sha256": first["corpus_sha256"],
-            "profile": first["profile"],
-            "harness_sources": first["harness_sources"],
-            "provenance": first["provenance"],
-            "exe_sha256": first["exe_sha256"],
-            "build_identity": first["build_identity"],
-            "shipped_profile": first["shipped_profile"],
+            **{
+                k: first.manifest[k]
+                for k in (
+                    "corpus_sha256",
+                    "profile",
+                    "harness_sources",
+                    "provenance",
+                    "exe_sha256",
+                    "build_identity",
+                    "shipped_profile",
+                )
+            },
         },
     )
 
@@ -709,16 +762,16 @@ def load_set(root, declarations=(), used=None):
     root = root.resolve()
     if root.name not in ("run-1", "run-2"):
         raise ValueError("dump set must name a completed capture run")
-    record = read_json(root.parent / "completion.json")
+    completion_bytes = (root.parent / "completion.json").read_bytes()
+    record = parse_json(completion_bytes)
     if record.get("schema") != 2 or record.get("deterministic") is not True:
         raise ValueError("invalid completion record")
-    first, items = load_run(root.parent / "run-1")
-    second, twin = load_run(root.parent / "run-2")
-    if first != second or items != twin:
+    first_run = load_run(root.parent / "run-1")
+    second_run = load_run(root.parent / "run-2")
+    first, items = first_run.manifest, first_run.items
+    if first != second_run.manifest or items != second_run.items:
         raise ValueError("completed capture is no longer deterministic")
-    if record["manifest_sha256"] != digest(
-        (root / "manifest.json").read_bytes()
-    ) or any(
+    if record["manifest_sha256"] != first_run.manifest_sha256 or any(
         record[k] != first[k]
         for k in (
             "corpus_sha256",
@@ -730,8 +783,8 @@ def load_set(root, declarations=(), used=None):
     ):
         raise ValueError("completion record does not bind this capture")
     hashes = {
-        run: digest((root.parent / run / "manifest.json").read_bytes())
-        for run in ("run-1", "run-2")
+        "run-1": first_run.manifest_sha256,
+        "run-2": second_run.manifest_sha256,
     }
     if (
         record["manifest_sha256s"] != hashes
@@ -750,7 +803,9 @@ def load_set(root, declarations=(), used=None):
         )
     if current != captured and used is not None:
         used.add(f"{captured}:{current}")
-    return first, items
+    return LoadedSet(
+        first, items, hashes, digest(completion_bytes), first_run.corpus_source_revision
+    )
 
 
 def classify(pre, branch, upstream):
@@ -763,16 +818,61 @@ def classify(pre, branch, upstream):
     return CLASSES[3]
 
 
+def native_corpus(revision):
+    cases = [
+        {"id": name, "source_sha256": digest(data), "operations": [send(data)]}
+        for name, data in (
+            ("text", b"oracle-control"),
+            ("sgr", b"\x1b[31moracle-control\x1b[0m"),
+            ("reset", b"discarded\x1bcoracle-control"),
+        )
+    ]
+    cases.append(
+        {"id": "resize", "operations": [send(b"0123456789" * 6), {"resize": [20, 24]}]}
+    )
+    for conpty in (False, True):
+        cases.append(
+            {
+                "id": "conpty-on" if conpty else "conpty-off",
+                "conpty": conpty,
+                "operations": [
+                    {"resize": [80, 4]},
+                    send(
+                        b"".join(b"L" + str(n).encode() + b"\r\n" for n in range(1, 9))
+                        + b"prompt"
+                    ),
+                    {"resize": [80, 6]},
+                    send(b"\x1b[4;7HX"),
+                ],
+            }
+        )
+    return {"schema": 1, "source_revision": revision, "sizes": SIZES, "cases": cases}
+
+
+def native_plain(name, flag_supported):
+    if name == "resize":
+        return b"\n".join([b"0123456789" * 2] * 3)
+    if name.startswith("conpty-"):
+        if name == "conpty-on" and flag_supported:
+            return b"L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\npromptX"
+        return b"L1\nL2\nL3\nL4\nL5\nL6\nL7    X\nL8\nprompt"
+    return b"oracle-control"
+
+
 def native_controls(args):
     used = set()
-    _, items = load_set(args.dumps, args.declare_harness_change, used)
+    capture = load_set(args.dumps, args.declare_harness_change, used)
+    items = capture.items
     validate_harness_declarations(args.declare_harness_change, used)
-    if {key[0] for key in items} != {"text", "sgr", "reset", "resize"}:
-        raise ValueError("native controls require the four sentinel inputs")
+    names = {"text", "sgr", "reset", "resize", "conpty-on", "conpty-off"}
+    if {key[0] for key in items} != names:
+        raise ValueError("native controls require the six sentinel inputs")
     checks = []
     for cols, rows in SIZES:
-        for name in ("text", "sgr", "reset", "resize"):
-            if items[(name, cols, rows, "plain")] != b"oracle-control":
+        for name in sorted(names):
+            if items[(name, cols, rows, "plain")] != native_plain(
+                name, capture.manifest["profile"]["conpty_no_pull_supported"]
+            ):
                 raise ValueError("native text/SGR/reset control failed")
             checks.append(f"{name} plain {cols}x{rows}")
         text = items[("text", cols, rows, "vt")]
@@ -807,9 +907,15 @@ def compare(
         for root in (pre_root, branch_root, upstream_root)
         if root is not None
     ]
+    if sets[0].manifest["revision"] != sets[0].corpus_source_revision:
+        raise ValueError(
+            "pre capture production revision does not match frozen corpus source_revision"
+        )
     validate_harness_declarations(declarations, used)
-    for index, (manifest, _) in enumerate(sets):
-        for other, _ in sets[:index]:
+    for index, capture in enumerate(sets):
+        manifest = capture.manifest
+        for other_capture in sets[:index]:
+            other = other_capture.manifest
             if manifest["exe_sha256"] == other["exe_sha256"] and (
                 manifest["revision"],
                 manifest["provenance"]["instrumented_revision"],
@@ -818,31 +924,36 @@ def compare(
                     "one executable hash is attributed to different source revisions"
                 )
     if (
-        len({m["corpus_sha256"] for m, _ in sets}) != 1
-        or len({m["request_sha256"] for m, _ in sets}) != 1
+        len({s.manifest["corpus_sha256"] for s in sets}) != 1
+        or len({s.manifest["request_sha256"] for s in sets}) != 1
     ):
         raise ValueError("compared corpus/request identities differ")
-    if expected_corpus and sets[0][0]["corpus_sha256"] != expected_corpus:
+    if expected_corpus and sets[0].manifest["corpus_sha256"] != expected_corpus:
         raise ValueError("corpus differs from the operator pin")
     profiles = {
-        side: m["profile"] for side, (m, _) in zip(("pre", "branch", "upstream"), sets)
+        side: s.manifest["profile"]
+        for side, s in zip(("pre", "branch", "upstream"), sets)
     }
     declared_profiles = validate_profile_declarations(profiles, profile_declarations)
     shipping_differences = {
         (side, d["option"]): {"side": side, **d}
-        for side, (m, _) in zip(("pre", "branch", "upstream"), sets)
+        for side, s in zip(("pre", "branch", "upstream"), sets)
+        for m in (s.manifest,)
         if side in ("pre", "branch") or m["build_identity"]["terminal_source"] == "app"
         for d in m["shipped_profile"]["differences"]
     }
     declared_shipping = validate_option_declarations(
-        shipping_differences, shipped_declarations
+        shipping_differences, shipped_declarations, "--declare-shipped-mismatches"
     )
     if (
-        any(m["harness_sources"] != sets[0][0]["harness_sources"] for m, _ in sets[1:])
+        any(
+            s.manifest["harness_sources"] != sets[0].manifest["harness_sources"]
+            for s in sets[1:]
+        )
         and not declarations
     ):
         raise ValueError("compared harness sources differ")
-    if any(set(items) != set(sets[0][1]) for _, items in sets[1:]):
+    if any(set(s.items) != set(sets[0].items) for s in sets[1:]):
         raise ValueError("compared dump coverage differs")
     triaged = {}
     if triage is not None and not isinstance(triage, list):
@@ -860,8 +971,8 @@ def compare(
         triaged[key] = row
     differences = []
     counts = collections.Counter()
-    for key in sorted(sets[0][1]):
-        values = [items[key] for _, items in sets]
+    for key in sorted(sets[0].items):
+        values = [s.items[key] for s in sets]
         category = (
             classify(*values)
             if len(values) == 3
@@ -892,6 +1003,8 @@ def compare(
     if triaged:
         raise ValueError("triage names an absent or unchanged item")
     return {
+        "corpus_sha256": sets[0].manifest["corpus_sha256"],
+        "expected_corpus": expected_corpus,
         "profiles": profiles,
         "profile_declarations": declared_profiles,
         "shipped_profile_declarations": declared_shipping,
@@ -905,22 +1018,15 @@ def compare(
                 "provenance": m["provenance"],
                 "build_identity": m["build_identity"],
                 "exe_sha256": m["exe_sha256"],
-                "manifest_sha256s": read_json(root.parent / "completion.json")[
-                    "manifest_sha256s"
-                ],
-                "completion_sha256": digest(
-                    (root.parent / "completion.json").read_bytes()
-                ),
+                "manifest_sha256s": s.manifest_sha256s,
+                "completion_sha256": s.completion_sha256,
                 "shipped_profile": m["shipped_profile"],
             }
-            for side, root, (m, _) in zip(
-                ("pre", "branch", "upstream"),
-                (pre_root, branch_root, upstream_root),
-                sets,
-            )
+            for side, s in zip(("pre", "branch", "upstream"), sets)
+            for m in (s.manifest,)
         },
         "counts": dict(sorted(counts.items())),
-        "items": len(sets[0][1]),
+        "items": len(sets[0].items),
         "differences": differences,
         "untriaged": sum(not r["triaged"] for r in differences),
     }
@@ -960,14 +1066,16 @@ def validate_profile_declarations(profiles, declarations):
                     "old": before,
                     "new": after,
                 }
-    return validate_option_declarations(differing, declarations)
+    return validate_option_declarations(
+        differing, declarations, "--declare-profile-differences"
+    )
 
 
-def validate_option_declarations(differing, declarations):
+def validate_option_declarations(differing, declarations, option):
     if declarations is None:
         declarations = []
     if not isinstance(declarations, list):
-        raise TypeError("profile declarations must be a list")
+        raise TypeError(f"{option}: declarations must be a list")
     accepted = {}
     for row in declarations:
         if (
@@ -978,20 +1086,20 @@ def validate_option_declarations(differing, declarations):
                 for k in ("side", "option", "reason")
             )
         ):
-            raise ValueError("invalid profile declaration")
+            raise ValueError(f"{option}: invalid declaration")
         key = row["side"], row["option"]
         if key not in differing or key in accepted:
             raise ValueError(
-                "profile declaration names an unchanged, absent or duplicate option"
+                f"{option}: declaration names an unchanged, absent or duplicate option"
             )
         if canonical(row["old"]) != canonical(differing[key]["old"]) or canonical(
             row["new"]
         ) != canonical(differing[key]["new"]):
-            raise ValueError("declaration values are stale or have the wrong direction")
+            raise ValueError(f"{option}: values are stale or have the wrong direction")
         accepted[key] = {**differing[key], "reason": row["reason"]}
     if set(accepted) != set(differing):
         raise ValueError(
-            "compared build profiles differ without a declaration for every differing option"
+            f"{option}: an exact declaration is required for every differing option"
         )
     return [accepted[key] for key in sorted(accepted)]
 
@@ -1034,6 +1142,11 @@ def control_profile():
 
 def controls(args):
     args.out.mkdir(parents=True, exist_ok=False)
+
+    def check(condition):
+        if not condition:
+            raise ValueError("oracle positive control failed")
+
     # All five partitions of equality, including pre=upstream != branch.
     triples = (
         (b"a", b"a", b"a"),
@@ -1045,6 +1158,7 @@ def controls(args):
     roots = [args.out / side / "run-1" for side in ("pre", "branch", "upstream")]
     corpus = {
         "schema": 1,
+        "source_revision": "0" * 40,
         "sizes": SIZES,
         "cases": [
             {"id": str(n), "operations": [send(b"control")]}
@@ -1101,20 +1215,23 @@ def controls(args):
         shutil.copytree(root, root.parent / "run-2")
         complete_capture(root.parent)
     result = compare(*roots)
-    assert result["counts"] == {
-        CLASSES[0]: 4,
-        CLASSES[1]: 4,
-        CLASSES[2]: 4,
-        CLASSES[3]: 8,
-    }
-    assert result["untriaged"] == 16 and len(result["differences"]) == 16
+    check(
+        result["counts"]
+        == {
+            CLASSES[0]: 4,
+            CLASSES[1]: 4,
+            CLASSES[2]: 4,
+            CLASSES[3]: 8,
+        }
+    )
+    check(result["untriaged"] == 16 and len(result["differences"]) == 16)
     triage = [
         dict(row, reason="synthetic control", ledger="control ledger row")
         for row in result["differences"]
     ]
-    assert compare(*roots, triage=triage)["untriaged"] == 0
-    assert compare(roots[0], roots[0])["untriaged"] == 0
-    assert compare(roots[0], roots[1])["counts"] == {"no change": 8, "different": 12}
+    check(compare(*roots, triage=triage)["untriaged"] == 0)
+    check(compare(roots[0], roots[0])["untriaged"] == 0)
+    check(compare(roots[0], roots[1])["counts"] == {"no change": 8, "different": 12})
     checks = [
         "five equality partitions",
         "complete three-way listing",
@@ -1123,10 +1240,12 @@ def controls(args):
         "pair differences",
     ]
 
-    def rejects(label, action):
+    def rejects(label, action, message=None):
         try:
             action()
-        except (ValueError, TypeError, KeyError, FileNotFoundError):
+        except (ValueError, TypeError, KeyError, FileNotFoundError) as error:
+            if message is not None and message not in str(error):
+                raise ValueError(label + " failed for the wrong reason") from error
             checks.append(label)
         else:
             raise AssertionError(label + " accepted")
@@ -1168,30 +1287,25 @@ def controls(args):
         "stale triage",
         lambda: compare(*roots, triage=[dict(row, sha256=[]) for row in triage]),
     )
-    assert unescape(r"a\e[1m\r\n\t\\\xff") == b"a\x1b[1m\r\n\t\\\xff"
+    check(unescape(r"a\e[1m\r\n\t\\\xff") == b"a\x1b[1m\r\n\t\\\xff")
     ops, conpty, initial = replay(
         b"size 4 2\npty conpty\nsend ab\nresize 8 3\nseq L 1 2\nexpect\n|x\nend\ncursor 0 0\n"
     )
-    assert (
+    check(
         conpty
         and initial == [4, 2]
         and ops == [send(b"ab"), {"resize": [8, 3]}, send(b"L1\r\nL2\r\n")]
     )
     checks.append("replay bytes and resize schedule")
+    for newline in ("\n", "\r\n"):
+        payload = "A\u2028#B\u0085C\vD\fE".encode()
+        script = ("size 4 2" + newline).encode() + b"send " + payload + newline.encode()
+        check(replay(script)[0] == [send(payload)])
+    checks.append("replay splits only LF and preserves Unicode separators")
     completion = roots[1].parent / "completion.json"
     saved = completion.read_bytes()
     completion.unlink()
     rejects("missing completion (failed second run)", lambda: compare(*roots))
-    rejects(
-        "native controls require completion",
-        lambda: native_controls(
-            argparse.Namespace(
-                dumps=roots[1],
-                declare_harness_change=[],
-                report=args.out / "must-not-exist.json",
-            )
-        ),
-    )
     completion.write_text("{}", encoding="utf-8")
     rejects("invalid completion", lambda: compare(*roots))
     completion.write_bytes(saved)
@@ -1202,9 +1316,23 @@ def controls(args):
     completion.write_bytes(saved)
     twin = roots[1].parent / "run-2/0-80x24.plain"
     twin.write_bytes(b"changed")
-    rejects("nondeterministic second run", lambda: compare(*roots))
-    twin.write_bytes(b"a")
     sibling_manifest = roots[1].parent / "run-2/manifest.json"
+    changed = json.loads(original)
+    changed["items"][0].update(bytes=7, sha256=digest(b"changed"))
+    sibling_manifest.write_text(json.dumps(changed), encoding="utf-8")
+    load_run(roots[1])
+    load_run(sibling_manifest.parent)
+    rejects(
+        "nondeterministic individually valid runs",
+        lambda: complete_capture(roots[1].parent),
+        "nondeterministic",
+    )
+    rejects(
+        "nondeterministic second run",
+        lambda: compare(*roots),
+        "no longer deterministic",
+    )
+    twin.write_bytes(b"a")
     sibling_manifest.write_text(
         json.dumps(json.loads(original), separators=(",", ":")), encoding="utf-8"
     )
@@ -1257,16 +1385,19 @@ def controls(args):
     declared = compare(
         *roots, profile_declarations=declaration, shipped_declarations=declaration
     )
-    assert declared["profile_declarations"] == [
-        {
-            "side": "branch",
-            "option": "optimize",
-            "reason": "synthetic profile control",
-            "old": {"present": True, "value": "ReleaseFast"},
-            "new": {"present": True, "value": "different"},
-        }
-    ]
-    assert declared["counts"] == result["counts"] and declared["untriaged"] == 16
+    check(
+        declared["profile_declarations"]
+        == [
+            {
+                "side": "branch",
+                "option": "optimize",
+                "reason": "synthetic profile control",
+                "old": {"present": True, "value": "ReleaseFast"},
+                "new": {"present": True, "value": "different"},
+            }
+        ]
+    )
+    check(declared["counts"] == result["counts"] and declared["untriaged"] == 16)
     checks.append(
         "declared profile difference accepted and recorded without triaging dumps"
     )
@@ -1274,6 +1405,7 @@ def controls(args):
         "wrong profile option declaration",
         lambda: compare(
             *roots,
+            shipped_declarations=declaration,
             profile_declarations=[
                 dict(declaration[0], option="terminal_options.oniguruma")
             ],
@@ -1282,22 +1414,34 @@ def controls(args):
     rejects(
         "empty profile reason",
         lambda: compare(
-            *roots, profile_declarations=[dict(declaration[0], reason=" ")]
+            *roots,
+            shipped_declarations=declaration,
+            profile_declarations=[dict(declaration[0], reason=" ")],
         ),
     )
     rejects(
         "duplicate profile declaration",
-        lambda: compare(*roots, profile_declarations=declaration * 2),
+        lambda: compare(
+            *roots,
+            shipped_declarations=declaration,
+            profile_declarations=declaration * 2,
+        ),
     )
     rejects(
         "wrong profile side",
         lambda: compare(
-            *roots, profile_declarations=[dict(declaration[0], side="upstream")]
+            *roots,
+            shipped_declarations=declaration,
+            profile_declarations=[dict(declaration[0], side="upstream")],
         ),
     )
     rejects(
         "malformed profile declaration",
-        lambda: compare(*roots, profile_declarations={"option": "optimize"}),
+        lambda: compare(
+            *roots,
+            shipped_declarations=declaration,
+            profile_declarations={"option": "optimize"},
+        ),
     )
     rejects(
         "unused profile declaration",
@@ -1307,6 +1451,7 @@ def controls(args):
         "stale declared new value",
         lambda: compare(
             *roots,
+            shipped_declarations=declaration,
             profile_declarations=[
                 dict(declaration[0], new={"present": True, "value": "stale"})
             ],
@@ -1316,6 +1461,7 @@ def controls(args):
         "stale declared old value",
         lambda: compare(
             *roots,
+            shipped_declarations=declaration,
             profile_declarations=[
                 dict(declaration[0], old={"present": True, "value": "stale"})
             ],
@@ -1325,6 +1471,7 @@ def controls(args):
         "missing declared values",
         lambda: compare(
             *roots,
+            shipped_declarations=declaration,
             profile_declarations=[
                 {k: v for k, v in declaration[0].items() if k not in ("old", "new")}
             ],
@@ -1340,10 +1487,11 @@ def controls(args):
         ).encode()
     )
     current = digest(json.dumps(harness_sources(), sort_keys=True).encode())
-    assert compare(*roots, declarations=[f"{captured}:{current}"])["untriaged"] == 16
-    assert compare(*roots, declarations=[f"{captured}:{current}"])[
-        "harness_declarations"
-    ] == [f"{captured}:{current}"]
+    check(compare(*roots, declarations=[f"{captured}:{current}"])["untriaged"] == 16)
+    check(
+        compare(*roots, declarations=[f"{captured}:{current}"])["harness_declarations"]
+        == [f"{captured}:{current}"]
+    )
     checks.append("explicit harness change declaration")
     for run in ("run-1", "run-2"):
         (roots[1].parent / run / "manifest.json").write_bytes(original)
@@ -1356,8 +1504,33 @@ def controls(args):
         "malformed harness declaration",
         lambda: compare(*roots, declarations=["deadbeef:cafe"]),
     )
-    assert compare(*roots)["sides"]["branch"]["revision"] == "0" * 40
+    check(compare(*roots)["sides"]["branch"]["revision"] == "0" * 40)
     checks.append("comparison records revisions, executable and both manifest hashes")
+
+    change_manifests(
+        lambda m: (
+            m.update(revision="4" * 40),
+            m["provenance"].update(production_revision="4" * 40),
+        )
+    )
+    check(compare(*roots)["counts"] == result["counts"])
+    rejects(
+        "wrong production revision in pre slot",
+        lambda: compare(roots[1], roots[1]),
+        "corpus source_revision",
+    )
+    checks.append("branch revision may differ from frozen corpus source")
+    for run in ("run-1", "run-2"):
+        (roots[1].parent / run / "manifest.json").write_bytes(original)
+    completion.write_bytes(saved)
+    pin = read_json(roots[0] / "manifest.json")["corpus_sha256"]
+    pinned = compare(*roots, expected_corpus=pin)
+    check(
+        pinned["corpus_sha256"] == pin
+        and pinned["expected_corpus"] == pin
+        and result["expected_corpus"] is None
+    )
+    checks.append("report records corpus identity and optional operator pin")
 
     def duplicate_exe_revision(m):
         m["exe_sha256"] = "1" * 64
@@ -1389,9 +1562,10 @@ def controls(args):
     non_shipped["shipped_profile"] = shipped_profile(
         non_shipped["profile"], non_shipped["build_identity"]
     )
-    assert [d["option"] for d in non_shipped["shipped_profile"]["differences"]] == [
-        "terminal_options.simd"
-    ]
+    check(
+        [d["option"] for d in non_shipped["shipped_profile"]["differences"]]
+        == ["terminal_options.simd"]
+    )
     for run in ("run-1", "run-2"):
         (roots[0].parent / run / "manifest.json").write_text(
             json.dumps(non_shipped), encoding="utf-8"
@@ -1408,9 +1582,11 @@ def controls(args):
         for side in ("pre", "branch")
     ]
     accepted = compare(roots[0], roots[0], shipped_declarations=shipping)
-    assert accepted["untriaged"] == 0 and accepted[
-        "shipped_profile_declarations"
-    ] == sorted(shipping, key=lambda row: row["side"])
+    check(
+        accepted["untriaged"] == 0
+        and accepted["shipped_profile_declarations"]
+        == sorted(shipping, key=lambda row: row["side"])
+    )
     checks.append("explicit value-bound shipped mismatches accepted and recorded")
     rejects(
         "missing one fork shipped declaration",
@@ -1456,7 +1632,7 @@ def controls(args):
         for side in ("pre", "branch")
         for d in public_pre["shipped_profile"]["differences"]
     ]
-    assert (
+    check(
         compare(roots[0], roots[0], shipped_declarations=public_shipping)["untriaged"]
         == 0
     )
@@ -1472,28 +1648,67 @@ def controls(args):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         rejects("missing provenance " + field, lambda: compare(*roots))
         manifest_path.write_bytes(original)
-    native_cases = []
-    for name, data in (
-        ("text", b"oracle-control"),
-        ("sgr", b"\x1b[31moracle-control\x1b[0m"),
-        ("reset", b"discarded\x1bcoracle-control"),
-    ):
-        native_cases.append(
-            {"id": name, "source_sha256": digest(data), "operations": [send(data)]}
+    native = native_corpus("0" * 40)
+    native_root = args.out / "native-fixture/run-1"
+    native_root.mkdir(parents=True)
+    write_json(native_root / "corpus.json", native)
+    manifest = json.loads(pre_manifest)
+    manifest["corpus_sha256"] = digest((native_root / "corpus.json").read_bytes())
+    manifest["request_sha256"] = digest(
+        requests(parse_json((native_root / "corpus.json").read_bytes()))[0]
+    )
+    manifest["items"] = []
+    for case in native["cases"]:
+        for cols, rows in SIZES:
+            for fmt in FORMATS:
+                data = (
+                    native_plain(case["id"], True)
+                    if fmt == "plain"
+                    else b"\x1b[0moracle-control"
+                    + (b"style" if case["id"] == "sgr" else b"")
+                )
+                leaf = f"{case['id']}-{cols}x{rows}.{fmt}"
+                (native_root / leaf).write_bytes(data)
+                manifest["items"].append(
+                    {
+                        "input": case["id"],
+                        "cols": cols,
+                        "rows": rows,
+                        "format": fmt,
+                        "file": leaf,
+                        "bytes": len(data),
+                        "sha256": digest(data),
+                    }
+                )
+    write_json(native_root / "manifest.json", manifest)
+    shutil.copytree(native_root, native_root.parent / "run-2")
+    complete_capture(native_root.parent)
+    native_controls(
+        argparse.Namespace(
+            dumps=native_root,
+            declare_harness_change=[],
+            report=args.out / "native-positive.json",
         )
-    native_cases.append(
-        {
-            "id": "resize",
-            "conpty": True,
-            "operations": [
-                send(b"oracle-control"),
-                {"resize": [40, 2]},
-                {"resize": [80, 24]},
-            ],
-        }
+    )
+    checks.append("complete valid native sentinel fixture")
+    (native_root.parent / "completion.json").unlink()
+    rejects(
+        "native controls require completion",
+        lambda: native_controls(
+            argparse.Namespace(
+                dumps=native_root,
+                declare_harness_change=[],
+                report=args.out / "must-not-exist.json",
+            )
+        ),
+        "completion.json",
     )
     write_json(
-        args.out / "corpus.json", {"schema": 1, "sizes": SIZES, "cases": native_cases}
+        args.out / "corpus.json",
+        native_corpus(
+            args.source_revision
+            or git(Path(__file__).resolve().parents[2], "rev-parse", "HEAD")
+        ),
     )
     write_json(args.out / "comparison.json", result)
     write_json(args.out / "triage.json", triage)
@@ -1553,6 +1768,10 @@ def main():
         "controls", help="exercise classifications and invalid-evidence refusals"
     )
     command.add_argument("--out", type=Path, required=True)
+    command.add_argument(
+        "--source-revision",
+        help="production revision for native sentinel corpus (defaults to running tool HEAD)",
+    )
     command.set_defaults(action=controls)
     command = commands.add_parser(
         "native-controls", help="verify captured text, SGR and reset sentinels"

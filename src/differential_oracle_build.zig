@@ -82,7 +82,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool) !void {
     identity.setCwd(b.path("."));
     // HEAD and cleanliness are not file inputs in the build cache.
     identity.has_side_effects = true;
-    identity.addArgs(&.{ compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
+    identity.addArgs(&.{ b.graph.zig_exe, compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
     mod.addImport("oracle_identity", b.createModule(.{
         .root_source_file = identity.addOutputFileArg("oracle_identity.zig"),
         .target = source.resolved_target,

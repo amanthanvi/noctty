@@ -71,11 +71,14 @@ def main():
     # Preserve the actual blob bytes, including its original final newline.
     before = subprocess.check_output(["git", "-C", str(repo), "show", "HEAD:build.zig"])
     after = instrument_build(before, args.api)
-    for path in sources(source):
+    overlay = sources(source)
+    record_path = repo / "test/differential-oracle/staged-source.json"
+    targets = [repo / path.relative_to(source) for path in overlay] + [record_path]
+    if any(target.exists() or target.is_symlink() for target in targets):
+        raise ValueError("oracle instrumentation already exists in source copy")
+    for path in overlay:
         relative = path.relative_to(source)
         target = repo / relative
-        if target.exists():
-            raise ValueError("oracle instrumentation already exists in source copy")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(path.read_bytes())
     (repo / "build.zig").write_bytes(after)
@@ -85,9 +88,7 @@ def main():
         "original_build_sha256": hashlib.sha256(before).hexdigest(),
         "instrumented_build_sha256": hashlib.sha256(after).hexdigest(),
     }
-    (repo / "test/differential-oracle/staged-source.json").write_text(
-        json.dumps(record, indent=2) + "\n", encoding="utf-8"
-    )
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(record, sort_keys=True))
 
 

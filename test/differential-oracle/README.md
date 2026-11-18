@@ -23,7 +23,10 @@ From the repository root:
 scripts\dev-windows.cmd zig build oracle -Dvt-api=fork -Doracle-corpus=true -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --prefix BUILD_DIR --summary all
 ```
 
-Run `build/bin/oracle-corpus.exe` in a fresh scratch directory. It writes
+Use a fresh `BUILD_DIR` outside the source tree (or a gitignored prefix), so
+build outputs do not dirty the captured checkout. Build the generator only in
+the pre-side source copy. Run `BUILD_DIR/bin/oracle-corpus.exe` by its absolute
+installed path, with a fresh scratch directory as its working directory. It writes
 `synthetic.bin`, using `src/synthetic`'s `Bytes`, `Utf8`, and `Osc` generators:
 
 - Seeds: `0`, `1`, and `0xC0FFEEEEEEEEEEEE`, independently reset per generator.
@@ -99,6 +102,11 @@ with that side's compiler, explicit API, SIMD on, ReleaseFast and baseline CPU.
 Only the fork accepts `-Dcustom-shaders=true`; read the other side's own app
 build options. The generator is needed only on the pre side.
 
+At **1A**, if the resolved Terminal API takes structured resize options,
+change the CI oracle step from `-Dvt-api=fork` to **`-Dvt-api=stone_flag`** when
+it retains `resize_pull_scrollback`, or **`-Dvt-api=stone`** when that flag is absent.
+Keep the legacy IO adapter until 1B.
+
 At **1B.3/1B.5**, delete these whole files:
 
 - `src/differential_oracle_adapter_legacy.zig`
@@ -133,6 +141,10 @@ to match the clean `--source-root` HEAD, validates API/ConPTY policy, and checks
 that the source and executable remain unchanged during both runs. A stale exe,
 wrong tree or dirty build is invalid evidence. Compare also refuses one exe
 hash attributed to different production or instrumented revisions.
+On the modern compiler, identity generation also runs that exact compiler's
+`zig fetch DIR` on every in-tree `zig-pkg` package and refuses any content hash
+that differs from its package directory name. Git ignores these dependencies;
+their edits must not masquerade as a clean build.
 
 The request and response have checked versioned headers, counts, lengths,
 ordered record indices and exact EOF. For each input/initial size, both plain
@@ -163,6 +175,12 @@ the SHA-256 of `json.dumps(harness_sources, sort_keys=True).encode()`.
 Declarations do not bypass profile, corpus, provenance, determinism or dump checks.
 Use `--expected-corpus SHA256` on compare to pin the real baseline corpus. Keep large dumps and their frozen corpus outside the
 repository.
+
+Compare binds the `pre` production revision to the frozen corpus's
+`source_revision`; the branch and upstream revisions may differ. It records
+`corpus_sha256` and `expected_corpus` (null if unpinned) in the report. Report
+manifest/completion hashes describe the exact bytes used during admission,
+including when a run is reached through a junction alias.
 
 ## Compare and triage
 
@@ -233,7 +251,9 @@ used. Unused or duplicate harness, profile or shipped declarations are errors.
 CI's build-only step measured **3m30s on the hosted runner**. Keep it under the
 existing Zig-path job filter: terminal dependencies and API drift span the Zig
 tree, so a narrower path filter could miss breakage. Documentation-only changes
-already skip compiled jobs.
+under the filter's explicit documentation rules skip compiled jobs. This README
+is outside those exemptions and still takes the default Zig rule; `identity.py`
+must also stay on that rule.
 
 The pair report lists every differing `(input, cols, rows, format)`. Three-way
 comparison implements the plan's table exactly:
@@ -256,22 +276,29 @@ each differing report row plus a nonempty `reason` and, for pair differences or 
 a nonempty `ledger` reference. The classification and ordered SHA-256 list must
 match current bytes; stale, duplicate and unused entries fail. This verifies
 the recorded reference, not the truth or completeness of the external ledger.
+Choose a fresh `--report` path for each invocation, including a rerun after
+adding triage: report writes are exclusive and preserve previous evidence.
 
 ## Controls
 
 ```text
-python test/differential-oracle/oracle.py controls --out CONTROL_DIR
+python test/differential-oracle/oracle.py controls --out CONTROL_DIR --source-revision PRE_PRODUCTION_SHA
 ```
 
 This saves synthetic dump sets and checks all five partitions of three-way
 equality, both pair outcomes, complete difference listing, hash-bound triage,
 required ledger references, and corrupt, absent, duplicate and mismatched
 evidence. `controls.json` names every passed check. `corpus.json` supplies
-native positive controls (`text`, `sgr`, `reset`, `resize`) for `capture`: each plain dump
-must equal `oracle-control`, text/reset VT dumps must match, and SGR VT must
-differ. This separately proves that the runner interprets input and that both
-formatter choices reach saved output. The resize control also executes both
-resize APIs. Stone cannot apply the absent ConPTY no-pull flag. Run it on each API adapter.
+native positive controls (`text`, `sgr`, `reset`, `resize`, `conpty-on`,
+`conpty-off`) for `capture`. Text/reset/SGR plain dumps equal `oracle-control`;
+text/reset VT dumps match and SGR VT differs. Resize must wrap a 60-byte line
+into three 20-column rows. The paired ConPTY cases create history, grow the
+screen and write at an absolute cursor position; exact expected dumps
+distinguish applying the no-pull flag from ignoring it. Stone explicitly checks
+the pull result for both cases because that API lacks the flag. Run all six
+sentinels on every adapter. `--source-revision` identifies the pre production
+revision in this native-only corpus; it defaults to the running tool's HEAD.
+Positive control checks remain active under Python optimization.
 
 ```text
 python test/differential-oracle/oracle.py native-controls NATIVE_DUMPS/run-1 --report NATIVE_CONTROLS.json
