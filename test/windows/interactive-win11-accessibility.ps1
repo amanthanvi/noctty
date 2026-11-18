@@ -4024,8 +4024,8 @@ $editEventElement = $null
 $editEventsRegistered = $false
 $relaunchProcess = $null
 $ownerProbeProcess = $null
-$saveProbeProcess = $null
-$saveVerifyProcess = $null
+$saveProbeCleanup = $null
+$saveVerifyCleanup = $null
 $settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout `
     -RepoRoot $repoRoot `
     -SandboxName "accessibility-save-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -7030,6 +7030,16 @@ try {
     # Exercise the third inline outcome end-to-end. Persist through the UIA
     # Invoke provider, terminate the writer, and prove a new process in the
     # same isolated sandbox observes the value before restoring the baseline.
+    # The saving processes read a default config file before their command
+    # lines, and an include it names after them (Config.load), so they start
+    # from none: only their command lines and what the first save writes decide
+    # (EVIDENCE-TOAST-FOREGROUND).
+    $settingsDefaultConfigFiles = @('noctty\config.ghostty', 'ghostty\config', 'winghostty\config.ghostty')
+    foreach ($defaultConfigFile in $settingsDefaultConfigFiles) {
+        if ([System.IO.File]::Exists((Join-Path $settingsPersistenceLayout.LocalAppData $defaultConfigFile))) {
+            throw "The settings save sandbox already holds $defaultConfigFile; the saving processes would read it."
+        }
+    }
     $settingsConfigBaselineExisted = [System.IO.File]::Exists($sandboxConfigPath)
     $settingsConfigBaselineBytes = if ($settingsConfigBaselineExisted) {
         [System.IO.File]::ReadAllBytes($sandboxConfigPath)
@@ -7046,10 +7056,14 @@ try {
     # (EVIDENCE-TOAST-FOREGROUND; settings.md PROFILES-4 trap 7). So both run
     # with every notification off, the clipboard-copy notice included, which
     # `desktop-notifications` does not gate; this leaf tests none of them.
-    # noctty takes the last value of each, resets one to its default on an
-    # empty value, and reads a config-file include after the command line:
-    # nothing may follow these, neither launch passes --config-file, and no
-    # element holds whitespace or a quote (Start-Process joins them unquoted).
+    # noctty takes the last value of each and resets one to its default on an
+    # empty value, so nothing may follow these, and it reads a config-file
+    # include after the command line. Contracts.90-Workflows.ps1 checks these
+    # two launches against a closed grammar and fails on any form outside it:
+    # the flags one literal array of single-quoted strings, assigned once; each
+    # launch's arguments, class name, process and probe assigned once, in the
+    # forms it lists; no element with whitespace or a quote (Start-Process
+    # joins them unquoted); no --config-file.
     $settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false')
     $saveProbeClass = "noctty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
     $saveProbeArguments = @(
@@ -7066,6 +7080,7 @@ try {
         -EnvironmentVariables $settingsProbeEnvironment `
         -RedirectStandardOutput (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-stdout.log') `
         -RedirectStandardError (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-stderr.log')
+    $saveProbeCleanup = $saveProbeProcess
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings save probe main HWND' -Condition {
         $saveProbeProcess.Refresh()
         return -not $saveProbeProcess.HasExited -and $saveProbeProcess.MainWindowHandle -ne [IntPtr]::Zero
@@ -7126,7 +7141,12 @@ try {
             $persistedConfig -match '(?m)^window-theme\s*=\s*dark\s*$'
     }
     Stop-InteractiveWin11Process -Process $saveProbeProcess -Contained
-    $saveProbeProcess = $null
+    $saveProbeCleanup = $null
+    # The verifier reads what the save wrote, and an include named there after
+    # its command line.
+    if ((Get-Content -LiteralPath $sandboxConfigPath -Raw) -match '(?m)^\s*config-file\s*=') {
+        throw 'The saved settings file names a config-file include; the verifier would read it after its command line.'
+    }
 
     $saveVerifyClass = "noctty-accessibility-settings-save-verify-$([Guid]::NewGuid().ToString('N'))"
     $saveVerifyArguments = @(
@@ -7143,6 +7163,7 @@ try {
         -EnvironmentVariables $settingsProbeEnvironment `
         -RedirectStandardOutput (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-verify-stdout.log') `
         -RedirectStandardError (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-verify-stderr.log')
+    $saveVerifyCleanup = $saveVerifyProcess
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings persistence verifier main HWND' -Condition {
         $saveVerifyProcess.Refresh()
         return -not $saveVerifyProcess.HasExited -and $saveVerifyProcess.MainWindowHandle -ne [IntPtr]::Zero
@@ -7260,7 +7281,7 @@ try {
         return -not [NocttyAccessibilityNative]::IsWindow($saveVerifyProbe.Hwnd)
     }
     Stop-InteractiveWin11Process -Process $saveVerifyProcess -Contained
-    $saveVerifyProcess = $null
+    $saveVerifyCleanup = $null
     Restore-AccessibilityConfigBaseline `
         -Path $sandboxConfigPath `
         -Existed $settingsConfigBaselineExisted `
@@ -7799,12 +7820,12 @@ finally {
         try { Stop-InteractiveWin11Process -Process $ownerProbeProcess -Contained }
         catch { $cleanupFailures.Add("settings owner probe cleanup failed: $($_.Exception.Message)") }
     }
-    if ($null -ne $saveProbeProcess) {
-        try { Stop-InteractiveWin11Process -Process $saveProbeProcess -Contained }
+    if ($null -ne $saveProbeCleanup) {
+        try { Stop-InteractiveWin11Process -Process $saveProbeCleanup -Contained }
         catch { $cleanupFailures.Add("settings save probe cleanup failed: $($_.Exception.Message)") }
     }
-    if ($null -ne $saveVerifyProcess) {
-        try { Stop-InteractiveWin11Process -Process $saveVerifyProcess -Contained }
+    if ($null -ne $saveVerifyCleanup) {
+        try { Stop-InteractiveWin11Process -Process $saveVerifyCleanup -Contained }
         catch { $cleanupFailures.Add("settings persistence verifier cleanup failed: $($_.Exception.Message)") }
     }
     if ($settingsConfigBaselineCaptured -and -not $settingsConfigBaselineRestored) {

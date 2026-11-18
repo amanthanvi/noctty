@@ -695,7 +695,31 @@ Settings run with `--app-notifications=false` and
 command lines (no empty value of either after them, which would reset it to
 its default, and no `--config-file`, whose include noctty reads after the
 command line), so a save shows its in-window banner (each has a terminal window
-to hold it) and no toast. All run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
+to hold it) and no toast. The leaf checks at run time that the saving sandbox
+has no default config file before the first launch and that the saved file
+names no `config-file` include before the verifier starts.
+
+`flagship/contracts/Contracts.90-Workflows.ps1` checks those two launches
+against a closed grammar, and any form outside it fails the contract; it
+evaluates no PowerShell. The grammar: the flags are one literal array of
+single-quoted strings, assigned exactly once as `$name = @('...', '...')` or
+`$name = '...', '...'`. Each launch's `-ArgumentList` is a variable assigned
+once as `$name = @( ... )`, each element one of
+`Get-InteractiveWin11ContainmentArguments` with no argument (defined once, in
+`scripts/interactive-win11-lib.ps1` and in no other job script, as `return @(
+... )` of single-quoted strings), a single-quoted string,
+`"--class=$name"` with `$name = "<letters, digits, hyphens>$([Guid]::NewGuid().ToString('N'))"`,
+or the flags variable. Each process a save runs in is assigned once, from its
+launch, and each probe once, from that process. Every one of those variables is
+written only by that one plain assignment and named nowhere else: no scoped
+spelling, other assignment, index, member, `[ref]`, loop or parameter of that
+name, no `-OutVariable`, `-PipelineVariable` or `Set-Variable` naming it, and no
+other job script naming it. The leaf uses no variable or alias cmdlet,
+`Invoke-Expression`, common variable parameter or `$ExecutionContext`. The
+arguments those forms give hold no whitespace, quote or backtick and no
+`--config-file`, and leave every notification setting off.
+
+The job's steps all run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
 jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the
