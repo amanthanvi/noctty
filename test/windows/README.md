@@ -436,15 +436,34 @@ PowerShell profile and uses your real `LOCALAPPDATA`, so they run only with
 `-AllowSshFarSideUserProfileAndLocalAppData`.
 
 Exit 0 means every requested reader ran every step, case 7 ran with its
-controls, and every positive control came back as predicted; other rows are
-observations, recorded either way. Exit 1 is an incomplete run, a failed
-control or a reader in the wrong state, 2 infrastructure (the outer phase
-too), 3 a changed isolation guard (the startup ledger,
-the PowerShell history, the product AUMID's registration, the clipboard
-sequence number, or a link left in the run directory). `-Sabotage delimiter|reader|control` breaks one thing on
-purpose and must exit 1; `-Sabotage setup` fails once reader d's ssh keys
-exist and must exit 2 with them deleted. `flagship/contracts/Contracts.98-ConptyReplyPath.ps1`
-pins the harness and refuses the round-1 council's mutations.
+controls (unless `-SkipPSReadLine`), and every positive control came back as
+predicted; other rows are observations, recorded either way, and a row whose
+step never finished reads INCOMPLETE. Exit 1 is an incomplete run, a failed
+control or a reader in the wrong state; 2 infrastructure, in the driver or the
+outer phase; 3 a changed isolation guard (the startup ledger, the PowerShell
+history, the product AUMID's registration, the clipboard sequence number), a
+link left in the run directory, or an ssh secret that could not be deleted.
+
+Controls: `-Sabotage delimiter|reader|control` breaks one thing on purpose and
+must exit 1. `-Sabotage setup` fails the setup at the point where reader d's
+ssh keys already exist, and must exit 2 with any keys deleted (with no ssh
+reader there are none to make). `-Sabotage key` holds an ssh secret's file open
+through the cleanup, and must exit 3 with the guards compared and the failure
+recorded.
+
+`flagship/contracts/Contracts.98-ConptyReplyPath.ps1` holds the harness to its
+safety and measurement properties in two ways:
+
+- **Checks and mutations.** It checks each launch's desktop and job, the
+  isolation flags and guards, the bindings' bytes, the step plan, the
+  predictions, the verdicts and the exit policy. It then applies 105 mutations
+  (the council's from rounds 1 to 3, and its own) and refuses each one.
+- **A closed set of pins.** Every block that decides or feeds an exit or a
+  verdict is pinned by SHA-256: the regions between `# pin-begin:` and
+  `# pin-end:` comments in the harness (the reader list, the whole outer
+  phase, case 7, the driver's results), the functions the contract lists, and
+  the whole reader. Any edit to a pinned block fails the contract until the
+  pin there is updated in the same change, so a reviewer sees it.
 
 ## interactive-win11-ime-candidate.ps1
 

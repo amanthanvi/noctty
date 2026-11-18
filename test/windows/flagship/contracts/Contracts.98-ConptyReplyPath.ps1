@@ -12,10 +12,15 @@
 #     and which rows are positive controls, the verdicts, the reader-state
 #     checks and the exit policy, driven by AST extraction on synthetic inputs;
 #   - how its result is wired: every exit statement in order, every assignment
-#     to a guard, exit or case-7 control variable, and the two guard
-#     fingerprint functions by hash.
-# The contract then applies the council's round-1 mutations (and its own) to
-# the harness and the reader, and each one must give at least one problem.
+#     to a guard, exit or case-7 control variable;
+#   - as a closed set, by SHA-256: every block that decides or feeds an exit or
+#     a verdict. These are the regions between `# pin-begin:` and `# pin-end:`
+#     comments (the reader list, the whole outer phase, case 7, the driver's
+#     results), the functions in $replyPathPinnedFunctions, and the whole
+#     reader. An edit to any of them fails this contract until the pin here is
+#     updated, so the reviewer sees each one.
+# The contract then applies the council's mutations from rounds 1-3 (and its
+# own) to the harness and the reader, and each one must give a problem.
 
 $replyPathScript = Join-Path $repoRoot 'test\windows\hidden-win11-conpty-reply-path.ps1'
 $replyPathReader = Join-Path $repoRoot 'test\windows\console-reply-reader.c'
@@ -91,11 +96,9 @@ function Get-ReplyPathProblems {
     Need '$clipboardUnchanged=$clipboardBefore -eq $clipboardAfter' 'the clipboard sequence comparison changed'
     Need '$clipboardBefore=[ReplyPath]::GetClipboardSequenceNumber()' 'the clipboard sequence number is not read before the run'
     Need 'if(-not $keysDeleted -or $links.Count -gt 0 -or ($guardsRead -and ($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged))) {' 'a changed guard no longer stops the run'
-    if ($code -notmatch '(?s)-not \$clipboardUnchanged\)\)\) \{\s*Write-Host \(''ISOLATION GUARD CHANGED:[^
-]*
-\s*exit 3\s*\}') { $problems.Add('a changed guard no longer exits 3') }
+    if ($code -notmatch '(?s)-not \$clipboardUnchanged\)\)\) \{\s*\$compared=[^\n]*\n\s*Write-Host \(''ISOLATION GUARD CHANGED:[^\n]*\n\s*exit 3\s*\}') { $problems.Add('a changed guard no longer exits 3') }
     # The ssh keys are made inside the try whose finally deletes them, so every exit path deletes them.
-    if ($code -notmatch '(?s)\[uint32\]\$code=2; \$guardsRead=\$false\s*try \{\s*if\(\$sshReaders\.Count -gt 0\) \{.*?ssh-keygen\.exe.*?if\(\$Sabotage -eq ''setup''\) \{ throw .*?\} finally \{.*?foreach\(\$name in \$sshSecrets\)') {
+    if ($code -notmatch '(?s)\[uint32\]\$code=2; \$guardsRead=\$false; \$keyHold=\$null\s*try \{\s*if\(\$sshReaders\.Count -gt 0\) \{.*?ssh-keygen\.exe.*?if\(\$Sabotage -eq ''setup''\) \{ throw .*?\} finally \{.*?foreach\(\$name in \$sshSecrets\)') {
         $problems.Add('the ssh keys are no longer made inside the try whose finally deletes them')
     }
 
@@ -140,12 +143,49 @@ function Get-ReplyPathProblems {
         }
     }
     Need '        $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;' 'case 7 no longer starts incomplete'
-    # The two guard fingerprints, whole: a change to either must update its hash here on purpose.
-    foreach ($fingerprint in @(@('Startup-Fingerprint', '428312CE8A516CD82051CC64ABFB2400B5270440636283E0940EA1571272E84A'), @('Aumid-Fingerprint', '72A98C045416F788C4EAA9ACD2E4D3ECA1B0CC0D2A8DCCE0566E04F0FD757220'))) {
-        $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $fingerprint[0] }, $true))
-        $hash = if ($definition.Count -eq 1) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($definition[0].Extent.Text))) } else { '' }
-        if ($hash -cne $fingerprint[1]) { $problems.Add("$($fingerprint[0]) changed (SHA-256 $hash); review it and pin its new hash here") }
+    # The closed set, by SHA-256 with LF line ends: every block that decides or feeds an exit or a
+    # verdict. A change to any of them must update its pin here, on purpose.
+    $regionPins = [ordered]@{
+        'reader-list' = '6C6783C2701572894B46C791C4D5FB3F4356C26BEE171EC2ACE83C1E77DCE9EA'
+        'outer-run' = 'E5E01BC4CCD53D0F9D418813403384C0CF88352B429A08356189E40CD61CA671'
+        'case-7' = '47B9FE392B154C7B0C0380D8915C96465DCCA0F8034DA502BD705CEE4E8CA622'
+        'driver-results' = '8398372CF4B302FE3560D39C2C24C6F145ABDD90D2797D7BE83F7238D4CA0B24'
     }
+    $regionsFound = @([regex]::Matches($Harness, '(?m)^[ \t]*# pin-begin: ([a-z0-9-]+)') | ForEach-Object { $_.Groups[1].Value })
+    if (-not [string]::Equals(($regionsFound -join ','), (@($regionPins.Keys) -join ','), [StringComparison]::Ordinal)) {
+        $problems.Add("the pinned regions are '$($regionsFound -join ',')' where '$(@($regionPins.Keys) -join ',')' are pinned")
+    }
+    foreach ($name in $regionPins.Keys) {
+        $begin = [regex]::Match($Harness, "(?m)^[ \t]*# pin-begin: $([regex]::Escape($name))[^\n]*\n")
+        $hash = ''
+        if ($begin.Success) {
+            $end = [regex]::Match($Harness.Substring($begin.Index), "(?m)^[ \t]*# pin-end: $([regex]::Escape($name))[ \t]*(\n|$)")
+            if ($end.Success) { $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Harness.Substring($begin.Index, $end.Index + $end.Length)))) }
+        }
+        if ($hash -cne $regionPins[$name]) { $problems.Add("pinned region $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
+    }
+    $functionPins = [ordered]@{
+        'Startup-Fingerprint' = '428312CE8A516CD82051CC64ABFB2400B5270440636283E0940EA1571272E84A'
+        'Aumid-Fingerprint' = '72A98C045416F788C4EAA9ACD2E4D3ECA1B0CC0D2A8DCCE0566E04F0FD757220'
+        'Get-PlannedSteps' = 'EB0D20B78CD38D490CB6E66580B296ED10C245158E586405BFDCD61CB56476F2'
+        'Read-Log' = '042B0B922955FFA1BE38F9B75823A925A7C4AAA22301A66DB4CFD3ABDB522631'
+        'Delimiters' = 'FB18706C2359BB0FBEE037A4D4605ABB1D080AE55EF492A56CC23802AA24C95C'
+        'Wait-Ready' = '21759327C7C7875427A99456403A0AC7C7DAF622C725C3EE1075638A61B72CF3'
+        'Invoke-ReaderSession' = '896111CDFF3D2367E4CC6DBC07EECFEB08C282EF00986BB0D2F36A96E6D52776'
+        'Get-ReaderStateProblems' = '142ACF57B19C5CAE625B2BF6760AECF007BFFD692DE251424F6931BFB167A0FD'
+        'Get-Segments' = '6185E4EC4F567726CE54703AC1F5F4CAFC9E3798EA73CD73B22688D6525240B7'
+        'Get-Prediction' = 'ADA5A9CACC21FB044994013F9006520E784514E2A9430B41893E872407726A3A'
+        'Get-Verdict' = '9C3EA7D71286F1EC81CA0A5CD08974F6E0E01B8DF2A2ABB0056F6C8F4F19DE93'
+        'Get-RunExit' = '8EDA51E33F1186A6403BD1359DD2AB071786BE6C8D298A99D5C943BF782C94A7'
+    }
+    foreach ($name in $functionPins.Keys) {
+        $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))
+        $hash = if ($definition.Count -eq 1) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($definition[0].Extent.Text))) } else { '' }
+        if ($hash -cne $functionPins[$name]) { $problems.Add("pinned function $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
+    }
+    # The reader, whole: every line of it decides what a reader records.
+    $readerHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Reader)))
+    if ($readerHash -cne '6C476A3E8670FE6E90D2A8DD426C0176DFF9BAED6976F53B62AF96F3DE11BC98') { $problems.Add("the reader changed (SHA-256 $readerHash); review it and update its pin here") }
 
     # Case 7: pwsh without a profile, history read back before anything is typed.
     Need '-e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' 'case 7''s pwsh must start -NoLogo -NoProfile -NoExit'
@@ -179,11 +219,11 @@ function Get-ReplyPathProblems {
     Need '(''"{0}" -d -f "{1}" -E "{2}"'' -f (Join-Path $openssh ''sshd.exe'')' 'sshd no longer serves one connection (-d) from the run''s config'
     Need 'if($listener.Count -gt 0 -and @($listener | Where-Object { $_.OwningProcess -ne $sshd.pid }).Count -gt 0) { throw' 'ssh no longer waits for the run''s own sshd on the port'
     Need '$sshSecrets=@(''host_ed25519'',''host_ed25519.pub'',''client_ed25519'',''client_ed25519.pub'',''authorized_keys'')' 'the run''s ssh keys are not all listed for deletion'
-    Need 'foreach($name in $sshSecrets) { $path=Join-Path $sshDir $name; if(Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force;' 'the run''s ssh keys are no longer deleted'
+    Need 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add(' 'the run''s ssh keys are no longer deleted best effort, each failure recorded'
 
     # Controls: sabotage off by default and limited to its three uses.
-    Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'',''setup'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
-    NeedCount '$Sabotage -eq' 4 'sabotage must break exactly four things'
+    Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'',''setup'',''key'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
+    NeedCount '$Sabotage -eq' 5 'sabotage must break exactly five things'
 
     # The run's config, case 7's injections, the split gap, readiness and the reader states.
     Need ("`$configLines=@('shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false',`n" +
@@ -246,7 +286,7 @@ function Get-ReplyPathProblems {
 }
 
 # Runs in a fresh runspace: defines the harness's tables and functions, then
-# checks them against what the kitty report's cases and the round-1 council
+# checks them against what the kitty report's cases and the council's rounds
 # require. Returns a list of problems.
 $script:ReplyPathEvaluation = {
     param($Definitions)
@@ -363,7 +403,7 @@ $script:ReplyPathEvaluation = {
         if ($got -cne $v[3]) { $out.Add("Get-Verdict gives '$got' where '$($v[3])' is right ($($v[2]))") }
     }
     # Reader states: the input mode each reader is named for, and the record readers' read sizes.
-    $state = { param($Mode, $Mode0, $Mode1, $Reads) @{ Mode = $Mode; Ready = @{ InputModeBefore = $Mode0; InputMode = $Mode1 }; Log = @($Reads | ForEach-Object { "READ,1,$_" }) } }
+    $state = { param($Mode, $Mode0, $Mode1, $Reads, $Done = 1) @{ Mode = $Mode; Ready = @{ InputModeBefore = $Mode0; InputMode = $Mode1 }; Log = @($Reads | ForEach-Object { "READ,1,$_" }); Planned = 1; Steps = @(1..1 | Where-Object { $Done } | ForEach-Object { @{ Barrier = 'OK' } }) } }
     $states = @(
         ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 16, 9)), 0)
         ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 30)), 1)
@@ -374,6 +414,9 @@ $script:ReplyPathEvaluation = {
         ,@((& $state 'b' '0x1f7' '0x298' @(4, 25)), 1)
         ,@((& $state 'c' '0x1f7' '0x3f0' @()), 0)
         ,@((& $state 'c' '0x1f7' '0x3f7' @()), 1)
+        ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 9) 0), 0)
+        ,@((& $state 'b' '0x1f7' '0x98' @(4) 0), 0)
+        ,@((& $state 'b' '0x1f7' '0x298' @(4) 0), 1)
     )
     foreach ($x in $states) {
         $got = @(Get-ReaderStateProblems $x[0]).Count
@@ -419,7 +462,8 @@ if ($replyPathProblems.Count -gt 0) { throw "The ConPTY reply-path harness break
 
 # Every mutation the council ran (round 1: Sol's 3, Opus's 22, Muse's 8, the
 # duplicates kept once; round 2: Opus's 25, those it did not name rebuilt and
-# marked so) and the contract's own: each must give a problem.
+# marked so; round 3: Opus's 7 named survivors and his reader-a read, Sol's
+# discarded result) and the contract's own: each must give a problem.
 $replyPathMutations = @(
     @{ Name = 'Sol 1 / Opus 1: the reader session''s noctty on a null desktop'; Old = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)'; New = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,$null,$job,0x08000000)' }
     @{ Name = 'Sol 2: no job assignment before resume'; Old = 'if(!AssignProcessToJobObject(job,p.process)||ResumeThread(p.thread)==0xFFFFFFFF) {'; New = 'if(ResumeThread(p.thread)==0xFFFFFFFF) {' }
@@ -467,7 +511,7 @@ $replyPathMutations = @(
     @{ Name = 'Opus r2 N11: the tab-switch control forced true'; Old = '$case7.TabSwitched=($surfacesDuring -ge 2 -and -not $visibleDuring -and $visibleAfter)'; New = '$case7.TabSwitched=$true' }
     @{ Name = 'Opus r2 N12 (reconstructed): the ledger read after the run fed the one before'; Old = '$after=Startup-Fingerprint'; New = '$after=$before' }
     @{ Name = 'Opus r2 N13 (reconstructed): the AUMID read after the run fed the one before'; Old = '$aumidAfter=Aumid-Fingerprint'; New = '$aumidAfter=$aumidBefore' }
-    @{ Name = 'Opus r2 N14: a changed guard exits 0'; Old = 'stop launches.'' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted,$links.Count)' + "`n" + '        exit 3'; New = 'stop launches.'' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted,$links.Count)' + "`n" + '        exit 0' }
+    @{ Name = 'Opus r2 N14: a changed guard exits 0'; Old = 'stop launches.'' -f $compared,$keysDeleted,$links.Count)' + "`n" + '        exit 3'; New = 'stop launches.'' -f $compared,$keysDeleted,$links.Count)' + "`n" + '        exit 0' }
     @{ Name = 'Opus r2 N15 (reconstructed): an infrastructure exit from the driver passes as 0'; Old = 'inspect results.json and driver-error.txt in Run."; exit 2 }'; New = 'inspect results.json and driver-error.txt in Run."; exit 0 }' }
     @{ Name = 'Opus r2 N16 (reconstructed): a cleanup failure exits 0'; Old = 'if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 2 }'; New = 'if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 0 }' }
     @{ Name = 'Opus r2 N17: a kept key counts as deleted'; Old = 'if(Test-Path -LiteralPath $path) { $keysDeleted=$false }'; New = 'if(Test-Path -LiteralPath $path) { $keysDeleted=$true }' }
@@ -482,13 +526,31 @@ $replyPathMutations = @(
     @{ Name = 'round 3: the history guard watches nothing'; Old = '$historyGuard=Start-WindowsHarnessHistoryGuard -Harness ''hidden-win11-conpty-reply-path.ps1'''; New = '$historyGuard=Start-WindowsHarnessHistoryGuard -Harness ''hidden-win11-conpty-reply-path.ps1'' -Paths @(''nul'')' }
     @{ Name = 'round 3: the link listing fed a constant'; Old = '$links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })'; New = '$links=@()' }
     @{ Name = 'round 3: an outer failure falls through to pwsh''s 1'; Old = '    if(-not $Driver) { Write-Host "Infrastructure: $($_.Exception.Message)"; exit 2 }'; New = '    if(-not $Driver) { break }' }
-    @{ Name = 'round 3: the ssh keys made before the try'; Old = '[uint32]$code=2; $guardsRead=$false' + "`n" + '    try {' + "`n" + '        if($sshReaders.Count -gt 0) {'; New = '[uint32]$code=2; $guardsRead=$false' + "`n" + '    if($true) {' + "`n" + '        if($sshReaders.Count -gt 0) {' }
+    @{ Name = 'round 3: the ssh keys made before the try'; Old = '[uint32]$code=2; $guardsRead=$false; $keyHold=$null' + "`n" + '    try {' + "`n" + '        if($sshReaders.Count -gt 0) {'; New = '[uint32]$code=2; $guardsRead=$false; $keyHold=$null' + "`n" + '    if($true) {' + "`n" + '        if($sshReaders.Count -gt 0) {' }
     @{ Name = 'round 3: the ready file read unshared'; Old = 'try { $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete);'; New = 'try { $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None);' }
     @{ Name = 'round 3: the reader writes ready.txt in place'; File = 'reader'; Old = 'if (_wfopen_s(&ready, ready_tmp, L"wb") || !ready) return 8;'; New = 'if (_wfopen_s(&ready, argv[3], L"wb") || !ready) return 8;' }
     @{ Name = 'round 3: an unfinished step judged'; Old = 'if($Barrier -ne ''OK'') { return ''INCOMPLETE'' }'; New = 'if($false) { return ''INCOMPLETE'' }' }
     @{ Name = 'round 3: reader states not checked'; Old = 'foreach($s in $Sessions) { foreach($q in @($s.StateProblems)) { if($q) { $why.Add($q) } } }'; New = '' }
     @{ Name = 'round 3: a16''s read size not checked'; Old = 'if($Session.Mode -eq ''a16'' -and $largest -ne 16)'; New = 'if($false)' }
     @{ Name = 'round 3: the guards compared without their first reading'; Old = '        $guardsRead=$true' + "`n"; New = '' }
+    @{ Name = 'Opus r3 P1: no row is a control'; Old = 'Control=[bool]($prediction -and $prediction.Control)'; New = 'Control=$false' }
+    @{ Name = 'Opus r3 P4: the reader-state result replaced'; Old = '$session.StateProblems=@(Get-ReaderStateProblems $session)'; New = '$session.StateProblems=@()' }
+    @{ Name = 'Sol r3: the reader-state result discarded'; Old = '$session.StateProblems=@(Get-ReaderStateProblems $session)'; New = '$null=@(Get-ReaderStateProblems $session)' }
+    @{ Name = 'Opus r3 P5: case 7 always skipped'; Old = 'if($SkipPSReadLine) { $command+='' -SkipPSReadLine'' }'; New = '$command+='' -SkipPSReadLine''' }
+    @{ Name = 'Opus r3 P6: the driver told one reader'; Old = '$Run,($Readers -join '',''),$Sabotage'; New = '$Run,$Readers[0],$Sabotage' }
+    @{ Name = 'Opus r3 P7: the outer exit switch on a constant'; Old = '    switch($code) {'; New = '    switch(0) {' }
+    @{ Name = 'Opus r3 P22: the tab-switch inputs forced'; Old = '$surfacesDuring=@([ReplyPath]::Surfaces($shell.pid)).Count; $visibleDuring=[ReplyPath]::IsWindowVisible($surface)'; New = '$surfacesDuring=2; $visibleDuring=$false' }
+    @{ Name = 'Opus r3 P29a: every run stops after the compile'; Old = 'if($CompileOnly) { Write-Host ''ConPTY reply-path harness C/C# compilation: PASS; no launches.''; exit 0 }'; New = 'if($true) { Write-Host ''ConPTY reply-path harness C/C# compilation: PASS; no launches.''; exit 0 }' }
+    @{ Name = 'Opus r3 L2: reader a reads W records'; File = 'reader'; Old = 'BOOL ok = ansi ? ReadConsoleInputA(in, batch, per_read, &count) : ReadConsoleInputW(in, batch, per_read, &count);'; New = 'BOOL ok = ReadConsoleInputW(in, batch, per_read, &count);' }
+    @{ Name = 'Opus r3 P2: no row has a prediction'; Old = '$prediction=Get-Prediction $step.Name $session.Mode $written'; New = '$prediction=$null' }
+    @{ Name = 'Opus r3 P3: no row is built'; Old = 'for($i=0;$i -lt $session.Steps.Count;$i++) {'; New = 'for($i=0;$i -lt 0;$i++) {' }
+    @{ Name = 'Opus r3 P23: case 7''s prompt record forced'; Old = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=$screen.Prompt;'; New = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=''PS> [?999;2n'';' }
+    @{ Name = 'Opus r3 P28: the reader list cut to one'; Old = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })'; New = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 1)' }
+    @{ Name = 'round 4: a held key ends the cleanup'; Old = 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add((''{0}: {1}'' -f $name,$_.Exception.GetType().Name)) }'; New = 'Remove-Item -LiteralPath $path -Force' }
+    @{ Name = 'round 4: the kept-key hold never released'; Old = 'if($keyHold) { $keyHold.Dispose() }'; New = '' }
+    @{ Name = 'round 4: read sizes judged on an unfinished run'; Old = '$finished=@($Session.Steps | Where-Object { $_.Barrier -eq ''OK'' }).Count -eq $Session.Planned'; New = '$finished=$true' }
+    @{ Name = 'round 4: case 7''s pin markers removed'; Old = '    # pin-end: case-7' + "`n"; New = '' }
+    @{ Name = 'round 4: any command counted as a delimiter'; Old = 'Where-Object { $_ -like ''CMD,*,02,*'' }'; New = 'Where-Object { $_ -like ''CMD,*'' }' }
     @{ Name = 'Muse 4: the APC-on-b prediction'; Old = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''\''} }'; New = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''''} }' }
     @{ Name = 'Muse 5: case 4 without its space'; Old = 'Bytes="${esc}[>1;2;3;29;30;40;100;101 q"'; New = 'Bytes="${esc}[>1;2;3;29;30;40;100;101q"' }
     @{ Name = 'Muse 7: no case 2 step'; Old = '    @{ Name=''case 2: APC feature-shaped''; Keys=@(''f16'') }'; New = '' }
@@ -503,7 +565,7 @@ $replyPathMutations = @(
     @{ Name = 'round 2: no listener PID check'; Old = 'if($listener.Count -gt 0 -and @($listener | Where-Object { $_.OwningProcess -ne $sshd.pid }).Count -gt 0) { throw ''Another process listens on the run''''s sshd port; nothing connects.'' }'; New = '' }
     @{ Name = 'round 2: ssh readers without the opt-in'; Old = 'if($sshReaders.Count -gt 0 -and -not $AllowSshFarSideUserProfileAndLocalAppData) {'; New = 'if($false) {' }
     @{ Name = 'round 2: the APC error split dropped'; Old = '    @{ Name=''case 1: APC error, split mid-body''; Keys=@(''insert'',''home''); Gap=300 }'; New = '' }
-    @{ Name = 'round 2: the ssh keys kept'; Old = 'Remove-Item -LiteralPath $path -Force;'; New = '$null=$path;' }
+    @{ Name = 'round 2: the ssh keys kept'; Old = 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }'; New = 'try { $null=$path }' }
     @{ Name = 'round 2: sabotage on by default'; Old = '[string] $Sabotage = ''none'','; New = '[string] $Sabotage = ''control'',' }
     @{ Name = 'round 2: Keys posts to any window'; Old = 'if(!OnCallerDesktop(h)) throw new Exception("Refusing to post keys to a window that is not on this private desktop");'; New = '' }
     @{ Name = 'round 2: verdicts compared with -ceq'; Old = 'if([string]::Equals($Observed,[string]$Prediction.Exact,[StringComparison]::Ordinal)) { return ''as predicted'' }'; New = 'if($Observed -ceq $Prediction.Exact) { return ''as predicted'' }' }
