@@ -4,7 +4,8 @@ const vt = @import("ghostty-vt");
 const api = @import("oracle_api").api;
 pub const Context = struct {};
 pub const alloc = std.heap.page_allocator;
-pub const conpty_no_pull_supported = api == .fork;
+pub const conpty_no_pull_supported = api == .fork or api == .stone_flag;
+pub const scrollback_bytes = @import("oracle_settings").scrollback_bytes;
 pub const option_names = names: {
     const decls = @typeInfo(vt.options).@"struct".decls;
     var result: [decls.len][]const u8 = undefined;
@@ -31,21 +32,21 @@ pub fn writeResponse(_: Context, bytes: []const u8) !void {
 }
 
 pub fn initTerminal(_: Context, cols: u16, rows: u16) !vt.Terminal {
-    return .init(alloc, .{ .cols = cols, .rows = rows, .max_scrollback = 10_000 });
+    return .init(alloc, .{ .cols = cols, .rows = rows, .max_scrollback = scrollback_bytes });
 }
 
 pub fn setConpty(term: *vt.Terminal, enabled: bool) void {
     switch (api) {
-        .fork => term.flags.resize_pull_scrollback = !enabled,
+        .fork, .stone_flag => term.flags.resize_pull_scrollback = !enabled,
         .stone => {}, // This app API has no resize-pull flag. Record that shape.
-        else => @compileError("legacy adapter requires fork or stone"),
+        else => @compileError("legacy adapter requires fork, stone or stone_flag"),
     }
 }
 
 pub fn resize(term: *vt.Terminal, cols: u16, rows: u16) !void {
     switch (api) {
         .fork => try term.resize(alloc, cols, rows),
-        .stone => try term.resize(alloc, .{ .cols = cols, .rows = rows }),
-        else => @compileError("legacy adapter requires fork or stone"),
+        .stone, .stone_flag => try term.resize(alloc, .{ .cols = cols, .rows = rows }),
+        else => @compileError("legacy adapter requires fork, stone or stone_flag"),
     }
 }

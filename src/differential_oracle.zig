@@ -6,6 +6,8 @@ const adapter = @import("oracle-adapter");
 const Entry = adapter.Entry(run);
 pub const main = Entry.main;
 pub const std_options: std.Options = .{ .log_level = .err };
+extern fn oracle_highway_target() [*:0]const u8;
+extern fn oracle_simdutf_name([*]u8, usize) usize;
 
 const Input = struct {
     bytes: []const u8,
@@ -31,16 +33,34 @@ fn run(ctx: adapter.Context) !void {
     const count = try input.int(u32);
     var output: std.Io.Writer.Allocating = .init(adapter.alloc);
     defer output.deinit();
-    try output.writer.writeAll("ORS2");
+    try output.writer.writeAll("ORS3");
     var profile: std.Io.Writer.Allocating = .init(adapter.alloc);
     defer profile.deinit();
-    try profile.writer.writeAll("{\"target\":");
     const build = @import("oracle_build");
+    const identity = @import("oracle_identity");
+    try profile.writer.writeAll("{\"build_identity\":");
+    try std.json.Stringify.value(.{ .revision = identity.revision, .dirty = identity.dirty, .vt_api = build.vt_api, .terminal_source = build.terminal_source }, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"profile\":{\"target\":");
     try std.json.Stringify.value(build.target, .{}, &profile.writer);
     try profile.writer.writeAll(",\"cpu_model\":");
     try std.json.Stringify.value(build.cpu_model, .{}, &profile.writer);
     try profile.writer.writeAll(",\"cpu_features\":");
     try std.json.Stringify.value(build.cpu_features, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"baseline_cpu_model\":");
+    try std.json.Stringify.value(build.baseline_cpu_model, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"baseline_cpu_features\":");
+    try std.json.Stringify.value(build.baseline_cpu_features, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"compiler_version\":");
+    try std.json.Stringify.value(build.compiler_version, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"scrollback_bytes\":");
+    try std.json.Stringify.value(adapter.scrollback_bytes, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"runtime_simd\":");
+    if (vt.options.simd) {
+        if (!build.simd_probe) @compileError("SIMD oracle requires the vt.cpp dispatch probe");
+        var name: [128]u8 = undefined;
+        const length = oracle_simdutf_name(&name, name.len);
+        try std.json.Stringify.value(.{ .highway = std.mem.span(oracle_highway_target()), .simdutf = name[0..length] }, .{}, &profile.writer);
+    } else try std.json.Stringify.value(.{ .highway = "scalar", .simdutf = "disabled" }, .{}, &profile.writer);
     try profile.writer.writeAll(",\"optimize\":");
     try std.json.Stringify.value(build.optimize, .{}, &profile.writer);
     try profile.writer.writeAll(",\"conpty_no_pull_supported\":");
@@ -57,7 +77,7 @@ fn run(ctx: adapter.Context) !void {
             comma = true;
         }
     }
-    try profile.writer.writeAll("}}");
+    try profile.writer.writeAll("}}}");
     try output.writer.writeInt(u32, @intCast(profile.written().len), .little);
     try output.writer.writeAll(profile.written());
     try output.writer.writeInt(u32, count, .little);

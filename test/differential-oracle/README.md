@@ -62,7 +62,7 @@ app module's generated Terminal options, imports, include paths, C macros and
 link dependencies. Oniguruma, Kitty graphics and tmux control mode remain
 selected by that tree's own app build.
 
-The upstream side is **v1.4.0's public lib-vt module**, exactly as §3.4 names it.
+The upstream side is **v1.4.0's public lib-vt module**, exactly as section 3.4 names it.
 Staging `--api v140` connects the harness to that module and its own generated
 option module. Its measured Windows defaults disable Oniguruma and tmux, while
 **Kitty graphics remains enabled**; every other public feature default is also
@@ -77,10 +77,11 @@ refuses undeclared profile differences; each actual difference must be named
 with a reason as described below. Dependency failures stop that side rather
 than selecting another profile.
 
-Select the Terminal API explicitly with `-Dvt-api=fork|stone|v140|v140_fork`.
+Select the Terminal API explicitly with `-Dvt-api=fork|stone|stone_flag|v140|v140_fork`.
 The choice never depends on compiler version or std-origin feature detection.
 `fork` and `stone` use the legacy IO adapter, with positional and structured
-resize respectively; `v140` and `v140_fork` use the modern IO adapter with
+resize respectively; `stone_flag` is structured resize **with** the ConPTY flag
+(the trial-theirs 1A API shape); `v140` and `v140_fork` use the modern IO adapter with
 structured and positional resize respectively. Stone has no ConPTY no-pull
 flag, so that flag is not emulated: record this limit when reviewing replays.
 
@@ -98,10 +99,22 @@ with that side's compiler, explicit API, SIMD on, ReleaseFast and baseline CPU.
 Only the fork accepts `-Dcustom-shaders=true`; read the other side's own app
 build options. The generator is needed only on the pre side.
 
-At **1B.3/1B.5**, delete `differential_oracle_adapter_legacy.zig` and
-`differential_oracle_corpus.zig` whole. Select a modern API and reuse the frozen
-corpus. The retained modern adapter and build helper need no compiler-selected
-shim or residue allowance. Check the cutover with `residue_gate17.py`.
+At **1B.3/1B.5**, delete these whole files:
+
+- `src/differential_oracle_adapter_legacy.zig`
+- `src/differential_oracle_corpus.zig`
+
+In `.github/workflows/test.yml`, change the **Build app-profile differential
+oracle (no capture)** step from `-Dvt-api=fork` to **`-Dvt-api=v140_fork`** for
+the retained positional-resize 1B API. If the resolved 1B API uses structured
+resize, use `-Dvt-api=v140` instead. Reuse the frozen corpus; stop building the
+legacy generator. The build rejects legacy API/generator selection on a modern
+compiler with a clear error. For a modern **app** build, the always-run identity
+step also refuses either retained legacy file by checking its actual presence,
+even if its comment is edited or its code is unreferenced. The upstream public
+module can retain the canonical source bundle; it is not a post-cutover app.
+These executable contracts do not rely on doc comments. Also run
+`residue_gate17.py` on the cutover tree.
 
 ```text
 python test/differential-oracle/oracle.py capture --corpus FROZEN_DIR/corpus.json --exe ORACLE_EXE --source-root SOURCE_TREE --out DUMPS_DIR --work RUN_DIR
@@ -113,13 +126,23 @@ separate working directories. No previous outputs are reused. Binary requests,
 responses and diagnostics stay under `RUN_DIR`; their stdout/stderr are not
 echoed. A failure, crash or timeout fails capture and preserves partial evidence.
 The timeout defaults to 900 seconds **per run**, not a performance criterion.
+The build embeds the build tree's Git HEAD and dirty flag through an always-run
+identity generator whose working directory is the actual build root. Python
+must be available for this optional build step. Capture requires that identity
+to match the clean `--source-root` HEAD, validates API/ConPTY policy, and checks
+that the source and executable remain unchanged during both runs. A stale exe,
+wrong tree or dirty build is invalid evidence. Compare also refuses one exe
+hash attributed to different production or instrumented revisions.
 
 The request and response have checked versioned headers, counts, lengths,
 ordered record indices and exact EOF. For each input/initial size, both plain
 and VT output are saved without newline conversion. Formatting keeps soft
 wraps and trailing spaces (`unwrap=false`, `trim=false`); plain uses no extras
 and VT uses `TerminalFormatter.Extra.all`. Scrollback is explicitly limited to
-10,000 bytes on both API versions. The formatter covers only the active screen,
+the app's shipped **10,000,000-byte (10 MB)** default on both API versions.
+The full corpus measured 58,899,721 dump bytes per run at this limit, below the
+1 GB budget. `-Doracle-scrollback=BYTES` is an explicit experimental override;
+it is recorded and needs a shipped-profile mismatch declaration on fork sides. The formatter covers only the active screen,
 including its history, as the API documents; it is not a complete terminal
 state serialization (for example, it does not dump inactive-screen contents).
 
@@ -130,7 +153,8 @@ writes `determinism.json` and finally `completion.json`. The completion record
 binds both identical manifests, the corpus, harness sources, full profile,
 executable and source provenance. Failed or nondeterministic runs retain partial
 evidence but receive no completion record. Compare and native-controls recheck
-both runs and refuse missing, corrupt or mismatched completion with exit 2.
+both runs and hash **both raw manifest files**, refusing byte-only rewrites as
+well as missing, corrupt or mismatched completion with exit 2.
 
 Admission also compares the captured harness hashes with the running tool's
 sources. To declare an intentional instrument change explicitly, pass
@@ -149,7 +173,7 @@ python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 UPSTREA
 
 An intentional profile difference requires `--declare-profile-differences
 DECLARATIONS.json`. The file is a JSON array; each row contains exactly `side`,
-`option` and a nonempty `reason`. `side` is `branch` or `upstream`, compared with
+`option`, `old`, `new` and a nonempty `reason`. `side` is `branch` or `upstream`, compared with
 `pre`; `option` is a dotted path in the recorded profile. For example:
 
 ```json
@@ -157,11 +181,15 @@ DECLARATIONS.json`. The file is a JSON array; each row contains exactly `side`,
   {
     "side": "upstream",
     "option": "terminal_options.oniguruma",
+    "old": { "present": true, "value": true },
+    "new": { "present": true, "value": false },
     "reason": "v1.4.0 public lib-vt disables Oniguruma"
   },
   {
     "side": "upstream",
     "option": "terminal_options.tmux_control_mode",
+    "old": { "present": true, "value": true },
+    "new": { "present": true, "value": false },
     "reason": "v1.4.0 public lib-vt derives tmux support from Oniguruma"
   }
 ]
@@ -171,11 +199,41 @@ The example covers only those two differences. A real declaration must name
 **every** measured difference, including artifact, version fields and options
 present on only one side. Kitty graphics is not a difference when enabled on
 both sides. Missing, extra, duplicate, unchanged or wrong-side option names and
-empty reasons are errors. The comparison report retains the complete profiles
+empty reasons are errors. Values are mandatory and must match exactly, including
+their types and presence. Use `{ "present": false }` for an absent field, which
+is distinct from a present `null`. Stale values or reversed directions fail. The comparison report retains the complete profiles
 and every accepted declaration with the measured values and presence on each
 side. It still lists and requires triage for every dump difference; declaring a
 profile difference does not disposition behavior. Harness-change declarations
 remain separate and do not authorize profile changes.
+
+Capture records an independent `shipped_profile` assessment against the app defaults:
+SIMD on, ReleaseFast, the compiler's baseline CPU/model/features, Windows MSVC,
+all app Terminal features, ConPTY no-pull support and 10 MB scrollback. App
+version fields and host provenance remain recorded separately from these
+settings. Even **two equal non-shipped fork profiles** are refused by compare.
+An intentional experiment needs `--declare-shipped-mismatches FILE`, using the
+same value-bound schema for **every** mismatch on each affected `pre`, `branch`
+or `upstream` app side: `old` is the shipped expectation and `new` the measured
+value. This declaration is separate from cross-profile differences. The `pre` and `branch` slots require shipped settings even if the executable
+uses the public module. Put a genuine public-library endpoint in the third
+`upstream` slot (for a pair diagnostic use pre/pre/upstream), or explicitly
+declare its shipped mismatches as well. Public metadata cannot silently exempt
+a fork slot. The upstream public profile still records that it differs from
+the shipped app; only that upstream role is exempt from enforcement.
+
+The profile also records the actual Zig compiler version and the host's
+Highway and simdutf dispatch names. The oracle-only probe uses `vt.cpp`'s exact
+C++ flags and runtime dispatch; it does not force a target. Scalar builds are
+marked explicitly. Different compiler/host paths require normal value-bound
+profile declarations. Reports identify each side's revisions, build identity,
+exe hash, both manifest hashes, completion hash and every declaration actually
+used. Unused or duplicate harness, profile or shipped declarations are errors.
+
+CI's build-only step measured **3m30s on the hosted runner**. Keep it under the
+existing Zig-path job filter: terminal dependencies and API drift span the Zig
+tree, so a narrower path filter could miss breakage. Documentation-only changes
+already skip compiled jobs.
 
 The pair report lists every differing `(input, cols, rows, format)`. Three-way
 comparison implements the plan's table exactly:

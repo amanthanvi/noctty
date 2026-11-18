@@ -6,6 +6,7 @@ pub const Context = struct { io: std.Io };
 pub const alloc = std.heap.page_allocator;
 pub const conpty_no_pull_supported = true;
 pub const option_names = @typeInfo(vt.options).@"struct".decl_names;
+pub const scrollback_bytes = @import("oracle_settings").scrollback_bytes;
 
 pub fn Entry(comptime run: anytype) type {
     return struct {
@@ -26,7 +27,7 @@ pub fn writeResponse(ctx: Context, bytes: []const u8) !void {
 }
 
 pub fn initTerminal(ctx: Context, cols: u16, rows: u16) !vt.Terminal {
-    return .init(ctx.io, alloc, .{ .cols = cols, .rows = rows, .max_scrollback_bytes = 10_000 });
+    return .init(ctx.io, alloc, .{ .cols = cols, .rows = rows, .max_scrollback_bytes = scrollback_bytes });
 }
 
 pub fn setConpty(term: *vt.Terminal, enabled: bool) void {

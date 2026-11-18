@@ -16,7 +16,7 @@ from pathlib import Path
 
 def instrument_build(data, api):
     text = data.decode("utf-8").replace("\r\n", "\n")
-    if api == "fork":
+    if api == "fork" or (api == "stone_flag" and "    const exe = if (" in text):
         anchor = "    // Standalone feasibility spike."
         addition = '    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe);\n\n'
     elif api == "v140":
@@ -37,7 +37,11 @@ def instrument_build(data, api):
 
 def sources(root):
     return sorted(
-        [p for p in (root / "src").glob("differential_oracle*.zig")]
+        [
+            p
+            for p in (root / "src").glob("differential_oracle*")
+            if p.suffix in (".zig", ".cpp")
+        ]
         + [
             p
             for p in (root / "test/differential-oracle").iterdir()
@@ -50,7 +54,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo", type=Path)
     parser.add_argument(
-        "--api", choices=("fork", "stone", "v140", "v140_fork"), required=True
+        "--api",
+        choices=("fork", "stone", "stone_flag", "v140", "v140_fork"),
+        required=True,
     )
     args = parser.parse_args()
     repo = args.repo.resolve()

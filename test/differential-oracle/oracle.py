@@ -325,6 +325,7 @@ def capture(args):
     if harness != harness_sources():
         raise ValueError("capture source harness differs from the running harness")
     exe = args.exe.resolve()
+    exe_hash = digest(exe.read_bytes())
     args.out.mkdir(parents=True, exist_ok=False)
     args.work.mkdir(parents=True, exist_ok=False)
     (args.out / "corpus.json").write_bytes(corpus_bytes)
@@ -351,12 +352,20 @@ def capture(args):
                 f"oracle run {repeat} failed with exit {proc.returncode}; diagnostics retained"
             )
         response = Binary((work / "response.bin").read_bytes())
-        if response.take(4) != b"ORS2":
+        if response.take(4) != b"ORS3":
             raise ValueError("unsupported oracle response")
-        profile = json.loads(
+        header = json.loads(
             response.take(response.unpack("I")[0]), object_pairs_hook=no_duplicates
         )
-        validate_profile(profile)
+        profile = header["profile"]
+        identity = header["build_identity"]
+        validate_build_identity(identity, provenance, profile)
+        if (
+            source_provenance(source) != provenance
+            or harness_sources(source) != harness
+            or digest(exe.read_bytes()) != exe_hash
+        ):
+            raise ValueError("source or executable changed during capture")
         if response.unpack("I")[0] != len(records):
             raise ValueError("bad oracle response count")
         dest = args.out / f"run-{repeat}"
@@ -383,14 +392,16 @@ def capture(args):
                 )
         response.done()
         manifest = {
-            "schema": 2,
+            "schema": 3,
             "revision": revision,
             "provenance": provenance,
             "harness_sources": harness,
             "profile": profile,
+            "build_identity": identity,
+            "shipped_profile": shipped_profile(profile, identity),
             "corpus_sha256": digest(corpus_bytes),
             "request_sha256": digest(packet),
-            "exe_sha256": digest(exe.read_bytes()),
+            "exe_sha256": exe_hash,
             "items": items,
         }
         write_json(dest / "manifest.json", manifest)
@@ -422,7 +433,7 @@ def capture(args):
 
 def load_run(root):
     manifest = read_json(root / "manifest.json")
-    if manifest["schema"] != 2 or not manifest["items"]:
+    if manifest["schema"] != 3 or not manifest["items"]:
         raise ValueError("unsupported or empty dump set")
     if not re.fullmatch("[0-9a-f]{40}", manifest["revision"]) or not re.fullmatch(
         "[0-9a-f]{64}", manifest["exe_sha256"]
@@ -434,6 +445,11 @@ def load_run(root):
     ):
         raise ValueError("inconsistent source provenance")
     validate_profile(manifest["profile"])
+    validate_build_identity(manifest["build_identity"], provenance, manifest["profile"])
+    if manifest["shipped_profile"] != shipped_profile(
+        manifest["profile"], manifest["build_identity"]
+    ):
+        raise ValueError("shipped profile assessment is stale")
     if not manifest["harness_sources"] or any(
         not re.fullmatch("[0-9a-f]{64}", h)
         for h in manifest["harness_sources"].values()
@@ -524,7 +540,9 @@ def source_provenance(repo):
         "build.zig",
         "test/differential-oracle/staged-source.json",
     }
-    changed = set(git(repo, "diff", "--name-only", production, head).splitlines())
+    changed = set(
+        git(repo, "diff", "--no-renames", "--name-only", production, head).splitlines()
+    )
     if not changed <= allowed:
         raise ValueError(
             "source contains production changes beyond oracle instrumentation"
@@ -575,6 +593,87 @@ def validate_profile(profile):
         or any(not isinstance(f, str) for f in profile["cpu_features"])
     ):
         raise ValueError("invalid target/CPU/optimization profile")
+    if (
+        not isinstance(profile["compiler_version"], str)
+        or not profile["compiler_version"]
+        or not isinstance(profile["runtime_simd"], dict)
+        or set(profile["runtime_simd"]) != {"highway", "simdutf"}
+        or any(
+            not isinstance(v, str) or not v for v in profile["runtime_simd"].values()
+        )
+    ):
+        raise ValueError("invalid compiler/runtime SIMD profile")
+    if (
+        type(profile["scrollback_bytes"]) is not int
+        or profile["scrollback_bytes"] < 0
+        or not isinstance(profile["baseline_cpu_model"], str)
+        or not isinstance(profile["baseline_cpu_features"], list)
+    ):
+        raise ValueError("invalid baseline CPU/scrollback profile")
+
+
+def validate_build_identity(identity, provenance, profile):
+    validate_profile(profile)
+    if (
+        identity["dirty"] is not False
+        or identity["revision"] != provenance["instrumented_revision"]
+    ):
+        raise ValueError("executable build HEAD/clean state does not match source-root")
+    api = identity["vt_api"]
+    if api not in ("fork", "stone", "stone_flag", "v140", "v140_fork") or (
+        "vt_api" in provenance and provenance["vt_api"] != api
+    ):
+        raise ValueError("executable API shape does not match source provenance")
+    if profile["conpty_no_pull_supported"] is not (api != "stone"):
+        raise ValueError("executable ConPTY policy does not match its API shape")
+    if identity["terminal_source"] not in ("app", "public-lib-vt") or profile[
+        "terminal_options"
+    ]["artifact"] != ("ghostty" if identity["terminal_source"] == "app" else "lib"):
+        raise ValueError("executable Terminal source does not match its profile")
+
+
+def shipped_profile(profile, identity):
+    expected_options = {
+        k: True
+        for k, v in profile["terminal_options"].items()
+        if type(v) is bool and not k.startswith("version_")
+    }
+    expected_options.update(
+        artifact="ghostty",
+        c_abi=False,
+        slow_runtime_safety=False,
+        simd=True,
+        oniguruma=True,
+        kitty_graphics=True,
+        tmux_control_mode=True,
+    )
+    expected = {
+        "target": profile["target"].split("-")[0] + "-windows-msvc",
+        "optimize": "ReleaseFast",
+        "cpu_model": profile["baseline_cpu_model"],
+        "cpu_features": profile["baseline_cpu_features"],
+        "scrollback_bytes": 10_000_000,
+        "conpty_no_pull_supported": True,
+        "terminal_options": expected_options,
+    }
+    actual = profile_options(profile)
+    differences = []
+    for option, value in sorted(profile_options(expected).items()):
+        old = {"present": True, "value": value}
+        new = {"present": option in actual}
+        if option in actual:
+            new["value"] = actual[option]
+        if canonical(old) != canonical(new):
+            differences.append({"option": option, "old": old, "new": new})
+    return {
+        "applicable": identity["terminal_source"] == "app",
+        "matches": not differences,
+        "differences": differences,
+    }
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def complete_capture(parent):
@@ -582,27 +681,36 @@ def complete_capture(parent):
     second, twin = load_run(parent / "run-2")
     if first != second or items != twin:
         raise ValueError("cannot complete a nondeterministic capture")
+    hashes = {
+        run: digest((parent / run / "manifest.json").read_bytes())
+        for run in ("run-1", "run-2")
+    }
+    if len(set(hashes.values())) != 1:
+        raise ValueError("cannot complete byte-different manifests")
     write_json(
         parent / "completion.json",
         {
-            "schema": 1,
+            "schema": 2,
             "deterministic": True,
             "manifest_sha256": digest((parent / "run-1/manifest.json").read_bytes()),
+            "manifest_sha256s": hashes,
             "corpus_sha256": first["corpus_sha256"],
             "profile": first["profile"],
             "harness_sources": first["harness_sources"],
             "provenance": first["provenance"],
             "exe_sha256": first["exe_sha256"],
+            "build_identity": first["build_identity"],
+            "shipped_profile": first["shipped_profile"],
         },
     )
 
 
-def load_set(root, declarations=()):
+def load_set(root, declarations=(), used=None):
     root = root.resolve()
     if root.name not in ("run-1", "run-2"):
         raise ValueError("dump set must name a completed capture run")
     record = read_json(root.parent / "completion.json")
-    if record.get("schema") != 1 or record.get("deterministic") is not True:
+    if record.get("schema") != 2 or record.get("deterministic") is not True:
         raise ValueError("invalid completion record")
     first, items = load_run(root.parent / "run-1")
     second, twin = load_run(root.parent / "run-2")
@@ -621,12 +729,27 @@ def load_set(root, declarations=()):
         )
     ):
         raise ValueError("completion record does not bind this capture")
+    hashes = {
+        run: digest((root.parent / run / "manifest.json").read_bytes())
+        for run in ("run-1", "run-2")
+    }
+    if (
+        record["manifest_sha256s"] != hashes
+        or len(set(hashes.values())) != 1
+        or record["build_identity"] != first["build_identity"]
+        or record["shipped_profile"] != first["shipped_profile"]
+    ):
+        raise ValueError(
+            "completion does not bind both manifest byte streams and assessments"
+        )
     current = digest(json.dumps(harness_sources(), sort_keys=True).encode())
     captured = digest(json.dumps(first["harness_sources"], sort_keys=True).encode())
     if current != captured and f"{captured}:{current}" not in declarations:
         raise ValueError(
             "harness changed; explicit --declare-harness-change OLD:CURRENT required"
         )
+    if current != captured and used is not None:
+        used.add(f"{captured}:{current}")
     return first, items
 
 
@@ -641,7 +764,9 @@ def classify(pre, branch, upstream):
 
 
 def native_controls(args):
-    _, items = load_set(args.dumps, args.declare_harness_change)
+    used = set()
+    _, items = load_set(args.dumps, args.declare_harness_change, used)
+    validate_harness_declarations(args.declare_harness_change, used)
     if {key[0] for key in items} != {"text", "sgr", "reset", "resize"}:
         raise ValueError("native controls require the four sentinel inputs")
     checks = []
@@ -659,7 +784,10 @@ def native_controls(args):
         if b"oracle-control" not in text or b"\x1b" not in text:
             raise ValueError("native VT formatter control failed")
         checks.append(f"VT reset/style {cols}x{rows}")
-    write_json(args.report, {"passed": len(checks), "checks": checks})
+    write_json(
+        args.report,
+        {"passed": len(checks), "checks": checks, "harness_declarations": sorted(used)},
+    )
     print(json.dumps({"native_controls_passed": len(checks)}))
 
 
@@ -671,12 +799,24 @@ def compare(
     declarations=(),
     expected_corpus=None,
     profile_declarations=None,
+    shipped_declarations=None,
 ):
+    used = set()
     sets = [
-        load_set(root, declarations)
+        load_set(root, declarations, used)
         for root in (pre_root, branch_root, upstream_root)
         if root is not None
     ]
+    validate_harness_declarations(declarations, used)
+    for index, (manifest, _) in enumerate(sets):
+        for other, _ in sets[:index]:
+            if manifest["exe_sha256"] == other["exe_sha256"] and (
+                manifest["revision"],
+                manifest["provenance"]["instrumented_revision"],
+            ) != (other["revision"], other["provenance"]["instrumented_revision"]):
+                raise ValueError(
+                    "one executable hash is attributed to different source revisions"
+                )
     if (
         len({m["corpus_sha256"] for m, _ in sets}) != 1
         or len({m["request_sha256"] for m, _ in sets}) != 1
@@ -688,6 +828,15 @@ def compare(
         side: m["profile"] for side, (m, _) in zip(("pre", "branch", "upstream"), sets)
     }
     declared_profiles = validate_profile_declarations(profiles, profile_declarations)
+    shipping_differences = {
+        (side, d["option"]): {"side": side, **d}
+        for side, (m, _) in zip(("pre", "branch", "upstream"), sets)
+        if side in ("pre", "branch") or m["build_identity"]["terminal_source"] == "app"
+        for d in m["shipped_profile"]["differences"]
+    }
+    declared_shipping = validate_option_declarations(
+        shipping_differences, shipped_declarations
+    )
     if (
         any(m["harness_sources"] != sets[0][0]["harness_sources"] for m, _ in sets[1:])
         and not declarations
@@ -745,6 +894,31 @@ def compare(
     return {
         "profiles": profiles,
         "profile_declarations": declared_profiles,
+        "shipped_profile_declarations": declared_shipping,
+        "harness_declarations": sorted(used),
+        "sides": {
+            side: {
+                "revision": m["revision"],
+                "harness_sources_sha256": digest(
+                    json.dumps(m["harness_sources"], sort_keys=True).encode()
+                ),
+                "provenance": m["provenance"],
+                "build_identity": m["build_identity"],
+                "exe_sha256": m["exe_sha256"],
+                "manifest_sha256s": read_json(root.parent / "completion.json")[
+                    "manifest_sha256s"
+                ],
+                "completion_sha256": digest(
+                    (root.parent / "completion.json").read_bytes()
+                ),
+                "shipped_profile": m["shipped_profile"],
+            }
+            for side, root, (m, _) in zip(
+                ("pre", "branch", "upstream"),
+                (pre_root, branch_root, upstream_root),
+                sets,
+            )
+        },
         "counts": dict(sorted(counts.items())),
         "items": len(sets[0][1]),
         "differences": differences,
@@ -779,13 +953,17 @@ def validate_profile_declarations(profiles, declarations):
                 before["value"] = pre[name]
             if name in options:
                 after["value"] = options[name]
-            if before != after:
+            if canonical(before) != canonical(after):
                 differing[(side, name)] = {
                     "side": side,
                     "option": name,
-                    "pre": before,
-                    "compared": after,
+                    "old": before,
+                    "new": after,
                 }
+    return validate_option_declarations(differing, declarations)
+
+
+def validate_option_declarations(differing, declarations):
     if declarations is None:
         declarations = []
     if not isinstance(declarations, list):
@@ -794,8 +972,11 @@ def validate_profile_declarations(profiles, declarations):
     for row in declarations:
         if (
             not isinstance(row, dict)
-            or set(row) != {"side", "option", "reason"}
-            or any(not isinstance(row[k], str) or not row[k].strip() for k in row)
+            or set(row) != {"side", "option", "reason", "old", "new"}
+            or any(
+                not isinstance(row[k], str) or not row[k].strip()
+                for k in ("side", "option", "reason")
+            )
         ):
             raise ValueError("invalid profile declaration")
         key = row["side"], row["option"]
@@ -803,12 +984,52 @@ def validate_profile_declarations(profiles, declarations):
             raise ValueError(
                 "profile declaration names an unchanged, absent or duplicate option"
             )
+        if canonical(row["old"]) != canonical(differing[key]["old"]) or canonical(
+            row["new"]
+        ) != canonical(differing[key]["new"]):
+            raise ValueError("declaration values are stale or have the wrong direction")
         accepted[key] = {**differing[key], "reason": row["reason"]}
     if set(accepted) != set(differing):
         raise ValueError(
             "compared build profiles differ without a declaration for every differing option"
         )
     return [accepted[key] for key in sorted(accepted)]
+
+
+def validate_harness_declarations(declarations, used):
+    if (
+        len(set(declarations)) != len(declarations)
+        or any(
+            not isinstance(d, str) or not re.fullmatch("[0-9a-f]{64}:[0-9a-f]{64}", d)
+            for d in declarations
+        )
+        or set(declarations) != used
+    ):
+        raise ValueError("unused, duplicate or malformed harness declaration")
+
+
+def control_profile():
+    return {
+        "target": "x86_64-windows-msvc",
+        "cpu_model": "x86_64",
+        "cpu_features": [],
+        "baseline_cpu_model": "x86_64",
+        "baseline_cpu_features": [],
+        "optimize": "ReleaseFast",
+        "compiler_version": "0.17.1",
+        "runtime_simd": {"highway": "control", "simdutf": "control"},
+        "scrollback_bytes": 10_000_000,
+        "conpty_no_pull_supported": True,
+        "terminal_options": {
+            "artifact": "ghostty",
+            "simd": True,
+            "oniguruma": True,
+            "c_abi": False,
+            "slow_runtime_safety": False,
+            "kitty_graphics": True,
+            "tmux_control_mode": True,
+        },
+    }
 
 
 def controls(args):
@@ -851,38 +1072,27 @@ def controls(args):
                             "sha256": digest(data),
                         }
                     )
+        identity = {
+            "revision": "0" * 40,
+            "dirty": False,
+            "vt_api": "v140_fork",
+            "terminal_source": "app",
+        }
+        profile = control_profile()
         write_json(
             root / "manifest.json",
             {
-                "schema": 2,
+                "schema": 3,
                 "revision": "0" * 40,
-                "exe_sha256": "1" * 64,
+                "exe_sha256": str(side + 1) * 64,
                 "provenance": {
                     "production_revision": "0" * 40,
                     "instrumented_revision": "0" * 40,
                 },
+                "build_identity": identity,
+                "profile": profile,
+                "shipped_profile": shipped_profile(profile, identity),
                 "harness_sources": harness_sources(),
-                "profile": {
-                    "target": "control",
-                    "cpu_model": "control",
-                    "cpu_features": [],
-                    "optimize": "control",
-                    "terminal_options": dict(
-                        dict.fromkeys(
-                            (
-                                "artifact",
-                                "simd",
-                                "oniguruma",
-                                "c_abi",
-                                "slow_runtime_safety",
-                                "kitty_graphics",
-                                "tmux_control_mode",
-                            ),
-                            True,
-                        ),
-                        artifact="ghostty",
-                    ),
-                },
                 "corpus_sha256": digest((root / "corpus.json").read_bytes()),
                 "request_sha256": digest(requests(read_json(root / "corpus.json"))[0]),
                 "items": items,
@@ -994,6 +1204,20 @@ def controls(args):
     twin.write_bytes(b"changed")
     rejects("nondeterministic second run", lambda: compare(*roots))
     twin.write_bytes(b"a")
+    sibling_manifest = roots[1].parent / "run-2/manifest.json"
+    sibling_manifest.write_text(
+        json.dumps(json.loads(original), separators=(",", ":")), encoding="utf-8"
+    )
+    rejects("sibling manifest bytes changed (run-1 selected)", lambda: compare(*roots))
+    rejects(
+        "sibling manifest bytes changed (run-2 selected)",
+        lambda: load_set(sibling_manifest.parent),
+    )
+    rejects(
+        "completion refuses byte-different manifests",
+        lambda: complete_capture(roots[1].parent),
+    )
+    sibling_manifest.write_bytes(original)
     rejects("malformed triage object", lambda: compare(*roots, triage={"a": 1}))
     rejects(
         "malformed triage reason",
@@ -1012,6 +1236,9 @@ def controls(args):
             path = roots[1].parent / run / "manifest.json"
             value = json.loads(original)
             mutate(value)
+            value["shipped_profile"] = shipped_profile(
+                value["profile"], value["build_identity"]
+            )
             path.write_text(json.dumps(value), encoding="utf-8")
         completion.unlink()
         complete_capture(roots[1].parent)
@@ -1019,16 +1246,24 @@ def controls(args):
     change_manifests(lambda m: m["profile"].update(optimize="different"))
     rejects("different complete build profiles", lambda: compare(*roots))
     declaration = [
-        {"side": "branch", "option": "optimize", "reason": "synthetic profile control"}
+        {
+            "side": "branch",
+            "option": "optimize",
+            "reason": "synthetic profile control",
+            "old": {"present": True, "value": "ReleaseFast"},
+            "new": {"present": True, "value": "different"},
+        }
     ]
-    declared = compare(*roots, profile_declarations=declaration)
+    declared = compare(
+        *roots, profile_declarations=declaration, shipped_declarations=declaration
+    )
     assert declared["profile_declarations"] == [
         {
             "side": "branch",
             "option": "optimize",
             "reason": "synthetic profile control",
-            "pre": {"present": True, "value": "control"},
-            "compared": {"present": True, "value": "different"},
+            "old": {"present": True, "value": "ReleaseFast"},
+            "new": {"present": True, "value": "different"},
         }
     ]
     assert declared["counts"] == result["counts"] and declared["untriaged"] == 16
@@ -1068,6 +1303,33 @@ def controls(args):
         "unused profile declaration",
         lambda: compare(roots[0], roots[0], profile_declarations=declaration),
     )
+    rejects(
+        "stale declared new value",
+        lambda: compare(
+            *roots,
+            profile_declarations=[
+                dict(declaration[0], new={"present": True, "value": "stale"})
+            ],
+        ),
+    )
+    rejects(
+        "stale declared old value",
+        lambda: compare(
+            *roots,
+            profile_declarations=[
+                dict(declaration[0], old={"present": True, "value": "stale"})
+            ],
+        ),
+    )
+    rejects(
+        "missing declared values",
+        lambda: compare(
+            *roots,
+            profile_declarations=[
+                {k: v for k, v in declaration[0].items() if k not in ("old", "new")}
+            ],
+        ),
+    )
     change_manifests(
         lambda m: m["harness_sources"].update({"src/control.zig": "2" * 64})
     )
@@ -1079,10 +1341,131 @@ def controls(args):
     )
     current = digest(json.dumps(harness_sources(), sort_keys=True).encode())
     assert compare(*roots, declarations=[f"{captured}:{current}"])["untriaged"] == 16
+    assert compare(*roots, declarations=[f"{captured}:{current}"])[
+        "harness_declarations"
+    ] == [f"{captured}:{current}"]
     checks.append("explicit harness change declaration")
     for run in ("run-1", "run-2"):
         (roots[1].parent / run / "manifest.json").write_bytes(original)
     completion.write_bytes(saved)
+    rejects(
+        "unused harness declaration",
+        lambda: compare(*roots, declarations=["a" * 64 + ":" + "b" * 64]),
+    )
+    rejects(
+        "malformed harness declaration",
+        lambda: compare(*roots, declarations=["deadbeef:cafe"]),
+    )
+    assert compare(*roots)["sides"]["branch"]["revision"] == "0" * 40
+    checks.append("comparison records revisions, executable and both manifest hashes")
+
+    def duplicate_exe_revision(m):
+        m["exe_sha256"] = "1" * 64
+        m["revision"] = "3" * 40
+        m["provenance"]["production_revision"] = "3" * 40
+
+    change_manifests(duplicate_exe_revision)
+    rejects("same executable hash under different revisions", lambda: compare(*roots))
+    change_manifests(lambda m: None)
+    for run in ("run-1", "run-2"):
+        (roots[1].parent / run / "manifest.json").write_bytes(original)
+    completion.write_bytes(saved)
+
+    pre_manifest = (roots[0] / "manifest.json").read_bytes()
+    pre_completion_path = roots[0].parent / "completion.json"
+    pre_completion = pre_completion_path.read_bytes()
+    non_shipped = json.loads(pre_manifest)
+    non_shipped["build_identity"].update(vt_api="v140_fork", terminal_source="app")
+    non_shipped["profile"].update(
+        target="x86_64-windows-msvc",
+        cpu_model="x86_64",
+        baseline_cpu_model="x86_64",
+        optimize="ReleaseFast",
+        compiler_version="0.17.1",
+    )
+    non_shipped["profile"]["terminal_options"].update(
+        artifact="ghostty", simd=False, oniguruma=True, tmux_control_mode=True
+    )
+    non_shipped["shipped_profile"] = shipped_profile(
+        non_shipped["profile"], non_shipped["build_identity"]
+    )
+    assert [d["option"] for d in non_shipped["shipped_profile"]["differences"]] == [
+        "terminal_options.simd"
+    ]
+    for run in ("run-1", "run-2"):
+        (roots[0].parent / run / "manifest.json").write_text(
+            json.dumps(non_shipped), encoding="utf-8"
+        )
+    pre_completion_path.unlink()
+    complete_capture(roots[0].parent)
+    rejects("two equal non-shipped fork profiles", lambda: compare(roots[0], roots[0]))
+    shipping = [
+        {
+            "side": side,
+            **non_shipped["shipped_profile"]["differences"][0],
+            "reason": "explicit non-shipping control",
+        }
+        for side in ("pre", "branch")
+    ]
+    accepted = compare(roots[0], roots[0], shipped_declarations=shipping)
+    assert accepted["untriaged"] == 0 and accepted[
+        "shipped_profile_declarations"
+    ] == sorted(shipping, key=lambda row: row["side"])
+    checks.append("explicit value-bound shipped mismatches accepted and recorded")
+    rejects(
+        "missing one fork shipped declaration",
+        lambda: compare(roots[0], roots[0], shipped_declarations=shipping[:1]),
+    )
+    rejects(
+        "wrong shipped mismatch value",
+        lambda: compare(
+            roots[0],
+            roots[0],
+            shipped_declarations=[
+                dict(row, old={"present": True, "value": False}) for row in shipping
+            ],
+        ),
+    )
+    for run in ("run-1", "run-2"):
+        (roots[0].parent / run / "manifest.json").write_bytes(pre_manifest)
+    pre_completion_path.write_bytes(pre_completion)
+    rejects(
+        "unused shipped mismatch declaration",
+        lambda: compare(roots[0], roots[0], shipped_declarations=shipping),
+    )
+    public_pre = json.loads(pre_manifest)
+    public_pre["build_identity"].update(vt_api="v140", terminal_source="public-lib-vt")
+    public_pre["profile"]["terminal_options"].update(
+        artifact="lib", oniguruma=False, tmux_control_mode=False
+    )
+    public_pre["shipped_profile"] = shipped_profile(
+        public_pre["profile"], public_pre["build_identity"]
+    )
+    for run in ("run-1", "run-2"):
+        (roots[0].parent / run / "manifest.json").write_text(
+            json.dumps(public_pre), encoding="utf-8"
+        )
+    pre_completion_path.unlink()
+    complete_capture(roots[0].parent)
+    rejects(
+        "public module cannot implicitly claim fork slots",
+        lambda: compare(roots[0], roots[0]),
+    )
+    public_shipping = [
+        {"side": side, **d, "reason": "Explicit public-as-fork sentinel role control"}
+        for side in ("pre", "branch")
+        for d in public_pre["shipped_profile"]["differences"]
+    ]
+    assert (
+        compare(roots[0], roots[0], shipped_declarations=public_shipping)["untriaged"]
+        == 0
+    )
+    checks.append(
+        "public profile in fork slots requires all shipped mismatch declarations"
+    )
+    for run in ("run-1", "run-2"):
+        (roots[0].parent / run / "manifest.json").write_bytes(pre_manifest)
+    pre_completion_path.write_bytes(pre_completion)
     for field in ("revision", "exe_sha256", "provenance"):
         manifest = json.loads(original)
         del manifest[field]
@@ -1158,6 +1541,11 @@ def main():
         help="JSON array naming each differing side/option and a reason",
     )
     command.add_argument(
+        "--declare-shipped-mismatches",
+        type=Path,
+        help="value-bound reasons for non-shipped fork options, including pre",
+    )
+    command.add_argument(
         "--expected-corpus", help="required corpus SHA-256 for a real gate"
     )
     command.add_argument("--report", type=Path, required=True)
@@ -1185,6 +1573,9 @@ def main():
                 args.expected_corpus,
                 read_json(args.declare_profile_differences)
                 if args.declare_profile_differences
+                else None,
+                read_json(args.declare_shipped_mismatches)
+                if args.declare_shipped_mismatches
                 else None,
             )
             write_json(args.report, result)
