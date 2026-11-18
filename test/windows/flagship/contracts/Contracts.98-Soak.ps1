@@ -37,9 +37,19 @@ $soakRules = @(
         Mutation = @('"--command=direct:$cmdPath /D"', '"--command=cmd.exe"')
     }
     @{
-        Description = 'the copy carries no noctty.ico, so it cannot create a missing AppUserModelId key'
-        Pattern = '(?s)Get-ChildItem -LiteralPath \$Bin -Force \| Where-Object \{ \$_\.Name -ne ''noctty\.ico'' \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw'
-        Mutation = @("Where-Object { `$_.Name -ne 'noctty.ico' }", 'Where-Object { $true }')
+        Description = 'the copy carries no noctty.ico (so it cannot create a missing AppUserModelId key) and no crash tree of an earlier run'
+        Pattern = '(?s)Get-ChildItem -LiteralPath \$Bin -Force \| Where-Object \{ \$_\.Name -notin @\(''noctty\.ico'', ''crash'', ''ghostty''\) \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw'
+        Mutation = @("Where-Object { `$_.Name -notin @('noctty.ico', 'crash', 'ghostty') }", "Where-Object { `$_.Name -notin @('noctty.ico') }")
+    }
+    @{
+        Description = 'a flood counts only when the acknowledgement file reaches its own number, written only after its output (CodeRabbit, round 1)'
+        Pattern = '(?s)\$script:soakFloodsAsked\+\+\s*\$want = \$script:soakFloodsAsked.*?Wait-For \{ \(Get-FloodCount\) -ge \$want \} 30000.*?''@type "\{0\}" && echo flood>>"\{1\}"'''
+        Mutation = @('(Get-FloodCount) -ge $want', '(Get-FloodCount) -gt $count')
+    }
+    @{
+        Description = 'the baseline is the original base pane, never a substitute (CodeRabbit, round 1)'
+        Pattern = '(?s)function Test-AtBaseline \{\s*\$panes = @\(Get-AllSurfaces \$false\)\s*return \$panes\.Count -eq 1 -and \$panes\[0\] -eq \$script:soakBase'
+        Mutation = @(' -and $panes[0] -eq $script:soakBase', '')
     }
     @{
         Description = 'the clipboard sequence number is recorded before and after each run'
@@ -93,8 +103,13 @@ $soakRules = @(
     }
     @{
         Description = 'nothing in the harness uses real input, the foreground, the clipboard, Start-Process or a recursive delete'
-        Pattern = '(?s)\A(?!.*(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|BringWindowToTop|OpenClipboard|SetClipboardData|GetClipboardData|Set-Clipboard|Get-Clipboard|Start-Process|Invoke-Item|Remove-Item\s+-Recurse))'
+        Pattern = '(?s)\A(?!.*(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|BringWindowToTop|OpenClipboard|SetClipboardData|GetClipboardData|Set-Clipboard|Get-Clipboard|Start-Process|Invoke-Item|Remove-Item\b[^\r\n;|]*\s-Recurse\b))'
         Mutation = @('[SoakNative]::Key($From, $Vk)', '[SoakNative]::Key($From, $Vk); Set-Clipboard -Value x')
+    }
+    @{
+        Description = 'nor a recursive delete with -Recurse after its path'
+        Pattern = '(?s)\A(?!.*Remove-Item\b[^\r\n;|]*\s-Recurse\b)'
+        Mutation = @("[IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), '')", "Remove-Item -LiteralPath `$copy -Recurse")
     }
     @{
         Description = 'the soak config clears every default binding, binds nothing that copies or pastes, and denies OSC 52 and updates'
@@ -117,9 +132,44 @@ $soakRules = @(
         Mutation = @('[SoakNative]::Inject($process)', '[SoakNative]::Inject([IntPtr]::Zero)')
     }
     @{
-        Description = 'neither control is written where the judge reads it: a control is judged blind'
-        Pattern = '(?s)\A(?!.*Add-Line \$(?:runTsv|samplesTsv|metricsTsv|threadsTsv)[^\r\n]*(?:KillAtMinute|Inject))'
-        Mutation = @('Add-Line $runTsv "planned`t$Minutes"', 'Add-Line $runTsv "planned`t$Minutes`t$KillAtMinute"')
+        Description = 'no control is written where the judge reads it: a control is judged blind'
+        Pattern = '(?s)\A(?!.*Add-Line \$(?:runTsv|samplesTsv|metricsTsv|threadsTsv|timingTsv)[^\r\n]*(?:KillAtMinute|Inject|Hang))'
+        Mutation = @('Add-Line $runTsv "planned`t$Minutes"', 'Add-Line $runTsv "planned`t$Minutes`t$HangAtMinute"')
+    }
+    @{
+        Description = 'a resize asks the copy''s own thread (SWP_ASYNCWINDOWPOS) and waits a bounded time, so a hung copy cannot hold the driver past a sample (round 1''s Opus H1)'
+        Pattern = '(?s)public static bool Resize\(IntPtr h, int width, int height, int ms\) \{\s*if \(!SetWindowPos\(h, IntPtr\.Zero, 0, 0, width, height, 0x0002 \| 0x0004 \| 0x0010 \| 0x4000\)\).*?while \(clock\.ElapsedMilliseconds < ms\);.*?\[SoakNative\]::Resize\(\$hostWindow, \$size\[0\], \$size\[1\], \$script:ResponseBoundMs\)'
+        Mutation = @('0x0002 | 0x0004 | 0x0010 | 0x4000', '0x0002 | 0x0004 | 0x0010')
+    }
+    @{
+        Description = 'the churn asks the copy to answer before the minute and before each step, so a hung copy costs it seconds, not the minute'
+        Pattern = '(?s)function Test-Answers\(\[IntPtr\] \$Window\) \{\s*return \$Window -ne \[IntPtr\]::Zero -and \[SoakNative\]::Responsive\(\$Window, \$script:ResponseBoundMs\).*?if \(-not \(Test-Answers \$hostWindow\)\) \{ Log "minute \$\{Minute\}: the copy does not answer; no churn"; \$r\.Missed\+\+; return \$r \}.*?if \(-not \(Test-Answers \$hostWindow\)\) \{ & \$skip \$Step ''the copy does not answer''; return \$false \}'
+        Mutation = @("if (-not (Test-Answers `$hostWindow)) { & `$skip `$Step 'the copy does not answer'; return `$false }", '')
+    }
+    @{
+        Description = 'a step that cannot run (past its deadline, after a missed step, the copy not answering) counts as missed (round 1''s Opus L6)'
+        Pattern = '(?s)\$skip = \{\s*param\(\[string\] \$Step, \[string\] \$Why\)\s*\$r\.Missed\+\+\s*Log "minute \$Minute \$Step step skipped: \$Why".*?if \(\$From -eq \[IntPtr\]::Zero\) \{ & \$skip \$Step ''the step before it missed''; return \$false \}\s*if \(\$clock\.ElapsedMilliseconds -ge \$OpenUntilMs\) \{ & \$skip \$Step ''past its deadline''; return \$false \}'
+        Mutation = @("param([string] `$Step, [string] `$Why)`n                `$r.Missed++", "param([string] `$Step, [string] `$Why)")
+    }
+    @{
+        Description = 'the hang control suspends only the soaked copy''s UI thread, resumes it from a timer, and runs after the first resize or 10 s before the sample'
+        Pattern = '(?s)public static uint SuspendFor\(IntPtr h, int pid, int ms\) \{.*?if \(tid == 0 \|\| owner != pid\) throw.*?if \(GetProcessIdOfThread\(t\) != \(uint\)pid\).*?resumer = new System\.Threading\.Timer\(_ => \{ ResumeThread\(t\); CloseHandle\(t\); \}.*?if \(\$i -eq 0 -and \$HangAtMinute -eq \$Minute -and \$HangAt -eq ''resize''\) \{ Start-Hang \$hostWindow \}.*?if \(\$HangAtMinute -eq \$minute -and \$HangAt -eq ''sample'' -and \[SoakNative\]::Alive\(\$process\)\) \{\s*while \(\$clock\.ElapsedMilliseconds -lt \$due - 10000\)'
+        Mutation = @('if (GetProcessIdOfThread(t) != (uint)pid)', 'if (false)')
+    }
+    @{
+        Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI", round 1''s Opus L4)'
+        Pattern = '(?s)if \(\[SoakNative\]::Layout\(\) -cne \$script:SdkLayout\) \{ throw'
+        Mutation = @('if ([SoakNative]::Layout() -cne $script:SdkLayout) { throw', 'if ($false) { throw')
+    }
+    @{
+        Description = 'a driver that overran its bound or a launch that failed still leaves the crash collection and the guards to run (round 1''s Opus L2)'
+        Pattern = '(?s)\} catch \{\s*\$outerError = \$_\.Exception\.Message\s*\} finally \{.*?Copy-CrashEvidence .*?Assert-WindowsHarnessHistoryGuard .*?if \(\$outerError\) \{ \$failed \+= \$outerError \}'
+        Mutation = @('if ($outerError) { $failed += $outerError }', '')
+    }
+    @{
+        Description = 'a LocalDumps dump counts only when written after the launch, since its name carries only the PID (round 1''s Opus L5)'
+        Pattern = '\(Test-Path -LiteralPath \$dump\) -and \(Get-Item -LiteralPath \$dump\)\.LastWriteTimeUtc -ge \$launchUtc\)'
+        Mutation = @(' -and (Get-Item -LiteralPath $dump).LastWriteTimeUtc -ge $launchUtc', '')
     }
     @{
         Description = 'the real startup ledger, jump list and PowerShell history are checked after the run, and a change fails it'
@@ -203,6 +253,9 @@ try {
     if (($native::HardErrorMode($self) -band 2) -ne 0) { throw 'The process error mode the soak reads shows SEM_NOGPFAULTERRORBOX after it was cleared.' }
 } finally { [void]$native::SetErrorMode($savedMode) }
 $injected = $false
+# The first call creates the event it duplicates, in this process: that one is not measured, so the handle the
+# count must gain is the duplicate's alone.
+if (-not $native::Inject($self)) { throw 'The negative control''s DuplicateHandle failed.' }
 for ($attempt = 0; $attempt -lt 3 -and -not $injected; $attempt++) {
     $handlesBefore = $native::HandleCount($self)
     if (-not $native::Inject($self)) { throw 'The negative control''s DuplicateHandle failed.' }
@@ -212,6 +265,50 @@ if (-not $injected) { throw 'The negative control''s injection did not add one h
 $threadRows = @($native::Threads($self, $PID))
 if ($threadRows.Count -lt 1 -or @($threadRows | Where-Object { $_ -cnotmatch '\A\d+\t(?:[^\t]+\+0x[0-9a-f]+|0x[0-9a-f]+|\?)\t[^\t]*\z' }).Count -ne 0) {
     throw 'The soak thread rows are not tid, start address and name.'
+}
+# The SDK's x64 layout (psapi.h, winnt.h, tlhelp32.h, processthreadsapi.h, winbase.h), written out here a
+# second time so the harness's own copy cannot drift with its structs.
+$sdkLayout = 'MemoryCounters=96 workingSet@16 privateUsage@72 sharedCommit@88 JobLimits=144 limitFlags@16 ' +
+    'ThreadEntry=28 threadId@8 ownerProcessId@12 ProcessEntry=568 processId@8 parentProcessId@32 ModuleInfo=24 ' +
+    'sizeOfImage@8 Startup=104 desktop@16 flags@60 output@88 error@96 StartupEx=112 attributes@104'
+if ($native::Layout() -cne $sdkLayout) { throw "The soak's mirrored structs are not the SDK's x64 layout: $($native::Layout())" }
+if ($soakText -notmatch [regex]::Escape("'" + $sdkLayout.Substring(0, 70))) { throw 'The harness''s SdkLayout is not the contract''s.' }
+
+# Round 1's Opus H1, as a probe: a window whose thread stops pumping. The harness's resize must come back
+# within its bound; a copy of it without SWP_ASYNCWINDOWPOS must wait for the thread (the hazard).
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class SoakStalledWindow {
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateWindowExW(uint ex, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr h);
+    // A hidden, never-shown popup on a thread that stops pumping for `holdMs` and then ends.
+    public static IntPtr Start(int holdMs) {
+        IntPtr window = IntPtr.Zero; var made = new ManualResetEvent(false);
+        var t = new Thread(() => {
+            window = CreateWindowExW(0x08000080, "STATIC", "", 0x80000000, 0, 0, 100, 100, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            made.Set();
+            Thread.Sleep(holdMs);
+            DestroyWindow(window);
+        });
+        t.IsBackground = true; t.Start(); made.WaitOne();
+        return window;
+    }
+}
+'@
+$blockingName = 'SoakNativeBlocking' + [guid]::NewGuid().ToString('N')
+Add-Type -TypeDefinition ($nativeSource.Replace('public static class SoakNative', "public static class $blockingName").Replace(
+        '0x0002 | 0x0004 | 0x0010 | 0x4000', '0x0002 | 0x0004 | 0x0010'))
+foreach ($case in @(@{ Type = $native; Async = $true }, @{ Type = ($blockingName -as [type]); Async = $false })) {
+    $stalled = [SoakStalledWindow]::Start(3000)
+    if ($stalled -eq [IntPtr]::Zero) { throw 'The stalled-window probe made no window.' }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    [void]$case.Type::Resize($stalled, 321, 123, 500)
+    $elapsed = $timer.ElapsedMilliseconds
+    if ($case.Async -and $elapsed -gt 2000) { throw "The soak's resize waited $elapsed ms for a thread that stopped pumping." }
+    if (-not $case.Async -and $elapsed -lt 2500) { throw "The blocking-resize control returned in $elapsed ms; the probe does not stall." }
+    Start-Sleep -Milliseconds 3200   # the probe thread ends and destroys its window
 }
 
 # CI runs the judge's controls on a pinned interpreter, unconditionally (PLAN.md §6.5: setup-python at a
