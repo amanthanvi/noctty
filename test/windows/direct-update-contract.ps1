@@ -363,7 +363,7 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
             Refuses RejectedNotObject {Assert-RejectedCopy $before $good}
         }
         [IO.File]::WriteAllText($journal,'{"portable_apply_phase":null,"staged_version":null}')
-        Assert-RejectedCopy $before $good
+        try{Assert-RejectedCopy $before $good}catch{$failures.Add('RejectedClearPositive')}
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
         Refuses Startup {Assert-LocalState $fingerprint @{Exists=$true;Hash='b';Modified='t'} @() @()}
