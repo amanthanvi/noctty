@@ -4,7 +4,7 @@
 # `test-lib-vt -Demit-lib-vt=true`), each reason read from the test's own skip condition.
 # Columns: suite<TAB>qualified name<TAB>requires<TAB>reason. requires is `-` for a skip the build decides
 # (target, backend, build option, or a body upstream disabled), or the environment facts the capture records
-# (capture-test-ran-list.ps1 `# env:` lines) under which the skip is approved. An unnamed block's entry approves
+# (capture-test-ran-list.ps1 `# env:` lines) or build keys (`build:<key>=<value>`) under which the skip is approved. An unnamed block's entry approves
 # one skipped block of its container. Add an entry only with the skip condition it rests on; remove one when its
 # test runs everywhere the gate lists are taken.
 ghostty-test	Command.test.Command: os pre exec 1	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
@@ -44,8 +44,8 @@ ghostty-test	cli.CommaSplitter.test.splitter 17	-	Escapes outside quotes are POS
 ghostty-test	cli.CommaSplitter.test.splitter 18	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
 ghostty-test	cli.CommaSplitter.test.splitter 25	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
 ghostty-test	cli.CommaSplitter.test.splitter 9	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
-ghostty-test	font.Collection.test.face metrics	-	Only for the web_canvas font backend (`options.backend != .web_canvas`); this build uses freetype
-ghostty-test	font.Collection.test.hasCodepoint emoji default graphical	-	Only for the fontconfig_freetype font backend; the Windows build uses freetype
+ghostty-test	font.Collection.test.face metrics	-	Only for the web_canvas font backend (`options.backend != .web_canvas`); the Windows build uses windows_freetype
+ghostty-test	font.Collection.test.hasCodepoint emoji default graphical	-	Only for the fontconfig_freetype font backend (`options.backend != .fontconfig_freetype`); the Windows build uses windows_freetype
 ghostty-test	font.shaper.harfbuzz.test.shape Bengali ligatures with out of order vowels	font:Arial Unicode MS=absent	Needs the Arial Unicode MS font (`testShaperWithDiscoveredFont`); skips where it is not installed
 ghostty-test	font.shaper.harfbuzz.test.shape Chakma vowel sign with ligature (vowel sign renders first)	font:Noto Sans Chakma=absent	Needs the Noto Sans Chakma font (`testShaperWithDiscoveredFont`); skips where it is not installed
 ghostty-test	font.shaper.harfbuzz.test.shape Devanagari string	font:Arial Unicode MS=absent	Needs the Arial Unicode MS font (`testShaperWithDiscoveredFont`); skips where it is not installed

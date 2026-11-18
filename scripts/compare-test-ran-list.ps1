@@ -6,34 +6,47 @@ one: as OK, as an approved SKIP, or as a ledgered removal.
 
 .DESCRIPTION
 Lists come from scripts/capture-test-ran-list.ps1. A test's identity is its
-suite and its fully qualified name. Zig names an unnamed `test { ... }` block
-by its position in its container (`<container>.test_<n>`, numbered from 0 in
-each container, file or struct), so a block added above it renumbers it: the
-compare counts a container's unnamed blocks instead (`<container>.test_#`,
-their number the multiplicity), which still fails a dropped one. Only a real
-unnamed block is counted that way: a named test called "test_0" is
-`<container>.test.test_0` and keeps its own identity.
+suite and its fully qualified name (as the list writes it: `\`, tab, CR and LF
+escaped). Zig names an unnamed `test { ... }` block by its position in its
+container (`<container>.test_<n>`, numbered from 0 in each container, file or
+struct), so a block added above it renumbers it: the compare counts a
+container's unnamed blocks instead (`<container>.test_#`, their number the
+multiplicity), which still fails a dropped one. Only a real unnamed block is
+counted that way: a named test called "test_0" is `<container>.test.test_0`
+and keeps its own identity.
 
-Several -Baseline lists are united, as PLAN.md §3.2 asks of a forward merge
-(the `main` commit it merges and the phase branch before it) and of the 1B
-branch's carried baseline (the last green phase-side list with the list of
+Several -Baseline lists are united, as PLAN.md section 3.2 asks of a forward
+merge (the `main` commit it merges and the phase branch before it) and of the
+1B branch's carried baseline (the last green phase-side list with the list of
 each `main` parent merged meanwhile): an identity counts with the largest
-multiplicity any baseline gives it. Every list must exist, parse, hold rows
-and be green: each suite exited 0 with no FAIL row, logged error, leak or
-panic, so a `-TestLog` import whose exit code was not given is refused. Every
-list must record a real build (options and compiler, not `unknown`), and all
-must agree on it and on their environment facts (`# env:` lines), so a test
-that runs only in some environments or with some options cannot read as
-dropped or as carried. A filtered build (`-Dtest-filter`) is refused as a
-baseline unless -AllowFilteredBaseline is given (for a control).
+multiplicity any baseline gives it.
+
+Every list must exist, parse, hold rows, carry one green suite record for each
+suite its rows name (exit 0, no FAIL row, logged error, leak or panic, counts
+that match the rows), record a real build (options and compiler, not
+`unknown`), and come from a clean checkout (a `dirty=true` build is refused
+unless -AllowDirty). All must agree on the build and on their environment facts
+(`# env:` lines), so a test that runs only in some environments or with some
+options cannot read as dropped or as carried. A filtered build (`-Dtest-filter`)
+is refused as a baseline unless -AllowFilteredBaseline is given (for a control).
+
+The compiler must match too, except across a crossing the caller declares:
+`-CompilerCrossing 0.15.2=0.17.1` lets baselines built by 0.15.2 be compared
+with a later list built by 0.17.1 (1B.5's first green build and each 1B forward
+merge's `main` parent, PLAN.md section 3.2). Across it the mode is compared by
+meaning (Debug = debug, ReleaseSafe = safe, ReleaseFast = fast, ReleaseSmall =
+small: 0.17.1 renamed the optimize modes), and every other key stays strict. The
+verdict names each crossing it used.
 
 The later list fails the check when
   * an identity has fewer occurrences than the baselines give it (DROPPED),
     unless -Removals ledgers them;
-  * it has a SKIP that no -ApprovedSkips entry approves (UNAPPROVED-SKIP), in
-    the baseline or not: PLAN.md §3.2 accepts "OK or an approved SKIP";
-  * an approved SKIP's entry names environment facts the list does not have
-    (SKIP-ENVIRONMENT);
+  * it has a SKIP that no applicable -ApprovedSkips entry approves
+    (UNAPPROVED-SKIP), in the baseline or not: section 3.2 accepts "OK or an
+    approved SKIP";
+  * an approval exists for a SKIP but its conditions do not hold for this list
+    (SKIP-ENVIRONMENT), including a fact an imported log could not record
+    (`unknown`);
   * it has any FAIL row.
 Tests only the later list has are counted as new; a new test that skips still
 needs its approval. A new test that never runs cannot be seen here (see
@@ -41,11 +54,14 @@ RAN-LIST-01 in docs/agents/log/test-harnesses.md for 1B.5).
 
 -Removals files hold `<suite><TAB><qualified name><TAB><reason>` lines, and
 -ApprovedSkips files `<suite><TAB><qualified name><TAB><requires><TAB><reason>`,
-where requires is `-` or `fact=value[;fact=value]` over the capture's
-environment facts; `#` starts a comment line. Each entry covers one test, an
-unnamed block's entry one block of its container. Every entry needs a reason:
-a removal names the residual- or dropped-delta-ledger entry it rests on
-(PLAN.md §3.2), a skip why the test skips. Several files of each are merged.
+where requires is `-` or `cond[;cond]`, each cond `<fact>=<value>` over the
+capture's environment facts or `build:<key>=<value>` over the list's build
+(`build:options=-Dcustom-shaders=true` names CI's list, `build:mode=ReleaseSafe`
+1A's ReleaseSafe list; a mode matches by meaning). `#` starts a comment line.
+Each entry covers one test, an unnamed block's entry one block of its
+container. Every entry needs a reason: a removal names the residual- or
+dropped-delta-ledger entry it rests on (section 3.2), a skip why the test
+skips. Several files of each are merged.
 
   pwsh scripts/compare-test-ran-list.ps1 -Baseline main-plain.tsv -Candidate branch-plain.tsv `
       -ApprovedSkips test/windows/ran-list-approved-skips.tsv
@@ -56,17 +72,34 @@ param(
     [string] $Candidate,
     [string[]] $Removals = @(),
     [string[]] $ApprovedSkips = @(),
+    # `<from>=<to>`: baselines built by <from> may be compared with a later list built by <to>.
+    [string] $CompilerCrossing,
     [switch] $AllowFilteredBaseline,
+    # Accept lists of a checkout with tracked changes (a control).
+    [switch] $AllowDirty,
     # Dot-source for the functions only.
     [switch] $LibraryOnly
 )
 
-$script:RanListFormat = '# noctty test ran list v2'
+$script:RanListFormat = '# noctty test ran list v3'
 
 function Resolve-RanListPath {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
     return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+}
+
+# An optimize mode by its meaning: Zig 0.17.1 renamed Debug, ReleaseSafe,
+# ReleaseFast and ReleaseSmall to debug, safe, fast and small.
+function Get-RanListModeMeaning {
+    param([AllowEmptyString()] [string] $Mode)
+    switch -CaseSensitive ($Mode) {
+        { $_ -cin 'Debug', 'debug' } { return 'debug' }
+        { $_ -cin 'ReleaseSafe', 'safe' } { return 'safe' }
+        { $_ -cin 'ReleaseFast', 'fast' } { return 'fast' }
+        { $_ -cin 'ReleaseSmall', 'small' } { return 'small' }
+        default { return $Mode }
+    }
 }
 
 # The identity the compare keys on. A real unnamed block, `<container>.test_<n>`
@@ -81,8 +114,9 @@ function Get-RanListIdentity {
     return "$Suite`t$Name"
 }
 
-# Reads a list. A file that is missing, empty, not a v2 list, cut short or
-# inconsistent with its end line has problems.
+# Reads a list. A file that is missing, empty, not a v3 list, cut short,
+# inconsistent with its end line, or without a green suite record for each of
+# its suites has problems.
 function Read-RanList {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
     $full = Resolve-RanListPath $Path
@@ -98,7 +132,7 @@ function Read-RanList {
         return $result
     }
     $rows = [Collections.Generic.List[object]]::new()
-    $suites = [Collections.Generic.List[object]]::new()
+    $suites = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $end = $null
     $total = 0
     $revision = $null
@@ -112,8 +146,16 @@ function Read-RanList {
             continue
         }
         if ($line -match '^# env: ([^=]+)=(.*)$') { $result.Environment[$Matches[1]] = $Matches[2]; continue }
-        if ($line -match '^# suite: (\S+) tests=(\d+) ok=(\d+) skip=(\d+) fail=(\d+) exit=(\S+) errors-logged=(\d+) leaked=(\d+) panics=(\d+)$') {
-            $suites.Add([pscustomobject]@{ Name = $Matches[1]; Fail = [int]$Matches[5]; Exit = $Matches[6]; ErrorsLogged = [int]$Matches[7]; Leaked = [int]$Matches[8]; Panics = [int]$Matches[9] })
+        if ($line.StartsWith('# suite: ')) {
+            if ($line -notmatch '^# suite: (\S+) tests=(\d+) ok=(\d+) skip=(\d+) fail=(\d+) exit=(\S+) errors-logged=(\d+) leaked=(\d+) panics=(\d+)$') {
+                $problems.Add("'$full' line $($i + 1) is not a suite record.")
+                continue
+            }
+            if ($suites.ContainsKey($Matches[1])) { $problems.Add("'$full' has two suite records for $($Matches[1])."); continue }
+            $suites[$Matches[1]] = [pscustomobject]@{
+                Name = $Matches[1]; Tests = [int]$Matches[2]; Ok = [int]$Matches[3]; Skip = [int]$Matches[4]; Fail = [int]$Matches[5]
+                Exit = $Matches[6]; ErrorsLogged = [int]$Matches[7]; Leaked = [int]$Matches[8]; Panics = [int]$Matches[9]
+            }
             continue
         }
         if ($line.StartsWith('#')) { continue }
@@ -134,15 +176,24 @@ function Read-RanList {
         }
     }
     if ($rows.Count -eq 0) { $problems.Add("'$full' holds no tests; a baseline is never taken as empty.") }
-    if ($suites.Count -eq 0) { $problems.Add("'$full' has no suite line.") }
-    foreach ($s in $suites) {
+    # One green suite record for each suite the rows name, whose counts are the rows'.
+    foreach ($name in @($rows | ForEach-Object Suite | Sort-Object -Unique)) {
+        if (-not $suites.ContainsKey($name)) { $problems.Add("'$full' has rows for suite $name but no suite record, so its run cannot be shown green."); continue }
+        $s = $suites[$name]
+        $mine = @($rows | Where-Object Suite -ceq $name)
+        $sum = { param($r) (@($mine | Where-Object Result -ceq $r | ForEach-Object Count) | Measure-Object -Sum).Sum }
+        $ok = [int](& $sum 'OK'); $skip = [int](& $sum 'SKIP'); $fail = [int](& $sum 'FAIL')
+        if ($s.Ok -ne $ok -or $s.Skip -ne $skip -or $s.Fail -ne $fail -or $s.Tests -ne $ok + $skip + $fail) {
+            $problems.Add("'$full' suite $name's record (tests=$($s.Tests) ok=$($s.Ok) skip=$($s.Skip) fail=$($s.Fail)) does not match its rows ($ok OK, $skip SKIP, $fail FAIL).")
+        }
         $green = $s.Exit -ceq '0' -and $s.Fail -eq 0 -and $s.ErrorsLogged -eq 0 -and $s.Leaked -eq 0 -and $s.Panics -eq 0
-        if (-not $green) { $problems.Add("'$full' suite $($s.Name) is not green (exit $($s.Exit), $($s.Fail) failed, $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked, $($s.Panics) panics).") }
+        if (-not $green) { $problems.Add("'$full' suite $name is not green (exit $($s.Exit), $($s.Fail) failed, $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked, $($s.Panics) panics).") }
     }
+    foreach ($name in $suites.Keys) { if (-not @($rows | Where-Object Suite -ceq $name).Count) { $problems.Add("'$full' has a suite record for $name but no rows of it.") } }
     $failed = @($rows | Where-Object Result -ceq 'FAIL')
     if ($failed.Count -gt 0) { $problems.Add("'$full' has $($failed.Count) FAIL rows, the first $($failed[0].Suite) $($failed[0].Name).") }
     $result.Rows = $rows.ToArray()
-    $result.Suites = $suites.ToArray()
+    $result.Suites = @($suites.Values)
     return $result
 }
 
@@ -197,9 +248,24 @@ function Get-RanListTally {
     return $tally
 }
 
-function Format-RanListMap {
-    param([System.Collections.IDictionary] $Map)
-    return (@($Map.Keys | Sort-Object | ForEach-Object { "$_=$($Map[$_])" }) -join ', ')
+# The conditions of an approval that do not hold for a list: each as text.
+function Get-RanListUnmetConditions {
+    param([Parameter(Mandatory)] [object] $Entry, [Parameter(Mandatory)] [object] $List)
+    $unmet = @()
+    foreach ($req in $Entry.Requires) {
+        $key, $value = $req -split '=', 2
+        if ($key.StartsWith('build:')) {
+            $buildKey = $key.Substring(6)
+            $have = "$($List.Build[$buildKey])"
+            $holds = if ($buildKey -ceq 'mode') { (Get-RanListModeMeaning $have) -ceq (Get-RanListModeMeaning $value) } else { $have -ceq $value }
+        }
+        else {
+            $have = "$($List.Environment[$key])"
+            $holds = $have -ceq $value
+        }
+        if (-not $holds) { $unmet += "$key=$value (the list has '$have'$(if ($have -ceq 'unknown') { ', an imported log whose run recorded no facts' }))" }
+    }
+    return , $unmet
 }
 
 # The verdict: Problems (each one fails the check) and Notes (reported only).
@@ -209,21 +275,43 @@ function Compare-RanList {
         [Parameter(Mandatory)] [object] $CandidateList,
         [Collections.Generic.Dictionary[string, object]] $RemovalEntries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal),
         [Collections.Generic.Dictionary[string, object]] $SkipEntries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal),
-        [switch] $AllowFilteredBaseline
+        [AllowEmptyString()] [string] $CompilerCrossing = '',
+        [switch] $AllowFilteredBaseline,
+        [switch] $AllowDirty
     )
     $problems = [Collections.Generic.List[string]]::new()
     $notes = [Collections.Generic.List[string]]::new()
     if ($BaselineLists.Count -eq 0) { $problems.Add('No baseline was given; a missing baseline fails, it is never taken as empty.') }
     foreach ($list in @($BaselineLists) + @($CandidateList)) { foreach ($p in $list.Problems) { $problems.Add($p) } }
+    $crossFrom = $null; $crossTo = $null
+    if (-not [string]::IsNullOrWhiteSpace($CompilerCrossing)) {
+        if ($CompilerCrossing -notmatch '^([^=\s]+)=([^=\s]+)$' -or $Matches[1] -ceq $Matches[2]) { $problems.Add("-CompilerCrossing '$CompilerCrossing' is not '<from>=<to>' with two compilers.") }
+        else { $crossFrom = $Matches[1]; $crossTo = $Matches[2] }
+    }
     if ($problems.Count -gt 0) { return [pscustomobject]@{ Problems = $problems.ToArray(); Notes = $notes.ToArray() } }
 
-    $buildKeys = @('options', 'mode', 'target', 'zig', 'filtered')
+    foreach ($list in @($BaselineLists) + @($CandidateList)) {
+        if ($list.Build['dirty'] -ceq 'true' -and -not $AllowDirty) { $problems.Add("'$($list.Path)' was built from a checkout with tracked changes (dirty=true), so its tests are not its revision's.") }
+    }
+    $crossings = 0
     foreach ($list in $BaselineLists) {
         if ($list.Build['filtered'] -ceq 'true' -and -not $AllowFilteredBaseline) { $problems.Add("'$($list.Path)' is a filtered build (-Dtest-filter), so it is no baseline.") }
-        foreach ($key in $buildKeys) {
-            if ("$($list.Build[$key])" -cne "$($CandidateList.Build[$key])") {
-                $problems.Add("BUILD-DIFFERS $key`: '$($list.Path)' has '$($list.Build[$key])', '$($CandidateList.Path)' has '$($CandidateList.Build[$key])'.")
+        $crossed = $false
+        if ("$($list.Build['zig'])" -cne "$($CandidateList.Build['zig'])") {
+            if ($null -ne $crossFrom -and $list.Build['zig'] -ceq $crossFrom -and $CandidateList.Build['zig'] -ceq $crossTo) { $crossed = $true; $crossings++ }
+            else {
+                $hint = if ($null -eq $crossFrom) { ' (declare -CompilerCrossing <from>=<to> for a planned compiler change)' } else { " (the declared crossing is $crossFrom=$crossTo)" }
+                $problems.Add("BUILD-DIFFERS zig: '$($list.Path)' has '$($list.Build['zig'])', '$($CandidateList.Path)' has '$($CandidateList.Build['zig'])'$hint.")
             }
+        }
+        foreach ($key in 'source', 'options', 'mode', 'target', 'filtered') {
+            $a = "$($list.Build[$key])"; $b = "$($CandidateList.Build[$key])"
+            if ($key -ceq 'source') {
+                # A declared or imported list and a built one can be compared only when both are of one kind.
+                $a = $(if ($a -ceq 'built') { 'built' } else { 'not built' }); $b = $(if ($b -ceq 'built') { 'built' } else { 'not built' })
+            }
+            $same = if ($key -ceq 'mode' -and $crossed) { (Get-RanListModeMeaning $a) -ceq (Get-RanListModeMeaning $b) } else { $a -ceq $b }
+            if (-not $same) { $problems.Add("BUILD-DIFFERS $key`: '$($list.Path)' has '$($list.Build[$key])', '$($CandidateList.Path)' has '$($CandidateList.Build[$key])'.") }
         }
         $facts = @(@($list.Environment.Keys) + @($CandidateList.Environment.Keys) | Sort-Object -Unique)
         foreach ($key in $facts) {
@@ -232,6 +320,9 @@ function Compare-RanList {
             }
         }
     }
+    if ($crossings -gt 0) { $notes.Add("COMPILER-CROSSING $crossFrom -> ${crossTo}: $crossings baseline(s) built by $crossFrom, compared with a list built by $crossTo (mode by meaning).") }
+    elseif ($null -ne $crossFrom) { $notes.Add("UNUSED-CROSSING $crossFrom -> ${crossTo}: no baseline needed it.") }
+
     # The union: the largest multiplicity any baseline gives.
     $union = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     foreach ($list in $BaselineLists) {
@@ -260,20 +351,13 @@ function Compare-RanList {
         if ($later[$id].FAIL -gt 0) { $problems.Add("FAILED $label ($($later[$id].FAIL))") }
         $skips = $later[$id].SKIP
         if ($skips -eq 0) { continue }
-        $approvals = if ($SkipEntries.ContainsKey($id)) { @($SkipEntries[$id]) } else { @() }
-        if ($approvals.Count -lt $skips) {
-            $problems.Add("UNAPPROVED-SKIP $label ($skips skipped, $($approvals.Count) approved)")
-            continue
-        }
-        foreach ($entry in $approvals) {
-            foreach ($req in $entry.Requires) {
-                $key, $value = $req -split '=', 2
-                if ("$($CandidateList.Environment[$key])" -cne $value) {
-                    $problems.Add("SKIP-ENVIRONMENT $label is approved only with $key=$value; the list has '$($CandidateList.Environment[$key])'.")
-                }
-            }
-        }
-        $notes.Add("APPROVED-SKIP $label`: $($approvals[0].Reason)")
+        $all = if ($SkipEntries.ContainsKey($id)) { @($SkipEntries[$id]) } else { @() }
+        if ($all.Count -eq 0) { $problems.Add("UNAPPROVED-SKIP $label ($skips skipped, 0 approved)"); continue }
+        # Only the approvals whose conditions hold for this list count.
+        $applicable = @($all | Where-Object { (Get-RanListUnmetConditions -Entry $_ -List $CandidateList).Count -eq 0 })
+        if ($applicable.Count -ge $skips) { $notes.Add("APPROVED-SKIP $label`: $($applicable[0].Reason)"); continue }
+        $why = @($all | Where-Object { $_ -notin $applicable } | ForEach-Object { (Get-RanListUnmetConditions -Entry $_ -List $CandidateList) -join '; ' }) -join ' | '
+        $problems.Add("SKIP-ENVIRONMENT $label ($skips skipped, $($applicable.Count) of $($all.Count) approvals apply): needs $why.")
     }
     $new = @($later.Keys | Where-Object { -not $union.ContainsKey($_) }).Count
     $notes.Add("$($union.Count) baseline identities checked, $new new in the later list.")
@@ -298,7 +382,7 @@ $removalEntries = Read-RanListLedger -Paths $Removals -Kind 'removals' -Problems
 $skipEntries = Read-RanListLedger -Paths $ApprovedSkips -Kind 'approved skips' -Problems $ledgerProblems
 $baselineLists = @($Baseline | ForEach-Object { Read-RanList -Path $_ })
 $candidateList = Read-RanList -Path $Candidate
-$verdict = Compare-RanList -BaselineLists $baselineLists -CandidateList $candidateList -RemovalEntries $removalEntries -SkipEntries $skipEntries -AllowFilteredBaseline:$AllowFilteredBaseline
+$verdict = Compare-RanList -BaselineLists $baselineLists -CandidateList $candidateList -RemovalEntries $removalEntries -SkipEntries $skipEntries -CompilerCrossing $CompilerCrossing -AllowFilteredBaseline:$AllowFilteredBaseline -AllowDirty:$AllowDirty
 foreach ($note in $verdict.Notes) { Write-Host $note }
 $problems = @($ledgerProblems) + @($verdict.Problems)
 foreach ($problem in $problems) { [Console]::Error.WriteLine("RAN LIST: $problem") }
