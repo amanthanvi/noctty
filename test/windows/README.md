@@ -902,6 +902,10 @@ clear transaction pass; unreadable, locked or malformed state fails.
 Updater diagnostics recognize `update_github_releases` and `update_portable_apply`.
 Receipts retain the level and scope for each matching line and omit its message,
 so paths, URLs and arbitrary release text never enter the exported diagnostic.
+The published versions emit warnings only for updater errors/cleanup trouble;
+the portable apply helper has debug-only directory-sync diagnostics. A clean
+release-mode update can therefore leave this field empty. The state timeline,
+file hashes and exit codes remain the acceptance evidence.
 
 Every launch pins a direct absolute System32 cmd with `/D` and denies clipboard
 reads and writes. Local runs additionally use the local harness library's real
