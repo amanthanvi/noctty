@@ -1,0 +1,198 @@
+# The soak (PLAN.md §3.5): test/windows/interactive-win11-soak.ps1 runs one portable copy on a private
+# desktop for hours and records a run directory; ci/soak_judge.py judges it, and ci/test_soak_judge.py,
+# which CI's checks job runs on a pinned Python, holds the judge's controls. Pinned here: what the harness
+# may do (patterns over its code with the comments removed, each with a mutation that must fail it), its
+# native layer (compiled and run against this process: the struct size, the error mode it reads, the
+# handle the negative control injects), that the launch helper's class has the shape the judge accepts,
+# and the CI step. No noctty is started.
+$soakScript = Join-Path $repoRoot 'test\windows\interactive-win11-soak.ps1'
+$soakJudge = Join-Path $repoRoot 'ci\soak_judge.py'
+$soakLib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
+$soakWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
+
+function Get-SoakCodeText([string] $Path) {
+    $text = Get-Content -LiteralPath $Path -Raw
+    $tokens = $null; $errors = $null
+    [void][Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw "The soak harness does not parse: $Path" }
+    $builder = [Text.StringBuilder]::new($text)
+    foreach ($token in @($tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)) {
+        [void]$builder.Remove($token.Extent.StartOffset, $token.Extent.EndOffset - $token.Extent.StartOffset)
+    }
+    return $builder.ToString()
+}
+$soakText = Get-SoakCodeText $soakScript
+
+# Each rule: the pattern the harness's code must match, and a mutation (old text, new text) of the code
+# that a correct rule must reject; the mutation must change the text.
+$soakRules = @(
+    @{
+        Description = 'the copy starts with the launch helper''s isolation (its own class, --single-instance=false, --command=cmd.exe) and --window-save-state=never'
+        Pattern = '(?s)Get-InteractiveWin11SandboxLayout -RepoRoot \$repoRoot -SandboxName \$SandboxName.*?@\(Get-InteractiveWin11LaunchArguments -Layout \$layout\) \+ @\(''--window-save-state=never''\).*?\$commandLine = \(''"\{0\}" '' -f \$exe\) \+ \(\$launchArguments -join '' ''\)'
+        Mutation = @('@(Get-InteractiveWin11LaunchArguments -Layout $layout)', "@('--class=noctty-soak')")
+    }
+    @{
+        Description = 'the build mode is checked through +version before the launch, and a mismatch launches nothing'
+        Pattern = '(?s)''"\{0\}" \+version''.*?build mode.*?if \(\$harness\.BuildMode -cne \$ExpectedBuildMode\) \{.*?return 3.*?\[SoakNative\]::Spawn\(\$exe, \$commandLine'
+        Mutation = @('return 3', '')
+    }
+    @{
+        Description = 'SEM_NOGPFAULTERRORBOX is set before the copy is created, so the copy inherits it'
+        Pattern = '(?s)\[SoakNative\]::SetErrorMode\(\[SoakNative\]::GetErrorMode\(\) -bor 2\).*?\[SoakNative\]::Spawn\(\$exe, \$commandLine'
+        Mutation = @('GetErrorMode() -bor 2', 'GetErrorMode() -bor 0')
+    }
+    @{
+        Description = 'no launch asks for the default error mode (CREATE_DEFAULT_ERROR_MODE would drop the inherited one)'
+        Pattern = '(?s)\A(?!.*0x04000000)'
+        Mutation = @('0x00080000 | priority', '0x00080000 | 0x04000000 | priority')
+    }
+    @{
+        Description = 'the driver refuses to run off its private desktop, and every process it starts names that desktop'
+        Pattern = '(?s)if \(\[SoakNative\]::CurrentDesktopName\(\) -cne \$DesktopName\) \{ throw .*?\$desktopPath = "WinSta0\\\$DesktopName".*?Spawn\(\$exe, \(''"\{0\}" \+version'' -f \$exe\), \$work, \$desktopPath,.*?Spawn\(\$exe, \$commandLine, \$work, \$desktopPath,'
+        Mutation = @('$desktopPath = "WinSta0\$DesktopName"', '$desktopPath = "WinSta0\Default"')
+    }
+    @{
+        Description = 'the driver starts on a new private desktop inside the owned job, with LOCALAPPDATA and APPDATA redirected into the run'
+        Pattern = '(?s)\$desktopName = ''noctty-soak-'' \+ \[guid\]::NewGuid\(\).*?\$job = \[HiddenLocal\]::CreateOwnedJob\(\).*?\$env:LOCALAPPDATA = Join-Path \$Run ''localappdata''; \$env:APPDATA = Join-Path \$Run ''appdata''.*?\[HiddenLocal\]::Launch\(\$pwsh, \$line, \$Run, "WinSta0\\\$desktopName", \$job\)'
+        Mutation = @("`$env:LOCALAPPDATA = Join-Path `$Run 'localappdata'; ", '')
+    }
+    @{
+        Description = 'the copy is portable: the noctty.portable marker sits beside its exe'
+        Pattern = '\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
+        Mutation = @("'noctty.portable'", "'portable.marker'")
+    }
+    @{
+        Description = 'the exit code comes only from GetExitCodeProcess on the held handle: no Process object, no PID lookup'
+        Pattern = '(?s)\A(?!.*(?:\.ExitCode\b|Get-Process\b|GetProcessById|WaitForExit|\.HasExited))'
+        Mutation = @('$end = "early`t$([SoakNative]::ExitCode($process))"', '$end = "early`t$((Get-Process -Id $nocttyPid).ExitCode)"')
+    }
+    @{
+        Description = 'nothing in the harness uses real input, the foreground, the clipboard, Start-Process or a recursive delete'
+        Pattern = '(?s)\A(?!.*(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|BringWindowToTop|OpenClipboard|SetClipboardData|GetClipboardData|Set-Clipboard|Get-Clipboard|Start-Process|Invoke-Item|Remove-Item\s+-Recurse))'
+        Mutation = @('[SoakNative]::Key($From, $Vk)', '[SoakNative]::Key($From, $Vk); Set-Clipboard -Value x')
+    }
+    @{
+        Description = 'the soak config clears every default binding, binds nothing that copies, and denies OSC 52 and updates'
+        Pattern = '(?s)''auto-update = off''.*?''clipboard-read = deny''.*?''clipboard-write = deny''.*?''copy-on-select = false''.*?''keybind = clear''(?!.*keybind = [^''"\r\n]*=(?:copy|paste))'
+        Mutation = @("'keybind = f8=clear_screen'", "'keybind = f8=clear_screen'`n        'keybind = f9=copy_to_clipboard'")
+    }
+    @{
+        Description = 'the kill control ends the process with exit code 3 after the minute''s sample'
+        Pattern = '(?s)Add-Line \$timingTsv .*?if \(\$KillAtMinute -eq \$minute -and \[SoakNative\]::Alive\(\$process\)\) \{\s*\[SoakNative\]::Terminate\(\$process, 3\)'
+        Mutation = @('[SoakNative]::Terminate($process, 3)', '[SoakNative]::Terminate($process, 0)')
+    }
+    @{
+        Description = 'the negative control duplicates a handle into the soaked process each minute, before its sample'
+        Pattern = '(?s)if \(\$InjectHandleEachMinute -and \[SoakNative\]::Alive\(\$process\)\) \{\s*if \(\[SoakNative\]::Inject\(\$process\)\).*?while \(\$clock\.ElapsedMilliseconds -lt \$due\)'
+        Mutation = @('[SoakNative]::Inject($process)', '[SoakNative]::Inject([IntPtr]::Zero)')
+    }
+    @{
+        Description = 'neither control is written where the judge reads it: a control is judged blind'
+        Pattern = '(?s)\A(?!.*Add-Line \$(?:runTsv|samplesTsv|metricsTsv|threadsTsv)[^\r\n]*(?:KillAtMinute|Inject))'
+        Mutation = @('Add-Line $runTsv "planned`t$Minutes"', 'Add-Line $runTsv "planned`t$Minutes`t$KillAtMinute"')
+    }
+    @{
+        Description = 'the real startup ledger, jump list and PowerShell history are checked after the run, and a change fails it'
+        Pattern = '(?s)StartupUnchanged = \$before\.Startup -ceq \$after\.Startup.*?JumpListUnchanged = .*?HistoryUnchanged = .*?if \(-not \$guards\.StartupUnchanged\).*?if \(-not \$guards\.JumpListUnchanged\).*?if \(\$historyFailure\).*?throw \(''soak harness: '''
+        Mutation = @('if (-not $guards.StartupUnchanged) {', 'if ($false -and -not $guards.StartupUnchanged) {')
+    }
+    @{
+        Description = 'a WER scan that cannot rule a report out leaves a file in crash\, which the judge counts'
+        Pattern = '(?s)if \(\$problems\.Count -gt 0\) \{.*?WriteAllLines\(\(Join-Path \$Destination ''wer-scan-incomplete\.txt''\)'
+        Mutation = @("'wer-scan-incomplete.txt'", "'..\wer-scan-incomplete.txt'")
+    }
+)
+$soakMutations = 0
+foreach ($rule in $soakRules) {
+    Assert-TextContract -Content $soakText -Pattern $rule.Pattern -Description $rule.Description -Context $soakScript
+    $mutated = $soakText.Replace($rule.Mutation[0], $rule.Mutation[1])
+    if ($mutated -ceq $soakText) { throw "Soak contract mutation changed nothing: $($rule.Description)" }
+    if ($mutated -match $rule.Pattern) { throw "Soak contract accepted a mutation: $($rule.Description)" }
+    $soakMutations++
+}
+
+# Each run.tsv row kind is written exactly once (the judge fails a duplicate), and the samples come from
+# the held handle's PID and creation time.
+foreach ($kind in @('launch', 'mode', 'class', 'exe', 'planned', 'wer', 'end')) {
+    $writes = [regex]::Matches($soakText, 'Add-Line \$runTsv \(?"' + $kind + '`t').Count
+    if ($writes -ne 1) { throw "The soak harness writes the run.tsv $kind row $writes times; the judge needs it once." }
+}
+if ($soakText -notmatch '(?s)\$start = \[SoakNative\]::CreationTime\(\$process\).*?Add-Line \$runTsv "launch`t\$nocttyPid`t\$start".*?Add-Line \$samplesTsv \("\$minute`t\$nocttyPid`t\$start`t"') {
+    throw 'The soak harness must take the launch row and each sample from the held handle.'
+}
+
+# The class the launch helper composes for a soak sandbox has the shape the judge accepts, and two sandbox
+# names give two classes. The helper's functions are taken from the library and run in a child scope.
+$judgeText = Get-Content -LiteralPath $soakJudge -Raw
+$classPattern = [regex]::Match($judgeText, '(?m)^CLASS_RE = r"(?<re>[^"]+)"').Groups['re'].Value
+if (-not $classPattern) { throw 'ci/soak_judge.py has no CLASS_RE.' }
+$libAst = [Management.Automation.Language.Parser]::ParseFile($soakLib, [ref]$null, [ref]$null)
+$helperNames = @('Get-InteractiveWin11NormalizedPath', 'Get-InteractiveWin11WorktreeId', 'Get-InteractiveWin11SandboxName',
+    'Get-InteractiveWin11SandboxLayout', 'Get-InteractiveWin11ContainmentArguments', 'Get-InteractiveWin11LaunchArguments')
+$helperText = ($helperNames | ForEach-Object {
+        $name = $_
+        $found = @($libAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $false))
+        if ($found.Count -ne 1) { throw "scripts/interactive-win11-lib.ps1 must define $name once." }
+        $found[0].Extent.Text
+    }) -join "`n"
+$classes = & {
+    . ([scriptblock]::Create($helperText))
+    foreach ($sandbox in @('soak-fast', 'soak-safe')) {
+        $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $sandbox
+        @(Get-InteractiveWin11LaunchArguments -Layout $layout | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
+    }
+}
+if (@($classes).Count -ne 2 -or $classes[0] -ceq $classes[1]) { throw 'Two soak sandboxes must give two classes.' }
+foreach ($class in $classes) {
+    if ($class -cnotmatch ('\A(?:' + $classPattern + ')\z')) { throw "The launch helper's class '$class' fails the judge's CLASS_RE." }
+}
+if ('noctty-interactive-soak' -cmatch ('\A(?:' + $classPattern + ')\z')) { throw 'The judge''s CLASS_RE accepts a class with no worktree hash.' }
+
+# The harness's native layer, compiled under another name and run against this process only.
+$nativeSource = [regex]::Match((Get-Content -LiteralPath $soakScript -Raw), "(?s)Add-Type @'\r?\n(?<cs>.*?public static class SoakNative.*?)\r?\n'@").Groups['cs'].Value
+if (-not $nativeSource) { throw 'The soak harness''s native layer was not found.' }
+$nativeName = 'SoakNativeContract' + [guid]::NewGuid().ToString('N')
+Add-Type -TypeDefinition ($nativeSource.Replace('public static class SoakNative', "public static class $nativeName"))
+$native = $nativeName -as [type]
+$self = [IntPtr]::new(-1)   # GetCurrentProcess's pseudo handle
+if ($native::MemoryCountersSize -ne 96) { throw "PROCESS_MEMORY_COUNTERS_EX2 mirrors as $($native::MemoryCountersSize) bytes, not 96 (psapi.h, x64)." }
+$memory = $native::Memory($self)
+if ($memory.Count -ne 3 -or $memory[0] -le 0 -or $memory[1] -le 0 -or $memory[2] -lt $memory[0]) { throw 'The soak memory sample is not private bytes, working set and commit charge.' }
+$created = [DateTime]::FromFileTimeUtc($native::CreationTime($self))
+if ([Math]::Abs(($created - [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds) -gt 1) { throw 'The soak creation time does not match this process''s start.' }
+$savedMode = $native::GetErrorMode()
+try {
+    [void]$native::SetErrorMode($savedMode -bor 2)
+    if (($native::HardErrorMode($self) -band 2) -eq 0) { throw 'The process error mode the soak reads does not show SEM_NOGPFAULTERRORBOX after SetErrorMode.' }
+    [void]$native::SetErrorMode($savedMode -band (-bnot 2))
+    if (($native::HardErrorMode($self) -band 2) -ne 0) { throw 'The process error mode the soak reads shows SEM_NOGPFAULTERRORBOX after it was cleared.' }
+} finally { [void]$native::SetErrorMode($savedMode) }
+$injected = $false
+for ($attempt = 0; $attempt -lt 3 -and -not $injected; $attempt++) {
+    $handlesBefore = $native::HandleCount($self)
+    if (-not $native::Inject($self)) { throw 'The negative control''s DuplicateHandle failed.' }
+    $injected = $native::HandleCount($self) -eq $handlesBefore + 1
+}
+if (-not $injected) { throw 'The negative control''s injection did not add one handle to its target.' }
+$threadRows = @($native::Threads($self, $PID))
+if ($threadRows.Count -lt 1 -or @($threadRows | Where-Object { $_ -cnotmatch '\A\d+\t(?:[^\t]+\+0x[0-9a-f]+|0x[0-9a-f]+|\?)\t[^\t]*\z' }).Count -ne 0) {
+    throw 'The soak thread rows are not tid, start address and name.'
+}
+
+# CI runs the judge's controls on a pinned interpreter, unconditionally (PLAN.md §6.5: setup-python at a
+# commit SHA, Python 3.13, each tool with -I).
+$soakChecks = Get-YamlJobText -Content (Get-Content -LiteralPath $soakWorkflow -Raw) -Name 'checks' -Source $soakWorkflow
+$setupStep = Get-YamlStepBlock -Content $soakChecks -Name 'Setup Python for the soak judge' -Source $soakWorkflow
+$testStep = Get-YamlStepBlock -Content $soakChecks -Name 'Soak judge tests' -Source $soakWorkflow
+if ($setupStep -notmatch '(?m)^        uses: actions/setup-python@[0-9a-f]{40} # v\S+\s*$' -or
+    $setupStep -notmatch "(?m)^          python-version: '3\.13'\s*$") {
+    throw 'The soak judge''s interpreter must be actions/setup-python pinned to a commit SHA with Python 3.13.'
+}
+if ($testStep -notmatch '(?m)^        run: python -I ci/test_soak_judge\.py\s*$') { throw 'CI must run the soak judge''s tests with python -I.' }
+foreach ($step in @($setupStep, $testStep)) {
+    if ($step -match '(?m)^        [''"]?(?:if|continue-on-error)[''"]?[ \t]*:') { throw 'The soak judge steps must be unconditional and fail closed.' }
+}
+if ($soakChecks.IndexOf('- name: Setup Python for the soak judge') -gt $soakChecks.IndexOf('- name: Soak judge tests')) {
+    throw 'The soak judge''s interpreter must be set up before its tests run.'
+}
+Write-Host "Soak contracts: $($soakRules.Count) rules, $soakMutations/$soakMutations mutations rejected"
