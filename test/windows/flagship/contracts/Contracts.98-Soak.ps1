@@ -27,9 +27,24 @@ $soakText = Get-SoakCodeText $soakScript
 # that a correct rule must reject; the mutation must change the text.
 $soakRules = @(
     @{
-        Description = 'the copy starts with the launch helper''s isolation (its own class, --single-instance=false, --command=cmd.exe) and --window-save-state=never'
-        Pattern = '(?s)Get-InteractiveWin11SandboxLayout -RepoRoot \$repoRoot -SandboxName \$SandboxName.*?@\(Get-InteractiveWin11LaunchArguments -Layout \$layout\) \+ @\(''--window-save-state=never''\).*?\$commandLine = \(''"\{0\}" '' -f \$exe\) \+ \(\$launchArguments -join '' ''\)'
-        Mutation = @('@(Get-InteractiveWin11LaunchArguments -Layout $layout)', "@('--class=noctty-soak')")
+        Description = 'the copy starts with the launch helper''s isolation (its containment, its own class, --single-instance=false), --window-save-state=never and the clipboard denied on the command line'
+        Pattern = '(?s)Get-InteractiveWin11SandboxLayout -RepoRoot \$repoRoot -SandboxName \$SandboxName.*?\$launchArguments = @\(Get-InteractiveWin11LaunchArguments -Layout \$layout -UseConfiguredCommand\) \+ @\(\s*"--command=direct:\$cmdPath /D", ''--window-save-state=never'', ''--clipboard-read=deny'', ''--clipboard-write=deny''\).*?\$commandLine = \(''"\{0\}" '' -f \$exe\) \+ \(@\(\$launchArguments \|'
+        Mutation = @("'--clipboard-read=deny', '--clipboard-write=deny'", "'--clipboard-read=deny'")
+    }
+    @{
+        Description = 'every pane runs System32''s cmd.exe directly with /D, so no cmd AutoRun runs (a bare --command=cmd.exe goes through Exec''s outer cmd /c)'
+        Pattern = '(?s)\$cmdPath = Join-Path \(\[Environment\]::GetFolderPath\(''System''\)\) ''cmd\.exe''.*?"--command=direct:\$cmdPath /D".*?if \(@\(\$launchArguments \| Where-Object \{ \$_ -like ''--command=\*'' \}\)\.Count -ne 1\) \{ throw'
+        Mutation = @('"--command=direct:$cmdPath /D"', '"--command=cmd.exe"')
+    }
+    @{
+        Description = 'the copy carries no noctty.ico, so it cannot create a missing AppUserModelId key'
+        Pattern = '(?s)Get-ChildItem -LiteralPath \$Bin -Force \| Where-Object \{ \$_\.Name -ne ''noctty\.ico'' \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw'
+        Mutation = @("Where-Object { `$_.Name -ne 'noctty.ico' }", 'Where-Object { $true }')
+    }
+    @{
+        Description = 'the clipboard sequence number is recorded before and after each run'
+        Pattern = '(?s)\$before = \[ordered\]@\{[^\r\n]*Clipboard = \[HiddenLocal\]::GetClipboardSequenceNumber\(\) \}.*?\$after = \[ordered\]@\{[^\r\n]*Clipboard = \[HiddenLocal\]::GetClipboardSequenceNumber\(\) \}.*?ClipboardSequenceBefore = \$before\.Clipboard; ClipboardSequenceAfter = \$after\.Clipboard'
+        Mutation = @('ClipboardSequenceAfter = $after.Clipboard', 'ClipboardSequenceAfter = $before.Clipboard')
     }
     @{
         Description = 'the build mode is checked through +version before the launch, and a mismatch launches nothing'
@@ -40,6 +55,16 @@ $soakRules = @(
         Description = 'SEM_NOGPFAULTERRORBOX is set before the copy is created, so the copy inherits it'
         Pattern = '(?s)\[SoakNative\]::SetErrorMode\(\[SoakNative\]::GetErrorMode\(\) -bor 2\).*?\[SoakNative\]::Spawn\(\$exe, \$commandLine'
         Mutation = @('GetErrorMode() -bor 2', 'GetErrorMode() -bor 0')
+    }
+    @{
+        Description = 'the soak job kills its processes when closed and ends one on an unhandled exception, so a crash cannot wait in WER''s dialog whatever the copy''s error mode becomes'
+        Pattern = '(?s)public static IntPtr CreateSoakJob\(\) \{.*?limits\.basic\.flags = 0x2000 \| 0x400;.*?SetInformationJobObject\(job, 9, ref limits'
+        Mutation = @('limits.basic.flags = 0x2000 | 0x400;', 'limits.basic.flags = 0x2000;')
+    }
+    @{
+        Description = 'the wer row says suppressed only with the job''s limit in force and SEM_NOGPFAULTERRORBOX at the copy''s launch'
+        Pattern = '(?s)\$harness\.JobLimitFlags = \[SoakNative\]::JobLimitFlags\(\[IntPtr\]::Zero\).*?\$jobDies = \(\$harness\.JobLimitFlags -band 0x2400\) -eq 0x2400.*?\$suppressed = \$jobDies -and \$harness\.HardErrorModes\.Count -gt 0 -and \(\$harness\.HardErrorModes\[0\] -band 2\) -ne 0'
+        Mutation = @('$suppressed = $jobDies -and ', '$suppressed = ')
     }
     @{
         Description = 'no launch asks for the default error mode (CREATE_DEFAULT_ERROR_MODE would drop the inherited one)'
@@ -53,7 +78,7 @@ $soakRules = @(
     }
     @{
         Description = 'the driver starts on a new private desktop inside the owned job, with LOCALAPPDATA and APPDATA redirected into the run'
-        Pattern = '(?s)\$desktopName = ''noctty-soak-'' \+ \[guid\]::NewGuid\(\).*?\$job = \[HiddenLocal\]::CreateOwnedJob\(\).*?\$env:LOCALAPPDATA = Join-Path \$Run ''localappdata''; \$env:APPDATA = Join-Path \$Run ''appdata''.*?\[HiddenLocal\]::Launch\(\$pwsh, \$line, \$Run, "WinSta0\\\$desktopName", \$job\)'
+        Pattern = '(?s)\$desktopName = ''noctty-soak-'' \+ \[guid\]::NewGuid\(\).*?\$job = \[SoakNative\]::CreateSoakJob\(\).*?\$env:LOCALAPPDATA = Join-Path \$Run ''localappdata''; \$env:APPDATA = Join-Path \$Run ''appdata''.*?\[HiddenLocal\]::Launch\(\$pwsh, \$line, \$Run, "WinSta0\\\$desktopName", \$job\)'
         Mutation = @("`$env:LOCALAPPDATA = Join-Path `$Run 'localappdata'; ", '')
     }
     @{
@@ -72,9 +97,14 @@ $soakRules = @(
         Mutation = @('[SoakNative]::Key($From, $Vk)', '[SoakNative]::Key($From, $Vk); Set-Clipboard -Value x')
     }
     @{
-        Description = 'the soak config clears every default binding, binds nothing that copies, and denies OSC 52 and updates'
-        Pattern = '(?s)''auto-update = off''.*?''clipboard-read = deny''.*?''clipboard-write = deny''.*?''copy-on-select = false''.*?''keybind = clear''(?!.*keybind = [^''"\r\n]*=(?:copy|paste))'
-        Mutation = @("'keybind = f8=clear_screen'", "'keybind = f8=clear_screen'`n        'keybind = f9=copy_to_clipboard'")
+        Description = 'the soak config clears every default binding, binds nothing that copies or pastes, and denies OSC 52 and updates'
+        Pattern = '(?s)\$bindings = \[ordered\]@\{(?:(?!copy|paste)[^}])*\}.*?''auto-update = off''.*?''clipboard-read = deny''.*?''clipboard-write = deny''.*?''copy-on-select = false''.*?''keybind = clear''\s*foreach \(\$key in \$bindings\.Keys\) \{ foreach \(\$chord in \$chords\) \{ "keybind = \$chord\$key=\$\(\$bindings\[\$key\]\)" \} \}\s*\) \| Set-Content'
+        Mutation = @("f8 = 'clear_screen'", "f8 = 'clear_screen'; f9 = 'copy_to_clipboard'")
+    }
+    @{
+        Description = 'each churn key is bound under every Shift, Ctrl and Alt chord, so a modifier the user holds cannot turn a posted key into an unbound one'
+        Pattern = '\$chords = @\('''', ''shift\+'', ''ctrl\+'', ''alt\+'', ''ctrl\+shift\+'', ''alt\+shift\+'', ''ctrl\+alt\+'', ''ctrl\+alt\+shift\+''\)'
+        Mutation = @(", 'ctrl+alt+shift+')", ')')
     }
     @{
         Description = 'the kill control ends the process with exit code 3 after the minute''s sample'
@@ -156,6 +186,11 @@ Add-Type -TypeDefinition ($nativeSource.Replace('public static class SoakNative'
 $native = $nativeName -as [type]
 $self = [IntPtr]::new(-1)   # GetCurrentProcess's pseudo handle
 if ($native::MemoryCountersSize -ne 96) { throw "PROCESS_MEMORY_COUNTERS_EX2 mirrors as $($native::MemoryCountersSize) bytes, not 96 (psapi.h, x64)." }
+if ($native::JobLimitsSize -ne 144) { throw "JOBOBJECT_EXTENDED_LIMIT_INFORMATION mirrors as $($native::JobLimitsSize) bytes, not 144 (winnt.h, x64)." }
+$soakJob = $native::CreateSoakJob()   # no process is ever assigned to it
+try {
+    if ($native::JobLimitFlags($soakJob) -ne 0x2400) { throw 'The soak job does not carry KILL_ON_JOB_CLOSE and DIE_ON_UNHANDLED_EXCEPTION, read back.' }
+} finally { [void]$native::CloseHandle($soakJob) }
 $memory = $native::Memory($self)
 if ($memory.Count -ne 3 -or $memory[0] -le 0 -or $memory[1] -le 0 -or $memory[2] -lt $memory[0]) { throw 'The soak memory sample is not private bytes, working set and commit charge.' }
 $created = [DateTime]::FromFileTimeUtc($native::CreationTime($self))

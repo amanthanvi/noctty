@@ -28,7 +28,10 @@ Run directory, process rules (as the prototype):
                                                       copy's when --other-run names it (SHARED-CLASS)
                 exe <TAB> <full path>                 the copy's noctty.exe, by which WER reports are matched
                 planned <TAB> <minutes>               at least --min-minutes (PLAN-TOO-SHORT)
-                wer <TAB> suppressed|default          whether the process runs with SEM_NOGPFAULTERRORBOX
+                wer <TAB> suppressed|default          whether WER's dialog cannot hold a crashed copy: it
+                                                      started with SEM_NOGPFAULTERRORBOX, inside a job that
+                                                      ends a process on an unhandled exception (the process's
+                                                      own mode can change during a run; the job's limit holds)
                 end <TAB> quit|early <TAB> <code>     ended after the harness's quit or before it, with the code
                                                       GetExitCodeProcess gave on the held handle
                 end <TAB> stuck <TAB> -               still running when the quit's bound ran out

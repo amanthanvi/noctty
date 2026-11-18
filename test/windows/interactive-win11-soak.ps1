@@ -18,9 +18,12 @@ What it does. The outer half (this process, on the user's desktop) copies -Bin i
 kill-on-close job, and starts this script again as the driver on that desktop, inside the job, with
 LOCALAPPDATA, APPDATA, TEMP and TMP redirected into the run directory. The driver checks the copy's build mode
 through `noctty.exe +version` (the copy is never launched on a mismatch), turns on SEM_NOGPFAULTERRORBOX (which
-the copy inherits, so a crash ends the process instead of waiting in a WER dialog), starts the copy with
-Get-InteractiveWin11LaunchArguments (`--single-instance=false`, its own `--class`, `--command=cmd.exe`) and
-`--window-save-state=never`, naming the private desktop in STARTUPINFO, and holds the process handle from
+the copy inherits) inside a job that ends a process on an unhandled exception (DIE_ON_UNHANDLED_EXCEPTION, so
+a crash ends the process instead of waiting in a WER dialog even after something in the process has changed
+its error mode, which the hour runs measured), starts the copy with
+Get-InteractiveWin11LaunchArguments (its containment, `--single-instance=false`, its own `--class`), with
+`--command=direct:<System32>\cmd.exe /D` (no cmd AutoRun), `--window-save-state=never` and the clipboard
+denied, naming the private desktop in STARTUPINFO, and holds the process handle from
 CreateProcess on. Each minute it runs scripted churn (new tabs, right and down splits, output floods through
 cmd, window resizes, pane and tab closes; every tenth minute and the first are idle), returns the copy to its
 baseline of one tab with one pane, waits, and samples. The samples come from the held handle: its PID and
@@ -47,9 +50,11 @@ Safety (AGENTS.md "Running noctty"). Every process starts on the private desktop
 the job; input is posted, never SendInput, and nothing takes the foreground. The copy is portable with
 LOCALAPPDATA and APPDATA redirected, so the real %LOCALAPPDATA%\noctty is never written: the outer half
 compares the size and time of its startup-attempts.json (never its content) before and after, and fails the
-run when they change. Nothing can copy: the config clears every default binding, binds none that copies, and
-denies OSC 52 reads and writes; the clipboard sequence number is logged before and after for the record, not
-judged (an hour-long run on a machine in use sees the user's own copies). PSReadLine history is guarded by
+run when they change. The copy carries no noctty.ico, so it cannot create a missing AppUserModelId key
+(app-lifecycle.md 2026-10-16), and its shells run no cmd AutoRun. Nothing can copy: the config clears every
+default binding and binds none that copies, and the config and the command line deny OSC 52 reads and
+writes; the clipboard sequence number is recorded before and after (guards.json) and printed, not judged (an
+hour-long run on a machine in use sees the user's own copies). PSReadLine history is guarded by
 metadata (scripts/windows-harness-history.ps1), and the product jump list's file by size and time (a portable
 copy writes none, app-lifecycle.md 2026-10-16). Logs name kinds and sizes, never a command line or an
 environment value.
@@ -156,6 +161,40 @@ public static class SoakNative {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformationW(IntPtr h, int index, StringBuilder name, int length, out int needed);
 
     public static int MemoryCountersSize { get { return Marshal.SizeOf<MemoryCounters>(); } }
+
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (winnt.h): 144 bytes on x64, pinned by JobLimitsSize.
+    [StructLayout(LayoutKind.Sequential)] struct BasicLimits {
+        public long processTime, jobTime; public uint flags;
+        public UIntPtr minWorking, maxWorking; public uint activeProcesses;
+        public UIntPtr affinity; public uint priority, scheduling;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IoCounters { public ulong readOps, writeOps, otherOps, readBytes, writeBytes, otherBytes; }
+    [StructLayout(LayoutKind.Sequential)] struct JobLimits {
+        public BasicLimits basic; public IoCounters io;
+        public UIntPtr processMemory, jobMemory, peakProcessMemory, peakJobMemory;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr sa, string name);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int type, ref JobLimits limits, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int type, out JobLimits limits, uint size, IntPtr returned);
+    public static int JobLimitsSize { get { return Marshal.SizeOf<JobLimits>(); } }
+    // The soak's job: its processes die when the harness closes it (KILL_ON_JOB_CLOSE), and an unhandled
+    // exception ends a process with its code instead of WER's dialog (DIE_ON_UNHANDLED_EXCEPTION, which the
+    // system checks at the crash, whatever the process's error mode is by then).
+    public static IntPtr CreateSoakJob() {
+        var job = CreateJobObjectW(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed: " + Marshal.GetLastWin32Error());
+        var limits = new JobLimits(); limits.basic.flags = 0x2000 | 0x400;
+        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<JobLimits>())) {
+            CloseHandle(job); throw new Exception("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
+        }
+        return job;
+    }
+    // The limit flags of `job`, or of the caller's own job when `job` is zero.
+    public static uint JobLimitFlags(IntPtr job) {
+        JobLimits limits;
+        if (!QueryInformationJobObject(job, 9, out limits, (uint)Marshal.SizeOf<JobLimits>(), IntPtr.Zero)) throw new Exception("Job limit query failed: " + Marshal.GetLastWin32Error());
+        return limits.basic.flags;
+    }
 
     // The name of the desktop this thread runs on.
     public static string CurrentDesktopName() {
@@ -298,6 +337,33 @@ public static class SoakNative {
         } finally { Marshal.FreeHGlobal(buffer); }
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct ProcessEntry {
+        public uint size, usage, processId; public IntPtr heapId; public uint moduleId, threads, parentProcessId;
+        public int basePriority; public uint flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string exeFile;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+    // The job's processes other than the driver, its own children (its console host) and the soaked copy:
+    // each pane's ConPTY host and shell. The driver is alive, so a process naming it as parent is its child.
+    public static int JobChildren(int driver, int soaked) {
+        var parents = new Dictionary<int,int>();
+        IntPtr snap = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+        if (snap == new IntPtr(-1)) throw new Exception("CreateToolhelp32Snapshot failed: " + Marshal.GetLastWin32Error());
+        try {
+            var e = new ProcessEntry { size = (uint)Marshal.SizeOf<ProcessEntry>() };
+            for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e)) {
+                parents[(int)e.processId] = (int)e.parentProcessId;
+                e.size = (uint)Marshal.SizeOf<ProcessEntry>();
+            }
+        } finally { CloseHandle(snap); }
+        int n = 0;
+        foreach (int id in JobPids()) {
+            int parent;
+            if (id == driver || id == soaked || (parents.TryGetValue(id, out parent) && parent == driver)) continue;
+            n++;
+        }
+        return n;
+    }
     static string Class(IntPtr h) { var s = new StringBuilder(128); GetClassNameW(h, s, 128); return s.ToString(); }
     // Every noctty host window on this desktop, as (hwnd, owner pid) pairs.
     public static long[] Hosts() {
@@ -376,7 +442,8 @@ function Invoke-SoakDriver {
         KillAtMinute = $KillAtMinute; InjectHandleEachMinute = [bool]$InjectHandleEachMinute
         QuitSeconds = $QuitSeconds; ResponseBoundMs = $script:ResponseBoundMs
         BuildMode = $null; Launched = $false; Injected = 0; Killed = $null; Churn = 0; Missed = 0
-        LateSamples = 0; WorstLatenessMs = 0; HardErrorModes = @(); QuitMs = $null; Error = $null
+        LateSamples = 0; WorstLatenessMs = 0; HardErrorModes = @(); ErrorModeChanges = @(); JobLimitFlags = $null
+        QuitMs = $null; Error = $null
     }
     $harnessPath = Join-Path $Run 'harness.json'
     $process = [IntPtr]::Zero
@@ -394,6 +461,11 @@ function Invoke-SoakDriver {
         Add-Line $threadsTsv "minute`ttid`tstart`tname"
         Add-Line $timingTsv "minute`tsampled_ms`tlate_ms`tworkload_ms"
         if ([SoakNative]::MemoryCountersSize -ne 96) { throw "PROCESS_MEMORY_COUNTERS_EX2 is $([SoakNative]::MemoryCountersSize) bytes, not 96." }
+        if ([SoakNative]::JobLimitsSize -ne 144) { throw "JOBOBJECT_EXTENDED_LIMIT_INFORMATION is $([SoakNative]::JobLimitsSize) bytes, not 144." }
+        # The copy inherits this job, so a crash cannot wait in WER's dialog even after something in the
+        # process changes its error mode (measured: SEM_NOGPFAULTERRORBOX lost mid-run in hour-long runs).
+        $harness.JobLimitFlags = [SoakNative]::JobLimitFlags([IntPtr]::Zero)
+        $jobDies = ($harness.JobLimitFlags -band 0x2400) -eq 0x2400
 
         # The build mode, from the copy's own `+version` (src/cli/version.zig); no launch on a mismatch.
         $versionPath = Join-Path $Run 'version.txt'
@@ -414,13 +486,20 @@ function Invoke-SoakDriver {
             return 3
         }
 
-        # The launch: the helper's isolation (contract 30), its own class, the private desktop.
+        # The launch: the helper's isolation (contract 30: its containment, --single-instance=false and its own
+        # class), the private desktop. The shell is System32's cmd.exe run directly with /D, not the helper's
+        # bare `--command=cmd.exe`: that one runs under Exec's outer `cmd /c`, which runs the user's cmd AutoRun
+        # whatever an inner /D says, and AutoRun can write state outside the sandbox (the 2026-10-26 R05c
+        # entry in chrome-tabs-paint.md). The clipboard is denied on the command line as well as in the config.
         $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $SandboxName
-        $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout) + @('--window-save-state=never')
+        $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
+            "--command=direct:$cmdPath /D", '--window-save-state=never', '--clipboard-read=deny', '--clipboard-write=deny')
         $class = @($launchArguments | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
         if ($class.Count -ne 1) { throw 'The launch helper gave no single --class.' }
-        foreach ($argument in $launchArguments) { if ($argument -match '[\s"]') { throw 'A launch argument needs quoting.' } }
-        $commandLine = ('"{0}" ' -f $exe) + ($launchArguments -join ' ')
+        if (@($launchArguments | Where-Object { $_ -like '--command=*' }).Count -ne 1) { throw 'The copy needs exactly one --command.' }
+        foreach ($argument in $launchArguments) { if ($argument -match '"' -or $argument.EndsWith('\')) { throw 'A launch argument cannot be quoted.' } }
+        $commandLine = ('"{0}" ' -f $exe) + (@($launchArguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
         [void][SoakNative]::SetErrorMode([SoakNative]::GetErrorMode() -bor 2)   # SEM_NOGPFAULTERRORBOX, inherited
         $env:GHOSTTY_LOG = 'stderr'
         $pi = [SoakNative]::Spawn($exe, $commandLine, $work, $desktopPath, (Join-Path $Run 'noctty.log'), 0x20)
@@ -431,6 +510,7 @@ function Invoke-SoakDriver {
         $start = [SoakNative]::CreationTime($process)
         $harness.Launched = $true
         $harness.HardErrorModes += [SoakNative]::HardErrorMode($process)
+        $script:soakLastMode = $harness.HardErrorModes[0]
         $mode = if (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable') -PathType Leaf) { 'portable' } else { 'standard' }
         Add-Line $runTsv "launch`t$nocttyPid`t$start"
         Add-Line $runTsv "mode`t$mode"
@@ -467,6 +547,10 @@ function Invoke-SoakDriver {
         $baseWidth = 1000; $baseHeight = 700
         $host0 = @((Get-Mine).Mine)
         if ($ready -and $host0.Count -ge 1) { [void][SoakNative]::Resize($host0[0].Hwnd, $baseWidth, $baseHeight) }
+        # The baseline's one pane, kept for the whole run: the churn opens from it and never closes it.
+        $startPanes = @(Get-AllSurfaces $false)
+        $script:soakBase = if ($startPanes.Count -eq 1) { $startPanes[0] } else { [IntPtr]::Zero }
+        if ($script:soakBase -eq [IntPtr]::Zero) { Log "no single first pane: $($startPanes.Count) panes" }
         if ([SoakNative]::Alive($process)) { $harness.HardErrorModes += [SoakNative]::HardErrorMode($process) }
         $floodCount = Join-Path $work 'flood-count.txt'
         # The floods finished so far: one line each in flood-count.txt, which cmd appends to. While cmd has it
@@ -486,13 +570,40 @@ function Invoke-SoakDriver {
 
         # One minute of churn: verified actions count as churn, unverified ones as missed. The copy is back
         # at its baseline (one tab, one pane) when it returns, or the miss is counted.
+        # Back to the baseline after a step that did not take effect: closed panes stay hidden for undo until
+        # undo-timeout (5 s) prunes them, so wait that out first; then close every other pane, never the base
+        # pane (closing the last one would quit the copy). True when only the base pane is left.
+        function Restore-Baseline([int] $Minute) {
+            $base = $script:soakBase
+            if ($base -eq [IntPtr]::Zero -or -not [SoakNative]::IsWindow($base)) { Log "minute $Minute baseline: the base pane is gone"; return $false }
+            if (Wait-For { @(Get-AllSurfaces $false).Count -eq 1 } 10000) { return $true }
+            for ($round = 1; $round -le 3; $round++) {
+                $others = @(Get-AllSurfaces $false | Where-Object { $_ -ne $base })
+                if ($others.Count -eq 0) { return $true }
+                Log "minute $Minute baseline: closing $($others.Count) other panes, round $round"
+                foreach ($pane in $others) {
+                    try { if ([SoakNative]::IsWindow($pane)) { [SoakNative]::Key($pane, 0x75) } } catch { Log "minute $Minute baseline close error: $($_.Exception.Message)" }
+                    Start-Sleep -Milliseconds 300
+                }
+                if (Wait-For { @(Get-AllSurfaces $false).Count -eq 1 } 30000) { return $true }
+            }
+            Log "minute $Minute baseline: $(@(Get-AllSurfaces $false).Count) panes left"
+            return $false
+        }
+
         function Invoke-Churn([int] $Minute, [long] $OpenUntilMs) {
             $r = [pscustomobject]@{ Churn = 0; Missed = 0 }
             $hosts = @((Get-Mine).Mine)
-            if ($hosts.Count -ne 1) { $r.Missed++; return $r }
+            if ($hosts.Count -ne 1) { Log "minute ${Minute}: $($hosts.Count) windows, not 1; no churn"; $r.Missed++; return $r }
             $hostWindow = $hosts[0].Hwnd
             $all = @(Get-AllSurfaces $false)
-            if ($all.Count -ne 1) { $r.Missed++; return $r }
+            if ($all.Count -ne 1) {
+                # The last minute left the copy off its baseline: a miss, and the copy is brought back.
+                Log "minute ${Minute}: $($all.Count) panes at the start, not 1"
+                $r.Missed++
+                [void](Restore-Baseline $Minute)
+                return $r
+            }
             $base = $all[0]
             # Each step counts itself: verified is churn, anything else (its effect not seen in time, or an
             # error, which is logged) is a miss, and the next steps and the return to the baseline still run.
@@ -509,7 +620,7 @@ function Invoke-SoakDriver {
                         return $false
                     } 15000
                 } catch { Log "minute $Minute open step error: $($_.Exception.Message)"; $ok = $false }
-                if ($ok) { $r.Churn++ } else { $r.Missed++ }
+                if ($ok) { $r.Churn++ } else { $r.Missed++; Log "minute $Minute open step: no new pane within 15 s (key 0x$($Vk.ToString('x')))" }
                 return $script:soakNew
             }
             $flood = {
@@ -520,7 +631,7 @@ function Invoke-SoakDriver {
                     [SoakNative]::Key($Target, 0x74)   # F5: text, runs flood.cmd
                     $ok = $count -ge 0 -and (Wait-For { (Get-FloodCount) -gt $count } 30000)
                 } catch { Log "minute $Minute flood step error: $($_.Exception.Message)"; $ok = $false }
-                if ($ok) { $r.Churn++ } else { $r.Missed++ }
+                if ($ok) { $r.Churn++ } else { $r.Missed++; Log "minute $Minute flood step: no finished flood within 30 s" }
             }
             $close = {
                 param([IntPtr[]] $Gone, [IntPtr] $Via, [int] $Vk)
@@ -529,7 +640,7 @@ function Invoke-SoakDriver {
                     [SoakNative]::Key($Via, $Vk)
                     $ok = Wait-For { @($Gone | Where-Object { [SoakNative]::IsWindow($_) -and [SoakNative]::IsWindowVisible($_) }).Count -eq 0 } 15000
                 } catch { Log "minute $Minute close step error: $($_.Exception.Message)"; $ok = $false }
-                if ($ok) { $r.Churn++ } else { $r.Missed++ }
+                if ($ok) { $r.Churn++ } else { $r.Missed++; Log "minute $Minute close step: a pane still shown after 15 s (key 0x$($Vk.ToString('x')))" }
             }
             $s1 = & $open $base 0x71                 # F2: new_tab
             & $flood $s1
@@ -538,7 +649,7 @@ function Invoke-SoakDriver {
             & $flood $s3
             if ($clock.ElapsedMilliseconds -lt $OpenUntilMs) {
                 foreach ($size in @(@(1300, 850), @(800, 560), @($baseWidth, $baseHeight))) {
-                    if ([SoakNative]::Resize($hostWindow, $size[0], $size[1]) -and [SoakNative]::Responsive($hostWindow, $script:ResponseBoundMs)) { $r.Churn++ } else { $r.Missed++ }
+                    if ([SoakNative]::Resize($hostWindow, $size[0], $size[1]) -and [SoakNative]::Responsive($hostWindow, $script:ResponseBoundMs)) { $r.Churn++ } else { $r.Missed++; Log "minute $Minute resize step: not $($size[0]) by $($size[1])" }
                     Start-Sleep -Milliseconds 300
                 }
             }
@@ -556,10 +667,8 @@ function Invoke-SoakDriver {
             # Back to the baseline: closed panes stay hidden for undo until undo-timeout (5 s) prunes them.
             if (-not (Wait-For { @(Get-AllSurfaces $false).Count -eq 1 } 30000)) {
                 $r.Missed++
-                foreach ($left in @(Get-AllSurfaces $true | Where-Object { $_ -ne $base })) {
-                    try { [SoakNative]::Key($left, 0x75) } catch { Log "minute $Minute cleanup step error: $($_.Exception.Message)" }
-                }
-                [void](Wait-For { @(Get-AllSurfaces $false).Count -eq 1 } 30000)
+                Log "minute $Minute baseline: $(@(Get-AllSurfaces $false).Count) panes 30 s after the churn"
+                [void](Restore-Baseline $Minute)
             }
             return $r
         }
@@ -598,9 +707,16 @@ function Invoke-SoakDriver {
                     foreach ($h in $mine) { if (-not [SoakNative]::Responsive($h.Hwnd, $script:ResponseBoundMs)) { $answered = $false } }
                     Add-Line $samplesTsv ("$minute`t$nocttyPid`t$start`t" + $(if ($answered) { 'yes' } else { 'no' }))
                 }
+                # The copy's error mode, each change kept with its minute (the job, not this mode, keeps a
+                # crash out of WER's dialog; the changes are evidence for the next reader).
+                $modeNow = [SoakNative]::HardErrorMode($process)
+                if ($modeNow -ne $script:soakLastMode) {
+                    $harness.ErrorModeChanges += ('minute {0}: 0x{1:x}' -f $minute, $modeNow)
+                    $script:soakLastMode = $modeNow
+                }
                 $threads = @([SoakNative]::Threads($process, $nocttyPid))
                 $memory = [SoakNative]::Memory($process)
-                $children = @([SoakNative]::JobPids() | Where-Object { $_ -ne $PID -and $_ -ne $nocttyPid }).Count
+                $children = [SoakNative]::JobChildren($PID, $nocttyPid)
                 $surfaces = @(Get-AllSurfaces $false).Count
                 Add-Line $metricsTsv ((@($minute, [SoakNative]::HandleCount($process), $threads.Count, $memory[0], $memory[1], $memory[2],
                     [SoakNative]::Gui($process, 0), [SoakNative]::Gui($process, 1), $children, $surfaces, $load.Churn, $load.Missed)) -join "`t")
@@ -631,7 +747,9 @@ function Invoke-SoakDriver {
                 [void][SoakNative]::WaitForSingleObject($process, 10000)
             }
         }
-        $suppressed = $harness.HardErrorModes.Count -gt 0 -and @($harness.HardErrorModes | Where-Object { ($_ -band 2) -eq 0 }).Count -eq 0
+        # Suppressed: the job kills a process on an unhandled exception, and the copy started with
+        # SEM_NOGPFAULTERRORBOX (inherited from this driver).
+        $suppressed = $jobDies -and $harness.HardErrorModes.Count -gt 0 -and ($harness.HardErrorModes[0] -band 2) -ne 0
         Add-Line $runTsv ("wer`t" + $(if ($suppressed) { 'suppressed' } else { 'default' }))
         Add-Line $runTsv "end`t$end"
         Log "ended: $($end -replace "`t", ' ')"
@@ -724,17 +842,30 @@ function Invoke-SoakOuter {
     $work = Join-Path $Run 'work'
     [void](New-Item -ItemType Directory -Path $Run)
     foreach ($name in @('localappdata', 'appdata', 'temp', 'crash', 'work')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
-    Copy-Item -LiteralPath $Bin -Destination $copy -Recurse
+    # Everything of -Bin but noctty.ico: a portable copy with its icon beside it creates the user's
+    # AppUserModelId registration when that key is missing (app-lifecycle.md, 2026-10-16), a real write.
+    [void](New-Item -ItemType Directory -Path $copy)
+    Get-ChildItem -LiteralPath $Bin -Force | Where-Object { $_.Name -ne 'noctty.ico' } |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $copy $_.Name) -Recurse }
     if (-not (Test-Path -LiteralPath (Join-Path $copy 'share')) -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Bin) 'share'))) {
         Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $Bin) 'share') -Destination (Join-Path $copy 'share') -Recurse
     }
+    if (Test-Path -LiteralPath (Join-Path $copy 'noctty.ico')) { throw 'The soak copy must not carry noctty.ico beside its exe.' }
     [IO.File]::WriteAllText((Join-Path $copy 'noctty.portable'), '')
     [IO.File]::WriteAllText((Join-Path $work 'flood.txt'), (New-FloodText), $script:Utf8)
     $floodCmd = Join-Path $work 'flood.cmd'
     [IO.File]::WriteAllText($floodCmd, ('@type "{0}"' -f (Join-Path $work 'flood.txt')) + "`r`n" + ('@echo flood>>"{0}"' -f (Join-Path $work 'flood-count.txt')) + "`r`n")
     $floodText = '\"' + $floodCmd.Replace('\', '\\') + '\"\r'
     # The soak's config (portable mode reads <copy>\config.ghostty). Every default binding is cleared, so no
-    # key the harness posts can copy, paste or open anything; F2 to F8 are the churn's.
+    # key the harness posts can copy, paste or open anything; F2 to F8 are the churn's. Each is bound under
+    # every Shift, Ctrl and Alt chord too: a private desktop keeps the user's keys out but not the modifiers
+    # they hold, which the copy reads for a posted key (input.md, 2026-10-11 Win32 input mode, trap 11), so
+    # on a machine in use a posted F6 can arrive as Shift+F6.
+    $bindings = [ordered]@{
+        f2 = 'new_tab'; f3 = 'new_split:right'; f4 = 'new_split:down'; f5 = "text:$floodText"
+        f6 = 'close_surface'; f7 = 'close_tab'; f8 = 'clear_screen'
+    }
+    $chords = @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')
     @(
         'auto-update = off'
         'window-save-state = never'
@@ -745,13 +876,7 @@ function Invoke-SoakOuter {
         'copy-on-select = false'
         "working-directory = $work"
         'keybind = clear'
-        'keybind = f2=new_tab'
-        'keybind = f3=new_split:right'
-        'keybind = f4=new_split:down'
-        "keybind = f5=text:$floodText"
-        'keybind = f6=close_surface'
-        'keybind = f7=close_tab'
-        'keybind = f8=clear_screen'
+        foreach ($key in $bindings.Keys) { foreach ($chord in $chords) { "keybind = $chord$key=$($bindings[$key])" } }
     ) | Set-Content -LiteralPath (Join-Path $copy 'config.ghostty') -Encoding utf8NoBOM
 
     $realLocal = [Environment]::GetFolderPath('LocalApplicationData')
@@ -768,7 +893,7 @@ function Invoke-SoakOuter {
     foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     $pi = $null; $job = [IntPtr]::Zero; $driverExit = $null; $cleanup = $null
     try {
-        $job = [HiddenLocal]::CreateOwnedJob()
+        $job = [SoakNative]::CreateSoakJob()
         $env:LOCALAPPDATA = Join-Path $Run 'localappdata'; $env:APPDATA = Join-Path $Run 'appdata'
         $env:TEMP = Join-Path $Run 'temp'; $env:TMP = $env:TEMP
         $pwsh = (Get-Command pwsh.exe).Source
@@ -818,6 +943,7 @@ function Invoke-SoakOuter {
     if ($driverExit -eq 3) { $failed += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
     elseif ($driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and harness.json)" }
     Write-Host "soak records: $Run"
+    Write-Host "clipboard sequence number before $($before.Clipboard), after $($after.Clipboard)"
     Write-Host ("judge with: python -I ci/soak_judge.py `"{0}`" --min-minutes <60 or 480> [--other-run <the other copy's run>]" -f $Run)
     if ($failed.Count -gt 0) { throw ('soak harness: ' + ($failed -join '; ')) }
     Write-Host 'soak harness: records complete'
