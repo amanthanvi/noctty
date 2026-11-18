@@ -129,8 +129,15 @@ if ($resume) {
 }
 $channels = if (-not $Fixture) { Assert-PromotionPackageManagers } else { @{ SCOOP=$false; WINGET=$false; CHOCOLATEY=$false } }
 if (-not $resume -and -not $Fixture -and $PSCmdlet.ShouldProcess($Tag, 'promote verified release to stable and latest')) {
+    Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha
     & gh release edit $Tag --repo $Repository --prerelease=false --latest
-    if ($LASTEXITCODE -ne 0) { throw 'Release promotion failed.' }
+    $flipExit = $LASTEXITCODE
+    $confirmation = @{
+        Path=$manifestPath; ExpectedSha256=$ManifestSha256; DownloadDirectory=$download
+        Tag=$Tag; CandidateSha=$CandidateSha; TestRunId=$TestRunId; EvidenceRunId=$EvidenceRunId; ReleaseRunId=$ReleaseRunId
+    }
+    [void](Confirm-ReleasePublication -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -ReleaseId ([string]$release.id) -Prerelease $false -ManifestInputs $confirmation)
+    if ($flipExit -ne 0) { Write-Host 'Promote response was lost; authenticated the completed stable flip.' }
 } elseif (-not $resume) { Write-Host 'Read-only rehearsal: release edit disabled.' }
 if (-not $Fixture -and -not $WhatIfPreference -and $resumeFrom -eq 0) {
     & (Join-Path $PSScriptRoot 'check-release-copy.ps1') -ExpectedVersion $version -CheckRemoteLatest

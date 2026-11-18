@@ -39,22 +39,24 @@ function gh {
     elseif ($endpoint -ceq 'user') { $data=@{login='fixture-author'} }
     elseif ($endpoint -ceq 'search/issues') {
         $query=@($args|Where-Object {$_ -like 'q=*'})[0]
-        $author=$query -like '*author:fixture-author*'
-        if ($args -notcontains 'per_page=100' -or ($query -notlike '*AmanThanvi.noctty*1.3.136*' -and -not $author)) { throw 'Search was not bounded to package/version or publishing author.' }
+        if ($args -notcontains 'per_page=100' -or $query -cne 'q=repo:microsoft/winget-pkgs is:pr is:open in:title,body "amanthanvi.noctty"') { throw 'Search must use identifier alone across title/body, with an open-PR bound.' }
+        if ($case -eq 'query-error') { $global:LASTEXITCODE=1; 'HTTP/2.0 422'; ''; '{"message":"Invalid query"}'; return }
         if ($case -eq 'retry-exhausted' -or ($case -eq 'transient-502' -and $global:NocttyReleaseResumeFixture.Failures -eq 0)) {
             $status=502;$data=@{message='Bad Gateway'};$global:NocttyReleaseResumeFixture.Failures++
         } else {
             $items=@()
-            if ($case -notin @('absent','large-population','incomplete','transient-502','connection-once','other-account-retitled') -and ($case -ne 'open-retitled' -or $author)) { $items=@(@{number=123;title='Unrelated retitled text'}) }
+            if ($case -notin @('absent','large-population','incomplete','transient-502','connection-once','identifier-omitted')) { $items=@(@{number=123;title='Unrelated retitled text';body='AmanThanvi.noctty identifier retained without version';user=@{login='another-account'}}) }
             $data=@{items=$items;total_count=$items.Count;incomplete_results=($case -eq 'incomplete')}
             if ($case -eq 'too-broad') { $data.total_count=101 }
+            if ($case -eq 'bound-100') { $data.items=@(1..100|ForEach-Object {@{number=$_+1000;title='Identifier retained but version omitted'}});$data.total_count=100 }
         }
     }
-    elseif ($endpoint -ceq 'repos/microsoft/winget-pkgs/pulls/123') {
+    elseif ($endpoint -match '\Arepos/microsoft/winget-pkgs/pulls/[0-9]+\z') {
         $data=@{state=$(if($case -eq 'closed'){'closed'}else{'open'});merged_at=$null;changed_files=$(if($case -in @('files-incomplete','files-paginated')){101}elseif($case -eq 'multiple-files'){3}else{1})}
     }
-    elseif ($endpoint -like '*/pulls/123/files?*') {
+    elseif ($endpoint -like '*/pulls/*/files?*') {
         $path=switch($case){'other-package'{'manifests/o/Other/Package/1.3.136/Other.Package.yaml'} 'other-version'{'manifests/a/AmanThanvi/noctty/1.3.1360/AmanThanvi.noctty.yaml'} default{'manifests/a/AmanThanvi/noctty/1.3.136/AmanThanvi.noctty.yaml'}}
+        if ($case -eq 'bound-100' -and $endpoint -notlike '*/pulls/1100/files?*') { $path='unrelated/file.yaml' }
         $data=@(@{filename=$path;status=$(if($case -eq 'deleted'){'removed'}else{'added'})})
         if ($case -eq 'files-incomplete') { $data=@(@{filename='unrelated/file.yaml';status='added'}) }
         if ($case -eq 'files-paginated' -and $endpoint -like '*page=1') { $data=@(1..100|ForEach-Object {@{filename="unrelated/$_.yaml";status='added'}}) }
@@ -67,7 +69,7 @@ function gh {
 $savedToken = $env:GH_TOKEN
 $savedWinGetToken = $env:WINGET_CREATE_GITHUB_TOKEN
 $env:WINGET_CREATE_GITHUB_TOKEN = 'resume-fixture-token'
-$cases = [ordered]@{ open=$true; 'open-retitled'=$true; merged=$true; 'merged-retitled'=$true; 'default-branch'=$true; 'multiple-files'=$true; 'files-paginated'=$true; deleted=$false; closed=$false; absent=$false; 'other-package'=$false; 'other-version'=$false; unknown='error'; incomplete='error'; 'files-incomplete'='error'; 'large-population'=$false; 'transient-502'=$false; 'retry-exhausted'='error'; 'too-broad'='error'; 'connection-once'=$false; 'connection-exhausted'='error'; 'other-account-retitled'=$false }
+$cases = [ordered]@{ open=$true; 'open-retitled'=$true; merged=$true; 'merged-retitled'=$true; 'default-branch'=$true; 'multiple-files'=$true; 'files-paginated'=$true; deleted=$false; closed=$false; absent=$false; 'other-package'=$false; 'other-version'=$false; unknown='error'; incomplete='error'; 'files-incomplete'='error'; 'large-population'=$false; 'transient-502'=$false; 'retry-exhausted'='error'; 'too-broad'='WinGetCandidateSetIncomplete'; 'connection-once'=$false; 'connection-exhausted'='error'; 'other-account-retitled'=$true; 'identifier-omitted'=$false; 'query-error'='WinGetQueryFailed'; 'bound-100'=$true }
 try {
     foreach ($case in $cases.Keys) {
         $global:NocttyReleaseResumeFixture.Case = $case
@@ -75,15 +77,22 @@ try {
         $global:NocttyReleaseResumeFixture.Delays=[Collections.Generic.List[int]]::new()
         $global:NocttyReleaseResumeFixture.Failures=0
         $message = $null; $actual = $null
-        try { $actual = Test-WinGetVersionSubmitted } catch { $message = $_.Exception.Message }
+        try {
+            $observed=@(Test-WinGetVersionSubmitted 6>&1)
+            $values=@($observed | Where-Object { $_ -is [bool] })
+            if($values.Count -ne 1){throw 'Expected one bounded lookup result.'}
+            $actual=$values[0]
+            if(-not $actual -and @($observed | Where-Object { [string]$_ -like '*absent within the stated limit*' }).Count -ne 1){throw 'A miss lacked the stated-limit qualification.'}
+        } catch { $message = $_.Exception.Message }
         if ($cases[$case] -is [string]) {
-            if (-not $message -or $message -notmatch 'Could not determine') { throw "WinGet resume $case did not fail closed." }
+            if (-not $message -or $message -notmatch $(if($cases[$case] -eq 'error'){'WinGetQueryFailed|WinGetCandidateSetIncomplete'}else{$cases[$case]})) { throw "WinGet resume $case did not fail closed." }
         } elseif ($message -or $actual -ne $cases[$case]) { throw "WinGet resume $case returned the wrong state." }
         if ($env:GH_TOKEN -cne $savedToken) { throw 'WinGet query did not restore the GitHub token.' }
         if ($case -eq 'retry-exhausted' -and ($global:NocttyReleaseResumeFixture.Failures -ne 3 -or -not $global:NocttyReleaseResumeFixture.Delays.Contains(2000) -or -not $global:NocttyReleaseResumeFixture.Delays.Contains(4000))) { throw '5xx retries were not bounded with backoff.' }
         if ($case -eq 'connection-exhausted' -and $global:NocttyReleaseResumeFixture.Failures -ne 3) { throw 'Connection retries were not bounded.' }
         if ($case -eq 'transient-502' -and $global:NocttyReleaseResumeFixture.Failures -ne 1) { throw 'Transient 502 was not exercised.' }
-        if ($case -eq 'large-population' -and $global:NocttyReleaseResumeFixture.Calls.Count -ne 5) { throw 'Fresh version scanned unrelated PRs.' }
+        if ($case -eq 'large-population' -and $global:NocttyReleaseResumeFixture.Calls.Count -ne 3) { throw 'Fresh version scanned unrelated PRs.' }
+        if ($case -eq 'bound-100' -and $global:NocttyReleaseResumeFixture.Calls.Count -ne 203) { throw 'The complete 100-candidate bound was not checked by paths.' }
         Write-Host "Publisher resume WinGet $case`: PASS"
     }
 } finally {

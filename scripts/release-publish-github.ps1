@@ -80,12 +80,12 @@ Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $Candida
 # Create an explicit draft, upload each immutable asset with bounded retries,
 # verify the complete set, then publish. Cancellation leaves a named manual
 # recovery path, never automatic deletion or replacement of unknown bytes.
-$extra = if ($Prerelease -eq 'true') { @('--prerelease') } else { @() }
+$extra = @(if ($Prerelease -eq 'true') { '--prerelease' })
 & gh release create $Tag --repo $Repository --target $CandidateSha --draft --title $Title --generate-notes --notes $notesPrefix @extra
-if ($LASTEXITCODE -ne 0) { throw 'Failed to create release draft. Inspect publication state before retrying.' }
-$created = Get-ReleaseByTag -Repository $Repository -Tag $Tag
+$createExit = $LASTEXITCODE
+$created = Get-CreatedReleaseDraft -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -Prerelease ($Prerelease -eq 'true')
+if ($createExit -ne 0) { Write-Host 'Release create response was lost; authenticated the resulting draft by ID.' }
 $releaseId = [string]$created.id
-if (-not $created.draft) { throw 'ReleaseIdentityMismatch: newly created release must be a draft.' }
 foreach ($asset in $assets) {
     $name = [IO.Path]::GetFileName($asset)
     $hash = Get-FileSha256Lower $asset
@@ -123,18 +123,6 @@ Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $Candida
 $publishFlags = if ($Prerelease -eq 'true') { @('--prerelease', '--latest=false') } else { @('--prerelease=false', '--latest') }
 & gh release edit $Tag --repo $Repository --draft=false @publishFlags
 $editExit = $LASTEXITCODE
-# A lost edit response does not prove failure. Reconcile persisted state by ID;
-# every read retries transient HTTP and connection failures. Never delete.
-$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
-if ($state.draft -or $state.prerelease -ne ($Prerelease -eq 'true')) {
-    throw "ReleasePublishUnconfirmed: publication flags differ (edit exit $editExit). Preserve the release and inspect its ID."
-}
-Assert-ReleasePublicationState -Release $state -Repository $Repository -Tag $Tag
-[void](Assert-ReleaseManifest @assertInputs -Release $state)
-Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha
-$latest = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/latest") -AllowNotFound
-if (($Prerelease -eq 'false' -and [string]$latest.id -cne $releaseId) -or
-    ($Prerelease -eq 'true' -and [string]$latest.id -ceq $releaseId)) {
-    throw 'ReleasePublishUnconfirmed: latest release state differs; preserve the release and inspect it.'
-}
+[void](Confirm-ReleasePublication -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -ReleaseId $releaseId -Prerelease ($Prerelease -eq 'true') -ManifestInputs $assertInputs)
+if ($editExit -ne 0) { Write-Host 'Publish response was lost; authenticated persisted publication state.' }
 Write-Host 'Build publication: PASS (publication flags, tag, all uploaded bytes and GitHub digests match).'

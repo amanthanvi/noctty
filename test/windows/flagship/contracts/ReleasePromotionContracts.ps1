@@ -71,7 +71,7 @@ if ($promoteText -match '(?m)^\s*& gh release (upload|create)\b|--clobber' -or
 }
 $publisherResumeOutput = @(& (Join-Path $repoRoot 'test/windows/release-publisher-resume.ps1') 6>&1)
 if ($LASTEXITCODE -ne 0 -or @($publisherResumeOutput | Where-Object {
-    [string]$_ -ceq 'Publisher resume: PASS (22 WinGet cases and unchanged Scoop with relative metadata).'
+    [string]$_ -ceq 'Publisher resume: PASS (25 WinGet cases and unchanged Scoop with relative metadata).'
 }).Count -ne 1) { throw 'Publisher resume controls did not all complete.' }
 $publisherResumeOutput | ForEach-Object { Write-Host $_ }
 
@@ -98,7 +98,7 @@ if ($publisherText -match 'releases/tags/' -or $publicationText -match 'releases
 $generatorRunner = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-run-generator.ps1') -Raw
 if ($promoteText -match 'generatorCredentials' -or $promoteText -notmatch 'Invoke-ReleaseGenerator' -or
     $generatorRunner -notmatch 'ProcessStartInfo' -or $generatorRunner -notmatch 'CreateNoWindow = \$true' -or
-    $generatorRunner -notmatch 'Environment.Remove' -or $generatorRunner -match 'SetEnvironmentVariable') { throw 'Candidate generator must be isolated from parent scope and token environment.' }
+    $generatorRunner -notmatch 'Environment.Clear' -or $generatorRunner -match 'SetEnvironmentVariable') { throw 'Candidate generator must be isolated from parent scope and token environment.' }
 
 $outcomeOutput=@(& (Join-Path $repoRoot 'test/windows/release-publisher-outcomes.ps1') 6>&1)
 if (@($outcomeOutput | Where-Object { [string]$_ -ceq 'Publisher outcomes: PASS (3 missing-credential paths).' }).Count -ne 1) { throw 'Publishers must distinguish missing credentials from completion.' }
@@ -108,3 +108,10 @@ foreach($channel in @('Scoop','WinGet','Chocolatey')) {
     if ($releaseWorkflowText -notmatch ([regex]::Escape("$channel publication outcome:")) -or
         $releaseWorkflowText -notmatch ([regex]::Escape("PUBLICATION_OUTCOME: " + '${{ steps.' + $slug + '.outputs.outcome }}'))) { throw 'The publishing attempt must persist channel outcomes in the jobs API.' }
 }
+
+$generatorOutput=@(& (Join-Path $repoRoot 'test/windows/release-generator.ps1') 6>&1)
+if (@($generatorOutput | Where-Object { [string]$_ -ceq 'Generator isolation: PASS (allowlist, parent scope, outer WhatIf, typed parameters, bounded redacted failure reason).' }).Count -ne 1) { throw 'Generator allowlist/diagnostics controls did not complete.' }
+$generatorOutput | ForEach-Object { Write-Host $_ }
+$buildVerificationOutput=@(& (Join-Path $repoRoot 'test/windows/release-build-verification.ps1') 6>&1)
+if (@($buildVerificationOutput | Where-Object { [string]$_ -ceq 'Build verification results: PASS (stale native status, failed copy, failed verifier).' }).Count -ne 1) { throw 'Build verification must consume explicit results.' }
+$buildVerificationOutput | ForEach-Object { Write-Host $_ }

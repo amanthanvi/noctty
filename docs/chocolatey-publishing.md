@@ -154,11 +154,15 @@ verify, Scoop, WinGet and Chocolatey at the first incomplete step, keeping
 Chocolatey last. Each enabled publisher must be configured before the stable
 flip; explicitly set its `*_PUBLISH` variable to `off` to disable it.
 
-Do not re-run the original Release workflow after draft creation or publication;
-resume through promote. A prior failed rerun does not erase an earlier
+Do not re-run the original Release workflow after draft creation or publication.
+Use guarded draft recovery for an incomplete draft and promote for a complete
+published release. A prior failed rerun does not erase an earlier
 publishing attempt. Use that attempt's digest, retaining the original run ID.
-`DraftRelease` requires inspection and manual deletion of only the incomplete
-draft and its tag, then a new accepted build. `LegacyReleaseWithoutManifest`
+`DraftRelease` requires the guarded recovery in PACKAGING.md: list every release
+with the tag, stop unless the sole match is the inspected incomplete draft,
+re-read that draft by ID, then manually delete only that draft by ID before a
+new accepted build. Preserve the tag; never delete a tag a published release
+uses, and never use `--cleanup-tag`. A tagless draft needs no tag deletion. `LegacyReleaseWithoutManifest`
 and `IncompletePublishedRelease` preserve the published release and tag; older
 releases can use this verified manual Chocolatey entry point without a digest.
 `EvidenceExpired` requires a Test dispatch on the candidate tag with

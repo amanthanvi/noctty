@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '883a7d0cc45d4bff481665cc957cb0f69fc21ec5a20dd901939b13233705fa7e'
+    '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1366,7 +1366,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow)
         }
-        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
+        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest -PassThru.*?\$copy\.Verified -ne \$true.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?-PassThru.*?\$verification\.Verified -ne \$true'
         Kind = 'Text'
         Description = 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks'
     }
@@ -1448,7 +1448,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '64eed3738a6c5d0efe87cd0ac5250de620770658a302b91cf71483bbad31aa3c'
+            '124745e2768c1ce7af20288b86723b60135cc5a9959589f605a927d8850afc37'
         CriticalStatement = '$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing'
     }
     [pscustomobject] @{
@@ -1463,7 +1463,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            'a684ae01dc9cbc35487e804bc571fc27c009dbc450d7f9613f8d596d2824bd35'
+            '309807de0e1c7ddf93dfd215a62f3d933a8dd4e23d300c08a8d2ebc9cf94b4fe'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1839,7 +1839,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-ReleasePayloadPaths.*?Get-ReleaseByTag -Repository \$Repository -Tag \$Tag -AllowMissing.*?Use mode promote with its recorded manifest.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha --draft.*?\$attempt -le 3.*?gh release upload.*?AssetDigestMismatch.*?Assert-ReleaseManifest.*?gh release edit.*?--draft=false.*?Assert-ReleaseManifest'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-ReleasePayloadPaths.*?Get-ReleaseByTag -Repository \$Repository -Tag \$Tag -AllowMissing.*?Use mode promote with its recorded manifest.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha --draft.*?\$attempt -le 3.*?gh release upload.*?AssetDigestMismatch.*?Assert-ReleaseManifest.*?gh release edit.*?--draft=false.*?Confirm-ReleasePublication'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }

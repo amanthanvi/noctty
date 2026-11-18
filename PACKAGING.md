@@ -340,7 +340,9 @@ with at most three attempts, checks every uploaded digest against
 `release-manifest.json`, then publishes. The manifest digest is recorded by
 **Write release manifest and record digest**, before **Publish GitHub Release**.
 Uploads are immutable; build mode refuses an existing release and never uses
-`--clobber`. Keep the original Release run ID and its summary digest.
+`--clobber`. A lost create or promote response is reconciled by reads, never by
+repeating the mutation. Publication flags, the created tag and latest state
+have three-read bounded backoff checks; unresolved state stops and is preserved. Keep the original Release run ID and its summary digest.
 
 For a soaked prerelease, land the stable-copy update to README and the site on
 `main` first, then dispatch **Release** from `main` with `mode=promote`:
@@ -388,7 +390,7 @@ pending tags for inspection. First list **every** release with this tag,
 including drafts, with a push-authorized token (listing is read-only):
 
 ```powershell
-gh api --paginate --slurp 'repos/amanthanvi/noctty/releases?per_page=100' --jq '[.[][] | select(.tag_name == "<tag>") | {id, tag_name, draft, prerelease}]'
+gh api --method GET --paginate 'repos/amanthanvi/noctty/releases?per_page=100' --jq '.[] | select(.tag_name == "<tag>") | {id, tag_name, draft, prerelease}'
 ```
 
 Stop unless there is **exactly one** match and it is the inspected incomplete
@@ -426,9 +428,10 @@ preservation and inspection, not deletion or a rebuild. `ReleaseMissing` means
 no release or draft was visible. Never delete a published historical release
 in response to a promotion refusal.
 
-The candidate generator runs in a separate, hidden `pwsh` process, with GitHub
-and package-manager token variables removed from its environment. Parent scope
-variables are inaccessible; the orchestration process retains its credentials
+The candidate generator runs in a separate, hidden `pwsh` process, with
+an environment allowlist containing only Windows runtime/temp locations.
+Arbitrary runner variables and parent scope variables are inaccessible; the
+orchestration process retains its credentials
 for channel preflight. Local metadata generation also works under an outer
 `-WhatIf`; external mutations still honor `-WhatIf`. All
 three `*_PUBLISH=off` switches compare case-insensitively in build, promote,
@@ -451,23 +454,22 @@ binaries. The default verifier continues to require a stable release.
 
 ### WinGet
 
-Duplicate discovery checks the default branch's exact version directory, then
-at most 100 package/version search matches and 100 open PRs by the publishing
-identity. Every discovered PR is checked through its state and changed-file
-paths under the version's manifest directory. Reads have a 250-request budget,
-three attempts for 5xx or connection loss, and search-rate pacing.
+Duplicate discovery checks the default branch's exact version directory and
+searches **open** winget-pkgs PRs for `amanthanvi.noctty` in **title or body**,
+without a version qualifier or an author restriction. The complete candidate
+set must contain at most **100** PRs. Each candidate's state and changed-file
+paths are checked under `manifests/a/AmanThanvi/noctty/<version>/`.
+Reads have a 250-request budget, search-rate pacing and three attempts for
+5xx or connection loss. `WinGetQueryFailed` stops after a failed lookup;
+`WinGetCandidateSetIncomplete` stops for a broad, incomplete or truncated result.
+Neither condition permits submission.
 
-**Discovery limit:** GitHub's pull-request files endpoint takes a PR number;
-it has no repository-wide directory filter. Issue search has no changed-path
-qualifier. Consequently, an open PR by another account that is retitled and
-omits package/version text from searchable content can escape this bounded
-candidate discovery. Scanning every open PR caused real 502s on winget-pkgs and
-is deliberately avoided. Before a fresh submission, the operator must check
-known external submissions by PR number, listing all files (up to the REST
-3,000-file limit) and matching `manifests/a/AmanThanvi/noctty/<version>/`.
-If that inspection cannot establish the state, disable WinGet with
-`WINGET_PUBLISH=off` and use an audited manual channel recovery. No claim of
-repository-wide open-PR path coverage is made.
+A miss is reported as **absent within the stated limit**, never confirmed
+repository-wide absence. The accepted residual is an external PR whose title
+**and** body both omit the package identifier; wingetcreate does not produce
+such PRs. Retitling a PR or omitting the version from its title/body is covered
+as long as either field retains the identifier. No all-open-PR enumeration is
+used: that caused measured 502s on winget-pkgs.
 
 - Secret: `WINGETCREATE_TOKEN`
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`

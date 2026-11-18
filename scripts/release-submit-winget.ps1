@@ -57,9 +57,10 @@ $artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 function Test-WinGetVersionSubmitted {
-    # Search is bounded to 100 package/version matches plus 100 open PRs by
-    # the publishing identity. Retitles are confirmed by files, never titles.
-    # Default-branch manifests also catch completed submissions without search.
+    # At most 100 open PRs matching the identifier in title OR body, without
+    # a version qualifier. Confirm identity by manifest paths, not PR text.
+    # Accepted limit: an external PR whose title AND body omit the identifier
+    # is undiscoverable here; wingetcreate submissions always include it.
     $segments = $PackageIdentifier.Split('.')
     $prefix = 'manifests/{0}/{1}/{2}/' -f $segments[0].Substring(0, 1).ToLowerInvariant(), ($segments -join '/'), $Version
     $requestBudget = [pscustomobject]@{ Remaining = 250 }
@@ -123,29 +124,26 @@ function Test-WinGetVersionSubmitted {
             }
             return $true
         }
-        $identity = Read-WinGetJson @('user')
-        if ($identity.login -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9-]*\z') { throw 'WinGet token identity is unknown.' }
+        $identifier = $PackageIdentifier.ToLowerInvariant()
+        $query = "repo:microsoft/winget-pkgs is:pr is:open in:title,body `"$identifier`""
+        $search = Read-WinGetJson @('search/issues', '-f', "q=$query", '-f', 'per_page=100') -Search
+        if ($null -eq $search.total_count -or $null -eq $search.items -or $search.incomplete_results -or
+            $search.total_count -ne @($search.items).Count -or $search.total_count -gt 100) {
+            throw 'WinGetCandidateSetIncomplete: identifier query must be complete and contain at most 100 open PRs.'
+        }
         $numbers = [Collections.Generic.HashSet[int]]::new()
-        foreach ($query in @(
-            "repo:microsoft/winget-pkgs is:pr `"$PackageIdentifier`" `"$Version`"",
-            "repo:microsoft/winget-pkgs is:pr is:open author:$($identity.login)"
-        )) {
-            $search = Read-WinGetJson @('search/issues', '-f', "q=$query", '-f', 'per_page=100') -Search
-            if ($null -eq $search.total_count -or $null -eq $search.items -or $search.incomplete_results -or
-                $search.total_count -gt 100 -or $search.total_count -ne @($search.items).Count) { throw 'Bounded WinGet candidate search was incomplete or too broad.' }
-            foreach ($item in $search.items) {
-                if (-not $item.number) { throw 'WinGet search candidate has no PR number.' }
-                [void]$numbers.Add([int]$item.number)
-            }
+        foreach ($item in $search.items) {
+            if (-not $item.number) { throw 'WinGet search candidate has no PR number.' }
+            [void]$numbers.Add([int]$item.number)
         }
         foreach ($number in $numbers) { if (Test-WinGetPrFiles -Number $number) { return $true } }
-        # GitHub issue search cannot query changed paths. Retitled PRs by
-        # another account that omit package/version text cannot be discovered
-        # within this bound; see PACKAGING.md's operator check.
-        Write-Warning 'WinGet discovery limit: a retitled other-account PR without package/version text needs an operator path check before submission.'
+        Write-Host "WinGet $PackageIdentifier $Version`: absent within the stated limit (open PR title/body identifier query and default-branch manifest check; external PRs omitting the identifier in both fields are excluded)."
         return $false
     }
-    catch { throw 'Could not determine whether this WinGet version already has an open or merged PR; refusing a duplicate submission.' }
+    catch {
+        if ($_.Exception.Message.StartsWith('WinGetCandidateSetIncomplete:', [StringComparison]::Ordinal)) { throw }
+        throw 'WinGetQueryFailed: could not complete the bounded submission lookup after its retry policy; refusing submission.'
+    }
     finally { $env:GH_TOKEN = $savedToken }
 }
 if (Test-WinGetVersionSubmitted) {

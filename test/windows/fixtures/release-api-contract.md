@@ -58,7 +58,7 @@ response and mutation.
 - Bootstrap reads accept only the two exact configured Scoop/WinGet paths and
   have an unavailable-path twin. Fixture B never pretends to publish a feed.
 - The separate publisher fixture models REST HTTP status/JSON framing, bounded
-  package/version and publishing-author searches, candidate file pagination,
+  identifier-only open-PR title/body search, candidate file pagination,
   default-branch existence, transient 502 and exhausted 5xx retries. It rejects
   GraphQL and unbounded PR enumeration. A population of thousands of unrelated
   open PRs requires no extra reads. Sleep is recorded in this unit fixture;
@@ -70,10 +70,18 @@ response and mutation.
   not a second real non-ancestor history. These limits do not establish hosted
   build, signing, tag publication, feed acceptance or real-input behavior.
 
-The bounded WinGet search cannot discover every other-account retitled PR: the
-[files API](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files)
-requires a PR number and supports only pagination, not a directory filter;
-[issue search](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
-does not support changed-file path qualifiers. The other-account-retitled twin
-records this limitation, and PACKAGING.md requires operator inspection or an
-explicit channel disable when the external submission state is uncertain.
+The WinGet search uses the package identifier alone over open PR title/body,
+with no author/version filter and a complete-set bound of 100. Each discovered
+PR is checked by manifest paths; the exact version directory is also checked
+on the default branch. The 100-candidate positive control reaches 203 GETs;
+over-bound, incomplete and failed-query twins refuse with named outcomes.
+A miss is explicitly **absent within the stated limit**. The lead accepts the
+remaining external-PR case where both title and body omit the identifier;
+wingetcreate does not produce that case. No global changed-path query is claimed.
+
+Post-write controls model lost create/flip responses, absent draft discovery,
+wrong draft identity, delayed publication flags, tag 404 visibility, stale/missing
+latest, and true HTTP 503 framing with retry/exhaustion twins. Mutations are
+issued once, then reconciliation uses reads only. Backoff is bounded to three
+logical observations, with at most three transport attempts per observation.
+Actual GitHub write propagation times remain unmeasured under this task's grant.

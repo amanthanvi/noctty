@@ -47,9 +47,15 @@ function Assert-ReleasePublicationState {
 }
 
 function Assert-RemoteReleaseTag {
-    param([string] $Repository, [string] $Tag, [string] $CandidateSha, [switch] $AllowMissing)
-    $ref = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/git/ref/tags/$Tag") -AllowNotFound:$AllowMissing
-    if ($null -eq $ref) { return }
+    param([string] $Repository, [string] $Tag, [string] $CandidateSha, [switch] $AllowMissing, [switch] $WaitForExistence)
+    $attempts = if ($WaitForExistence) { 3 } else { 1 }
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $ref = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/git/ref/tags/$Tag") -AllowNotFound:($AllowMissing -or $WaitForExistence)
+        if ($null -ne $ref) { break }
+        if ($AllowMissing) { return }
+        if ($attempt -lt $attempts) { Start-Sleep -Seconds $attempt }
+    }
+    if ($null -eq $ref) { throw 'ReleaseTagUnconfirmed: published tag is still missing after 3 reads; preserve release and inspect it.' }
     $object = $ref.object
     for ($depth = 0; $object.type -ceq 'tag' -and $depth -lt 8; $depth++) {
         $object = (Invoke-ReleaseGhJson @('api', "repos/$Repository/git/tags/$($object.sha)")).object
@@ -57,4 +63,47 @@ function Assert-RemoteReleaseTag {
     if ($object.type -cne 'commit' -or -not [string]::Equals($object.sha, $CandidateSha, [StringComparison]::Ordinal)) {
         throw 'TagIdentityMismatch: remote tag differs from candidate input.'
     }
+}
+function Get-CreatedReleaseDraft {
+    param([string] $Repository, [string] $Tag, [string] $CandidateSha, [bool] $Prerelease)
+    # Create is issued once. A failed response may have created the draft;
+    # discover it by list/ID and authenticate it before uploading any bytes.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $draft = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing
+        if ($null -ne $draft) {
+            if (-not $draft.draft -or $draft.prerelease -ne $Prerelease -or
+                @($draft.assets).Count -ne 0) { throw "ReleaseIdentityMismatch: created draft flags/assets differ (draft=$($draft.draft), prerelease=$($draft.prerelease), expected=$Prerelease, assets=$(@($draft.assets).Count)); preserve it for inspection." }
+            if (-not [string]::Equals($draft.target_commitish, $CandidateSha, [StringComparison]::Ordinal)) {
+                # GitHub ignores target_commitish when the tag already exists.
+                # In that case only its peeled ref authenticates the candidate.
+                try { Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha }
+                catch { throw 'ReleaseIdentityMismatch: created draft target cannot be authenticated; preserve it for inspection.' }
+            }
+            return $draft
+        }
+        if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+    }
+    throw 'ReleaseCreateUnconfirmed: draft absent after 3 discovery reads; inspect the run before retrying. Never delete a published release.'
+}
+function Confirm-ReleasePublication {
+    param([string] $Repository, [string] $Tag, [string] $CandidateSha, [string] $ReleaseId, [bool] $Prerelease, [hashtable] $ManifestInputs)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $state = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/$ReleaseId") -AllowNotFound
+        if ($null -ne $state -and -not $state.draft -and $state.prerelease -eq $Prerelease) { break }
+        if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+    }
+    if ($null -eq $state -or $state.draft -or $state.prerelease -ne $Prerelease) {
+        throw 'ReleasePublishUnconfirmed: publication flags did not converge after 3 reads; preserve the release and inspect its ID.'
+    }
+    if (-not [string]::Equals([string]$state.id, $ReleaseId, [StringComparison]::Ordinal)) { throw 'ReleaseIdentityMismatch: publication ID differs.' }
+    Assert-ReleasePublicationState -Release $state -Repository $Repository -Tag $Tag
+    [void](Assert-ReleaseManifest @ManifestInputs -Release $state)
+    Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -WaitForExistence
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $latest = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/latest") -AllowNotFound
+        $isLatest = [string]::Equals([string]$latest.id, $ReleaseId, [StringComparison]::Ordinal)
+        if ($isLatest -ne $Prerelease) { return $state }
+        if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+    }
+    throw 'ReleaseLatestUnconfirmed: latest state did not converge after 3 reads; preserve the release and inspect it.'
 }

@@ -8,9 +8,14 @@ function Invoke-ReleaseGenerator {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','SCOOP_BUCKET_TOKEN','WINGET_CREATE_GITHUB_TOKEN','WINGETCREATE_TOKEN','CHOCO_API_KEY')) {
-        [void]$start.Environment.Remove($name)
+    $start.Environment.Clear()
+    foreach ($name in @('SystemRoot','WINDIR','SystemDrive','TEMP','TMP')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { $start.Environment[$name] = $value }
     }
+    # Only OS/runtime/temp locations are inherited. No PATH, user profiles,
+    # package configuration or arbitrary runner variables reach candidate code.
+    $start.Environment['NO_COLOR'] = '1'
     foreach ($argument in @('-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
     $child = [Diagnostics.Process]::new()
     $child.StartInfo = $start
@@ -19,10 +24,16 @@ function Invoke-ReleaseGenerator {
         $stdout = $child.StandardOutput.ReadToEndAsync()
         $stderr = $child.StandardError.ReadToEndAsync()
         $child.WaitForExit()
-        # Candidate output is deliberately not printed: it is untrusted and may
-        # contain inherited noncredential environment data or filesystem paths.
         [void]$stdout.GetAwaiter().GetResult()
-        [void]$stderr.GetAwaiter().GetResult()
-        if ($child.ExitCode -ne 0) { throw "Package-manager generator failed (exit $($child.ExitCode))." }
+        $errorText = $stderr.GetAwaiter().GetResult()
+        if ($child.ExitCode -ne 0) {
+            # At most eight lines/2048 chars; remove terminal controls and
+            # recognizable GitHub token forms before emitting diagnostics.
+            $tail = (@($errorText -split '\r?\n' | Where-Object { $_.Length }) | Select-Object -Last 8) -join "`n"
+            $tail = [regex]::Replace($tail, '[\x00-\x08\x0B-\x1F\x7F]', '')
+            $tail = [regex]::Replace($tail, '(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)', '[REDACTED]')
+            if ($tail.Length -gt 2048) { $tail = $tail.Substring($tail.Length - 2048) }
+            throw "Package-manager generator failed (exit $($child.ExitCode)). Child stderr tail: $tail"
+        }
     } finally { $child.Dispose() }
 }

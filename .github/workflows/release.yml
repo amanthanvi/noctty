@@ -433,10 +433,11 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           RELEASE_MANIFEST_SHA256: ${{ steps.manifest.outputs.manifest_sha256 }}
         run: |
-          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION -ManifestSha256 $env:RELEASE_MANIFEST_SHA256
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $copy = ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest -PassThru
+          if ($copy.Verified -ne $true) { throw 'Published release copy verification failed.' }
+          $verification = ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION -ManifestSha256 $env:RELEASE_MANIFEST_SHA256 -PassThru
+          if ($verification.Verified -ne $true) { throw 'Published release verification failed.' }
+          $global:LASTEXITCODE = 0
 
       - name: Publish Scoop manifest
         id: scoop
