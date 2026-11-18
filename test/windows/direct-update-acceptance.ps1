@@ -274,13 +274,14 @@ try {
     $result.FinalWindowProcessId=$windows[0].ProcessId
     if(@([HiddenWin]::JobProcessIds($script:caseJob)) -notcontains $windows[0].ProcessId){throw 'Final application is not in the owned job'}
     $finalProcess=[Diagnostics.Process]::GetProcessById($windows[0].ProcessId)
-    $null=$finalProcess.Handle
+    $finalHandle=$finalProcess.Handle
     if($finalProcess.MainModule.FileName -ine $exe){throw 'Final application identity does not match the portable copy'}
     $hosts=@([HiddenWin]::Hosts($windows[0].ProcessId))
     foreach($hwnd in $hosts){$null=[HiddenWin]::PostMessageW($hwnd,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)}
     if(-not $finalProcess.WaitForExit(40000)){throw 'Final application did not shut down normally'}
-    $result.FinalAppExit=$finalProcess.ExitCode
-    if($finalProcess.ExitCode -ne 0){throw 'Final application exited unsuccessfully'}
+    [uint32]$finalCode=259
+    if(-not [HiddenWin]::GetExitCodeProcess($finalHandle,[ref]$finalCode) -or $finalCode -ne 0){throw 'Final application exited unsuccessfully'}
+    $result.FinalAppExit=$finalCode
     Wait-Check 'normal final application shutdown' { @([HiddenWin]::JobProcessIds($script:caseJob)).Count -eq 0 } 40
     $result.NoRollbackObserved=$true; $result.Passed=$true
 } catch {
