@@ -842,6 +842,11 @@ records versions, folder inventories, a sanitized state timeline, and the final
 stub's signature, publisher pin, description, empty export/import directories,
 load failure (1114), and equality with the verified candidate ZIP.
 
+Invoke from noninteractive automation, or from a caller whose PSReadLine history
+was already set to a run-local path or `SaveNothing` before its first read.
+Typing a wrapper command in an ordinary interactive host can itself enter the
+real history before this script starts; the metadata guard cannot prevent that.
+
 ```powershell
 ./test/windows/direct-update-acceptance.ps1 `
     -Run H:\scratch\direct-update-136-137-NEW `
@@ -849,7 +854,14 @@ load failure (1114), and equality with the verified candidate ZIP.
 ```
 
 The run directory must not exist. Every harness launch names a private desktop;
-the driver inherits separate LOCALAPPDATA, APPDATA and temporary directories.
+the driver inherits a small explicit environment whitelist with separate profile,
+LOCALAPPDATA, APPDATA and temporary directories, excluding workflow credentials.
+The controller must observe Default. Downloads check both system and run-volume
+space, use bounded GitHub CLI calls, and verify the publisher of both noctty.exe
+and its console shim before either runs. Receipts publish by a sibling-file rename
+after serialization and preserve zero/one/many array shapes. Inventories include
+hidden files and files within hidden directories. Trailing run-path separators
+are removed while drive roots are preserved.
 The parent samples owned windows on both Default and the named private desktop,
 and checks clipboard sequence and PSReadLine history metadata. A sample cannot
 prove the placement of a window that existed entirely between samples.
@@ -914,6 +926,11 @@ Run `direct-update-contract.ps1` for static refusal controls and the harness's
 actual verdict functions against synthetic files and receipts. Parse-valid
 here-string, disabled-guard, forged-stub, clipboard, confirmation,
 executable-identity and sidecar mutants must fail; the flagship gate includes it.
+The hosted definition, historical/Mesa/desktop guards and Default positive are
+pinned by executable AST shape. Clipboard-helper admission masks C# strings and
+comments, refuses conditional compilation and requires exact native call counts;
+extra unguarded calls and inert copies fail. The parent's positive counters must
+also equal the helper's own before/after pair.
 Public artifacts should contain only the named JSON receipts, never the raw child logs,
 copied profiles or binaries. The hosted workflow used to gather W10 evidence is
 scratch-only and is not part of this change.

@@ -59,10 +59,64 @@ function Get-DirectUpdateProblems([string] $Text) {
     function OutsideFunction($Node){for($p=$Node.Parent;$p;$p=$p.Parent){if($p -is [Management.Automation.Language.FunctionDefinitionAst]){return $false}};return $true}
     function InFinally($Pipeline){$block=$Pipeline.Parent;return $block -is [Management.Automation.Language.StatementBlockAst] -and $block.Parent -is [Management.Automation.Language.TryStatementAst] -and [object]::ReferenceEquals($block,$block.Parent.Finally)}
     function Need([string] $Key,[bool] $Present){if(-not $Present){$problems.Add($Key)}}
+    function Function-Statements([string] $Name){
+        $nodes=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ieq $Name})
+        if($nodes.Count -eq 1){return @($nodes[0].Body.EndBlock.Statements)}
+        return @()
+    }
+    # Canonical executable statements: quoted copies and disabled wrappers cannot satisfy these.
+    $guardStatements=[ordered]@{
+        Native=@('Assert-NativeArchitecture','if ($native -cne $Architecture -or $processArchitecture -cne $Architecture) { throw ''Native OS and process architecture must match the requested test; emulation is not evidence'' }')
+        NewRun=@('Assert-NewRun','if (Test-Path -LiteralPath $Run) { throw ''Run directory must be new'' }')
+        NewDownload=@('Get-ReleaseCopy','if (Test-Path -LiteralPath $destination) { throw ''Download destination already exists'' }')
+        PublishedHash=@('Get-ReleaseCopy','if ((Get-Sha $zip) -cne $published -or $zipAsset[0].digest -cne "sha256:$published") { throw ''Portable ZIP SHA-256 mismatch'' }')
+        Profile=@('Assert-DriverProfile','if(-not $isolated){throw ''Driver profile isolation failed''}')
+        DefaultOracle=@('Assert-NoDefaultWindows','if ($escaped.Count -ne 0) { throw ''Owned process has a window on Default; blocking further work'' }')
+        StubHash=@('Assert-InstalledStub','if($result.FinalStub.Sha256 -cne $result.TargetStub.Sha256){throw ''Final stub differs from the verified candidate ZIP''}')
+        Rollback=@('Add-UpdateSample','if ($state -and $state.Phase -ceq ''rollback'') { throw ''Observed portable rollback'' }')
+        CryptographicSignature=@('Get-Stub','$signature=Assert-ReleaseSignature -Path $Path -Label ''Portable stub'' -AllowedPins $pins -TrustSelfSigned $true')
+        StubLoad=@('Get-Stub','if ($errorCode -ne 1114) { throw ''Stub did not refuse loading with ERROR_DLL_INIT_FAILED'' }')
+        MesaNewDownload=@('Add-HostedMesa','if(Test-Path -LiteralPath $destination){throw ''Mesa download directory must be new''}')
+        MesaHashBeforeExtraction=@('Add-HostedMesa','if((Get-Sha $archive) -cne $pins[$Architecture]){throw ''Mesa archive SHA-256 mismatch''}')
+        MesaSingleFile=@('Add-HostedMesa','if($after.Count -ne $before.Count+1 -or $changes.Count -ne 1 -or $changes[0].SideIndicator -cne ''=>'' -or $changes[0].InputObject -cnotmatch ''^opengl32\.dll:''){throw ''Mesa injection changed more than one extra file''}')
+        ClipboardHosted=@('Invoke-ClipboardPositive','if(-not $ephemeral){return @{Supported=$false;FailedApi=''HostedOnly'';WinSta0WriterNeverInvoked=$true}}')
+        HostedWinSta0=@('Invoke-HostedClipboardPositive','if(-not $ephemeral){throw ''WinSta0 clipboard control requires a disposable hosted runner''}')
+        ClipboardSupported=@('Invoke-ClipboardPositive','if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw ''Clipboard positive control failed''}')
+        ReceiptArray=@('Save-Receipt','$json=ConvertTo-Json -InputObject $Value -Depth 12')
+        ReceiptPublication=@('Save-Receipt','[IO.File]::Move($temporary,$path,$true)')
+        StubLoadApi=@('Get-StubLoadError','[DirectUpdateUi]::StubLoadError($Path)')
+    }
+    foreach($entry in $guardStatements.GetEnumerator()){Need $entry.Key (Direct (Function-Statements $entry.Value[0]) $entry.Value[1])}
+    $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'New-DriverEnvironment'})
+    Need MinimalEnvironmentPolicy ($node.Count -eq 1 -and (Same $node[0].Body '{ $minimal=@{} foreach($name in @(''SystemRoot'',''WINDIR'',''COMSPEC'',''PATH'',''PATHEXT'',''GITHUB_ACTIONS'',''RUNNER_ENVIRONMENT'')){ if($Parent.Contains($name)){$minimal[$name]=[string]$Parent[$name]} } $minimal.LOCALAPPDATA=Join-Path $Root ''localappdata''; $minimal.APPDATA=Join-Path $Root ''appdata'' $minimal.TEMP=Join-Path $Root ''temp''; $minimal.TMP=$minimal.TEMP $minimal.USERPROFILE=Join-Path $Root ''profile'' return $minimal }'))
+    $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'Invoke-MinimalDriverEnvironment'})
+    Need MinimalEnvironmentScope ($node.Count -eq 1 -and (Same $node[0].Body '{ # CreateProcess inherits this explicit whitelist; restore only this controller. # Never log the saved environment or its values. $parent=[Environment]::GetEnvironmentVariables(''Process'') $minimal=New-DriverEnvironment $parent $Run try{ foreach($name in @($parent.Keys)){[Environment]::SetEnvironmentVariable($name,$null,''Process'')} foreach($name in $minimal.Keys){[Environment]::SetEnvironmentVariable($name,$minimal[$name],''Process'')} & $Start }finally{ foreach($name in @([Environment]::GetEnvironmentVariables(''Process'').Keys)){[Environment]::SetEnvironmentVariable($name,$null,''Process'')} foreach($name in $parent.Keys){[Environment]::SetEnvironmentVariable($name,[string]$parent[$name],''Process'')} } }'))
+    Need PublisherVerification (Direct (Function-Statements 'Get-ReleaseCopy') '$publishers=@(foreach($name in @(''noctty.exe'',''noctty.com'')){ $binary=Join-Path $executables[0].DirectoryName $name $signature=Assert-ReleaseSignature -Path $binary -Label ''Published portable executable'' -AllowedPins @(Get-StubPublisherPins) -TrustSelfSigned $true @{File=$name;Sha256=Get-Sha $binary;SignerSpkiSha256=$signature.SpkiSha256;CryptographicallyVerified=$true} })')
+    Need MesaPins (Direct (Function-Statements 'Add-HostedMesa') '$pins=@{ x64=''11dc079e356f33ce2ff84aa399c975da1a7bdd4c470f6eef4cf359ad8b9ca80f'' arm64=''067f3aca687fbf5afc8a1f41487bd051487d964d6c1686757a4d8ee6a2d3b901'' }')
+    $mesaParameter=@($ast.ParamBlock.Parameters | Where-Object {$_.Name.VariablePath.UserPath -ieq 'HostedMesa'})
+    Need MesaOptIn ($mesaParameter.Count -eq 1 -and $null -eq $mesaParameter[0].DefaultValue -and @($mesaParameter[0].Attributes | Where-Object {$_.TypeName.FullName -ieq 'switch'}).Count -eq 1)
+    $definitions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -imatch '(^|:)ephemeral$'},$true))
+    Need EphemeralDefinition ($definitions.Count -eq 1 -and [object]::ReferenceEquals($definitions[0].Parent,$ast.EndBlock) -and (Same $definitions[0] "`$ephemeral=`$env:GITHUB_ACTIONS -ceq 'true' -and `$env:RUNNER_ENVIRONMENT -ceq 'github-hosted'"))
+    Need LegacyStatement (Direct $ast.EndBlock.Statements "if ([version]`$FromVersion -lt [version]'1.3.136' -and -not `$ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }")
+    Need MesaStatement (Direct $ast.EndBlock.Statements "if(`$HostedMesa -and (-not `$ephemeral -or `$FromVersion -cne '1.3.125' -or `$TargetVersion -cne '1.3.137' -or `$Expected -cne 'Stub')){throw 'Mesa fixture requires hosted 1.3.125 to 1.3.137 stub acceptance'}")
+    Need NativeStatement (Direct (Function-Statements 'Assert-NativeArchitecture') "if (`$native -cne `$Architecture -or `$processArchitecture -cne `$Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }")
     $controller=Find-If $ast.EndBlock.Statements '-not $Driver'
+    Need RunPathCall (Direct $controller.Clauses[0].Item2.Statements '$Run=Get-RunPath $Run')
+    Need ParentDesktop (Direct $controller.Clauses[0].Item2.Statements "if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}")
+    Need RunVolume (Direct $controller.Clauses[0].Item2.Statements "if(`$runFree -le 20GB){throw 'Run volume has 20 GB or less free'}")
     Need HistoryStart (Direct $controller.Clauses[0].Item2.Statements "`$historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'")
     $controllerTry=@($controller.Clauses[0].Item2.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    $positive=@($controllerTry.Body.Statements | Where-Object {Same $_ 'Invoke-DefaultOraclePositive $pwsh'})
+    $launches=@($controllerTry.Body.Statements | Where-Object {$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$launch'})
+    Need DefaultPositiveCall ($positive.Count -eq 1 -and $launches.Count -eq 1 -and $positive[0].Extent.StartOffset -lt $launches[0].Extent.StartOffset)
+    $positiveTry=@((Function-Statements 'Invoke-DefaultOraclePositive') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need DefaultPositiveVerdict (Direct $positiveTry.Body.Statements "if(-not `$detected -or -not `$refused){throw 'Default oracle positive control failed'}")
+    Need MinimalEnvironmentCall (Direct $controllerTry.Body.Statements "`$launch=Invoke-MinimalDriverEnvironment { [HiddenWin]::Launch(`$pwsh,`$line,`$Run,`"WinSta0\`$DesktopName`",`$job,(Join-Path `$Run 'driver-raw.log')) }")
     Need PrivateClipboardCall (Direct $controllerTry.Body.Statements '$clipboardPositive=Invoke-ClipboardPositive $pwsh $job $DesktopName')
+    Need DriverBudget (Direct $controllerTry.Body.Statements '$deadline=[datetime]::UtcNow.AddSeconds(8*$TimeoutSeconds+300)')
+    $networkTry=@((Function-Statements 'Invoke-ReleaseGh') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need NetworkTimeout (Direct $networkTry.Body.Statements "if(-not `$child.WaitForExit(`$Seconds*1000)){throw 'Release request timed out'}")
+    Need NetworkHidden (Direct (Function-Statements 'Invoke-ReleaseGh') '$info.CreateNoWindow=$true')
     $loops=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.DoWhileStatementAst] -and (OutsideFunction $n)},$true))
     $loop=if($loops.Count -eq 1){$loops[0]}else{$null}
     Need DefaultCall ($null -ne $loop -and (Same $loop.Body.Statements[0] 'Assert-NoDefaultWindows $job'))
@@ -70,7 +124,17 @@ function Get-DirectUpdateProblems([string] $Text) {
     $done=Find-If $ready.Clauses[0].Item2.Statements "Test-Path -LiteralPath (Join-Path `$Run 'driver-done')"
     Need PrivateSentinel (Direct $done.ElseClause.Statements "if(@(`$private | Where-Object ProcessId -EQ `$launch.pid).Count -eq 0){throw 'Private driver sentinel was not observed'}")
     $driver=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need DriverDesktopStatement (Direct $driver.Body.Statements 'if($DesktopName -cnotmatch ''^noctty-hw-[a-f0-9]{32}$'' -or [HiddenWin]::CurrentDesktopName() -cne $DesktopName){throw ''Driver is not on its private desktop''}')
+    Need FinalExit (Direct $driver.Body.Statements 'if(-not [HiddenWin]::GetExitCodeProcess($finalHandle,[ref]$finalCode) -or $finalCode -ne 0){throw ''Final application exited unsuccessfully''}')
+    Need LegacyDispatch (Direct $driver.Body.Statements '$legacyPainted=$FromVersion -ceq ''1.3.125''')
+    Need Shell (Direct $driver.Body.Statements '$line=''"{0}" --window-save-state=never "--command=direct:{3} /D" --clipboard-write=deny --clipboard-read=deny --single-instance=false --class={1} --auto-update=download --auto-update-feed-url={2} --confirm-close-surface=false --keybind=f7=check_for_updates'' -f $exe,$class,$feed,$shell')
+    Need ShellSystem (Direct $driver.Body.Statements '$shell=Join-Path ([Environment]::GetFolderPath(''System'')) ''cmd.exe''')
+    $mesaBodies=@($driver.Body.Statements | Where-Object {$_ -is [Management.Automation.Language.IfStatementAst] -and (Same $_.Clauses[0].Item1 '$HostedMesa')} | ForEach-Object {$_.Clauses[0].Item2})
+    $moduleTries=@($mesaBodies | ForEach-Object {$_.Statements} | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]})
+    Need MesaBacking ($moduleTries.Count -eq 1 -and (Direct $moduleTries[0].Body.Statements 'if($modules.Count -ne 1 -or $modules[0].FileName -ine (Join-Path $script:install ''opengl32.dll'') -or (Get-Sha $modules[0].FileName) -cne $result.Mesa.DllSha256){throw ''Mesa module backing mismatch''}'))
+    Need MesaPreserved (@($mesaBodies | Where-Object {Direct $_.Statements 'if((Get-Sha (Join-Path $script:install ''opengl32.dll'')) -cne $result.Mesa.DllSha256){throw ''Mesa extra file was not preserved''}'}).Count -eq 1)
     Need DriverProfileCall (Direct $driver.Body.Statements '$isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run')
+    Need DriverCredentials (Direct $driver.Body.Statements "if(-not `$credentialsAbsent){throw 'Driver workflow credentials were inherited'}")
     $removed=Find-If $driver.Body.Statements "`$Expected -ceq 'Removed'"
     Need SourceStubCall (Direct $removed.Clauses[0].Item2.Statements "`$result.BeforeStub=Assert-SourceStub (Join-Path `$script:install 'ghostty-vt.dll')")
     $rejected=Find-If $driver.Body.Statements "`$Expected -ceq 'Rejected'"
@@ -96,7 +160,11 @@ function Get-DirectUpdateProblems([string] $Text) {
     return @($problems.ToArray())
 }
 function Get-ClipboardHelperProblems([string] $Text,[switch] $Hosted) {
-    $code=[regex]::Replace($Text,'(?s)/\*.*?\*/|//[^\r\n]*','')
+    # Preserve offsets while masking C# comments and literals. A string containing
+    # a guarded call is data, and preprocessor branches are never admitted here.
+    $lex='(?s)/\*.*?\*/|//[^\r\n]*|@"(?:""|[^"])*"|"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*'''
+    $structure=[regex]::Replace($Text,$lex,{param($m) [regex]::Replace($m.Value,'[^\r\n]',' ')})
+    $code=[regex]::Replace($Text,$lex,{param($m) if($m.Value.StartsWith('//') -or $m.Value.StartsWith('/*')){[regex]::Replace($m.Value,'[^\r\n]',' ')}else{$m.Value}})
     $requirements=if($Hosted){[ordered]@{
         HostedEnvironment='if\(!String.Equals\(Environment.GetEnvironmentVariable\("GITHUB_ACTIONS"\),"true",StringComparison.Ordinal\) \|\|\s*!String.Equals\(Environment.GetEnvironmentVariable\("RUNNER_ENVIRONMENT"\),"github-hosted",StringComparison.Ordinal\)\)\s*throw'
         HostedStation='!String.Equals\(ObjectName\(GetProcessWindowStation\(\)\),"WinSta0",StringComparison.OrdinalIgnoreCase\)'
@@ -124,23 +192,32 @@ function Get-ClipboardHelperProblems([string] $Text,[switch] $Hosted) {
         PrivateAfter='RequirePrivate\(station\); fact.After=GetClipboardSequenceNumber\(\);'
     }}
     $problems=[Collections.Generic.List[string]]::new()
-    foreach($entry in $requirements.GetEnumerator()){if($code -cnotmatch $entry.Value){$problems.Add($entry.Key)}}
     $gatePattern=if($Hosted){'(?s)static void RequireHostedWinSta0\(\) \{.*?\n    \}'}else{'(?s)static void RequirePrivate\(IntPtr station\) \{.*?\n    \}'}
     $expectedGate=if($Hosted){
         'static void RequireHostedWinSta0() { if(!String.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"),"true",StringComparison.Ordinal) || !String.Equals(Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT"),"github-hosted",StringComparison.Ordinal)) throw new Exception("Hosted-only clipboard control"); string desktop=ObjectName(GetThreadDesktop(GetCurrentThreadId())); Guid id; if(!String.Equals(ObjectName(GetProcessWindowStation()),"WinSta0",StringComparison.OrdinalIgnoreCase) || !desktop.StartsWith("noctty-hw-",StringComparison.Ordinal) || !Guid.TryParseExact(desktop.Substring(10),"N",out id)) throw new Exception("Hosted private desktop identity check failed"); }'
     }else{
         'static void RequirePrivate(IntPtr station) { var name=new StringBuilder(256); int needed; if (station == IntPtr.Zero || GetProcessWindowStation() != station || !GetUserObjectInformationW(station, 2, name, 512, out needed) || name.Length == 0 || String.Equals(name.ToString(), "WinSta0", StringComparison.OrdinalIgnoreCase)) throw new Exception("Private station identity check failed"); }'
     }
-    $gates=[regex]::Matches($code,$gatePattern)
-    if($gates.Count -ne 1 -or -not [string]::Equals([regex]::Replace($gates[0].Value,'[ \t\r\n]+',' '),$expectedGate,[StringComparison]::Ordinal)){$problems.Add('CompleteStationGate')}
-    if($code -match '\b(?:GetClipboardData|EnumClipboardFormats)\s*\('){$problems.Add('ClipboardContentRead')}
+    $gates=[regex]::Matches($structure,$gatePattern)
+    $gate=if($gates.Count -eq 1){$code.Substring($gates[0].Index,$gates[0].Length)}else{''}
+    foreach($entry in $requirements.GetEnumerator()){
+        $scope=if($entry.Key -in @('HostedEnvironment','HostedStation','HostedDesktop','StationIdentity','NotWinSta0','NonemptyStation')){$gate}else{$structure}
+        if($scope -cnotmatch $entry.Value){$problems.Add($entry.Key)}
+    }
+    if($gates.Count -ne 1 -or -not [string]::Equals([regex]::Replace($gate,'[ \t\r\n]+',' '),$expectedGate,[StringComparison]::Ordinal)){$problems.Add('CompleteStationGate')}
+    if($structure -match '(?m)^\s*#\s*(?:if|define)\b'){$problems.Add('Preprocessor')}
+    if($Text -match '\$@?"|@\$"|"""'){$problems.Add('UnsupportedLiteral')}
+    foreach($entry in (@{OpenClipboard=2;EmptyClipboard=2;SetClipboardData=2;CloseClipboard=3;GetClipboardSequenceNumber=3}).GetEnumerator()){
+        if([regex]::Matches($structure,('\b'+$entry.Key+'\s*\(')).Count -ne $entry.Value){$problems.Add('ClipboardCallCount')}
+    }
+    if($structure -match '\b(?:GetClipboardData|EnumClipboardFormats)\s*\('){$problems.Add('ClipboardContentRead')}
     return @($problems.ToArray())
 }
 function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'Behavioural fixture must parse'}
-    $names=@('Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
+    $names=@('Get-RunPath','New-DriverEnvironment','Save-Receipt','Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
     $definitions=foreach($name in $names){
         $found=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
         if($found.Count -ne 1){throw "Verdict definition is absent or ambiguous: $name"}
@@ -160,8 +237,21 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         function Get-StubPublisherPins {'fixture-pin'}
         function Assert-ReleaseSignature($Path,$Label,$AllowedPins,$TrustSelfSigned){@{Status='fixture';Thumbprint='fixture';SpkiSha256='fixture'}}
         function Get-PeDataDirectories($Path){@(@{Rva=0;Size=0},@{Rva=0;Size=0})}
+        $receiptWriter=${function:Save-Receipt}
         function Save-Receipt($Name,$Value){$script:savedIsolation=$Value}
         function Assert-WindowsHarnessHistoryGuard($Guard){if($script:historyShouldFail){throw 'Fixture history changed'}}
+
+        $Run=Join-Path $Root 'receipts'; $null=New-Item -ItemType Directory -Path $Run
+        & $receiptWriter -Name 'one.json' -Value @(@{Phase='fixture'})
+        $one=Get-Content -LiteralPath (Join-Path $Run 'one.json') -Raw
+        if(-not $one.TrimStart().StartsWith('[') -or @(ConvertFrom-Json -InputObject $one).Count -ne 1){$failures.Add('ReceiptArray')}
+        if(@(Get-ChildItem -LiteralPath $Run -Filter '*.tmp').Count){$failures.Add('ReceiptPublication')}
+        if(-not [string]::Equals((Get-RunPath ($Root+'\')),$Root,[StringComparison]::OrdinalIgnoreCase)){$failures.Add('RunPath')}
+        $driveRoot=[IO.Path]::GetPathRoot($Root)
+        if(-not [string]::Equals((Get-RunPath $driveRoot),$driveRoot,[StringComparison]::OrdinalIgnoreCase)){$failures.Add('RunRoot')}
+        $minimal=New-DriverEnvironment @{PATH='fixture';GH_TOKEN='fixture-secret';GITHUB_TOKEN='fixture-secret';UNRELATED_SECRET='fixture-secret';GITHUB_ACTIONS='true'} $Root
+        if($minimal.Contains('GH_TOKEN') -or $minimal.Contains('GITHUB_TOKEN') -or $minimal.Contains('UNRELATED_SECRET') -or $minimal.PATH -cne 'fixture' -or $minimal.LOCALAPPDATA -cne (Join-Path $Root 'localappdata')){$failures.Add('MinimalEnvironment')}
+
         Assert-NativeArchitecture x64 x64 x64
         Refuses Native {Assert-NativeArchitecture arm64 x64 x64}
         Refuses NewRun {Assert-NewRun $Root}
@@ -204,6 +294,18 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         }
         [IO.File]::WriteAllText((Join-Path $good 'ghostty-vt.dll'),'same-stub')
         [IO.File]::WriteAllText((Join-Path $changed 'ghostty-vt.dll'),'changed-stub')
+
+        $hiddenFile=Join-Path $good 'hidden-original'; [IO.File]::WriteAllText($hiddenFile,'hidden')
+        [IO.File]::SetAttributes($hiddenFile,[IO.FileAttributes]::Hidden)
+        $hiddenDir=Join-Path $good 'hidden-directory'; $null=New-Item -ItemType Directory -Path $hiddenDir
+        [IO.File]::SetAttributes($hiddenDir,[IO.FileAttributes]::Hidden)
+        [IO.File]::WriteAllText((Join-Path $hiddenDir 'nested'),'hidden-child')
+        $hiddenNames=@(Get-SourceSnapshot $good).Name
+        if($hiddenNames -cnotcontains 'hidden-original' -or $hiddenNames -cnotcontains (Join-Path 'hidden-directory' 'nested')){$failures.Add('HiddenInventory')}
+        [IO.File]::SetAttributes($hiddenFile,[IO.FileAttributes]::Normal)
+        [IO.File]::SetAttributes($hiddenDir,[IO.FileAttributes]::Directory)
+        [IO.File]::Delete($hiddenFile); [IO.File]::Delete((Join-Path $hiddenDir 'nested')); [IO.Directory]::Delete($hiddenDir)
+
         $before=@(Get-SourceSnapshot $good)
         Assert-RejectedCopy $before $good $clear
         $runtime=[IO.File]::Open((Join-Path $good 'update-state.json.lock'),[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
@@ -222,9 +324,10 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         $script:historyShouldFail=$true; $script:savedIsolation=$null
         Refuses HistoryFailure {Write-IsolationReceipt @{} @{}}
         if($null -eq $script:savedIsolation -or $script:savedIsolation.HistoryUnchanged -ne $false){$failures.Add('HistoryFailureReceipt')}
-        Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true} 1 2
+        Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true;Before=1;After=2} 1 2
         Refuses HostedUnsupported {Assert-HostedClipboardControl @{Supported=$false;HostedWinSta0=$true} 1 2}
-        Refuses HostedDeadReader {Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true} 1 1}
+        Refuses HostedDeadReader {Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true;Before=1;After=2} 1 1}
+        Refuses HostedCounterMismatch {Assert-HostedClipboardControl @{Supported=$true;HostedWinSta0=$true;Before=7;After=8} 1 2}
         return @($failures.ToArray())
     } $definitions $Root
 }
@@ -264,6 +367,20 @@ $controls=[ordered]@{
     ClipboardSupported=@('if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw','if($false){throw')
 }
 $sites=[ordered]@{
+    RunPathCall=@('$Run=Get-RunPath $Run','$Run=[IO.Path]::GetFullPath($Run)')
+    ParentDesktop=@("if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}",'')
+    RunVolume=@("if(`$runFree -le 20GB){throw 'Run volume has 20 GB or less free'}",'')
+    DriverBudget=@('$deadline=[datetime]::UtcNow.AddSeconds(8*$TimeoutSeconds+300)','$deadline=[datetime]::UtcNow.AddSeconds($TimeoutSeconds)')
+    NetworkTimeout=@("if(-not `$child.WaitForExit(`$Seconds*1000)){throw 'Release request timed out'}",'')
+    NetworkHidden=@('$info.CreateNoWindow=$true','$info.CreateNoWindow=$false')
+    DriverCredentials=@("if(-not `$credentialsAbsent){throw 'Driver workflow credentials were inherited'}",'')
+    EphemeralDefinition=@('$ephemeral=$env:GITHUB_ACTIONS -ceq ''true'' -and $env:RUNNER_ENVIRONMENT -ceq ''github-hosted''','$ephemeral=$true')
+    DefaultPositiveCall=@('Invoke-DefaultOraclePositive $pwsh','')
+    DefaultPositiveVerdict=@('if(-not $detected -or -not $refused){throw ''Default oracle positive control failed''}','')
+    MinimalEnvironmentCall=@('$launch=Invoke-MinimalDriverEnvironment {','$launch=& {')
+    ReceiptArray=@('$json=ConvertTo-Json -InputObject $Value -Depth 12','$json=$Value | ConvertTo-Json -Depth 12')
+    ReceiptPublication=@('[IO.File]::Move($temporary,$path,$true)','')
+    PublisherVerification=@('-Label ''Published portable executable''','-Label ''Unpinned portable executable''')
     DefaultCall=@('Assert-NoDefaultWindows $job','')
     ClipboardCall=@('Assert-ClipboardSequence $clipboardBefore $clipboardAfter','Assert-ClipboardSequence $clipboardBefore $clipboardBefore')
     HistoryCall=@('Assert-WindowsHarnessHistoryGuard -Guard $historyGuard','')
@@ -303,6 +420,26 @@ foreach($control in $inert.GetEnumerator()){
     $issues=@(Get-DirectUpdateProblems ($source.Replace($control.Value[0],$control.Value[1])))
     if($issues -cnotcontains $expected){throw "Inert-copy mutant escaped: $($control.Key)"}
 }
+
+# Ordinary strings and disabled executable guards must fail, too.
+$shapeControls=[ordered]@{}
+$ephemeralLine=@($source -split "`r?`n" | Where-Object {$_ -like '$ephemeral=*'})
+$shapeControls.EphemeralReassignment=@($ephemeralLine[0],($ephemeralLine[0]+"`n`$ephemeral=`$true"),'EphemeralDefinition')
+foreach($item in @(@('Legacy','LegacyStatement'),@('Mesa','MesaStatement'),@('Desktop','DriverDesktopStatement'))){
+    $needle=switch($item[0]){Legacy{'Historical portable identity requires'} Mesa{'Mesa fixture requires hosted'} Desktop{'Driver is not on its private desktop'}}
+    $anchor=@($source -split "`r?`n" | Where-Object {$_.Contains($needle)})[0]
+    $shapeControls[($item[0]+'Disabled')]=@($anchor,('if($false){'+$anchor+'}'),$item[1])
+    $shapeControls[($item[0]+'Quoted')]=@($anchor,('$unused="'+$anchor.Replace('`','``').Replace('$','`$').Replace('"','`"')+'"'),$item[1])
+}
+$legacyLine=@($source -split "`r?`n" | Where-Object {$_.Contains('Historical portable identity requires')})[0]
+$shapeControls.LegacyFalseClause=@($legacyLine,$legacyLine.Replace('-and -not $ephemeral)','-and -not $ephemeral -and $false)'),'LegacyStatement')
+$nativeLine=@($source -split "`r?`n" | Where-Object {$_.Contains('Native OS and process architecture must match')})[0]
+$shapeControls.NativeQuoted=@($nativeLine,('$unused='''+$nativeLine.Replace("'","''")+''''+"`n"+$nativeLine.Replace('$native -cne $Architecture -or $processArchitecture -cne $Architecture','$false')),'NativeStatement')
+foreach($control in $shapeControls.GetEnumerator()){
+    if([regex]::Matches($source,[regex]::Escape($control.Value[0])).Count -ne 1){throw "Shape anchor not unique: $($control.Key)"}
+    if(@(Get-DirectUpdateProblems ($source.Replace($control.Value[0],$control.Value[1]))) -cnotcontains $control.Value[2]){throw "Shape mutant escaped: $($control.Key)"}
+}
+
 $fixtures=Join-Path ([IO.Path]::GetTempPath()) ('direct-update-contract-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory -Path $fixtures
 try {
@@ -310,6 +447,8 @@ $baseline=Join-Path $fixtures 'baseline'; $null=New-Item -ItemType Directory -Pa
 $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
+    HiddenInventory=@('-File -Recurse -Force','-File -Recurse')
+    MinimalEnvironment=@("'PATH','PATHEXT'","'PATH','GH_TOKEN','PATHEXT'")
     StubAlias=@('$result.FinalStub=Get-Stub $Path','$result.FinalStub=$result.TargetStub')
     StubConsequence=@("{throw 'Final stub differs from the verified candidate ZIP'}",'{}')
     Hardcoded1114=@('$errorCode=Get-StubLoadError $Path','$errorCode=1114')
@@ -386,6 +525,17 @@ $hostedControls=[ordered]@{
 foreach($kind in @('private','hosted')){
     $text=if($kind -ceq 'private'){$privateSource}else{$hostedSource}
     $cases=if($kind -ceq 'private'){$privateControls}else{$hostedControls}
+
+    $gate=if($kind -ceq 'private'){'RequirePrivate(station);'}else{'RequireHostedWinSta0();'}
+    $anchor=$gate+' if(!OpenClipboard(window))'
+    $unguarded='if(!OpenClipboard(window))'
+    $extra=$text.Replace('public static Fact Run() {', 'public static Fact Run() { OpenClipboard(IntPtr.Zero); EmptyClipboard(); CloseClipboard();')
+    $disabled=$text.Replace($anchor,("`n#if NEVER`n"+$anchor+"`n#endif`n"+$unguarded))
+    $literal=$text.Replace($anchor,('string inert="'+$anchor+'"; '+$unguarded))
+    foreach($case in @(@('ExtraCalls',$extra,'ClipboardCallCount'),@('DeadPreprocessor',$disabled,'Preprocessor'),@('StringCopy',$literal,$(if($kind -ceq 'private'){'PrivateOpen'}else{'HostedOpen'})))){
+        if(@(Get-ClipboardHelperProblems $case[1] -Hosted:($kind -ceq 'hosted')) -cnotcontains $case[2]){throw "Native inert/extra control escaped: $kind/$($case[0])"}
+    }
+
     foreach($control in $cases.GetEnumerator()){
         if(([regex]::Matches($text,[regex]::Escape($control.Value[0]))).Count -ne 1){throw "Native clipboard control anchor is not unique: $($control.Key)"}
         $issues=@(Get-ClipboardHelperProblems ($text.Replace($control.Value[0],$control.Value[1])) -Hosted:($kind -ceq 'hosted'))
@@ -402,5 +552,5 @@ if($native -cnotmatch 'ClassName\(host\) != "noctty.win32.host"' -or $native -cn
     [IO.Directory]::Delete($owned,$true)
     if(Test-Path -LiteralPath $owned){throw 'Contract fixture cleanup failed'}
 }
-Write-Host "direct-update admission contracts: PASS (1 static + 1 behavioural baseline, $($controls.Count) static, $($sites.Count) call-site, $($inert.Count) inert-copy, $($mutants.Count) behavioural, $($privateControls.Count+$hostedControls.Count) native clipboard controls, forbidden-operation negatives, native API boundary; fixtures removed)"
+Write-Host "direct-update admission contracts: PASS (1 static + 1 behavioural baseline, $($controls.Count) static, $($sites.Count) call-site, $($inert.Count) inert-copy, $($shapeControls.Count) syntax-shape, $($mutants.Count) behavioural, $($privateControls.Count+$hostedControls.Count+6) native clipboard controls, forbidden-operation negatives, native API boundary; fixtures removed)"
 $global:LASTEXITCODE=0

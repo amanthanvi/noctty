@@ -9,8 +9,8 @@ link itself remains a separate browser check; this harness never opens a browser
 Historical binaries before portable identity isolation (including 1.3.125)
 are admitted ONLY on a disposable GitHub-hosted runner. Redirecting profile
 directories does not isolate their Shell jump list or AUMID registry writes.
-Local guards read only the real startup-attempts.json hash/mtime and product
-jump-list metadata; they do not write those files or read clipboard contents.
+Local guards read the startup-attempts.json hash/mtime, AUMID registration and
+history/jump-list metadata; they do not write those files or read clipboard contents.
 Raw child logs are local evidence only; upload only the sanitized JSON receipts.
 #>
 [CmdletBinding()]
@@ -49,7 +49,62 @@ function Read-ControlName([IntPtr] $Window,[int] $Id) {
 }
 
 function Save-Receipt([string] $Name, $Value) {
-    $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Run $Name) -Encoding utf8
+    $path=Join-Path $Run $Name
+    $temporary=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    $json=ConvertTo-Json -InputObject $Value -Depth 12
+    [IO.File]::WriteAllText($temporary,$json,[Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($temporary,$path,$true)
+}
+function Get-RunPath([string] $Path) {
+    $full=[IO.Path]::GetFullPath($Path)
+    if($full.Length -gt [IO.Path]::GetPathRoot($full).Length){return $full.TrimEnd([char[]]'\/')}
+    return $full
+}
+function New-DriverEnvironment($Parent,[string] $Root) {
+    $minimal=@{}
+    foreach($name in @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','GITHUB_ACTIONS','RUNNER_ENVIRONMENT')){
+        if($Parent.Contains($name)){$minimal[$name]=[string]$Parent[$name]}
+    }
+    $minimal.LOCALAPPDATA=Join-Path $Root 'localappdata'; $minimal.APPDATA=Join-Path $Root 'appdata'
+    $minimal.TEMP=Join-Path $Root 'temp'; $minimal.TMP=$minimal.TEMP
+    $minimal.USERPROFILE=Join-Path $Root 'profile'
+    return $minimal
+}
+function Invoke-MinimalDriverEnvironment([scriptblock] $Start) {
+    # CreateProcess inherits this explicit whitelist; restore only this controller.
+    # Never log the saved environment or its values.
+    $parent=[Environment]::GetEnvironmentVariables('Process')
+    $minimal=New-DriverEnvironment $parent $Run
+    try{
+        foreach($name in @($parent.Keys)){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+        foreach($name in $minimal.Keys){[Environment]::SetEnvironmentVariable($name,$minimal[$name],'Process')}
+        & $Start
+    }finally{
+        foreach($name in @([Environment]::GetEnvironmentVariables('Process').Keys)){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+        foreach($name in $parent.Keys){[Environment]::SetEnvironmentVariable($name,[string]$parent[$name],'Process')}
+    }
+}
+function Invoke-ReleaseGh([string[]] $Arguments,[int] $Seconds=$TimeoutSeconds) {
+    $info=[Diagnostics.ProcessStartInfo]::new((Get-Command gh -CommandType Application).Source)
+    $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+    $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+    foreach($argument in $Arguments){$info.ArgumentList.Add($argument)}
+    $child=[Diagnostics.Process]::new(); $child.StartInfo=$info; $started=$false
+    try{
+        if(-not $child.Start()){throw 'Release request could not start'}
+        $started=$true; $ownedPid=$child.Id; $ownedStart=$child.StartTime
+        $output=$child.StandardOutput.ReadToEndAsync(); $errors=$child.StandardError.ReadToEndAsync()
+        if(-not $child.WaitForExit($Seconds*1000)){throw 'Release request timed out'}
+        if($child.ExitCode -ne 0){throw 'Release request failed'}
+        $null=$errors.GetAwaiter().GetResult()
+        return $output.GetAwaiter().GetResult()
+    }finally{
+        if($started -and -not $child.HasExited){
+            if($child.Id -ne $ownedPid -or $child.StartTime -ne $ownedStart){throw 'Release request process identity changed'}
+            $child.Kill(); $null=$child.WaitForExit(5000)
+        }
+        $child.Dispose()
+    }
 }
 function Get-Sha([string] $Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Assert-NativeArchitecture($native,$processArchitecture,$Architecture) {
@@ -192,7 +247,7 @@ Add-Type -Path '__CODE__'
     }finally{Close-Launch $controlLaunch}
 }
 function Assert-HostedClipboardControl($fact,$Before,$After) {
-    if(-not $fact.Supported -or -not $fact.HostedWinSta0 -or $Before -eq $After){throw 'Hosted WinSta0 clipboard oracle positive failed'}
+    if(-not $fact.Supported -or -not $fact.HostedWinSta0 -or $Before -eq $After -or $fact.Before -ne $Before -or $fact.After -ne $After){throw 'Hosted WinSta0 clipboard oracle positive failed'}
 }
 function Invoke-HostedClipboardPositive([string] $Pwsh) {
     if(-not $ephemeral){throw 'WinSta0 clipboard control requires a disposable hosted runner'}
@@ -224,7 +279,7 @@ Add-Type -Path '__CODE__'
     }finally{$null=[HiddenWin]::StopOwnedJob($controlJob);Close-Launch $controlLaunch;$null=[HiddenWin]::CloseDesktop($controlDesktop)}
 }
 function Get-Listing([string] $Root) {
-    @(Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName | ForEach-Object {
+    @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
         @{ Name=[IO.Path]::GetRelativePath($Root,$_.FullName); Bytes=$_.Length }
     })
 }
@@ -267,8 +322,7 @@ function Get-ReleaseCopy([string] $Version) {
     $destination = Join-Path $Run "download-$Version"
     if (Test-Path -LiteralPath $destination) { throw 'Download destination already exists' }
     $null = New-Item -ItemType Directory -Path $destination
-    $metadataText = gh api "repos/amanthanvi/noctty/releases/tags/v$Version"
-    if ($LASTEXITCODE -ne 0) { throw 'Release metadata request failed' }
+    $metadataText = Invoke-ReleaseGh @('api',"repos/amanthanvi/noctty/releases/tags/v$Version")
     $metadata = $metadataText | ConvertFrom-Json
     $zipName = "noctty-$Version-windows-$Architecture-portable.zip"
     $sumsName = "SHA256SUMS-windows-$Architecture.txt"
@@ -276,8 +330,7 @@ function Get-ReleaseCopy([string] $Version) {
     $sumsAsset = @($metadata.assets | Where-Object name -CEQ $sumsName)
     if ($zipAsset.Count -ne 1 -or $sumsAsset.Count -ne 1) { throw 'Release lacks exact architecture assets' }
     # No overwrite flag: each download is into its own new empty directory.
-    gh release download "v$Version" --repo amanthanvi/noctty --dir $destination --pattern $zipName --pattern $sumsName
-    if ($LASTEXITCODE -ne 0) { throw 'Release asset download failed' }
+    $null=Invoke-ReleaseGh @('release','download',"v$Version",'--repo','amanthanvi/noctty','--dir',$destination,'--pattern',$zipName,'--pattern',$sumsName)
     $zip = Join-Path $destination $zipName
     $matches = @(Get-Content -LiteralPath (Join-Path $destination $sumsName) | Where-Object { $_ -match ('^[0-9a-fA-F]{64}\s+\*?' + [regex]::Escape($zipName) + '$') })
     if ($matches.Count -ne 1) { throw 'Published checksum entry is absent or ambiguous' }
@@ -288,6 +341,12 @@ function Get-ReleaseCopy([string] $Version) {
     [IO.Compression.ZipFile]::ExtractToDirectory($zip,$expanded)
     $executables = @(Get-ChildItem -LiteralPath $expanded -Filter 'noctty.exe' -File -Recurse)
     if ($executables.Count -ne 1) { throw 'Portable ZIP has ambiguous executable layout' }
+    $publishers=@(foreach($name in @('noctty.exe','noctty.com')){
+        $binary=Join-Path $executables[0].DirectoryName $name
+        $signature=Assert-ReleaseSignature -Path $binary -Label 'Published portable executable' -AllowedPins @(Get-StubPublisherPins) -TrustSelfSigned $true
+        @{File=$name;Sha256=Get-Sha $binary;SignerSpkiSha256=$signature.SpkiSha256;CryptographicallyVerified=$true}
+    })
+    Save-Receipt "$Version-publisher.json" $publishers
     return $executables[0].DirectoryName
 }
 function Get-UpdateState([string] $Root) {
@@ -295,7 +354,8 @@ function Get-UpdateState([string] $Root) {
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try { $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
     # Explicit nonsecret projection: never export confirmation tokens or arbitrary paths.
-    return @{ Phase=$value.portable_apply_phase; StagedVersion=$value.staged_version; StagedKind=$value.staged_kind; ApplyRequestedAt=$value.apply_requested_at; FeedMatches=($value.staged_feed_url -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
+    $observed=if([string]$value.last_seen_version -cmatch '^1\.[34]\.[0-9]+$'){[string]$value.last_seen_version}else{$null}
+    return @{ Phase=$value.portable_apply_phase; StagedVersion=$value.staged_version; StagedKind=$value.staged_kind; LatestVersion=$observed; ApplyRequestedAt=$value.apply_requested_at; FeedMatches=($value.staged_feed_url -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
 }
 function Wait-Check([string] $Stage,[scriptblock] $Predicate,[int] $Seconds=$TimeoutSeconds) {
     Save-Receipt 'progress.json' @{ Stage=$Stage; At=[datetime]::UtcNow.ToString('o') }
@@ -346,8 +406,9 @@ $ephemeral=$env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'gi
 if ([version]$FromVersion -lt [version]'1.3.136' -and -not $ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }
 if($HostedMesa -and (-not $ephemeral -or $FromVersion -cne '1.3.125' -or $TargetVersion -cne '1.3.137' -or $Expected -cne 'Stub')){throw 'Mesa fixture requires hosted 1.3.125 to 1.3.137 stub acceptance'}
 if (-not $Driver) {
-    $Run=[IO.Path]::GetFullPath($Run)
+    $Run=Get-RunPath $Run
     Assert-NewRun $Run
+    if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}
     if (-not $ephemeral) {
         $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\AppUserModelId\io.github.amanthanvi.noctty',$false)
         if ($null -eq $key) { throw 'Product AUMID registration is absent; refusing a portable registration write' }
@@ -358,6 +419,8 @@ if (-not $Driver) {
     }
     $free=[IO.DriveInfo]::new([IO.Path]::GetPathRoot([Environment]::GetFolderPath('LocalApplicationData'))).AvailableFreeSpace
     if ($free -le 20GB) { throw 'System drive has 20 GB or less free' }
+    $runFree=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($Run)).AvailableFreeSpace
+    if($runFree -le 20GB){throw 'Run volume has 20 GB or less free'}
     $null=New-Item -ItemType Directory -Path $Run
     $source=Get-ReleaseCopy $FromVersion
     $target=Get-ReleaseCopy $TargetVersion
@@ -365,7 +428,7 @@ if (-not $Driver) {
     $commit=git -C $PSScriptRoot rev-parse HEAD
     if($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$'){throw 'Harness commit provenance unavailable'}
     Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral; HarnessCommit=$commit; HarnessSha256=Get-Sha $PSCommandPath; UiSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-ui.cs'); ContractSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-contract.ps1'); ClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs'); HostedClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-hosted-clipboard-control.cs') }
-    foreach ($directory in @('localappdata','appdata','temp')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
+    foreach ($directory in @('localappdata','appdata','temp','profile')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
     $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'
     $clipboardBefore=[HiddenWin]::GetClipboardSequenceNumber()
     $DesktopName='noctty-hw-'+[guid]::NewGuid().ToString('N')
@@ -380,8 +443,10 @@ if (-not $Driver) {
         $clipboardPositive=Invoke-ClipboardPositive $pwsh $job $DesktopName
         $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Run "{2}" -FromVersion {3} -TargetVersion {4} -Architecture {5} -Expected {6} -TimeoutSeconds {7} -DesktopName {8} -Driver' -f $pwsh,$PSCommandPath,$Run,$FromVersion,$TargetVersion,$Architecture,$Expected,$TimeoutSeconds,$DesktopName
         if($HostedMesa){$line+=' -HostedMesa'}
-        $launch=[HiddenWin]::Launch($pwsh,$line,$Run,"WinSta0\$DesktopName",$job,(Join-Path $Run 'driver-raw.log'))
-        $deadline=[datetime]::UtcNow.AddSeconds(3*$TimeoutSeconds+120)
+        $launch=Invoke-MinimalDriverEnvironment { [HiddenWin]::Launch($pwsh,$line,$Run,"WinSta0\$DesktopName",$job,(Join-Path $Run 'driver-raw.log')) }
+        # Longest branch has five full waits, one <=60s pane wait and bounded
+        # version/shutdown/handshake waits. Leave margin for hashing and teardown.
+        $deadline=[datetime]::UtcNow.AddSeconds(8*$TimeoutSeconds+300)
         do {
             Assert-NoDefaultWindows $job
             $defaultSamples++
@@ -447,10 +512,12 @@ $result=@{ Passed=$false; FromVersion=$FromVersion; TargetVersion=$TargetVersion
 try {
     if($DesktopName -cnotmatch '^noctty-hw-[a-f0-9]{32}$' -or [HiddenWin]::CurrentDesktopName() -cne $DesktopName){throw 'Driver is not on its private desktop'}
     $isolated=Assert-DriverProfile $env:LOCALAPPDATA $env:APPDATA $Run
+    $credentialsAbsent=@('GH_TOKEN','GITHUB_TOKEN','ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN' | Where-Object {-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_,'Process'))}).Count -eq 0
+    if(-not $credentialsAbsent){throw 'Driver workflow credentials were inherited'}
     # EnumDesktopWindows returns false/error 0 on a genuinely empty desktop.
     # This hidden driver-owned window gives the parent's oracle a positive control.
     $sentinel=[DirectUpdateUi]::CreateSentinel()
-    Save-Receipt 'driver-ready.json' @{ ProcessId=$PID; Desktop=$DesktopName; IsolatedProfile=$isolated }
+    Save-Receipt 'driver-ready.json' @{ ProcessId=$PID; Desktop=$DesktopName; IsolatedProfile=$isolated; WorkflowCredentialsAbsent=$credentialsAbsent }
     $approvalDeadline=[datetime]::UtcNow.AddSeconds(30)
     while(-not (Test-Path -LiteralPath (Join-Path $Run 'driver-approved'))){if([datetime]::UtcNow -ge $approvalDeadline){throw 'Parent desktop approval timed out'}; Start-Sleep -Milliseconds 100}
     $inputs=Get-Content -LiteralPath (Join-Path $Run 'inputs.json') -Raw | ConvertFrom-Json
