@@ -9,8 +9,11 @@
 #     ssh client and sshd hardened; the startup-ledger, history, AUMID-key and
 #     clipboard comparisons;
 #   - what it measures: every binding's bytes, the step plan, the predictions
-#     and which rows are positive controls, and the exit policy, driven by AST
-#     extraction on synthetic inputs.
+#     and which rows are positive controls, the verdicts, the reader-state
+#     checks and the exit policy, driven by AST extraction on synthetic inputs;
+#   - how its result is wired: every exit statement in order, every assignment
+#     to a guard, exit or case-7 control variable, and the two guard
+#     fingerprint functions by hash.
 # The contract then applies the council's round-1 mutations (and its own) to
 # the harness and the reader, and each one must give at least one problem.
 
@@ -25,6 +28,7 @@ function Get-ReplyPathProblems {
         [switch] $StopAtFirst
     )
     $problems = [Collections.Generic.List[string]]::new()
+    $Harness = $Harness -replace "`r`n", "`n"; $Reader = $Reader -replace "`r`n", "`n"
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($Harness, [ref]$tokens, [ref]$errors)
     if ($errors.Count -ne 0) { $problems.Add("the harness does not parse: $($errors[0].Message)"); return $problems.ToArray() }
@@ -40,7 +44,7 @@ function Get-ReplyPathProblems {
     }
 
     # No real input, foreground, clipboard access, Start-Process or recursive delete.
-    if ($code -match '(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|Set-Clipboard|Get-Clipboard|SetClipboardData|OpenClipboard|GetClipboardData|Start-Process|Invoke-Item|Remove-Item\s+-Recurse)') {
+    if ($code -match '(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|Set-Clipboard|Get-Clipboard|SetClipboardData|OpenClipboard|GetClipboardData|Start-Process|Stop-Process|taskkill|Invoke-Item|Remove-Item\s+-Recurse)') {
         $problems.Add("forbidden call: $($Matches[0])")
     }
 
@@ -86,8 +90,62 @@ function Get-ReplyPathProblems {
     Need '$aumidUnchanged=($aumidBefore.Keys -join ''|'') -ceq ($aumidAfter.Keys -join ''|'') -and $aumidBefore.Sha256 -ceq $aumidAfter.Sha256' 'the AUMID key comparison changed'
     Need '$clipboardUnchanged=$clipboardBefore -eq $clipboardAfter' 'the clipboard sequence comparison changed'
     Need '$clipboardBefore=[ReplyPath]::GetClipboardSequenceNumber()' 'the clipboard sequence number is not read before the run'
-    Need 'if($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged -or -not $keysDeleted -or $links.Count -gt 0) {' 'a changed guard no longer stops the run'
-    if ($code -notmatch '(?s)\$links\.Count -gt 0\) \{.*?exit 3') { $problems.Add('a changed guard no longer exits 3') }
+    Need 'if(-not $keysDeleted -or $links.Count -gt 0 -or ($guardsRead -and ($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged))) {' 'a changed guard no longer stops the run'
+    if ($code -notmatch '(?s)-not \$clipboardUnchanged\)\)\) \{\s*Write-Host \(''ISOLATION GUARD CHANGED:[^
+]*
+\s*exit 3\s*\}') { $problems.Add('a changed guard no longer exits 3') }
+    # The ssh keys are made inside the try whose finally deletes them, so every exit path deletes them.
+    if ($code -notmatch '(?s)\[uint32\]\$code=2; \$guardsRead=\$false\s*try \{\s*if\(\$sshReaders\.Count -gt 0\) \{.*?ssh-keygen\.exe.*?if\(\$Sabotage -eq ''setup''\) \{ throw .*?\} finally \{.*?foreach\(\$name in \$sshSecrets\)') {
+        $problems.Add('the ssh keys are no longer made inside the try whose finally deletes them')
+    }
+
+    # How the result is wired: every exit statement, in source order.
+    $exits = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.ExitStatementAst] }, $true) | ForEach-Object { $_.Extent.Text })
+    $exitsWanted = @('exit 2', 'exit 2', 'exit 0', 'exit 3', 'exit 2', 'exit 0', 'exit 1', 'exit 2', 'exit $exit.Code')
+    if (-not [string]::Equals(($exits -join ' | '), ($exitsWanted -join ' | '), [StringComparison]::Ordinal)) {
+        $problems.Add("the exit statements are '$($exits -join ' | ')' where '$($exitsWanted -join ' | ')' are pinned (trap outer, trap driver, compile-only, guards, cleanup, complete, incomplete, infrastructure, driver)")
+    }
+    Need '    if(-not $Driver) { Write-Host "Infrastructure: $($_.Exception.Message)"; exit 2 }' 'an outer-phase failure no longer exits 2'
+    Need '        0 { Write-Host "ConPTY reply-path harness: COMPLETE; see $(Join-Path $Run ''results.md'')."; exit 0 }' 'the outer''s exit 0 branch changed'
+    Need '        1 { Write-Host "ConPTY reply-path harness: INCOMPLETE (a reader, case 7 or a positive control failed); see $(Join-Path $Run ''results.md'')."; exit 1 }' 'the outer no longer passes the driver''s 1 on'
+    # Every assignment to a guard, exit or case-7 control variable, with what it assigns.
+    $pinned = [ordered]@{
+        'before' = @('Startup-Fingerprint'); 'after' = @('Startup-Fingerprint')
+        'aumidBefore' = @('Aumid-Fingerprint'); 'aumidAfter' = @('Aumid-Fingerprint')
+        'clipboardBefore' = @('[ReplyPath]::GetClipboardSequenceNumber()'); 'clipboardAfter' = @('[ReplyPath]::GetClipboardSequenceNumber()')
+        'historyGuard' = @('Start-WindowsHarnessHistoryGuard -Harness ''hidden-win11-conpty-reply-path.ps1''')
+        'historyFailure' = @('$null', '$_.Exception.Message')
+        'unchanged' = @('$before.Exists -eq $after.Exists -and $before.Hash -eq $after.Hash -and $before.Modified -eq $after.Modified')
+        'aumidUnchanged' = @('($aumidBefore.Keys -join ''|'') -ceq ($aumidAfter.Keys -join ''|'') -and $aumidBefore.Sha256 -ceq $aumidAfter.Sha256')
+        'clipboardUnchanged' = @('$clipboardBefore -eq $clipboardAfter')
+        'keysDeleted' = @('$true', '$false')
+        'links' = @('@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })')
+        'guardsRead' = @('$false', '$true')
+        'code' = @('2', '2')
+        'exit' = @('Get-RunExit $failures $rows $sessions $Readers $case7 (-not $SkipPSReadLine)')
+        'verdict' = @('Get-Verdict $prediction $observed $step.Barrier')
+        'case7.InjectedReportShown' = @('[bool](@($case7.Steps[0].Prompt) -join '''' -cmatch ''\[\?999;2n$'')')
+        'case7.TabSwitched' = @('($surfacesDuring -ge 2 -and -not $visibleDuring -and $visibleAfter)')
+        'case7.Complete' = @('$true')
+    }
+    $assignments = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] }, $true))
+    foreach ($name in $pinned.Keys) {
+        $found = @($assignments | Where-Object {
+                $left = $_.Left; if ($left -is [Management.Automation.Language.ConvertExpressionAst]) { $left = $left.Child }
+                [string]::Equals($left.Extent.Text, "`$$name", [StringComparison]::Ordinal)
+            } | ForEach-Object { '{0} {1}' -f $_.Operator, $_.Right.Extent.Text })
+        $wanted = @($pinned[$name] | ForEach-Object { "Equals $_" })
+        if (-not [string]::Equals(($found -join ' || '), ($wanted -join ' || '), [StringComparison]::Ordinal)) {
+            $problems.Add("`$$name is assigned '$($found -join ' || ')' where '$($wanted -join ' || ')' is pinned")
+        }
+    }
+    Need '        $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;' 'case 7 no longer starts incomplete'
+    # The two guard fingerprints, whole: a change to either must update its hash here on purpose.
+    foreach ($fingerprint in @(@('Startup-Fingerprint', '428312CE8A516CD82051CC64ABFB2400B5270440636283E0940EA1571272E84A'), @('Aumid-Fingerprint', '72A98C045416F788C4EAA9ACD2E4D3ECA1B0CC0D2A8DCCE0566E04F0FD757220'))) {
+        $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $fingerprint[0] }, $true))
+        $hash = if ($definition.Count -eq 1) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($definition[0].Extent.Text))) } else { '' }
+        if ($hash -cne $fingerprint[1]) { $problems.Add("$($fingerprint[0]) changed (SHA-256 $hash); review it and pin its new hash here") }
+    }
 
     # Case 7: pwsh without a profile, history read back before anything is typed.
     Need '-e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' 'case 7''s pwsh must start -NoLogo -NoProfile -NoExit'
@@ -106,10 +164,7 @@ function Get-ReplyPathProblems {
     Need '$cmdExe = Join-Path ([Environment]::GetFolderPath(''System'')) ''cmd.exe''' 'cmd.exe is no longer System32''s'
     if ($code -match '--command=cmd\.exe|\$env:ComSpec') { $problems.Add('a cmd.exe is started without /D or from ComSpec, where the user''s AutoRun can run') }
     Need '$links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })' 'the run directory is no longer checked for links'
-    Need '-or -not $keysDeleted -or $links.Count -gt 0) {' 'a link left in the run no longer stops the run'
     Need 'finally { if($Mode -eq ''c-inbox'') { Remove-Item Env:NOCTTY_CONPTY } }' 'NOCTTY_CONPTY is not cleared after the in-box launch'
-    # Verdicts compare ordinally: -ceq ignores control characters in pwsh 7 (ICU), so "ESC[A" -ceq "[A" is true.
-    Need 'else { $verdict=if([string]::Equals($observed,[string]$prediction.Exact,[StringComparison]::Ordinal)) {' 'the verdict no longer compares bytes ordinally'
 
     # Reader d: off by default, opt-in only, hardened, its keys deleted.
     Need '[string[]] $Readers = @(''a'',''a16'',''b'',''c''),' 'the default readers changed (d and d-notiming must stay opt-in)'
@@ -127,8 +182,32 @@ function Get-ReplyPathProblems {
     Need 'foreach($name in $sshSecrets) { $path=Join-Path $sshDir $name; if(Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force;' 'the run''s ssh keys are no longer deleted'
 
     # Controls: sabotage off by default and limited to its three uses.
-    Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
-    NeedCount '$Sabotage -eq' 3 'sabotage must break exactly three things'
+    Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'',''setup'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
+    NeedCount '$Sabotage -eq' 4 'sabotage must break exactly four things'
+
+    # The run's config, case 7's injections, the split gap, readiness and the reader states.
+    Need ("`$configLines=@('shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false',`n" +
+        "    'quit-after-last-window-closed = true','keybind = clear','window-width = 100','window-height = 30',`n" +
+        "    'keybind = f23=new_tab','keybind = f24=previous_tab')") 'the run''s config changed (keybind = clear, shell-integration = none, no saved state, no close prompt)'
+    Need ("foreach(`$inject in @(@{Key='f22';Name='2033 report, hidden (what a tab switch would send with ?2033 stale)'},`n" +
+        "                                 @{Key='f17';Name='2033 report, visible'},`n" +
+        "                                 @{Key='f18';Name='DECRPM 2033'},`n" +
+        "                                 @{Key='f19';Name='multiple-cursors reply'},`n" +
+        "                                 @{Key='f8';Name='APC OK'},`n" +
+        "                                 @{Key='f20';Name='injected OSC 11 reply'})) {") 'case 7''s injections changed'
+    Need 'if(-not $first -and $planned.Gap) { Start-Sleep -Milliseconds $planned.Gap }' 'a split''s two writes are no longer apart'
+    Need 'try { $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete);' 'the ready file is no longer read shared'
+    Need 'catch [IO.IOException] { $t=$null }' 'a busy ready file no longer retries'
+    foreach ($line in @(
+            'if (wcscmp(argv[1], L"a") == 0) { wanted = (before & ~0x7u) | 0x200; records = 1; ansi = 1; }',
+            'else if (wcscmp(argv[1], L"a16") == 0) { wanted = (before & ~0x7u) | 0x200; records = 1; per_read = 16; }',
+            'else if (wcscmp(argv[1], L"b") == 0) { wanted = 0x98; records = 1; }',
+            'else if (wcscmp(argv[1], L"c") == 0) { wanted = (before & ~0x7u) | 0x200; }',
+            'if (swprintf_s(ready_tmp, MAX_PATH, L"%ls.tmp", argv[3]) < 0) return 8;',
+            'if (_wfopen_s(&ready, ready_tmp, L"wb") || !ready) return 8;',
+            'if (!MoveFileExW(ready_tmp, argv[3], MOVEFILE_REPLACE_EXISTING)) return 13;')) {
+        if (-not $Reader.Contains($line)) { $problems.Add("the reader no longer has: $line") }
+    }
 
     # The control bytes: bindings, the reader's commands and the analysis's skip list agree.
     $readerCodes = @([regex]::Matches($Reader, 'case 0x([0-9A-Fa-f]{2}):') | ForEach-Object { [Convert]::ToInt32($_.Groups[1].Value, 16) } | Sort-Object -Unique)
@@ -158,7 +237,8 @@ function Get-ReplyPathProblems {
         $found[0].Extent.Text
     }
     $definitions = @((& $assignment 'bindings'), (& $assignment 'stepPlan'), (& $function 'Get-PlannedSteps'), (& $function 'Get-Prediction'),
-        (& $function 'Get-RunExit'), (& $function 'Get-Segments'), (& $function 'Binding-Line'))
+        (& $function 'Get-RunExit'), (& $function 'Get-Segments'), (& $function 'Binding-Line'), (& $function 'Get-Verdict'),
+        (& $function 'Get-ReaderStateProblems'))
     if ($problems.Count -gt 0 -and $StopAtFirst) { return $problems.ToArray() }
     $evaluated = @(Invoke-ContractScriptWithDeadline -Script $script:ReplyPathEvaluation -Arguments @(, $definitions) -HangMessage 'The reply-path harness''s tables and functions did not evaluate in time.')
     foreach ($p in $evaluated) { if ($p) { $problems.Add([string]$p) } }
@@ -268,6 +348,37 @@ $script:ReplyPathEvaluation = {
         if ($match -ne $c[4]) { $out.Add("the prediction for $($c[0]) on $($c[1]) $(if ($c[4]) { 'refuses' } else { 'accepts' }) the sample") }
         if ([bool]$p.Control -ne $c[5]) { $out.Add("$($c[0]) on $($c[1]) is $(if ($c[5]) { 'no longer' } else { 'now' }) a positive control") }
     }
+    # Verdicts: ordinal bytes, and a step that never finished is INCOMPLETE whatever it observed.
+    $verdicts = @(
+        ,@(@{ Exact = "${e}_A" }, '_A', 'OK', 'DIFFERS')
+        ,@(@{ Exact = "${e}_A" }, "${e}_A", 'OK', 'as predicted')
+        ,@(@{ Exact = '' }, '', 'TIMEOUT', 'INCOMPLETE')
+        ,@(@{ Regex = '^\x1b\[\?1u$' }, "${e}[?1u", 'OK', 'as predicted')
+        ,@(@{ Regex = '^\x1b\[\?1u$' }, '[?1u', 'OK', 'DIFFERS')
+        ,@($null, 'x', 'OK', '-')
+        ,@($null, '', 'TIMEOUT', 'INCOMPLETE')
+    )
+    foreach ($v in $verdicts) {
+        $got = Get-Verdict $v[0] $v[1] $v[2]
+        if ($got -cne $v[3]) { $out.Add("Get-Verdict gives '$got' where '$($v[3])' is right ($($v[2]))") }
+    }
+    # Reader states: the input mode each reader is named for, and the record readers' read sizes.
+    $state = { param($Mode, $Mode0, $Mode1, $Reads) @{ Mode = $Mode; Ready = @{ InputModeBefore = $Mode0; InputMode = $Mode1 }; Log = @($Reads | ForEach-Object { "READ,1,$_" }) } }
+    $states = @(
+        ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 16, 9)), 0)
+        ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 30)), 1)
+        ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 9)), 1)
+        ,@((& $state 'a' '0x1f7' '0x3f0' @(1, 30)), 0)
+        ,@((& $state 'a' '0x1f7' '0x3f0' @(1, 12)), 1)
+        ,@((& $state 'b' '0x1f7' '0x98' @(4, 25)), 0)
+        ,@((& $state 'b' '0x1f7' '0x298' @(4, 25)), 1)
+        ,@((& $state 'c' '0x1f7' '0x3f0' @()), 0)
+        ,@((& $state 'c' '0x1f7' '0x3f7' @()), 1)
+    )
+    foreach ($x in $states) {
+        $got = @(Get-ReaderStateProblems $x[0]).Count
+        if ($got -ne $x[1]) { $out.Add("Get-ReaderStateProblems finds $got problem(s) for reader $($x[0].Mode) (mode $($x[0].Ready.InputMode), reads $(@($x[0].Log) -join ' ')), expected $($x[1])") }
+    }
     # The exit policy: incomplete runs and failed controls exit 1, infrastructure 2, a complete run 0.
     $mk = { param($Mode, $Done, $Planned) @{ Mode = $Mode; Planned = $Planned; Steps = @(1..$Done | ForEach-Object { @{ Barrier = 'OK' } }) } }
     $full = @((& $mk 'a' 27 27), (& $mk 'b' 23 23)); $c7 = @{ Complete = $true; InjectedReportShown = $true; TabSwitched = $true }
@@ -285,6 +396,7 @@ $script:ReplyPathEvaluation = {
         ,@('case 7 without its report', 1, @(), $rowOk, $full, @('a', 'b'), @{ Complete = $true; InjectedReportShown = $false; TabSwitched = $true }, $true)
         ,@('case 7 without the tab switch', 1, @(), $rowOk, $full, @('a', 'b'), @{ Complete = $true; InjectedReportShown = $true; TabSwitched = $false }, $true)
         ,@('infrastructure', 2, @('infrastructure: boom'), $rowOk, $full, @('a', 'b'), $c7, $true)
+        ,@('a reader in the wrong state', 1, @(), $rowOk, @((& $mk 'a' 27 27), ((& $mk 'b' 23 23) + @{ StateProblems = @('reader b: input mode 0x298, expected 0x98') })), @('a', 'b'), $c7, $true)
     )
     foreach ($x in $exits) {
         $got = (Get-RunExit $x[2] $x[3] $x[4] $x[5] $x[6] $x[7]).Code
@@ -305,8 +417,9 @@ $replyPathReaderText = Get-Content -LiteralPath $replyPathReader -Raw
 $replyPathProblems = @(Get-ReplyPathProblems -Harness $replyPathHarnessText -Reader $replyPathReaderText)
 if ($replyPathProblems.Count -gt 0) { throw "The ConPTY reply-path harness breaks its contract: $($replyPathProblems -join '; ')" }
 
-# Every mutation the round-1 council ran (Sol's 3, Opus's 22, Muse's 8; the
-# duplicates kept once) and the contract's own: each must give a problem.
+# Every mutation the council ran (round 1: Sol's 3, Opus's 22, Muse's 8, the
+# duplicates kept once; round 2: Opus's 25, those it did not name rebuilt and
+# marked so) and the contract's own: each must give a problem.
 $replyPathMutations = @(
     @{ Name = 'Sol 1 / Opus 1: the reader session''s noctty on a null desktop'; Old = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)'; New = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,$null,$job,0x08000000)' }
     @{ Name = 'Sol 2: no job assignment before resume'; Old = 'if(!AssignProcessToJobObject(job,p.process)||ResumeThread(p.thread)==0xFFFFFFFF) {'; New = 'if(ResumeThread(p.thread)==0xFFFFFFFF) {' }
@@ -340,7 +453,42 @@ $replyPathMutations = @(
     @{ Name = 'round 2b: the compiler through ComSpec'; Old = '[ReplyPath]::Launch($cmdExe,(''"{0}" /d /c ""{1}""'' -f $cmdExe,$compile)'; New = '[ReplyPath]::Launch($env:ComSpec,(''"{0}" /d /c ""{1}""'' -f $env:ComSpec,$compile)' }
     @{ Name = 'round 2b: clipboard writes allowed'; Old = '--clipboard-write=deny --clipboard-read=deny -e "{3}" {4} {5} {6}'; New = '--clipboard-read=deny -e "{3}" {4} {5} {6}' }
     @{ Name = 'round 2b: clipboard reads allowed'; Old = '--clipboard-read=deny -e "{3}" {4}'' -f'; New = '-e "{3}" {4}'' -f' }
-    @{ Name = 'round 2b: links in the run not checked'; Old = '-or -not $keysDeleted -or $links.Count -gt 0) {'; New = '-or -not $keysDeleted) {' }
+    @{ Name = 'round 2b: links in the run not checked'; Old = 'if(-not $keysDeleted -or $links.Count -gt 0 -or ($guardsRead'; New = 'if(-not $keysDeleted -or ($guardsRead' }
+    @{ Name = 'Opus r2 N1: the AUMID fingerprint matches no key'; Old = 'Where-Object { $_.PSChildName -like ''io.github.amanthanvi.noctty*'' }'; New = 'Where-Object { $_.PSChildName -like ''no-such-key*'' }' }
+    @{ Name = 'Opus r2 N2: the startup-ledger path changed'; Old = '''noctty\startup-attempts.json'''; New = '''noctty\no-such-ledger.json''' }
+    @{ Name = 'Opus r2 N3: the clipboard read after the run fed the one before'; Old = '$clipboardAfter=[ReplyPath]::GetClipboardSequenceNumber()'; New = '$clipboardAfter=$clipboardBefore' }
+    @{ Name = 'Opus r2 N4: an incomplete run exits 0 in the outer'; Old = 'or a positive control failed); see $(Join-Path $Run ''results.md'')."; exit 1 }'; New = 'or a positive control failed); see $(Join-Path $Run ''results.md'')."; exit 0 }' }
+    @{ Name = 'Opus r2 N5: the driver exits 0'; Old = 'exit $exit.Code'; New = 'exit 0' }
+    @{ Name = 'Opus r2 N6: the driver trap exits 0'; Old = '-f $_.Exception.Message,$_.InvocationInfo.PositionMessage); exit 2'; New = '-f $_.Exception.Message,$_.InvocationInfo.PositionMessage); exit 0' }
+    @{ Name = 'Opus r2 N7: case 7''s controls not required'; Old = '$exit=Get-RunExit $failures $rows $sessions $Readers $case7 (-not $SkipPSReadLine)'; New = '$exit=Get-RunExit $failures $rows $sessions $Readers $case7 $false' }
+    @{ Name = 'Opus r2 N8 (reconstructed): no requested reader checked'; Old = '$exit=Get-RunExit $failures $rows $sessions $Readers $case7'; New = '$exit=Get-RunExit $failures $rows $sessions @() $case7' }
+    @{ Name = 'Opus r2 N9 (reconstructed): case 7 starts complete'; Old = 'Complete=$false;NotMeasured='; New = 'Complete=$true;NotMeasured=' }
+    @{ Name = 'Opus r2 N10: the injected-report control forced true'; Old = '$case7.InjectedReportShown=[bool](@($case7.Steps[0].Prompt) -join '''' -cmatch ''\[\?999;2n$'')'; New = '$case7.InjectedReportShown=$true' }
+    @{ Name = 'Opus r2 N11: the tab-switch control forced true'; Old = '$case7.TabSwitched=($surfacesDuring -ge 2 -and -not $visibleDuring -and $visibleAfter)'; New = '$case7.TabSwitched=$true' }
+    @{ Name = 'Opus r2 N12 (reconstructed): the ledger read after the run fed the one before'; Old = '$after=Startup-Fingerprint'; New = '$after=$before' }
+    @{ Name = 'Opus r2 N13 (reconstructed): the AUMID read after the run fed the one before'; Old = '$aumidAfter=Aumid-Fingerprint'; New = '$aumidAfter=$aumidBefore' }
+    @{ Name = 'Opus r2 N14: a changed guard exits 0'; Old = 'stop launches.'' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted,$links.Count)' + "`n" + '        exit 3'; New = 'stop launches.'' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted,$links.Count)' + "`n" + '        exit 0' }
+    @{ Name = 'Opus r2 N15 (reconstructed): an infrastructure exit from the driver passes as 0'; Old = 'inspect results.json and driver-error.txt in Run."; exit 2 }'; New = 'inspect results.json and driver-error.txt in Run."; exit 0 }' }
+    @{ Name = 'Opus r2 N16 (reconstructed): a cleanup failure exits 0'; Old = 'if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 2 }'; New = 'if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 0 }' }
+    @{ Name = 'Opus r2 N17: a kept key counts as deleted'; Old = 'if(Test-Path -LiteralPath $path) { $keysDeleted=$false }'; New = 'if(Test-Path -LiteralPath $path) { $keysDeleted=$true }' }
+    @{ Name = 'Opus r2 N18: a16 reads 64 records'; File = 'reader'; Old = 'records = 1; per_read = 16; }'; New = 'records = 1; per_read = 64; }' }
+    @{ Name = 'Opus r2 N19: b with VT input'; File = 'reader'; Old = '{ wanted = 0x98; records = 1; }'; New = '{ wanted = 0x298; records = 1; }' }
+    @{ Name = 'Opus r2 N20: a without ReadConsoleInputA'; File = 'reader'; Old = 'records = 1; ansi = 1; }'; New = 'records = 1; }' }
+    @{ Name = 'Opus r2 N21: keybind = clear dropped'; Old = '''keybind = clear'','; New = '' }
+    @{ Name = 'Opus r2 N22: shell-integration = none dropped'; Old = '$configLines=@(''shell-integration = none'','; New = '$configLines=@(' }
+    @{ Name = 'Opus r2 N23: case 7''s cursors injection dropped'; Old = '@{Key=''f19'';Name=''multiple-cursors reply''},'; New = '' }
+    @{ Name = 'Opus r2 N24: a split''s writes not apart'; Old = 'if(-not $first -and $planned.Gap) { Start-Sleep -Milliseconds $planned.Gap }'; New = '' }
+    @{ Name = 'Opus r2 N25: the dead-reader control kills by name'; Old = '[ReplyPath]::KillExact($session.Ready.Pid)'; New = 'Stop-Process -Name console-reply-reader -Force' }
+    @{ Name = 'round 3: the history guard watches nothing'; Old = '$historyGuard=Start-WindowsHarnessHistoryGuard -Harness ''hidden-win11-conpty-reply-path.ps1'''; New = '$historyGuard=Start-WindowsHarnessHistoryGuard -Harness ''hidden-win11-conpty-reply-path.ps1'' -Paths @(''nul'')' }
+    @{ Name = 'round 3: the link listing fed a constant'; Old = '$links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })'; New = '$links=@()' }
+    @{ Name = 'round 3: an outer failure falls through to pwsh''s 1'; Old = '    if(-not $Driver) { Write-Host "Infrastructure: $($_.Exception.Message)"; exit 2 }'; New = '    if(-not $Driver) { break }' }
+    @{ Name = 'round 3: the ssh keys made before the try'; Old = '[uint32]$code=2; $guardsRead=$false' + "`n" + '    try {' + "`n" + '        if($sshReaders.Count -gt 0) {'; New = '[uint32]$code=2; $guardsRead=$false' + "`n" + '    if($true) {' + "`n" + '        if($sshReaders.Count -gt 0) {' }
+    @{ Name = 'round 3: the ready file read unshared'; Old = 'try { $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete);'; New = 'try { $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None);' }
+    @{ Name = 'round 3: the reader writes ready.txt in place'; File = 'reader'; Old = 'if (_wfopen_s(&ready, ready_tmp, L"wb") || !ready) return 8;'; New = 'if (_wfopen_s(&ready, argv[3], L"wb") || !ready) return 8;' }
+    @{ Name = 'round 3: an unfinished step judged'; Old = 'if($Barrier -ne ''OK'') { return ''INCOMPLETE'' }'; New = 'if($false) { return ''INCOMPLETE'' }' }
+    @{ Name = 'round 3: reader states not checked'; Old = 'foreach($s in $Sessions) { foreach($q in @($s.StateProblems)) { if($q) { $why.Add($q) } } }'; New = '' }
+    @{ Name = 'round 3: a16''s read size not checked'; Old = 'if($Session.Mode -eq ''a16'' -and $largest -ne 16)'; New = 'if($false)' }
+    @{ Name = 'round 3: the guards compared without their first reading'; Old = '        $guardsRead=$true' + "`n"; New = '' }
     @{ Name = 'Muse 4: the APC-on-b prediction'; Old = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''\''} }'; New = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''''} }' }
     @{ Name = 'Muse 5: case 4 without its space'; Old = 'Bytes="${esc}[>1;2;3;29;30;40;100;101 q"'; New = 'Bytes="${esc}[>1;2;3;29;30;40;100;101q"' }
     @{ Name = 'Muse 7: no case 2 step'; Old = '    @{ Name=''case 2: APC feature-shaped''; Keys=@(''f16'') }'; New = '' }
@@ -358,7 +506,7 @@ $replyPathMutations = @(
     @{ Name = 'round 2: the ssh keys kept'; Old = 'Remove-Item -LiteralPath $path -Force;'; New = '$null=$path;' }
     @{ Name = 'round 2: sabotage on by default'; Old = '[string] $Sabotage = ''none'','; New = '[string] $Sabotage = ''control'',' }
     @{ Name = 'round 2: Keys posts to any window'; Old = 'if(!OnCallerDesktop(h)) throw new Exception("Refusing to post keys to a window that is not on this private desktop");'; New = '' }
-    @{ Name = 'round 2: verdicts compared with -ceq'; Old = 'else { $verdict=if([string]::Equals($observed,[string]$prediction.Exact,[StringComparison]::Ordinal)) {'; New = 'else { $verdict=if($observed -ceq $prediction.Exact) {' }
+    @{ Name = 'round 2: verdicts compared with -ceq'; Old = 'if([string]::Equals($Observed,[string]$Prediction.Exact,[StringComparison]::Ordinal)) { return ''as predicted'' }'; New = 'if($Observed -ceq $Prediction.Exact) { return ''as predicted'' }' }
     @{ Name = 'round 2: the in-box DA1 control dropped'; Old = 'if($inbox) { return @{Text=''the in-box conhost''''s own DA1'';Regex=''^\x1b\[\?61;[0-9;]+c$'';Control=$true} }'; New = 'if($inbox) { return @{Text=''the in-box conhost''''s own DA1'';Regex=''^\x1b\[\?61;[0-9;]+c$''} }' }
 )
 $replyPathMissed = [Collections.Generic.List[string]]::new()
