@@ -27,21 +27,23 @@
 # The contract then applies the council's mutations from rounds 1-5 (and its
 # own) to the harness and the reader. Each must give a problem, and, through
 # the pins, the whole-file pin's problem and that of every pinned region or
-# function the mutation changes. Unless it is marked PinOnly, the content
-# checks alone (-SkipPins) must refuse it too, so they are shown to work once
-# a pin moves; a PinOnly mutation must get nothing from them, so the mark
-# stays true.
+# function the mutation changes. Unless it is marked PinOnly, a run with the
+# pins skipped (-SkipPins) must refuse it too: so each such mutation is shown
+# to be refused by some content check, not by a pin alone. That does not show
+# every content check is exercised. A PinOnly mutation must get nothing from
+# the content checks, so the mark stays true; an entry with Check must be
+# refused by the content check whose problem starts with that text.
 
 $replyPathScript = Join-Path $repoRoot 'test\windows\hidden-win11-conpty-reply-path.ps1'
 $replyPathReader = Join-Path $repoRoot 'test\windows\console-reply-reader.c'
 
 # The pins, by SHA-256 with LF line ends. A change to the harness or the reader must update its pin
 # here, on purpose, in the same change.
-$replyPathHarnessPin = '9A8157F6D684859052B892D1647EFC40FB273A80F6D95B0DB822F1CD3164484C'
+$replyPathHarnessPin = '8E0B76D2E8474B69F3E731C7F00AA450DAFDE19D9D02991CFA589C038233AF1C'
 $replyPathReaderPin = '58AE918EBB70275F906043F2093E27ECE2410A9A885FD1D8063AB8152FDE1C86'
 $replyPathRegionPins = [ordered]@{
     'reader-list' = '9E5CB8938C4BEA431C33149E32A793E92567904865F64FC6FB5933FCE553F942'
-    'outer-run' = 'A6F8DD0AF26F947628B1693177A40DAAD06BDB841CDBDCC1F01406A1839434B0'
+    'outer-run' = 'CED0B24BD4A4164538C1C2A293F5A182007C1F34F034DAF0EE4C6A5C2A51E339'
     'case-7' = 'E2C4B68078D36D0F1AC3B2082783F0AC9E9D9FB5481B93173DD9C48EF64FE904'
     'driver-results' = '8398372CF4B302FE3560D39C2C24C6F145ABDD90D2797D7BE83F7238D4CA0B24'
 }
@@ -267,6 +269,8 @@ function Get-ReplyPathProblems {
     # Controls: sabotage off by default and limited to its three uses.
     Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'',''setup'',''key'',''acl'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
     NeedCount '$Sabotage -eq' 6 'sabotage must break exactly six things'
+    Need 'function Cell($Text) { ([string]$Text).Replace(''|'',''\|'') }' 'results.md no longer escapes a cell''s own pipe'
+    NeedCount '(Cell $r.' 6 'a results.md row no longer escapes each of its text cells'
     Need 'LocalAppDataInRun=$(switch($probe[6]) { ''1'' { $true } ''0'' { $false } ''2'' { ''unset'' } default { ''unknown'' } })}' 'the reader''s LOCALAPPDATA answer no longer tells unset from unknown'
 
     # The run's config, case 7's injections, the split gap, readiness and the reader states.
@@ -516,7 +520,8 @@ if ($replyPathProblems.Count -gt 0) { throw "The ConPTY reply-path harness break
 # marked so; round 3: Opus's survivors and his reader-a read, Sol's discarded
 # result; round 4: Opus's probes and Sol's five, one shared; round 5: the
 # bots' threads and Opus's Lows) and the contract's own. An entry has Old and
-# New, or Edits for several; PinOnly marks one only a pin can see.
+# New, or Edits for several; PinOnly marks one only a pin can see, and Check
+# names the content check that must refuse it.
 $replyPathMutations = @(
     @{ Name = 'Sol 1 / Opus 1: the reader session''s noctty on a null desktop'; Old = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)'; New = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,$null,$job,0x08000000)' }
     @{ Name = 'Sol 2: no job assignment before resume'; Old = 'if(!AssignProcessToJobObject(job,p.process)||ResumeThread(p.thread)==0xFFFFFFFF) {'; New = 'if(ResumeThread(p.thread)==0xFFFFFFFF) {' }
@@ -639,6 +644,10 @@ $replyPathMutations = @(
     @{ Name = 'r5: an unknown LOCALAPPDATA published as unset'; Old = '''2'' { ''unset'' } default { ''unknown'' }'; New = 'default { ''unset'' }' }
     @{ Name = 'r5: the ssh readers take a Run with shell syntax'; Old = '$Run -cnotmatch ''^[A-Za-z]:\\[A-Za-z0-9_.\\-]*$'''; New = '$Run -match ''\s''' }
     @{ Name = 'r5: the ACL sabotage always on'; Old = 'if($Sabotage -eq ''acl'') {'; New = 'if($true) {' }
+    @{ Name = 'r6 Opus L2: the ready escape a no-op'; Check = 'case 7''s ready path is no longer escaped as a literal'; Old = '$readyLiteral=[Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($shellReady)'; New = '$readyLiteral=$shellReady' }
+    @{ Name = 'r6 Opus L2: the Run rules read and execute only'; Check = 'the Run directory''s rules changed'; Old = '[Security.Principal.SecurityIdentifier]::new($sid),''FullControl'''; New = '[Security.Principal.SecurityIdentifier]::new($sid),''ReadAndExecute''' }
+    @{ Name = 'r6 Sol L2: a cell''s pipe left bare'; Check = 'results.md no longer escapes a cell''s own pipe'; Old = 'function Cell($Text) { ([string]$Text).Replace(''|'',''\|'') }'; New = 'function Cell($Text) { [string]$Text }' }
+    @{ Name = 'r6 Sol L2: the step cell unescaped'; Check = 'a results.md row no longer escapes each of its text cells'; Old = '(Cell $r.Step)'; New = '$r.Step' }
     @{ Name = 'round 4: a held key ends the cleanup'; Old = 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add((''{0}: {1}'' -f $name,$_.Exception.GetType().Name)) }'; New = 'Remove-Item -LiteralPath $path -Force' }
     @{ Name = 'round 4: the kept-key hold never released'; PinOnly = $true; Old = 'if($keyHold) { $keyHold.Dispose() }'; New = '' }
     @{ Name = 'round 4: read sizes judged on an unfinished run'; Old = '$finished=@($Session.Steps | Where-Object { $_.Barrier -eq ''OK'' }).Count -eq $Session.Planned'; New = '$finished=$true' }
@@ -716,5 +725,6 @@ foreach ($mutation in $replyPathMutations) {
     $content = if ($isReader) { @(Get-ReplyPathProblems -Harness $replyPathHarnessLf -Reader $mutated -StopAtFirst -SkipPins) } else { @(Get-ReplyPathProblems -Harness $mutated -Reader $replyPathReaderLf -StopAtFirst -SkipPins) }
     if ($mutation.PinOnly -and $content.Count -gt 0) { $replyPathMissed.Add("$($mutation.Name): marked PinOnly, but a content check refuses it ('$($content[0])'); drop the mark") }
     elseif (-not $mutation.PinOnly -and $content.Count -eq 0) { $replyPathMissed.Add("$($mutation.Name): only a pin refuses it; a content check must too, or mark it PinOnly") }
+    if ($mutation.Check -and -not @($content | Where-Object { $_.StartsWith($mutation.Check, [StringComparison]::Ordinal) }).Count) { $replyPathMissed.Add("$($mutation.Name): not refused by its own check, '$($mutation.Check)'") }
 }
 if ($replyPathMissed.Count -gt 0) { throw "The reply-path contract lets mutations through: $($replyPathMissed -join '; ')" }
