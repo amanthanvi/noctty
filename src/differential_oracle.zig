@@ -2,9 +2,9 @@
 //! supplies frozen operations and owns filenames, manifests and comparison.
 const std = @import("std");
 const vt = @import("ghostty-vt");
-const adapter = @import("differential_oracle_adapter.zig");
+const adapter = @import("oracle-adapter");
 const Entry = adapter.Entry(run);
-pub const main = if (adapter.modern) Entry.current else Entry.legacy;
+pub const main = Entry.main;
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const Input = struct {
@@ -31,7 +31,35 @@ fn run(ctx: adapter.Context) !void {
     const count = try input.int(u32);
     var output: std.Io.Writer.Allocating = .init(adapter.alloc);
     defer output.deinit();
-    try output.writer.writeAll("ORS1");
+    try output.writer.writeAll("ORS2");
+    var profile: std.Io.Writer.Allocating = .init(adapter.alloc);
+    defer profile.deinit();
+    try profile.writer.writeAll("{\"target\":");
+    const build = @import("oracle_build");
+    try std.json.Stringify.value(build.target, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"cpu_model\":");
+    try std.json.Stringify.value(build.cpu_model, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"cpu_features\":");
+    try std.json.Stringify.value(build.cpu_features, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"optimize\":");
+    try std.json.Stringify.value(build.optimize, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"conpty_no_pull_supported\":");
+    try std.json.Stringify.value(adapter.conpty_no_pull_supported, .{}, &profile.writer);
+    try profile.writer.writeAll(",\"terminal_options\":{");
+    var comma = false;
+    inline for (@typeInfo(vt.options).@"struct".decls) |decl| {
+        const value = @field(vt.options, decl.name);
+        if (@TypeOf(value) != type) {
+            if (comma) try profile.writer.writeByte(',');
+            try std.json.Stringify.value(decl.name, .{}, &profile.writer);
+            try profile.writer.writeByte(':');
+            try std.json.Stringify.value(value, .{}, &profile.writer);
+            comma = true;
+        }
+    }
+    try profile.writer.writeAll("}}");
+    try output.writer.writeInt(u32, @intCast(profile.written().len), .little);
+    try output.writer.writeAll(profile.written());
     try output.writer.writeInt(u32, count, .little);
     for (0..count) |index| {
         // Only the ordinal is diagnostic: never print corpus-controlled
@@ -43,7 +71,7 @@ fn run(ctx: adapter.Context) !void {
         if (conpty > 1) return error.BadRequest;
         var term = try adapter.initTerminal(ctx, cols, rows);
         defer term.deinit(adapter.alloc);
-        term.flags.resize_pull_scrollback = conpty == 0;
+        adapter.setConpty(&term, conpty == 1);
         var stream = term.vtStream();
         defer stream.deinit();
         const operations = try input.int(u32);

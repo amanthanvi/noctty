@@ -1,5 +1,6 @@
 //! Run once on the pre-side compiler. Never regenerate the corpus on a
 //! compared tree: the saved bytes, not PRNG source equivalence, are the input.
+//! Zig 0.15.2-only generator: delete whole at 1B.3/1B.5 after freezing input.
 const std = @import("std");
 const synthetic = @import("synthetic/main.zig");
 

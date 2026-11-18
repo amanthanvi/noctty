@@ -5,12 +5,17 @@ import argparse
 import base64
 import collections
 import hashlib
+import importlib.util
 import json
 import re
+import shutil
 import struct
 import subprocess
 import sys
 from pathlib import Path
+
+# Loading the sibling staging helper must not dirty a captured source tree.
+sys.dont_write_bytecode = True
 
 SIZES = ((80, 24), (132, 43))
 FORMATS = ("plain", "vt")
@@ -169,9 +174,12 @@ def replay(data):
 
 def prepare(args):
     repo = args.repo.resolve()
+    provenance = source_provenance(repo)
     args.out.mkdir(parents=True, exist_ok=False)
     paths = git(repo, "ls-files", "-z", "test/fuzz-libghostty/corpus").split("\0")
-    paths = sorted(path for path in paths if path)
+    paths = sorted(
+        path for path in paths if path and not path.endswith("/sanitize-filenames.sh")
+    )
     if len(paths) != args.expect_fuzz:
         raise ValueError("fuzz seed count differs from the declared corpus")
     cases = []
@@ -187,7 +195,7 @@ def prepare(args):
         )
 
     for path in paths:
-        data = (repo / path).read_bytes()
+        data = subprocess.check_output(["git", "-C", str(repo), "show", "HEAD:" + path])
         # Feed the whole stored file: do not strip the stream fuzzer's mode
         # selector or interpret parser/OSC corpus bytes through a fuzzer ABI.
         add(
@@ -220,11 +228,22 @@ def prepare(args):
             generator=KINDS[kind],
         )
     generated.done()
-    fixtures = sorted((repo / "src/terminal/testdata/replay").glob("*.vt"))
+    fixtures = [
+        repo / p
+        for p in git(repo, "ls-files", "src/terminal/testdata/replay/*.vt").splitlines()
+    ]
     if not fixtures:
         raise ValueError("no replay fixtures")
     for path in fixtures:
-        data = path.read_bytes()
+        data = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "show",
+                "HEAD:" + path.relative_to(repo).as_posix(),
+            ]
+        )
         operations, conpty, initial = replay(data)
         add(
             "replay/" + path.stem,
@@ -237,7 +256,7 @@ def prepare(args):
         )
     corpus = {
         "schema": 1,
-        "source_revision": git(repo, "rev-parse", "HEAD"),
+        "source_revision": provenance["production_revision"],
         "sizes": SIZES,
         "cases": cases,
     }
@@ -300,11 +319,11 @@ def capture(args):
     corpus = read_json(args.corpus)
     packet, records = requests(corpus)
     source = args.source_root.resolve()
-    # New harness overlays on an exact production revision are permitted;
-    # any tracked source edit invalidates the revision label.
-    if git(source, "status", "--porcelain=v1", "--untracked-files=no"):
-        raise ValueError("capture source has tracked changes")
-    revision = git(source, "rev-parse", "HEAD")
+    provenance = source_provenance(source)
+    revision = provenance["production_revision"]
+    harness = harness_sources(source)
+    if harness != harness_sources():
+        raise ValueError("capture source harness differs from the running harness")
     exe = args.exe.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     args.work.mkdir(parents=True, exist_ok=False)
@@ -332,7 +351,13 @@ def capture(args):
                 f"oracle run {repeat} failed with exit {proc.returncode}; diagnostics retained"
             )
         response = Binary((work / "response.bin").read_bytes())
-        if response.take(4) != b"ORS1" or response.unpack("I")[0] != len(records):
+        if response.take(4) != b"ORS2":
+            raise ValueError("unsupported oracle response")
+        profile = json.loads(
+            response.take(response.unpack("I")[0]), object_pairs_hook=no_duplicates
+        )
+        validate_profile(profile)
+        if response.unpack("I")[0] != len(records):
             raise ValueError("bad oracle response count")
         dest = args.out / f"run-{repeat}"
         dest.mkdir()
@@ -358,8 +383,11 @@ def capture(args):
                 )
         response.done()
         manifest = {
-            "schema": 1,
+            "schema": 2,
             "revision": revision,
+            "provenance": provenance,
+            "harness_sources": harness,
+            "profile": profile,
             "corpus_sha256": digest(corpus_bytes),
             "request_sha256": digest(packet),
             "exe_sha256": digest(exe.read_bytes()),
@@ -388,13 +416,29 @@ def capture(args):
         "manifest_sha256": digest((baseline / "manifest.json").read_bytes()),
     }
     write_json(args.out / "determinism.json", result)
+    complete_capture(args.out)
     print(json.dumps(result, sort_keys=True))
 
 
-def load_set(root):
+def load_run(root):
     manifest = read_json(root / "manifest.json")
-    if manifest["schema"] != 1 or not manifest["items"]:
+    if manifest["schema"] != 2 or not manifest["items"]:
         raise ValueError("unsupported or empty dump set")
+    if not re.fullmatch("[0-9a-f]{40}", manifest["revision"]) or not re.fullmatch(
+        "[0-9a-f]{64}", manifest["exe_sha256"]
+    ):
+        raise ValueError("invalid revision/executable provenance")
+    provenance = manifest["provenance"]
+    if provenance["production_revision"] != manifest["revision"] or not re.fullmatch(
+        "[0-9a-f]{40}", provenance["instrumented_revision"]
+    ):
+        raise ValueError("inconsistent source provenance")
+    validate_profile(manifest["profile"])
+    if not manifest["harness_sources"] or any(
+        not re.fullmatch("[0-9a-f]{64}", h)
+        for h in manifest["harness_sources"].values()
+    ):
+        raise ValueError("invalid harness provenance")
     corpus_bytes = (root / "corpus.json").read_bytes()
     corpus = read_json(root / "corpus.json")
     packet, _ = requests(corpus)
@@ -438,6 +482,154 @@ def load_set(root):
     return manifest, items
 
 
+def harness_sources(repo=None):
+    repo = repo or Path(__file__).resolve().parents[2]
+    return {
+        p.relative_to(repo).as_posix(): digest(p.read_bytes())
+        for p in staging().sources(repo)
+        if p.suffix != ".md"
+    }
+
+
+def staging():
+    spec = importlib.util.spec_from_file_location(
+        "oracle_stage", Path(__file__).with_name("stage.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def source_provenance(repo):
+    if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ValueError("source tree must be completely clean")
+    head = git(repo, "rev-parse", "HEAD")
+    record = repo / "test/differential-oracle/staged-source.json"
+    if not record.exists():
+        return {"production_revision": head, "instrumented_revision": head}
+    stage = staging()
+    staged = read_json(record)
+    production = staged["production_revision"]
+    original = subprocess.check_output(
+        ["git", "-C", str(repo), "show", production + ":build.zig"]
+    )
+    after = stage.instrument_build(original, staged["vt_api"])
+    if (
+        digest(original) != staged["original_build_sha256"]
+        or digest(after) != staged["instrumented_build_sha256"]
+        or after != (repo / "build.zig").read_bytes()
+    ):
+        raise ValueError("source instrumentation build delta differs")
+    allowed = {p.relative_to(repo).as_posix() for p in stage.sources(repo)} | {
+        "build.zig",
+        "test/differential-oracle/staged-source.json",
+    }
+    changed = set(git(repo, "diff", "--name-only", production, head).splitlines())
+    if not changed <= allowed:
+        raise ValueError(
+            "source contains production changes beyond oracle instrumentation"
+        )
+    return {**staged, "instrumented_revision": head}
+
+
+def validate_profile(profile):
+    if (
+        not isinstance(profile, dict)
+        or not {"target", "cpu_model", "cpu_features", "optimize", "terminal_options"}
+        <= profile.keys()
+    ):
+        raise ValueError("invalid build profile")
+    options = profile["terminal_options"]
+    if (
+        not isinstance(options, dict)
+        or not {
+            "artifact",
+            "simd",
+            "oniguruma",
+            "c_abi",
+            "slow_runtime_safety",
+            "kitty_graphics",
+            "tmux_control_mode",
+        }
+        <= options.keys()
+    ):
+        raise ValueError("incomplete Terminal profile")
+    if options["artifact"] not in ("ghostty", "lib") or any(
+        type(options[k]) is not bool
+        for k in (
+            "simd",
+            "oniguruma",
+            "c_abi",
+            "slow_runtime_safety",
+            "kitty_graphics",
+            "tmux_control_mode",
+        )
+    ):
+        raise ValueError("invalid Terminal profile values")
+    if (
+        any(
+            not isinstance(profile[k], str) or not profile[k]
+            for k in ("target", "cpu_model", "optimize")
+        )
+        or not isinstance(profile["cpu_features"], list)
+        or any(not isinstance(f, str) for f in profile["cpu_features"])
+    ):
+        raise ValueError("invalid target/CPU/optimization profile")
+
+
+def complete_capture(parent):
+    first, items = load_run(parent / "run-1")
+    second, twin = load_run(parent / "run-2")
+    if first != second or items != twin:
+        raise ValueError("cannot complete a nondeterministic capture")
+    write_json(
+        parent / "completion.json",
+        {
+            "schema": 1,
+            "deterministic": True,
+            "manifest_sha256": digest((parent / "run-1/manifest.json").read_bytes()),
+            "corpus_sha256": first["corpus_sha256"],
+            "profile": first["profile"],
+            "harness_sources": first["harness_sources"],
+            "provenance": first["provenance"],
+            "exe_sha256": first["exe_sha256"],
+        },
+    )
+
+
+def load_set(root, declarations=()):
+    root = root.resolve()
+    if root.name not in ("run-1", "run-2"):
+        raise ValueError("dump set must name a completed capture run")
+    record = read_json(root.parent / "completion.json")
+    if record.get("schema") != 1 or record.get("deterministic") is not True:
+        raise ValueError("invalid completion record")
+    first, items = load_run(root.parent / "run-1")
+    second, twin = load_run(root.parent / "run-2")
+    if first != second or items != twin:
+        raise ValueError("completed capture is no longer deterministic")
+    if record["manifest_sha256"] != digest(
+        (root / "manifest.json").read_bytes()
+    ) or any(
+        record[k] != first[k]
+        for k in (
+            "corpus_sha256",
+            "profile",
+            "harness_sources",
+            "provenance",
+            "exe_sha256",
+        )
+    ):
+        raise ValueError("completion record does not bind this capture")
+    current = digest(json.dumps(harness_sources(), sort_keys=True).encode())
+    captured = digest(json.dumps(first["harness_sources"], sort_keys=True).encode())
+    if current != captured and f"{captured}:{current}" not in declarations:
+        raise ValueError(
+            "harness changed; explicit --declare-harness-change OLD:CURRENT required"
+        )
+    return first, items
+
+
 def classify(pre, branch, upstream):
     if branch == upstream == pre:
         return CLASSES[0]
@@ -449,7 +641,7 @@ def classify(pre, branch, upstream):
 
 
 def native_controls(args):
-    _, items = load_set(args.dumps)
+    _, items = load_set(args.dumps, args.declare_harness_change)
     if {key[0] for key in items} != {"text", "sgr", "reset", "resize"}:
         raise ValueError("native controls require the four sentinel inputs")
     checks = []
@@ -471,9 +663,16 @@ def native_controls(args):
     print(json.dumps({"native_controls_passed": len(checks)}))
 
 
-def compare(pre_root, branch_root, upstream_root=None, triage=None):
+def compare(
+    pre_root,
+    branch_root,
+    upstream_root=None,
+    triage=None,
+    declarations=(),
+    expected_corpus=None,
+):
     sets = [
-        load_set(root)
+        load_set(root, declarations)
         for root in (pre_root, branch_root, upstream_root)
         if root is not None
     ]
@@ -482,10 +681,27 @@ def compare(pre_root, branch_root, upstream_root=None, triage=None):
         or len({m["request_sha256"] for m, _ in sets}) != 1
     ):
         raise ValueError("compared corpus/request identities differ")
+    if expected_corpus and sets[0][0]["corpus_sha256"] != expected_corpus:
+        raise ValueError("corpus differs from the operator pin")
+    if any(m["profile"] != sets[0][0]["profile"] for m, _ in sets[1:]):
+        raise ValueError("compared build profiles differ")
+    if (
+        any(m["harness_sources"] != sets[0][0]["harness_sources"] for m, _ in sets[1:])
+        and not declarations
+    ):
+        raise ValueError("compared harness sources differ")
     if any(set(items) != set(sets[0][1]) for _, items in sets[1:]):
         raise ValueError("compared dump coverage differs")
     triaged = {}
+    if triage is not None and not isinstance(triage, list):
+        raise ValueError("triage must be a list")
     for row in triage or []:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("reason"), str)
+            or ("ledger" in row and not isinstance(row["ledger"], str))
+        ):
+            raise ValueError("invalid triage row types")
         key = (row["input"], row["cols"], row["rows"], row["format"])
         if key in triaged or not row.get("reason", "").strip():
             raise ValueError("duplicate or unexplained triage")
@@ -515,7 +731,9 @@ def compare(pre_root, branch_root, upstream_root=None, triage=None):
                 or entry.get("sha256") != row["sha256"]
             ):
                 raise ValueError("triage classification or bytes are stale")
-            if category in CLASSES[1:3] and not entry.get("ledger", "").strip():
+            if (category in CLASSES[1:3] or category == "different") and not entry.get(
+                "ledger", ""
+            ).strip():
                 raise ValueError("fork difference requires a ledger entry")
             row.update(triaged=True, reason=entry["reason"], ledger=entry.get("ledger"))
         differences.append(row)
@@ -539,7 +757,7 @@ def controls(args):
         (b"a", b"b", b"c"),
         (b"a", b"b", b"a"),
     )
-    roots = [args.out / side for side in ("pre", "branch", "upstream")]
+    roots = [args.out / side / "run-1" for side in ("pre", "branch", "upstream")]
     corpus = {
         "schema": 1,
         "sizes": SIZES,
@@ -549,7 +767,7 @@ def controls(args):
         ],
     }
     for side, root in enumerate(roots):
-        root.mkdir()
+        root.mkdir(parents=True)
         write_json(root / "corpus.json", corpus)
         items = []
         for number, triple in enumerate(triples):
@@ -572,12 +790,42 @@ def controls(args):
         write_json(
             root / "manifest.json",
             {
-                "schema": 1,
+                "schema": 2,
+                "revision": "0" * 40,
+                "exe_sha256": "1" * 64,
+                "provenance": {
+                    "production_revision": "0" * 40,
+                    "instrumented_revision": "0" * 40,
+                },
+                "harness_sources": harness_sources(),
+                "profile": {
+                    "target": "control",
+                    "cpu_model": "control",
+                    "cpu_features": [],
+                    "optimize": "control",
+                    "terminal_options": dict(
+                        dict.fromkeys(
+                            (
+                                "artifact",
+                                "simd",
+                                "oniguruma",
+                                "c_abi",
+                                "slow_runtime_safety",
+                                "kitty_graphics",
+                                "tmux_control_mode",
+                            ),
+                            True,
+                        ),
+                        artifact="ghostty",
+                    ),
+                },
                 "corpus_sha256": digest((root / "corpus.json").read_bytes()),
                 "request_sha256": digest(requests(read_json(root / "corpus.json"))[0]),
                 "items": items,
             },
         )
+        shutil.copytree(root, root.parent / "run-2")
+        complete_capture(root.parent)
     result = compare(*roots)
     assert result["counts"] == {
         CLASSES[0]: 4,
@@ -604,7 +852,7 @@ def controls(args):
     def rejects(label, action):
         try:
             action()
-        except (ValueError, FileNotFoundError):
+        except (ValueError, KeyError, FileNotFoundError):
             checks.append(label)
         else:
             raise AssertionError(label + " accepted")
@@ -656,6 +904,77 @@ def controls(args):
         and ops == [send(b"ab"), {"resize": [8, 3]}, send(b"L1\r\nL2\r\n")]
     )
     checks.append("replay bytes and resize schedule")
+    completion = roots[1].parent / "completion.json"
+    saved = completion.read_bytes()
+    completion.unlink()
+    rejects("missing completion (failed second run)", lambda: compare(*roots))
+    rejects(
+        "native controls require completion",
+        lambda: native_controls(
+            argparse.Namespace(
+                dumps=roots[1],
+                declare_harness_change=[],
+                report=args.out / "must-not-exist.json",
+            )
+        ),
+    )
+    completion.write_text("{}", encoding="utf-8")
+    rejects("invalid completion", lambda: compare(*roots))
+    completion.write_bytes(saved)
+    record = read_json(completion)
+    record["corpus_sha256"] = "0" * 64
+    completion.write_text(json.dumps(record), encoding="utf-8")
+    rejects("mismatched completion", lambda: compare(*roots))
+    completion.write_bytes(saved)
+    twin = roots[1].parent / "run-2/0-80x24.plain"
+    twin.write_bytes(b"changed")
+    rejects("nondeterministic second run", lambda: compare(*roots))
+    twin.write_bytes(b"a")
+    rejects("malformed triage object", lambda: compare(*roots, triage={"a": 1}))
+    rejects(
+        "malformed triage reason",
+        lambda: compare(*roots, triage=[dict(triage[0], reason=1)]),
+    )
+    pair = compare(roots[0], roots[1])
+    pair_triage = [dict(r, reason="control") for r in pair["differences"]]
+    rejects(
+        "pair triage requires ledger",
+        lambda: compare(roots[0], roots[1], triage=pair_triage),
+    )
+    rejects("operator corpus pin", lambda: compare(*roots, expected_corpus="0" * 64))
+
+    def change_manifests(mutate):
+        for run in ("run-1", "run-2"):
+            path = roots[1].parent / run / "manifest.json"
+            value = json.loads(original)
+            mutate(value)
+            path.write_text(json.dumps(value), encoding="utf-8")
+        completion.unlink()
+        complete_capture(roots[1].parent)
+
+    change_manifests(lambda m: m["profile"].update(optimize="different"))
+    rejects("different complete build profiles", lambda: compare(*roots))
+    change_manifests(
+        lambda m: m["harness_sources"].update({"src/control.zig": "2" * 64})
+    )
+    rejects("changed harness", lambda: compare(*roots))
+    captured = digest(
+        json.dumps(
+            read_json(roots[1] / "manifest.json")["harness_sources"], sort_keys=True
+        ).encode()
+    )
+    current = digest(json.dumps(harness_sources(), sort_keys=True).encode())
+    assert compare(*roots, declarations=[f"{captured}:{current}"])["untriaged"] == 16
+    checks.append("explicit harness change declaration")
+    for run in ("run-1", "run-2"):
+        (roots[1].parent / run / "manifest.json").write_bytes(original)
+    completion.write_bytes(saved)
+    for field in ("revision", "exe_sha256", "provenance"):
+        manifest = json.loads(original)
+        del manifest[field]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        rejects("missing provenance " + field, lambda: compare(*roots))
+        manifest_path.write_bytes(original)
     native_cases = []
     for name, data in (
         ("text", b"oracle-control"),
@@ -699,7 +1018,7 @@ def main():
     command.add_argument("--repo", type=Path, required=True)
     command.add_argument("--synthetic", type=Path, required=True)
     command.add_argument("--out", type=Path, required=True)
-    command.add_argument("--expect-fuzz", type=int, default=4002)
+    command.add_argument("--expect-fuzz", type=int, default=4001)
     command.set_defaults(action=prepare)
     command = commands.add_parser(
         "capture", help="run twice and require identical saved bytes"
@@ -718,6 +1037,10 @@ def main():
     command.add_argument("branch", type=Path)
     command.add_argument("upstream", type=Path, nargs="?")
     command.add_argument("--triage", type=Path)
+    command.add_argument("--declare-harness-change", action="append", default=[])
+    command.add_argument(
+        "--expected-corpus", help="required corpus SHA-256 for a real gate"
+    )
     command.add_argument("--report", type=Path, required=True)
     command = commands.add_parser(
         "controls", help="exercise classifications and invalid-evidence refusals"
@@ -728,6 +1051,7 @@ def main():
         "native-controls", help="verify captured text, SGR and reset sentinels"
     )
     command.add_argument("dumps", type=Path)
+    command.add_argument("--declare-harness-change", action="append", default=[])
     command.add_argument("--report", type=Path, required=True)
     command.set_defaults(action=native_controls)
     args = parser.parse_args()
@@ -738,6 +1062,8 @@ def main():
                 args.branch,
                 args.upstream,
                 read_json(args.triage) if args.triage else None,
+                args.declare_harness_change,
+                args.expected_corpus,
             )
             write_json(args.report, result)
             print(
@@ -749,7 +1075,14 @@ def main():
             return 1 if result["untriaged"] else 0
         args.action(args)
         return 0
-    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
         # Do not print parser input, native diagnostics or environment data.
         detail = str(error) if type(error) is ValueError else "see retained artifacts"
         print(f"oracle: {type(error).__name__}: {detail}", file=sys.stderr)

@@ -123,6 +123,8 @@ pub fn build(b: *std.Build) !void {
     else
         null;
 
+    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe);
+
     // Standalone feasibility spike. This artifact is intentionally absent
     // from the normal build and every product packaging path.
     if (config.emit_conpty_host) {

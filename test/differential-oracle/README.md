@@ -2,7 +2,7 @@
 
 This implements migration-plan sections 3.3 and 3.4. It captures the active
 terminal screen and retained history through `TerminalFormatter` after feeding
-the same frozen corpus into the `ghostty-vt` Zig module. It opens no window or
+the same frozen corpus into the app's `Terminal`, with its actual options and dependencies. It opens no window or
 PTY and uses no clipboard, shell integration, application configuration or user
 state.
 
@@ -12,7 +12,7 @@ not proof of a regression or permission to discard fork behavior.
 ## Build and freeze inputs
 
 Run the repository's required quiet-window guard before **every** build, test
-or harness command below. Use `scripts/dev-windows.cmd` for Zig 0.15.2 and a VS
+or harness command below. Use `scripts/dev-windows.cmd` for pre-cutover builds and a VS
 developer shell with an explicitly addressed compiler for Zig 0.17.1. Keep build
 roots and their Zig global caches on the same drive. Use task-owned scratch
 copies and caches; never build in a retained read-only plan tree.
@@ -20,7 +20,7 @@ copies and caches; never build in a retained read-only plan tree.
 From the repository root:
 
 ```text
-scripts\dev-windows.cmd zig build --build-file test/differential-oracle/build.zig -Dcorpus=true -Doptimize=ReleaseSafe --prefix H:\scratch\oracle\build
+scripts\dev-windows.cmd zig build oracle -Dvt-api=fork -Doracle-corpus=true -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --prefix BUILD_DIR --summary all
 ```
 
 Run `build/bin/oracle-corpus.exe` in a fresh scratch directory. It writes
@@ -39,8 +39,8 @@ python test/differential-oracle/oracle.py prepare --repo PRE_TREE --synthetic SY
 ```
 
 `prepare` counts the tracked files in `test/fuzz-libghostty/corpus`, requires
-4,002 by default (`--expect-fuzz` makes a future intentional count explicit),
-and copies their full bytes into the frozen JSON. It does not strip the stream
+4,001 seeds by default (the tracked `sanitize-filenames.sh` is excluded) (`--expect-fuzz` makes a future intentional count explicit),
+and freezes their committed blob bytes into JSON. It refuses tracked or untracked changes. It does not strip the stream
 fuzzer's mode-selector byte or apply the parser/OSC fuzzers' calling convention.
 It also freezes all `src/terminal/testdata/replay/*.vt` fixtures consumed by
 `src/terminal/resize_replay.zig`. IDs retain corpus subdirectories, even when
@@ -57,29 +57,46 @@ or the original fixture's golden expectations.
 
 ## Capture each tree
 
-Build the same harness files on the pre tree, 1A, upstream v1.4.0 and 1B. To
-use a tree that does not yet contain this tool, copy these **new** files into a
-scratch copy of that revision:
+The root `oracle` step inherits the app module's generated Terminal options,
+imports, include paths, C macros and link dependencies. It does not use the
+public lib-vt defaults: Oniguruma, Kitty graphics and tmux control mode stay
+enabled as selected by that tree's own app build. Dependency failures stop that
+side; there is no reduced-feature fallback. The response records target, CPU
+model and features, optimization, and **all** generated Terminal options,
+including the version fields. Compare refuses any unequal profiles.
+
+Select the Terminal API explicitly with `-Dvt-api=fork|stone|v140|v140_fork`.
+The choice never depends on compiler version or std-origin feature detection.
+`fork` and `stone` use the legacy IO adapter, with positional and structured
+resize respectively; `v140` and `v140_fork` use the modern IO adapter with
+structured and positional resize respectively. Stone has no ConPTY no-pull
+flag, so that flag is not emulated: record this limit when reviewing replays.
+
+For a clean task-owned copy without the harness, run:
 
 ```text
-src/differential_oracle.zig
-src/differential_oracle_adapter.zig
-test/differential-oracle/build.zig
-test/differential-oracle/build.zig.zon
+python test/differential-oracle/stage.py SOURCE_TREE --api stone
 ```
 
-Build without `-Dcorpus=true`. All terminal/allocator/IO version differences
-are isolated in `differential_oracle_adapter.zig`. The standalone build imports
-the tree's own `ghostty-vt` module with SIMD disabled. It forwards target and
-optimization to the dependency. The generator is only built on the pre side;
-it is not needed on upstream or 1B.
+Stage applies only instrumentation, retaining the original production revision
+and exact root-build delta in `staged-source.json`. Commit that overlay locally
+before prepare/capture. Capture verifies the clean tree and permitted delta;
+manifest provenance distinguishes production and instrumented commits. Build
+with that side's compiler, explicit API, SIMD on, ReleaseFast and baseline CPU.
+Only the fork accepts `-Dcustom-shaders=true`; read the other side's own app
+build options. The generator is needed only on the pre side.
+
+At **1B.3/1B.5**, delete `differential_oracle_adapter_legacy.zig` and
+`differential_oracle_corpus.zig` whole. Select a modern API and reuse the frozen
+corpus. The retained modern adapter and build helper need no compiler-selected
+shim or residue allowance. Check the cutover with `residue_gate17.py`.
 
 ```text
 python test/differential-oracle/oracle.py capture --corpus FROZEN_DIR/corpus.json --exe ORACLE_EXE --source-root SOURCE_TREE --out DUMPS_DIR --work RUN_DIR
 ```
 
-Both output directories must be fresh. `capture` rejects tracked source edits,
-records the source HEAD and executable hash, and runs the executable twice in
+Both output directories must be fresh. `capture` requires a completely clean source,
+records production/instrumented revisions, executable and harness source hashes, and runs the executable twice in
 separate working directories. No previous outputs are reused. Binary requests,
 responses and diagnostics stay under `RUN_DIR`; their stdout/stderr are not
 echoed. A failure, crash or timeout fails capture and preserves partial evidence.
@@ -97,7 +114,18 @@ state serialization (for example, it does not dump inactive-screen contents).
 `run-1/manifest.json` and `run-2/manifest.json` map readable input IDs, sizes
 and formats to safe numbered filenames, lengths and SHA-256 hashes. The driver
 requires every saved dump and both manifests to be **byte-identical**, then
-writes `determinism.json`. Keep large dumps and their frozen corpus outside the
+writes `determinism.json` and finally `completion.json`. The completion record
+binds both identical manifests, the corpus, harness sources, full profile,
+executable and source provenance. Failed or nondeterministic runs retain partial
+evidence but receive no completion record. Compare and native-controls recheck
+both runs and refuse missing, corrupt or mismatched completion with exit 2.
+
+Admission also compares the captured harness hashes with the running tool's
+sources. To declare an intentional instrument change explicitly, pass
+`--declare-harness-change OLD:CURRENT` to compare/native-controls; each value is
+the SHA-256 of `json.dumps(harness_sources, sort_keys=True).encode()`.
+Declarations do not bypass profile, corpus, provenance, determinism or dump checks.
+Use `--expected-corpus SHA256` on compare to pin the real baseline corpus. Keep large dumps and their frozen corpus outside the
 repository.
 
 ## Compare and triage
@@ -124,7 +152,7 @@ coverage, corrupt content or unequal corpus/request identities are errors.
 Manifests detect accidental corruption; they are not signed attestations.
 
 To supply dispositions, pass `--triage ENTRIES.json`, a JSON array containing
-each differing report row plus a nonempty `reason` and, for either fork class,
+each differing report row plus a nonempty `reason` and, for pair differences or either fork class,
 a nonempty `ledger` reference. The classification and ordered SHA-256 list must
 match current bytes; stale, duplicate and unused entries fail. This verifies
 the recorded reference, not the truth or completeness of the external ledger.
@@ -143,7 +171,7 @@ native positive controls (`text`, `sgr`, `reset`, `resize`) for `capture`: each 
 must equal `oracle-control`, text/reset VT dumps must match, and SGR VT must
 differ. This separately proves that the runner interprets input and that both
 formatter choices reach saved output. The resize control also executes both
-resize APIs with ConPTY's no-pull policy. Run it on each compiler adapter.
+resize APIs. Stone cannot apply the absent ConPTY no-pull flag. Run it on each API adapter.
 
 ```text
 python test/differential-oracle/oracle.py native-controls NATIVE_DUMPS/run-1 --report NATIVE_CONTROLS.json
