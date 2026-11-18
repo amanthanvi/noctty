@@ -1,10 +1,13 @@
 // Only controls belonging to the isolated copy are inspected or driven.
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class DirectUpdateUi {
     delegate bool EnumWindow(IntPtr hwnd, IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr hwnd, EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder text, int capacity);
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
@@ -26,6 +29,37 @@ public static class DirectUpdateUi {
     }
     public static void CloseSentinel(IntPtr hwnd) {
         if (hwnd != IntPtr.Zero && !DestroyWindow(hwnd)) throw new Exception("Driver sentinel destruction failed");
+    }
+    public sealed class WindowFact {
+        public string ClassName;
+        public int ControlId;
+        public bool Visible;
+        public string GraphicsDialogText;
+    }
+    static string ClassName(IntPtr hwnd) {
+        var name = new StringBuilder(128); GetClassNameW(hwnd, name, name.Capacity); return name.ToString();
+    }
+    public static WindowFact[] StartupFacts(int ownedProcess) {
+        var facts = new List<WindowFact>();
+        EnumWindows((hwnd, unused) => {
+            int owner; GetWindowThreadProcessId(hwnd, out owner);
+            if (owner != ownedProcess) return true;
+            string cls = ClassName(hwnd);
+            facts.Add(new WindowFact { ClassName=cls, ControlId=GetDlgCtrlID(hwnd), Visible=IsWindowVisible(hwnd) });
+            EnumChildWindows(hwnd, (child, parameter) => {
+                var fact = new WindowFact { ClassName=ClassName(child), ControlId=GetDlgCtrlID(child), Visible=IsWindowVisible(child) };
+                // Only fixed startup-graphics messages of our own app may be read.
+                // Never read a terminal, command, directory or unrelated window title.
+                if (cls == "#32770" && fact.ClassName == "Static") {
+                    string text = Text(child);
+                    if (text.IndexOf("OpenGL", StringComparison.OrdinalIgnoreCase) >= 0)
+                        fact.GraphicsDialogText = text;
+                }
+                facts.Add(fact); return true;
+            }, IntPtr.Zero);
+            return true;
+        }, IntPtr.Zero);
+        return facts.ToArray();
     }
     public static IntPtr Child(IntPtr parent, int id) {
         IntPtr result = IntPtr.Zero;

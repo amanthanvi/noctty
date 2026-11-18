@@ -225,13 +225,16 @@ try {
     $app=[HiddenWin]::Launch($exe,$line,$script:install,"WinSta0\$DesktopName",$script:caseJob,(Join-Path $Run 'app-raw.log'))
     $script:hostWindow=[IntPtr]::Zero
     Wait-Check 'source window' { $windows=@([HiddenWin]::Hosts($app.pid)); if($windows.Count -eq 1){$script:hostWindow=$windows[0];return $true};return $false }
-    Wait-Check 'source pane ready' { @([HiddenWin]::Surfaces($script:hostWindow)).Count -eq 1 }
+    Wait-Check 'source pane ready' { @([HiddenWin]::Surfaces($script:hostWindow)).Count -eq 1 } ([Math]::Min(60,$TimeoutSeconds))
     $panes=@([HiddenWin]::Surfaces($script:hostWindow))
     # Force the check through the old app's normal binding dispatch.
     [DirectUpdateUi]::CheckKey($panes[0]); $result.Steps.Add('Posted F7 check_for_updates')
     if($Expected -ceq 'Rejected') {
         Wait-Check 'incomplete payload banner' { (Read-ControlName $script:hostWindow 1913) -match 'portable ZIP payload is incomplete' }
         $result.Banner=Read-ControlName $script:hostWindow 1913
+        # An error message temporarily covers the underlying update notice.
+        [DirectUpdateUi]::Click([DirectUpdateUi]::Child($script:hostWindow,1915))
+        Wait-Check 'rejected update notice' { (Read-ControlName $script:hostWindow 1914) -cmatch '^Open Release(?::|$)' }
         $result.NoticeButton=Read-ControlName $script:hostWindow 1914
         if($result.NoticeButton -cnotmatch '^Open Release(?::|$)'){throw 'Rejected update does not offer Open Release'}
         if((Get-Sha $exe) -cne $result.BeforeExeSha256){throw 'Rejected update changed the source executable'}
@@ -277,6 +280,12 @@ try {
     $result.ErrorType=$_.Exception.GetType().Name
     $result.ErrorStage=if($_.Exception.Message -cmatch '^(Timed out: |Observed |Wrong |Expected |Driver |Parent |Install did not |Old application |Final application |Rejected update |Update did not |Acceptance |Stub |Owned )'){$_.Exception.Message}else{'Driver operation failed; inspect retained local raw evidence'}
     $result.ErrorLine=$_.InvocationInfo.ScriptLineNumber
+    if($app){
+        $result.StartupWindows=@([DirectUpdateUi]::StartupFacts($app.pid) | ForEach-Object {
+            @{ ClassName=$_.ClassName; ControlId=$_.ControlId; Visible=$_.Visible;
+                GraphicsDialogText=($_.GraphicsDialogText -replace '[A-Za-z]:[\\/][^\s,;]+','[path]') }
+        })
+    }
 } finally {
     Save-Receipt 'state-timeline.json' @($script:states.ToArray())
     $cleaned=$false
