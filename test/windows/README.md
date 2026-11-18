@@ -409,7 +409,9 @@ Which terminal replies reach a console program through ConPTY's input, and in
 what shape (the kitty report's shortlist #0; log entry REPLY-PATH-01 in
 `docs/agents/log/conpty.md`). On a private desktop, a portable copy of noctty
 (without `noctty.ico`, with its own AppData, clipboard reads and writes denied,
-and later tabs on `direct:<System32>\cmd.exe /D` so no AutoRun runs) runs
+and later tabs on `direct:<System32>\cmd.exe /D` so no cmd AutoRun runs in the
+run; the helper compile's `dev-windows.cmd` still runs it, and an fnm hook's
+junctions from it land in your own `%LOCALAPPDATA%\fnm_multishells`) runs
 `console-reply-reader.c` as
 its `-e` child in one reader state at a time, types keys so conhost has seen
 Win32 input mode records, then has noctty write each case's reply: its own
@@ -435,11 +437,13 @@ PowerShell profile and uses your real `LOCALAPPDATA`, so they run only with
 
 Exit 0 means every requested reader ran every step, case 7 ran with its
 controls, and every positive control came back as predicted; other rows are
-observations, recorded either way. Exit 1 is an incomplete run or a failed
-control, 2 infrastructure, 3 a changed isolation guard (the startup ledger,
+observations, recorded either way. Exit 1 is an incomplete run, a failed
+control or a reader in the wrong state, 2 infrastructure (the outer phase
+too), 3 a changed isolation guard (the startup ledger,
 the PowerShell history, the product AUMID's registration, the clipboard
 sequence number, or a link left in the run directory). `-Sabotage delimiter|reader|control` breaks one thing on
-purpose and must exit 1. `flagship/contracts/Contracts.98-ConptyReplyPath.ps1`
+purpose and must exit 1; `-Sabotage setup` fails once reader d's ssh keys
+exist and must exit 2 with them deleted. `flagship/contracts/Contracts.98-ConptyReplyPath.ps1`
 pins the harness and refuses the round-1 council's mutations.
 
 ## interactive-win11-ime-candidate.ps1

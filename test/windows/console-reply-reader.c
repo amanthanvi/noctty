@@ -155,6 +155,7 @@ int wmain(int argc, wchar_t **argv) {
     DWORD before = 0, wanted = 0, mode = 0, out_mode = 0;
     LARGE_INTEGER frequency;
     FILE *ready = NULL;
+    wchar_t ready_tmp[MAX_PATH];
     ULONGLONG deadline = GetTickCount64() + 15 * 60 * 1000;
     int records = 0, ansi = 0;
     DWORD per_read = 64;
@@ -173,10 +174,13 @@ int wmain(int argc, wchar_t **argv) {
     g_log = _wfsopen(argv[2], L"wb", _SH_DENYNO);
     if (!g_log) return 7;
     QueryPerformanceFrequency(&frequency);
-    if (_wfopen_s(&ready, argv[3], L"wb") || !ready) return 8;
+    // The ready file appears whole: written as <ready>.tmp, closed, then renamed.
+    if (swprintf_s(ready_tmp, MAX_PATH, L"%ls.tmp", argv[3]) < 0) return 8;
+    if (_wfopen_s(&ready, ready_tmp, L"wb") || !ready) return 8;
     fprintf(ready, "%lu,%lu,%lu,%lu,%u,%lld,%d\n", GetCurrentProcessId(), before, mode, out_mode, GetConsoleCP(),
         frequency.QuadPart, local_app_data_in_run(argv[2]));
-    fclose(ready);
+    if (fclose(ready) != 0) return 8;
+    if (!MoveFileExW(ready_tmp, argv[3], MOVEFILE_REPLACE_EXISTING)) return 13;
     while (GetTickCount64() < deadline && GetFileAttributesW(argv[4]) == INVALID_FILE_ATTRIBUTES) {
         INPUT_RECORD batch[256];
         DWORD count = 0, i;
