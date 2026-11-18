@@ -71,7 +71,7 @@ if ($promoteText -match '(?m)^\s*& gh release (upload|create)\b|--clobber' -or
 }
 $publisherResumeOutput = @(& (Join-Path $repoRoot 'test/windows/release-publisher-resume.ps1') 6>&1)
 if ($LASTEXITCODE -ne 0 -or @($publisherResumeOutput | Where-Object {
-    [string]$_ -ceq 'Publisher resume: PASS (15 WinGet cases and unchanged Scoop with relative metadata).'
+    [string]$_ -ceq 'Publisher resume: PASS (19 WinGet cases and unchanged Scoop with relative metadata).'
 }).Count -ne 1) { throw 'Publisher resume controls did not all complete.' }
 $publisherResumeOutput | ForEach-Object { Write-Host $_ }
 
@@ -89,3 +89,10 @@ foreach ($spec in @(@{Version='1.3.123';Count=8;Symbols=0}, @{Version='1.3.124';
 }
 $checks = Get-YamlJobText -Content $testWorkflowText -Name checks -Source 'Test workflow'
 if ($checks -notmatch 'Cache digest-verified release fixture inputs' -or $checks -notmatch 'NOCTTY_RELEASE_FIXTURE_ASSETS:') { throw 'Checks must cache the verified real fixture assets.' }
+
+$channelOutput = @(& (Join-Path $repoRoot 'test/windows/release-channel-switches.ps1') 6>&1)
+if (@($channelOutput | Where-Object { [string]$_ -ceq 'Release channel switches: PASS (4 case variants and enabled-missing twin).' }).Count -ne 1) { throw 'Build/direct channel switch controls did not complete.' }
+$channelOutput | ForEach-Object { Write-Host $_ }
+$publicationText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-publication-state.ps1') -Raw
+if ($publisherText -match 'releases/tags/' -or $publicationText -match 'releases/tags/' -or $publicationText -notmatch 'releases/\$id') { throw 'Draft lookup must discover and read by release ID.' }
+if ($promoteText -notmatch 'generatorCredentials' -or $promoteText -notmatch 'SetEnvironmentVariable\(\$name, \$null\)' -or $promoteText -notmatch 'finally') { throw 'Candidate generator must have a credential-free environment.' }

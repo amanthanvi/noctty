@@ -70,9 +70,8 @@ Base upstream release: $UpstreamBaseVersion
 Versioning: major.minor follow the Ghostty upstream line; patch is the noctty release number on that line.
 "@
 
-& gh release view $Tag --repo $Repository *> $null
-if ($LASTEXITCODE -eq 0) {
-    $existing = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing
+if ($existing) {
     Assert-ReleasePublicationState -Release $existing -Repository $Repository -Tag $Tag
     throw "Release $Tag already exists. Use mode promote with its recorded manifest; a build must never replace published assets."
 }
@@ -82,6 +81,9 @@ if ($LASTEXITCODE -eq 0) {
 $extra = if ($Prerelease -eq 'true') { @('--prerelease') } else { @() }
 & gh release create $Tag --repo $Repository --target $CandidateSha --draft --title $Title --generate-notes --notes $notesPrefix @extra
 if ($LASTEXITCODE -ne 0) { throw 'Failed to create release draft. Inspect publication state before retrying.' }
+$created = Get-ReleaseByTag -Repository $Repository -Tag $Tag
+$releaseId = [string]$created.id
+if (-not $created.draft) { throw 'ReleaseIdentityMismatch: newly created release must be a draft.' }
 foreach ($asset in $assets) {
     $name = [IO.Path]::GetFileName($asset)
     $hash = Get-FileSha256Lower $asset
@@ -91,7 +93,7 @@ foreach ($asset in $assets) {
         & gh release upload $Tag --repo $Repository $asset
         $uploadExit = $LASTEXITCODE
         # Also reconcile a lost success response; never retry with replacement.
-        $state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+        $state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
         $remote = @($state.assets | Where-Object { $_.name -ceq $name })
         if ($remote.Count -eq 1) {
             if ($remote[0].digest -cne "sha256:$hash" -or $remote[0].size -ne $size) {
@@ -112,12 +114,12 @@ $assertInputs = @{
     DownloadDirectory = $primary; Tag = $Tag; CandidateSha = $CandidateSha
     TestRunId = [string]$manifest.testRunId; EvidenceRunId = [string]$manifest.evidenceRunId; ReleaseRunId = [string]$manifest.releaseRunId
 }
-$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
 [void](Assert-ReleaseManifest @assertInputs -Release $state)
 $publishFlags = if ($Prerelease -eq 'true') { @('--prerelease', '--latest=false') } else { @('--prerelease=false', '--latest') }
 & gh release edit $Tag --repo $Repository --draft=false @publishFlags
 if ($LASTEXITCODE -ne 0) { throw 'ReleasePublishUnconfirmed: inspect release state; no automatic deletion is permitted.' }
-$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
 Assert-ReleasePublicationState -Release $state -Repository $Repository -Tag $Tag
 [void](Assert-ReleaseManifest @assertInputs -Release $state)
 Write-Host 'Build publication: PASS (all uploaded bytes and GitHub digests match the shared manifest, including prereleases).'

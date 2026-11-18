@@ -359,10 +359,15 @@ or be explicitly disabled by `SCOOP_PUBLISH=off`, `WINGET_PUBLISH=off` or
 `PackageManagerNotReady`; disabling a channel is a deliberate operator choice.
 
 **PublishedReleaseResume** uses the same promote inputs for a stable or
-prerelease build whose original Release run failed later. The jobs API must
-show **Publish GitHub Release** succeeded; the tag must still resolve to the
+prerelease build whose original Release run failed or was cancelled later.
+It reads every run attempt and its jobs. Some attempt must show
+**Publish GitHub Release** succeeded; the tag must still resolve to the
 candidate, and the summary digest, manifest and every asset must match. The
-original run ID stays fixed. A stable recovery starts at the first incomplete
+original run ID stays fixed. **Do not re-run the original Release workflow**
+after it created a draft or published a release; dispatch promote instead. If
+a rerun already happened, resume still authenticates the earlier publishing
+attempt. Take `manifest_sha256` from that attempt's summary, not a later rerun's
+newly generated digest. A stable recovery starts at the first incomplete
 step (verify, Scoop, WinGet, Chocolatey); completed preceding steps are skipped.
 A prerelease recovery verifies after its flip. Each publisher is idempotent:
 Scoop compares the desired bytes, WinGet checks open/merged PR manifest paths,
@@ -370,9 +375,11 @@ and Chocolatey checks the exact version. Unknown state stops the run.
 `ReleasePublishNotSuccessful` refuses a failed run without a successful publish
 step. Inspect that run and publication state before choosing recovery.
 
-`DraftRelease` (including a cancelled upload) and `IncompleteRelease` (missing
-manifest or payload assets) cannot be promoted. After inspecting the release,
-manual recovery is to delete the incomplete release **and tag**, then dispatch
+`DraftRelease` (including a partial or cancelled upload) cannot be promoted.
+Discovery reads all release-list pages and the selected release ID because
+GitHub's tag endpoint hides drafts. `AmbiguousReleaseTag` refuses duplicate
+pending tags for inspection. After confirming that the target is an incomplete
+**draft**, manual recovery is to delete that draft and its tag, then dispatch
 a new build from main with renewed acceptance evidence:
 
 ```powershell
@@ -380,9 +387,22 @@ gh release delete <tag> --repo amanthanvi/noctty --cleanup-tag --yes
 gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=build -f version=<version> -f prerelease=true
 ```
 
-This is an operator recovery, never an automatic deletion. It produces a new
-candidate/run/manifest and needs a new soak. A complete published release uses
+This applies only to an inspected draft. It is an operator recovery, never an
+automatic deletion. It produces a new candidate/run/manifest and needs a new soak. A complete published release uses
 `PublishedReleaseResume`; do not delete it to retry a package-manager step.
+
+`LegacyReleaseWithoutManifest` identifies a complete published release from
+before promotion manifests, including v1.3.136 through v1.3.138. Preserve the
+release and tag; use the verified manual Chocolatey workflow or an audited
+channel-specific recovery. `IncompletePublishedRelease` also requires
+preservation and inspection, not deletion or a rebuild. `ReleaseMissing` means
+no release or draft was visible. Never delete a published historical release
+in response to a promotion refusal.
+
+The candidate generator runs with GitHub and package-manager token environment
+variables removed; the variables are restored before channel preflight. All
+three `*_PUBLISH=off` switches compare case-insensitively in build, promote,
+preflight and direct publisher scripts.
 
 Test evidence is retained for 90 days. `EvidenceExpired` identifies the run,
 artifact and expiry time. Dispatch fresh exact-candidate evidence, then pass

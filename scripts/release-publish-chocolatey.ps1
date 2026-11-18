@@ -34,6 +34,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+if ([string]::Equals($env:CHOCOLATEY_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'Chocolatey explicitly disabled.'; return }
 . (Join-Path $PSScriptRoot 'package-manager-paths.ps1')
 
 if (-not $PackOnly -and -not $env:CHOCO_API_KEY) {

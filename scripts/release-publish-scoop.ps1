@@ -17,6 +17,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+if ([string]::Equals($env:SCOOP_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'Scoop explicitly disabled.'; return }
 . (Join-Path $PSScriptRoot 'package-manager-paths.ps1')
 
 if (-not $env:GH_TOKEN) {

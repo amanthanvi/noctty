@@ -2,7 +2,7 @@
 param([string] $WorkDirectory)
 $ErrorActionPreference = 'Stop'
 $previousResumeContext = $global:NocttyReleaseResumeFixture
-$global:NocttyReleaseResumeFixture = [pscustomobject]@{ Case=$null; Clone=$null; Source=$null; GitCalls=$null }
+$global:NocttyReleaseResumeFixture = [pscustomobject]@{ Case=$null; Clone=$null; Source=$null; GitCalls=$null; Calls=$null; Failures=0; Delays=$null }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $createdWorkDirectory = -not $WorkDirectory
 if (-not $WorkDirectory) { $WorkDirectory = Join-Path ([IO.Path]::GetTempPath()) ('release-resume-' + [guid]::NewGuid().ToString('N')) }
@@ -17,69 +17,77 @@ if ($function.Count -ne 1) { throw 'Expected exactly one WinGet version query.' 
 $PackageIdentifier = 'AmanThanvi.noctty'
 $Version = '1.3.136'
 $global:NocttyReleaseResumeFixture.Case = ''
+function Start-Sleep {
+    param([int]$Milliseconds,[int]$Seconds)
+    $global:NocttyReleaseResumeFixture.Delays.Add($(if($Seconds){$Seconds*1000}else{$Milliseconds}))
+}
 function gh {
-    $global:LASTEXITCODE = 0
-    $case = $global:NocttyReleaseResumeFixture.Case
-    if ($case -eq 'unknown') { $global:LASTEXITCODE = 1; return '{}' }
-    $endpoint = $args[1]
-    if ($endpoint -ceq 'repos/microsoft/winget-pkgs/pulls/123') {
-        return (@{changed_files=$(if ($case -in @('files-incomplete','files-paginated')) { 101 } elseif ($case -eq 'merged-retitled') { 3 } else { 1 })} | ConvertTo-Json)
+    $global:LASTEXITCODE=0
+    $case=$global:NocttyReleaseResumeFixture.Case
+    if ($args[0] -cne 'api' -or $args -notcontains 'GET' -or $args -contains 'graphql') { throw 'WinGet fixture refused a non-REST-GET operation.' }
+    $endpoint=@($args|Where-Object {$_ -like 'repos/*' -or $_ -eq 'user' -or $_ -eq 'search/issues'})[0]
+    $global:NocttyReleaseResumeFixture.Calls.Add($endpoint)
+    $status=200;$data=$null
+    if ($case -eq 'unknown') { $status=401;$data=@{message='Unauthorized'} }
+    elseif ($endpoint -ceq 'repos/microsoft/winget-pkgs') { $data=@{default_branch='master'} }
+    elseif ($endpoint -like '*/contents/*') {
+        if ($args -notcontains 'ref=master') { throw 'Default branch was not explicitly checked.' }
+        if ($case -in @('merged','merged-retitled','default-branch')) { $data=@(@{type='file';name='AmanThanvi.noctty.yaml';path='manifests/a/AmanThanvi/noctty/1.3.136/AmanThanvi.noctty.yaml'}) }
+        else { $status=404;$data=@{message='Not Found'} }
     }
-    if ($args -contains 'repos/microsoft/winget-pkgs/commits') {
-        if ($case -in @('merged','merged-retitled')) { return (ConvertTo-Json -InputObject @(@{sha='a'*40})) }
-        return '[]'
-    }
-    if ($endpoint -like '*/commits/*/pulls?*') {
-        return (ConvertTo-Json -InputObject @(@{number=123;state='closed';merged_at='2026-11-18T00:00:00Z';title='Unrelated retitled text'}))
-    }
-    $path = switch ($case) {
-        'other-package' { 'manifests/o/Other/Package/1.3.136/Other.Package.yaml' }
-        'other-version' { 'manifests/a/AmanThanvi/noctty/1.3.1360/AmanThanvi.noctty.yaml' }
-        default { 'manifests/a/AmanThanvi/noctty/1.3.136/AmanThanvi.noctty.yaml' }
-    }
-    if ($endpoint -like '*/files?*') {
-        if ($case -eq 'files-incomplete') { return '[{}]' }
-        if ($case -eq 'files-paginated' -and $endpoint -like '*page=1') {
-            return (ConvertTo-Json -InputObject @(1..100 | ForEach-Object { @{filename="unrelated/$_.yaml";status='added'} }))
+    elseif ($endpoint -ceq 'user') { $data=@{login='fixture-author'} }
+    elseif ($endpoint -ceq 'search/issues') {
+        $query=@($args|Where-Object {$_ -like 'q=*'})[0]
+        $author=$query -like '*author:fixture-author*'
+        if ($args -notcontains 'per_page=100' -or ($query -notlike '*AmanThanvi.noctty*1.3.136*' -and -not $author)) { throw 'Search was not bounded to package/version or publishing author.' }
+        if ($case -eq 'retry-exhausted' -or ($case -eq 'transient-502' -and $global:NocttyReleaseResumeFixture.Failures -eq 0)) {
+            $status=502;$data=@{message='Bad Gateway'};$global:NocttyReleaseResumeFixture.Failures++
+        } else {
+            $items=@()
+            if ($case -notin @('absent','large-population','incomplete','transient-502') -and ($case -ne 'open-retitled' -or $author)) { $items=@(@{number=123;title='Unrelated retitled text'}) }
+            $data=@{items=$items;total_count=$items.Count;incomplete_results=($case -eq 'incomplete')}
+            if ($case -eq 'too-broad') { $data.total_count=101 }
         }
-        if ($case -eq 'merged-retitled') {
-            return (ConvertTo-Json -InputObject @(1..3 | ForEach-Object { @{filename=$path;status='added'} }))
-        }
-        return (ConvertTo-Json -InputObject @(@{filename=$path;status='added'}))
     }
-    if ($endpoint -ceq 'graphql') {
-        if ($case -eq 'incomplete') { return '{"errors":[{"message":"Unavailable"}]}' }
-        $nodes = @()
-        $nextPage = $false
-        if ($case -notin @('absent','closed')) {
-            $files = @{ nodes=@(@{path=$path;changeType=$(if ($case -eq 'deleted') { 'DELETED' } else { 'ADDED' })}); pageInfo=@{hasNextPage=$false;endCursor=$null} }
-            if ($case -in @('files-paginated','files-incomplete')) { $files.nodes=@(); $files.pageInfo.hasNextPage=$true }
-            $nodes = @(@{ number=123; files=$files })
-            if ($case -in @('paginated','stalled') -and $args -notcontains 'cursor=page2') { $nodes=@(); $nextPage=$true }
-        }
-        return (@{data=@{repository=@{pullRequests=@{nodes=$nodes;pageInfo=@{hasNextPage=$nextPage;endCursor=$(if ($case -eq 'stalled') { $null } else { 'page2' })}}}}} | ConvertTo-Json -Depth 9)
+    elseif ($endpoint -ceq 'repos/microsoft/winget-pkgs/pulls/123') {
+        $data=@{state=$(if($case -eq 'closed'){'closed'}else{'open'});merged_at=$null;changed_files=$(if($case -in @('files-incomplete','files-paginated')){101}elseif($case -eq 'multiple-files'){3}else{1})}
     }
-    throw 'Resume fixture refused an unrecorded API operation.'
+    elseif ($endpoint -like '*/pulls/123/files?*') {
+        $path=switch($case){'other-package'{'manifests/o/Other/Package/1.3.136/Other.Package.yaml'} 'other-version'{'manifests/a/AmanThanvi/noctty/1.3.1360/AmanThanvi.noctty.yaml'} default{'manifests/a/AmanThanvi/noctty/1.3.136/AmanThanvi.noctty.yaml'}}
+        $data=@(@{filename=$path;status=$(if($case -eq 'deleted'){'removed'}else{'added'})})
+        if ($case -eq 'files-incomplete') { $data=@(@{filename='unrelated/file.yaml';status='added'}) }
+        if ($case -eq 'files-paginated' -and $endpoint -like '*page=1') { $data=@(1..100|ForEach-Object {@{filename="unrelated/$_.yaml";status='added'}}) }
+        if ($case -eq 'multiple-files') { $data=@(1..3|ForEach-Object {@{filename=$path;status='added'}}) }
+    }
+    else { throw 'Resume fixture refused an unrecorded endpoint.' }
+    "HTTP/2.0 $status";'';(ConvertTo-Json -Depth 8 -InputObject $data)
+    $global:LASTEXITCODE=if($status -eq 200){0}else{1}
 }
 $savedToken = $env:GH_TOKEN
 $savedWinGetToken = $env:WINGET_CREATE_GITHUB_TOKEN
 $env:WINGET_CREATE_GITHUB_TOKEN = 'resume-fixture-token'
-$cases = [ordered]@{ open = $true; 'open-retitled' = $true; merged = $true; 'merged-retitled' = $true; paginated = $true; 'files-paginated' = $true; deleted = $false; stalled = 'error'; closed = $false; absent = $false; 'other-package' = $false; 'other-version' = $false; unknown = 'error'; incomplete = 'error'; 'files-incomplete' = 'error' }
+$cases = [ordered]@{ open=$true; 'open-retitled'=$true; merged=$true; 'merged-retitled'=$true; 'default-branch'=$true; 'multiple-files'=$true; 'files-paginated'=$true; deleted=$false; closed=$false; absent=$false; 'other-package'=$false; 'other-version'=$false; unknown='error'; incomplete='error'; 'files-incomplete'='error'; 'large-population'=$false; 'transient-502'=$false; 'retry-exhausted'='error'; 'too-broad'='error' }
 try {
     foreach ($case in $cases.Keys) {
         $global:NocttyReleaseResumeFixture.Case = $case
+        $global:NocttyReleaseResumeFixture.Calls=[Collections.Generic.List[string]]::new()
+        $global:NocttyReleaseResumeFixture.Delays=[Collections.Generic.List[int]]::new()
+        $global:NocttyReleaseResumeFixture.Failures=0
         $message = $null; $actual = $null
         try { $actual = Test-WinGetVersionSubmitted } catch { $message = $_.Exception.Message }
         if ($cases[$case] -is [string]) {
             if (-not $message -or $message -notmatch 'Could not determine') { throw "WinGet resume $case did not fail closed." }
         } elseif ($message -or $actual -ne $cases[$case]) { throw "WinGet resume $case returned the wrong state." }
         if ($env:GH_TOKEN -cne $savedToken) { throw 'WinGet query did not restore the GitHub token.' }
+        if ($case -eq 'retry-exhausted' -and ($global:NocttyReleaseResumeFixture.Failures -ne 3 -or -not $global:NocttyReleaseResumeFixture.Delays.Contains(2000) -or -not $global:NocttyReleaseResumeFixture.Delays.Contains(4000))) { throw '5xx retries were not bounded with backoff.' }
+        if ($case -eq 'transient-502' -and $global:NocttyReleaseResumeFixture.Failures -ne 1) { throw 'Transient 502 was not exercised.' }
+        if ($case -eq 'large-population' -and $global:NocttyReleaseResumeFixture.Calls.Count -ne 5) { throw 'Fresh version scanned unrelated PRs.' }
         Write-Host "Publisher resume WinGet $case`: PASS"
     }
 } finally {
     $env:WINGET_CREATE_GITHUB_TOKEN = $savedWinGetToken
     $env:GH_TOKEN = $savedToken
-    Remove-Item Function:\gh
+    Remove-Item Function:\gh,Function:\Start-Sleep
     $global:LASTEXITCODE = 0
 }
 

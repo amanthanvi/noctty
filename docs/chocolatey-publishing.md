@@ -135,26 +135,35 @@ gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f ve
 
 For a release carrying `release-manifest.json`, supply `-f manifest_sha256=<sha256>`
 on both commands, using the digest in the original Release run's **Write
-release manifest and record digest** summary. The manual workflow checks out
+release manifest and record digest** summary in the attempt that published.
+The stager refuses `ManifestAnchorRequired` before verification or generation
+when that input is omitted for a manifest-bearing release. The manual workflow
+checks out
 candidate data and forwards this anchor to the verifier. Historical releases
 without that asset omit the input.
 
 Build mode refuses existing releases and never overwrites assets with
 `--clobber`. To resume verification or multiple package managers after a failed
-Release run, use **Release**, `mode=promote`, from main with the tag, peeled
+or cancelled Release run, use **Release**, `mode=promote`, from main with the
+tag, peeled
 candidate SHA, Test/evidence IDs, original Release run ID and
 `manifest_sha256`. Its `PublishedReleaseResume` path requires successful
-publication in that run's jobs API and matching immutable assets. It resumes
+publication in one of that run's attempt-specific jobs records and matching
+immutable assets. It resumes
 verify, Scoop, WinGet and Chocolatey at the first incomplete step, keeping
 Chocolatey last. Each enabled publisher must be configured before the stable
 flip; explicitly set its `*_PUBLISH` variable to `off` to disable it.
 
-`DraftRelease` and `IncompleteRelease` require inspection and manual deletion
-of the incomplete release and tag, then a new build dispatch with renewed
-evidence and soak. `EvidenceExpired` requires a Test dispatch on the candidate
-tag with `run_interactive_win11=true`, followed by promote with those fresh
-Test/evidence IDs. Keep the original Release run ID and digest. Exact dispatch
-and manual recovery commands are in the [release runbook](../PACKAGING.md#release-runbook).
+Do not re-run the original Release workflow after draft creation or publication;
+resume through promote. A prior failed rerun does not erase an earlier
+publishing attempt. Use that attempt's digest, retaining the original run ID.
+`DraftRelease` requires inspection and manual deletion of only the incomplete
+draft and its tag, then a new accepted build. `LegacyReleaseWithoutManifest`
+and `IncompletePublishedRelease` preserve the published release and tag; older
+releases can use this verified manual Chocolatey entry point without a digest.
+`EvidenceExpired` requires a Test dispatch on the candidate tag with
+`run_interactive_win11=true`, followed by promote with those fresh Test/evidence
+IDs. Exact commands are in the [release runbook](../PACKAGING.md#release-runbook).
 No recovery automatically deletes a release, replaces assets or rebuilds a
 published candidate. Older workflow revisions may still replace assets on a
 rerun; use main's recovery entry points.

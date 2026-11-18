@@ -20,24 +20,42 @@ function Assert-ReleaseEvidence {
         $run = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)")
         if ([string]$run.id -cne $spec.Id -or $run.head_sha -cne $CandidateSha -or
             $run.status -cne 'completed' -or
-            ($run.conclusion -cne 'success' -and -not ($spec.Workflow -ceq 'release.yml' -and $run.conclusion -ceq 'failure')) -or
+            ($run.conclusion -cne 'success' -and -not ($spec.Workflow -ceq 'release.yml' -and $run.conclusion -in @('failure','cancelled'))) -or
             $run.path -cne ".github/workflows/$($spec.Workflow)") {
             throw "RunIdentityMismatch: run $($spec.Id) must be completed and successful on the candidate in $($spec.Workflow)."
         }
-        if ($spec.Workflow -ceq 'release.yml' -and $run.conclusion -ceq 'failure') {
-            $releaseJobs = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$ReleaseRunId/jobs?per_page=100")
-            $build = @($releaseJobs.jobs | Where-Object { $_.name -ceq 'Windows Release' })
-            $published = @($build.steps | Where-Object { $_.name -ceq 'Publish GitHub Release' -and $_.conclusion -ceq 'success' })
-            if ($releaseJobs.total_count -gt @($releaseJobs.jobs).Count -or $build.Count -ne 1 -or $published.Count -ne 1) {
-                throw 'ReleasePublishNotSuccessful: original Release run did not successfully complete Publish GitHub Release; published-release resume is refused.'
+        if ($spec.Workflow -ceq 'release.yml') {
+            $attemptCount = $run.run_attempt
+            if ($attemptCount -isnot [long] -and $attemptCount -isnot [int]) { throw 'ReleaseAttemptsIncomplete: run_attempt is missing.' }
+            if ($attemptCount -lt 1) { throw 'ReleaseAttemptsIncomplete: invalid attempt count.' }
+            $publishingAttempt = $null
+            for ($attempt = 1; $attempt -le $attemptCount; $attempt++) {
+                $attemptRun = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$ReleaseRunId/attempts/$attempt")
+                if ([string]$attemptRun.id -cne $ReleaseRunId -or $attemptRun.run_attempt -ne $attempt -or
+                    $attemptRun.head_sha -cne $CandidateSha -or $attemptRun.path -cne '.github/workflows/release.yml' -or
+                    $attemptRun.status -cne 'completed') { throw 'ReleaseAttemptsIncomplete: attempt identity/status differs.' }
+                $jobs = @()
+                for ($page = 1; ; $page++) {
+                    $records = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$ReleaseRunId/attempts/$attempt/jobs?per_page=100&page=$page")
+                    if ($null -eq $records.total_count -or $null -eq $records.jobs) { throw 'ReleaseAttemptsIncomplete: jobs record is incomplete.' }
+                    $jobs += @($records.jobs)
+                    if (@($records.jobs).Count -lt 100) { break }
+                }
+                if ($jobs.Count -ne $records.total_count) { throw 'ReleaseAttemptsIncomplete: jobs were truncated.' }
+                $build = @($jobs | Where-Object { $_.name -ceq 'Windows Release' })
+                $published = @($build.steps | Where-Object { $_.name -ceq 'Publish GitHub Release' -and $_.conclusion -ceq 'success' })
+                if ($build.Count -eq 1 -and $published.Count -eq 1 -and $null -eq $publishingAttempt) {
+                    $publishingAttempt = $attempt
+                    $resumeFrom = 0
+                    foreach ($stepName in @('Verify published release copy and assets', 'Publish Scoop manifest', 'Submit WinGet manifest update', 'Publish Chocolatey package')) {
+                        $step = @($build[0].steps | Where-Object { $_.name -ceq $stepName })
+                        if ($step.Count -ne 1 -or $step[0].conclusion -cne 'success') { break }
+                        $resumeFrom++
+                    }
+                }
             }
-            $resumeFrom = 0
-            foreach ($stepName in @('Verify published release copy and assets', 'Publish Scoop manifest', 'Submit WinGet manifest update', 'Publish Chocolatey package')) {
-                $step = @($build[0].steps | Where-Object { $_.name -ceq $stepName })
-                if ($step.Count -ne 1 -or $step[0].conclusion -cne 'success') { break }
-                $resumeFrom++
-            }
-            Write-Host "PublishedReleaseResume: original Release $ReleaseRunId published successfully; resume step index $resumeFrom (verify, Scoop, WinGet, Chocolatey)."
+            if ($null -eq $publishingAttempt) { throw 'ReleasePublishNotSuccessful: no attempt of the original Release run successfully published. Inspect the release and original attempts; preserve any published release.' }
+            Write-Host "PublishedReleaseResume: original Release $ReleaseRunId, publishing attempt $publishingAttempt of $attemptCount; resume step index $resumeFrom (verify, Scoop, WinGet, Chocolatey). Use that attempt's manifest summary digest."
         }
         # Read the records before any download, including on a stable retry.
         $records = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)/artifacts?per_page=100")

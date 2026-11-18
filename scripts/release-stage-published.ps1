@@ -45,10 +45,20 @@ $DownloadDirectory = [System.IO.Path]::GetFullPath($DownloadDirectory)
 try {
     # Throws on any failure: a missing or draft or prerelease release, an unexpected
     # asset set, a digest, checksum, provenance or Authenticode mismatch.
+    $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) { 'amanthanvi/noctty' } else { $env:GITHUB_REPOSITORY }
+    $json = & gh release view "v$Version" --repo $repository --json assets
+    if ($LASTEXITCODE -ne 0) { throw 'StagingReleaseUnknown: cannot determine whether the release requires an anchor.' }
+    $published = $json | ConvertFrom-Json
+    if (@($published.assets | Where-Object { $_.name -ceq 'release-manifest.json' }).Count -and -not $ManifestSha256) {
+        throw 'ManifestAnchorRequired: Chocolatey staging requires ManifestSha256 from the attempt that published release-manifest.json.'
+    }
     $verifyArguments = @{ Version = $Version; DownloadDirectory = $DownloadDirectory }
     if ($CandidateDirectory) { $verifyArguments.CandidateDirectory = $CandidateDirectory }
     if ($ManifestSha256) { $verifyArguments.ManifestSha256 = $ManifestSha256 }
     & (Join-Path $PSScriptRoot 'verify-published-release.ps1') @verifyArguments
+    if (-not $ManifestSha256 -and (Test-Path -LiteralPath (Join-Path $DownloadDirectory 'release-manifest.json'))) {
+        throw 'ManifestAnchorRequired: a manifest appeared during verification; staging requires its independent publishing-attempt digest.'
+    }
 
     $architectures = @(Get-WindowsPackageArchitectures)
 

@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '1102833ee9be365a174b319dab7b3c0cfc5e03c60edc47c134ce5ec85e18641c'
+    '8f247498bd072b5a013b88fc2dd0711c268b37ce07270cf5c48dd669ef20eb48'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1448,14 +1448,14 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '393b4e83edd3c9de44f1ae07f707d06ac0e2c92ffbcd9aaad94245c4ba115ef9'
-        CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
+            '7347679056e1de520300ad16b5fffa373593601546ec893cd9af745c52e76b60'
+        CriticalStatement = '$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing'
     }
     [pscustomobject] @{
         Context = $releaseScoopPublisher
         Content = $releaseScoopPublisherText
         ExpectedSha256 =
-            '8778a607804a805daaffb09903d09702d9f8babb3d4a5cca4662cf3b71aecec0'
+            '35999940a6fdfaae6cfeac2e9c0c4f5a91b4fdfd1c25cfdf304ba0a4bb2e17b9'
         CriticalStatement =
             "        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD"
     }
@@ -1463,7 +1463,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            '3d3a459e65838664d9affc1c1f1d727b5654036fa6eb98e1b18dd8e04db455b9'
+            '04a31a9ba6fa010d62dcbaffe15fa42a65dbc97aade35f7efef7cee5ed0193aa'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1818,9 +1818,9 @@ foreach ($stablePublisher in @(
     [pscustomobject]@{ Name = 'Scoop'; Step = $releasePublishScoopStep },
     [pscustomobject]@{ Name = 'WinGet'; Step = $releaseSubmitWingetStep }
 )) {
-    if ($stablePublisher.Step -notmatch
-        '(?m)^        if: steps\.meta\.outputs\.prerelease != ''true''\s*$') {
-        throw "$($stablePublisher.Name) publication must be gated to stable releases."
+    $expectedCondition = "        if: steps.meta.outputs.prerelease != 'true' && vars.$($stablePublisher.Name.ToUpperInvariant())_PUBLISH != 'off'"
+    if ($stablePublisher.Step -notmatch ('(?m)^' + [regex]::Escape($expectedCondition) + '\r?$')) {
+        throw "$($stablePublisher.Name) publication must honor stable release and channel-off gates."
     }
 }
 if ($releaseSubmitWingetStep -notmatch
@@ -1839,7 +1839,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-ReleasePayloadPaths.*?gh release view \$Tag --repo \$Repository.*?Use mode promote with its recorded manifest.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha --draft.*?\$attempt -le 3.*?gh release upload.*?AssetDigestMismatch.*?Assert-ReleaseManifest.*?gh release edit.*?--draft=false.*?Assert-ReleaseManifest'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-ReleasePayloadPaths.*?Get-ReleaseByTag -Repository \$Repository -Tag \$Tag -AllowMissing.*?Use mode promote with its recorded manifest.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha --draft.*?\$attempt -le 3.*?gh release upload.*?AssetDigestMismatch.*?Assert-ReleaseManifest.*?gh release edit.*?--draft=false.*?Assert-ReleaseManifest'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }

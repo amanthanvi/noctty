@@ -6,7 +6,7 @@
 param([string] $AssetDirectory, [string] $WorkDirectory)
 $ErrorActionPreference = 'Stop'
 $previousFixtureContext = $global:NocttyReleaseFixtureB
-$global:NocttyReleaseFixtureB = [pscustomobject]@{ RealGit=$null; Candidate=$null; Inputs=$null; Calls=$null; Case=$null; ReleaseRun=$null; TestRun=$null; Release=$null; Jobs=$null; ManifestText=$null }
+$global:NocttyReleaseFixtureB = [pscustomobject]@{ RealGit=$null; Candidate=$null; Inputs=$null; Calls=$null; Case=$null; ReleaseRun=$null; TestRun=$null; Release=$null; Jobs=$null; ManifestText=$null; BuildCreated=$false }
 $sourceRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $recordPath = Join-Path $PSScriptRoot 'fixtures/release-promotion-1.3.136.json'
 $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
@@ -18,7 +18,7 @@ $bulk = Join-Path $resultDirectory 'bulk'
 $WorkDirectory = $bulk
 [void][IO.Directory]::CreateDirectory($bulk)
 $savedEnvironment = @{}
-foreach ($name in @('SCOOP_PUBLISH','WINGET_PUBLISH','CHOCOLATEY_PUBLISH','SCOOP_BUCKET_REPO','SCOOP_BUCKET_TOKEN','WINGET_PACKAGE_IDENTIFIER','WINGET_CREATE_GITHUB_TOKEN','PROMOTE_CHOCOLATEY_KEY_PRESENT','GITHUB_OUTPUT')) {
+foreach ($name in @('SCOOP_PUBLISH','WINGET_PUBLISH','CHOCOLATEY_PUBLISH','SCOOP_BUCKET_REPO','SCOOP_BUCKET_TOKEN','WINGET_PACKAGE_IDENTIFIER','WINGET_CREATE_GITHUB_TOKEN','PROMOTE_CHOCOLATEY_KEY_PRESENT','SCOOP_BUCKET_MANIFEST_PATH','SCOOP_BUCKET_BRANCH','GITHUB_OUTPUT','GH_TOKEN','GITHUB_TOKEN','WINGETCREATE_TOKEN','CHOCO_API_KEY')) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 try {
@@ -57,6 +57,12 @@ param([string] $Version, [string] $CandidateDirectory, [string] $ManifestSha256)
 Test-PromoteFixtureVerification -CandidateDirectory $CandidateDirectory -ManifestSha256 $ManifestSha256
 $global:LASTEXITCODE = 0
 '@)
+$generatorPath = Join-Path $primary 'scripts/package-package-managers.ps1'
+$generatorSource = [IO.File]::ReadAllText($generatorPath)
+$guard = "foreach (`$credential in @('GH_TOKEN','GITHUB_TOKEN','SCOOP_BUCKET_TOKEN','WINGET_CREATE_GITHUB_TOKEN','WINGETCREATE_TOKEN','CHOCO_API_KEY')) { if ([Environment]::GetEnvironmentVariable(`$credential)) { throw 'GeneratorCredentialLeak' } }"
+$generatorSource = $generatorSource.Replace('$ErrorActionPreference = "Stop"', "`$ErrorActionPreference = 'Stop'`n$guard")
+if ($generatorSource.IndexOf('GeneratorCredentialLeak') -gt $generatorSource.IndexOf('function ')) { throw 'Credential assertion was not inserted at generator entry.' }
+[IO.File]::WriteAllText($generatorPath, $generatorSource, [Text.UTF8Encoding]::new($false))
 $global:NocttyReleaseFixtureB.RealGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source
 function Invoke-FixtureGit {
     & $global:NocttyReleaseFixtureB.RealGit @args
@@ -86,7 +92,12 @@ function Initialize-FixtureArtifacts {
             }
         }
     }
+    $saved = @{}
+    foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','SCOOP_BUCKET_TOKEN','WINGET_CREATE_GITHUB_TOKEN','WINGETCREATE_TOKEN','CHOCO_API_KEY')) { $saved[$name]=[Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name,$null) }
+    try {
     & (Join-Path $Root 'scripts/package-package-managers.ps1') -Version 1.3.136 -Architectures @('x64', 'arm64') -UpstreamBaseVersion 1.3.2 -FirstForkPatch 100 | Out-Null
+    } finally { foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name]) } }
+
 }
 Initialize-FixtureArtifacts $primary
 Initialize-FixtureArtifacts $other
@@ -131,13 +142,10 @@ function git {
 function gh {
     $global:LASTEXITCODE = 0
     $operation = @($args)
-    if ($operation[0] -ceq 'release' -and $operation[1] -ceq 'view' -and $global:NocttyReleaseFixtureB.Case -like 'build*') {
-        $global:LASTEXITCODE = if ($global:NocttyReleaseFixtureB.Case -eq 'build-existing') { 0 } else { 1 }
-        return
-    }
     if ($operation[0] -ceq 'release' -and $operation[1] -ceq 'create' -and $global:NocttyReleaseFixtureB.Case -like 'build*') {
         $target = $operation[[array]::IndexOf($operation, '--target') + 1]
         if ($target -cne $global:NocttyReleaseFixtureB.Inputs.CandidateSha -or $operation -notcontains '--draft') { throw 'Build omitted candidate or draft.' }
+        $global:NocttyReleaseFixtureB.BuildCreated = $true
         $global:NocttyReleaseFixtureB.Release.assets = @()
         $global:NocttyReleaseFixtureB.Release.draft = $true
         $global:NocttyReleaseFixtureB.Calls.Add('create')
@@ -149,15 +157,21 @@ function gh {
         $call = "upload:$name"
         $count = @($global:NocttyReleaseFixtureB.Calls | Where-Object { $_ -ceq $call }).Count
         $global:NocttyReleaseFixtureB.Calls.Add($call)
+        if (@($global:NocttyReleaseFixtureB.Release.assets | Where-Object name -ceq $name).Count) { $global:LASTEXITCODE=1;return }
         if ($name -ceq 'noctty-icon.svg' -and ($global:NocttyReleaseFixtureB.Case -eq 'build-exhausted' -or ($global:NocttyReleaseFixtureB.Case -eq 'build-retry' -and $count -lt 2))) { $global:LASTEXITCODE = 1; return }
-        $global:NocttyReleaseFixtureB.Release.assets += [pscustomobject]@{ name=$name; size=(Get-Item $path).Length; digest="sha256:$(Get-FileSha256Lower $path)" }
+        $global:NocttyReleaseFixtureB.Release.assets += [pscustomobject]@{ name=$name; size=(Get-Item $path).Length; digest="sha256:$(Get-FileSha256Lower $path)"; state='uploaded' }
         if ($global:NocttyReleaseFixtureB.Case -eq 'build-lost-response') { $global:LASTEXITCODE = 1 }
+        if ($global:NocttyReleaseFixtureB.Case -eq 'build-upload-starter' -and $name -ceq 'noctty-icon.svg') { $global:NocttyReleaseFixtureB.Release.assets[-1].digest=$null; $global:NocttyReleaseFixtureB.Release.assets[-1].state='starter' }
         if ($global:NocttyReleaseFixtureB.Case -eq 'build-drift' -and $name -ceq 'noctty-icon.svg') { $global:NocttyReleaseFixtureB.Release.assets[-1].digest = 'sha256:' + ('0' * 64) }
         return
     }
     if ($operation[0] -ceq 'api') {
         $endpoint = $operation[1]
         if ($operation -contains '--method') {
+            if ($operation[[array]::IndexOf($operation,'--method')+1] -cne 'GET') { throw 'Fixture refused an unrecorded API mutation.' }
+            $readPath=$operation[[array]::IndexOf($operation,'--method')+2]
+            if ($readPath -notin @('repos/fixture/bucket/contents/bucket/noctty.json','repos/microsoft/winget-pkgs/contents/manifests/a/AmanThanvi/noctty')) { throw 'Preflight queried an unrecorded bootstrap path.' }
+
             if ($global:NocttyReleaseFixtureB.Case -eq 'preflight-bootstrap') { $global:LASTEXITCODE = 1 }
             return '{}'
         }
@@ -165,10 +179,30 @@ function gh {
             $remoteSha = if ($global:NocttyReleaseFixtureB.Case -eq 'remote-tag') { 'f' * 40 } else { $global:NocttyReleaseFixtureB.Inputs.CandidateSha }
             return (@{ object = @{ type = 'commit'; sha = $remoteSha } } | ConvertTo-Json -Depth 5)
         }
-        if ($endpoint -like '*/releases/tags/*') { return ($global:NocttyReleaseFixtureB.Release | ConvertTo-Json -Depth 8) }
-        if ($endpoint -match '/actions/runs/([0-9]+)(/artifacts|/jobs)?(?:\?|$)') {
-            $runId = $Matches[1]; $kind = $Matches[2]
+        if ($endpoint -match '/releases\?per_page=100&page=([0-9]+)$') {
+            $page=[int]$Matches[1];$case=$global:NocttyReleaseFixtureB.Case
+            if ($case -eq 'release-missing' -or ($case -like 'build*' -and $case -notin @('build-existing','build-draft') -and -not $global:NocttyReleaseFixtureB.BuildCreated)) { return '[]' }
+            if ($case -eq 'discovery-page2' -and $page -eq 1) { return (ConvertTo-Json -Depth 5 -InputObject @(1..100 | ForEach-Object { @{id=$_;tag_name="v0.0.$_";draft=$false;assets=@()} })) }
+            if (($case -eq 'discovery-page2' -and $page -ne 2) -or ($case -ne 'discovery-page2' -and $page -ne 1)) { return '[]' }
+            $items=@($global:NocttyReleaseFixtureB.Release)
+            if ($case -eq 'duplicate-draft') { $items += [pscustomobject]@{id=137;tag_name='v1.3.136';draft=$true;assets=@()} }
+            return (ConvertTo-Json -Depth 8 -InputObject $items)
+        }
+        if ($endpoint -like '*/releases/tags/*') {
+            # REST docs + cli v2.100.0 FetchRelease: drafts are never found by tag.
+            $global:NocttyReleaseFixtureB.Calls.Add('tag-release-read')
+            if ($global:NocttyReleaseFixtureB.Release.draft) { $global:LASTEXITCODE=1; return '{"message":"Not Found","status":"404"}' }
+            return ($global:NocttyReleaseFixtureB.Release | ConvertTo-Json -Depth 8)
+        }
+        if ($endpoint -match '/releases/([0-9]+)$') {
+            if ([string]$global:NocttyReleaseFixtureB.Release.id -cne $Matches[1]) { $global:LASTEXITCODE=1; return '{}' }
+            $global:NocttyReleaseFixtureB.Calls.Add('id-release-read')
+            return ($global:NocttyReleaseFixtureB.Release | ConvertTo-Json -Depth 8)
+        }
+        if ($endpoint -match '/actions/runs/([0-9]+)(?:/attempts/([0-9]+))?(/artifacts|/jobs)?(?:\?|$)') {
+            $runId=$Matches[1]; $attempt=if($Matches[2]){[int]$Matches[2]}else{0}; $kind=$Matches[3]
             if ($kind -ceq '/artifacts') {
+                if ($runId -ceq '42346135091') { return '{"total_count":0,"artifacts":[]}' }
                 $expired = $global:NocttyReleaseFixtureB.Case -eq 'expired' -and $runId -ceq '42344250161'
                 $expiration = if ($expired) { '2026-11-21T06:07:57Z' } else { '2099-01-01T00:00:00Z' }
                 return (@{ total_count = 2; artifacts = @(
@@ -176,15 +210,32 @@ function gh {
                     @{ name = "flagship-interactive-win11-$runId"; expired = ($expired -or $global:NocttyReleaseFixtureB.Case -eq 'expired-interactive'); expires_at = $expiration }
                 ) } | ConvertTo-Json -Depth 5)
             }
-            if ($kind -ceq '/jobs') {
-                if ($runId -ceq '42346135091') {
-                    $names = @('Publish GitHub Release','Verify published release copy and assets','Publish Scoop manifest','Submit WinGet manifest update','Publish Chocolatey package')
-                    $incomplete = switch ($global:NocttyReleaseFixtureB.Case) { 'failed-scoop' {2} 'failed-winget' {3} 'failed-chocolatey' {4} default {1} }
-                    $steps = @(for ($i=0; $i -lt $names.Count; $i++) { @{ name=$names[$i]; conclusion=$(if ($global:NocttyReleaseFixtureB.Case -eq 'run' -or $i -ge $incomplete) { 'failure' } else { 'success' }) } })
-                    return (@{ total_count=1; jobs=@(@{ name='Windows Release'; steps=$steps }) } | ConvertTo-Json -Depth 6)
+            if ($runId -ceq '42346135091') {
+                $case=$global:NocttyReleaseFixtureB.Case
+                $run=$global:NocttyReleaseFixtureB.ReleaseRun | ConvertTo-Json | ConvertFrom-Json
+                $run.id=[long]$runId
+                if ($attempt) {
+                    $global:NocttyReleaseFixtureB.Calls.Add("attempt:$attempt$kind")
+                    $run.run_attempt=$attempt
+                    if ($attempt -eq 1 -and $case -eq 'rerun') { $run.conclusion='failure' }
+                    if ($case -eq 'attempt-sha') { $run.head_sha='0'*40 }
                 }
-                return ($global:NocttyReleaseFixtureB.Jobs | ConvertTo-Json -Depth 5)
+                if ($kind -ceq '/jobs') {
+                    # Unqualified jobs is latest-only; attempts retain publication.
+                    if (-not $attempt) { $attempt=$global:NocttyReleaseFixtureB.ReleaseRun.run_attempt }
+                    $names=@('Publish GitHub Release','Verify published release copy and assets','Publish Scoop manifest','Submit WinGet manifest update','Publish Chocolatey package')
+                    $incomplete=switch($case){'failed-scoop'{2} 'failed-winget'{3} 'failed-chocolatey'{4} 'rerun'{2} 'cancelled-after'{2} default{1}}
+                    $steps=@(for($i=0;$i -lt $names.Count;$i++) {
+                        $conclusion=if($run.conclusion -eq 'success') { if($i -eq 0){'success'}else{'skipped'} }
+                            elseif($case -in @('run','cancelled-no-publish','rerun-no-publish') -or ($case -eq 'rerun' -and $attempt -eq 2)) { if($i -eq 0){$run.conclusion}else{'skipped'} }
+                            elseif($i -lt $incomplete){'success'}elseif($i -eq $incomplete){$run.conclusion}else{'skipped'}
+                        @{name=$names[$i];conclusion=$conclusion}
+                    })
+                    return (@{total_count=1;jobs=@(@{name='Windows Release';status='completed';conclusion=$run.conclusion;run_attempt=$attempt;steps=$steps})}|ConvertTo-Json -Depth 6)
+                }
+                return ($run|ConvertTo-Json -Depth 5)
             }
+            if ($kind -ceq '/jobs') { return ($global:NocttyReleaseFixtureB.Jobs | ConvertTo-Json -Depth 5) }
             $run = if ($runId -ceq '42346135091') { $global:NocttyReleaseFixtureB.ReleaseRun } else { $global:NocttyReleaseFixtureB.TestRun }
             $run.id = [long]$runId
             return ($run | ConvertTo-Json -Depth 5)
@@ -222,6 +273,7 @@ function gh {
         }
         if (($operation -join ' ') -cne 'release edit v1.3.136 --repo amanthanvi/noctty --prerelease=false --latest') { throw 'Wrong promote mutation.' }
         $global:NocttyReleaseFixtureB.Calls.Add('edit')
+        $global:NocttyReleaseFixtureB.Release | Add-Member -NotePropertyName id -NotePropertyValue 136 -Force
         $global:NocttyReleaseFixtureB.Release.prerelease = $false
         return
     }
@@ -232,11 +284,14 @@ $cases = [ordered]@{
     prerelease = $null; resume = $null
     'failed-verify' = $null; 'failed-scoop' = $null; 'failed-winget' = $null; 'failed-chocolatey' = $null; 'failed-prerelease' = $null
     'failed-digest' = 'ManifestDigestMismatch'; 'failed-asset' = 'AssetDigestMismatch'
-    draft = 'DraftRelease'; 'manifest-missing' = 'IncompleteRelease'
+    draft = 'DraftRelease'; 'manifest-missing' = 'LegacyReleaseWithoutManifest'
+    'duplicate-draft' = 'AmbiguousReleaseTag'; 'release-missing' = 'ReleaseMissing'; 'discovery-page2' = $null
+    rerun = $null; 'rerun-no-publish' = 'ReleasePublishNotSuccessful'; 'cancelled-after' = $null; 'cancelled-prerelease' = $null; 'cancelled-no-publish' = 'ReleasePublishNotSuccessful'; 'cancelled-before' = 'DraftRelease'; 'attempt-sha' = 'ReleaseAttemptsIncomplete'
+    'generator-secrets' = $null; 'switches-Off' = $null
     'preflight-missing-scoop' = 'PackageManagerNotReady'; 'preflight-missing-winget' = 'PackageManagerNotReady'; 'preflight-missing-chocolatey' = 'PackageManagerNotReady'; 'preflight-bootstrap' = 'PackageManagerNotReady'; 'preflight-configured' = $null
     tag = 'TagIdentityMismatch'; 'remote-tag' = 'TagIdentityMismatch'; ancestry = 'CandidateNotAncestor'
     asset = 'AssetDigestMismatch'; 'github-digest' = 'AssetDigestMismatch'; digest = 'ManifestDigestMismatch'; self = 'ManifestPayloadInvalid'
-    extra = 'AssetSetMismatch'; missing = 'IncompleteRelease'; metadata = 'PackageManagerMismatch'
+    extra = 'AssetSetMismatch'; missing = 'IncompletePublishedRelease'; metadata = 'PackageManagerMismatch'
     generator = 'package-manager generator differs from the prerelease'; 'generator-missing' = 'package-manager generator differs from the prerelease'
     identity = 'ManifestIdentityMismatch'; expired = 'EvidenceExpired'; recovery = $null; 'expired-interactive' = 'EvidenceExpired'; run = 'ReleasePublishNotSuccessful'
     job = 'EvidenceJobInvalid'; 'evidence-hash' = 'EvidenceHashMismatch'; 'evidence-sha' = 'EvidenceInvalid'
@@ -246,10 +301,14 @@ $results = [Collections.Generic.List[object]]::new()
 try {
     foreach ($case in $cases.Keys) {
         $env:SCOOP_PUBLISH = 'off'; $env:WINGET_PUBLISH = 'off'; $env:CHOCOLATEY_PUBLISH = 'off'
+        $env:SCOOP_BUCKET_MANIFEST_PATH='';$env:SCOOP_BUCKET_BRANCH=''
         $env:SCOOP_BUCKET_REPO = 'fixture/bucket'; $env:SCOOP_BUCKET_TOKEN = 'fixture'
         $env:WINGET_PACKAGE_IDENTIFIER = 'AmanThanvi.noctty'; $env:WINGET_CREATE_GITHUB_TOKEN = 'fixture'
         $env:PROMOTE_CHOCOLATEY_KEY_PRESENT = 'true'
-        if ($case -like 'preflight*' -or $case -like 'failed-*') { $env:SCOOP_PUBLISH = ''; $env:WINGET_PUBLISH = ''; $env:CHOCOLATEY_PUBLISH = '' }
+        if ($case -eq 'switches-Off') { $env:SCOOP_PUBLISH='Off';$env:WINGET_PUBLISH='OFF';$env:CHOCOLATEY_PUBLISH='oFf';$env:SCOOP_BUCKET_TOKEN='';$env:WINGET_CREATE_GITHUB_TOKEN='';$env:PROMOTE_CHOCOLATEY_KEY_PRESENT='false' }
+        if ($case -eq 'generator-secrets') { $env:GH_TOKEN='fixture';$env:GITHUB_TOKEN='fixture';$env:WINGETCREATE_TOKEN='fixture';$env:CHOCO_API_KEY='fixture' }
+
+        if ($case -like 'preflight*' -or $case -like 'failed-*' -or $case -in @('rerun','cancelled-after','cancelled-prerelease')) { $env:SCOOP_PUBLISH = ''; $env:WINGET_PUBLISH = ''; $env:CHOCOLATEY_PUBLISH = '' }
         if ($case -eq 'preflight-missing-scoop') { $env:SCOOP_BUCKET_TOKEN = '' }
         if ($case -eq 'preflight-missing-winget') { $env:WINGET_CREATE_GITHUB_TOKEN = '' }
         if ($case -eq 'preflight-missing-chocolatey') { $env:PROMOTE_CHOCOLATEY_KEY_PRESENT = 'false' }
@@ -257,11 +316,13 @@ try {
         $global:NocttyReleaseFixtureB.Case = $case
         $global:NocttyReleaseFixtureB.Calls.Clear()
         $global:NocttyReleaseFixtureB.Release = ($record.release | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
-        $global:NocttyReleaseFixtureB.Release.prerelease = $case -notin @('resume', 'identity', 'failed-verify', 'failed-scoop', 'failed-winget', 'failed-chocolatey', 'failed-digest', 'failed-asset')
+        $global:NocttyReleaseFixtureB.Release | Add-Member -NotePropertyName id -NotePropertyValue 136 -Force
+        $global:NocttyReleaseFixtureB.Release.prerelease = $case -notin @('resume', 'identity', 'failed-verify', 'failed-scoop', 'failed-winget', 'failed-chocolatey', 'failed-digest', 'failed-asset', 'rerun', 'cancelled-after', 'cancelled-no-publish', 'rerun-no-publish')
         $global:NocttyReleaseFixtureB.TestRun = ($record.testRun | ConvertTo-Json | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.ReleaseRun = ($record.releaseRun | ConvertTo-Json | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.TestRun.head_sha = $sha
         $global:NocttyReleaseFixtureB.ReleaseRun.head_sha = $sha
+        $global:NocttyReleaseFixtureB.ReleaseRun | Add-Member -NotePropertyName run_attempt -NotePropertyValue $(if($case -in @('rerun','rerun-no-publish')){2}else{1}) -Force
         $global:NocttyReleaseFixtureB.Jobs = ($record.jobs | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.ManifestText = $manifestBytes
         $manifest = $manifestBytes | ConvertFrom-Json
@@ -276,9 +337,10 @@ try {
         if ($case -eq 'github-digest') { $global:NocttyReleaseFixtureB.Release.assets[0].digest = 'sha256:' + ('0' * 64) }
         if ($case -eq 'extra') { $global:NocttyReleaseFixtureB.Release.assets += [pscustomobject]@{ name = 'extra.txt'; size = 1; digest = 'sha256:' + ('0' * 64) } }
         if ($case -eq 'missing') { $global:NocttyReleaseFixtureB.Release.assets = @($global:NocttyReleaseFixtureB.Release.assets | Where-Object { $_.name -cne 'noctty-icon.svg' }) }
-        if ($case -eq 'draft') { $global:NocttyReleaseFixtureB.Release.draft = $true }
+        if ($case -in @('draft','duplicate-draft','cancelled-before')) { $global:NocttyReleaseFixtureB.Release.draft = $true; $global:NocttyReleaseFixtureB.Release.assets=@($global:NocttyReleaseFixtureB.Release.assets[0]) }
         if ($case -eq 'manifest-missing') { $global:NocttyReleaseFixtureB.Release.assets = @($global:NocttyReleaseFixtureB.Release.assets | Where-Object { $_.name -cne 'release-manifest.json' }) }
-        if ($case -eq 'run' -or $case -like 'failed-*') { $global:NocttyReleaseFixtureB.ReleaseRun.conclusion = 'failure' }
+        if ($case -eq 'run' -or $case -like 'failed-*' -or $case -in @('rerun','rerun-no-publish','attempt-sha')) { $global:NocttyReleaseFixtureB.ReleaseRun.conclusion = 'failure' }
+        if ($case -like 'cancelled-*') { $global:NocttyReleaseFixtureB.ReleaseRun.conclusion = 'cancelled' }
         if ($case -eq 'job') { $global:NocttyReleaseFixtureB.Jobs.jobs = @() }
         $global:NocttyReleaseFixtureB.Inputs.ManifestSha256 = if ($case -in @('digest','failed-digest')) { '0' * 64 } else { $digest }
         $global:NocttyReleaseFixtureB.Inputs.CandidateSha = if ($case -eq 'tag') { '0' * 40 } else { $sha }
@@ -296,19 +358,22 @@ try {
         if ($cases[$case]) {
             if (-not $errorMessage -or $errorMessage -notmatch [regex]::Escape($cases[$case])) { throw "Fixture $case failed for the wrong reason: $errorMessage" }
             if ($case -ne 'verification' -and $global:NocttyReleaseFixtureB.Calls.Contains('edit')) { throw "Fixture $case mutated before validation completed." }
-            if ($case -in @('draft','manifest-missing','missing') -and ($errorMessage -notmatch 'gh release delete v1.3.136 --repo amanthanvi/noctty --cleanup-tag --yes' -or $errorMessage -notmatch 'gh workflow run release.yml --repo amanthanvi/noctty --ref main')) { throw 'Manual recovery omitted exact commands.' }
+            if ($case -in @('draft','cancelled-before') -and ($errorMessage -notmatch 'gh release delete v1.3.136 --repo amanthanvi/noctty --cleanup-tag --yes' -or $errorMessage -notmatch 'gh workflow run release.yml --repo amanthanvi/noctty --ref main')) { throw 'Manual recovery omitted exact commands.' }
+            if ($case -in @('manifest-missing','missing') -and $errorMessage -match 'gh release delete') { throw 'Published refusal gave destructive advice.' }
             if ($case -eq 'expired' -and ($errorMessage -notmatch '42344250161.*flagship-portable-x64-42344250161.*2026-11-21T06:07:57' -or
                 $errorMessage -notmatch 'gh workflow run test.yml --repo amanthanvi/noctty --ref v1.3.136 -f run_interactive_win11=true')) { throw 'Expiry omitted its identity or recovery command.' }
         } else {
             if ($errorMessage) { throw "Fixture $case unexpectedly failed: $errorMessage" }
             $edits = @($global:NocttyReleaseFixtureB.Calls | Where-Object { $_ -ceq 'edit' }).Count
-            $skipVerify = $case -in @('failed-scoop','failed-winget','failed-chocolatey')
-            $stable = $case -in @('resume','failed-verify','failed-scoop','failed-winget','failed-chocolatey')
+            $skipVerify = $case -in @('failed-scoop','failed-winget','failed-chocolatey','rerun','cancelled-after')
+            $stable = $case -in @('resume','failed-verify','failed-scoop','failed-winget','failed-chocolatey','rerun','cancelled-after')
             if ($edits -ne $(if ($stable) { 0 } else { 1 }) -or
                 $global:NocttyReleaseFixtureB.Calls.Contains('verify') -eq $skipVerify -or
                 -not $global:NocttyReleaseFixtureB.Calls.Contains('copy:1.3.136:False') -or
                 $global:NocttyReleaseFixtureB.Calls.Contains('copy:1.3.136:True') -eq $skipVerify) { throw "Fixture $case skipped a required orchestration step." }
-            if ($case -like 'failed-*') {
+            if ($case -eq 'rerun' -and (-not $global:NocttyReleaseFixtureB.Calls.Contains('attempt:1/jobs') -or -not $global:NocttyReleaseFixtureB.Calls.Contains('attempt:2/jobs'))) { throw 'Resume skipped an attempt.' }
+            if ($case -eq 'generator-secrets' -and $env:SCOOP_BUCKET_TOKEN -cne 'fixture') { throw 'Generator failed to restore credentials.' }
+            if ($case -like 'failed-*' -or $case -in @('rerun','cancelled-after','cancelled-prerelease')) {
                 $outputs = Get-Content -LiteralPath $env:GITHUB_OUTPUT -Raw
                 $wantScoop = $case -notin @('failed-winget','failed-chocolatey')
                 $wantWinGet = $case -ne 'failed-chocolatey'
@@ -320,25 +385,29 @@ try {
         $results.Add([ordered]@{ case = $case; result = 'pass'; expectedError = $cases[$case]; calls = @($global:NocttyReleaseFixtureB.Calls) })
         Write-Host "Fixture B $case`: PASS"
     }
-    foreach ($case in @('build', 'build-stable', 'build-retry', 'build-lost-response', 'build-exhausted', 'build-drift', 'build-existing')) {
+    foreach ($case in @('build', 'build-stable', 'build-retry', 'build-lost-response', 'build-exhausted', 'build-drift', 'build-existing', 'build-draft', 'build-upload-starter')) {
         $global:NocttyReleaseFixtureB.Case = $case
         $global:NocttyReleaseFixtureB.Calls.Clear()
-        $global:NocttyReleaseFixtureB.Release.draft = $false
+        $global:NocttyReleaseFixtureB.Release.draft = $case -eq 'build-draft'
+        $global:NocttyReleaseFixtureB.BuildCreated = $false
         $global:NocttyReleaseFixtureB.Release.assets = @($record.release.assets) + [pscustomobject]@{name='release-manifest.json';size=1;digest='sha256:' + ('0'*64)}
         $message = $null
         try {
             & (Join-Path $sourceRoot 'scripts/release-publish-github.ps1') -Tag v1.3.136 -Version 1.3.136 -Title 'noctty 1.3.136' -VersionLine 1.3 -UpstreamBaseVersion 1.3.2 -Prerelease $(if ($case -eq 'build-stable') { 'false' } else { 'true' }) -CandidateSha $sha -ArtifactRoot (Join-Path $primary 'dist/artifacts') *> (Join-Path $resultDirectory "case-$case.log")
         } catch { $message = $_.Exception.Message }
-        if ($case -in @('build-exhausted','build-drift')) {
+        if ($case -in @('build-exhausted','build-drift','build-upload-starter')) {
             $expected = if ($case -eq 'build-exhausted') { 'IncompleteRelease' } else { 'AssetDigestMismatch' }
             if ($message -notmatch $expected -or $global:NocttyReleaseFixtureB.Calls.Contains('publish')) { throw "Build failure control $case failed: $message" }
             if ($case -eq 'build-exhausted' -and @($global:NocttyReleaseFixtureB.Calls | Where-Object { $_ -ceq 'upload:noctty-icon.svg' }).Count -ne 3) { throw 'Upload retry was not bounded at three.' }
+        } elseif ($case -eq 'build-draft') {
+            if ($message -notmatch 'DraftRelease' -or $global:NocttyReleaseFixtureB.Calls.Contains('create')) { throw 'Existing draft did not reach its named refusal.' }
         } elseif ($case -eq 'build-existing') {
-            if ($message -notmatch 'already exists' -or $global:NocttyReleaseFixtureB.Calls.Count -ne 0) { throw 'Build publisher must refuse an existing release.' }
+            if ($message -notmatch 'already exists' -or $global:NocttyReleaseFixtureB.Calls.Contains('create')) { throw 'Build publisher must refuse an existing release.' }
         } else {
             if ($message -or -not $global:NocttyReleaseFixtureB.Calls.Contains('publish') -or @($global:NocttyReleaseFixtureB.Release.assets).Count -ne 13) { throw "Build publisher fixture failed: $message" }
             if ($case -eq 'build-retry' -and @($global:NocttyReleaseFixtureB.Calls | Where-Object { $_ -ceq 'upload:noctty-icon.svg' }).Count -ne 3) { throw 'Transient upload was not retried.' }
         }
+        if ($global:NocttyReleaseFixtureB.Calls.Contains('tag-release-read')) { throw 'Build used the published-only tag endpoint.' }
         $results.Add([ordered]@{ case = $case; result = 'pass'; calls = @($global:NocttyReleaseFixtureB.Calls) })
         Write-Host "Fixture B $case`: PASS"
     }

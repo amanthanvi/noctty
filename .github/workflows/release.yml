@@ -55,6 +55,9 @@ jobs:
       id-token: write
       attestations: write
     env:
+      SCOOP_PUBLISH: ${{ vars.SCOOP_PUBLISH }}
+      WINGET_PUBLISH: ${{ vars.WINGET_PUBLISH }}
+      CHOCOLATEY_PUBLISH: ${{ vars.CHOCOLATEY_PUBLISH }}
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
       SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
       SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}
@@ -436,7 +439,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
-        if: steps.meta.outputs.prerelease != 'true'
+        if: steps.meta.outputs.prerelease != 'true' && vars.SCOOP_PUBLISH != 'off'
         shell: pwsh
         timeout-minutes: 10
         env:
@@ -445,7 +448,7 @@ jobs:
         run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION
 
       - name: Submit WinGet manifest update
-        if: steps.meta.outputs.prerelease != 'true'
+        if: steps.meta.outputs.prerelease != 'true' && vars.WINGET_PUBLISH != 'off'
         shell: pwsh
         timeout-minutes: 15
         env:

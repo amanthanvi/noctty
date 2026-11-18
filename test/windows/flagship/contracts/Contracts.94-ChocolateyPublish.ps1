@@ -11,7 +11,7 @@ $chocolateyPublishingDoc = Join-Path $repoRoot 'docs\chocolatey-publishing.md'
 
 $stagerFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-stager-inputs.ps1') 6>&1)
 if ($LASTEXITCODE -ne 0 -or @($stagerFixtureOutput | Where-Object {
-    [string]$_ -ceq 'Published release stager: PASS (2 verifier argument cases; no GitHub calls).'
+    [string]$_ -ceq 'Published release stager: PASS (5 anchor/input cases; recorded GitHub only).'
 }).Count -ne 1) { throw 'Published release stager argument controls did not complete.' }
 $stagerFixtureOutput | ForEach-Object { Write-Host $_ }
 

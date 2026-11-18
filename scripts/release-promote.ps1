@@ -30,7 +30,7 @@ foreach ($field in @('Tag', 'CandidateSha', 'TestRunId', 'EvidenceRunId', 'Relea
     if (-not (Get-Variable $field -ValueOnly)) { throw "Required promote input missing: $field." }
 }
 if (-not $Fixture -and -not $ManifestSha256) { throw 'Required promote input missing: ManifestSha256.' }
-$release = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+$release = Get-ReleaseByTag -Repository $Repository -Tag $Tag
 if (-not $Fixture) { Assert-ReleasePublicationState -Release $release -Repository $Repository -Tag $Tag }
 if (-not $WorkDirectory) { $WorkDirectory = Join-Path $repoRoot ('dist/promote-' + [guid]::NewGuid().ToString('N')) }
 $WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
@@ -115,7 +115,17 @@ if (-not $Fixture) {
         throw "package-manager generator differs from the prerelease: $recorded != $found (working file $disk)"
     }
     $metadata = Get-Content -LiteralPath (Join-Path $CandidateDirectory 'dist/windows/release-metadata.json') -Raw | ConvertFrom-Json
-    & $generator -Version $version -Tag $Tag -Repo $Repository -Architectures @('x64', 'arm64') -ArtifactBase $artifactRoot -UpstreamBaseVersion $metadata.upstreamBaseVersion -FirstForkPatch $metadata.firstForkPatch
+    $generatorCredentials = @{}
+    foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','SCOOP_BUCKET_TOKEN','WINGET_CREATE_GITHUB_TOKEN','WINGETCREATE_TOKEN','CHOCO_API_KEY')) {
+        $generatorCredentials[$name] = [Environment]::GetEnvironmentVariable($name)
+        [Environment]::SetEnvironmentVariable($name, $null)
+    }
+    try {
+        & $generator -Version $version -Tag $Tag -Repo $Repository -Architectures @('x64', 'arm64') -ArtifactBase $artifactRoot -UpstreamBaseVersion $metadata.upstreamBaseVersion -FirstForkPatch $metadata.firstForkPatch
+    } finally {
+        foreach ($name in $generatorCredentials.Keys) { [Environment]::SetEnvironmentVariable($name, $generatorCredentials[$name]) }
+        $generatorCredentials.Clear()
+    }
     Assert-PackageManagerFiles -Manifest $manifest -PrimaryDirectory $primary
     & (Join-Path $PSScriptRoot 'check-release-copy.ps1') -ExpectedVersion $version
     if ($LASTEXITCODE -ne 0) { throw 'Stable release copy check failed.' }

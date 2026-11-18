@@ -1,10 +1,13 @@
 # Focused promotion preflight: candidate metadata is independent of main's
 # release line/signing setup. Credentials are never printed.
+function Test-ReleasePublisherEnabled {
+    param([string] $Channel)
+    -not [string]::Equals([Environment]::GetEnvironmentVariable($Channel + '_PUBLISH'), 'off', [StringComparison]::OrdinalIgnoreCase)
+}
 function Assert-PromotionPackageManagers {
     $enabled = @{}
     foreach ($channel in @('SCOOP', 'WINGET', 'CHOCOLATEY')) {
-        $setting = [Environment]::GetEnvironmentVariable($channel + '_PUBLISH')
-        $enabled[$channel] = $setting -cne 'off'
+        $enabled[$channel] = Test-ReleasePublisherEnabled $channel
     }
     $required = @{
         SCOOP = @('SCOOP_BUCKET_REPO', 'SCOOP_BUCKET_TOKEN')
