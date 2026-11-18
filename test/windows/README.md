@@ -830,3 +830,47 @@ ghostty-vt.dll placeholder smoke: 3/3 checks passed
 A DLL that loads (libghostty-vt from `zig build -Demit-lib-vt=true` does),
 fails to load for any other reason, has an export table or carries another
 FileDescription fails the smoke.
+
+## Published portable direct updates
+
+`direct-update-acceptance.ps1` exercises the published source release's own
+updater against the candidate's GitHub tag API feed. It downloads both portable
+ZIPs into separate new directories, verifies their published SHA-256 values
+before extraction, posts the configured check key and Install notification,
+restarts the copy, and waits for confirmation and helper finalization. It
+records versions, folder inventories, a sanitized state timeline, and the final
+stub's signature, publisher pin, description, empty export/import directories,
+load failure (1114), and equality with the verified candidate ZIP.
+
+```powershell
+./test/windows/direct-update-acceptance.ps1 `
+    -Run H:\scratch\direct-update-136-137-NEW `
+    -FromVersion 1.3.136 -TargetVersion 1.3.137 -Architecture x64
+```
+
+The run directory must not exist. Every harness launch names a private desktop;
+the driver inherits separate LOCALAPPDATA, APPDATA and temporary directories.
+The parent samples owned windows on both Default and the named private desktop,
+and checks clipboard sequence and PSReadLine history metadata. A sample cannot
+prove the placement of a window that existed entirely between samples.
+No clipboard contents or real noctty directory are read. Keep failed attempts.
+
+Run 1.3.125 only on a disposable GitHub-hosted runner: that historical binary
+writes the product AUMID registration and Shell jump list even in portable mode.
+Redirecting APPDATA does not isolate those writes. OS and PowerShell process
+architectures must both match `-Architecture`; x64 emulation proves no ARM64 run.
+The historical self-signed publisher is verified cryptographically against the
+updater pin through the existing release verifier, without a trust-store import.
+
+For the v1.4.100 boundary, `-Expected Rejected` checks that a source on 1.3.136
+stays on its original executable and runs, reports the incomplete portable ZIP,
+and offers Open Release. `-Expected Removed`, from the previous stub-bearing
+1.3.x, checks that a successful update removes the stub. Opening the release
+page and checking its manual instructions is a separate browser check. Neither
+future boundary is established by the 1.3.137 acceptance run.
+
+Run `direct-update-contract.ps1` for the admission baseline and its twelve
+parse-checked refusal controls; the flagship contracts include it. Public
+artifacts should contain only the named JSON receipts, never the raw child logs,
+copied profiles or binaries. The hosted workflow used to gather W10 evidence is
+scratch-only and is not part of this change.
