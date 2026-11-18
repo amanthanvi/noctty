@@ -8,6 +8,8 @@ from pathlib import Path
 
 # Decoded relative paths, measured with Windows Zig 0.15.2. Keep the rejected
 # spellings too, so path-normalization claims remain tied to native behavior.
+# A single trailing directory dot is deliberately absent: acceptance depends on
+# whether Zig opens the fixture relative to its cwd or by an absolute path.
 IMPORT_PATHS = (
     ("forward", "../../os/windows.zig", True),
     ("backslash", r"..\..\os\windows.zig", True),
@@ -17,7 +19,6 @@ IMPORT_PATHS = (
     ("repeated-slash", "../..//os//windows.zig", True),
     ("repeated-backslash", r"..\\..\os\\windows.zig", True),
     ("case", "../../OS/WINDOWS.zig", True),
-    ("directory-trailing-dot", "../../os./windows.zig", True),
     ("file-trailing-dot", "../../os/windows.zig.", False),
     ("file-trailing-space", "../../os/windows.zig ", False),
     ("directory-trailing-space", "../../os /windows.zig", False),

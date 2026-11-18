@@ -2,9 +2,11 @@
 
 import contextlib
 import argparse
+import ast
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,23 @@ LINE = "var flags_stack = std.heap.stackFallback(4096, alloc);"
 REMOVED = {"kernel32.Sleep", "kernel32.GetLastError", "sliceToPrefixedFileW"}
 EXPORTS = {"kernel32": ["os", "windows", "kernel32"],
            "sliceToPrefixedFileW": ["os", "windows", "sliceToPrefixedFileW"]}
+
+
+def fixture_commit_pins(files):
+    """Find every SHA literal in executable controls, including abbreviated pins."""
+    return [(path.name, node.lineno, node.value) for path in files
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and re.fullmatch(r"[0-9a-f]{7,40}", node.value)]
+
+
+def require_main_fixture_history(repo, pins):
+    """A fetched PR branch is temporary; fixture commits must survive its deletion."""
+    for path, line, pin in pins:
+        try:
+            common.git(repo, "merge-base", "--is-ancestor", common.revision(repo, pin), "origin/main")
+        except subprocess.CalledProcessError as error:
+            raise AssertionError(f"{path}:{line}: fixture commit {pin} is not an ancestor of origin/main") from error
 
 
 class BaselineControls(unittest.TestCase):
@@ -253,6 +272,10 @@ class Win32Controls(unittest.TestCase):
             with self.subTest(spelling=label):
                 rows = list(win.Bindings(source, EXPORTS, path).uses(REMOVED))
                 self.assertEqual(accepted, bool(rows))
+        # Layout-dependent native acceptance remains a safe-side lint match.
+        for spelling in ("../../os./windows.zig", r"..\..\os.\windows.zig"):
+            source = 'const w = @import(' + json.dumps(spelling) + '); w.kernel32.GetLastError();'
+            self.assertTrue(list(win.Bindings(source, EXPORTS, path).uses(REMOVED)))
         for route, tail in (("../../os/windows.zig", "kernel32.GetLastError"),
                             ("../../os/main.zig", "windows.kernel32.GetLastError"),
                             ("../../os.zig", "windows.kernel32.GetLastError"),
@@ -284,7 +307,7 @@ class Win32Controls(unittest.TestCase):
             self.assertEqual(key, list(win.Bindings("std.os.windows." + key).uses(removed))[0][0])
         repo = Path(__file__).resolve().parent.parent
         name = "src/os/color_scheme.zig"
-        text = common.sources(repo, "cd61e53395b563335124d4eb0236162ae1d5ce6e", {name})[name]
+        text = common.sources(repo, "263eacfa08ba4c4e550364760a935149863d41ec", {name})[name]
         self.assertIn("windows.REG.DWORD", text.splitlines()[46])
         self.assertTrue(any(key == "REG.DWORD" and line == 47
                             for key, span, line in win.Bindings(text, path=name).uses(removed)))
@@ -351,6 +374,23 @@ class GitControls(unittest.TestCase):
         common.git(self.repo, "add", ".")
         common.git(self.repo, "commit", "-qm", "control", "--allow-empty")
         return common.revision(self.repo, "HEAD")
+
+    def test_fixture_history_guard_rejects_existing_branch_commit(self):
+        self.write("source.zig", "// main\n")
+        base = self.commit()
+        common.git(self.repo, "update-ref", "refs/remotes/origin/main", base)
+        self.write("source.zig", "// branch\n")
+        branch = self.commit()
+        control = self.repo / "test_fixture.py"
+        for pin, accepted in ((base, True), (branch, False), ("f" * 40, False)):
+            control.write_text("PIN = " + repr(pin) + "\n", encoding="utf-8")
+            pins = fixture_commit_pins([control])
+            self.assertEqual([(control.name, 1, pin)], pins)
+            if accepted:
+                require_main_fixture_history(self.repo, pins)
+            else:
+                with self.assertRaisesRegex(AssertionError, "not an ancestor of origin/main"):
+                    require_main_fixture_history(self.repo, pins)
 
     def test_real_diff_added_lines_and_rename(self):
         unchanged = "".join(f"const a{i} = {i};\n" for i in range(10))
@@ -703,8 +743,15 @@ class HistoryControls(unittest.TestCase):
         objects = common.git(cls.source, "rev-parse", "--path-format=absolute", "--git-path", "objects").decode().strip()
         (cls.repo / ".git/objects/info/alternates").write_text(objects.replace("\\", "/") + "\n",
                                                                encoding="utf-8", newline="\n")
-        cls.base = "cd61e53395b563335124d4eb0236162ae1d5ce6e"
+        cls.base = "263eacfa08ba4c4e550364760a935149863d41ec"
         cls.ci = cls.source / "ci"
+
+    def test_all_control_sha_literals_survive_branch_deletion(self):
+        files = [path for path in self.ci.rglob("*.py")
+                 if path.name.startswith("test_") or path.stem.endswith("_control")]
+        pins = fixture_commit_pins(files)
+        self.assertTrue(pins)
+        require_main_fixture_history(self.source, pins)
 
     def fixture(self, path, source, parent=None):
         parent = parent or self.base
@@ -757,7 +804,7 @@ class HistoryControls(unittest.TestCase):
                   "genuine added-line errors", len(rows))
 
     def test_real_pty_alias_revert_rechecks_46_unchanged_uses(self):
-        base = "886bcf177d5b8450f6ad57e29afd398d2ac3ed3f"
+        base = self.base
         path = "src/pty_transport_probe.zig"
         source = common.sources(self.repo, base, {path})[path]
         before = 'const windows = internal_os.windows;'

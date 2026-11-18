@@ -3,6 +3,11 @@
 These implement migration PLAN sections 4.1 and 4.2. Run each Python entry
 point with Python 3.13 and `-I`. Local imports come only from the script's own
 directory; there are no third-party Python dependencies or upstream CI fetches.
+The checkout needs main history and `origin/main`. Controls verify that every
+SHA literal in test/control scripts is an ancestor of `origin/main`; fixtures
+must never depend on temporary PR branch commits. The upstream path generator's
+three source pins are separate regeneration inputs, retained by upstream tags,
+and are not loaded by the control suite or CI lints.
 
 ```powershell
 python -I ci/test_lints.py
@@ -30,8 +35,14 @@ They compile the pointer-expression matrix on both compilers, compile the
 binary-repeat twins on 0.15.2 and verify their rejection on 0.17.1, and check
 every generated removed name by native reflection on both versions. They use
 the repository's dev-windows wrapper and caches in the supplied output directory.
-They also run the Windows 0.15.2 import-spelling matrix: nine spellings compile
+They also run the Windows 0.15.2 import-spelling matrix: eight spellings compile
 and seven malformed/unaccepted variants fail for their import paths.
+**Layout warning:** a single trailing directory dot (`../../os./windows.zig`)
+is excluded from that matrix's accepted set. Zig 0.15.2 accepts it when it opens
+the fixture by an absolute path outside its cwd, but rejects it in cwd-relative
+layouts and a real `zig build`. The lint still recognizes it conservatively;
+that recognition does not establish native build acceptance. The remaining
+matrix supports output directories both inside and outside the checkout.
 
 The `checks` job runs the controls and both lints on every change. The Zig lint
 fails new occurrences of binary array-repeat `**`, `@Type`, `@cImport`,
@@ -70,8 +81,9 @@ move or comment with the same origin does not trigger that scan.
 Inline `@import("std").os.windows` and relative imports of `src/os/windows.zig`
 are recognized. Decoded file paths normalize `/` and Windows `\` separators,
 `.`/`..` segments and repeated separators before resolution. Windows file-case
-variants and a single trailing directory dot are also recognized, matching the
-native 0.15.2 controls. Filename suffix dots/spaces, directory spaces and repeated
+variants are also recognized. A single trailing directory dot is recognized
+conservatively despite the native layout limit described above.
+Filename suffix dots/spaces, directory spaces and repeated
 trailing dots were rejected in those controls. Uses behind pointer/slice qualifiers and bare aliases of leaf
 types (for example `HRESULT`) count. Calls re-homed to fork declarations pass.
 The generated list covers **1,534 removed names**: the 1,485 root/file-namespace

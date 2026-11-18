@@ -43,7 +43,8 @@ def chain(tokens):
 def import_path(path):
     """Canonical relative file spelling for this Windows-only fork.
 
-    Zig 0.15.2 also accepts case variants and a single trailing directory dot.
+    Zig 0.15.2 accepts case variants. A single trailing directory dot works only
+    in some cwd layouts; retain recognition as a conservative over-report.
     Keep filename suffixes, spaces and repeated trailing dots intact: native
     controls reject those spellings.
     """
