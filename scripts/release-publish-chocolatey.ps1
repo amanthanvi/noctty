@@ -34,6 +34,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'package-manager-paths.ps1')
 
 if (-not $PackOnly -and -not $env:CHOCO_API_KEY) {
     Write-Host 'Skipping Chocolatey publish: CHOCO_API_KEY is not configured.'
@@ -66,6 +67,8 @@ $packageDirectory = $metadata.chocolatey.packageDirectory
 if ([string]::IsNullOrWhiteSpace($packageDirectory)) {
     throw 'metadata.json does not record the Chocolatey package directory.'
 }
+$nuspecPath = Resolve-ArtifactMetadataPath -ArtifactDirectory $artifactDirectoryX64 -Path $nuspecPath -SchemaVersion $metadata.schemaVersion
+$packageDirectory = Resolve-ArtifactMetadataPath -ArtifactDirectory $artifactDirectoryX64 -Path $packageDirectory -SchemaVersion $metadata.schemaVersion
 # The nuspec has to be the one inside the package directory the same run
 # generated; a mismatch means the metadata describes a different build.
 $nuspecParent = [System.IO.Path]::GetFullPath(

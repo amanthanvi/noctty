@@ -1,0 +1,178 @@
+{
+  "release": {
+    "assets": [
+      {
+        "digest": "sha256:ebc13413aa71343941173af7b5626673e7304729b8b3165532b51459472787df",
+        "name": "noctty-1.3.136-windows-arm64-portable.manifest.ps1",
+        "size": 54909
+      },
+      {
+        "digest": "sha256:61c5cb83809b50ad3e5d81b92ca36e6c2f4e1011b421f75e373bf46c05ca336e",
+        "name": "noctty-1.3.136-windows-arm64-portable.zip",
+        "size": 19743607
+      },
+      {
+        "digest": "sha256:a471b1b8afda9612290482a566b2836961adab1552773a3dbb1003050ad14ae8",
+        "name": "noctty-1.3.136-windows-arm64-setup.exe",
+        "size": 18257512
+      },
+      {
+        "digest": "sha256:6da4b2788df559c0eddaf147e27ca43b174365f9ecbb65a6457fe360523a2d83",
+        "name": "noctty-1.3.136-windows-arm64-symbols.zip",
+        "size": 24829798
+      },
+      {
+        "digest": "sha256:0f821cc72bedd9487e9e05ee8253beaae5d7161703e25030a42c2d4c1c407844",
+        "name": "noctty-1.3.136-windows-x64-portable.manifest.ps1",
+        "size": 54909
+      },
+      {
+        "digest": "sha256:960f36053d1da738ae86d4979bd3f8438162240ccd31ec697e4054699faaefb8",
+        "name": "noctty-1.3.136-windows-x64-portable.zip",
+        "size": 20367891
+      },
+      {
+        "digest": "sha256:34dd10db5682e29d39b019664f963d899113f88bc205601c84d15def4521196e",
+        "name": "noctty-1.3.136-windows-x64-setup.exe",
+        "size": 18869456
+      },
+      {
+        "digest": "sha256:9272c28c6908c9ef5fbdf03b0e696a5cb4ed2b321f973ba7080df7c73d0a421f",
+        "name": "noctty-1.3.136-windows-x64-symbols.zip",
+        "size": 24553896
+      },
+      {
+        "digest": "sha256:89e105c84bc29284905b5bf85e322d7639430b357063e056631080ba29ed79b7",
+        "name": "noctty-icon.svg",
+        "size": 803
+      },
+      {
+        "digest": "sha256:39a5c59c965daa8c70f2578f4fc012e7ba3400e1cb044e32dae5b35796872259",
+        "name": "SHA256SUMS-windows-arm64.txt",
+        "size": 323
+      },
+      {
+        "digest": "sha256:9406d11c684f7d35765be066448d3c27d16dbf674c3166c13100a9f93e4f8617",
+        "name": "SHA256SUMS-windows-x64.txt",
+        "size": 317
+      },
+      {
+        "digest": "sha256:9406d11c684f7d35765be066448d3c27d16dbf674c3166c13100a9f93e4f8617",
+        "name": "SHA256SUMS.txt",
+        "size": 317
+      }
+    ],
+    "draft": false,
+    "prerelease": false,
+    "tag_name": "v1.3.136"
+  },
+  "testRun": {
+    "conclusion": "success",
+    "head_sha": "e629842e9c4ddef133ab4d4ad27d37e0e9718e09",
+    "id": 42344250161,
+    "path": ".github/workflows/test.yml",
+    "status": "completed"
+  },
+  "releaseRun": {
+    "conclusion": "success",
+    "head_sha": "e629842e9c4ddef133ab4d4ad27d37e0e9718e09",
+    "id": 42346135091,
+    "path": ".github/workflows/release.yml",
+    "status": "completed"
+  },
+  "jobs": {
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "Windows 11 Interactive Composite",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows Benchmark Trend (report only)",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows Checks",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Changed paths",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows Zig Tests",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows ConPTY Probes (experimental)",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows x64 Portable Package Smoke",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows libghostty-vt Tests",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows D3D11 Renderer Smoke",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows Executable Build",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows Headless Benchmarks",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows ARM64 Cross Build",
+        "status": "completed"
+      },
+      {
+        "conclusion": "success",
+        "name": "Windows Build And Tests",
+        "status": "completed"
+      }
+    ],
+    "total_count": 13
+  },
+  "artifacts": {
+    "artifacts": [
+      {
+        "expired": false,
+        "expires_at": "2026-11-21T05:55:50Z",
+        "name": "flagship-portable-x64-42344250161"
+      },
+      {
+        "expired": false,
+        "expires_at": "2026-11-21T06:07:57Z",
+        "name": "flagship-interactive-win11-42344250161"
+      },
+      {
+        "expired": false,
+        "expires_at": "2027-02-05T05:48:13Z",
+        "name": "bench-trend-42344250161"
+      },
+      {
+        "expired": false,
+        "expires_at": "2027-02-05T05:48:13Z",
+        "name": "renderer-x64-42344250161"
+      }
+    ],
+    "total_count": 4
+  }
+}

@@ -49,9 +49,17 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $releaseWorkflow
+        Content = { Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow }
         Pattern = '(?ms)- name: Submit WinGet manifest update\r?\n.*?- name: Publish Chocolatey package\r?\n(?:(?!- name:).)*\z'
-        Kind = 'Workflow'
+        Kind = 'Text'
         Description = 'Chocolatey publishes last, so a moderation 403 cannot keep WinGet from the release'
+    }
+    @{
+        File = $releaseWorkflow
+        Content = { Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-promote' -Source $releaseWorkflow }
+        Pattern = '(?ms)- name: Submit promoted WinGet manifest update\r?\n.*?- name: Publish promoted Chocolatey package\r?\n(?:(?!- name:).)*\z'
+        Kind = 'Text'
+        Description = 'promoted Chocolatey publication also stays last'
     }
     @{
         File = "$releasePreflight :: Assert-WingetArchitectureCoverage"
@@ -106,7 +114,7 @@ $releaseChocolateyProblems = @(Test-ReleaseChocolateyStep -Text $releaseWorkflow
 if ($releaseChocolateyProblems.Count -ne 0) {
     throw "Release workflow Chocolatey step contract failed: $($releaseChocolateyProblems -join '; ')"
 }
-$releaseChocolateyCanonical = ConvertTo-CanonicalText -Text $releaseWorkflowText
+$releaseChocolateyCanonical = ConvertTo-CanonicalText -Text (Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow)
 $releaseChocolateyMutants = @(
     @{ Label = 'no publish switch'; Target = $releaseChocolateyCondition; Replacement = 'if: steps.meta.outputs.prerelease != ''true''' },
     @{ Label = 'prerelease gate dropped'; Target = $releaseChocolateyCondition; Replacement = 'if: vars.CHOCOLATEY_PUBLISH != ''off''' },

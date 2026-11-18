@@ -12,13 +12,20 @@ param(
     [string] $PackageSourceRef,
 
     # An empty or missing directory for the verified download.
-    [string] $DownloadDirectory
+    [string] $DownloadDirectory,
+
+    [string] $CandidateDirectory,
+
+    # Empty for historical releases; required for releases carrying the new
+    # manifest, using the digest recorded in their Release run summary.
+    [ValidatePattern('\A(?:[0-9a-f]{64})?\z')]
+    [string] $ManifestSha256
 )
 
 # Rebuilds the package-manager metadata and the Chocolatey package for a
 # release that is already published, from the installers on its release page
 # and without building anything: the Release workflow cannot be rerun for that
-# because it replaces the published assets (docs/chocolatey-publishing.md).
+# because build mode refuses existing releases (docs/chocolatey-publishing.md).
 # The release is verified first by the same script the Release workflow ends
 # with, so the installers a package names have the checksums, build provenance
 # and signer the release promises. Afterwards
@@ -38,7 +45,10 @@ $DownloadDirectory = [System.IO.Path]::GetFullPath($DownloadDirectory)
 try {
     # Throws on any failure: a missing or draft or prerelease release, an unexpected
     # asset set, a digest, checksum, provenance or Authenticode mismatch.
-    & (Join-Path $PSScriptRoot 'verify-published-release.ps1') -Version $Version -DownloadDirectory $DownloadDirectory
+    $verifyArguments = @{ Version = $Version; DownloadDirectory = $DownloadDirectory }
+    if ($CandidateDirectory) { $verifyArguments.CandidateDirectory = $CandidateDirectory }
+    if ($ManifestSha256) { $verifyArguments.ManifestSha256 = $ManifestSha256 }
+    & (Join-Path $PSScriptRoot 'verify-published-release.ps1') @verifyArguments
 
     $architectures = @(Get-WindowsPackageArchitectures)
 

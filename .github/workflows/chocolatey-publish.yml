@@ -1,9 +1,9 @@
 name: Chocolatey Publish
 
 # Pushes the Chocolatey package for a version that is already on the GitHub
-# release page, from a hosted runner and without building anything. Rerunning
-# the Release workflow cannot do this: it rebuilds the installers and replaces
-# the published assets. docs/chocolatey-publishing.md explains when to run it.
+# release page, from a hosted runner and without building anything. Release
+# build mode refuses an existing release, and promotion preserves its assets.
+# docs/chocolatey-publishing.md explains when to run this workflow.
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ on:
       version:
         description: Published release to package, without a leading v, such as 1.3.132
         required: true
+        type: string
+      manifest_sha256:
+        description: Release run summary SHA-256 of release-manifest.json; required when that asset exists
+        required: false
         type: string
       push:
         description: Push to chocolatey.org. Leave off for a dry run that verifies the release and packs the package but stops before choco push.
@@ -76,6 +80,14 @@ jobs:
           }
           "version=$env:VERSION_INPUT" >> $env:GITHUB_OUTPUT
 
+      - name: Checkout released candidate data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ steps.meta.outputs.version }}
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+
       - name: Show the Chocolatey version
         shell: pwsh
         run: |
@@ -91,13 +103,16 @@ jobs:
           WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           PACKAGE_SOURCE_REF: ${{ github.sha }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
         shell: pwsh
         timeout-minutes: 15
         run: |
           ./scripts/release-stage-published.ps1 `
             -Version $env:RELEASE_VERSION `
             -DownloadDirectory (Join-Path $env:RUNNER_TEMP 'published-release') `
-            -PackageSourceRef $env:PACKAGE_SOURCE_REF
+            -PackageSourceRef $env:PACKAGE_SOURCE_REF `
+            -CandidateDirectory (Join-Path $PWD 'candidate') `
+            -ManifestSha256 $env:MANIFEST_SHA256
 
       - name: Pack the package (dry run)
         if: ${{ !inputs.push }}

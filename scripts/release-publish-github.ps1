@@ -33,7 +33,11 @@ param(
         }
     ),
 
-    [string] $ArtifactRoot
+    [string] $ArtifactRoot,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('\A[0-9a-f]{40}\z')]
+    [string] $CandidateSha
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,7 +92,8 @@ foreach ($architecture in $architectures) {
 }
 $assets += @(
     $legacyChecksumsPath,
-    (Join-Path $artifactDirectoryX64 'noctty-icon.svg')
+    (Join-Path $artifactDirectoryX64 'noctty-icon.svg'),
+    (Join-Path $artifactDirectoryX64 'release-manifest.json')
 )
 $notesPrefix = @"
 Compatibility line: Ghostty $VersionLine
@@ -102,25 +107,10 @@ if ($LASTEXITCODE -ne 0) {
     if ($Prerelease -eq 'true') {
         $extra += '--prerelease'
     }
-    & gh release create $Tag --repo $Repository --title $Title --generate-notes --notes $notesPrefix @extra @assets
+    & gh release create $Tag --repo $Repository --target $CandidateSha --title $Title --generate-notes --notes $notesPrefix @extra @assets
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create GitHub release $Tag."
     }
 } else {
-    # Promoting an existing prerelease must also move the "Latest" pointer:
-    # GitHub keeps the previous stable release as latest when a release that
-    # was created as a prerelease is edited to stable. Keep a prerelease off
-    # the latest pointer.
-    $latestArgs = @()
-    if ($Prerelease -ne 'true') {
-        $latestArgs += '--latest'
-    }
-    & gh release edit $Tag --repo $Repository --title $Title "--prerelease=$Prerelease" @latestArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to edit GitHub release $Tag."
-    }
-    & gh release upload $Tag --repo $Repository @assets --clobber
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to upload assets for GitHub release $Tag."
-    }
+    throw "Release $Tag already exists. Use mode promote with its recorded manifest; a build must never replace published assets."
 }

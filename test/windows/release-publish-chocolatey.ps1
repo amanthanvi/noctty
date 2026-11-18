@@ -34,10 +34,11 @@ try {
     $nuspecPath = Join-Path $packageDirectory 'noctty.nuspec'
     Set-Content -LiteralPath $nuspecPath -Value '<package />'
     $metadata = [ordered]@{
+        schemaVersion = 2
         chocolatey = [ordered]@{
             packageName      = 'noctty'
-            nuspecPath       = $nuspecPath
-            packageDirectory = $packageDirectory
+            nuspecPath       = 'package-managers/chocolatey/noctty.nuspec'
+            packageDirectory = 'package-managers/chocolatey'
         }
     }
     Set-Content -LiteralPath (Join-Path $artifactRoot "noctty-$version-windows-x64\package-managers\metadata.json") -Value ($metadata | ConvertTo-Json -Depth 4)

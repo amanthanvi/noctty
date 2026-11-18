@@ -51,6 +51,48 @@ $TempDirectory = [System.IO.Path]::GetFullPath($TempDirectory)
 $artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+function Test-WinGetVersionSubmitted {
+    # Query both states: a closed, unmerged PR is not a completed submission.
+    # An unavailable or truncated search leaves publication state unknown.
+    foreach ($state in @('is:open', 'is:merged')) {
+        $query = "repo:microsoft/winget-pkgs is:pr $state in:title `"$PackageIdentifier`" `"$Version`""
+        $previousGhToken = $env:GH_TOKEN
+        try {
+            $env:GH_TOKEN = $env:WINGET_CREATE_GITHUB_TOKEN
+            $json = & gh api --method GET search/issues -f "q=$query" -f per_page=100
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub search failed.' }
+            $search = $json | ConvertFrom-Json
+            if ($null -eq $search.items -or $search.incomplete_results -or $search.total_count -gt 100) {
+                throw 'GitHub search was incomplete.'
+            }
+            foreach ($item in @($search.items)) {
+                if ($item.title -match ('(?i)(?<![\w.])' + [regex]::Escape($PackageIdentifier) + '(?![\w.])') -and
+                    $item.title -match ('(?<![\d.])' + [regex]::Escape($Version) + '(?![\d.])')) {
+                    $prJson = & gh api "repos/microsoft/winget-pkgs/pulls/$($item.number)"
+                    if ($LASTEXITCODE -ne 0) { throw 'Cannot read the matching PR.' }
+                    $pr = $prJson | ConvertFrom-Json
+                    $filesJson = & gh api "repos/microsoft/winget-pkgs/pulls/$($item.number)/files?per_page=100"
+                    if ($LASTEXITCODE -ne 0) { throw 'Cannot read the matching PR files.' }
+                    $files = @($filesJson | ConvertFrom-Json)
+                    if ($pr.changed_files -gt $files.Count) { throw 'Matching PR file list is incomplete.' }
+                    $segments = $PackageIdentifier.Split('.')
+                    $prefix = 'manifests/{0}/{1}/{2}/' -f $segments[0].Substring(0, 1).ToLowerInvariant(), ($segments -join '/'), $Version
+                    if (($pr.state -ceq 'open' -or $pr.merged_at) -and @($files | Where-Object {
+                        $_.status -cne 'removed' -and $_.filename.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+                    }).Count -gt 0) { return $true }
+                }
+            }
+        }
+        catch { throw 'Could not determine whether this WinGet version already has an open or merged PR; refusing a duplicate submission.' }
+        finally { $env:GH_TOKEN = $previousGhToken }
+    }
+    return $false
+}
+if (Test-WinGetVersionSubmitted) {
+    Write-Host "WinGet already has an open or merged PR for $PackageIdentifier $Version; nothing to submit."
+    $global:LASTEXITCODE = 0
+    return
+}
 $packageIdSegments = $PackageIdentifier.Split('.')
 $manifestPath = 'manifests/{0}/{1}' -f `
     $packageIdSegments[0].Substring(0, 1).ToLowerInvariant(), `

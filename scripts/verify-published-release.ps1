@@ -4,12 +4,21 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version,
 
-    [string]$DownloadDirectory
+    [string]$DownloadDirectory,
+
+    # Orchestration stays on main; only the pins and ConPTY data come from
+    # the second checkout. Historical releases without a manifest still work.
+    [string]$CandidateDirectory,
+
+    [ValidatePattern('\A[0-9a-f]{64}\z')]
+    [string]$ManifestSha256
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Get-RepoRoot
+$candidateDataRoot = if ($CandidateDirectory) { [IO.Path]::GetFullPath($CandidateDirectory) } else { $repoRoot }
+. (Join-Path $PSScriptRoot 'release-manifest.ps1')
 $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
     'amanthanvi/noctty'
 } else {
@@ -131,10 +140,17 @@ $expectedNames.Add('noctty-icon.svg')
 $expectedAttestationNames = @($expectedNames | Where-Object { $_ -ne 'noctty-icon.svg' })
 $expectedAssetCount = if ($requiresPortableManifests) { 10 } else { 8 }
 if ($requiresSymbols) { $expectedAssetCount += 2 }
-# Everything but the static icon is attested.
+# Every payload except the static icon is attested. The release manifest is
+# authenticated separately by the digest in the Release run summary.
 $expectedAttestationCount = $expectedAssetCount - 1
 if ($expectedNames.Count -ne $expectedAssetCount) {
     throw "Published release contract must require exactly $expectedAssetCount assets; generated $($expectedNames.Count)."
+}
+$hasReleaseManifest = @($release.assets | Where-Object { $_.name -ceq 'release-manifest.json' }).Count -gt 0
+if ($hasReleaseManifest -or $ManifestSha256) {
+    if (-not $ManifestSha256) { throw 'The run-summary ManifestSha256 is required to verify release-manifest.json.' }
+    $expectedNames.Add('release-manifest.json')
+    $expectedAssetCount += 1
 }
 
 $assets = @($release.assets)
@@ -165,11 +181,20 @@ try {
     & gh release download $tag --repo $repository --dir $DownloadDirectory
     if ($LASTEXITCODE -ne 0) { throw "Could not download published release $tag from $repository." }
 
-    $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $repoRoot 'src/update/github_releases.zig'))
+    if ($hasReleaseManifest -or $ManifestSha256) {
+        $releaseManifestPath = Join-Path $DownloadDirectory 'release-manifest.json'
+        if ((Get-FileSha256Lower $releaseManifestPath) -cne $ManifestSha256) { throw 'ManifestDigestMismatch: run-summary digest differs.' }
+        $identity = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
+        $candidateCommit = & git -C $candidateDataRoot rev-parse HEAD
+        if ($LASTEXITCODE -ne 0 -or $candidateCommit -cne $identity.candidateSha) { throw 'Candidate data checkout differs from release-manifest.json.' }
+        [void](Assert-ReleaseManifest -Path $releaseManifestPath -ExpectedSha256 $ManifestSha256 -Release $release -DownloadDirectory $DownloadDirectory -Tag $tag -CandidateSha $identity.candidateSha -TestRunId ([string]$identity.testRunId) -EvidenceRunId ([string]$identity.evidenceRunId) -ReleaseRunId ([string]$identity.releaseRunId))
+    }
+
+    $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $candidateDataRoot 'src/update/github_releases.zig'))
     if ($allowedPins.Count -eq 0) { throw 'Updater publisher-pin allowlist is empty.' }
     $trustSelfSigned = ([string]$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
     $conptyPin = Get-Content `
-        -LiteralPath (Join-Path $repoRoot 'dist/windows/conpty-redist.json') `
+        -LiteralPath (Join-Path $candidateDataRoot 'dist/windows/conpty-redist.json') `
         -Raw | ConvertFrom-Json
 
     $attestationEvidenceCount = 0

@@ -17,6 +17,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'package-manager-paths.ps1')
 
 if (-not $env:GH_TOKEN) {
     Write-Host 'Skipping Scoop publish: SCOOP_BUCKET_TOKEN is not configured.'
@@ -173,7 +174,8 @@ try {
         }
     }
     New-Item -ItemType Directory -Path $destinationManifestDirectory -Force | Out-Null
-    Copy-Item -LiteralPath $metadata.scoop.manifestPath -Destination $destinationManifestPath -Force
+    $sourceManifest = Resolve-ArtifactMetadataPath -ArtifactDirectory $artifactDirectoryX64 -Path $metadata.scoop.manifestPath -SchemaVersion $metadata.schemaVersion
+    Copy-Item -LiteralPath $sourceManifest -Destination $destinationManifestPath -Force
 
     Push-Location $bucketDirectory
     try {

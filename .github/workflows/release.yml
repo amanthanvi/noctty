@@ -6,9 +6,32 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      mode:
+        description: Build a new candidate, or promote the recorded candidate without rebuilding
+        type: choice
+        options: [build, promote]
+        default: build
+      tag:
+        description: Promote only - the soaked candidate tag
+        type: string
+      candidate_sha:
+        description: Promote only - peeled candidate commit
+        type: string
+      test_run_id:
+        description: Promote only - successful Test run on the candidate
+        type: string
+      evidence_run_id:
+        description: Promote only - successful interactive evidence run on the candidate
+        type: string
+      release_run_id:
+        description: Promote only - successful prerelease build run on the candidate
+        type: string
+      manifest_sha256:
+        description: Promote only - release-manifest.json SHA-256 from the build run summary
+        type: string
       version:
         description: Release version to package, without a leading v. Use the noctty fork scheme such as 1.3.100
-        required: true
+        required: false
         type: string
       prerelease:
         description: Publish the manual build as a prerelease
@@ -23,6 +46,7 @@ concurrency:
 jobs:
   windows-release:
     name: Windows Release
+    if: github.event_name == 'push' || inputs.mode != 'promote'
     runs-on: windows-latest
     environment: release
     permissions:
@@ -77,6 +101,7 @@ jobs:
             }
           }
       - name: Require successful Test workflow for release SHA
+        id: evidence
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPOSITORY: ${{ github.repository }}
@@ -159,6 +184,10 @@ jobs:
             throw "Release SHA $sha has no successful interactive Win11 Test run with exact-SHA, hash-bound evidence. Dispatch Test with run_interactive_win11=true first."
           }
           Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."
+          if ($env:GITHUB_OUTPUT) {
+            "test_run_id=$($evidenceRun.databaseId)" >> $env:GITHUB_OUTPUT
+            "evidence_run_id=$($evidenceRun.databaseId)" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Resolve release metadata
         id: meta
@@ -354,6 +383,7 @@ jobs:
           -FirstForkPatch $env:RELEASE_FIRST_FORK_PATCH
 
       - name: Publish GitHub Release
+        id: publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -363,15 +393,25 @@ jobs:
           RELEASE_VERSION_LINE: ${{ steps.meta.outputs.version_line }}
           RELEASE_UPSTREAM_BASE_VERSION: ${{ steps.meta.outputs.upstream_base_version }}
           RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          RELEASE_CANDIDATE_SHA: ${{ github.sha }}
+          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}
+          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
         shell: pwsh
         run: |
+          ./scripts/release-write-manifest.ps1 `
+            -Tag $env:RELEASE_TAG -Version $env:RELEASE_VERSION `
+            -CandidateSha $env:RELEASE_CANDIDATE_SHA `
+            -TestRunId $env:RELEASE_TEST_RUN_ID -EvidenceRunId $env:RELEASE_EVIDENCE_RUN_ID `
+            -ReleaseRunId $env:RELEASE_RUN_ID
           ./scripts/release-publish-github.ps1 `
             -Tag $env:RELEASE_TAG `
             -Version $env:RELEASE_VERSION `
             -Title $env:RELEASE_TITLE `
             -VersionLine $env:RELEASE_VERSION_LINE `
             -UpstreamBaseVersion $env:RELEASE_UPSTREAM_BASE_VERSION `
-            -Prerelease $env:RELEASE_PRERELEASE
+            -Prerelease $env:RELEASE_PRERELEASE `
+            -CandidateSha $env:RELEASE_CANDIDATE_SHA
 
       - name: Verify published release copy and assets
         if: steps.meta.outputs.prerelease != 'true'
@@ -379,10 +419,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_MANIFEST_SHA256: ${{ steps.publish.outputs.manifest_sha256 }}
         run: |
           ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION
+          ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION -ManifestSha256 $env:RELEASE_MANIFEST_SHA256
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
@@ -415,3 +456,79 @@ jobs:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: ./scripts/release-publish-chocolatey.ps1 -Version $env:RELEASE_VERSION
+
+  windows-promote:
+    name: Promote Windows Release
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'promote'
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+      SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
+      SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}
+      SCOOP_BUCKET_MANIFEST_PATH: ${{ vars.SCOOP_BUCKET_MANIFEST_PATH }}
+      WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}
+    steps:
+      - name: Checkout orchestration main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout candidate data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+
+      - name: Verify and promote recorded candidate
+        id: promote
+        shell: pwsh
+        timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_TAG: ${{ inputs.tag }}
+          PROMOTE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PROMOTE_TEST_RUN_ID: ${{ inputs.test_run_id }}
+          PROMOTE_EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          PROMOTE_RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          PROMOTE_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+        run: >
+          ./scripts/release-promote.ps1
+          -Tag $env:PROMOTE_TAG -CandidateSha $env:PROMOTE_CANDIDATE_SHA
+          -TestRunId $env:PROMOTE_TEST_RUN_ID -EvidenceRunId $env:PROMOTE_EVIDENCE_RUN_ID
+          -ReleaseRunId $env:PROMOTE_RELEASE_RUN_ID -ManifestSha256 $env:PROMOTE_MANIFEST_SHA256
+          -CandidateDirectory (Join-Path $PWD 'candidate')
+
+      - name: Publish promoted Scoop manifest
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          RELEASE_VERSION: ${{ steps.promote.outputs.version }}
+          RELEASE_ARTIFACT_ROOT: ${{ steps.promote.outputs.artifact_root }}
+        run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION -ArtifactRoot $env:RELEASE_ARTIFACT_ROOT
+
+      - name: Submit promoted WinGet manifest update
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+          RELEASE_VERSION: ${{ steps.promote.outputs.version }}
+          RELEASE_ARTIFACT_ROOT: ${{ steps.promote.outputs.artifact_root }}
+        run: ./scripts/release-submit-winget.ps1 -Version $env:RELEASE_VERSION -ArtifactRoot $env:RELEASE_ARTIFACT_ROOT
+
+      - name: Publish promoted Chocolatey package
+        if: vars.CHOCOLATEY_PUBLISH != 'off'
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+          RELEASE_VERSION: ${{ steps.promote.outputs.version }}
+          RELEASE_ARTIFACT_ROOT: ${{ steps.promote.outputs.artifact_root }}
+        run: ./scripts/release-publish-chocolatey.ps1 -Version $env:RELEASE_VERSION -ArtifactRoot $env:RELEASE_ARTIFACT_ROOT

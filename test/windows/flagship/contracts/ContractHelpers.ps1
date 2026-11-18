@@ -179,7 +179,7 @@ function Assert-DeferredZigFixtureExecution {
         -Content $WorkflowText `
         -Name 'windows' `
         -Source $Source
-    if ($gateJob -notmatch '(?m)^    needs: \[[^\]]*\bchecks\b[^\]]*\btests\b[^\]]*\]\s*$' -or
+    if ($gateJob -notmatch '(?m)^    needs:\s*\[[^\]]*\bchecks\b[^\]]*\btests\b[^\]]*\]\s*$' -or
         $gateJob -notmatch '-Expect [^\r\n]*\bchecks:always\b[^\r\n]*\btests:tests\b') {
         throw 'The gate job must require both the checks job and the tests job.'
     }

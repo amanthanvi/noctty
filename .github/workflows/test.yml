@@ -580,9 +580,9 @@ jobs:
       - name: Run opt-in ConPTY transport and key input probes
         timeout-minutes: 15
         env:
-          NOCTTY_RUN_CONPTY_TRANSPORT_TEST: '1'
-          NOCTTY_CONPTY_TRANSPORT_PROBE: '1'
-          NOCTTY_CONPTY_KEY_INPUT_PROBE: '1'
+          NOCTTY_RUN_CONPTY_TRANSPORT_TEST: "1"
+          NOCTTY_CONPTY_TRANSPORT_PROBE: "1"
+          NOCTTY_CONPTY_KEY_INPUT_PROBE: "1"
         run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-filter=ConPTY --summary all
 
   windows-portable-smoke:
@@ -625,7 +625,7 @@ jobs:
         with:
           name: flagship-portable-x64-${{ github.run_id }}
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 90
           path: |
             test/windows/flagship/artifacts/portable-x64
             dist/artifacts/noctty-0.0.1-windows-x64
@@ -689,7 +689,18 @@ jobs:
   # probes, and the report-only and dispatch-only jobs, aside).
   windows:
     name: Windows Build And Tests
-    needs: [changes, checks, tests, bench, build, renderer-smoke, cross-arm64, windows-lib-vt, windows-portable-smoke]
+    needs:
+      [
+        changes,
+        checks,
+        tests,
+        bench,
+        build,
+        renderer-smoke,
+        cross-arm64,
+        windows-lib-vt,
+        windows-portable-smoke,
+      ]
     # always(), not !cancelled(): under !cancelled() a cancelled run skips the
     # gate, and a skipped required check counts as passing. The gate runs
     # anyway and fails on the cancelled jobs (scripts/ci-gate.ps1).
@@ -756,7 +767,7 @@ jobs:
           name: flagship-interactive-win11-${{ github.run_id }}
           if-no-files-found: warn
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 90
           path: |
             test/windows/flagship/artifacts/interactive-win11
             ${{ github.workspace }}/.sandbox/win11/**/logs/**

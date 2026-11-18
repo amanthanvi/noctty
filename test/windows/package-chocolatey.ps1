@@ -464,8 +464,8 @@ try {
 
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
     if ($metadata.chocolatey.packageName -cne 'noctty' -or
-        $metadata.chocolatey.nuspecPath -cne $nuspecPath -or
-        $metadata.chocolatey.packageDirectory -cne (Split-Path -Parent $nuspecPath)) {
+        $metadata.chocolatey.nuspecPath -cne ([IO.Path]::GetRelativePath($artifactRoot, $nuspecPath).Replace('\', '/')) -or
+        $metadata.chocolatey.packageDirectory -cne ([IO.Path]::GetRelativePath($artifactRoot, (Split-Path -Parent $nuspecPath)).Replace('\', '/'))) {
         throw 'metadata.json has an invalid Chocolatey block.'
     }
 

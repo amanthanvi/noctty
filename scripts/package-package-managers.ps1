@@ -44,6 +44,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 
 $Architectures = @($Architectures | ForEach-Object { (Get-WindowsPackageArchitecture -Architecture $_).Name })
+$Architectures = @(Get-WindowsPackageArchitectures | Where-Object { $_ -in $Architectures })
 
 $repoRoot = Get-RepoRoot
 $tagValue = if ($Tag) { $Tag } else { "v$Version" }
@@ -52,12 +53,12 @@ if ($ArtifactRoot -and $Architectures.Count -ne 1) {
 }
 $primaryArch = if ($Architectures -contains "x64") { "x64" } else { $Architectures[0] }
 $primaryArtifactRootPath = if ($ArtifactRoot) {
-    [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
+    [System.IO.Path]::GetFullPath($ArtifactRoot, $repoRoot)
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "$ArtifactBase/noctty-$Version-windows-$primaryArch"))
+    [System.IO.Path]::GetFullPath("$ArtifactBase/noctty-$Version-windows-$primaryArch", $repoRoot)
 }
 $outputRootPath = if ($OutputRoot) {
-    [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
+    [System.IO.Path]::GetFullPath($OutputRoot, $repoRoot)
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $primaryArtifactRootPath "package-managers"))
 }
@@ -106,6 +107,18 @@ function Reset-Directory {
     }
 
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
+}
+
+function Write-PackageManagerText {
+    param([string] $Path, [string] $Text)
+    [IO.File]::WriteAllText($Path, ($Text.Replace("`r`n", "`n").TrimEnd("`r", "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+}
+
+function Get-PackageManagerRelativePath {
+    param([string] $Path)
+    # All paths are relative to the primary architecture's artifact directory.
+    # arm64's payload is a sibling of x64's; no checkout root enters the bytes.
+    [IO.Path]::GetRelativePath($primaryArtifactRootPath, $Path).Replace('\', '/')
 }
 
 function Get-ChecksumMap {
@@ -165,9 +178,9 @@ function Get-VersionLine {
 $artifacts = [ordered]@{}
 foreach ($arch in $Architectures) {
     $artifactRootPath = if ($ArtifactRoot) {
-        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
+        [System.IO.Path]::GetFullPath($ArtifactRoot, $repoRoot)
     } else {
-        [System.IO.Path]::GetFullPath((Join-Path $repoRoot "$ArtifactBase/noctty-$Version-windows-$arch"))
+        [System.IO.Path]::GetFullPath("$ArtifactBase/noctty-$Version-windows-$arch", $repoRoot)
     }
 
     $checksumsPath = Join-Path $artifactRootPath (New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind checksums)
@@ -281,7 +294,7 @@ foreach ($arch in $Architectures) {
         hash = $artifacts[$arch].portableSha256
     }
 }
-Set-Content -LiteralPath $scoopManifestPath -Value ($scoopManifest | ConvertTo-Json -Depth 5)
+Write-PackageManagerText -Path $scoopManifestPath -Text ($scoopManifest | ConvertTo-Json -Depth 5)
 
 $escapedDescription = [System.Security.SecurityElement]::Escape($packageDescription)
 $escapedChocolateyDescription = [System.Security.SecurityElement]::Escape($chocolateyDescription)
@@ -313,7 +326,7 @@ $chocolateyNuspec = @"
   </files>
 </package>
 "@
-Set-Content -LiteralPath $chocolateyNuspecPath -Value $chocolateyNuspec -Encoding utf8
+Write-PackageManagerText -Path $chocolateyNuspecPath -Text $chocolateyNuspec
 
 $x64SetupUrl = if ($artifacts.Contains("x64")) { $artifacts["x64"].setupUrl } else { "" }
 $x64SetupSha256 = if ($artifacts.Contains("x64")) { $artifacts["x64"].setupSha256 } else { "" }
@@ -475,20 +488,20 @@ $chocolateyInstall = $chocolateyInstall.
     Replace("__X64_SETUP_SHA256__", $x64SetupSha256).
     Replace("__ARM64_SETUP_URL__", $arm64SetupUrl).
     Replace("__ARM64_SETUP_SHA256__", $arm64SetupSha256)
-Set-Content -LiteralPath $chocolateyInstallPath -Value $chocolateyInstall -Encoding utf8
+Write-PackageManagerText -Path $chocolateyInstallPath -Text $chocolateyInstall
 
 $metadataArchitectures = [ordered]@{}
 foreach ($arch in $Architectures) {
     $metadataArchitectures[$arch] = [ordered]@{
         installer = [ordered]@{
             name   = $artifacts[$arch].setupName
-            path   = $artifacts[$arch].setupPath
+            path   = Get-PackageManagerRelativePath $artifacts[$arch].setupPath
             url    = $artifacts[$arch].setupUrl
             sha256 = $artifacts[$arch].setupSha256
         }
         portable  = [ordered]@{
             name   = $artifacts[$arch].portableName
-            path   = $artifacts[$arch].portablePath
+            path   = Get-PackageManagerRelativePath $artifacts[$arch].portablePath
             url    = $artifacts[$arch].portableUrl
             sha256 = $artifacts[$arch].portableSha256
         }
@@ -496,6 +509,7 @@ foreach ($arch in $Architectures) {
 }
 
 $metadata = [ordered]@{
+    schemaVersion = 2
     version     = $Version
     tag         = $tagValue
     repository  = $Repo
@@ -512,13 +526,13 @@ $metadata = [ordered]@{
     assets      = [ordered]@{
         installer = [ordered]@{
             name   = $primaryArtifact.setupName
-            path   = $primaryArtifact.setupPath
+            path   = Get-PackageManagerRelativePath $primaryArtifact.setupPath
             url    = $primaryArtifact.setupUrl
             sha256 = $primaryArtifact.setupSha256
         }
         portable  = [ordered]@{
             name   = $primaryArtifact.portableName
-            path   = $primaryArtifact.portablePath
+            path   = Get-PackageManagerRelativePath $primaryArtifact.portablePath
             url    = $primaryArtifact.portableUrl
             sha256 = $primaryArtifact.portableSha256
         }
@@ -534,13 +548,13 @@ $metadata = [ordered]@{
     }
     scoop      = [ordered]@{
         packageName   = $ScoopPackageName
-        manifestPath  = $scoopManifestPath
+        manifestPath  = Get-PackageManagerRelativePath $scoopManifestPath
         manifestRelPath = "$ScoopPackageName.json"
     }
     chocolatey = [ordered]@{
         packageName     = "noctty"
-        nuspecPath      = $chocolateyNuspecPath
-        packageDirectory = $chocolateyRoot
+        nuspecPath      = Get-PackageManagerRelativePath $chocolateyNuspecPath
+        packageDirectory = Get-PackageManagerRelativePath $chocolateyRoot
     }
 }
 
@@ -554,7 +568,7 @@ if ($FirstForkPatch -gt 0) {
     $metadata.versioning.firstForkPatch = $FirstForkPatch
 }
 
-Set-Content -LiteralPath $metadataPath -Value ($metadata | ConvertTo-Json -Depth 8)
+Write-PackageManagerText -Path $metadataPath -Text ($metadata | ConvertTo-Json -Depth 8)
 
 Write-Host "Scoop manifest         : $scoopManifestPath"
 Write-Host "Chocolatey nuspec      : $chocolateyNuspecPath"
