@@ -2997,9 +2997,13 @@ and the
   whole; one that reads records with it off (PSReadLine does) gets a single
   Alt+`\` key and nothing of the body. `[Console]::ReadKey` and `cmd` read
   with it off by default and are expected to get the lone `\` the 2026-10-10
-  audit saw (not re-measured). Over `ssh.exe` before OpenSSH for Windows
-  9.8.2 a reply longer than 16 bytes travels in 16-byte parts. A tool run directly
-  under ConPTY that does not parse APC replies should send `q=2`.
+  audit saw (not re-measured). Before OpenSSH for Windows 9.8.2, `ssh.exe`
+  reads a reply longer than 16 bytes in 16-record parts. That it sends each
+  part as its own channel write is inferred, not observed (no channel trace
+  was taken): with `ObscureKeystrokeTiming` off, a Windows far end lost
+  exactly the first 16 bytes of most such replies, though not all (a 28-byte
+  split reply arrived whole), and with the default timing, 1 of 5. A tool run
+  directly under ConPTY that does not parse APC replies should send `q=2`.
 - **Sixel is passed through but not rendered.** The bundled ConPTY delivers a
   Sixel DCS payload byte-for-byte (see the
   [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog)),

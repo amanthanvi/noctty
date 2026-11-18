@@ -440,8 +440,11 @@ reader command unquoted.
 
 The Run directory must be new. The harness makes it with a protected ACL (you,
 SYSTEM and Administrators, inherited by everything in it) and reads that back
-before it writes anything there. It refuses to run with `NOCTTY_CONPTY`
-already set, since it sets that itself for c-inbox.
+before it writes anything there. That ACL is defence in depth for Run's own
+contents. It does not guard against an account with rights on Run's parent
+folders: other local accounts are outside the harness's threat model, since it
+runs under your own account on a single-user machine. It refuses to run with
+`NOCTTY_CONPTY` already set, since it sets that itself for c-inbox.
 
 Exit 0 means every requested reader ran every step, case 7 ran with its
 controls (unless `-SkipPSReadLine`), and every positive control came back as
@@ -467,13 +470,15 @@ safety and measurement properties in two ways:
 
 - **Checks and mutations.** It checks each launch's desktop and job, the
   isolation flags and guards, the bindings' bytes, the step plan, the
-  predictions, the verdicts and the exit policy. It then applies 145 mutations
+  predictions, the verdicts and the exit policy. It then applies 149 mutations
   (the council's from rounds 1 to 5, the review bots', and its own). Each must
   be refused by the whole-file pin and by the pin of every pinned region or
-  function it changes. All but the 39 marked `PinOnly` must also be refused by
-  the content checks alone (`-SkipPins`), so those checks are shown to work
-  once a pin moves. The 39 are edits only a pin can see, and they must get
-  nothing from the content checks, so the mark stays true.
+  function it changes. All but the 39 marked `PinOnly` must also be refused
+  with the pins skipped (`-SkipPins`), so each of those mutations is shown to
+  be refused by a content check too; that does not show every content check
+  is exercised. The 39 are edits only a pin can see, and they must get nothing
+  from the content checks, so the mark stays true. A mutation with `Check`
+  must be refused by that content check itself.
 - **A closed set of pins.** The whole harness and the whole reader are pinned
   by SHA-256 with LF line ends. Any edit to either fails the contract until its
   pin there is updated in the same change, so a reviewer sees it. The regions
