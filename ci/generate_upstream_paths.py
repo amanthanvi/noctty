@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lint_common import git, paths, revision
+from lint_common import paths, revision
 
 PINS = ("ba398dfff3e30ff83da07140981ca138410cf608",
         "74d0c72fd9318ad3ab95bfb56f6c2d995e267e2e",
@@ -21,18 +21,7 @@ def generate(repos):
         if revision(repo, pin) != pin:
             raise ValueError("upstream pin mismatch")
         result.update(paths(repo, pin))
-    for repo, start, end in ((repos[1], PINS[0], PINS[1]),
-                             (repos[2], PINS[1], PINS[2]),
-                             (repos[2], PINS[0], PINS[2])):
-        fields = git(repo, "diff", "--name-status", "-z", "--find-renames", start, end).split(b"\0")
-        i = 0
-        while i < len(fields) and fields[i]:
-            status = fields[i].decode()
-            if status.startswith("R"):
-                result.add(fields[i + 1].decode("utf-8"))
-                i += 3
-            else:
-                i += 2
+    # A rename source is already a path in its start tree, included above.
     return "".join(p + "\n" for p in sorted(result))
 
 

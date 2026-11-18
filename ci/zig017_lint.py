@@ -8,16 +8,34 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lint_common import added_lines, emit, sources
+from lint_common import added_lines, emit, merge_base, sources
+from zig_bindings import Bindings, identifier
 import zigtok
 
 FAIL_FORMS = frozenset(("**", "@Type", "@cImport", "stackFallback", "errdefer-capture"))
 
 
-def identifier(token):
-    if token.kind == "identifier" and token.text.startswith('@"'):
-        return zigtok.unescape(token.text[2:-1]).decode("utf-8")
-    return token.text
+def binary_repeat(tokens, index):
+    """A repeat has a left operand; a pointer-to-pointer type is a prefix."""
+    def ends_value(i):
+        if i < 0:
+            return False
+        token = tokens[i]
+        if token.kind in ("identifier", "number", "string", "char", "mlstring"):
+            return True
+        if zigtok.is_op(token, "]"):
+            opening = zigtok.match_back(tokens, i)
+            return opening is not None and ends_value(opening - 1)
+        if zigtok.is_op(token, ")"):
+            opening = zigtok.match_back(tokens, i)
+            if opening is not None and opening > 0:
+                previous = tokens[opening - 1]
+                if (previous.text in ("fn", "align", "addrspace", "callconv")
+                        or (opening > 1 and tokens[opening - 2].text == "fn")):
+                    return False
+            return True
+        return zigtok.is_op(token, "}", ".*", ".?")
+    return ends_value(index - 1)
 
 
 def _matches(text):
@@ -26,17 +44,11 @@ def _matches(text):
     Literals remain opaque tokens: removing them would join unrelated code.
     Comments alone are skipped. Multiline code is matched as one token stream.
     """
-    tokens = zigtok.code(text)
+    bindings = Bindings(text)
+    tokens = bindings.tokens
     words = [identifier(t) for t in tokens]
-    scopes, parents, stack = [], {0: None}, [0]
+    scopes, parents = bindings.scopes, bindings.parents
     containers = {}
-    for i, token in enumerate(tokens):
-        scopes.append(stack[-1])
-        if zigtok.is_op(token, "{"):
-            parents[i + 1] = stack[-1]
-            stack.append(i + 1)
-        elif zigtok.is_op(token, "}") and len(stack) > 1:
-            stack.pop()
     for i, token in enumerate(tokens):
         if zigtok.declaration_at(tokens, i):
             opening = i + 4 if words[i + 2:i + 5] == ["=", "struct", "{"] else None
@@ -45,12 +57,10 @@ def _matches(text):
     for i, token in enumerate(tokens):
         form, width, level = None, 1, "error"
         word = words[i]
-        if token.kind == "op" and word == "**":
+        if token.kind == "op" and word == "**" and binary_repeat(tokens, i):
             form = "**"
         elif token.kind == "builtin" and word in ("@Type", "@cImport"):
             form = word
-        elif words[i:i + 5] == ["std", ".", "heap", ".", "stackFallback"]:
-            form, width = "stackFallback", 5
         elif token.kind == "keyword" and words[i:i + 2] == ["errdefer", "|"]:
             form, width = "errdefer-capture", 2
         elif words[i:i + 3] in (["builtin", ".", "os"], ["builtin", ".", "cpu"],
@@ -67,6 +77,7 @@ def _matches(text):
             # container with an explicitly pub member can discharge the report.
             form, level = "@hasDecl (verify target is pub; unresolved targets need review)", "review"
             end = zigtok.match_paren(tokens, i + 1) if i + 1 < len(tokens) and words[i + 1] == "(" else i
+            width = end - i + 1
             args = tokens[i + 2:end]
             if len(args) == 3 and args[1].text == "," and args[2].kind == "string":
                 target = identifier(args[0])
@@ -94,6 +105,12 @@ def _matches(text):
             if key not in seen:
                 seen.add(key)
                 yield form, line, {t.line + 1 for t in tokens[i:i + width]}, level
+    for start, end, origin in bindings.accesses():
+        if origin.kind == "std" and origin.parts == ("heap", "stackFallback"):
+            line = tokens[start].line + 1
+            if ("stackFallback", line) not in seen:
+                seen.add(("stackFallback", line))
+                yield "stackFallback", line, bindings.span(start, end, origin), "error"
 
 
 @functools.lru_cache(maxsize=64)
@@ -132,8 +149,9 @@ def read_baseline(path):
     return parent, rows
 
 
-def check_file(path, before, after, added, baseline, fork=""):
+def check_file(path, before, after, added, baseline, fork="", tip=None):
     base_counts, head_counts, fork_counts = map(occurrences, (before, after, fork))
+    tip_counts = occurrences(tip) if tip is not None else base_counts
     lines, findings = after.split("\n"), []
     for form, line, span, level in matches(after):
         if not span.intersection(added):
@@ -142,9 +160,10 @@ def check_file(path, before, after, added, baseline, fork=""):
             exact = lines[line - 1].strip()
             key = form, exact
             allowance = baseline.get((path, form, exact), 0)
-            consumed = max(0, base_counts[key] - fork_counts[key])
+            consumed = max(0, tip_counts[key] - fork_counts[key])
             remaining = max(0, allowance - consumed)
-            if head_counts[key] <= base_counts[key] + remaining and allowance:
+            projected = tip_counts[key] + head_counts[key] - base_counts[key]
+            if projected <= tip_counts[key] + remaining:
                 continue
         findings.append((path, line, level, form))
     return findings
@@ -152,16 +171,18 @@ def check_file(path, before, after, added, baseline, fork=""):
 
 def check(repo, base, head, baseline_path):
     parent, baseline = read_baseline(baseline_path)
-    added = added_lines(repo, base, head)
+    comparison = merge_base(repo, base, head)
+    added = added_lines(repo, comparison, head)
     from lint_common import paths
     names = set(added)
-    before = sources(repo, base, names & paths(repo, base))
+    before = sources(repo, comparison, names & paths(repo, comparison))
     after = sources(repo, head, names)
+    tip = sources(repo, base, names & paths(repo, base)) if base != comparison else before
     fork = sources(repo, parent, names & paths(repo, parent)) if baseline else {}
     findings = []
     for name in sorted(names):
         findings.extend(check_file(name, before.get(name, ""), after[name], added[name],
-                                   baseline, fork.get(name, "")))
+                                   baseline, fork.get(name, ""), tip.get(name, "")))
     return findings
 
 

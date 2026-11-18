@@ -7,8 +7,12 @@ from pathlib import Path
 
 
 def git(repo, *args):
+    env = os.environ.copy()
+    for name in ("GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"):
+        env.pop(name, None)
     return subprocess.run(
-        ["git", "-c", "color.ui=never", "-C", str(repo), *args], check=True, capture_output=True
+        ["git", "-c", "color.ui=never", "-c", "color.diff=false",
+         "-C", str(repo), *args], check=True, capture_output=True, env=env,
     ).stdout
 
 
@@ -49,27 +53,53 @@ def sources(repo, rev, names):
     return result
 
 
-def added_lines(repo, base, head):
-    names = [
+def merge_base(repo, base, head):
+    return git(repo, "merge-base", base, head).decode().strip()
+
+
+DIFF_OPTIONS = ("--text", "--no-ext-diff", "--no-textconv", "--no-color",
+                "--no-renames", "--no-relative", "--ignore-submodules=none",
+                "--diff-algorithm=myers", "--no-indent-heuristic",
+                "--inter-hunk-context=0", "--unified=0")
+
+
+def changed_paths(repo, base, head, *pathspecs):
+    base = merge_base(repo, base, head)
+    return [
         p.decode("utf-8")
-        for p in git(repo, "diff", "--name-only", "-z", "--no-renames", base, head,
-                     "--", "*.zig").split(b"\0") if p
+        for p in git(repo, "diff", *DIFF_OPTIONS, "--name-only", "-z", base, head,
+                     "--", *pathspecs).split(b"\0") if p
     ]
+
+
+def added_lines(repo, base, head):
+    base = merge_base(repo, base, head)
+    names = changed_paths(repo, base, head, "*.zig")
     result = {}
     for name in names:
-        diff = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
-                   "--unified=0", base, head, "--", ":(literal)" + name).decode("utf-8")
-        rows = set()
-        for match in re.finditer(r"(?m)^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", diff):
-            start = int(match[1])
-            rows.update(range(start, start + int(match[2] or "1")))
+        diff = git(repo, "diff", *DIFF_OPTIONS, base, head,
+                   "--", ":(literal)" + name).decode("utf-8")
+        rows, current, had_hunk = set(), None, False
+        for line in diff.split("\n"):
+            match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match:
+                current, had_hunk = int(match[1]), True
+            elif current is not None and line.startswith("+"):
+                rows.add(current)
+                current += 1
+            elif current is not None and line.startswith(" "):
+                current += 1
+        if not had_hunk and name in paths(repo, head):
+            before = sources(repo, base, {name})[name] if name in paths(repo, base) else ""
+            if sources(repo, head, {name})[name] != before:
+                raise ValueError("changed Zig content produced no diff hunk")
         if rows:
             result[name] = rows
     return result
 
 
 def ci_revisions(repo, event):
-    """PR: exact base/head; push: before/head; nightly/manual: last commit."""
+    """Return declared commits; diff readers resolve their common ancestor."""
     kind = event.get("event_name")
     if kind == "pull_request":
         return revision(repo, event["base"]), revision(repo, event["head"])
@@ -82,6 +112,15 @@ def ci_revisions(repo, event):
     if kind in ("schedule", "workflow_dispatch"):
         return revision(repo, head + "^"), head
     raise ValueError("unsupported CI event")
+
+
+def lint_input_changes(repo, base, head):
+    """Implementation/data edits require explicit review, including self-edits."""
+    return [(name, 1, "review", "migration lint code or data changed; review required")
+            for name in changed_paths(repo, base, head)
+            if name.startswith("ci/") or name in (
+                ".github/workflows/test.yml",
+                "test/windows/flagship/contracts/Contracts.90-Workflows.ps1")]
 
 
 def emit(title, findings, mode="enforce"):

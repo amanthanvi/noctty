@@ -92,6 +92,8 @@ function Test-MigrationLintSteps {
     $python = Get-YamlStepBlock -Content $JobText -Name 'Setup Python' -Source 'migration lints'
     $controls = Get-YamlStepBlock -Content $JobText -Name 'Migration lint controls' -Source 'migration lints'
     $lints = Get-YamlStepBlock -Content $JobText -Name 'Migration diff lints' -Source 'migration lints'
+    if ($JobText.IndexOf($python) -ge $JobText.IndexOf($controls) -or
+        $JobText.IndexOf($controls) -ge $JobText.IndexOf($lints)) { return $false }
     $activeLines = @($python -split '\r?\n' | Where-Object { $_.Trim() -and $_ -notmatch '^\s*#' }) -join "`n"
     $expectedPython = @'
       - name: Setup Python
@@ -118,29 +120,44 @@ function Test-MigrationLintSteps {
           LINT_BEFORE: ${{ github.event.before }}
         run: python -I ci/run_lints.py --win32-mode report
 '@
-    # The first Phase 0b PR changes only the workflow's report -> enforce.
+    # A separate activation PR just before Phase 0b flips this one token.
     return $activeLines -ceq $expectedLints.TrimEnd() -or
         $activeLines -ceq $expectedLints.Replace('--win32-mode report', '--win32-mode enforce').TrimEnd()
 }
 if (-not (Test-MigrationLintSteps -JobText $checksJob)) {
     throw 'Migration lints must pin Python 3.13, use isolated mode and exact event inputs, and retain the Phase 0b switch.'
 }
-$lintMutations = @(
-    $checksJob.Replace('python -I ci/test_lints.py', 'python ci/test_lints.py'),
-    $checksJob.Replace('python -I ci/run_lints.py', 'python ci/run_lints.py'),
-    $checksJob.Replace('python-version: "3.13"', 'python-version: "3.14"'),
-    $checksJob.Replace('actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548', 'actions/setup-python@v6'),
-    $checksJob.Replace('LINT_BASE: ${{ github.event.pull_request.base.sha }}', 'LINT_BASE: ${{ github.sha }}'),
-    $checksJob.Replace('LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}', 'LINT_HEAD: main'),
-    $checksJob.Replace('LINT_BEFORE: ${{ github.event.before }}', 'LINT_BEFORE: main'),
-    $checksJob.Replace('--win32-mode report', '--win32-mode report --win32-mode report')
-)
-foreach ($lintMutation in $lintMutations) {
-    if ($lintMutation -ceq $checksJob -or (Test-MigrationLintSteps -JobText $lintMutation)) {
-        throw 'Migration lint workflow accepted a weakening mutation.'
+function Assert-MigrationLintMutations {
+    param([Parameter(Mandatory)] [string] $JobText)
+    $selectedMode = [regex]::Match($JobText, '--win32-mode (report|enforce)').Groups[1].Value
+    if (-not $selectedMode) { throw 'Migration lint mode was not found.' }
+    $pythonStep = Get-YamlStepBlock -Content $JobText -Name 'Setup Python' -Source 'migration lint controls'
+    $lintStep = Get-YamlStepBlock -Content $JobText -Name 'Migration diff lints' -Source 'migration lint controls'
+    $mutations = @(
+        $JobText.Replace('python -I ci/test_lints.py', 'python ci/test_lints.py'),
+        $JobText.Replace('python -I ci/run_lints.py', 'python ci/run_lints.py'),
+        $JobText.Replace('python-version: "3.13"', 'python-version: "3.14"'),
+        $JobText.Replace('actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548', 'actions/setup-python@v6'),
+        $JobText.Replace('LINT_BASE: ${{ github.event.pull_request.base.sha }}', 'LINT_BASE: ${{ github.sha }}'),
+        $JobText.Replace('LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}', 'LINT_HEAD: main'),
+        $JobText.Replace('LINT_BEFORE: ${{ github.event.before }}', 'LINT_BEFORE: main'),
+        $JobText.Replace("--win32-mode $selectedMode", "--win32-mode $selectedMode --win32-mode $selectedMode"),
+        $JobText.Replace($pythonStep, '').Replace($lintStep, $lintStep + $pythonStep)
+    )
+    foreach ($mutation in $mutations) {
+        if ($mutation -ceq $JobText -or (Test-MigrationLintSteps -JobText $mutation)) {
+            throw 'Migration lint workflow accepted a weakening mutation.'
+        }
     }
+    return $mutations.Count
 }
-Write-Host "Migration lint workflow: $($lintMutations.Count)/$($lintMutations.Count) weakening mutations rejected"
+$lintMutationCount = 0
+foreach ($migrationMode in @('report', 'enforce')) {
+    $migrationVariant = [regex]::Replace($checksJob, '--win32-mode (report|enforce)', "--win32-mode $migrationMode")
+    if (-not (Test-MigrationLintSteps -JobText $migrationVariant)) { throw 'Migration lint switch position failed its contract.' }
+    $lintMutationCount += Assert-MigrationLintMutations -JobText $migrationVariant
+}
+Write-Host "Migration lint workflow: $lintMutationCount/$lintMutationCount weakening mutations rejected (report and enforce)"
 foreach ($controlCase in @(
         @{ Name = 'Harness provenance and state controls (PowerShell 7)'; Shell = 'pwsh' },
         @{ Name = 'Harness provenance and state controls (Windows PowerShell 5.1)'; Shell = 'powershell' }

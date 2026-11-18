@@ -105,7 +105,7 @@ jobs:
           LINT_BASE: ${{ github.event.pull_request.base.sha }}
           LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           LINT_BEFORE: ${{ github.event.before }}
-        # Phase 0b enables the Win32 lint by changing report to enforce here.
+        # A separate PR just before Phase 0b changes report to enforce here.
         run: python -I ci/run_lints.py --win32-mode report
 
       - name: Interactive hints contract checks

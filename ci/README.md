@@ -10,27 +10,47 @@ python -I ci/zig017_lint.py --base origin/main --head HEAD
 python -I ci/win32_ident_lint.py --base origin/main --head HEAD --mode enforce
 ```
 
+For the approved 1A proxy and extra-occurrence twin, supply a read-only repo
+containing the old fork pin and `trial-hybrid`, plus a fresh output directory:
+
+```powershell
+python -I ci/test_lints.py --proxy-repo <read-only-repo> --proxy-ref trial-hybrid --proxy-output <fresh-output>
+```
+
+This also runs the ordinary controls. It generates the proxy baseline and
+retains the twin in a separate fixture repo; it never writes to the input repo.
+
 The `checks` job runs the controls and both lints on every change. The Zig lint
-fails added code using `**`, `@Type`, `@cImport`, `std.heap.stackFallback`, or an
+fails new occurrences of binary array-repeat `**`, `@Type`, `@cImport`,
+`std.heap.stackFallback` (including literal imports and const aliases), or an
 `errdefer` capture. It reports the plan's review forms as warnings and in the
 GitHub job summary. `@hasDecl` on an unresolved target also needs review: this
 lexical lint cannot prove an imported or computed target's visibility. A local
 literal struct's explicitly public member discharges that warning.
 
 Both lints tokenize complete files before intersecting matches with added diff
-lines. Comments and string/character literals are opaque. A multiline match
+lines. A Win32 use is also rechecked if any alias definition it depends on is
+added or changed, even when its own line is unchanged. Comments and
+string/character literals are opaque. A multiline match
 counts when any of its participating code tokens is on an added line. The
 tokenizer is the plan's measured `zigtok.py`, copied without changes.
 
 The Win32 lint resolves the inventory's namespace binding paths and local const
 aliases, with block scope, literal imports, quoted identifiers, and alias chains.
 It follows `internal_os.windows` through the current head's public re-exports.
-Calls re-homed to the fork's declarations pass. Arbitrarily computed namespace
-values and complete Zig type inference are outside this lexical lint's scope.
-The 124-name list is the plan's measured inventory at `31796f5d0`, checked
-against both compiler std trees. It is not the whole removed std declaration
-universe. The retained `win_idents3.py` reference has only its Git reads batched
-through `lint_common.py`; its original inventory rules and output are retained.
+Inline `@import("std").os.windows` and relative imports of `src/os/windows.zig`
+are recognized. Uses behind pointer/slice qualifiers and bare aliases of leaf
+types (for example `HRESULT`) count. Calls re-homed to fork declarations pass.
+The generated list covers **1,485 removed names**: 582 root names and 903
+namespace members, checked against both compiler std trees. The plan's 124 is
+the reached subset at `31796f5d0`; all 124 remain in the full set. The retained
+`win_idents3.py` preserves its historical inventory matching rules, with
+batched Git reads and strict UTF-8 decoding instead of replacement decoding.
+
+This remains a literal-binding lint, not Zig type inference. Computed forms
+such as `@field`, `comptime` or `if` aliases, destructuring, `(namespace).member`,
+and access through another container (`S.k.Sleep`) are a known limit shared
+with the reference tool. They are not evaluated by this lint.
 
 The fork-added file set is computed at each head, by subtracting
 `upstream-paths.txt` from its tree. That list includes upstream rename sources.
@@ -42,11 +62,16 @@ this lint.
 `run: python -I ci/run_lints.py --win32-mode report` to
 `run: python -I ci/run_lints.py --win32-mode enforce`. The Zig lint already
 enforces. Report mode still reports Win32 violations, and input/tool errors
-still fail. The workflow contract accepts either switch position.
+still fail. **Land this single-token flip as its own small PR immediately
+before the first Phase 0b PR.** Section 5 excludes `test.yml` from 0b membership.
+The workflow contract accepts both positions now and tests its weakening
+mutations in both positions. The activation PR can then require `enforce` for
+subsequent changes.
 
 ## Diff bases
 
-- Pull request: the event's exact base SHA and head SHA, not the synthetic merge.
+- Pull request: added lines come from the merge base of the event's base/head
+  through the head, so changes made only on main cannot appear as PR additions.
 - Push to main: `github.event.before` through `github.sha`, covering every
   commit in a multi-commit push. A missing/zero/unavailable base fails closed.
 - Scheduled or manual run: the checked-out head against its first parent. A
@@ -56,6 +81,12 @@ still fail. The workflow contract accepts either switch position.
 Checkout has full history. A missing revision, source, generated list, or
 malformed baseline is an error, never an empty successful check. Diagnostics
 print locations and rule names, not source lines or Git's command/stderr.
+Diffs force text, disable external diff/textconv/color/renames, and override
+user diff formatting/algorithm options and diff environment variables. Binary
+attributes and NUL detection cannot hide added lines. A changed head blob with
+no hunk fails closed; deletions and mode-only changes remain valid.
+PR edits to the lints' code, data, workflow or workflow contract are flagged
+for review in the job summary. This is a review flag, not a self-protection seal.
 
 ## Occurrence-bound baseline
 
@@ -76,9 +107,14 @@ Do not feed raw legacy TSV without that header to a nonempty baseline.
 
 For each `(path, form, line)`, let `F`, `B`, and `H` be its occurrence counts
 at the fork parent, PR base, and PR head, and `A` its allowance. The remaining
-allowance is `max(0, A - max(0, B - F))`. An added matching line passes only
-when it has that baseline entry and `H <= B + remaining`. A different path or
-line/form has no allowance. A second identical copy exhausts the same entry.
+allowance is `max(0, A - max(0, B - F))`. Every matching line, including one with
+no baseline entry (`A = 0`), passes while `H <= B + remaining`. Moving or
+retaining a line cannot fail. A different path or line/form has zero allowance;
+an additional copy must fit the same occurrence budget.
+For a stale PR, let `M` be the merge-base count and `B` the current base-tip
+count. Its projected count is `B + H - M`, so consuming an allowance on main
+also counts before another branch adds a copy. Added-line selection still
+uses the merge base.
 Removing and later re-adding within the original allowance passes. Only the
 reviewed upstream import updates the baseline; fork changes never add entries.
 
@@ -92,12 +128,12 @@ Pass read-only checkouts containing these exact commits, in order:
 
 ```powershell
 python -I ci/generate_upstream_paths.py <base-repo> <stone-repo> <v140-repo> ci/upstream-paths.txt
-python -I ci/generate_win32_identifiers.py . <std-0.17.1> <std-0.15.2> ci/win32-removed-identifiers.txt
+python -I ci/generate_win32_identifiers.py <std-0.17.1> <std-0.15.2> ci/win32-removed-identifiers.txt
 ```
 
 Each std argument is its compiler's `lib/std` directory. The identifier
-generator uses the reference inventory at its fixed revision and checks every
-name exists in 0.15.2 and is absent in 0.17.1. It needs the already-extracted
+generator enumerates every public root and exported namespace declaration and
+keeps names present in 0.15.2 and absent in 0.17.1. It needs the already-extracted
 compiler sources, not a download. The path generator unions all three trees
 and rename sources, writes only the supplied output, and is deterministic.
 
