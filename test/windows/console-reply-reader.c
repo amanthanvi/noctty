@@ -38,10 +38,13 @@
 //                                    on them); their KEY lines are the PEEK's
 //   BYTES,<ticks>,<count>,<hex>      one ReadFile (c)
 //   CMD,<ticks>,<code>,<hex>         what the reader wrote for a command
+//   STOP,<ticks>                     the stop file seen: a clean stop, the
+//                                    log's last line
 // The ready file holds
 //   pid,inputModeBefore,inputMode,outputMode,inputCodePage,qpcFrequency,localAppDataInRun
 // where localAppDataInRun is 1 when %LOCALAPPDATA% lies inside the run
-// directory (the log's grandparent), 0 when it does not, 2 when it is unset.
+// directory (the log's grandparent), 0 when it does not, 2 when it is unset,
+// 3 when it or the run directory cannot be determined.
 // Only that answer is written, never the value.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -129,16 +132,18 @@ static void log_record(const INPUT_RECORD *r, int ansi) {
 
 // Whether %LOCALAPPDATA% is inside the run: the directory two levels above
 // the log (Run\reader-<mode>\reader.log).
+// A value can be up to 32767 characters, so the buffers hold any.
 static int local_app_data_in_run(const wchar_t *log_path) {
-    wchar_t run[MAX_PATH], value[MAX_PATH];
+    static wchar_t run[32768], value[32768];
     size_t len;
     int level;
-    DWORD got = GetEnvironmentVariableW(L"LOCALAPPDATA", value, MAX_PATH);
-    if (got == 0 || got >= MAX_PATH) return 2;
-    if (wcscpy_s(run, MAX_PATH, log_path) != 0) return 0;
+    DWORD got = GetEnvironmentVariableW(L"LOCALAPPDATA", value, 32768);
+    if (got == 0) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 2 : 3;
+    if (got >= 32768) return 3;
+    if (wcscpy_s(run, 32768, log_path) != 0) return 3;
     for (level = 0; level < 2; ++level) {
         wchar_t *slash = wcsrchr(run, L'\\');
-        if (!slash) return 0;
+        if (!slash) return 3;
         *slash = 0;
     }
     len = wcslen(run);
@@ -189,6 +194,9 @@ int wmain(int argc, wchar_t **argv) {
             BOOL ok = ansi ? ReadConsoleInputA(in, batch, per_read, &count) : ReadConsoleInputW(in, batch, per_read, &count);
             if (!ok) return 9;
             fprintf(g_log, "READ,%lld,%lu\n", now_ticks(), count);
+            // The whole batch is logged before its commands run. The harness posts a case only once it
+            // reads the delimiter's CMD line, which follows the batch's records, so a record after a
+            // delimiter in the same batch is the closing case's late output, and the log keeps it there.
             for (i = 0; i < count; ++i) log_record(&batch[i], ansi);
             for (i = 0; i < count; ++i) command(record_unit(&batch[i], ansi));
         } else {
@@ -214,6 +222,7 @@ int wmain(int argc, wchar_t **argv) {
         }
         fflush(g_log);
     }
+    if (GetFileAttributesW(argv[4]) != INVALID_FILE_ATTRIBUTES) fprintf(g_log, "STOP,%lld\n", now_ticks());
     fclose(g_log);
     return 0;
 }

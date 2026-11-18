@@ -45,10 +45,13 @@ Reader states, -Readers (a list, or one comma-separated string):
                  after it); reader c runs on the far side, behind the pseudo
                  console sshd makes for the session (the in-box conhost).
                  d-notiming adds -o ObscureKeystrokeTiming=no. The far side
-                 runs through sshd's DefaultShell (HKLM\SOFTWARE\OpenSSH) as
-                 this user, which loads the user's own PowerShell profile and
-                 uses the real LOCALAPPDATA, not the run's; both readers are
-                 refused without -AllowSshFarSideUserProfileAndLocalAppData.
+                 runs through sshd's DefaultShell (HKLM\SOFTWARE\OpenSSH;
+                 cmd.exe when unset) as this user, with the real LOCALAPPDATA,
+                 not the run's, and a PowerShell DefaultShell (pwsh here) also
+                 loads the user's own PowerShell profile; both readers are
+                 refused without -AllowSshFarSideUserProfileAndLocalAppData,
+                 and need a Run path of letters, digits, _ . - and \ only,
+                 since the far side's shell gets the reader command unquoted.
 
 Phase 2 (case 7) types into PSReadLine inside noctty (pwsh -NoProfile), with
 its history redirected into Run and set to SaveNothing before its first read:
@@ -67,11 +70,14 @@ Results: Run\results.json and Run\results.md. Exit codes:
   0  complete: every requested reader ran every step, case 7 ran (unless
      -SkipPSReadLine) with its controls, and every positive control came back
      as predicted (other rows are observations, recorded, not judged);
-  1  incomplete: a reader failed or died, a delimiter or readiness wait
-     failed, case 7 failed, a positive control differed from its
+  1  incomplete: a reader failed or died (no clean stop in its log), a
+     delimiter or readiness wait failed, case 7 failed or showed no prompt
+     row before or after its tab switch, a positive control differed from its
      prediction, or a reader ran in the wrong state (its input mode, or a16
      without 16-record reads);
-  2  infrastructure failure, in the driver or the outer phase;
+  2  infrastructure failure, in the driver or the outer phase (including a
+     NOCTTY_CONPTY the run inherits, and a Run directory whose ACL does not
+     read back as this user's alone);
   3  an isolation guard changed (startup ledger, history, AUMID key,
      clipboard sequence number), a link was left in the run directory, or
      an ssh secret could not be deleted (kept, recorded, guards compared).
@@ -81,7 +87,8 @@ then exit 1. -Sabotage setup fails the setup at the point where reader d's
 ssh keys already exist (when d is requested), and the run must exit 2 with
 any keys deleted. -Sabotage key holds an ssh secret's file open through the
 cleanup, and the run must exit 3 with the guards compared and the failure
-recorded.
+recorded. -Sabotage acl gives Everyone a rule on the Run directory once it is
+made, and the run must exit 2 with nothing compiled or launched.
 
 Contracts.98-ConptyReplyPath.ps1 pins this script and the reader in two
 ways: checks and mutations for each safety property, and SHA-256 pins. This
@@ -89,8 +96,10 @@ whole script and the whole reader are pinned, and so, again, are the regions
 between `# pin-begin:` and `# pin-end:` comments and the functions the
 contract names, so a failure also says which block changed. Any edit to this
 script or the reader fails the contract until its pin is updated in the same
-change. Not pinned: console-attach-info.c, which case 7 reads the prompt with
-and four other harnesses share.
+change. Not pinned, since other harnesses share them: console-attach-info.c,
+which case 7 reads the prompt with; scripts\windows-harness-history.ps1, whose
+guard decides exit 3's history branch; and scripts\dev-windows.cmd, which the
+helper compile runs (exit 2).
 #>
 [CmdletBinding()]
 param(
@@ -101,7 +110,7 @@ param(
     [string[]] $Readers = @('a','a16','b','c'),
     [switch] $AllowSshFarSideUserProfileAndLocalAppData,
     [switch] $SkipPSReadLine,
-    [ValidateSet('none','delimiter','reader','control','setup','key')] [string] $Sabotage = 'none',
+    [ValidateSet('none','delimiter','reader','control','setup','key','acl')] [string] $Sabotage = 'none',
     [ValidateRange(60,1800)] [int] $DriverTimeoutSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
@@ -123,7 +132,7 @@ foreach($r in $Readers) { if($r -notin $readerStates) { throw "Unknown reader '$
 if($Readers.Count -eq 0) { throw 'No reader requested.' }
 $sshReaders = @($Readers | Where-Object { $_ -in @('d','d-notiming') })
 if($sshReaders.Count -gt 0 -and -not $AllowSshFarSideUserProfileAndLocalAppData) {
-    throw 'Readers d and d-notiming run the far side through sshd''s DefaultShell (HKLM\SOFTWARE\OpenSSH) as this user, which loads the user''s own PowerShell profile and uses the real LOCALAPPDATA, not the run''s. Pass -AllowSshFarSideUserProfileAndLocalAppData to accept that.'
+    throw 'Readers d and d-notiming run the far side through sshd''s DefaultShell (HKLM\SOFTWARE\OpenSSH; cmd.exe when unset) as this user, with the real LOCALAPPDATA, not the run''s; a PowerShell DefaultShell also loads the user''s own PowerShell profile. Pass -AllowSshFarSideUserProfileAndLocalAppData to accept that.'
 }
 # pin-end: reader-list
 Add-Type @'
@@ -421,10 +430,23 @@ if(-not $Driver) {
     # pin-begin: outer-run (Contracts.98 pins the whole outer phase by hash: the compile, what the driver is told, the guards and the outer exit)
     $Bin=(Resolve-Path -LiteralPath $Bin).Path; $Run=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
+    # The bundled readers must run on the bundled ConPTY: an inherited override would move them to another host.
+    if($null -ne [Environment]::GetEnvironmentVariable('NOCTTY_CONPTY')) { throw 'NOCTTY_CONPTY is set in this environment, which would run the bundled readers on another host; the harness sets it itself for c-inbox. Unset it and run again.' }
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain a built noctty.exe.' }
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'conpty.dll'))) { throw 'Bin must hold the bundled conpty.dll: this measures the bundled ConPTY.' }
-    if($sshReaders.Count -gt 0 -and $Run -match '\s') { throw 'Readers d and d-notiming need a Run path without spaces: the far side gets the reader command unquoted.' }
-    [void](New-Item -ItemType Directory -Path $Run)
+    if($sshReaders.Count -gt 0 -and $Run -cnotmatch '^[A-Za-z]:\\[A-Za-z0-9_.\\-]*$') { throw 'Readers d and d-notiming need a Run path of letters, digits, _ . - and \ only: the far side''s shell gets the reader command unquoted.' }
+    # The run tree is this user's alone: made with a protected DACL (this user, SYSTEM and Administrators,
+    # inherited by everything in it), then read back, so no other account can replace what runs from it.
+    $runParent=Split-Path -Parent $Run; if(-not (Test-Path -LiteralPath $runParent)) { [void](New-Item -ItemType Directory -Path $runParent) }
+    $runSids=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,'S-1-5-18','S-1-5-32-544')
+    $runAcl=[Security.AccessControl.DirectorySecurity]::new(); $runAcl.SetAccessRuleProtection($true,$false)
+    foreach($sid in $runSids) { $runAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow')) }
+    [void][IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($Run),$runAcl)
+    # The ACL control: a rule for Everyone, added once the directory exists, which the read-back must refuse.
+    if($Sabotage -eq 'acl') { $aclSabotage=[IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($Run)); $aclSabotage.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'Modify','ContainerInherit,ObjectInherit','None','Allow')); [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($Run),$aclSabotage) }
+    $runRead=[IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($Run))
+    $runOthers=@($runRead.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -ne 'Allow' -or $runSids -notcontains $_.IdentityReference.Value })
+    if(-not $runRead.AreAccessRulesProtected -or $runOthers.Count -gt 0 -or @($runSids[0],'S-1-5-32-544') -notcontains $runRead.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw 'The Run directory''s ACL did not read back as this user''s alone; nothing runs from it.' }
     $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $compile=Join-Path $Run 'compile.cmd'
     $lines=@('@echo off')
@@ -658,7 +680,7 @@ function Invoke-ReaderSession([string] $Mode) {
         if(-not [ReplyPath]::OnCallerDesktop($surface)) { throw 'The noctty surface is not on the private desktop; nothing is posted to it.' }
         $probe=Wait-Ready $ready $terminal 30
         $session.Ready=@{Pid=[int]$probe[0];InputModeBefore=('0x{0:x}' -f [uint32]$probe[1]);InputMode=('0x{0:x}' -f [uint32]$probe[2]);OutputMode=('0x{0:x}' -f [uint32]$probe[3]);InputCodePage=[int]$probe[4];
-            LocalAppDataInRun=$(switch($probe[6]) { '1' { $true } '0' { $false } default { 'unset' } })}
+            LocalAppDataInRun=$(switch($probe[6]) { '1' { $true } '0' { $false } '2' { 'unset' } default { 'unknown' } })}
         if($Mode -in @('d','d-notiming')) {
             # ssh.exe's own console input mode, read from its pseudo console (noctty's bundled one).
             $sshPid=@(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" | Where-Object { $_.ParentProcessId -eq $terminal.pid } | Select-Object -ExpandProperty ProcessId)
@@ -739,6 +761,8 @@ function Get-ReaderStateProblems($Session) {
         if($Session.Mode -eq 'a16' -and $largest -ne 16) { $p.Add("reader a16: its largest read was $largest records, expected 16") }
         if($Session.Mode -in @('a','b') -and $largest -le 16) { $p.Add("reader $($Session.Mode): no read above 16 records, expected 64-record reads") }
     }
+    # A clean stop: the reader saw the stop file and wrote its last line. One that died after the last step has none.
+    if($finished -and -not @($Session.Log | Where-Object { $_ -like 'STOP,*' }).Count) { $p.Add("reader $($Session.Mode): no clean stop in its log (it exited before it saw the stop file)") }
     return @($p)
 }
 
@@ -860,8 +884,11 @@ try {
         $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;NotMeasured=@($notMeasured | Select-Object -First 2)}
         $dir=Join-Path $Run 'psreadline'; [void](New-Item -ItemType Directory -Path $dir)
         $shellReady=Join-Path $dir 'ready.txt'; $shellHistory=Join-Path $dir 'history.txt'
+        # Both paths go into the startup as single-quoted literals, their quotes escaped: a Run may hold an apostrophe.
+        $historyLiteral=[Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($shellHistory)
+        $readyLiteral=[Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($shellReady)
         $pwshExe=(Get-Command pwsh.exe).Source
-        $startup="Set-PSReadLineOption -HistorySavePath '$shellHistory' -HistorySaveStyle SaveNothing; if((Get-PSReadLineOption).HistorySaveStyle -eq 'SaveNothing' -and (Get-PSReadLineOption).HistorySavePath -ceq '$shellHistory') { [Console]::Write([char]27+'[?2033h'); Set-Content -LiteralPath '$shellReady' -Value ready }"
+        $startup="Set-PSReadLineOption -HistorySavePath '$historyLiteral' -HistorySaveStyle SaveNothing; if((Get-PSReadLineOption).HistorySaveStyle -eq 'SaveNothing' -and (Get-PSReadLineOption).HistorySavePath -ceq '$historyLiteral') { [Console]::Write([char]27+'[?2033h'); Set-Content -LiteralPath '$readyLiteral' -Value ready }"
         $command='"{0}" --config-file="{1}" --window-save-state=never "--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' -f $exe,$config,$cmdExe,$pwshExe,$startup
         $shell=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)
         $layout=$null
@@ -921,6 +948,8 @@ try {
             $afterSwitch=Read-Shell 'after-tab-switch'
             $case7.TabSwitch=@{SurfacesDuring=$surfacesDuring;PwshSurfaceVisibleDuring=$visibleDuring;PwshSurfaceVisibleAfter=$visibleAfter;PromptBefore=$shellBefore.Prompt;PromptAfter=$afterSwitch.Prompt}
             $case7.TabSwitched=($surfacesDuring -ge 2 -and -not $visibleDuring -and $visibleAfter)
+            # The switch's null needs its evidence: a PS prompt row both before and after it.
+            if(@($shellBefore.Prompt).Count -ne 1 -or @($afterSwitch.Prompt).Count -ne 1) { throw 'No PS prompt row before or after the tab switch, so the switch''s null is not shown.' }
             $case7.Complete=$true
         } catch {
             $failures.Add("case 7: $($_.Exception.Message)")
