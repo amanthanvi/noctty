@@ -1,0 +1,10 @@
+# Soak slope thresholds (PLAN.md §3.5), read by ci/soak_judge.py. Provisional until the two clean runs.
+slope	handles	12
+slope	threads	2
+slope	private_bytes	8388608
+slope	working_set	16777216
+slope	commit_charge	8388608
+slope	gdi_objects	6
+slope	user_objects	6
+slope	children	1
+bound	threads	64
