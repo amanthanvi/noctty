@@ -613,7 +613,12 @@ that govern each symbol you change, or that none does.
   (`Invoke-InteractiveWin11MeasureBuild` in
   `scripts/interactive-win11-measure-lib.ps1`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
-  `origin/*-measurement-harness` branches), CI test steps (the raw
+  `origin/*-measurement-harness` branches), which steps of the release
+  evidence job may raise a real toast (the job's order,
+  `Get-InteractiveWin11JobPlan`, the composite's `-DeferCommandFinish`,
+  `$settingsSaveNotificationArguments` in the accessibility leaf, and the
+  toast-source inventory and quiet-save reading in
+  `Contracts.90-Workflows.ps1`), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
   `win32/sys.zig`'s imports to `src/apprt`), the Zig test runner and its
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
