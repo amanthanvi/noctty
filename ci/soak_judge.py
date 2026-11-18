@@ -61,14 +61,20 @@ Run directory, metrics stage (new):
   threads.tsv   the header `minute tid start name`, then one row per thread of each live sample: its start
                 address as module+offset (`?` when unreadable) and its description (empty when unnamed). A
                 thread's kind is its name, else its start address.
-Fails (metrics stage): NO-METRICS, NO-THREADS, MISSING-METRIC, DUPLICATE-METRIC, MALFORMED, NOT-AT-BASELINE,
-WORKLOAD-MISSED, NO-WORKLOAD (fewer than half the live minutes did any churn), BAD-THRESHOLDS, and, when the
-run's required minimum exceeds the 30-minute warm-up: NO-SLOPE-SAMPLES (fewer than 10 live minutes after it),
-SLOPE (a metric's least-squares slope over the live minutes after the warm-up, per hour, above its
-threshold; only an upward slope fails), THREAD-BOUND (more threads after the warm-up than the bound), KIND-BOUND (more threads of one
-kind than its bound). A required minimum within the warm-up leaves no slope to judge (only the
-synthetic fixtures use one); every real soak's minimum (60, 480) exceeds it, and a plan below the minimum
-fails PLAN-TOO-SHORT rather than the slope check.
+  timing.tsv    the header `minute sampled_ms late_ms workload_ms`, then one row per sampled minute
+                (MISSING-TIMING, DUPLICATE-TIMING): when the sample was taken (ms after the launch), how late
+                that was against its due time (minute x 60 s), and how long the minute's churn ran. A sample
+                more than LATE_SAMPLE_MS late fails (LATE-SAMPLE): for that long nothing looked at the copy at
+                its due time, so a hang there would read as an answer once it ended.
+Fails (metrics stage): NO-METRICS, NO-THREADS, NO-TIMING, MISSING-METRIC, DUPLICATE-METRIC, MISSING-TIMING,
+DUPLICATE-TIMING, MALFORMED, LATE-SAMPLE, NOT-AT-BASELINE, WORKLOAD-MISSED, NO-WORKLOAD (fewer than half the
+live minutes did any churn), BAD-THRESHOLDS, MINIMUM-TOO-SHORT (a required minimum that leaves no slope window
+after the warm-up: the call is refused, never judged without a slope), NO-SLOPE-SAMPLES (fewer live minutes
+after the warm-up than the window), SLOPE (a metric's least-squares slope over the live minutes after the
+warm-up rises with confidence: its lower bound, slope - Z x standard error, per hour, is above the metric's
+floor; so a longer run, whose standard error is smaller, holds a slow rise to account), THREAD-BOUND (more
+threads after the warm-up than the bound), KIND-BOUND (more threads of one kind than its bound). A plan below
+the minimum fails PLAN-TOO-SHORT rather than the slope check.
 
 Fails (process rules): NO-MINIMUM, PLAN-TOO-SHORT, NO-OTHER-RUN, BAD-CLASS, SHARED-CLASS, MALFORMED,
 DUPLICATE-ROW, MISSING-ROW, NO-SAMPLES, DUPLICATE-MINUTE, MISSING-MINUTE, SHORT-RUN, PROCESS-GONE,
@@ -76,8 +82,12 @@ PROCESS-CHANGED, HUNG, EARLY-EXIT, QUIT-TIMEOUT, EXIT-CODE, NO-CRASH-DIR, CRASH-
 A ReleaseSafe panic exits with code 3 and writes no minidump (Zig's default panic handler; only ReleaseFast
 traps into the minidump filter), so EARLY-EXIT and EXIT-CODE are what catch it.
 
-Thresholds file: `#` comments, blank lines, and TAB-separated rows:
-  slope <metric> <per hour>   one for every metric above (handles .. children)
+Thresholds file: `#` comments, blank lines, and TAB-separated rows, each once:
+  warmup <minutes>            the warm-up the slope check skips
+  window <minutes>            the fewest live minutes after it a slope is fitted over; a --min-minutes below
+                              warmup + window is refused (MINIMUM-TOO-SHORT)
+  floor <metric> <per hour>   one for every metric above (handles .. children): the rise a slope's lower
+                              bound may reach
   bound threads <max>         the most threads a sample after the warm-up may hold
   kind <kind> <max>           optional: the most threads of one kind after the warm-up
 """
@@ -88,32 +98,43 @@ import os
 import re
 import sys
 
-WARMUP_MINUTES = 30
-MIN_SLOPE_SAMPLES = 10
+Z = 3.0                 # the slope's lower bound is slope - Z x its standard error
+LATE_SAMPLE_MS = 5000   # the harness's response bound: a sample later than this saw nothing at its due time
 BASELINE_SURFACES = 1
+TIMING_HEADER = ("minute", "sampled_ms", "late_ms", "workload_ms")
 KINDS = ("launch", "mode", "class", "exe", "planned", "wer", "end")
 METRICS = ("handles", "threads", "private_bytes", "working_set", "commit_charge", "gdi_objects", "user_objects",
            "children")
 METRICS_HEADER = ("minute",) + METRICS + ("surfaces", "churn", "missed")
 THREADS_HEADER = ("minute", "tid", "start", "name")
 # Get-InteractiveWin11LaunchArguments: noctty-interactive-<worktree slug>-<12 hex>-<sandbox slug>
-CLASS_RE = r"noctty-interactive-(?:[a-z0-9.-]+-)?[0-9a-f]{12}-[a-z0-9.][a-z0-9.-]*"
+CLASS_RE = r"noctty-interactive-[a-z0-9.-]+-[0-9a-f]{12}-[a-z0-9.][a-z0-9.-]*"   # the slug is never empty
 USAGE = ("usage: python -I soak_judge.py <run-dir> --min-minutes <N> [--other-run <dir>] "
          "[--thresholds <file>]")
 
 
 def read_lines(path):
-    """The file's lines without their line ends, or None when it does not exist."""
+    """(lines without their line ends, numbers of the lines that are not UTF-8), or (None, []) when the file does
+    not exist. A line that is not UTF-8 is left out, so a corrupt byte can never pass as another name or kind."""
     if not os.path.isfile(path):
-        return None
-    # Bytes that are not UTF-8 become U+FFFD, so the row they sit in fails as MALFORMED instead of the tool.
-    with open(path, encoding="utf-8", errors="replace", newline="") as fh:
-        text = fh.read()
-    return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+        return None, []
+    with open(path, "rb") as fh:
+        data = fh.read()
+    lines, bad = [], []
+    for number, raw in enumerate(data.split(b"\n"), 1):
+        if raw.endswith(b"\r"):
+            raw = raw[:-1]
+        try:
+            lines.append(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            bad.append(number)
+    return lines, bad
 
 
 def is_count(text):
-    return text.isascii() and text.isdigit()
+    """A whole number the harness can write: ASCII digits, at most 18 of them (below 2**63), so no record can
+    reach Python's integer-string limit or overflow the slope's floating point."""
+    return text.isascii() and text.isdigit() and len(text) <= 18
 
 
 def least_squares(points):
@@ -143,13 +164,20 @@ class Judge:
     def fail(self, text):
         self.failures.append(text)
 
+    def read(self, path, label):
+        """The lines of `path` (None when it is missing); each line that is not UTF-8 fails as MALFORMED."""
+        lines, bad = read_lines(path)
+        for number in bad:
+            self.fail(f"MALFORMED {label} line {number} is not UTF-8")
+        return lines
+
     # -- process rules (the prototype's) -------------------------------------------------------------------
     def process_rules(self):
         if self.min_minutes is not None and self.min_minutes >= 480 and self.other_run is None:
             self.fail("NO-OTHER-RUN release coverage soaks two copies the same night; name the other copy's run "
                       "directory with --other-run, so their classes are compared")
         rows = collections.defaultdict(list)
-        lines = read_lines(os.path.join(self.d, "run.tsv"))
+        lines = self.read(os.path.join(self.d, "run.tsv"), "run.tsv")
         for line in lines or []:
             p = line.split("\t")
             if p[0] in KINDS:
@@ -174,13 +202,14 @@ class Judge:
             self.fail(f"BAD-CLASS {self.klass!r} is not the launch helper's "
                       "noctty-interactive-<worktree>-<hash>-<sandbox>")
         if self.other_run is not None:
-            other = None
-            for line in read_lines(os.path.join(self.other_run, "run.tsv")) or [] if self.other_run else []:
-                p = line.split("\t")
-                if p[0] == "class" and len(p) == 2:
-                    other = p[1] if other is None else ""
+            # The other copy's class row: exactly one, well formed and of the helper's shape, or the comparison
+            # proves nothing.
+            peer = self.read(os.path.join(self.other_run, "run.tsv"), "--other-run run.tsv") if self.other_run else None
+            rows = [p for p in (line.split("\t") for line in peer or []) if p[0] == "class"]
+            other = rows[0][1] if len(rows) == 1 and len(rows[0]) == 2 and re.fullmatch(CLASS_RE, rows[0][1]) else None
             if not other:
-                self.fail(f"MALFORMED --other-run {self.other_run!r}: no single class row in its run.tsv")
+                self.fail(f"MALFORMED --other-run {self.other_run!r}: no single class row of the helper's shape in "
+                          "its run.tsv")
             elif self.klass is not None and other == self.klass:
                 self.fail(f"SHARED-CLASS both copies run as {self.klass!r}, so they share one IPC pipe")
         self.parsed("exe", lambda p: len(p) == 2 and ntpath.isabs(p[1]) and p[1].lower().endswith(".exe"),
@@ -191,13 +220,12 @@ class Judge:
             self.fail(f"PLAN-TOO-SHORT {self.planned} planned minutes, below the run's required {self.min_minutes}")
         wer = self.parsed("wer", lambda p: len(p) == 2 and p[1] in ("suppressed", "default"), lambda p: p[1])
         end = self.parsed("end", lambda p: len(p) == 3 and ((p[1] in ("quit", "early")
-                                                              and p[2].lstrip("-").isascii()
-                                                              and p[2].lstrip("-").isdigit())
+                                                              and is_count(p[2].removeprefix("-")))
                                                              or (p[1] == "stuck" and p[2] == "-")),
                           lambda p: (p[1], None if p[1] == "stuck" else int(p[2])))
 
         self.samples, self.minutes = {}, collections.Counter()
-        for line in read_lines(os.path.join(self.d, "samples.tsv")) or []:
+        for line in self.read(os.path.join(self.d, "samples.tsv"), "samples.tsv") or []:
             p = line.split("\t")
             if not line.strip():
                 continue
@@ -217,9 +245,13 @@ class Judge:
         if not self.minutes:
             self.fail("NO-SAMPLES the harness recorded no per-minute sample")
         else:
-            for m in range(1, max(self.minutes) + 1):
-                if m not in self.minutes:
-                    self.fail(f"MISSING-MINUTE minute {m}")
+            # Each gap once, as a range: a corrupt minute number cannot make the judge list billions of minutes.
+            expected = 1
+            for m in sorted(self.minutes):
+                if m > expected:
+                    self.fail(f"MISSING-MINUTE minute {expected}" if m == expected + 1
+                              else f"MISSING-MINUTE minutes {expected}-{m - 1}")
+                expected = m + 1
             if self.planned is not None and max(self.minutes) < self.planned:
                 self.fail(f"SHORT-RUN {max(self.minutes)} of {self.planned} planned minutes")
         for m in sorted(self.samples):
@@ -240,9 +272,12 @@ class Judge:
         crash = os.path.join(self.d, "crash")
         if not os.path.isdir(crash):
             self.fail("NO-CRASH-DIR the run directory has no crash\\ (empty is a pass, missing is not)")
-        for root, _, names in os.walk(crash) if os.path.isdir(crash) else []:
+        unreadable = []
+        for root, _, names in os.walk(crash, onerror=unreadable.append) if os.path.isdir(crash) else []:
             for n in sorted(names):
                 self.fail(f"CRASH-REPORT {os.path.relpath(os.path.join(root, n), crash)}")
+        for error in unreadable:   # evidence that cannot be listed cannot be ruled out
+            self.fail(f"CRASH-REPORT unreadable {os.path.relpath(error.filename or crash, crash)}")
         if wer is not None and wer != "suppressed":
             self.fail("WER-NOT-SUPPRESSED a crash could wait in a WER dialog and look alive")
 
@@ -257,8 +292,9 @@ class Judge:
 
     # -- metrics stage --------------------------------------------------------------------------------------
     def read_thresholds(self):
-        slopes, bound, kinds = {}, None, {}
-        lines = read_lines(self.thresholds_path)
+        """{warmup, window, floors, bound, kinds}, or None after a BAD-THRESHOLDS failure."""
+        floors, kinds, single = {}, {}, {}
+        lines = self.read(self.thresholds_path, "thresholds")
         if lines is None:
             self.fail(f"BAD-THRESHOLDS no thresholds file at {self.thresholds_path!r}")
             return None
@@ -267,34 +303,38 @@ class Judge:
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             p = line.split("\t")
-            if len(p) == 3 and p[0] == "slope" and p[1] in METRICS and p[1] not in slopes:
+            if len(p) == 3 and p[0] == "floor" and p[1] in METRICS and p[1] not in floors:
                 try:
                     value = float(p[2])
                 except ValueError:
                     value = -1.0
                 if math.isfinite(value) and value >= 0:
-                    slopes[p[1]] = value
+                    floors[p[1]] = value
                     continue
-            elif len(p) == 3 and p[0] == "bound" and p[1] == "threads" and bound is None and is_count(p[2]):
-                bound = int(p[2])
+            elif len(p) == 2 and p[0] in ("warmup", "window") and p[0] not in single and is_count(p[1]):
+                single[p[0]] = int(p[1])
+                if p[0] != "window" or single[p[0]] >= 3:
+                    continue
+            elif len(p) == 3 and p[0] == "bound" and p[1] == "threads" and "bound" not in single and is_count(p[2]):
+                single["bound"] = int(p[2])
                 continue
             elif len(p) == 3 and p[0] == "kind" and p[1] and p[1] not in kinds and is_count(p[2]):
                 kinds[p[1]] = int(p[2])
                 continue
             bad.append(line)
-        missing = [m for m in METRICS if m not in slopes]
-        if bad or missing or bound is None:
-            self.fail(f"BAD-THRESHOLDS {self.thresholds_path!r}: rows not understood {bad!r}, metrics without a "
-                      f"slope row {missing!r}, threads bound {'missing' if bound is None else 'present'}")
+        missing = [m for m in METRICS if m not in floors] + [k for k in ("warmup", "window", "bound") if k not in single]
+        if bad or missing:
+            self.fail(f"BAD-THRESHOLDS {self.thresholds_path!r}: rows not understood {bad!r}, rows missing "
+                      f"{missing!r} (one floor per metric, a warmup, a window of at least 3 minutes, a threads bound)")
             return None
-        return slopes, bound, kinds
+        return dict(single, floors=floors, kinds=kinds)
 
     def metrics_stage(self):
         thresholds = self.read_thresholds()
         live = {m for m, s in self.samples.items() if not s[3]}
         sampled = set(self.samples)
         metrics = {}
-        lines = read_lines(os.path.join(self.d, "metrics.tsv"))
+        lines = self.read(os.path.join(self.d, "metrics.tsv"), "metrics.tsv")
         if lines is None:
             self.fail("NO-METRICS the run directory has no metrics.tsv")
         else:
@@ -339,7 +379,7 @@ class Judge:
                           "live minutes did any tab, split, flood or resize")
 
         kinds_by_minute = {}
-        tlines = read_lines(os.path.join(self.d, "threads.tsv"))
+        tlines = self.read(os.path.join(self.d, "threads.tsv"), "threads.tsv")
         if tlines is None:
             self.fail("NO-THREADS the run directory has no threads.tsv")
         else:
@@ -349,6 +389,7 @@ class Judge:
                 body = []
             per_minute = collections.defaultdict(collections.Counter)
             count = collections.Counter()
+            tids = set()
             for line in body[1:]:
                 p = line.split("\t")
                 if len(p) != 4 or not is_count(p[0]) or not is_count(p[1]) or not p[2]:
@@ -358,6 +399,10 @@ class Judge:
                 if m not in live:
                     self.fail(f"MALFORMED threads.tsv minute {m} has threads and no live sample")
                     continue
+                if (m, p[1]) in tids:   # a copied row would hide a thread of another kind
+                    self.fail(f"MALFORMED threads.tsv minute {m} lists thread {p[1]} twice")
+                    continue
+                tids.add((m, p[1]))
                 count[m] += 1
                 per_minute[m][p[3] if p[3] else p[2]] += 1
             for m in sorted(metrics):
@@ -366,30 +411,66 @@ class Judge:
                               f"{metrics[m]['threads']}")
             kinds_by_minute = per_minute
 
-        if thresholds is None:
+        # When each sample was taken: a sample late beyond the bound looked at nothing at its due time.
+        tlines = self.read(os.path.join(self.d, "timing.tsv"), "timing.tsv")
+        if tlines is None:
+            self.fail("NO-TIMING the run directory has no timing.tsv")
+        else:
+            body = [line for line in tlines if line.strip()]
+            if not body or tuple(body[0].split("\t")) != TIMING_HEADER:
+                self.fail(f"MALFORMED timing.tsv header {body[0] if body else ''!r}")
+                body = []
+            timed = collections.Counter()
+            for line in body[1:]:
+                p = line.split("\t")
+                if (len(p) != 4 or not is_count(p[0]) or int(p[0]) < 1 or not is_count(p[1])
+                        or not is_count(p[2].removeprefix("-")) or not is_count(p[3])):
+                    self.fail(f"MALFORMED timing.tsv: {line.strip()!r}")
+                    continue
+                m = int(p[0])
+                timed[m] += 1
+                if timed[m] > 1:
+                    self.fail(f"DUPLICATE-TIMING minute {m} has {timed[m]} timing rows")
+                    continue
+                if m not in self.minutes:
+                    self.fail(f"MALFORMED timing.tsv minute {m} has a time and no sample")
+                elif int(p[2]) > LATE_SAMPLE_MS:
+                    self.fail(f"LATE-SAMPLE minute {m} sampled {int(p[2])} ms after its due time, beyond "
+                              f"{LATE_SAMPLE_MS} ms")
+            for m in sorted(self.minutes):
+                if timed[m] == 0:
+                    self.fail(f"MISSING-TIMING minute {m}")
+
+        if thresholds is None or lines is None:   # no slope without thresholds, or without metrics.tsv (NO-METRICS)
             return
-        slopes, bound, kind_bounds = thresholds
-        # The slope judges the samples a plan of the required length gives: it applies when the required
-        # minimum exceeds the warm-up and the plan meets it (a shorter plan fails PLAN-TOO-SHORT instead).
-        applies = (self.min_minutes is not None and self.min_minutes > WARMUP_MINUTES
+        warmup, window_min, bound = thresholds["warmup"], thresholds["window"], thresholds["bound"]
+        floors, kind_bounds = thresholds["floors"], thresholds["kinds"]
+        # A minimum that leaves no slope window is refused, never judged without the slope. The slope judges
+        # the samples a plan of the required length gives (a shorter plan fails PLAN-TOO-SHORT instead).
+        refused = self.min_minutes is not None and self.min_minutes < warmup + window_min
+        if refused:
+            self.fail(f"MINIMUM-TOO-SHORT --min-minutes {self.min_minutes} leaves no slope window: the warm-up is "
+                      f"{warmup} minutes and a slope needs {window_min} after it")
+        applies = (not refused and self.min_minutes is not None
                    and self.planned is not None and self.planned >= self.min_minutes)
-        after = sorted(m for m in metrics if m > WARMUP_MINUTES)
+        after = sorted(m for m in metrics if m > warmup)
         span = f"minutes {after[0]}-{after[-1]}" if after else "no minutes"
         if not applies:
-            self.info.append(f"slope check: not applicable (the required minimum is within the "
-                             f"{WARMUP_MINUTES}-minute warm-up, or the plan is below it)")
-        elif len(after) < MIN_SLOPE_SAMPLES:
-            self.fail(f"NO-SLOPE-SAMPLES {len(after)} live minutes after the {WARMUP_MINUTES}-minute warm-up, "
-                      f"at least {MIN_SLOPE_SAMPLES} needed")
+            self.info.append("slope check: not run (see the failures above)")
+        elif len(after) < window_min:
+            self.fail(f"NO-SLOPE-SAMPLES {len(after)} live minutes after the {warmup}-minute warm-up, "
+                      f"at least {window_min} needed")
         else:
             for metric in METRICS:
                 slope, se = least_squares([(m, metrics[m][metric]) for m in after])
                 per_hour, se_hour = slope * 60, se * 60
-                self.info.append(f"SLOPE-INFO {metric} slope={per_hour:+.4f}/h se={se_hour:.4f}/h n={len(after)} "
-                                 f"threshold={slopes[metric]:g}/h {span}")
-                if per_hour > slopes[metric]:
-                    self.fail(f"SLOPE {metric} {per_hour:+.2f}/h over {span} ({len(after)} samples, standard "
-                              f"error {se_hour:.2f}/h), above its threshold {slopes[metric]:g}/h")
+                lower = per_hour - Z * se_hour
+                self.info.append(f"SLOPE-INFO {metric} slope={per_hour:+.4f}/h se={se_hour:.4f}/h "
+                                 f"lower={lower:+.4f}/h floor={floors[metric]:g}/h n={len(after)} {span}")
+                if lower > floors[metric]:
+                    self.fail(f"SLOPE {metric} rises {per_hour:+.2f}/h over {span} ({len(after)} samples, standard "
+                              f"error {se_hour:.2f}/h): its lower bound {lower:+.2f}/h is above the floor "
+                              f"{floors[metric]:g}/h")
             worst = max(after, key=lambda m: metrics[m]["threads"])
             self.info.append(f"THREADS-INFO max {metrics[worst]['threads']} at minute {worst}, bound {bound}")
             if metrics[worst]["threads"] > bound:
@@ -436,6 +517,9 @@ def main(argv):
             pre.append(f"MALFORMED --min-minutes {v!r}")
     else:
         pre.append("NO-MINIMUM the caller gave no --min-minutes, so no plan can be judged long enough")
+    if opts.get("--thresholds") == "":   # a trailing --thresholds names nothing; never fall back to the default
+        print(f"--thresholds needs a file\n{USAGE}", file=sys.stderr)
+        return 2
     thresholds = opts.get("--thresholds") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                            "soak-thresholds.tsv")
     judge = Judge(positional[0], min_minutes, opts.get("--other-run"), thresholds)

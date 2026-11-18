@@ -27,18 +27,23 @@ THREADS = (("noctty.exe+0x1000", ""), ("noctty.exe+0x2000", "renderer"), ("noctt
 FLAT = {"handles": 400, "threads": len(THREADS), "private_bytes": 50 << 20, "working_set": 80 << 20,
         "commit_charge": 60 << 20, "gdi_objects": 30, "user_objects": 20, "children": 2, "surfaces": 1,
         "churn": 3, "missed": 0}
-TEST_THRESHOLDS = """# the tests' own thresholds, so a retuned ci/soak-thresholds.tsv cannot move them
-slope\thandles\t12
-slope\tthreads\t2
-slope\tprivate_bytes\t8388608
-slope\tworking_set\t16777216
-slope\tcommit_charge\t8388608
-slope\tgdi_objects\t6
-slope\tuser_objects\t6
-slope\tchildren\t1
+FLOORS = """floor\thandles\t2
+floor\tthreads\t0.5
+floor\tprivate_bytes\t4194304
+floor\tworking_set\t4194304
+floor\tcommit_charge\t4194304
+floor\tgdi_objects\t2
+floor\tuser_objects\t2
+floor\tchildren\t0.5
 bound\tthreads\t8
 kind\trenderer\t1
 """
+# The metrics stage's tests: their own thresholds, so a retuned ci/soak-thresholds.tsv cannot move them.
+TEST_THRESHOLDS = "warmup\t30\nwindow\t10\n" + FLOORS
+# The prototype's controls had no slope: their 8-minute fixtures are judged with no warm-up and a 3-minute
+# window, so the flat metrics pass and each control still fails only by the rule it names.
+PROTO_THRESHOLDS = "warmup\t0\nwindow\t3\n" + FLOORS
+MiB = 1 << 20
 
 
 def ok_samples(n):
@@ -79,9 +84,19 @@ def thread_rows(metrics, extra=None):
     return rows
 
 
-def write_run(d, rows, samples, crash_dir=True, crash_files=(), metrics="flat", threads="flat"):
-    """A recorded soak run directory: run.tsv, samples.tsv, crash\\, metrics.tsv and threads.tsv. `metrics`
-    and `threads` are row lists, "flat" for the complete flat ones, or None to leave the file out."""
+def flat_timing(samples, late=None):
+    """One timing row per sample: taken 10 ms after its due time, or `late(minute)` ms when given."""
+    rows = []
+    for m, _, _, _ in samples:
+        ms = (late or (lambda _m: 10))(m)
+        rows.append((m, m * 60000 + ms, ms, 0 if m == 1 else 8000))
+    return rows
+
+
+def write_run(d, rows, samples, crash_dir=True, crash_files=(), metrics="flat", threads="flat", timing="flat"):
+    """A recorded soak run directory: run.tsv, samples.tsv, crash\\, metrics.tsv, threads.tsv and timing.tsv.
+    `metrics`, `threads` and `timing` are row lists, "flat" for the complete flat ones, or None to leave the
+    file out."""
     os.makedirs(d)
     if crash_dir:
         os.makedirs(os.path.join(d, "crash"))
@@ -105,15 +120,21 @@ def write_run(d, rows, samples, crash_dir=True, crash_files=(), metrics="flat", 
         threads = thread_rows(metrics or flat_metrics(samples))
     if threads is not None:
         put("threads.tsv", "minute\ttid\tstart\tname", threads)
+    if timing == "flat":
+        timing = flat_timing(samples)
+    if timing is not None:
+        put("timing.tsv", "minute\tsampled_ms\tlate_ms\tworkload_ms", timing)
 
 
 class JudgeCase(unittest.TestCase):
+    THRESHOLDS = PROTO_THRESHOLDS
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="soak-judge-")
         self.addCleanup(self.tmp.cleanup)
         self.thresholds = os.path.join(self.tmp.name, "thresholds.tsv")
         with open(self.thresholds, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(TEST_THRESHOLDS)
+            fh.write(self.THRESHOLDS)
         self.n = 0
 
     def run_dir(self, *args, **kwargs):
@@ -182,7 +203,8 @@ class PrototypeControls(JudgeCase):
 
     def test_109_a_minute_recorded_twice(self):
         samples = SOAK_OK[:4] + SOAK_OK[3:]
-        self.expect(self.run_dir(soak_rows(("quit", 0)), samples, metrics=flat_metrics(SOAK_OK)),
+        self.expect(self.run_dir(soak_rows(("quit", 0)), samples, metrics=flat_metrics(SOAK_OK),
+                                 timing=flat_timing(SOAK_OK)),
                     {"DUPLICATE-MINUTE": 1})
 
     def test_110_an_early_end_then_a_clean_one(self):
@@ -241,7 +263,8 @@ class PrototypeControls(JudgeCase):
 
 
 class MetricsStage(JudgeCase):
-    """The slope check and the records it reads (PLAN.md §3.5: thresholds fixed in 0a, 30-minute warm-up)."""
+    """The slope check and the records it reads (PLAN.md §3.5: thresholds fixed in 0a, a warm-up)."""
+    THRESHOLDS = TEST_THRESHOLDS
 
     def hour(self, override=None, extra_threads=None, samples=None, end=("quit", 0), **kwargs):
         samples = samples or ok_samples(60)
@@ -254,12 +277,40 @@ class MetricsStage(JudgeCase):
         self.assertIn("n=30", out)
         self.assertIn("minutes 31-60", out)
 
-    def test_the_repository_thresholds_parse(self):
-        self.expect(self.hour(), {}, min_minutes=60, thresholds=DEFAULT_THRESHOLDS)
+    def eight_hours(self, override=None):
+        """Release coverage's soak: 480 minutes, judged with the repository's own thresholds."""
+        samples = ok_samples(480)
+        metrics = flat_metrics(samples, override)
+        return self.run_dir(soak_rows(("quit", 0), planned=480), samples, metrics=metrics,
+                            threads=thread_rows(metrics))
+
+    def release(self, d, kinds):
+        return self.expect(d, kinds, min_minutes=480, other_class=OTHER_CLASS, thresholds=DEFAULT_THRESHOLDS)
+
+    def test_the_repository_thresholds_pass_eight_noisy_flat_hours(self):
+        noise = lambda m: {"handles": 400 + (7 if m % 2 else -7), "private_bytes": (50 << 20) + (m % 5) * MiB,
+                           "commit_charge": (60 << 20) + (m % 5) * MiB, "user_objects": 20 + m % 3}
+        self.release(self.eight_hours(noise), {})
+
+    def test_the_repository_thresholds_fail_a_steady_memory_rise(self):
+        # Round 1's Sol High: 1 MiB a minute (60 MiB/h, about 480 MiB in 8 hours) passed the 64 MiB/h thresholds.
+        rise = lambda m: {"private_bytes": (50 << 20) + m * MiB, "commit_charge": (60 << 20) + m * MiB}
+        out = self.release(self.eight_hours(rise), {"SLOPE": 2})
+        self.assertIn("FAIL SLOPE private_bytes", out)
+
+    def test_the_repository_thresholds_fail_a_slow_handle_leak_over_eight_hours(self):
+        # Round 1's Opus L1: 15 handles an hour (about 110 after the warm-up) passed a fixed 16/h threshold.
+        leak = lambda m: {"handles": 400 + (7 if m % 2 else -7) + m // 4}
+        out = self.release(self.eight_hours(leak), {"SLOPE": 1})
+        self.assertIn("FAIL SLOPE handles", out)
+
+    def test_the_repository_thresholds_fail_two_leaked_panes_an_hour(self):
+        # Round 1's Opus L1: 5 leaked child processes an hour passed a 6/h threshold.
+        self.release(self.eight_hours(lambda m: {"children": 2 + m // 30}), {"SLOPE": 1})
 
     def test_the_negative_control_one_handle_a_minute_fails_on_handles(self):
         out = self.expect(self.hour(lambda m: {"handles": 400 + m}), {"SLOPE": 1}, min_minutes=60)
-        self.assertIn("FAIL SLOPE handles +60.00/h", out)
+        self.assertIn("FAIL SLOPE handles rises +60.00/h", out)
 
     def test_growth_inside_the_warm_up_passes(self):
         self.expect(self.hour(lambda m: {"handles": 400 + 5 * min(m, 30), "private_bytes": (40 + min(m, 30)) << 20}),
@@ -302,12 +353,85 @@ class MetricsStage(JudgeCase):
         self.expect(self.hour(samples=samples, end=("early", 3)),
                     {"PROCESS-GONE": 55, "EARLY-EXIT": 1, "EXIT-CODE": 1, "NO-SLOPE-SAMPLES": 1}, min_minutes=60)
 
-    def test_a_plan_within_the_warm_up_has_no_slope(self):
-        samples = ok_samples(30)
+    def test_a_minimum_without_a_slope_window_is_refused(self):
+        # Round 1's Opus L3: a --min-minutes within the warm-up used to skip the slope silently and pass.
+        samples = ok_samples(39)
         metrics = flat_metrics(samples, lambda m: {"handles": 400 + m})
-        d = self.run_dir(soak_rows(("quit", 0), planned=30), samples, metrics=metrics)
-        out = self.expect(d, {}, min_minutes=30)
-        self.assertIn("slope check: not applicable", out)
+        d = self.run_dir(soak_rows(("quit", 0), planned=39), samples, metrics=metrics)
+        self.expect(d, {"MINIMUM-TOO-SHORT": 1}, min_minutes=39)
+
+    def test_the_shortest_minimum_with_a_window_is_judged(self):
+        samples = ok_samples(40)
+        metrics = flat_metrics(samples, lambda m: {"handles": 400 + m})
+        d = self.run_dir(soak_rows(("quit", 0), planned=40), samples, metrics=metrics)
+        self.expect(d, {"SLOPE": 1}, min_minutes=40)
+
+    def test_a_sample_away_from_the_baseline(self):
+        self.expect(self.hour(lambda m: {"surfaces": 2} if m == 40 else {}), {"NOT-AT-BASELINE": 1}, min_minutes=60)
+
+    def test_a_workload_action_that_did_not_take_effect(self):
+        self.expect(self.hour(lambda m: {"missed": 1} if m == 12 else {}), {"WORKLOAD-MISSED": 1}, min_minutes=60)
+
+    def test_no_workload(self):
+        self.expect(self.hour(lambda m: {"churn": 0}), {"NO-WORKLOAD": 1}, min_minutes=60)
+
+    def test_idle_minutes_are_allowed(self):
+        self.expect(self.hour(lambda m: {"churn": 0} if m % 10 == 0 else {}), {}, min_minutes=60)
+
+    def test_thread_rows_that_disagree_with_the_count(self):
+        metrics = flat_metrics(ok_samples(60))
+        threads = [r for r in thread_rows(metrics) if not (r[0] == 33 and r[3] == "io")]
+        self.expect(self.run_dir(soak_rows(("quit", 0), planned=60), ok_samples(60), metrics=metrics,
+                                 threads=threads),
+                    {"MALFORMED": 1}, min_minutes=60)
+
+    def test_thresholds_without_a_metric_fail_closed(self):
+        bad = os.path.join(self.tmp.name, "bad-thresholds.tsv")
+        with open(bad, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(line + "\n" for line in TEST_THRESHOLDS.splitlines() if "children" not in line))
+        self.expect(self.hour(), {"BAD-THRESHOLDS": 1}, min_minutes=60, thresholds=bad)
+
+    def test_thresholds_with_an_unknown_row_fail_closed(self):
+        bad = os.path.join(self.tmp.name, "bad-thresholds.tsv")
+        with open(bad, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(TEST_THRESHOLDS + "floor\thandles\t99\n")
+        self.expect(self.hour(), {"BAD-THRESHOLDS": 1}, min_minutes=60, thresholds=bad)
+
+    def test_a_missing_thresholds_file_fails_closed(self):
+        self.expect(self.hour(), {"BAD-THRESHOLDS": 1}, min_minutes=60,
+                    thresholds=os.path.join(self.tmp.name, "absent.tsv"))
+
+
+class Records(JudgeCase):
+    """The records the metrics stage reads, complete and once each (8-minute fixtures, no warm-up)."""
+
+    def test_a_late_sample_fails(self):
+        # Round 1's Opus H1: a hung copy blocked the driver, and the sample taken after the hang read "yes".
+        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=flat_timing(SOAK_OK, lambda m: 66858 if m == 3 else 10))
+        out = self.expect(d, {"LATE-SAMPLE": 1})
+        self.assertIn("LATE-SAMPLE minute 3 sampled 66858 ms", out)
+
+    def test_a_sample_at_the_bound_passes(self):
+        self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=flat_timing(SOAK_OK, lambda m: 5000)), {})
+
+    def test_no_timing_file(self):
+        self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=None), {"NO-TIMING": 1})
+
+    def test_a_timing_row_missing(self):
+        self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=[r for r in flat_timing(SOAK_OK) if r[0] != 6]),
+                    {"MISSING-TIMING": 1})
+
+    def test_a_timing_row_twice(self):
+        timing = flat_timing(SOAK_OK)
+        self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=timing + timing[1:2]),
+                    {"DUPLICATE-TIMING": 1})
+
+    def test_an_end_code_with_two_minus_signs_is_malformed(self):
+        # Round 1's Opus L9: `--3` passed the prototype's lstrip check and then crashed int().
+        d = self.run_dir(soak_rows(("early", "--3")), SOAK_OK)
+        rc, kinds, out = self.judge(d)
+        self.assertEqual((rc, kinds), (1, {"MALFORMED": 1}), out)
+        self.assertNotIn("Traceback", out)
 
     def test_no_metrics_file(self):
         self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, metrics=None,
@@ -347,43 +471,9 @@ class MetricsStage(JudgeCase):
         self.assertGreaterEqual(kinds.get("MALFORMED", 0), 1, out)
         self.assertEqual(kinds.get("MISSING-METRIC"), 8, out)
 
-    def test_a_sample_away_from_the_baseline(self):
-        self.expect(self.hour(lambda m: {"surfaces": 2} if m == 40 else {}), {"NOT-AT-BASELINE": 1}, min_minutes=60)
-
-    def test_a_workload_action_that_did_not_take_effect(self):
-        self.expect(self.hour(lambda m: {"missed": 1} if m == 12 else {}), {"WORKLOAD-MISSED": 1}, min_minutes=60)
-
-    def test_no_workload(self):
-        self.expect(self.hour(lambda m: {"churn": 0}), {"NO-WORKLOAD": 1}, min_minutes=60)
-
-    def test_idle_minutes_are_allowed(self):
-        self.expect(self.hour(lambda m: {"churn": 0} if m % 10 == 0 else {}), {}, min_minutes=60)
-
-    def test_thread_rows_that_disagree_with_the_count(self):
-        metrics = flat_metrics(ok_samples(60))
-        threads = [r for r in thread_rows(metrics) if not (r[0] == 33 and r[3] == "io")]
-        self.expect(self.run_dir(soak_rows(("quit", 0), planned=60), ok_samples(60), metrics=metrics,
-                                 threads=threads),
-                    {"MALFORMED": 1}, min_minutes=60)
-
-    def test_thresholds_without_a_metric_fail_closed(self):
-        bad = os.path.join(self.tmp.name, "bad-thresholds.tsv")
-        with open(bad, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write("".join(line + "\n" for line in TEST_THRESHOLDS.splitlines() if "children" not in line))
-        self.expect(self.hour(), {"BAD-THRESHOLDS": 1}, min_minutes=60, thresholds=bad)
-
-    def test_thresholds_with_an_unknown_row_fail_closed(self):
-        bad = os.path.join(self.tmp.name, "bad-thresholds.tsv")
-        with open(bad, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(TEST_THRESHOLDS + "slope\thandles\t99\n")
-        self.expect(self.hour(), {"BAD-THRESHOLDS": 1}, min_minutes=60, thresholds=bad)
-
-    def test_a_missing_thresholds_file_fails_closed(self):
-        self.expect(self.hour(), {"BAD-THRESHOLDS": 1}, min_minutes=60,
-                    thresholds=os.path.join(self.tmp.name, "absent.tsv"))
-
 
 class LineEnds(JudgeCase):
+    THRESHOLDS = TEST_THRESHOLDS
     def test_records_and_thresholds_with_crlf_line_ends_pass(self):
         # A core.autocrlf checkout gives the thresholds CRLF ends; a record written on Windows may have them too.
         d = self.run_dir(soak_rows(("quit", 0), planned=60), ok_samples(60))
@@ -404,6 +494,124 @@ class LineEnds(JudgeCase):
             fh.write(b"9\t720\t\xff\tyes\n")
         rc, kinds, out = self.judge(d)
         self.assertEqual((rc, kinds.get("MALFORMED")), (1, 1), out)
+
+
+class RealNoise(JudgeCase):
+    """Synthetic leaks on real runs' metrics (round 1's Opus controls), judged with the repository's thresholds.
+    The fixtures are metrics.tsv as two clean soaks recorded it (ci/soak-fixtures/, numbers only): a 4-hour
+    ReleaseFast copy and a 1-hour ReleaseSafe copy, both of the PR's harness on 2026-11-18. The other records
+    are rebuilt to match them, so only the metrics carry the run's own noise."""
+
+    def real_run(self, fixture, add_mib_per_hour=0.0, warmup_window=None):
+        with open(os.path.join(HERE, "soak-fixtures", fixture), encoding="utf-8") as fh:
+            lines = [line for line in fh.read().splitlines() if line.strip()]
+        header = lines[0].split("\t")
+        metrics = []
+        for line in lines[1:]:
+            values = dict(zip(header, line.split("\t")))
+            m = int(values["minute"])
+            add = int(round(add_mib_per_hour * MiB * m / 60))
+            for key in ("private_bytes", "commit_charge"):   # a heap leak moves both
+                values[key] = str(int(values[key]) + add)
+            metrics.append(tuple(values[k] for k in header))
+        samples = ok_samples(len(metrics))
+        threads = []
+        for row in metrics:
+            named = (("noctty.exe+0x2000", "renderer"), ("noctty.exe+0x3000", "io"), ("noctty.exe+0x4000", "io-reader"))
+            rest = (("ntdll.dll+0x24990", ""),) * (int(row[2]) - len(named))
+            threads += [(row[0], 100 + i, start, name) for i, (start, name) in enumerate(named + rest)]
+        d = self.run_dir(soak_rows(("quit", 0), planned=len(metrics)), samples, metrics=metrics, threads=threads)
+        thresholds = DEFAULT_THRESHOLDS
+        if warmup_window is not None:   # the repository's floors and bounds with another warm-up and window
+            with open(DEFAULT_THRESHOLDS, encoding="utf-8") as fh:
+                kept = [line for line in fh.read().splitlines() if not line.startswith(("warmup\t", "window\t"))]
+            thresholds = os.path.join(self.tmp.name, "real-thresholds.tsv")
+            with open(thresholds, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(f"warmup\t{warmup_window[0]}\nwindow\t{warmup_window[1]}\n" + "\n".join(kept) + "\n")
+        return d, thresholds, len(metrics)
+
+    def test_the_clean_four_hours_pass(self):
+        d, thresholds, n = self.real_run("long4h-releasefast.metrics.tsv")
+        self.expect(d, {}, min_minutes=n, thresholds=thresholds)
+
+    def test_the_clean_four_hours_with_20_mib_an_hour_fail(self):
+        d, thresholds, n = self.real_run("long4h-releasefast.metrics.tsv", 20)
+        out = self.expect(d, {"SLOPE": 2}, min_minutes=n, thresholds=thresholds)
+        self.assertIn("FAIL SLOPE private_bytes", out)
+        self.assertIn("FAIL SLOPE commit_charge", out)
+
+    def test_the_releasesafe_hour_passes_after_a_30_minute_warm_up(self):
+        d, thresholds, n = self.real_run("r3-releasesafe.metrics.tsv", 0, (30, 30))
+        self.expect(d, {}, min_minutes=n, thresholds=thresholds)
+
+    def test_the_releasesafe_hour_with_50_mib_an_hour_fails(self):
+        d, thresholds, n = self.real_run("r3-releasesafe.metrics.tsv", 50, (30, 30))
+        self.expect(d, {"SLOPE": 2}, min_minutes=n, thresholds=thresholds)
+
+
+class ReviewRound1(JudgeCase):
+    """PR #727 round 1's review threads on the judge, one test each."""
+
+    def test_a_class_with_a_hash_and_no_worktree_slug_is_bad(self):
+        rows = soak_rows(("quit", 0), klass="noctty-interactive-0123456789ab-soak-fast")
+        self.expect(self.run_dir(rows, SOAK_OK), {"BAD-CLASS": 1})
+
+    def test_a_peer_with_two_class_rows_is_malformed(self):
+        peer = os.path.join(self.tmp.name, "peer")
+        write_run(peer, soak_rows(("quit", 0), klass=OTHER_CLASS) + [("class", OTHER_CLASS, "extra")], SOAK_OK)
+        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK)
+        self.expect(d, {"MALFORMED": 1}, extra=("--other-run", peer))
+
+    def test_a_peer_class_not_of_the_helper_shape_is_malformed(self):
+        peer = os.path.join(self.tmp.name, "peer")
+        write_run(peer, soak_rows(("quit", 0), klass="noctty-interactive-soak"), SOAK_OK)
+        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK)
+        self.expect(d, {"MALFORMED": 1}, extra=("--other-run", peer))
+
+    def test_a_number_with_thousands_of_digits_is_malformed(self):
+        d = self.run_dir(soak_rows(("quit", 0), planned="9" * 4301), SOAK_OK)
+        rc, kinds, out = self.judge(d)
+        self.assertEqual((rc, kinds.get("MALFORMED")), (1, 1), out)
+
+    def test_a_corrupt_minute_number_is_one_gap(self):
+        samples = SOAK_OK + [(999999999999, PID, START, "yes")]
+        d = self.run_dir(soak_rows(("quit", 0)), samples, metrics=flat_metrics(SOAK_OK), timing=flat_timing(SOAK_OK))
+        rc, kinds, out = self.judge(d)
+        self.assertEqual(kinds.get("MISSING-MINUTE"), 1, out)
+        self.assertIn("MISSING-MINUTE minutes 9-999999999998", out)
+
+    def test_a_thread_listed_twice_in_a_minute_is_malformed(self):
+        metrics = flat_metrics(SOAK_OK)
+        threads = thread_rows(metrics)
+        threads = [r if not (r[0] == 3 and r[3] == "io") else (3, 101, r[2], r[3]) for r in threads]
+        # The copied row, and the count it then leaves short of metrics.tsv's.
+        self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, metrics=metrics, threads=threads), {"MALFORMED": 2})
+
+    def test_a_thread_name_that_is_not_utf8_is_malformed_and_left_out(self):
+        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK)
+        path = os.path.join(d, "threads.tsv")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        with open(path, "wb") as fh:
+            fh.write(data.replace(b"3\t102\tnoctty.exe+0x3000\tio\n", b"3\t102\tnoctty.exe+0x3000\tio\xff\n", 1))
+        rc, kinds, out = self.judge(d)
+        self.assertEqual((rc, kinds), (1, {"MALFORMED": 2}), out)   # the line, and the count it then leaves short
+
+    def test_a_trailing_thresholds_option_is_a_usage_error(self):
+        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK)
+        r = subprocess.run([sys.executable, "-I", JUDGE, d, "--min-minutes", "8", "--thresholds"],
+                           capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_the_default_thresholds_are_found_without_the_option(self):
+        samples = ok_samples(480)
+        metrics = flat_metrics(samples)
+        d = self.run_dir(soak_rows(("quit", 0), planned=480), samples, metrics=metrics, threads=thread_rows(metrics))
+        peer = self.run_dir(soak_rows(("quit", 0), klass=OTHER_CLASS), SOAK_OK)
+        r = subprocess.run([sys.executable, "-I", JUDGE, d, "--min-minutes", "480", "--other-run", peer],
+                           capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("RESULT PASS", r.stdout)
 
 
 class Usage(JudgeCase):
