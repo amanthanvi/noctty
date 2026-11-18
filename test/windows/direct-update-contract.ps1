@@ -81,12 +81,13 @@ function Get-DirectUpdateProblems([string] $Text) {
         MesaSingleFile=@('Add-HostedMesa','if($after.Count -ne $before.Count+1 -or $changes.Count -ne 1 -or $changes[0].SideIndicator -cne ''=>'' -or $changes[0].InputObject -cnotmatch ''^opengl32\.dll:''){throw ''Mesa injection changed more than one extra file''}')
         ClipboardHosted=@('Invoke-ClipboardPositive','if(-not $ephemeral){return @{Supported=$false;FailedApi=''HostedOnly'';WinSta0WriterNeverInvoked=$true}}')
         HostedWinSta0=@('Invoke-HostedClipboardPositive','if(-not $ephemeral){throw ''WinSta0 clipboard control requires a disposable hosted runner''}')
-        ClipboardSupported=@('Invoke-ClipboardPositive','if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw ''Clipboard positive control failed''}')
         ReceiptArray=@('Save-Receipt','$json=ConvertTo-Json -InputObject $Value -Depth 12')
         ReceiptPublication=@('Save-Receipt','[IO.File]::Move($temporary,$path,$true)')
         StubLoadApi=@('Get-StubLoadError','[DirectUpdateUi]::StubLoadError($Path)')
     }
     foreach($entry in $guardStatements.GetEnumerator()){Need $entry.Key (Direct (Function-Statements $entry.Value[0]) $entry.Value[1])}
+    $clipboardTry=@((Function-Statements 'Invoke-ClipboardPositive') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    Need ClipboardSupported (Direct $clipboardTry.Body.Statements "if(-not `$fact.Supported -or -not `$fact.IsolatedStation -or -not `$fact.SequenceAdvanced){throw 'Clipboard positive control failed'}")
     $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'New-DriverEnvironment'})
     Need MinimalEnvironmentPolicy ($node.Count -eq 1 -and (Same $node[0].Body '{ $minimal=@{} foreach($name in @(''SystemRoot'',''WINDIR'',''COMSPEC'',''PATH'',''PATHEXT'',''GITHUB_ACTIONS'',''RUNNER_ENVIRONMENT'')){ if($Parent.Contains($name)){$minimal[$name]=[string]$Parent[$name]} } $minimal.LOCALAPPDATA=Join-Path $Root ''localappdata''; $minimal.APPDATA=Join-Path $Root ''appdata'' $minimal.TEMP=Join-Path $Root ''temp''; $minimal.TMP=$minimal.TEMP $minimal.USERPROFILE=Join-Path $Root ''profile'' return $minimal }'))
     $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'Invoke-MinimalDriverEnvironment'})
