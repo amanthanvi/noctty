@@ -11,6 +11,7 @@ function Assert-ReleaseEvidence {
         [string] $TestRunId, [string] $EvidenceRunId, [string] $ReleaseRunId,
         [string] $WorkDirectory
     )
+    $resumeFrom = 0
     foreach ($spec in @(
         @{ Id = $TestRunId; Workflow = 'test.yml'; Artifact = "flagship-portable-x64-$TestRunId" },
         @{ Id = $EvidenceRunId; Workflow = 'test.yml'; Artifact = "flagship-interactive-win11-$EvidenceRunId" },
@@ -18,9 +19,25 @@ function Assert-ReleaseEvidence {
     )) {
         $run = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)")
         if ([string]$run.id -cne $spec.Id -or $run.head_sha -cne $CandidateSha -or
-            $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
+            $run.status -cne 'completed' -or
+            ($run.conclusion -cne 'success' -and -not ($spec.Workflow -ceq 'release.yml' -and $run.conclusion -ceq 'failure')) -or
             $run.path -cne ".github/workflows/$($spec.Workflow)") {
             throw "RunIdentityMismatch: run $($spec.Id) must be completed and successful on the candidate in $($spec.Workflow)."
+        }
+        if ($spec.Workflow -ceq 'release.yml' -and $run.conclusion -ceq 'failure') {
+            $releaseJobs = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$ReleaseRunId/jobs?per_page=100")
+            $build = @($releaseJobs.jobs | Where-Object { $_.name -ceq 'Windows Release' })
+            $published = @($build.steps | Where-Object { $_.name -ceq 'Publish GitHub Release' -and $_.conclusion -ceq 'success' })
+            if ($releaseJobs.total_count -gt @($releaseJobs.jobs).Count -or $build.Count -ne 1 -or $published.Count -ne 1) {
+                throw 'ReleasePublishNotSuccessful: original Release run did not successfully complete Publish GitHub Release; published-release resume is refused.'
+            }
+            $resumeFrom = 0
+            foreach ($stepName in @('Verify published release copy and assets', 'Publish Scoop manifest', 'Submit WinGet manifest update', 'Publish Chocolatey package')) {
+                $step = @($build[0].steps | Where-Object { $_.name -ceq $stepName })
+                if ($step.Count -ne 1 -or $step[0].conclusion -cne 'success') { break }
+                $resumeFrom++
+            }
+            Write-Host "PublishedReleaseResume: original Release $ReleaseRunId published successfully; resume step index $resumeFrom (verify, Scoop, WinGet, Chocolatey)."
         }
         # Read the records before any download, including on a stable retry.
         $records = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)/artifacts?per_page=100")
@@ -61,4 +78,7 @@ function Assert-ReleaseEvidence {
             (Get-FileSha256Lower $path) -cne $artifact.sha256) { throw 'EvidenceHashMismatch: interactive artifact is not hash-bound.' }
     }
     Write-Host "Evidence: PASS (Test $TestRunId, interactive $EvidenceRunId, Release $ReleaseRunId)."
+    # Successful original builds and ordinary promote retries start at verification.
+    if ($null -eq $resumeFrom) { $resumeFrom = 0 }
+    return [int]$resumeFrom
 }

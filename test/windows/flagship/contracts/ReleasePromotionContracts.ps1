@@ -10,11 +10,21 @@ function Test-ReleasePromotionWorkflow {
         '          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}',
         '          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}',
         '          RELEASE_RUN_ID: ${{ github.run_id }}',
-        '          RELEASE_MANIFEST_SHA256: ${{ steps.publish.outputs.manifest_sha256 }}',
-        "        if: vars.CHOCOLATEY_PUBLISH != 'off'"
+        '          RELEASE_MANIFEST_SHA256: ${{ steps.manifest.outputs.manifest_sha256 }}',
+        "        if: steps.promote.outputs.publish_chocolatey == 'true' && vars.CHOCOLATEY_PUBLISH != 'off'"
     )) {
         if (@([regex]::Matches($Text, '(?m)^' + [regex]::Escape($line) + '\r?$')).Count -ne 1) { return $false }
     }
+    $job = Get-YamlJobText -Content $Text -Name 'windows-promote' -Source 'promote workflow'
+    if ($job -notmatch '(?m)^      attestations: read\r?$') { return $false }
+    $manifest = Get-YamlStepBlock -Content $Text -Name 'Write release manifest and record digest' -Source 'build workflow'
+    $publish = Get-YamlStepBlock -Content $Text -Name 'Publish GitHub Release' -Source 'build workflow'
+    if ($manifest -notmatch 'release-write-manifest.ps1' -or $publish -match 'release-write-manifest.ps1' -or
+        $Text.IndexOf('      - name: Write release manifest and record digest') -ge $Text.IndexOf('      - name: Publish GitHub Release')) { return $false }
+    foreach ($channel in @('scoop','winget','chocolatey')) {
+        if ($job -notmatch ('steps.promote.outputs.publish_' + $channel + ' == ''true''')) { return $false }
+    }
+    if ($Text.IndexOf('      - name: Refuse incomplete publication before candidate checkout') -ge $Text.IndexOf('      - name: Checkout candidate data')) { return $false }
     $main = Get-YamlStepBlock -Content $Text -Name 'Checkout orchestration main' -Source 'promote workflow'
     $candidate = Get-YamlStepBlock -Content $Text -Name 'Checkout candidate data' -Source 'promote workflow'
     foreach ($step in @($main, $candidate)) {
@@ -41,9 +51,10 @@ foreach ($target in @(
     '          RELEASE_CANDIDATE_SHA: ${{ github.sha }}',
     '          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}',
     '          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}',
+    '      attestations: read',
     '          RELEASE_RUN_ID: ${{ github.run_id }}',
-    '          RELEASE_MANIFEST_SHA256: ${{ steps.publish.outputs.manifest_sha256 }}',
-    "        if: vars.CHOCOLATEY_PUBLISH != 'off'"
+    '          RELEASE_MANIFEST_SHA256: ${{ steps.manifest.outputs.manifest_sha256 }}',
+    "        if: steps.promote.outputs.publish_chocolatey == 'true' && vars.CHOCOLATEY_PUBLISH != 'off'"
 )) {
     if (Test-ReleasePromotionWorkflow ($releaseWorkflowText.Replace($target, '# removed by contract control'))) { throw 'Promotion workflow accepted a missing requirement.' }
 }
@@ -60,6 +71,21 @@ if ($promoteText -match '(?m)^\s*& gh release (upload|create)\b|--clobber' -or
 }
 $publisherResumeOutput = @(& (Join-Path $repoRoot 'test/windows/release-publisher-resume.ps1') 6>&1)
 if ($LASTEXITCODE -ne 0 -or @($publisherResumeOutput | Where-Object {
-    [string]$_ -ceq 'Publisher resume: PASS (9 WinGet cases and unchanged Scoop with relative metadata).'
+    [string]$_ -ceq 'Publisher resume: PASS (15 WinGet cases and unchanged Scoop with relative metadata).'
 }).Count -ne 1) { throw 'Publisher resume controls did not all complete.' }
 $publisherResumeOutput | ForEach-Object { Write-Host $_ }
+
+$manifestText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-manifest.ps1') -Raw
+$publisherText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-publish-github.ps1') -Raw
+$verifierText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/verify-published-release.ps1') -Raw
+foreach ($text in @($publisherText,$verifierText)) {
+    if ($text -notmatch 'Get-ReleasePayloadPaths' -or $text -notmatch 'Assert-ReleaseManifest') { throw 'Writer, publisher and verifier must use one payload definition and assertion.' }
+}
+if ($publisherText -match 'Copy-Item' -or $manifestText.IndexOf('Copy-Item') -ge $manifestText.IndexOf('payload = @(')) { throw 'Checksum alias must be finalized before manifest hashing.' }
+. (Join-Path $repoRoot 'scripts/release-manifest.ps1')
+foreach ($spec in @(@{Version='1.3.123';Count=8;Symbols=0}, @{Version='1.3.124';Count=10;Symbols=0}, @{Version='1.3.133';Count=12;Symbols=2}, @{Version='1.4.100';Count=12;Symbols=2})) {
+    $paths = @(Get-ReleasePayloadPaths -ArtifactRoot '.' -Version $spec.Version)
+    if ($paths.Count -ne $spec.Count -or @($paths | Where-Object { $_ -like '*-symbols.zip' }).Count -ne $spec.Symbols) { throw 'Shared release payload lost its historical manifest/symbols boundaries.' }
+}
+$checks = Get-YamlJobText -Content $testWorkflowText -Name checks -Source 'Test workflow'
+if ($checks -notmatch 'Cache digest-verified release fixture inputs' -or $checks -notmatch 'NOCTTY_RELEASE_FIXTURE_ASSETS:') { throw 'Checks must cache the verified real fixture assets.' }

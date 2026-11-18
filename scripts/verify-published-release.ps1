@@ -124,19 +124,7 @@ $verifyAttestations = if ($requiresAttestation) {
 }
 
 $expectedNames = [System.Collections.Generic.List[string]]::new()
-foreach ($architecture in (Get-WindowsPackageArchitectures)) {
-    $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup))
-    $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable))
-    if ($requiresPortableManifests) {
-        $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest))
-    }
-    if ($requiresSymbols) {
-        $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind symbols))
-    }
-    $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
-}
-$expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
-$expectedNames.Add('noctty-icon.svg')
+Get-ReleasePayloadPaths -ArtifactRoot '.' -Version $Version | ForEach-Object { $expectedNames.Add([IO.Path]::GetFileName($_)) }
 $expectedAttestationNames = @($expectedNames | Where-Object { $_ -ne 'noctty-icon.svg' })
 $expectedAssetCount = if ($requiresPortableManifests) { 10 } else { 8 }
 if ($requiresSymbols) { $expectedAssetCount += 2 }
@@ -148,7 +136,7 @@ if ($expectedNames.Count -ne $expectedAssetCount) {
 }
 $hasReleaseManifest = @($release.assets | Where-Object { $_.name -ceq 'release-manifest.json' }).Count -gt 0
 if ($hasReleaseManifest -or $ManifestSha256) {
-    if (-not $ManifestSha256) { throw 'The run-summary ManifestSha256 is required to verify release-manifest.json.' }
+    if (-not $hasReleaseManifest) { throw 'ManifestMissing: supplied digest cannot be verified because this release has no release-manifest.json.' }
     $expectedNames.Add('release-manifest.json')
     $expectedAssetCount += 1
 }
@@ -183,11 +171,13 @@ try {
 
     if ($hasReleaseManifest -or $ManifestSha256) {
         $releaseManifestPath = Join-Path $DownloadDirectory 'release-manifest.json'
-        if ((Get-FileSha256Lower $releaseManifestPath) -cne $ManifestSha256) { throw 'ManifestDigestMismatch: run-summary digest differs.' }
+        if ($ManifestSha256 -and (Get-FileSha256Lower $releaseManifestPath) -cne $ManifestSha256) { throw 'ManifestDigestMismatch: run-summary digest differs.' }
         $identity = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
         $candidateCommit = & git -C $candidateDataRoot rev-parse HEAD
         if ($LASTEXITCODE -ne 0 -or $candidateCommit -cne $identity.candidateSha) { throw 'Candidate data checkout differs from release-manifest.json.' }
         [void](Assert-ReleaseManifest -Path $releaseManifestPath -ExpectedSha256 $ManifestSha256 -Release $release -DownloadDirectory $DownloadDirectory -Tag $tag -CandidateSha $identity.candidateSha -TestRunId ([string]$identity.testRunId) -EvidenceRunId ([string]$identity.evidenceRunId) -ReleaseRunId ([string]$identity.releaseRunId))
+        if (-not $ManifestSha256) { Write-Warning 'Manifest is unanchored: no independent run-summary digest supplied. Payload and manifest bytes match GitHub digests; this does not authenticate the manifest against its build summary.' }
+        else { Write-Host 'Manifest: anchored to the supplied run-summary digest.' }
     }
 
     $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $candidateDataRoot 'src/update/github_releases.zig'))

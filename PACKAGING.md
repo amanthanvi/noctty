@@ -335,11 +335,63 @@ A release does not require a manual Windows 10 pass. The
 optional pass for a change that needs Windows 10 evidence, not a release step.
 The scheduled **Windows 10 branches** workflow is a non-required check.
 
-If a tag already exists and the workflow failed before publish, configure
-the missing signing secrets and then rerun the failed `Release` workflow or
-manually dispatch **Release** with the same version. The workflow is
-idempotent for release creation/upload because it uses `gh release create`
-on first publish and `gh release upload --clobber` on reruns.
+Build mode creates a draft targeting the accepted candidate, uploads each asset
+with at most three attempts, checks every uploaded digest against
+`release-manifest.json`, then publishes. The manifest digest is recorded by
+**Write release manifest and record digest**, before **Publish GitHub Release**.
+Uploads are immutable; build mode refuses an existing release and never uses
+`--clobber`. Keep the original Release run ID and its summary digest.
+
+For a soaked prerelease, land the stable-copy update to README and the site on
+`main` first, then dispatch **Release** from `main` with `mode=promote`:
+
+```powershell
+gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=promote -f tag=<tag> -f candidate_sha=<peeled-sha> -f test_run_id=<test-run> -f evidence_run_id=<interactive-run> -f release_run_id=<original-build-run> -f manifest_sha256=<summary-sha256>
+```
+
+Promotion runs main's scripts, checks out the candidate for its pinned data and
+generator, authenticates evidence and every asset, regenerates identical
+package-manager files, checks the stable copy, flips the release, verifies it,
+then publishes Scoop, WinGet and Chocolatey in order. Before the flip, each
+channel must have its repository/package ID, token and bootstrap configured,
+or be explicitly disabled by `SCOOP_PUBLISH=off`, `WINGET_PUBLISH=off` or
+`CHOCOLATEY_PUBLISH=off`. Missing configuration fails with
+`PackageManagerNotReady`; disabling a channel is a deliberate operator choice.
+
+**PublishedReleaseResume** uses the same promote inputs for a stable or
+prerelease build whose original Release run failed later. The jobs API must
+show **Publish GitHub Release** succeeded; the tag must still resolve to the
+candidate, and the summary digest, manifest and every asset must match. The
+original run ID stays fixed. A stable recovery starts at the first incomplete
+step (verify, Scoop, WinGet, Chocolatey); completed preceding steps are skipped.
+A prerelease recovery verifies after its flip. Each publisher is idempotent:
+Scoop compares the desired bytes, WinGet checks open/merged PR manifest paths,
+and Chocolatey checks the exact version. Unknown state stops the run.
+`ReleasePublishNotSuccessful` refuses a failed run without a successful publish
+step. Inspect that run and publication state before choosing recovery.
+
+`DraftRelease` (including a cancelled upload) and `IncompleteRelease` (missing
+manifest or payload assets) cannot be promoted. After inspecting the release,
+manual recovery is to delete the incomplete release **and tag**, then dispatch
+a new build from main with renewed acceptance evidence:
+
+```powershell
+gh release delete <tag> --repo amanthanvi/noctty --cleanup-tag --yes
+gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=build -f version=<version> -f prerelease=true
+```
+
+This is an operator recovery, never an automatic deletion. It produces a new
+candidate/run/manifest and needs a new soak. A complete published release uses
+`PublishedReleaseResume`; do not delete it to retry a package-manager step.
+
+Test evidence is retained for 90 days. `EvidenceExpired` identifies the run,
+artifact and expiry time. Dispatch fresh exact-candidate evidence, then pass
+the new Test/evidence run IDs to promote, retaining the original Release run
+ID and manifest digest:
+
+```powershell
+gh workflow run test.yml --repo amanthanvi/noctty --ref <tag> -f run_interactive_win11=true
+```
 
 ### WinGet
 

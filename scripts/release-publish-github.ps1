@@ -57,44 +57,13 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'GitHub CLI (gh) is required to publish a release.'
 }
 
-$architectures = Get-WindowsPackageArchitectures
-$artifactDirectories = @{}
-foreach ($architecture in $architectures) {
-    $artifactDirectories[$architecture] = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
-}
-$artifactDirectoryX64 = $artifactDirectories['x64']
-$legacyChecksumsPath = Join-Path $artifactDirectoryX64 (
-    New-WindowsPackageArtifactName `
-        -Version $Version `
-        -Architecture x64 `
-        -Kind legacy-checksums
-)
-Copy-Item `
-    -LiteralPath (Join-Path $artifactDirectoryX64 (
-        New-WindowsPackageArtifactName `
-            -Version $Version `
-            -Architecture x64 `
-            -Kind checksums
-    )) `
-    -Destination $legacyChecksumsPath `
-    -Force
-
-$assets = @()
-foreach ($architecture in $architectures) {
-    $artifactDirectory = $artifactDirectories[$architecture]
-    $assets += @(
-        (Join-Path $artifactDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup)),
-        (Join-Path $artifactDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable)),
-        (Join-Path $artifactDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest)),
-        (Join-Path $artifactDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind symbols)),
-        (Join-Path $artifactDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
-    )
-}
-$assets += @(
-    $legacyChecksumsPath,
-    (Join-Path $artifactDirectoryX64 'noctty-icon.svg'),
-    (Join-Path $artifactDirectoryX64 'release-manifest.json')
-)
+# The writer finalizes SHA256SUMS.txt before hashing; never modify payload here.
+. (Join-Path $PSScriptRoot 'release-publication-state.ps1')
+$primary = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
+$manifestPath = Join-Path $primary 'release-manifest.json'
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$manifestDigest = Get-FileSha256Lower $manifestPath
+$assets = @(Get-ReleasePayloadPaths -ArtifactRoot $ArtifactRoot -Version $Version) + $manifestPath
 $notesPrefix = @"
 Compatibility line: Ghostty $VersionLine
 Base upstream release: $UpstreamBaseVersion
@@ -102,15 +71,53 @@ Versioning: major.minor follow the Ghostty upstream line; patch is the noctty re
 "@
 
 & gh release view $Tag --repo $Repository *> $null
-if ($LASTEXITCODE -ne 0) {
-    $extra = @()
-    if ($Prerelease -eq 'true') {
-        $extra += '--prerelease'
-    }
-    & gh release create $Tag --repo $Repository --target $CandidateSha --title $Title --generate-notes --notes $notesPrefix @extra @assets
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create GitHub release $Tag."
-    }
-} else {
+if ($LASTEXITCODE -eq 0) {
+    $existing = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+    Assert-ReleasePublicationState -Release $existing -Repository $Repository -Tag $Tag
     throw "Release $Tag already exists. Use mode promote with its recorded manifest; a build must never replace published assets."
 }
+# Create an explicit draft, upload each immutable asset with bounded retries,
+# verify the complete set, then publish. Cancellation leaves a named manual
+# recovery path, never automatic deletion or replacement of unknown bytes.
+$extra = if ($Prerelease -eq 'true') { @('--prerelease') } else { @() }
+& gh release create $Tag --repo $Repository --target $CandidateSha --draft --title $Title --generate-notes --notes $notesPrefix @extra
+if ($LASTEXITCODE -ne 0) { throw 'Failed to create release draft. Inspect publication state before retrying.' }
+foreach ($asset in $assets) {
+    $name = [IO.Path]::GetFileName($asset)
+    $hash = Get-FileSha256Lower $asset
+    $size = (Get-Item -LiteralPath $asset).Length
+    $uploaded = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        & gh release upload $Tag --repo $Repository $asset
+        $uploadExit = $LASTEXITCODE
+        # Also reconcile a lost success response; never retry with replacement.
+        $state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+        $remote = @($state.assets | Where-Object { $_.name -ceq $name })
+        if ($remote.Count -eq 1) {
+            if ($remote[0].digest -cne "sha256:$hash" -or $remote[0].size -ne $size) {
+                throw "AssetDigestMismatch: existing upload $name differs; refusing replacement."
+            }
+            $uploaded = $true
+            break
+        }
+        if ($uploadExit -eq 0) { throw "UploadStateUnknown: successful upload $name is missing from GitHub." }
+        if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+    }
+    if (-not $uploaded) {
+        throw "IncompleteRelease: upload $name failed after 3 attempts. $(Get-IncompleteReleaseRecovery -Repository $Repository -Tag $Tag)"
+    }
+}
+$assertInputs = @{
+    Path = $manifestPath; ExpectedSha256 = $manifestDigest; ArtifactRoot = $ArtifactRoot
+    DownloadDirectory = $primary; Tag = $Tag; CandidateSha = $CandidateSha
+    TestRunId = [string]$manifest.testRunId; EvidenceRunId = [string]$manifest.evidenceRunId; ReleaseRunId = [string]$manifest.releaseRunId
+}
+$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+[void](Assert-ReleaseManifest @assertInputs -Release $state)
+$publishFlags = if ($Prerelease -eq 'true') { @('--prerelease', '--latest=false') } else { @('--prerelease=false', '--latest') }
+& gh release edit $Tag --repo $Repository --draft=false @publishFlags
+if ($LASTEXITCODE -ne 0) { throw 'ReleasePublishUnconfirmed: inspect release state; no automatic deletion is permitted.' }
+$state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+Assert-ReleasePublicationState -Release $state -Repository $Repository -Tag $Tag
+[void](Assert-ReleaseManifest @assertInputs -Release $state)
+Write-Host 'Build publication: PASS (all uploaded bytes and GitHub digests match the shared manifest, including prereleases).'

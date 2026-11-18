@@ -52,41 +52,78 @@ $artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 function Test-WinGetVersionSubmitted {
-    # Query both states: a closed, unmerged PR is not a completed submission.
-    # An unavailable or truncated search leaves publication state unknown.
-    foreach ($state in @('is:open', 'is:merged')) {
-        $query = "repo:microsoft/winget-pkgs is:pr $state in:title `"$PackageIdentifier`" `"$Version`""
-        $previousGhToken = $env:GH_TOKEN
-        try {
-            $env:GH_TOKEN = $env:WINGET_CREATE_GITHUB_TOKEN
-            $json = & gh api --method GET search/issues -f "q=$query" -f per_page=100
-            if ($LASTEXITCODE -ne 0) { throw 'GitHub search failed.' }
-            $search = $json | ConvertFrom-Json
-            if ($null -eq $search.items -or $search.incomplete_results -or $search.total_count -gt 100) {
-                throw 'GitHub search was incomplete.'
+    # Titles are mutable. Discover merged submissions through path-scoped
+    # commits and associated PRs, and enumerate open PR file connections.
+    $segments = $PackageIdentifier.Split('.')
+    $prefix = 'manifests/{0}/{1}/{2}/' -f $segments[0].Substring(0, 1).ToLowerInvariant(), ($segments -join '/'), $Version
+    function Read-WinGetJson {
+        param([string[]] $Arguments)
+        $json = & gh @Arguments
+        if ($LASTEXITCODE -ne 0) { throw 'WinGet GitHub read failed.' }
+        $data = $json | ConvertFrom-Json -NoEnumerate
+        if ($null -eq $data -or ($data -isnot [array] -and $data.errors)) { throw 'WinGet GitHub response is incomplete.' }
+        return $data
+    }
+    function Test-WinGetPrFiles {
+        param([int] $Number)
+        $pr = Read-WinGetJson @('api', "repos/microsoft/winget-pkgs/pulls/$Number")
+        if ($null -eq $pr.changed_files -or $pr.changed_files -lt 0) { throw 'Missing PR file count.' }
+        $seen = 0
+        for ($page = 1; ; $page++) {
+            $files = @(Read-WinGetJson @('api', "repos/microsoft/winget-pkgs/pulls/$Number/files?per_page=100&page=$page"))
+            $seen += $files.Count
+            foreach ($file in $files) {
+                if (-not $file.filename -or -not $file.status) { throw 'Incomplete PR files.' }
+                if ($file.status -cne 'removed' -and $file.filename.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
             }
-            foreach ($item in @($search.items)) {
-                if ($item.title -match ('(?i)(?<![\w.])' + [regex]::Escape($PackageIdentifier) + '(?![\w.])') -and
-                    $item.title -match ('(?<![\d.])' + [regex]::Escape($Version) + '(?![\d.])')) {
-                    $prJson = & gh api "repos/microsoft/winget-pkgs/pulls/$($item.number)"
-                    if ($LASTEXITCODE -ne 0) { throw 'Cannot read the matching PR.' }
-                    $pr = $prJson | ConvertFrom-Json
-                    $filesJson = & gh api "repos/microsoft/winget-pkgs/pulls/$($item.number)/files?per_page=100"
-                    if ($LASTEXITCODE -ne 0) { throw 'Cannot read the matching PR files.' }
-                    $files = @($filesJson | ConvertFrom-Json)
-                    if ($pr.changed_files -gt $files.Count) { throw 'Matching PR file list is incomplete.' }
-                    $segments = $PackageIdentifier.Split('.')
-                    $prefix = 'manifests/{0}/{1}/{2}/' -f $segments[0].Substring(0, 1).ToLowerInvariant(), ($segments -join '/'), $Version
-                    if (($pr.state -ceq 'open' -or $pr.merged_at) -and @($files | Where-Object {
-                        $_.status -cne 'removed' -and $_.filename.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
-                    }).Count -gt 0) { return $true }
-                }
+            if ($files.Count -lt 100) {
+                if ($seen -ne $pr.changed_files) { throw 'PR files were truncated.' }
+                return $false
             }
         }
-        catch { throw 'Could not determine whether this WinGet version already has an open or merged PR; refusing a duplicate submission.' }
-        finally { $env:GH_TOKEN = $previousGhToken }
     }
-    return $false
+    $savedToken = $env:GH_TOKEN
+    try {
+        $env:GH_TOKEN = $env:WINGET_CREATE_GITHUB_TOKEN
+        for ($page = 1; ; $page++) {
+            $commits = @(Read-WinGetJson @('api', '--method', 'GET', 'repos/microsoft/winget-pkgs/commits', '-f', "path=$prefix", '-f', 'per_page=100', '-f', "page=$page"))
+            foreach ($commit in $commits) {
+                if ($commit.sha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Incomplete commit list.' }
+                for ($prPage = 1; ; $prPage++) {
+                    $prs = @(Read-WinGetJson @('api', "repos/microsoft/winget-pkgs/commits/$($commit.sha)/pulls?per_page=100&page=$prPage"))
+                    foreach ($pr in $prs) {
+                        if (-not $pr.number -or -not $pr.state) { throw 'Incomplete associated PR list.' }
+                        if ($pr.merged_at -and (Test-WinGetPrFiles -Number $pr.number)) { return $true }
+                    }
+                    if ($prs.Count -lt 100) { break }
+                }
+            }
+            if ($commits.Count -lt 100) { break }
+        }
+        $cursor = $null
+        do {
+            $query = 'query($cursor:String) { repository(owner:"microsoft",name:"winget-pkgs") { pullRequests(states:OPEN,first:100,after:$cursor) { nodes { number files(first:100) { nodes { path changeType } pageInfo { hasNextPage endCursor } } } pageInfo { hasNextPage endCursor } } } }'
+            $arguments = @('api', 'graphql', '-f', "query=$query")
+            if ($cursor) { $arguments += @('-f', "cursor=$cursor") }
+            $connection = (Read-WinGetJson $arguments).data.repository.pullRequests
+            if ($null -eq $connection.nodes -or $null -eq $connection.pageInfo.hasNextPage) { throw 'Incomplete open PR list.' }
+            foreach ($pr in $connection.nodes) {
+                if (-not $pr.number -or $null -eq $pr.files.nodes -or $null -eq $pr.files.pageInfo.hasNextPage) { throw 'Incomplete open PR files.' }
+                foreach ($file in $pr.files.nodes) {
+                    if (-not $file.path -or -not $file.changeType) { throw 'Incomplete open PR file.' }
+                    if ($file.changeType -cne 'DELETED' -and $file.path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+                }
+                # REST pagination covers the uncommon PR with >100 files.
+                if ($pr.files.pageInfo.hasNextPage -and (Test-WinGetPrFiles -Number $pr.number)) { return $true }
+            }
+            $next = $connection.pageInfo.endCursor
+            if ($connection.pageInfo.hasNextPage -and (-not $next -or $next -ceq $cursor)) { throw 'Open PR pagination stalled.' }
+            $cursor = $next
+        } while ($connection.pageInfo.hasNextPage)
+        return $false
+    }
+    catch { throw 'Could not determine whether this WinGet version already has an open or merged PR; refusing a duplicate submission.' }
+    finally { $env:GH_TOKEN = $savedToken }
 }
 if (Test-WinGetVersionSubmitted) {
     Write-Host "WinGet already has an open or merged PR for $PackageIdentifier $Version; nothing to submit."

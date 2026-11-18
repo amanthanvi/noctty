@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 $previousResumeContext = $global:NocttyReleaseResumeFixture
 $global:NocttyReleaseResumeFixture = [pscustomobject]@{ Case=$null; Clone=$null; Source=$null; GitCalls=$null }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$createdWorkDirectory = -not $WorkDirectory
 if (-not $WorkDirectory) { $WorkDirectory = Join-Path ([IO.Path]::GetTempPath()) ('release-resume-' + [guid]::NewGuid().ToString('N')) }
 if (Test-Path -LiteralPath $WorkDirectory) { throw 'Resume fixture directory must be fresh.' }
 [void][IO.Directory]::CreateDirectory($WorkDirectory)
@@ -18,33 +19,52 @@ $Version = '1.3.136'
 $global:NocttyReleaseResumeFixture.Case = ''
 function gh {
     $global:LASTEXITCODE = 0
-    if ($global:NocttyReleaseResumeFixture.Case -eq 'unknown') { $global:LASTEXITCODE = 1; return '{}' }
-    if ($args -contains 'search/issues') {
-        $isMergedQuery = @($args | Where-Object { $_ -like '*is:merged*' }).Count -gt 0
-        $items = @()
-        if ($global:NocttyReleaseResumeFixture.Case -notin @('absent', 'incomplete') -and ($global:NocttyReleaseResumeFixture.Case -ne 'merged' -or $isMergedQuery)) {
-            $title = if ($global:NocttyReleaseResumeFixture.Case -eq 'other-version') { 'New version: AmanThanvi.noctty version 1.3.1360' } else { 'New version: AmanThanvi.noctty version 1.3.136' }
-            $items = @(@{ title = $title; number = 123 })
+    $case = $global:NocttyReleaseResumeFixture.Case
+    if ($case -eq 'unknown') { $global:LASTEXITCODE = 1; return '{}' }
+    $endpoint = $args[1]
+    if ($endpoint -ceq 'repos/microsoft/winget-pkgs/pulls/123') {
+        return (@{changed_files=$(if ($case -in @('files-incomplete','files-paginated')) { 101 } elseif ($case -eq 'merged-retitled') { 3 } else { 1 })} | ConvertTo-Json)
+    }
+    if ($args -contains 'repos/microsoft/winget-pkgs/commits') {
+        if ($case -in @('merged','merged-retitled')) { return (ConvertTo-Json -InputObject @(@{sha='a'*40})) }
+        return '[]'
+    }
+    if ($endpoint -like '*/commits/*/pulls?*') {
+        return (ConvertTo-Json -InputObject @(@{number=123;state='closed';merged_at='2026-11-18T00:00:00Z';title='Unrelated retitled text'}))
+    }
+    $path = switch ($case) {
+        'other-package' { 'manifests/o/Other/Package/1.3.136/Other.Package.yaml' }
+        'other-version' { 'manifests/a/AmanThanvi/noctty/1.3.1360/AmanThanvi.noctty.yaml' }
+        default { 'manifests/a/AmanThanvi/noctty/1.3.136/AmanThanvi.noctty.yaml' }
+    }
+    if ($endpoint -like '*/files?*') {
+        if ($case -eq 'files-incomplete') { return '[{}]' }
+        if ($case -eq 'files-paginated' -and $endpoint -like '*page=1') {
+            return (ConvertTo-Json -InputObject @(1..100 | ForEach-Object { @{filename="unrelated/$_.yaml";status='added'} }))
         }
-        return (@{ items = $items; total_count = $items.Count; incomplete_results = ($global:NocttyReleaseResumeFixture.Case -eq 'incomplete') } | ConvertTo-Json -Depth 5)
+        if ($case -eq 'merged-retitled') {
+            return (ConvertTo-Json -InputObject @(1..3 | ForEach-Object { @{filename=$path;status='added'} }))
+        }
+        return (ConvertTo-Json -InputObject @(@{filename=$path;status='added'}))
     }
-    if ($args[1] -like '*/files?per_page=100') {
-        $path = if ($global:NocttyReleaseResumeFixture.Case -eq 'other-package') { 'manifests/o/Other/Package/1.3.136/Other.Package.yaml' } else { 'manifests/a/AmanThanvi/noctty/1.3.136/AmanThanvi.noctty.yaml' }
-        return (ConvertTo-Json -InputObject @(@{ filename = $path; status = 'added' }))
-    }
-    if ($args[1] -ceq 'repos/microsoft/winget-pkgs/pulls/123') {
-        return (@{
-            state = $(if ($global:NocttyReleaseResumeFixture.Case -in @('merged', 'closed')) { 'closed' } else { 'open' })
-            merged_at = $(if ($global:NocttyReleaseResumeFixture.Case -eq 'merged') { '2026-11-18T00:00:00Z' } else { $null })
-            changed_files = $(if ($global:NocttyReleaseResumeFixture.Case -eq 'files-incomplete') { 101 } else { 1 })
-        } | ConvertTo-Json)
+    if ($endpoint -ceq 'graphql') {
+        if ($case -eq 'incomplete') { return '{"errors":[{"message":"Unavailable"}]}' }
+        $nodes = @()
+        $nextPage = $false
+        if ($case -notin @('absent','closed')) {
+            $files = @{ nodes=@(@{path=$path;changeType=$(if ($case -eq 'deleted') { 'DELETED' } else { 'ADDED' })}); pageInfo=@{hasNextPage=$false;endCursor=$null} }
+            if ($case -in @('files-paginated','files-incomplete')) { $files.nodes=@(); $files.pageInfo.hasNextPage=$true }
+            $nodes = @(@{ number=123; files=$files })
+            if ($case -in @('paginated','stalled') -and $args -notcontains 'cursor=page2') { $nodes=@(); $nextPage=$true }
+        }
+        return (@{data=@{repository=@{pullRequests=@{nodes=$nodes;pageInfo=@{hasNextPage=$nextPage;endCursor=$(if ($case -eq 'stalled') { $null } else { 'page2' })}}}}} | ConvertTo-Json -Depth 9)
     }
     throw 'Resume fixture refused an unrecorded API operation.'
 }
 $savedToken = $env:GH_TOKEN
 $savedWinGetToken = $env:WINGET_CREATE_GITHUB_TOKEN
 $env:WINGET_CREATE_GITHUB_TOKEN = 'resume-fixture-token'
-$cases = [ordered]@{ open = $true; merged = $true; closed = $false; absent = $false; 'other-package' = $false; 'other-version' = $false; unknown = 'error'; incomplete = 'error'; 'files-incomplete' = 'error' }
+$cases = [ordered]@{ open = $true; 'open-retitled' = $true; merged = $true; 'merged-retitled' = $true; paginated = $true; 'files-paginated' = $true; deleted = $false; stalled = 'error'; closed = $false; absent = $false; 'other-package' = $false; 'other-version' = $false; unknown = 'error'; incomplete = 'error'; 'files-incomplete' = 'error' }
 try {
     foreach ($case in $cases.Keys) {
         $global:NocttyReleaseResumeFixture.Case = $case
@@ -94,3 +114,5 @@ try {
 Write-Host "Publisher resume: PASS ($($cases.Count) WinGet cases and unchanged Scoop with relative metadata)."
 
 $global:NocttyReleaseResumeFixture = $previousResumeContext
+
+if ($createdWorkDirectory -and [IO.Path]::GetFileName($WorkDirectory) -cmatch '\Arelease-resume-[0-9a-f]{32}\z' -and [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($WorkDirectory)) -eq [IO.Path]::GetTempPath().TrimEnd('\','/')) { Remove-Item -LiteralPath $WorkDirectory -Recurse -Force }

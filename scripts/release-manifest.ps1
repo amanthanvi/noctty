@@ -8,7 +8,11 @@ function Get-ReleasePayloadPaths {
     param([string] $ArtifactRoot, [string] $Version)
     foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         $directory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
-        foreach ($kind in @('setup', 'portable', 'manifest', 'symbols', 'checksums')) {
+        $kinds = @('setup', 'portable')
+        if ([version]$Version -ge [version]'1.3.124') { $kinds += 'manifest' }
+        if ([version]$Version -ge [version]'1.3.133') { $kinds += 'symbols' }
+        $kinds += 'checksums'
+        foreach ($kind in $kinds) {
             Join-Path $directory (New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind $kind)
         }
     }
@@ -42,6 +46,8 @@ function Write-ReleaseManifest {
     $diskBlob = & git -C $CandidateDirectory hash-object scripts/package-package-managers.ps1
     if ($LASTEXITCODE -ne 0 -or $diskBlob -cne $generatorBlob) { throw 'Candidate generator has uncommitted changes.' }
     $primary = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
+    # Finalize the legacy alias before hashing it. Publication never rewrites it.
+    Copy-Item -LiteralPath (Join-Path $primary 'SHA256SUMS-windows-x64.txt') -Destination (Join-Path $primary 'SHA256SUMS.txt') -Force
     $manifest = [ordered]@{
         schemaVersion = 1
         tag = $Tag
@@ -72,14 +78,16 @@ function Write-ReleaseManifest {
 function Assert-ReleaseManifest {
     param(
         [Parameter(Mandatory)] [string] $Path,
-        [Parameter(Mandatory)] [string] $ExpectedSha256,
+        [string] $ExpectedSha256,
         [Parameter(Mandatory)] $Release,
         [Parameter(Mandatory)] [string] $DownloadDirectory,
         [string] $Tag, [string] $CandidateSha, [string] $TestRunId,
         [string] $EvidenceRunId, [string] $ReleaseRunId,
+        [string] $ArtifactRoot,
         [switch] $Historical
     )
-    if ($ExpectedSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or (Get-FileSha256Lower $Path) -cne $ExpectedSha256) {
+    $manifestDigest = Get-FileSha256Lower $Path
+    if ($ExpectedSha256 -and ($ExpectedSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $manifestDigest -cne $ExpectedSha256)) {
         throw 'ManifestDigestMismatch: release-manifest.json differs from the run-summary digest.'
     }
     $manifest = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
@@ -98,16 +106,20 @@ function Assert-ReleaseManifest {
         }
     }
     $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $payloadPaths = @(Get-ReleasePayloadPaths -ArtifactRoot $(if ($ArtifactRoot) { $ArtifactRoot } else { '.' }) -Version $manifest.version)
+    $expectedNames = @($payloadPaths | ForEach-Object { [IO.Path]::GetFileName($_) })
     foreach ($entry in @($manifest.payload)) {
         $name = [string]$entry.name
         if ($name -ceq 'release-manifest.json' -or $name -cnotmatch '\A[0-9A-Za-z][0-9A-Za-z._-]*\z' -or -not $names.Add($name)) {
             throw 'ManifestPayloadInvalid: payload lists itself, duplicates a name or contains an invalid asset name.'
         }
-        if ($entry.sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $entry.size -isnot [long] -and $entry.size -isnot [int]) {
+        if ($entry.sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or ($entry.size -isnot [long] -and $entry.size -isnot [int])) {
             throw 'ManifestPayloadInvalid: invalid size or SHA-256.'
         }
+        if ($name -cnotin $expectedNames) { throw 'AssetSetMismatch: unexpected manifest payload.' }
         $asset = @($Release.assets | Where-Object { $_.name -ceq $name })
         $file = Join-Path $DownloadDirectory $name
+        if ($ArtifactRoot) { $file = @($payloadPaths | Where-Object { [IO.Path]::GetFileName($_) -ceq $name })[0] }
         if ($asset.Count -ne 1 -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "AssetSetMismatch: missing payload $name." }
         $hash = Get-FileSha256Lower $file
         if ((Get-Item -LiteralPath $file).Length -ne $entry.size -or $asset[0].size -ne $entry.size -or
@@ -116,10 +128,13 @@ function Assert-ReleaseManifest {
         }
     }
     if ($names.Count -eq 0) { throw 'ManifestPayloadInvalid: payload is empty.' }
+    if ($names.Count -ne $expectedNames.Count -or @($expectedNames | Where-Object { -not $names.Contains($_) }).Count) {
+        throw 'AssetSetMismatch: manifest payload differs from the shared release payload definition.'
+    }
     if (-not $Historical) {
         [void]$names.Add('release-manifest.json')
         $asset = @($Release.assets | Where-Object { $_.name -ceq 'release-manifest.json' })
-        if ($asset.Count -ne 1 -or $asset[0].digest -cne "sha256:$ExpectedSha256" -or
+        if ($asset.Count -ne 1 -or $asset[0].digest -cne "sha256:$manifestDigest" -or
             $asset[0].size -ne (Get-Item -LiteralPath $Path).Length) { throw 'ManifestDigestMismatch: GitHub manifest record differs.' }
     }
     if (@($Release.assets).Count -ne $names.Count -or

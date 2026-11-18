@@ -101,7 +101,12 @@ acceptable.
 GitHub build provenance, and the repository verifier that checks every asset's
 signature against the compiled pin. The short version is
 `scripts/verify-published-release.ps1 -Version <version>`, run from a tag
-checkout of this repository.
+checkout of this repository. When the release carries `release-manifest.json`,
+the public command verifies payload hashes and GitHub digests and reports
+**Manifest is unanchored** unless `-ManifestSha256 <sha256>` supplies the
+independent digest from the original Release run summary. Promotion requires
+that anchor; a public unanchored consistency check does not authenticate the
+manifest against its build summary.
 
 Verifying by eye is not enough while the certificate is self-signed: Windows
 will report the signature as untrusted, and `Get-AuthenticodeSignature` may

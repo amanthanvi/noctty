@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '01357d875fe48e4503009f93a9a0bd07060ac540e29133fd6ea44ab12e0cde39'
+    '1102833ee9be365a174b319dab7b3c0cfc5e03c60edc47c134ce5ec85e18641c'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1448,7 +1448,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '50f3d6d9000feb64dd0defd060c7dafa0108270cd9fbd3af5adaa7a941811ba2'
+            '393b4e83edd3c9de44f1ae07f707d06ac0e2c92ffbcd9aaad94245c4ba115ef9'
         CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
     }
     [pscustomobject] @{
@@ -1463,7 +1463,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            '8bcc7e35725f5b0487ae4d8ba537478fc0d768753b28bd04a225e52590eca98f'
+            '3d3a459e65838664d9affc1c1f1d727b5654036fa6eb98e1b18dd8e04db455b9'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1775,7 +1775,7 @@ if ($releaseArtifactVerifierText -notmatch
     $checksumHashLoopIndex -le $checksumMembershipIndex) {
     throw 'Local artifact verification must require exactly the setup, portable and symbols checksum entries before comparing hashes.'
 }
-if ($releaseGithubPublisherText -match '(?m)^\s*& gh release (edit|upload)\b' -or
+if ($releaseGithubPublisherText -match '--clobber' -or
     $releaseGithubPublisherText -notmatch 'Use mode promote with its recorded manifest' -or
     $releaseGithubPublisherText -notmatch '(?m)^\s*& gh release create .*?--target \$CandidateSha ') {
     throw 'Build publication must target the candidate and refuse to replace existing release assets.'
@@ -1839,7 +1839,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?noctty-icon\.svg.*?release-manifest\.json.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha.*?Failed to create.*?Use mode promote with its recorded manifest'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-ReleasePayloadPaths.*?gh release view \$Tag --repo \$Repository.*?Use mode promote with its recorded manifest.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha --draft.*?\$attempt -le 3.*?gh release upload.*?AssetDigestMismatch.*?Assert-ReleaseManifest.*?gh release edit.*?--draft=false.*?Assert-ReleaseManifest'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }

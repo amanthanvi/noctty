@@ -24,7 +24,7 @@ on:
         description: Promote only - successful interactive evidence run on the candidate
         type: string
       release_run_id:
-        description: Promote only - successful prerelease build run on the candidate
+        description: Promote only - original build run (success, or failure after successful publication)
         type: string
       manifest_sha256:
         description: Promote only - release-manifest.json SHA-256 from the build run summary
@@ -382,6 +382,23 @@ jobs:
           -UpstreamBaseVersion $env:RELEASE_UPSTREAM_BASE_VERSION
           -FirstForkPatch $env:RELEASE_FIRST_FORK_PATCH
 
+      - name: Write release manifest and record digest
+        id: manifest
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          MANIFEST_CANDIDATE_SHA: ${{ github.sha }}
+          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}
+          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+        shell: pwsh
+        run: |
+          ./scripts/release-write-manifest.ps1 `
+            -Tag $env:RELEASE_TAG -Version $env:RELEASE_VERSION `
+            -CandidateSha $env:MANIFEST_CANDIDATE_SHA `
+            -TestRunId $env:RELEASE_TEST_RUN_ID -EvidenceRunId $env:RELEASE_EVIDENCE_RUN_ID `
+            -ReleaseRunId $env:RELEASE_RUN_ID
+
       - name: Publish GitHub Release
         id: publish
         env:
@@ -394,16 +411,8 @@ jobs:
           RELEASE_UPSTREAM_BASE_VERSION: ${{ steps.meta.outputs.upstream_base_version }}
           RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
           RELEASE_CANDIDATE_SHA: ${{ github.sha }}
-          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}
-          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}
-          RELEASE_RUN_ID: ${{ github.run_id }}
         shell: pwsh
         run: |
-          ./scripts/release-write-manifest.ps1 `
-            -Tag $env:RELEASE_TAG -Version $env:RELEASE_VERSION `
-            -CandidateSha $env:RELEASE_CANDIDATE_SHA `
-            -TestRunId $env:RELEASE_TEST_RUN_ID -EvidenceRunId $env:RELEASE_EVIDENCE_RUN_ID `
-            -ReleaseRunId $env:RELEASE_RUN_ID
           ./scripts/release-publish-github.ps1 `
             -Tag $env:RELEASE_TAG `
             -Version $env:RELEASE_VERSION `
@@ -419,7 +428,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-          RELEASE_MANIFEST_SHA256: ${{ steps.publish.outputs.manifest_sha256 }}
+          RELEASE_MANIFEST_SHA256: ${{ steps.manifest.outputs.manifest_sha256 }}
         run: |
           ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -465,7 +474,11 @@ jobs:
     permissions:
       contents: write
       actions: read
+      attestations: read
     env:
+      SCOOP_PUBLISH: ${{ vars.SCOOP_PUBLISH }}
+      WINGET_PUBLISH: ${{ vars.WINGET_PUBLISH }}
+      CHOCOLATEY_PUBLISH: ${{ vars.CHOCOLATEY_PUBLISH }}
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
       SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
       SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}
@@ -478,6 +491,13 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Refuse incomplete publication before candidate checkout
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_TAG: ${{ inputs.tag }}
+        run: ./scripts/release-check-publication.ps1 -Tag $env:PROMOTE_TAG
 
       - name: Checkout candidate data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -493,6 +513,9 @@ jobs:
         timeout-minutes: 30
         env:
           GH_TOKEN: ${{ github.token }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+          PROMOTE_CHOCOLATEY_KEY_PRESENT: ${{ secrets.CHOCO_API_KEY != '' }}
           PROMOTE_TAG: ${{ inputs.tag }}
           PROMOTE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           PROMOTE_TEST_RUN_ID: ${{ inputs.test_run_id }}
@@ -507,6 +530,7 @@ jobs:
           -CandidateDirectory (Join-Path $PWD 'candidate')
 
       - name: Publish promoted Scoop manifest
+        if: steps.promote.outputs.publish_scoop == 'true'
         shell: pwsh
         timeout-minutes: 10
         env:
@@ -516,6 +540,7 @@ jobs:
         run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION -ArtifactRoot $env:RELEASE_ARTIFACT_ROOT
 
       - name: Submit promoted WinGet manifest update
+        if: steps.promote.outputs.publish_winget == 'true'
         shell: pwsh
         timeout-minutes: 15
         env:
@@ -525,7 +550,7 @@ jobs:
         run: ./scripts/release-submit-winget.ps1 -Version $env:RELEASE_VERSION -ArtifactRoot $env:RELEASE_ARTIFACT_ROOT
 
       - name: Publish promoted Chocolatey package
-        if: vars.CHOCOLATEY_PUBLISH != 'off'
+        if: steps.promote.outputs.publish_chocolatey == 'true' && vars.CHOCOLATEY_PUBLISH != 'off'
         shell: pwsh
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}

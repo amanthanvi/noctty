@@ -15,6 +15,8 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'release-manifest.ps1')
 . (Join-Path $PSScriptRoot 'release-evidence.ps1')
+. (Join-Path $PSScriptRoot 'release-publication-state.ps1')
+. (Join-Path $PSScriptRoot 'release-package-manager-preflight.ps1')
 $repoRoot = Get-RepoRoot
 if ($Fixture -eq 'historical') {
     $Tag = 'v1.3.136'
@@ -28,6 +30,8 @@ foreach ($field in @('Tag', 'CandidateSha', 'TestRunId', 'EvidenceRunId', 'Relea
     if (-not (Get-Variable $field -ValueOnly)) { throw "Required promote input missing: $field." }
 }
 if (-not $Fixture -and -not $ManifestSha256) { throw 'Required promote input missing: ManifestSha256.' }
+$release = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
+if (-not $Fixture) { Assert-ReleasePublicationState -Release $release -Repository $Repository -Tag $Tag }
 if (-not $WorkDirectory) { $WorkDirectory = Join-Path $repoRoot ('dist/promote-' + [guid]::NewGuid().ToString('N')) }
 $WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
 if (Test-Path -LiteralPath $WorkDirectory) {
@@ -60,10 +64,10 @@ for ($depth = 0; $object.type -ceq 'tag' -and $depth -lt 8; $depth++) {
     $object = (Invoke-ReleaseGhJson @('api', "repos/$Repository/git/tags/$($object.sha)")).object
 }
 if ($object.type -cne 'commit' -or $object.sha -cne $CandidateSha) { throw 'TagIdentityMismatch: remote tag differs from candidate input.' }
-$release = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/tags/$Tag")
-if ($release.tag_name -cne $Tag -or $release.draft) { throw 'ReleaseIdentityMismatch: release is missing, draft or has another tag.' }
 $resume = -not $release.prerelease
-Assert-ReleaseEvidence -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -EvidenceRunId $EvidenceRunId -ReleaseRunId $ReleaseRunId -WorkDirectory $WorkDirectory
+$resumeFrom = Assert-ReleaseEvidence -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -EvidenceRunId $EvidenceRunId -ReleaseRunId $ReleaseRunId -WorkDirectory $WorkDirectory
+# After a prerelease flip verification always runs, even if its build verified it.
+if (-not $resume) { $resumeFrom = 0 }
 $version = $Tag.Substring(1)
 $download = Join-Path $WorkDirectory 'download'
 [void][IO.Directory]::CreateDirectory($download)
@@ -123,11 +127,13 @@ if (-not $Fixture) {
 }
 if ($resume) {
     Write-Host 'Resume: verified identical already-stable release; skipping release edit.'
-} elseif (-not $Fixture -and $PSCmdlet.ShouldProcess($Tag, 'promote verified release to stable and latest')) {
+}
+$channels = if (-not $Fixture) { Assert-PromotionPackageManagers } else { @{ SCOOP=$false; WINGET=$false; CHOCOLATEY=$false } }
+if (-not $resume -and -not $Fixture -and $PSCmdlet.ShouldProcess($Tag, 'promote verified release to stable and latest')) {
     & gh release edit $Tag --repo $Repository --prerelease=false --latest
     if ($LASTEXITCODE -ne 0) { throw 'Release promotion failed.' }
-} else { Write-Host 'Read-only rehearsal: release edit disabled.' }
-if (-not $Fixture -and -not $WhatIfPreference) {
+} elseif (-not $resume) { Write-Host 'Read-only rehearsal: release edit disabled.' }
+if (-not $Fixture -and -not $WhatIfPreference -and $resumeFrom -eq 0) {
     & (Join-Path $PSScriptRoot 'check-release-copy.ps1') -ExpectedVersion $version -CheckRemoteLatest
     if ($LASTEXITCODE -ne 0) { throw 'Remote latest copy check failed.' }
     & (Join-Path $PSScriptRoot 'verify-published-release.ps1') -Version $version -CandidateDirectory $CandidateDirectory -ManifestSha256 $ManifestSha256
@@ -140,6 +146,7 @@ if ($Fixture) {
 }
 if ($env:GITHUB_OUTPUT) {
     "version=$version`nartifact_root=$artifactRoot" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "publish_scoop=$($channels.SCOOP -and $resumeFrom -le 1)`npublish_winget=$($channels.WINGET -and $resumeFrom -le 2)`npublish_chocolatey=$($channels.CHOCOLATEY -and $resumeFrom -le 3)".ToLowerInvariant() | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
 }
 Write-Host "Release promote: PASS ($Tag, resume=$resume, fixture=$([bool]$Fixture))."
 $global:LASTEXITCODE = 0
