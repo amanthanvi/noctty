@@ -1,0 +1,9 @@
+.{
+    .name = .differential_oracle,
+    .version = "0.0.0",
+    .fingerprint = 0x6cc13d77ee5e8c88,
+    .dependencies = .{
+        .ghostty = .{ .path = "../../" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon" },
+}
