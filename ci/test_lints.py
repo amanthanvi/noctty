@@ -20,7 +20,8 @@ from generate_win32_identifiers import generate as generate_removed
 
 LINE = "var flags_stack = std.heap.stackFallback(4096, alloc);"
 REMOVED = {"kernel32.Sleep", "kernel32.GetLastError", "sliceToPrefixedFileW"}
-EXPORTS = {"kernel32": ["kernel32"], "sliceToPrefixedFileW": ["sliceToPrefixedFileW"]}
+EXPORTS = {"kernel32": ["os", "windows", "kernel32"],
+           "sliceToPrefixedFileW": ["os", "windows", "sliceToPrefixedFileW"]}
 
 
 class BaselineControls(unittest.TestCase):
@@ -133,6 +134,17 @@ class BaselineControls(unittest.TestCase):
             self.assertTrue(self.check("", "const repeated = " + value + " ** 2;"))
             self.assertTrue(self.check("", "return " + value + " ** 2;"))
 
+    def test_pointer_expression_contexts_and_binary_twins(self):
+        from lint_compiler_control import TYPE_SOURCE, REPEAT_SOURCE
+        self.assertEqual([], self.check("", TYPE_SOURCE))
+        rows = self.check("", REPEAT_SOURCE)
+        self.assertEqual(12, len(rows))
+        self.assertTrue(all(row[3] == "**" for row in rows))
+        # The approved mechanical proxy has a stray brace. It must not turn
+        # this lexical lint into a whole-file syntax gate.
+        self.assertEqual([], self.check("", "}\nconst P = **u8;"))
+        self.assertTrue(self.check("", '}\nconst a = "x" ** 2;'))
+
     def test_hasdecl_target_line_is_in_review_span(self):
         source = '@hasDecl(\n T,\n "hook"\n);'
         self.assertEqual(1, len(zig.check_file("x.zig", "", source, {2}, {})))
@@ -243,6 +255,29 @@ class Win32Controls(unittest.TestCase):
         for expression in ("std.os.windows.CreatePipe", "std.os.windows.advapi32.RegSetValueExW"):
             self.assertTrue(list(win.Bindings(expression + "();").uses(removed)))
 
+    def test_nested_removed_names_and_real_registry_line(self):
+        removed = set(Path(__file__).with_name("win32-removed-identifiers.txt").read_text().splitlines())
+        for key in ("REG.DWORD", "REG.BINARY", "ws2_32.SOCK.CLOEXEC", "ws2_32.SOCK.NONBLOCK",
+                    "ws2_32.MSG.ERRQUEUE", "advapi32.RRF.RT_DWORD", "KNOWNFOLDERID.parse"):
+            self.assertIn(key, removed)
+            self.assertEqual(key, list(win.Bindings("std.os.windows." + key).uses(removed))[0][0])
+        repo = Path(__file__).resolve().parent.parent
+        name = "src/os/color_scheme.zig"
+        text = common.sources(repo, "cd61e53395b563335124d4eb0236162ae1d5ce6e", {name})[name]
+        self.assertIn("windows.REG.DWORD", text.splitlines()[46])
+        self.assertTrue(any(key == "REG.DWORD" and line == 47
+                            for key, span, line in win.Bindings(text, path=name).uses(removed)))
+
+    def test_reexports_share_literal_resolver(self):
+        for expression in ("windows.kernel32.Sleep", "std.os.windows.kernel32.Sleep",
+                           '@import("std").os.windows.kernel32.Sleep', "w.kernel32.Sleep"):
+            source = 'const std = @import("std"); const windows = std.os.windows; const w = windows;\n'
+            source += "pub const call = " + expression + ";"
+            self.assertEqual({"call": ["os", "windows", "kernel32", "Sleep"]}, win.reexports(source))
+        exports = win.reexports('pub const s = @import("std");')
+        self.assertEqual({"s": []}, exports)
+        self.assertTrue(list(win.Bindings('internal_os.windows.s.os.windows.kernel32.Sleep(1);', exports).uses(REMOVED)))
+
     def test_generator_enumerates_public_names_without_a_repo(self):
         root = Path(tempfile.mkdtemp(prefix="lint-std-control-"))
         for name in ("std15", "std17"):
@@ -256,6 +291,21 @@ class Win32Controls(unittest.TestCase):
         (root / "std15/os/windows/unexported.zig").write_text('pub const Unreachable = 1;', encoding="utf-8")
         self.assertEqual({"Removed", "advapi32", "advapi32.AlsoGone", "kernel32.Gone"},
                          set(generate_removed(root / "std17", root / "std15").splitlines()))
+
+    def test_generator_follows_nested_containers_imports_and_aliases(self):
+        root = Path(tempfile.mkdtemp(prefix="lint-nested-control-"))
+        for version in ("15", "17"):
+            (root / version / "os/windows").mkdir(parents=True)
+            (root / version / "os/windows.zig").write_text(
+                'const private = @import("windows/detail.zig");\npub const Imported = private;\n'
+                'pub const Outer = struct { pub const Inner = struct { ' +
+                ('pub const Gone = 1;' if version == "15" else '') +
+                ' }; pub const Alias = Inner; };\n', encoding="utf-8")
+            (root / version / "os/windows/detail.zig").write_text(
+                'pub const N = struct { ' + ('pub const Missing = 1;' if version == "15" else '') +
+                ' const Hidden = 0; };\n', encoding="utf-8")
+        self.assertEqual({"Outer.Inner.Gone", "Outer.Alias.Gone", "Imported.N.Missing"},
+                         set(generate_removed(root / "17", root / "15").splitlines()))
 
 
 class GitControls(unittest.TestCase):
@@ -400,16 +450,92 @@ class GitControls(unittest.TestCase):
         twin = self.commit()
         self.assertEqual([], win.check(self.repo, base, twin, upstream, removed))
 
+    def test_alias_move_visibility_comment_and_equivalent_origin_pass(self):
+        self.write("src/os/windows.zig", "// reexports\n")
+        source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
+                  'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
+        self.write("probe.zig", source)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        variants = (source.replace("const w =", "pub const w ="),
+                    source.replace("kernel32;", "kernel32; // Win32 API"),
+                    source.replace("const w = std.os.windows.kernel32;\n", "").replace(
+                        "const unrelated = 1;", "const unrelated = 1;\nconst w = std.os.windows.kernel32;"),
+                    source.replace("std.os.windows.kernel32;", '@import("std").os.windows.kernel32;'))
+        for variant in variants:
+            self.write("probe.zig", variant)
+            head = self.commit()
+            self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
+
+    def test_alias_matching_keeps_function_scopes(self):
+        self.write("src/os/windows.zig", "// reexports\n")
+        first = 'fn first() void { const k = local.sys; k.Sleep(1); }\n'
+        second = 'fn second() void { const k = std.os.windows.kernel32; k.Sleep(1); }\n'
+        self.write("probe.zig", first + second)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        self.write("probe.zig", first.replace("local.sys", "std.os.windows.kernel32") + second)
+        head = self.commit()
+        rows = win.check(self.repo, base, head, upstream, removed)
+        self.assertEqual([1], [row[1] for row in rows])
+
+    def test_reexport_changes_recheck_other_files_and_same_origin_twin(self):
+        module = "src/os/windows.zig"
+        source = 'const std = @import("std"); const windows = std.os.windows; const w = windows;\n'
+        self.write(module, source + "pub const call = local.sys.Sleep;\n")
+        self.write("probe.zig", 'const w = @import("src/os/windows.zig");\nfn f() void { w.call(1); }\n')
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        for route in ("windows.kernel32.Sleep", "std.os.windows.kernel32.Sleep", "w.kernel32.Sleep",
+                      '@import("std").os.windows.kernel32.Sleep'):
+            self.write(module, source + "pub const call = " + route + ";\n")
+            head = self.commit()
+            rows = win.check(self.repo, base, head, upstream, removed)
+            self.assertEqual([("probe.zig", 2)], [(r[0], r[1]) for r in rows])
+        # Changing the spelling or moving a re-export without changing its origin
+        # does not recheck the unchanged caller.
+        old = head
+        self.write(module, source + '// moved\npub const call = windows.kernel32.Sleep; // comment\n')
+        same = self.commit()
+        self.assertEqual([], win.check(self.repo, old, same, upstream, removed))
+        self.write(module, source + "pub const call = windows.kernel32.GetLastError;\n")
+        changed = self.commit()
+        removed.write_text("kernel32.GetLastError\nkernel32.Sleep\n", encoding="utf-8")
+        self.assertTrue(win.check(self.repo, same, changed, upstream, removed))
+        self.write(module, source + "pub const call = local.sys.Sleep;\n")
+        rehomed = self.commit()
+        self.assertEqual([], win.check(self.repo, changed, rehomed, upstream, removed))
+
+    def test_git_environment_cannot_hide_paths_or_choose_another_repo(self):
+        self.write("src/os/windows.zig", "// reexports\n")
+        base = self.commit()
+        self.write("glob[1].zig", 'const repeated = "a" ** 4;\nstd.os.windows.kernel32.Sleep(1);\n')
+        head = self.commit()
+        environments = [{name: "1"} for name in ("GIT_LITERAL_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
+                        "GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")]
+        environments.append({**{name: "1" for row in environments for name in row},
+            "GIT_DIR": "nonexistent-control-repo", "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "color.diff", "GIT_CONFIG_VALUE_0": "always",
+            "GIT_DIFF_OPTS": "--unified=100", "GIT_EXTERNAL_DIFF": "exit 91"})
+        for hostile in environments:
+            result = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("run_lints.py")),
+                "--win32-mode", "enforce"], cwd=self.repo, capture_output=True, text=True,
+                env={**os.environ, **hostile, "LINT_EVENT": "pull_request", "LINT_BASE": base,
+                     "LINT_HEAD": head, "GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": "false"})
+            self.assertEqual(1, result.returncode, result.stderr)
+            self.assertIn("**", result.stdout)
+            self.assertIn("kernel32.Sleep", result.stdout)
+
     def test_changed_blob_without_hunk_fails_closed_but_mode_change_passes(self):
         self.write("x.zig", "// before\n")
         base = self.commit()
         self.write("x.zig", "const x = @Type(.{});\n")
         head = self.commit()
         real_git = common.git
-        def no_hunk(repo, *args):
+        def no_hunk(repo, *args, **kwargs):
             if args[0] == "diff" and "--name-only" not in args:
                 return b"Binary files differ\n"
-            return real_git(repo, *args)
+            return real_git(repo, *args, **kwargs)
         with patch.object(common, "git", side_effect=no_hunk), self.assertRaises(ValueError):
             common.added_lines(self.repo, base, head)
         common.git(self.repo, "update-index", "--chmod=+x", "x.zig")
@@ -492,11 +618,79 @@ class GitControls(unittest.TestCase):
             common.ci_revisions(self.repo, {"event_name": "pull_request", "base": "no-such-ref", "head": head})
 
 
+class HistoryControls(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = Path(__file__).resolve().parent.parent
+        cls.repo = Path(tempfile.mkdtemp(prefix="lint-history-controls-"))
+        common.git(cls.repo, "init", "-q")
+        common.git(cls.repo, "config", "user.name", "Lint History Control")
+        common.git(cls.repo, "config", "user.email", "lint@example.invalid")
+        common.git(cls.repo, "config", "commit.gpgsign", "false")
+        objects = common.git(cls.source, "rev-parse", "--path-format=absolute", "--git-path", "objects").decode().strip()
+        (cls.repo / ".git/objects/info/alternates").write_text(objects.replace("\\", "/") + "\n",
+                                                               encoding="utf-8", newline="\n")
+        cls.base = "cd61e53395b563335124d4eb0236162ae1d5ce6e"
+        cls.ci = cls.source / "ci"
+
+    def fixture(self, path, source):
+        blob = common.git(self.repo, "hash-object", "-w", "--stdin", input=source.encode()).decode().strip()
+        common.git(self.repo, "read-tree", self.base)
+        common.git(self.repo, "update-index", "--cacheinfo", "100644," + blob + "," + path)
+        tree = common.git(self.repo, "write-tree").decode().strip()
+        return common.git(self.repo, "commit-tree", tree, "-p", self.base, "-m", "alias control").decode().strip()
+
+    def check(self, base, head):
+        return win.check(self.repo, base, head, self.ci / "upstream-paths.txt", self.ci / "win32-removed-identifiers.txt")
+
+    def test_real_import_swap_and_ipc_alias_move(self):
+        path = "src/apprt/win32.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        lines = source.splitlines(keepends=True)
+        self.assertEqual('const std = @import("std");\n', lines[10])
+        lines[10], lines[11] = lines[11], lines[10]
+        self.assertEqual([], self.check(self.base, self.fixture(path, "".join(lines))))
+        path = "src/apprt/win32/ipc_server.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        lines = source.splitlines(keepends=True)
+        at = lines.index("const windows = std.os.windows;\n")
+        line = lines.pop(at)
+        lines.insert(at + 2, line)
+        self.assertEqual([], self.check(self.base, self.fixture(path, "".join(lines))))
+
+    def test_real_refactors_do_not_recheck_unchanged_uses(self):
+        for head in ("1c8d4d39463e43415f8e8de603ed7312ad907420", "2ec37a2c80f9dab40b06b036b66ca575487d633b"):
+            base = common.revision(self.repo, head + "^")
+            rows = self.check(base, head)
+            added = common.added_lines(self.repo, base, head)
+            unchanged = [row for row in rows if row[1] not in added.get(row[0], ())]
+            self.assertEqual([], unchanged)
+            if head.startswith("1c8d4d394"):
+                self.assertEqual([], rows)
+            else:
+                self.assertEqual(45, len(rows))
+                path = "src/apprt/win32.zig"
+                module = "src/os/windows.zig"
+                texts = common.sources(self.repo, head, {path, module})
+                # With no previous snapshot, span() reproduces the old
+                # declaration-touch rule, accounting for the removed 29 errors.
+                legacy = win.Bindings(texts[path], win.reexports(texts[module]), path)
+                old_false = {(key, line) for key, span, line in legacy.uses(
+                    set((self.ci / "win32-removed-identifiers.txt").read_text().splitlines()))
+                    if span & added.get(path, set()) and line not in added.get(path, set())}
+                self.assertEqual(29, len(old_false))
+            print("Historical alias control:", head[:9], "unchanged-use errors", len(unchanged),
+                  "genuine added-line errors", len(rows))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--proxy-repo")
     parser.add_argument("--proxy-ref", default="trial-hybrid")
     parser.add_argument("--proxy-output", type=Path)
+    parser.add_argument("--compiler-output", type=Path)
+    parser.add_argument("--zig017", type=Path)
+    parser.add_argument("--pause-script", type=Path)
     options, rest = parser.parse_known_args()
     if options.proxy_repo:
         if options.proxy_output is None:
@@ -506,4 +700,13 @@ if __name__ == "__main__":
                 from lint_proxy_control import run
                 result = run(options.proxy_repo, options.proxy_ref, options.proxy_output)
                 self.assertEqual((8, 9), (result["baseline_entries"], result["baseline_allowance"]))
+    if options.compiler_output:
+        if options.zig017 is None or options.pause_script is None:
+            parser.error("--compiler-output requires --zig017 and --pause-script")
+        class CompilerControls(unittest.TestCase):
+            def test_both_compilers_and_removed_declaration_census(self):
+                from lint_compiler_control import run
+                result = run(Path(__file__).resolve().parent.parent, options.zig017,
+                             options.compiler_output, options.pause_script)
+                self.assertEqual(6, len(result["runs"]))
     unittest.main(argv=[sys.argv[0], *rest], verbosity=2)

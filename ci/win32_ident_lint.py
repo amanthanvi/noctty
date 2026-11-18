@@ -7,32 +7,34 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lint_common import added_lines, emit, paths, sources
-from zig_bindings import Bindings as LiteralBindings, chain
+from lint_common import added_lines, emit, merge_base, paths, sources
+from zig_bindings import Bindings as LiteralBindings
 
 
 class Bindings(LiteralBindings):
-    def uses(self, removed):
+    def uses(self, removed, added=None):
         for start, end, origin in self.accesses():
             if origin.kind != "std" or origin.parts[:2] != ("os", "windows"):
                 continue
             parts = origin.parts[2:]
             # Prefer the member when a whole namespace and its member disappeared.
-            for size in (2, 1):
+            for size in range(len(parts), 0, -1):
                 key = ".".join(parts[:size])
                 if len(parts) >= size and key in removed:
-                    yield key, self.span(start, end, origin), self.tokens[start].line + 1
+                    span = self.span(start, end, origin)
+                    if added is None or span & added or origin.exports & self.changed_exports:
+                        yield key, span, self.tokens[start].line + 1
                     break
 
 
 def reexports(text):
-    bindings, result = LiteralBindings(text), {}
+    bindings, result = LiteralBindings(text, path="src/os/windows.zig"), {}
     for (scope, name), (at, expression) in bindings.decls.items():
         if scope != 0 or at == 0 or bindings.tokens[at - 1].text != "pub":
             continue
-        parts = chain(expression)
-        if parts and parts[0] == "windows":
-            result[name] = parts[1:]
+        origin = bindings.resolve([name], at)
+        if origin and origin.kind == "std":
+            result[name] = list(origin.parts)
     return result
 
 
@@ -42,8 +44,12 @@ def fork_added(repo, head, upstream):
 
 
 @functools.lru_cache(maxsize=64)
-def removed_uses(path, text, exports, removed):
-    return tuple(Bindings(text, {name: list(parts) for name, parts in exports}, path).uses(removed))
+def removed_uses(path, before, text, old_exports, exports, removed, added):
+    bindings = Bindings(text, dict(exports), path)
+    bindings.previous = Bindings(before, dict(old_exports), path)
+    bindings.changed_exports = frozenset(name for name, value in exports
+                                        if dict(old_exports).get(name) != value)
+    return tuple(bindings.uses(removed, frozenset(added)))
 
 
 def check(repo, base, head, upstream_path, removed_path):
@@ -52,15 +58,24 @@ def check(repo, base, head, upstream_path, removed_path):
     if not upstream or not rows or rows != sorted(set(rows)):
         raise ValueError("missing upstream paths or malformed removed-name inventory")
     removed = frozenset(rows)
+    comparison = merge_base(repo, base, head)
     added = added_lines(repo, base, head)
-    names = set(added) & fork_added(repo, head, upstream)
-    texts = sources(repo, head, names | {"src/os/windows.zig"})
-    exports = tuple(sorted((name, tuple(parts)) for name, parts in reexports(texts["src/os/windows.zig"]).items()))
+    module = "src/os/windows.zig"
+    old_paths = paths(repo, comparison)
+    old_module = sources(repo, comparison, {module})[module] if module in old_paths else ""
+    new_module = sources(repo, head, {module})[module]
+    old_exports, exports = (tuple(sorted((name, tuple(parts)) for name, parts in reexports(text).items()))
+                            for text in (old_module, new_module))
+    fork = {name for name in fork_added(repo, head, upstream) if name.endswith(".zig")}
+    # A re-export edit can change bindings even in files with no changed lines.
+    names = fork if old_exports != exports else set(added) & fork
+    texts = sources(repo, head, names)
+    before = sources(repo, comparison, names & old_paths)
     findings = set()
     for name in sorted(names):
-        for key, span, line in removed_uses(name, texts[name], exports, removed):
-            if span & added[name]:
-                findings.add((name, line, "error", "removed std.os.windows." + key))
+        for key, span, line in removed_uses(name, before.get(name, ""), texts[name], old_exports,
+                                          exports, removed, tuple(sorted(added.get(name, ())))):
+            findings.add((name, line, "error", "removed std.os.windows." + key))
     return sorted(findings)
 
 

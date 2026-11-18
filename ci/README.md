@@ -20,6 +20,17 @@ python -I ci/test_lints.py --proxy-repo <read-only-repo> --proxy-ref trial-hybri
 This also runs the ordinary controls. It generates the proxy baseline and
 retains the twin in a separate fixture repo; it never writes to the input repo.
 
+The two-compiler controls are optional locally, using existing toolchains:
+
+```powershell
+python -I ci/test_lints.py --compiler-output <fresh-output> --zig017 <zig-0.17.1-exe> --pause-script <quiet-window-guard.ps1>
+```
+
+They compile the pointer-expression matrix on both compilers, compile the
+binary-repeat twins on 0.15.2 and verify their rejection on 0.17.1, and check
+every generated removed name by native reflection on both versions. They use
+the repository's dev-windows wrapper and caches in the supplied output directory.
+
 The `checks` job runs the controls and both lints on every change. The Zig lint
 fails new occurrences of binary array-repeat `**`, `@Type`, `@cImport`,
 `std.heap.stackFallback` (including literal imports and const aliases), or an
@@ -28,21 +39,36 @@ GitHub job summary. `@hasDecl` on an unresolved target also needs review: this
 lexical lint cannot prove an imported or computed target's visibility. A local
 literal struct's explicitly public member discharges that warning.
 
+The repeat classifier tracks whether the next token must begin an operand.
+Balanced token frames distinguish control-flow headers, function parameter
+lists and type attributes from completed calls/groups and indexing. Declaration
+names, break labels and payload captures do not complete operands. `**` in an
+operand position is a pointer prefix; after a completed operand it is binary
+repeat. This uses grammatical token context, without evaluating whether a
+value represents a type or enumerating preceding-prefix exceptions.
+
 Both lints tokenize complete files before intersecting matches with added diff
-lines. A Win32 use is also rechecked if any alias definition it depends on is
-added or changed, even when its own line is unchanged. Comments and
+lines. A Win32 use is also rechecked if an alias definition it depends on changes
+its resolved std origin relative to the merge base. Declarations are matched
+by name within their lexical owner; moves, visibility and comments with the
+same binding do not recheck unchanged uses. Comments and
 string/character literals are opaque. A multiline match
 counts when any of its participating code tokens is on an added line. The
 tokenizer is the plan's measured `zigtok.py`, copied without changes.
 
 The Win32 lint resolves the inventory's namespace binding paths and local const
 aliases, with block scope, literal imports, quoted identifiers, and alias chains.
-It follows `internal_os.windows` through the current head's public re-exports.
+It follows `internal_os.windows` through the current head's public re-exports,
+resolved through the same literal bindings regardless of their alias/import
+spelling. A changed re-export's std origin rechecks dependent uses throughout
+the head's fork-added Zig files, including files without a diff. A spelling,
+move or comment with the same origin does not trigger that scan.
 Inline `@import("std").os.windows` and relative imports of `src/os/windows.zig`
 are recognized. Uses behind pointer/slice qualifiers and bare aliases of leaf
 types (for example `HRESULT`) count. Calls re-homed to fork declarations pass.
-The generated list covers **1,485 removed names**: 582 root names and 903
-namespace members, checked against both compiler std trees. The plan's 124 is
+The generated list covers **1,534 removed names**: the 1,485 root/file-namespace
+names plus 49 nested declarations (including `REG.*`, `ws2_32.SOCK.*` and
+`ws2_32.MSG.ERRQUEUE`), checked against both compiler std trees. The plan's 124 is
 the reached subset at `31796f5d0`; all 124 remain in the full set. The retained
 `win_idents3.py` preserves its historical inventory matching rules, with
 batched Git reads and strict UTF-8 decoding instead of replacement decoding.
@@ -50,7 +76,10 @@ batched Git reads and strict UTF-8 decoding instead of replacement decoding.
 This remains a literal-binding lint, not Zig type inference. Computed forms
 such as `@field`, `comptime` or `if` aliases, destructuring, `(namespace).member`,
 and access through another container (`S.k.Sleep`) are a known limit shared
-with the reference tool. They are not evaluated by this lint.
+with the reference tool. These computed forms also limit re-export resolution;
+the cross-file recheck is bounded to resolved literal exports of
+`src/os/windows.zig`, not arbitrary module evaluation. They are not evaluated
+by this lint.
 
 The fork-added file set is computed at each head, by subtracting
 `upstream-paths.txt` from its tree. That list includes upstream rename sources.
@@ -82,7 +111,10 @@ Checkout has full history. A missing revision, source, generated list, or
 malformed baseline is an error, never an empty successful check. Diagnostics
 print locations and rule names, not source lines or Git's command/stderr.
 Diffs force text, disable external diff/textconv/color/renames, and override
-user diff formatting/algorithm options and diff environment variables. Binary
+user diff formatting/algorithm options. All `GIT_*` environment overrides are
+removed for local Git commands, including pathspec, repository-selection,
+config-injection and diff variables; the explicit repo and arguments own each
+read. Binary
 attributes and NUL detection cannot hide added lines. A changed head blob with
 no hunk fails closed; deletions and mode-only changes remain valid.
 PR edits to the lints' code, data, workflow or workflow contract are flagged
@@ -132,8 +164,12 @@ python -I ci/generate_win32_identifiers.py <std-0.17.1> <std-0.15.2> ci/win32-re
 ```
 
 Each std argument is its compiler's `lib/std` directory. The identifier
-generator enumerates every public root and exported namespace declaration and
-keeps names present in 0.15.2 and absent in 0.17.1. It needs the already-extracted
+generator follows public declarations recursively through literal containers,
+relative imports and namespace aliases, and keeps names present in 0.15.2 and
+absent in 0.17.1. Private aliases may be intermediate routes; fields, function
+evaluation and computed namespaces are not expanded. Cycles stop at the first
+repeated source scope rather than generating infinitely repeated alias paths.
+It needs the already-extracted
 compiler sources, not a download. The path generator unions all three trees
 and rename sources, writes only the supplied output, and is deterministic.
 

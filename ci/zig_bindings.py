@@ -45,6 +45,7 @@ class Origin:
     kind: str
     parts: tuple = ()
     declarations: frozenset = frozenset()
+    exports: frozenset = frozenset()
 
 
 class Bindings:
@@ -53,6 +54,8 @@ class Bindings:
         self.reexports, self.path = reexports or {}, path
         self.scopes, self.parents = scopes(self.tokens)
         self.decls, self.ends, self.resolved = {}, {}, {}
+        self.previous, self.changed_exports = None, frozenset()
+        self.scope_keys, self.declaration_keys, self.changed_declarations = None, None, {}
         for i, token in enumerate(self.tokens):
             if not zigtok.declaration_at(self.tokens, i):
                 continue
@@ -89,7 +92,8 @@ class Bindings:
         elif kind == "os" and parts[:1] == ("windows",):
             kind, parts = "fork", parts[1:]
         if kind == "fork" and parts and parts[0] in self.reexports:
-            kind, parts = "std", ("os", "windows") + tuple(self.reexports[parts[0]]) + parts[1:]
+            origin = replace(origin, exports=origin.exports | {parts[0]})
+            kind, parts = "std", tuple(self.reexports[parts[0]]) + parts[1:]
         return replace(origin, kind=kind, parts=parts)
 
     def imported(self, module):
@@ -138,6 +142,8 @@ class Bindings:
             origin = self.resolved[index]
             return self.normalize(replace(origin, parts=origin.parts + tuple(parts[1:]))) if origin else None
         kinds = {"std": "std", "win32": "win32", "internal_os": "os", "os": "os"}
+        if parts[0] == "windows" and self.path == "src/os/windows.zig":
+            return Origin("std", ("os", "windows") + tuple(parts[1:]))
         kind = kinds.get(parts[0])
         return self.normalize(Origin(kind, tuple(parts[1:]))) if kind else None
 
@@ -161,26 +167,81 @@ class Bindings:
             if origin:
                 yield i, end, origin
 
+    def stable_declarations(self):
+        """Match declaration names within lexical owners, independent of lines.
+
+        Named functions/containers/labels keep their names when moved. Unnamed
+        sibling blocks use their token header and ordinal within the parent.
+        """
+        if self.declaration_keys is not None:
+            return self.declaration_keys
+        functions = zigtok.functions_of_tokens(self.tokens)
+        named = {f["body"][0] + 1: (f["kind"], f["name"])
+                 for f in functions if f["body"]}
+        for container in zigtok.containers_of_tokens(self.tokens, functions):
+            if container["naming"] == "declaration":
+                named[container["open"] + 1] = ("container", container["name"])
+        keys, siblings = {0: ()}, {}
+        for scope, parent in self.parents.items():
+            if parent is None:
+                continue
+            opening = scope - 1
+            if opening >= 2 and zigtok.is_op(self.tokens[opening - 1], ":"):
+                label = ("label", identifier(self.tokens[opening - 2]))
+            elif scope in named:
+                label = named[scope]
+            else:
+                start = opening - 1
+                while start >= 0 and not zigtok.is_op(self.tokens[start], "{", "}", ";"):
+                    start -= 1
+                label = ("block", tuple((t.kind, t.text) for t in self.tokens[start + 1:opening]))
+            sibling = parent, label
+            ordinal = siblings.get(sibling, 0)
+            siblings[sibling] = ordinal + 1
+            keys[scope] = keys[parent] + ((label, ordinal),)
+        self.scope_keys = keys
+        self.declaration_keys = {(keys[scope], name): at
+                                 for (scope, name), (at, _) in self.decls.items()}
+        return self.declaration_keys
+
+    def declaration_changed(self, index):
+        if self.previous is None:
+            return True
+        if index not in self.changed_declarations:
+            self.stable_declarations()
+            key = self.scope_keys[self.scopes[index]], identifier(self.tokens[index + 1])
+            prior = self.previous.stable_declarations().get(key)
+            current = self.resolve([key[1]], index)
+            old = self.previous.resolve([key[1]], prior) if prior is not None else None
+            def std_origin(origin):
+                return origin.parts if origin and origin.kind == "std" else None
+            self.changed_declarations[index] = std_origin(current) != std_origin(old)
+        return self.changed_declarations[index]
+
     def span(self, start, end, origin=None):
         result = {t.line + 1 for t in self.tokens[start:end]}
         if origin:
             for index in origin.declarations:
-                result.update(t.line + 1 for t in self.tokens[index:self.ends[index] + 1])
+                if self.declaration_changed(index):
+                    result.update(t.line + 1 for t in self.tokens[index:self.ends[index] + 1])
         return result
 
 
-def public_names(text):
-    """Top-level pub const/var/fn names, including extern and inline functions."""
-    tokens = zigtok.code(text)
-    owners, _ = scopes(tokens)
-    result = set()
+def public_members(tokens, owners):
+    """Public declaration names and their lexical scopes (not enum fields)."""
     for i, token in enumerate(tokens):
-        if owners[i] != 0 or token.kind != "keyword" or token.text != "pub":
+        if token.kind != "keyword" or token.text != "pub":
             continue
         j = i + 1
         while j < len(tokens) and (tokens[j].text in ("extern", "inline", "noinline", "export", "threadlocal")
                                   or tokens[j].kind == "string"):
             j += 1
         if j + 1 < len(tokens) and tokens[j].text in ("const", "var", "fn") and tokens[j + 1].kind == "identifier":
-            result.add(identifier(tokens[j + 1]))
-    return result
+            yield owners[i], identifier(tokens[j + 1])
+
+
+def public_names(text):
+    """Top-level pub const/var/fn names, including extern and inline functions."""
+    tokens = zigtok.code(text)
+    owners, _ = scopes(tokens)
+    return {name for scope, name in public_members(tokens, owners) if scope == 0}

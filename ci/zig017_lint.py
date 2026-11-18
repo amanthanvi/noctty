@@ -10,32 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lint_common import added_lines, emit, merge_base, sources
 from zig_bindings import Bindings, identifier
+from zig_context import binary_repeats
 import zigtok
 
 FAIL_FORMS = frozenset(("**", "@Type", "@cImport", "stackFallback", "errdefer-capture"))
-
-
-def binary_repeat(tokens, index):
-    """A repeat has a left operand; a pointer-to-pointer type is a prefix."""
-    def ends_value(i):
-        if i < 0:
-            return False
-        token = tokens[i]
-        if token.kind in ("identifier", "number", "string", "char", "mlstring"):
-            return True
-        if zigtok.is_op(token, "]"):
-            opening = zigtok.match_back(tokens, i)
-            return opening is not None and ends_value(opening - 1)
-        if zigtok.is_op(token, ")"):
-            opening = zigtok.match_back(tokens, i)
-            if opening is not None and opening > 0:
-                previous = tokens[opening - 1]
-                if (previous.text in ("fn", "align", "addrspace", "callconv")
-                        or (opening > 1 and tokens[opening - 2].text == "fn")):
-                    return False
-            return True
-        return zigtok.is_op(token, "}", ".*", ".?")
-    return ends_value(index - 1)
 
 
 def _matches(text):
@@ -46,6 +24,7 @@ def _matches(text):
     """
     bindings = Bindings(text)
     tokens = bindings.tokens
+    repeats = binary_repeats(tokens)
     words = [identifier(t) for t in tokens]
     scopes, parents = bindings.scopes, bindings.parents
     containers = {}
@@ -57,7 +36,7 @@ def _matches(text):
     for i, token in enumerate(tokens):
         form, width, level = None, 1, "error"
         word = words[i]
-        if token.kind == "op" and word == "**" and binary_repeat(tokens, i):
+        if i in repeats:
             form = "**"
         elif token.kind == "builtin" and word in ("@Type", "@cImport"):
             form = word

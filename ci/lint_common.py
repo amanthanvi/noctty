@@ -6,13 +6,20 @@ import subprocess
 from pathlib import Path
 
 
-def git(repo, *args):
+def git_environment():
+    """The explicit repo/arguments own Git reads, independent of shell overrides."""
     env = os.environ.copy()
-    for name in ("GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"):
-        env.pop(name, None)
+    for name in tuple(env):
+        if name.upper().startswith("GIT_"):
+            del env[name]
+    return env
+
+
+def git(repo, *args, input=None):
     return subprocess.run(
         ["git", "-c", "color.ui=never", "-c", "color.diff=false",
-         "-C", str(repo), *args], check=True, capture_output=True, env=env,
+         "-C", str(repo), *args], check=True, capture_output=True,
+        env=git_environment(), input=input,
     ).stdout
 
 
@@ -36,10 +43,7 @@ def sources(repo, rev, names):
     if any("\n" in p or "\r" in p for p in names):
         raise ValueError("source paths containing newlines are unsupported")
     requests = "".join(f"{rev}:{p}\n" for p in names).encode("utf-8")
-    data = subprocess.run(
-        ["git", "-C", str(repo), "cat-file", "--batch"],
-        input=requests, capture_output=True, check=True,
-    ).stdout
+    data = git(repo, "cat-file", "--batch", input=requests)
     result, offset = {}, 0
     for name in names:
         end = data.index(b"\n", offset)
