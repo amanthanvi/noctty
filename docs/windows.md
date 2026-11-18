@@ -2998,7 +2998,7 @@ and the
   Alt+`\` key and nothing of the body. `[Console]::ReadKey` and `cmd` read
   with it off by default and are expected to get the lone `\` the 2026-10-10
   audit saw (not re-measured). Over `ssh.exe` before OpenSSH for Windows
-  9.8.2 a reply longer than 16 bytes travels in two parts. A tool run directly
+  9.8.2 a reply longer than 16 bytes travels in 16-byte parts. A tool run directly
   under ConPTY that does not parse APC replies should send `q=2`.
 - **Sixel is passed through but not rendered.** The bundled ConPTY delivers a
   Sixel DCS payload byte-for-byte (see the
