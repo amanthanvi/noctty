@@ -8,9 +8,12 @@ copy needs before it registers the product AUMID, with both AppData roots
 redirected; the driver and every window live on a private desktop. Input is
 posted key messages only (WM_KEYDOWN/WM_KEYUP pairs, the target's keyboard
 state set explicitly), and only to a window on that desktop; nothing touches
-the clipboard or the foreground. The real startup ledger, the PowerShell
-history, the AUMID registration and the clipboard sequence number are compared
-before and after.
+the clipboard or the foreground, and the copy runs with clipboard reads and
+writes denied. Every cmd.exe the harness starts is System32's with /D
+(noctty's `command` as `direct:<System32>\cmd.exe /D`), so the user's AutoRun
+stays out. The real startup ledger, the PowerShell history, the AUMID
+registration and the clipboard sequence number are compared before and after,
+and no link may remain in the run directory.
 
 Phase 1 runs console-reply-reader.c as noctty's `-e` child once per reader
 state (see the C file). Each run first types keys, so conhost has seen 9001
@@ -64,7 +67,7 @@ Results: Run\results.json and Run\results.md. Exit codes:
      prediction;
   2  infrastructure failure;
   3  an isolation guard changed (startup ledger, history, AUMID key,
-     clipboard sequence number).
+     clipboard sequence number), or a link was left in the run directory.
 -Sabotage is for the harness's own controls: it breaks one thing on purpose
 (the delimiter, the reader mid-run, or the DA1 control), and the run must
 then exit 1.
@@ -83,6 +86,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
+# Every cmd.exe the harness starts is System32's, with /D, so the user's AutoRun stays out of the run.
+$cmdExe = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
 # pwsh -File passes a list as one string; accept "a,b" and @('a','b') alike.
 $readerStates = @('a','a16','b','c','c-inbox','d','d-notiming')
 $Readers = @($Readers | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -403,7 +408,7 @@ if(-not $Driver) {
     $compileJob=[ReplyPath]::CreateOwnedJob(); $cp=$null
     try {
         # The compiler is the one launch without a desktop: it opens no window and runs before the private one exists.
-        $cp=[ReplyPath]::Launch($env:ComSpec,('"{0}" /d /c ""{1}""' -f $env:ComSpec,$compile),$root,$null,$compileJob,0x08000000)
+        $cp=[ReplyPath]::Launch($cmdExe,('"{0}" /d /c ""{1}""' -f $cmdExe,$compile),$root,$null,$compileJob,0x08000000)
         if([ReplyPath]::WaitForSingleObject($cp.process,120000) -ne 0) { throw 'Helper compilation timed out.' }
         [uint32]$compileCode=0; [void][ReplyPath]::GetExitCodeProcess($cp.process,[ref]$compileCode)
         if($compileCode -ne 0) { throw "Helper compilation failed ($compileCode); inspect Run/compile.log." }
@@ -486,15 +491,17 @@ if(-not $Driver) {
         $unchanged=$before.Exists -eq $after.Exists -and $before.Hash -eq $after.Hash -and $before.Modified -eq $after.Modified
         $aumidUnchanged=($aumidBefore.Keys -join '|') -ceq ($aumidAfter.Keys -join '|') -and $aumidBefore.Sha256 -ceq $aumidAfter.Sha256
         $clipboardUnchanged=$clipboardBefore -eq $clipboardAfter
+        # No link may stay in the run (listed, never followed): a cmd AutoRun hook once left a junction under its LOCALAPPDATA.
+        $links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })
         $historyFailure=$null
         try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure=$_.Exception.Message }
         $guards=[ordered]@{Unchanged=$unchanged;HistoryUnchanged=($null -eq $historyFailure);AumidKeysBefore=$aumidBefore.Keys;AumidKeysAfter=$aumidAfter.Keys;AumidUnchanged=$aumidUnchanged;
             ClipboardSequenceBefore=$clipboardBefore;ClipboardSequenceAfter=$clipboardAfter;ClipboardUnchanged=$clipboardUnchanged;
-            SshKeysDeleted=$keysDeleted;OwnedJobCleanedUp=($null -eq $cleanupError);OwnedProcessCount=$owned;DriverExit=$code}
+            SshKeysDeleted=$keysDeleted;LinksInRun=$links;OwnedJobCleanedUp=($null -eq $cleanupError);OwnedProcessCount=$owned;DriverExit=$code}
         $guards | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'startup-state.json')
     }
-    if($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged -or -not $keysDeleted) {
-        Write-Host ('ISOLATION GUARD CHANGED: startup ledger unchanged={0}, history unchanged={1}, AUMID key unchanged={2}, clipboard sequence unchanged={3}, ssh keys deleted={4}; stop launches.' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted)
+    if($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged -or -not $keysDeleted -or $links.Count -gt 0) {
+        Write-Host ('ISOLATION GUARD CHANGED: startup ledger unchanged={0}, history unchanged={1}, AUMID key unchanged={2}, clipboard sequence unchanged={3}, ssh keys deleted={4}, links left in the run={5}; stop launches.' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted,$links.Count)
         exit 3
     }
     if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 2 }
@@ -580,9 +587,9 @@ function Invoke-ReaderSession([string] $Mode) {
             $session.Ssh=@{Version=$ssh.SshVersion;SshdPid=$sshd.pid;DefaultShell=$ssh.DefaultShell;DefaultShellCommandOption=$ssh.DefaultShellCommandOption;PwshCurrentUserProfilesExist=$ssh.PwshCurrentUserProfilesExist}
             $timing=if($Mode -eq 'd-notiming') { ' -o ObscureKeystrokeTiming=no' } else { '' }
             $sshArgs='-tt -a -x -k -F none -p {0} -i "{1}" -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o ClearAllForwardings=yes -o UserKnownHostsFile="{2}" -o StrictHostKeyChecking=accept-new{3} 127.0.0.1' -f $ssh.Port,(Join-Path $sshDir 'client_ed25519'),(Join-Path $sshDir 'known_hosts'),$timing
-            $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" {3} {4} {5}' -f $exe,$config,(Join-Path $openssh 'ssh.exe'),$sshArgs,$reader,$readerArgs.Replace('"','')
+            $command='"{0}" --config-file="{1}" --window-save-state=never "--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" {4} {5} {6}' -f $exe,$config,$cmdExe,(Join-Path $openssh 'ssh.exe'),$sshArgs,$reader,$readerArgs.Replace('"','')
         } else {
-            $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" {3}' -f $exe,$config,$reader,$readerArgs
+            $command='"{0}" --config-file="{1}" --window-save-state=never "--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" {4}' -f $exe,$config,$cmdExe,$reader,$readerArgs
         }
         if($Mode -eq 'c-inbox') { $env:NOCTTY_CONPTY='inbox' }
         try { $terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000) }
@@ -765,7 +772,7 @@ try {
         $shellReady=Join-Path $dir 'ready.txt'; $shellHistory=Join-Path $dir 'history.txt'
         $pwshExe=(Get-Command pwsh.exe).Source
         $startup="Set-PSReadLineOption -HistorySavePath '$shellHistory' -HistorySaveStyle SaveNothing; if((Get-PSReadLineOption).HistorySaveStyle -eq 'SaveNothing' -and (Get-PSReadLineOption).HistorySavePath -ceq '$shellHistory') { [Console]::Write([char]27+'[?2033h'); Set-Content -LiteralPath '$shellReady' -Value ready }"
-        $command='"{0}" --config-file="{1}" --window-save-state=never --command=cmd.exe -e "{2}" -NoLogo -NoProfile -NoExit -Command "{3}"' -f $exe,$config,$pwshExe,$startup
+        $command='"{0}" --config-file="{1}" --window-save-state=never "--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' -f $exe,$config,$cmdExe,$pwshExe,$startup
         $shell=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)
         $layout=$null
         try {

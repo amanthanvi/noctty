@@ -58,7 +58,7 @@ function Get-ReplyPathProblems {
         $desktop = $arguments[3].Extent.Text; $jobArgument = $arguments[4].Extent.Text
         $byDesktop[$desktop] = 1 + [int]$byDesktop[$desktop]
         switch -CaseSensitive ($desktop) {
-            '$null' { if ($arguments[0].Extent.Text -ne '$env:ComSpec' -or $jobArgument -ne '$compileJob') { $problems.Add('only the compiler may launch without a desktop, in its own job') } }
+            '$null' { if ($arguments[0].Extent.Text -cne '$cmdExe' -or $jobArgument -ne '$compileJob') { $problems.Add('only the compiler may launch without a desktop, in its own job') } }
             '"WinSta0\$desktopName"' { if ($jobArgument -ne '$job') { $problems.Add('the driver launch is not in the run''s job') } }
             '"WinSta0\$driverDesktop"' { if ($jobArgument -ne '$job') { $problems.Add("a driver launch is not in the run's job: $($launch.Extent.Text)") } }
             default { $problems.Add("a launch names another desktop: $desktop") }
@@ -86,17 +86,27 @@ function Get-ReplyPathProblems {
     Need '$aumidUnchanged=($aumidBefore.Keys -join ''|'') -ceq ($aumidAfter.Keys -join ''|'') -and $aumidBefore.Sha256 -ceq $aumidAfter.Sha256' 'the AUMID key comparison changed'
     Need '$clipboardUnchanged=$clipboardBefore -eq $clipboardAfter' 'the clipboard sequence comparison changed'
     Need '$clipboardBefore=[ReplyPath]::GetClipboardSequenceNumber()' 'the clipboard sequence number is not read before the run'
-    Need 'if($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged -or -not $keysDeleted) {' 'a changed guard no longer stops the run'
-    if ($code -notmatch '(?s)not \$keysDeleted\) \{.*?exit 3') { $problems.Add('a changed guard no longer exits 3') }
+    Need 'if($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged -or -not $keysDeleted -or $links.Count -gt 0) {' 'a changed guard no longer stops the run'
+    if ($code -notmatch '(?s)\$links\.Count -gt 0\) \{.*?exit 3') { $problems.Add('a changed guard no longer exits 3') }
 
     # Case 7: pwsh without a profile, history read back before anything is typed.
-    Need '-e "{2}" -NoLogo -NoProfile -NoExit -Command "{3}"' 'case 7''s pwsh must start -NoLogo -NoProfile -NoExit'
+    Need '-e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' 'case 7''s pwsh must start -NoLogo -NoProfile -NoExit'
     if ($code -notmatch '(?s)Set-PSReadLineOption -HistorySavePath ''\$shellHistory'' -HistorySaveStyle SaveNothing; if\(\(Get-PSReadLineOption\)\.HistorySaveStyle -eq ''SaveNothing'' -and \(Get-PSReadLineOption\)\.HistorySavePath -ceq ''\$shellHistory''\).*?did not become ready \(history isolation not confirmed\); nothing typed') {
         $problems.Add('PSReadLine''s history is no longer read back before anything is typed')
     }
-    $launchLines = [regex]::Matches($code, '--config-file="\{1\}"[^'']*')
+    # Every noctty launch: no saved window state, later tabs on System32's cmd.exe /D (no AutoRun), no clipboard.
+    $launchLines = [regex]::Matches($code, '--config-file="\{1\}"[^'']*'' -f [^\r\n]*')
     if ($launchLines.Count -ne 3) { $problems.Add("noctty launch command lines: $($launchLines.Count), expected 3") }
-    foreach ($line in $launchLines) { if ($line.Value -notmatch '--window-save-state=never --command=cmd\.exe') { $problems.Add("a noctty launch lacks --window-save-state=never --command=cmd.exe: $($line.Value)") } }
+    foreach ($line in $launchLines) {
+        if (-not $line.Value.Contains('--config-file="{1}" --window-save-state=never "--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}"') -or
+            -not $line.Value.Contains("' -f `$exe,`$config,`$cmdExe,")) {
+            $problems.Add("a noctty launch lacks --window-save-state=never, --command=direct:<System32 cmd.exe> /D or the clipboard denials: $($line.Value)")
+        }
+    }
+    Need '$cmdExe = Join-Path ([Environment]::GetFolderPath(''System'')) ''cmd.exe''' 'cmd.exe is no longer System32''s'
+    if ($code -match '--command=cmd\.exe|\$env:ComSpec') { $problems.Add('a cmd.exe is started without /D or from ComSpec, where the user''s AutoRun can run') }
+    Need '$links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })' 'the run directory is no longer checked for links'
+    Need '-or -not $keysDeleted -or $links.Count -gt 0) {' 'a link left in the run no longer stops the run'
     Need 'finally { if($Mode -eq ''c-inbox'') { Remove-Item Env:NOCTTY_CONPTY } }' 'NOCTTY_CONPTY is not cleared after the in-box launch'
     # Verdicts compare ordinally: -ceq ignores control characters in pwsh 7 (ICU), so "ESC[A" -ceq "[A" is true.
     Need 'else { $verdict=if([string]::Equals($observed,[string]$prediction.Exact,[StringComparison]::Ordinal)) {' 'the verdict no longer compares bytes ordinally'
@@ -323,7 +333,14 @@ $replyPathMutations = @(
     @{ Name = 'Opus 21: password authentication allowed'; Old = '''PasswordAuthentication no'','; New = '' }
     @{ Name = 'Opus 22: ssh may prompt'; Old = ' -o BatchMode=yes'; New = '' }
     @{ Name = 'Muse 1: the reader''s error-query code'; File = 'reader'; Old = 'case 0x0E:'; New = 'case 0x0D:' }
-    @{ Name = 'Muse 3: a launch without --command=cmd.exe'; Old = '--window-save-state=never --command=cmd.exe -e "{2}" {3}'' -f $exe,$config,$reader,$readerArgs'; New = '--window-save-state=never -e "{2}" {3}'' -f $exe,$config,$reader,$readerArgs' }
+    @{ Name = 'Muse 3: a launch without the pinned later-tab command'; Old = '--window-save-state=never "--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" {4}'' -f $exe,$config,$cmdExe,$reader,$readerArgs'; New = '--window-save-state=never --clipboard-write=deny --clipboard-read=deny -e "{2}" {3}'' -f $exe,$config,$reader,$readerArgs' }
+    @{ Name = 'round 2b: a launch with --command=cmd.exe (AutoRun)'; Old = '"--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" -NoLogo'; New = '--command=cmd.exe --clipboard-write=deny --clipboard-read=deny -e "{3}" -NoLogo' }
+    @{ Name = 'round 2b: case 7''s later tab without /D'; Old = '"--command=direct:{2} /D" --clipboard-write=deny --clipboard-read=deny -e "{3}" -NoLogo'; New = '"--command=direct:{2}" --clipboard-write=deny --clipboard-read=deny -e "{3}" -NoLogo' }
+    @{ Name = 'round 2b: cmd.exe from PATH'; Old = '$cmdExe = Join-Path ([Environment]::GetFolderPath(''System'')) ''cmd.exe'''; New = '$cmdExe = ''cmd.exe''' }
+    @{ Name = 'round 2b: the compiler through ComSpec'; Old = '[ReplyPath]::Launch($cmdExe,(''"{0}" /d /c ""{1}""'' -f $cmdExe,$compile)'; New = '[ReplyPath]::Launch($env:ComSpec,(''"{0}" /d /c ""{1}""'' -f $env:ComSpec,$compile)' }
+    @{ Name = 'round 2b: clipboard writes allowed'; Old = '--clipboard-write=deny --clipboard-read=deny -e "{3}" {4} {5} {6}'; New = '--clipboard-read=deny -e "{3}" {4} {5} {6}' }
+    @{ Name = 'round 2b: clipboard reads allowed'; Old = '--clipboard-read=deny -e "{3}" {4}'' -f'; New = '-e "{3}" {4}'' -f' }
+    @{ Name = 'round 2b: links in the run not checked'; Old = '-or -not $keysDeleted -or $links.Count -gt 0) {'; New = '-or -not $keysDeleted) {' }
     @{ Name = 'Muse 4: the APC-on-b prediction'; Old = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''\''} }'; New = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''''} }' }
     @{ Name = 'Muse 5: case 4 without its space'; Old = 'Bytes="${esc}[>1;2;3;29;30;40;100;101 q"'; New = 'Bytes="${esc}[>1;2;3;29;30;40;100;101q"' }
     @{ Name = 'Muse 7: no case 2 step'; Old = '    @{ Name=''case 2: APC feature-shaped''; Keys=@(''f16'') }'; New = '' }
