@@ -7188,8 +7188,8 @@ test "win32 a Settings save toasts unless config-reload notifications are off an
     // By default a save shows its banner and a toast from noctty itself,
     // which has no tag, so noctty never takes it down. The interactive
     // accessibility harness saves twice, and so launches both of its saving
-    // processes with `--app-notifications=no-config-reload`
-    // (EVIDENCE-TOAST-FOREGROUND).
+    // processes with `--app-notifications=false`, which turns `config-reload`
+    // off (EVIDENCE-TOAST-FOREGROUND).
     settingsNotifySuccessThunk(&w.app, "Settings saved", "");
     try std.testing.expectEqual(HostBannerKind.info, w.host.banner_kind);
     try std.testing.expectEqual(@as(usize, 1), w.recorder.shown);

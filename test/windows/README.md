@@ -692,7 +692,9 @@ command-finish leaf, the one step that raises a real toast, so that its banner
 has no later leaf to disturb. The accessibility leaf's two processes that save
 Settings run with `--app-notifications=false` and
 `--desktop-notifications=false` as the last notification values on their
-command lines, so a save shows its in-window banner (each has a terminal window
+command lines (no empty value of either after them, which would reset it to
+its default, and no `--config-file`, whose include noctty reads after the
+command line), so a save shows its in-window banner (each has a terminal window
 to hold it) and no toast. All run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
 jump list (the Shell keeps one per AUMID in the real profile, which a redirected

@@ -7046,7 +7046,10 @@ try {
     # (EVIDENCE-TOAST-FOREGROUND; settings.md PROFILES-4 trap 7). So both run
     # with every notification off, the clipboard-copy notice included, which
     # `desktop-notifications` does not gate; this leaf tests none of them.
-    # noctty takes the last value of each, so nothing may follow these.
+    # noctty takes the last value of each, resets one to its default on an
+    # empty value, and reads a config-file include after the command line:
+    # nothing may follow these, neither launch passes --config-file, and no
+    # element holds whitespace or a quote (Start-Process joins them unquoted).
     $settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false')
     $saveProbeClass = "noctty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
     $saveProbeArguments = @(

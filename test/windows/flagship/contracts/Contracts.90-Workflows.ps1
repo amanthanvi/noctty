@@ -791,14 +791,21 @@ if (-not $toastDiscovered.ContainsKey($toastExtraLibrary) -or
 
 # The accessibility leaf's Settings saves run only in its two probe processes,
 # and noctty starts each with every notification off. What counts is what the
-# command line leaves each setting at, as noctty reads it (`cli/args.zig`
-# `parse`, `parseBool`, `parsePackedStruct`; `Config.parseManuallyHook`): every
+# command line leaves each setting at. The reading below models the rules of
+# `cli/args.zig` (`parse`, `parseIntoField`, `parseBool`, `parsePackedStruct`)
+# and `Config.parseManuallyHook` for the forms these launches can use: every
 # `--key=value` replaces the field whole, a packed value starting from the
-# defaults; the last one wins; a bare `--desktop-notifications` is true; a value
-# noctty cannot parse changes nothing; nothing after `-e`, `-Embedding` or
-# `-ToastActivated` is configuration. A save then shows its banner and, with
-# `config-reload` off and that banner shown, `settingsNotifySuccessThunk` returns
-# before the toast (settings.md PROFILES-4 trap 7).
+# defaults; an empty value resets the field to its default; the last one wins;
+# a bare `--desktop-notifications` is true; a value noctty cannot parse changes
+# nothing; nothing after `-e`, `-Embedding` or `-ToastActivated` is
+# configuration. Anything it does not model fails closed: a `--config-file`
+# (an include is read after the command line, `Config.load`, and its values
+# win), an element with whitespace or a quote (`Start-Process -ArgumentList`
+# joins the elements with spaces and quotes nothing, so one element can reach
+# noctty as several arguments), and a variable changed in any way but its one
+# plain assignment. A save then shows its banner and, with `config-reload` off
+# and that banner shown, `settingsNotifySuccessThunk` returns before the toast
+# (settings.md PROFILES-4 trap 7).
 $parseNocttyBool = {
     param([string] $Text)
     if ($Text -cin @('1', 't', 'T', 'true')) { $true } elseif ($Text -cin @('0', 'f', 'F', 'false')) { $false } else { $null }
@@ -814,10 +821,12 @@ $getEffectiveNotifications = {
         $equals = $key.IndexOf('=')
         if ($equals -ge 0) { $value = $key.Substring($equals + 1); $key = $key.Substring(0, $equals) }
         if ($key -ceq 'desktop-notifications') {
+            if ($null -ne $value -and $value.Length -eq 0) { $state.Desktop = $true; continue }
             $parsedBool = & $parseNocttyBool $(if ($null -eq $value) { 't' } else { $value })
             if ($null -ne $parsedBool) { $state.Desktop = $parsedBool }
         }
         elseif ($key -ceq 'app-notifications' -and $null -ne $value) {
+            if ($value.Length -eq 0) { $state.ClipboardCopy = $true; $state.ConfigReload = $true; continue }
             $parsedBool = & $parseNocttyBool $value
             if ($null -ne $parsedBool) { $state.ClipboardCopy = $parsedBool; $state.ConfigReload = $parsedBool; continue }
             $fields = [ordered]@{ ClipboardCopy = $true; ConfigReload = $true }
@@ -846,6 +855,9 @@ foreach ($toastCase in @(
         @{ Name = 'desktop as 1'; Arguments = $toastQuietPair + @('--desktop-notifications=1'); Expected = 'True False False' },
         @{ Name = 'desktop as F'; Arguments = @('--desktop-notifications=F'); Expected = 'False True True' },
         @{ Name = 'an unparsed desktop value'; Arguments = $toastQuietPair + @('--desktop-notifications=yes'); Expected = 'False False False' },
+        @{ Name = 'an empty desktop value after it'; Arguments = $toastQuietPair + @('--desktop-notifications='); Expected = 'True False False' },
+        @{ Name = 'an empty app value after it'; Arguments = $toastQuietPair + @('--app-notifications='); Expected = 'False True True' },
+        @{ Name = 'empty values before it'; Arguments = @('--app-notifications=', '--desktop-notifications=') + $toastQuietPair; Expected = 'False False False' },
         @{ Name = 'a bare app flag'; Arguments = $toastQuietPair + @('--app-notifications'); Expected = 'False False False' },
         @{ Name = 'an unparsed app list'; Arguments = $toastQuietPair + @('--app-notifications=no-config-reload,bogus'); Expected = 'False False False' },
         @{ Name = 'an app list in another case'; Arguments = $toastQuietPair + @('--app-notifications=NO-CONFIG-RELOAD'); Expected = 'False False False' },
@@ -860,10 +872,68 @@ foreach ($toastCase in @(
         throw "The effective notification reading of $($toastCase.Name) is '$toastActual' (desktop, clipboard-copy, config-reload); noctty reads '$($toastCase.Expected)'."
     }
 }
+# A variable's one plain assignment (`$name = ...`), or $null when the variable
+# is changed in any other way or used where its value could change: a scoped
+# spelling (`$script:name`), an index or member write, `+=` and the other
+# operators, a variable cmdlet or anything else naming it as a string, `[ref]`.
+# The reads a launch makes are allowed: an element of an `@( )` array, an
+# argument of the start, a part of an expanded string.
+$findSoleAssignment = {
+    param([System.Management.Automation.Language.ScriptBlockAst] $Ast, [string] $Name)
+    $plain = $null
+    $spelled = '^(?i)((global|local|script|private|variable|using|env):)?' + [regex]::Escape($Name) + '$'
+    foreach ($use in @($Ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -match $spelled
+                }, $true))) {
+        if ($use.VariablePath.UserPath -ine $Name) { return $null }
+        $parent = $use.Parent
+        if ($parent -is [System.Management.Automation.Language.AssignmentStatementAst] -and [object]::ReferenceEquals($parent.Left, $use)) {
+            if ($parent.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals -or $null -ne $plain) { return $null }
+            $plain = $parent
+            continue
+        }
+        if ($parent -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) { continue }
+        if ($parent -is [System.Management.Automation.Language.CommandExpressionAst] -and $parent.Parent -is [System.Management.Automation.Language.PipelineAst] -and
+            $parent.Parent.Parent -is [System.Management.Automation.Language.StatementBlockAst] -and
+            $parent.Parent.Parent.Parent -is [System.Management.Automation.Language.ArrayExpressionAst]) { continue }
+        if ($parent -is [System.Management.Automation.Language.CommandAst] -and $parent.GetCommandName() -ceq 'Start-AccessibilityProcessWithEnvironment') { continue }
+        return $null
+    }
+    if (@($Ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -match $spelled
+                }, $true)).Count -ne 0) { return $null }
+    $plain
+}
+# An expanded string's value with each part known: a variable whose one plain
+# assignment is a string made the same way, or a fresh GUID's 32 hex digits;
+# $null for anything else.
+$guidPart = '$([Guid]::NewGuid().ToString(''N''))'
+$expandString = {
+    param([System.Management.Automation.Language.ScriptBlockAst] $Ast, $Expression, [int] $Depth)
+    if ($Expression -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $Expression.Value }
+    if ($Expression -isnot [System.Management.Automation.Language.ExpandableStringExpressionAst] -or $Depth -gt 4) { return $null }
+    $text = $Expression.Value
+    foreach ($part in $Expression.NestedExpressions) {
+        if ($part -is [System.Management.Automation.Language.SubExpressionAst] -and $part.Extent.Text -ceq $guidPart) {
+            $text = $text.Replace($guidPart, ('0' * 32))
+            continue
+        }
+        if ($part -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $null }
+        $assignment = & $findSoleAssignment $Ast $part.VariablePath.UserPath
+        if ($null -eq $assignment -or $assignment.Right -isnot [System.Management.Automation.Language.CommandExpressionAst]) { return $null }
+        $value = & $expandString $Ast $assignment.Right.Expression ($Depth + 1)
+        if ($null -eq $value) { return $null }
+        $text = $text.Replace($part.Extent.Text, $value)
+    }
+    $text
+}
 # A launch's arguments as noctty gets them, from the parsed array literal; $null
-# when one cannot be known from the source (a variable without one literal
-# assignment, a command other than the shared containment arguments, or an
-# expanded string that could name either setting).
+# when one cannot be known from the source (a variable without one plain literal
+# assignment, a command other than the shared containment arguments, an
+# expanded string with a part it cannot know) or when one element could reach
+# noctty as more than one argument (whitespace or a quote in it).
 $resolveLaunchArguments = {
     param([System.Management.Automation.Language.ScriptBlockAst] $Ast, [System.Management.Automation.Language.ArrayExpressionAst] $Array, [string] $LibraryText)
     $resolved = [Collections.Generic.List[string]]::new()
@@ -889,21 +959,17 @@ $resolveLaunchArguments = {
             continue
         }
         $expression = $element.Expression
-        if ($expression -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $resolved.Add($expression.Value); continue }
-        if ($expression -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
-            if ($expression.Value -notmatch '^--[a-z0-9-]+=' -or $expression.Value -match 'notifications') { return $null }
-            $resolved.Add($expression.Value)
+        if ($expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+            $expression -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
+            $value = & $expandString $Ast $expression 0
+            if ($null -eq $value) { return $null }
+            $resolved.Add($value)
             continue
         }
         if ($expression -is [System.Management.Automation.Language.VariableExpressionAst]) {
-            $name = $expression.VariablePath.UserPath
-            $writes = @($Ast.FindAll({
-                param($node)
-                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                    $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq $name
-            }, $true))
-            if ($writes.Count -ne 1 -or [regex]::Matches($Ast.Extent.Text, "\`$$([regex]::Escape($name))\s*[+\-*/]?=(?!=)").Count -ne 1) { return $null }
-            $literal = $writes[0].Right.Expression
+            $assignment = & $findSoleAssignment $Ast $expression.VariablePath.UserPath
+            if ($null -eq $assignment -or $assignment.Right -isnot [System.Management.Automation.Language.CommandExpressionAst]) { return $null }
+            $literal = $assignment.Right.Expression
             if ($literal -isnot [System.Management.Automation.Language.ArrayExpressionAst] -or $literal.SubExpression.Statements.Count -ne 1) { return $null }
             $items = $literal.SubExpression.Statements[0].PipelineElements[0].Expression
             $values = if ($items -is [System.Management.Automation.Language.ArrayLiteralAst]) { @($items.Elements) } else { @($items) }
@@ -915,6 +981,7 @@ $resolveLaunchArguments = {
         }
         return $null
     }
+    if (@($resolved | Where-Object { $_ -match '[\s"''`]' }).Count -ne 0) { return $null }
     , [string[]]$resolved
 }
 $testQuietSettingsSaves = {
@@ -931,18 +998,12 @@ $testQuietSettingsSaves = {
         if ($null -eq $assignment -or $assignment.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
         $argumentList = & $getNamedArgument $start 'ArgumentList'
         if ($argumentList -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
-        $arguments = $argumentList.VariablePath.UserPath
-        $writes = @($ast.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-                $node.Left.VariablePath.UserPath -eq $arguments
-        }, $true))
-        if ($writes.Count -ne 1 -or [regex]::Matches($Text, "\`$$([regex]::Escape($arguments))\s*[+\-*/]?=(?!=)").Count -ne 1) { return $false }
-        $array = $writes[0].Right.Expression
-        if ($array -isnot [System.Management.Automation.Language.ArrayExpressionAst]) { return $false }
-        $resolvedArguments = & $resolveLaunchArguments $ast $array $LibraryText
+        $arguments = & $findSoleAssignment $ast $argumentList.VariablePath.UserPath
+        if ($null -eq $arguments -or $arguments.Right -isnot [System.Management.Automation.Language.CommandExpressionAst] -or
+            $arguments.Right.Expression -isnot [System.Management.Automation.Language.ArrayExpressionAst]) { return $false }
+        $resolvedArguments = & $resolveLaunchArguments $ast $arguments.Right.Expression $LibraryText
         if ($null -eq $resolvedArguments) { return $false }
+        if (@($resolvedArguments | Where-Object { $_ -match '^--config-file(=|$)' }).Count -ne 0) { return $false }
         $effective = & $getEffectiveNotifications $resolvedArguments
         if ($effective.Desktop -or $effective.ClipboardCopy -or $effective.ConfigReload) { return $false }
         $processes[$assignment.Left.VariablePath.UserPath] = $true
@@ -964,13 +1025,15 @@ $testQuietSettingsSaves = {
 $accessibilityText = $jobFileTexts[$accessibilityLeaf]
 $launchLibraryText = $jobFileTexts['scripts\interactive-win11-lib.ps1']
 if (-not (& $testQuietSettingsSaves $accessibilityText $launchLibraryText)) {
-    throw 'interactive-win11-accessibility.ps1 must save Settings only in its save probe and verifier processes, and noctty must start each with desktop-notifications and both app-notifications off, as the last values on its command line.'
+    throw 'interactive-win11-accessibility.ps1 must save Settings only in its save probe and verifier processes, and noctty must start each with desktop-notifications and both app-notifications off, read from argument lists the check can resolve (no --config-file, no element with whitespace or a quote, each variable assigned once).'
 }
 $toastEol = if ($accessibilityText.Contains("`r`n")) { "`r`n" } else { "`n" }
 $toastQuietLine = "        '--command=cmd.exe'`n        `$settingsSaveNotificationArguments`n"
 $toastProbeArguments = "`"--class=`$saveProbeClass`"`n$toastQuietLine"
 $toastVerifyArguments = "`"--class=`$saveVerifyClass`"`n$toastQuietLine"
 $toastQuietValue = "`$settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false')"
+$toastProbeClass = "    `$saveProbeClass = "
+$toastProbeStart = "    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"
 $toastContainmentReturn = "        '--windows-job-object-kill-on-close=true'`n    )"
 foreach ($toastControl in @(
         @{ Name = 'the save probe without the flags'; From = $toastProbeArguments; To = "`"--class=`$saveProbeClass`"`n        '--command=cmd.exe'`n"; Accept = $false },
@@ -979,11 +1042,25 @@ foreach ($toastControl in @(
         @{ Name = 'clipboard-copy left on'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=no-config-reload', '--desktop-notifications=false')"; Accept = $false },
         @{ Name = 'desktop notifications left on'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=true')"; Accept = $false },
         @{ Name = 'a later value in the flags themselves'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false', '--app-notifications=no-clipboard-copy')"; Accept = $false },
-        @{ Name = 'the flags emptied later'; From = "    `$saveProbeClass = "; To = "    `$settingsSaveNotificationArguments = @()`n    `$saveProbeClass = "; Accept = $false },
-        @{ Name = 'the save probe arguments rewritten'; From = "    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"; To = "    `$saveProbeArguments += @()`n    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"; Accept = $false },
+        @{ Name = 'the flags emptied later'; From = $toastProbeClass; To = "    `$settingsSaveNotificationArguments = @()`n$toastProbeClass"; Accept = $false },
+        @{ Name = 'the save probe arguments rewritten'; From = $toastProbeStart; To = "    `$saveProbeArguments += @()`n$toastProbeStart"; Accept = $false },
         @{ Name = 'app notifications turned back on after the flags'; From = $toastProbeArguments; To = "$toastProbeArguments        '--app-notifications=true'`n"; Accept = $false },
         @{ Name = 'a bare desktop flag after the flags'; From = $toastVerifyArguments; To = "$toastVerifyArguments        '--desktop-notifications'`n"; Accept = $false },
         @{ Name = 'desktop notifications as 1 after the flags'; From = $toastVerifyArguments; To = "$toastVerifyArguments        '--desktop-notifications=1'`n"; Accept = $false },
+        @{ Name = 'an empty app value after the flags (Sol M1, round 2)'; From = $toastProbeArguments; To = "$toastProbeArguments        '--app-notifications='`n"; Accept = $false },
+        @{ Name = 'an empty desktop value after the flags (Sol M1, round 2)'; From = $toastVerifyArguments; To = "$toastVerifyArguments        '--desktop-notifications='`n"; Accept = $false },
+        @{ Name = 'empty values before the flags (the flags win)'; From = $toastProbeArguments; To = "`"--class=`$saveProbeClass`"`n        '--app-notifications='`n        '--desktop-notifications='`n$toastQuietLine"; Accept = $true },
+        @{ Name = 'a config-file include (Opus L1, round 2)'; From = $toastProbeArguments; To = "$toastProbeArguments        '--config-file=?C:\x\notify.conf'`n"; Accept = $false },
+        @{ Name = 'a later option inside one element (Sol M2, round 2)'; From = $toastProbeArguments; To = "$toastProbeArguments        '--command=cmd.exe --app-notifications=true'`n"; Accept = $false },
+        @{ Name = 'a later option inside a title element (Opus L2, round 2)'; From = $toastVerifyArguments; To = "$toastVerifyArguments        '--title=x --app-notifications=true'`n"; Accept = $false },
+        @{ Name = 'a quote inside an element'; From = $toastProbeArguments; To = "$toastProbeArguments        '--title=`"x`"'`n"; Accept = $false },
+        @{ Name = 'whitespace through an expanded class name'; From = "`$saveProbeClass = `"noctty-accessibility-settings-save-"; To = "`$saveProbeClass = `"noctty-accessibility settings-save-"; Accept = $false },
+        @{ Name = 'the flags set again in script scope (Opus L2, round 2)'; From = $toastProbeClass; To = "    `$script:settingsSaveNotificationArguments = @('--app-notifications=true')`n$toastProbeClass"; Accept = $false },
+        @{ Name = 'the flags set again by Set-Variable (Opus L2, round 2)'; From = $toastProbeClass; To = "    Set-Variable -Name settingsSaveNotificationArguments -Value @('--app-notifications=true')`n$toastProbeClass"; Accept = $false },
+        @{ Name = 'an index write to the flags (Opus L2, round 2)'; From = $toastProbeClass; To = "    `$settingsSaveNotificationArguments[0] = '--app-notifications=true'`n$toastProbeClass"; Accept = $false },
+        @{ Name = 'an index write to the arguments (Opus L2, round 2)'; From = $toastProbeStart; To = "    `$saveProbeArguments[-1] = '--desktop-notifications=true'`n$toastProbeStart"; Accept = $false },
+        @{ Name = 'a scoped += to the arguments (Opus L2, round 2)'; From = $toastProbeStart; To = "    `$script:saveProbeArguments += '--app-notifications=true'`n$toastProbeStart"; Accept = $false },
+        @{ Name = 'the class name set twice'; From = "    `$saveProbeArguments = @("; To = "    `$saveProbeClass = 'other'`n    `$saveProbeArguments = @("; Accept = $false },
         @{ Name = 'an argument that cannot be read'; From = $toastProbeArguments; To = "$toastProbeArguments        `$extraProbeArguments`n"; Accept = $false },
         @{ Name = 'an override in an expanded string'; From = $toastProbeArguments; To = "$toastProbeArguments        `"--app-notifications=`$probeNotifications`"`n"; Accept = $false },
         @{ Name = 'an override before the flags (the flags win)'; From = $toastProbeArguments; To = "`"--class=`$saveProbeClass`"`n        '--app-notifications=true'`n$toastQuietLine"; Accept = $true },
@@ -1000,8 +1077,8 @@ foreach ($toastControl in @(
     }
 }
 # The shared containment arguments come first on both command lines, so an
-# override there loses to the flags; a containment list noctty's reading cannot
-# know refuses the launch.
+# override there loses to the flags; a containment list the check cannot read
+# refuses the launch, and so does one holding an element with whitespace.
 $toastLibraryEol = if ($launchLibraryText.Contains("`r`n")) { "`r`n" } else { "`n" }
 $toastContainmentFrom = $toastContainmentReturn.Replace("`n", $toastLibraryEol)
 if (([regex]::Matches($launchLibraryText, [regex]::Escape($toastContainmentFrom))).Count -ne 1) { throw 'The containment-arguments control lost its anchor.' }
@@ -1010,6 +1087,9 @@ if (-not (& $testQuietSettingsSaves $accessibilityText $launchLibraryText.Replac
 }
 if (& $testQuietSettingsSaves $accessibilityText $launchLibraryText.Replace($toastContainmentFrom, "        '--windows-job-object-kill-on-close=true'$toastLibraryEol        `$extraContainment$toastLibraryEol    )")) {
     throw 'The quiet Settings save check accepted containment arguments it cannot read.'
+}
+if (& $testQuietSettingsSaves $accessibilityText $launchLibraryText.Replace($toastContainmentFrom, "        '--windows-job-object-kill-on-close=true --app-notifications=true'$toastLibraryEol    )")) {
+    throw 'The quiet Settings save check accepted a containment element that reaches noctty as two arguments.'
 }
 foreach ($leafHarness in @($shaderHarness, (Join-Path $repoRoot 'test\windows\interactive-win11-shader-pacing.ps1'))) {
     # A leaf rebuild in measurement mode rebuilds the measurement generation,
