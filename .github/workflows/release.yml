@@ -439,6 +439,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
+        id: scoop
         if: steps.meta.outputs.prerelease != 'true' && vars.SCOOP_PUBLISH != 'off'
         shell: pwsh
         timeout-minutes: 10
@@ -447,7 +448,16 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION
 
+      - name: "Scoop publication outcome: ${{ steps.scoop.outputs.outcome }}"
+        if: steps.scoop.outcome == 'success'
+        shell: pwsh
+        run: |
+          if ($env:PUBLICATION_OUTCOME -notin @('published', 'already-present', 'skipped-unconfigured', 'skipped-disabled', 'what-if', 'packed')) { throw 'Publisher outcome missing or invalid.' }
+        env:
+          PUBLICATION_OUTCOME: ${{ steps.scoop.outputs.outcome }}
+
       - name: Submit WinGet manifest update
+        id: winget
         if: steps.meta.outputs.prerelease != 'true' && vars.WINGET_PUBLISH != 'off'
         shell: pwsh
         timeout-minutes: 15
@@ -456,18 +466,35 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: ./scripts/release-submit-winget.ps1 -Version $env:RELEASE_VERSION
 
+      - name: "WinGet publication outcome: ${{ steps.winget.outputs.outcome }}"
+        if: steps.winget.outcome == 'success'
+        shell: pwsh
+        run: |
+          if ($env:PUBLICATION_OUTCOME -notin @('published', 'already-present', 'skipped-unconfigured', 'skipped-disabled', 'what-if', 'packed')) { throw 'Publisher outcome missing or invalid.' }
+        env:
+          PUBLICATION_OUTCOME: ${{ steps.winget.outputs.outcome }}
+
       # Last on purpose: until chocolatey.org approves a first version, every
       # later push is refused with 403 for weeks (docs/chocolatey-publishing.md),
       # and that must not keep WinGet from getting the release. The repository
       # variable CHOCOLATEY_PUBLISH set to off skips the push while
       # chocolatey.org cannot accept it; unset, the push runs.
       - name: Publish Chocolatey package
+        id: chocolatey
         if: steps.meta.outputs.prerelease != 'true' && vars.CHOCOLATEY_PUBLISH != 'off'
         shell: pwsh
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: ./scripts/release-publish-chocolatey.ps1 -Version $env:RELEASE_VERSION
+
+      - name: "Chocolatey publication outcome: ${{ steps.chocolatey.outputs.outcome }}"
+        if: steps.chocolatey.outcome == 'success'
+        shell: pwsh
+        run: |
+          if ($env:PUBLICATION_OUTCOME -notin @('published', 'already-present', 'skipped-unconfigured', 'skipped-disabled', 'what-if', 'packed')) { throw 'Publisher outcome missing or invalid.' }
+        env:
+          PUBLICATION_OUTCOME: ${{ steps.chocolatey.outputs.outcome }}
 
   windows-promote:
     name: Promote Windows Release

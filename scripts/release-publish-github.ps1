@@ -75,6 +75,8 @@ if ($existing) {
     Assert-ReleasePublicationState -Release $existing -Repository $Repository -Tag $Tag
     throw "Release $Tag already exists. Use mode promote with its recorded manifest; a build must never replace published assets."
 }
+# GitHub ignores --target for an existing tag. Peel it before any mutation.
+Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -AllowMissing
 # Create an explicit draft, upload each immutable asset with bounded retries,
 # verify the complete set, then publish. Cancellation leaves a named manual
 # recovery path, never automatic deletion or replacement of unknown bytes.
@@ -116,10 +118,23 @@ $assertInputs = @{
 }
 $state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
 [void](Assert-ReleaseManifest @assertInputs -Release $state)
+# A draft may still be tagless; reject a conflicting ref if one exists.
+Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -AllowMissing
 $publishFlags = if ($Prerelease -eq 'true') { @('--prerelease', '--latest=false') } else { @('--prerelease=false', '--latest') }
 & gh release edit $Tag --repo $Repository --draft=false @publishFlags
-if ($LASTEXITCODE -ne 0) { throw 'ReleasePublishUnconfirmed: inspect release state; no automatic deletion is permitted.' }
+$editExit = $LASTEXITCODE
+# A lost edit response does not prove failure. Reconcile persisted state by ID;
+# every read retries transient HTTP and connection failures. Never delete.
 $state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
+if ($state.draft -or $state.prerelease -ne ($Prerelease -eq 'true')) {
+    throw "ReleasePublishUnconfirmed: publication flags differ (edit exit $editExit). Preserve the release and inspect its ID."
+}
 Assert-ReleasePublicationState -Release $state -Repository $Repository -Tag $Tag
 [void](Assert-ReleaseManifest @assertInputs -Release $state)
-Write-Host 'Build publication: PASS (all uploaded bytes and GitHub digests match the shared manifest, including prereleases).'
+Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha
+$latest = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/latest") -AllowNotFound
+if (($Prerelease -eq 'false' -and [string]$latest.id -cne $releaseId) -or
+    ($Prerelease -eq 'true' -and [string]$latest.id -ceq $releaseId)) {
+    throw 'ReleasePublishUnconfirmed: latest release state differs; preserve the release and inspect it.'
+}
+Write-Host 'Build publication: PASS (publication flags, tag, all uploaded bytes and GitHub digests match).'

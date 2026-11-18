@@ -26,12 +26,15 @@ response and mutation.
   draft, uploading, and publishing update local state. Duplicate asset names
   fail; lost responses retain the successful upload. A `starter` asset without
   a digest fails closed with no publish. No asset is replaced or deleted.
-  GitHub tag creation and latest-release selection are not simulated: local Git
-  already supplies the candidate tag, and mutation flags/order are asserted.
+  Remote tag refs include absent, lightweight and annotated success/mismatch
+  cases. Publishing updates draft/prerelease state and models latest selection;
+  lost edit responses and connection-read retries have positive and refusal twins.
+  Local Git supplies candidate history; actual GitHub tag creation is not measured.
   This proves script decisions, not a hosted API write.
 - Drafts may have only one asset. Only drafts receive manual delete-and-rebuild
-  advice. Complete published releases without a manifest have a legacy outcome;
-  incomplete published releases require inspection and preservation.
+  advice. Every published release without a manifest has a legacy outcome, including
+  pre-rename payload names; manifest-bearing incomplete releases require preservation.
+  Shared-tag drafts and tagless drafts receive guarded, ID-only manual advice.
 
 ## Actions evidence and attempts
 
@@ -42,7 +45,8 @@ response and mutation.
   earlier successful publish followed by a failed rerun and cancellation before
   or after publication. Production must read every attempt. A successful
   prerelease build has skipped channel steps; failed/cancelled jobs have skipped
-  suffixes. Wrong attempt SHA and no successful publish refuse resume.
+  suffixes. Publisher outcome markers distinguish completion from credential skips;
+  missing old markers conservatively resume. Wrong attempt SHA and no successful publish refuse resume.
 - Recorded historical Test/job metadata is projected to the consumed fields.
   Downloaded interactive evidence is a small, locally generated hash-bound
   object; payload/evidence tamper and identity cases deliberately violate those
@@ -65,3 +69,11 @@ response and mutation.
   verification evidence. The local Git negative ancestry return is a seam,
   not a second real non-ancestor history. These limits do not establish hosted
   build, signing, tag publication, feed acceptance or real-input behavior.
+
+The bounded WinGet search cannot discover every other-account retitled PR: the
+[files API](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files)
+requires a PR number and supports only pagination, not a directory filter;
+[issue search](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
+does not support changed-file path qualifiers. The other-account-retitled twin
+records this limitation, and PACKAGING.md requires operator inspection or an
+explicit channel disable when the external submission state is uncertain.

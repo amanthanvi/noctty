@@ -28,7 +28,7 @@ function Get-ReleaseByTag {
 }
 function Get-IncompleteReleaseRecovery {
     param([string] $Repository, [string] $Tag)
-    "Manual recovery (only after confirming this is an incomplete draft; preserve every published release): gh release delete $Tag --repo $Repository --cleanup-tag --yes ; then gh workflow run release.yml --repo $Repository --ref main -f mode=build -f version=$($Tag.Substring(1)) -f prerelease=true . This rebuild is a new candidate and requires renewed evidence and soak."
+    "Manual recovery: first list EVERY release with tag $Tag, including drafts, and stop unless the sole match is this incomplete draft. Read its ID again immediately before deleting ONLY that draft by ID (gh api --method DELETE repos/$Repository/releases/<draft-id>). Never use --cleanup-tag. A tagless draft needs no tag deletion. Preserve any existing tag until an independently audited tag recovery; see PACKAGING.md. Then use gh workflow run release.yml --repo $Repository --ref main -f mode=build -f version=$($Tag.Substring(1)) -f prerelease=true with renewed evidence and soak."
 }
 function Assert-ReleasePublicationState {
     param($Release, [string] $Repository, [string] $Tag)
@@ -37,11 +37,24 @@ function Assert-ReleasePublicationState {
     if ($Release.tag_name -cne $Tag) { throw 'ReleaseIdentityMismatch: release tag differs.' }
     $expected = @(Get-ReleasePayloadPaths -ArtifactRoot '.' -Version $Tag.Substring(1) | ForEach-Object { [IO.Path]::GetFileName($_) })
     $actual = @($Release.assets | ForEach-Object { $_.name })
-    if ('release-manifest.json' -cnotin $actual -and @($expected | Where-Object { $_ -cnotin $actual }).Count -eq 0) {
+    if ('release-manifest.json' -cnotin $actual) {
         throw 'LegacyReleaseWithoutManifest: this published release has no promotion manifest. Preserve its release and tag. Use the verified manual Chocolatey workflow or an audited channel-specific recovery; do not rebuild or delete the published release.'
     }
     $expected += 'release-manifest.json'
     if (@($expected | Where-Object { $_ -cnotin $actual }).Count) {
         throw "IncompletePublishedRelease: missing manifest or payload assets for $Tag. Preserve the published release and tag; inspect the original run and use audited channel-specific recovery. Automatic promotion is unavailable."
+    }
+}
+
+function Assert-RemoteReleaseTag {
+    param([string] $Repository, [string] $Tag, [string] $CandidateSha, [switch] $AllowMissing)
+    $ref = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/git/ref/tags/$Tag") -AllowNotFound:$AllowMissing
+    if ($null -eq $ref) { return }
+    $object = $ref.object
+    for ($depth = 0; $object.type -ceq 'tag' -and $depth -lt 8; $depth++) {
+        $object = (Invoke-ReleaseGhJson @('api', "repos/$Repository/git/tags/$($object.sha)")).object
+    }
+    if ($object.type -cne 'commit' -or -not [string]::Equals($object.sha, $CandidateSha, [StringComparison]::Ordinal)) {
+        throw 'TagIdentityMismatch: remote tag differs from candidate input.'
     }
 }

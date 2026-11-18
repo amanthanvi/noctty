@@ -364,11 +364,17 @@ It reads every run attempt and its jobs. Some attempt must show
 **Publish GitHub Release** succeeded; the tag must still resolve to the
 candidate, and the summary digest, manifest and every asset must match. The
 original run ID stays fixed. **Do not re-run the original Release workflow**
-after it created a draft or published a release; dispatch promote instead. If
+after it created a draft or published a release. Use the guarded draft recovery
+below for a draft; dispatch promote for a complete published release. If
 a rerun already happened, resume still authenticates the earlier publishing
 attempt. Take `manifest_sha256` from that attempt's summary, not a later rerun's
 newly generated digest. A stable recovery starts at the first incomplete
-step (verify, Scoop, WinGet, Chocolatey); completed preceding steps are skipped.
+step (verify, Scoop, WinGet, Chocolatey) in the **original publishing attempt**,
+not a later promotion attempt. Verification needs a successful step; each channel
+also needs its durable `publication outcome: published` or `already-present`
+step. `skipped-unconfigured` never counts as complete. Older runs without
+outcome markers conservatively resume at the first unproven publisher and rely
+on its idempotence. Later promotion progress is not used to advance this index.
 A prerelease recovery verifies after its flip. Each publisher is idempotent:
 Scoop compares the desired bytes, WinGet checks open/merged PR manifest paths,
 and Chocolatey checks the exact version. Unknown state stops the run.
@@ -378,29 +384,53 @@ step. Inspect that run and publication state before choosing recovery.
 `DraftRelease` (including a partial or cancelled upload) cannot be promoted.
 Discovery reads all release-list pages and the selected release ID because
 GitHub's tag endpoint hides drafts. `AmbiguousReleaseTag` refuses duplicate
-pending tags for inspection. After confirming that the target is an incomplete
-**draft**, manual recovery is to delete that draft and its tag, then dispatch
-a new build from main with renewed acceptance evidence:
+pending tags for inspection. First list **every** release with this tag,
+including drafts, with a push-authorized token (listing is read-only):
 
 ```powershell
-gh release delete <tag> --repo amanthanvi/noctty --cleanup-tag --yes
+gh api --paginate --slurp 'repos/amanthanvi/noctty/releases?per_page=100' --jq '[.[][] | select(.tag_name == "<tag>") | {id, tag_name, draft, prerelease}]'
+```
+
+Stop unless there is **exactly one** match and it is the inspected incomplete
+draft. A published release plus a draft, or two drafts, requires investigation;
+never delete either on a first-match lookup. Immediately before deletion, repeat
+the full list and read `gh api repos/amanthanvi/noctty/releases/<draft-id>`;
+verify the same ID/tag and `draft: true`. Only then may an operator delete that
+specific draft by ID:
+
+```powershell
+gh api --method DELETE repos/amanthanvi/noctty/releases/<draft-id>
+```
+
+Never use `--cleanup-tag` in this recovery: another published release may share
+the tag, and GitHub may never have created a tag for a tagless draft. Check the
+remote ref separately (`gh api repos/amanthanvi/noctty/git/ref/tags/<tag>`; a 404
+means no ref). Preserve an existing tag; if it points to a different candidate,
+stop for independently audited tag recovery rather than deleting it here. With
+an absent tag or one peeled to the newly accepted candidate, dispatch a fresh
+build from main:
+
+```powershell
 gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=build -f version=<version> -f prerelease=true
 ```
 
-This applies only to an inspected draft. It is an operator recovery, never an
-automatic deletion. It produces a new candidate/run/manifest and needs a new soak. A complete published release uses
-`PublishedReleaseResume`; do not delete it to retry a package-manager step.
+This is manual draft recovery only, never automatic deletion or promotion.
+It creates a new run/manifest and requires renewed evidence and a new soak.
+Every published release and its tag must be preserved.
 
-`LegacyReleaseWithoutManifest` identifies a complete published release from
-before promotion manifests, including v1.3.136 through v1.3.138. Preserve the
+`LegacyReleaseWithoutManifest` identifies any published release from
+before promotion manifests, including the 22 pre-rename winghostty releases and v1.3.136 through v1.3.138. Preserve the
 release and tag; use the verified manual Chocolatey workflow or an audited
 channel-specific recovery. `IncompletePublishedRelease` also requires
 preservation and inspection, not deletion or a rebuild. `ReleaseMissing` means
 no release or draft was visible. Never delete a published historical release
 in response to a promotion refusal.
 
-The candidate generator runs with GitHub and package-manager token environment
-variables removed; the variables are restored before channel preflight. All
+The candidate generator runs in a separate, hidden `pwsh` process, with GitHub
+and package-manager token variables removed from its environment. Parent scope
+variables are inaccessible; the orchestration process retains its credentials
+for channel preflight. Local metadata generation also works under an outer
+`-WhatIf`; external mutations still honor `-WhatIf`. All
 three `*_PUBLISH=off` switches compare case-insensitively in build, promote,
 preflight and direct publisher scripts.
 
@@ -413,7 +443,31 @@ ID and manifest digest:
 gh workflow run test.yml --repo amanthanvi/noctty --ref <tag> -f run_interactive_win11=true
 ```
 
+For read-only verification of historical v1.3.124, pass `-AllowPrerelease`
+explicitly: it is still marked as a prerelease on GitHub. Its portable archives
+predate the bundled ConPTY pair (v1.3.125), so its candidate data need no
+`conpty-redist.json`. Modern releases still require both pinned Microsoft
+binaries. The default verifier continues to require a stable release.
+
 ### WinGet
+
+Duplicate discovery checks the default branch's exact version directory, then
+at most 100 package/version search matches and 100 open PRs by the publishing
+identity. Every discovered PR is checked through its state and changed-file
+paths under the version's manifest directory. Reads have a 250-request budget,
+three attempts for 5xx or connection loss, and search-rate pacing.
+
+**Discovery limit:** GitHub's pull-request files endpoint takes a PR number;
+it has no repository-wide directory filter. Issue search has no changed-path
+qualifier. Consequently, an open PR by another account that is retitled and
+omits package/version text from searchable content can escape this bounded
+candidate discovery. Scanning every open PR caused real 502s on winget-pkgs and
+is deliberately avoided. Before a fresh submission, the operator must check
+known external submissions by PR number, listing all files (up to the REST
+3,000-file limit) and matching `manifests/a/AmanThanvi/noctty/<version>/`.
+If that inspection cannot establish the state, disable WinGet with
+`WINGET_PUBLISH=off` and use an audited manual channel recovery. No claim of
+repository-wide open-PR path coverage is made.
 
 - Secret: `WINGETCREATE_TOKEN`
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`

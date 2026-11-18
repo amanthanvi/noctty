@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'release-evidence.ps1')
 . (Join-Path $PSScriptRoot 'release-publication-state.ps1')
 . (Join-Path $PSScriptRoot 'release-package-manager-preflight.ps1')
+. (Join-Path $PSScriptRoot 'release-run-generator.ps1')
 $repoRoot = Get-RepoRoot
 if ($Fixture -eq 'historical') {
     $Tag = 'v1.3.136'
@@ -58,12 +59,7 @@ if ($LASTEXITCODE -ne 0 -or $candidateHead -cne $CandidateSha) { throw 'TagIdent
 & git -C $repoRoot merge-base --is-ancestor $CandidateSha origin/main
 if ($LASTEXITCODE -ne 0) { throw 'CandidateNotAncestor: candidate is not an ancestor of origin/main.' }
 # API ref resolution independently checks a moved remote tag, including annotated tags.
-$ref = Invoke-ReleaseGhJson @('api', "repos/$Repository/git/ref/tags/$Tag")
-$object = $ref.object
-for ($depth = 0; $object.type -ceq 'tag' -and $depth -lt 8; $depth++) {
-    $object = (Invoke-ReleaseGhJson @('api', "repos/$Repository/git/tags/$($object.sha)")).object
-}
-if ($object.type -cne 'commit' -or $object.sha -cne $CandidateSha) { throw 'TagIdentityMismatch: remote tag differs from candidate input.' }
+Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha
 $resume = -not $release.prerelease
 $resumeFrom = Assert-ReleaseEvidence -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -EvidenceRunId $EvidenceRunId -ReleaseRunId $ReleaseRunId -WorkDirectory $WorkDirectory
 # After a prerelease flip verification always runs, even if its build verified it.
@@ -115,16 +111,9 @@ if (-not $Fixture) {
         throw "package-manager generator differs from the prerelease: $recorded != $found (working file $disk)"
     }
     $metadata = Get-Content -LiteralPath (Join-Path $CandidateDirectory 'dist/windows/release-metadata.json') -Raw | ConvertFrom-Json
-    $generatorCredentials = @{}
-    foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','SCOOP_BUCKET_TOKEN','WINGET_CREATE_GITHUB_TOKEN','WINGETCREATE_TOKEN','CHOCO_API_KEY')) {
-        $generatorCredentials[$name] = [Environment]::GetEnvironmentVariable($name)
-        [Environment]::SetEnvironmentVariable($name, $null)
-    }
-    try {
-        & $generator -Version $version -Tag $Tag -Repo $Repository -Architectures @('x64', 'arm64') -ArtifactBase $artifactRoot -UpstreamBaseVersion $metadata.upstreamBaseVersion -FirstForkPatch $metadata.firstForkPatch
-    } finally {
-        foreach ($name in $generatorCredentials.Keys) { [Environment]::SetEnvironmentVariable($name, $generatorCredentials[$name]) }
-        $generatorCredentials.Clear()
+    Invoke-ReleaseGenerator -Generator $generator -Parameters @{
+        Version=$version; Tag=$Tag; Repo=$Repository; Architectures=@('x64','arm64'); ArtifactBase=$artifactRoot
+        UpstreamBaseVersion=$metadata.upstreamBaseVersion; FirstForkPatch=$metadata.firstForkPatch
     }
     Assert-PackageManagerFiles -Manifest $manifest -PrimaryDirectory $primary
     & (Join-Path $PSScriptRoot 'check-release-copy.ps1') -ExpectedVersion $version
@@ -133,7 +122,7 @@ if (-not $Fixture) {
     Write-Host 'Historical fixture: current-main copy checks do not apply to a superseded release; metadata hashes are unavailable.'
     # Chocolatey reads metadata before ShouldProcess. Generate local metadata
     # with the repaired orchestration writer solely for its WhatIf invocation.
-    & (Join-Path $PSScriptRoot 'package-package-managers.ps1') -Version $version -Architectures @('x64', 'arm64') -ArtifactBase $artifactRoot
+    Invoke-ReleaseGenerator -Generator (Join-Path $PSScriptRoot 'package-package-managers.ps1') -Parameters @{ Version=$version; Architectures=@('x64','arm64'); ArtifactBase=$artifactRoot }
 }
 if ($resume) {
     Write-Host 'Resume: verified identical already-stable release; skipping release edit.'
@@ -146,8 +135,8 @@ if (-not $resume -and -not $Fixture -and $PSCmdlet.ShouldProcess($Tag, 'promote 
 if (-not $Fixture -and -not $WhatIfPreference -and $resumeFrom -eq 0) {
     & (Join-Path $PSScriptRoot 'check-release-copy.ps1') -ExpectedVersion $version -CheckRemoteLatest
     if ($LASTEXITCODE -ne 0) { throw 'Remote latest copy check failed.' }
-    & (Join-Path $PSScriptRoot 'verify-published-release.ps1') -Version $version -CandidateDirectory $CandidateDirectory -ManifestSha256 $ManifestSha256
-    if ($LASTEXITCODE -ne 0) { throw 'Published release verification failed.' }
+    $verification = & (Join-Path $PSScriptRoot 'verify-published-release.ps1') -Version $version -CandidateDirectory $CandidateDirectory -ManifestSha256 $ManifestSha256 -PassThru
+    if ($verification.Verified -ne $true) { throw 'Published release verification failed.' }
 }
 if ($Fixture) {
     & (Join-Path $PSScriptRoot 'release-publish-scoop.ps1') -Version $version -ArtifactRoot $artifactRoot -RunnerTemp $WorkDirectory -WhatIf

@@ -25,17 +25,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
-if ([string]::Equals($env:WINGET_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'WinGet explicitly disabled.'; return }
+. (Join-Path $PSScriptRoot 'release-publisher-outcome.ps1')
+if ([string]::Equals($env:WINGET_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'WinGet explicitly disabled.'; Set-ReleasePublisherOutcome skipped-disabled; return }
 
 if (-not $env:WINGET_CREATE_GITHUB_TOKEN) {
     Write-Host 'Skipping WinGet submit: WINGET_CREATE_GITHUB_TOKEN is not configured.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
     Write-Host 'Skipping WinGet submit: WINGET_PACKAGE_IDENTIFIER is not configured. Initial WinGet bootstrap is still manual.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 if (-not $PSCmdlet.ShouldProcess($PackageIdentifier, "submit noctty $Version WinGet manifest")) {
+    Set-ReleasePublisherOutcome what-if
     return
 }
 
@@ -69,7 +73,10 @@ function Test-WinGetVersionSubmitted {
             $lines = @(& gh api --method GET @Arguments --include 2>$null)
             $exitCode = $LASTEXITCODE
             $status = [regex]::Match(($lines -join "`n"), '(?m)^HTTP/\S+\s+([0-9]{3})\b')
-            if (-not $status.Success) { throw 'WinGet HTTP status unavailable.' }
+            if (-not $status.Success) {
+                if ($attempt -lt 3) { Start-Sleep -Seconds ([math]::Pow(2, $attempt)); continue }
+                throw 'WinGet HTTP status unavailable after 3 attempts.'
+            }
             $code = [int]$status.Groups[1].Value
             if ($code -ge 500 -and $code -le 599 -and $attempt -lt 3) {
                 Start-Sleep -Seconds ([math]::Pow(2, $attempt))
@@ -132,6 +139,10 @@ function Test-WinGetVersionSubmitted {
             }
         }
         foreach ($number in $numbers) { if (Test-WinGetPrFiles -Number $number) { return $true } }
+        # GitHub issue search cannot query changed paths. Retitled PRs by
+        # another account that omit package/version text cannot be discovered
+        # within this bound; see PACKAGING.md's operator check.
+        Write-Warning 'WinGet discovery limit: a retitled other-account PR without package/version text needs an operator path check before submission.'
         return $false
     }
     catch { throw 'Could not determine whether this WinGet version already has an open or merged PR; refusing a duplicate submission.' }
@@ -139,7 +150,7 @@ function Test-WinGetVersionSubmitted {
 }
 if (Test-WinGetVersionSubmitted) {
     Write-Host "WinGet already has an open or merged PR for $PackageIdentifier $Version; nothing to submit."
-    $global:LASTEXITCODE = 0
+    Set-ReleasePublisherOutcome already-present
     return
 }
 $packageIdSegments = $PackageIdentifier.Split('.')
@@ -164,6 +175,7 @@ catch {
 
     if ($statusCode -eq 404) {
         Write-Host "Skipping WinGet submit: $PackageIdentifier is not bootstrapped in microsoft/winget-pkgs ($manifestPath)."
+    Set-ReleasePublisherOutcome skipped-unconfigured
         return
     }
     throw
@@ -346,3 +358,4 @@ $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
 if ($result.ExitCode -ne 0) {
     throw "wingetcreate update failed with exit code $($result.ExitCode)"
 }
+Set-ReleasePublisherOutcome published

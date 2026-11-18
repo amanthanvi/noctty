@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '8f247498bd072b5a013b88fc2dd0711c268b37ce07270cf5c48dd669ef20eb48'
+    '883a7d0cc45d4bff481665cc957cb0f69fc21ec5a20dd901939b13233705fa7e'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1448,14 +1448,14 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '7347679056e1de520300ad16b5fffa373593601546ec893cd9af745c52e76b60'
+            '64eed3738a6c5d0efe87cd0ac5250de620770658a302b91cf71483bbad31aa3c'
         CriticalStatement = '$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing'
     }
     [pscustomobject] @{
         Context = $releaseScoopPublisher
         Content = $releaseScoopPublisherText
         ExpectedSha256 =
-            '35999940a6fdfaae6cfeac2e9c0c4f5a91b4fdfd1c25cfdf304ba0a4bb2e17b9'
+            '8864180c506a0736cc0da4ec80752a727dc35bb8b89f974db1269c8e3cb46d5c'
         CriticalStatement =
             "        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD"
     }
@@ -1463,7 +1463,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            '04a31a9ba6fa010d62dcbaffe15fa42a65dbc97aade35f7efef7cee5ed0193aa'
+            'a684ae01dc9cbc35487e804bc571fc27c009dbc450d7f9613f8d596d2824bd35'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }

@@ -603,3 +603,7 @@ foreach ($contract in @(
         }
     )
 }
+
+if ($publishedReleaseVerifierText -notmatch '\$firstBundledConptyVersion = \[version\]''1\.3\.125''' -or
+    $publishedReleaseVerifierText -notmatch '(?s)\$conptyPin = if \(\$requiresBundledConpty\).*?conpty-redist.json' -or
+    $publishedReleaseVerifierText -notmatch '\[switch\]\$AllowPrerelease') { throw 'Historical verification must retain an explicit prerelease opt-in and the first bundled ConPTY boundary.' }

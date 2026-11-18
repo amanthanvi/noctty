@@ -11,7 +11,12 @@ param(
     [string]$CandidateDirectory,
 
     [ValidatePattern('\A[0-9a-f]{64}\z')]
-    [string]$ManifestSha256
+    [string]$ManifestSha256,
+
+    [switch]$PassThru,
+
+    # Explicit opt-in for read-only verification of historical prereleases.
+    [switch]$AllowPrerelease
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +31,7 @@ $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
 }
 $firstAttestedVersion = [version]'1.3.124'
 $firstPortableManifestVersion = [version]'1.3.124'
+$firstBundledConptyVersion = [version]'1.3.125'
 $firstSymbolsVersion = [version]'1.3.133'
 $minimumGhAttestationVersion = [version]'2.93.0'
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
@@ -109,7 +115,7 @@ $tag = "v$Version"
 $releaseJson = & gh release view $tag --repo $repository --json tagName,isDraft,isPrerelease,assets
 if ($LASTEXITCODE -ne 0) { throw "Could not load published release $tag from $repository." }
 $release = $releaseJson | ConvertFrom-Json
-if ($release.tagName -ne $tag -or $release.isDraft -or $release.isPrerelease) {
+if ($release.tagName -ne $tag -or $release.isDraft -or ($release.isPrerelease -and -not $AllowPrerelease)) {
     throw "Published release $tag must exist as a stable, non-draft release."
 }
 $releaseVersion = [version]$Version
@@ -183,9 +189,10 @@ try {
     $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $candidateDataRoot 'src/update/github_releases.zig'))
     if ($allowedPins.Count -eq 0) { throw 'Updater publisher-pin allowlist is empty.' }
     $trustSelfSigned = ([string]$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
-    $conptyPin = Get-Content `
-        -LiteralPath (Join-Path $candidateDataRoot 'dist/windows/conpty-redist.json') `
-        -Raw | ConvertFrom-Json
+    $requiresBundledConpty = [version]$Version -ge $firstBundledConptyVersion
+    $conptyPin = if ($requiresBundledConpty) {
+        Get-Content -LiteralPath (Join-Path $candidateDataRoot 'dist/windows/conpty-redist.json') -Raw | ConvertFrom-Json
+    }
 
     $attestationEvidenceCount = 0
     foreach ($asset in $assets) {
@@ -278,8 +285,8 @@ try {
         # can never satisfy the updater publisher pins. It still has to survive
         # publication, so it is checked below the way the pre-publish verifier
         # checks it, against the pinned hash and Microsoft's own signer.
-        $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
-        $conptyPortablePayloads = @(
+        $conptyArchitecture = if ($requiresBundledConpty) { $conptyPin.architectures.PSObject.Properties[$architecture].Value }
+        $conptyPortablePayloads = @(if ($requiresBundledConpty) {
             [pscustomobject]@{
                 RelativePath = 'noctty/conpty.dll'
                 Pin          = $conptyArchitecture.conptyDll
@@ -288,9 +295,9 @@ try {
                 RelativePath = 'noctty/OpenConsole.exe'
                 Pin          = $conptyArchitecture.openConsoleExe
             }
-        )
+        })
         $signedPortablePePaths = @(Get-WindowsSignedRuntimePayloads)
-        $expectedPortablePePaths = $signedPortablePePaths + @($conptyPortablePayloads.RelativePath)
+        $expectedPortablePePaths = $signedPortablePePaths + @($conptyPortablePayloads | ForEach-Object { $_.RelativePath })
         $portablePePaths = @(Get-PortablePeRelativePaths -Root $extractDirectory)
         $missingPortablePe = @($expectedPortablePePaths | Where-Object { $_ -notin $portablePePaths })
         $unexpectedPortablePe = @($portablePePaths | Where-Object { $_ -notin $expectedPortablePePaths })
@@ -356,6 +363,7 @@ try {
     } else {
         "provenance not required before v$firstAttestedVersion"
     }
+    if ($PassThru) { [pscustomobject]@{ Verified=$true; Tag=$tag } }
     Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $attestationSummary, $($signatureEvidence.Count) signed files, SPKI $($pins[0]))" -ForegroundColor Green
 }
 finally {

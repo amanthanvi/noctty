@@ -1,8 +1,26 @@
 function Invoke-ReleaseGhJson {
-    param([string[]] $Arguments)
-    $json = & gh @Arguments
-    if ($LASTEXITCODE -ne 0) { throw 'Release GitHub read failed; publication state is unknown.' }
-    $json | ConvertFrom-Json
+    param([string[]] $Arguments, [switch] $AllowNotFound)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $lines = @(& gh @Arguments --include 2>$null)
+        $readExit = $LASTEXITCODE
+        $status = [regex]::Match(($lines -join "`n"), '(?m)^HTTP/\S+\s+([0-9]{3})\b')
+        if ($status.Success) {
+            $code = [int]$status.Groups[1].Value
+            if ($code -eq 404 -and $AllowNotFound) { $global:LASTEXITCODE = 0; return $null }
+            if ($readExit -eq 0 -and $code -eq 200) {
+                $blank = [array]::IndexOf($lines, '')
+                if ($blank -ge 0) {
+                    $data = ($lines[($blank + 1)..($lines.Count - 1)] -join "`n") | ConvertFrom-Json -NoEnumerate
+                    if ($null -eq $data) { throw 'Release GitHub JSON is missing; publication state is unknown.' }
+                    return $data
+                }
+            }
+            if ($code -lt 500 -or $code -gt 599) { throw "Release GitHub read refused (HTTP $code); publication state is unknown." }
+        }
+        # A connection failure may have no HTTP response. Retry it too.
+        if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+    }
+    throw 'Release GitHub read failed after 3 attempts; publication state is unknown.'
 }
 
 function Assert-ReleaseEvidence {
@@ -50,6 +68,14 @@ function Assert-ReleaseEvidence {
                     foreach ($stepName in @('Verify published release copy and assets', 'Publish Scoop manifest', 'Submit WinGet manifest update', 'Publish Chocolatey package')) {
                         $step = @($build[0].steps | Where-Object { $_.name -ceq $stepName })
                         if ($step.Count -ne 1 -or $step[0].conclusion -cne 'success') { break }
+                        if ($resumeFrom -gt 0) {
+                            $channel = @('Scoop','WinGet','Chocolatey')[$resumeFrom - 1]
+                            $outcome = @($build[0].steps | Where-Object {
+                                ([string]::Equals($_.name, "$channel publication outcome: published", [StringComparison]::Ordinal) -or
+                                 [string]::Equals($_.name, "$channel publication outcome: already-present", [StringComparison]::Ordinal)) -and $_.conclusion -ceq 'success'
+                            })
+                            if ($outcome.Count -ne 1) { break }
+                        }
                         $resumeFrom++
                     }
                 }

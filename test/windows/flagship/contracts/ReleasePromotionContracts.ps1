@@ -71,7 +71,7 @@ if ($promoteText -match '(?m)^\s*& gh release (upload|create)\b|--clobber' -or
 }
 $publisherResumeOutput = @(& (Join-Path $repoRoot 'test/windows/release-publisher-resume.ps1') 6>&1)
 if ($LASTEXITCODE -ne 0 -or @($publisherResumeOutput | Where-Object {
-    [string]$_ -ceq 'Publisher resume: PASS (19 WinGet cases and unchanged Scoop with relative metadata).'
+    [string]$_ -ceq 'Publisher resume: PASS (22 WinGet cases and unchanged Scoop with relative metadata).'
 }).Count -ne 1) { throw 'Publisher resume controls did not all complete.' }
 $publisherResumeOutput | ForEach-Object { Write-Host $_ }
 
@@ -95,4 +95,16 @@ if (@($channelOutput | Where-Object { [string]$_ -ceq 'Release channel switches:
 $channelOutput | ForEach-Object { Write-Host $_ }
 $publicationText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-publication-state.ps1') -Raw
 if ($publisherText -match 'releases/tags/' -or $publicationText -match 'releases/tags/' -or $publicationText -notmatch 'releases/\$id') { throw 'Draft lookup must discover and read by release ID.' }
-if ($promoteText -notmatch 'generatorCredentials' -or $promoteText -notmatch 'SetEnvironmentVariable\(\$name, \$null\)' -or $promoteText -notmatch 'finally') { throw 'Candidate generator must have a credential-free environment.' }
+$generatorRunner = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-run-generator.ps1') -Raw
+if ($promoteText -match 'generatorCredentials' -or $promoteText -notmatch 'Invoke-ReleaseGenerator' -or
+    $generatorRunner -notmatch 'ProcessStartInfo' -or $generatorRunner -notmatch 'CreateNoWindow = \$true' -or
+    $generatorRunner -notmatch 'Environment.Remove' -or $generatorRunner -match 'SetEnvironmentVariable') { throw 'Candidate generator must be isolated from parent scope and token environment.' }
+
+$outcomeOutput=@(& (Join-Path $repoRoot 'test/windows/release-publisher-outcomes.ps1') 6>&1)
+if (@($outcomeOutput | Where-Object { [string]$_ -ceq 'Publisher outcomes: PASS (3 missing-credential paths).' }).Count -ne 1) { throw 'Publishers must distinguish missing credentials from completion.' }
+$outcomeOutput | ForEach-Object { Write-Host $_ }
+foreach($channel in @('Scoop','WinGet','Chocolatey')) {
+    $slug=$channel.ToLowerInvariant()
+    if ($releaseWorkflowText -notmatch ([regex]::Escape("$channel publication outcome:")) -or
+        $releaseWorkflowText -notmatch ([regex]::Escape("PUBLICATION_OUTCOME: " + '${{ steps.' + $slug + '.outputs.outcome }}'))) { throw 'The publishing attempt must persist channel outcomes in the jobs API.' }
+}
