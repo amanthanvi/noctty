@@ -173,8 +173,8 @@ function Get-ReplyPathProblems {
         }
     }
     Need '        $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;' 'case 7 no longer starts incomplete'
-    # The closed set, by SHA-256 with LF line ends: every block that decides or feeds an exit or a
-    # verdict. A change to any of them must update its pin here, on purpose.
+    # The blocks that decide or feed an exit or a verdict, by SHA-256 with LF line ends, so a failure
+    # names the block. The whole-file pins below close the set.
     $regionPins = $replyPathRegionPins
     $regionsFound = @([regex]::Matches($Harness, '(?m)^[ \t]*# pin-begin: ([a-z0-9-]+)') | ForEach-Object { $_.Groups[1].Value })
     if (-not [string]::Equals(($regionsFound -join ','), (@($regionPins.Keys) -join ','), [StringComparison]::Ordinal)) {
