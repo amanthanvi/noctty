@@ -194,8 +194,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\powershell-shell-integ
 Composite Win11 validator. It runs launch-helper checks and startup smoke,
 then runs the command-finish and progress validators in parallel against
 separate sandbox roots. `-DeferCommandFinish` leaves the command-finish
-validator out (the suite logs it as deferred) for a caller that runs it
-later, as `interactive-win11-job.ps1` does.
+validator out (the suite logs it as deferred, and its coverage line says the
+caller checks the command-finish policy) for a caller that runs it later, as
+`interactive-win11-job.ps1` does.
 
 Run with:
 
@@ -689,9 +690,10 @@ the composite (with `-DeferCommandFinish`), then the shader, shader-pacing,
 accessibility, palette-theme and session-restore leaves, and last the
 command-finish leaf, the one step that raises a real toast, so that its banner
 has no later leaf to disturb. The accessibility leaf's two processes that save
-Settings run with `--app-notifications=no-config-reload` and
-`--desktop-notifications=false`, so a save shows its in-window banner and no
-toast. All run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
+Settings run with `--app-notifications=false` and
+`--desktop-notifications=false` as the last notification values on their
+command lines, so a save shows its in-window banner (each has a terminal window
+to hold it) and no toast. All run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
 jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the

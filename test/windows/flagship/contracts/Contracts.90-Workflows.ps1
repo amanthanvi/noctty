@@ -440,8 +440,9 @@ if ($interactiveJobPlanText -cne ($expectedInteractiveJobPlan -replace '\r\n?', 
 # only step that raises one on purpose, so the composite defers it and the job
 # runs it last; every other step's noctty is kept from raising one. Checked
 # here: the order, the composite's deferral, the accessibility leaf's two
-# Settings-saving processes, and an inventory of toast sources over the job's
-# files, each with mutation controls.
+# Settings-saving processes (by the notification settings noctty ends up with),
+# and an inventory of toast sources over every script the job runs, each with
+# mutation controls.
 $toastLeaf = 'test\windows\interactive-win11-command-finish.ps1'
 $toastLeafSteps = @($interactiveJobPlan | Where-Object { $_.Script -ceq $toastLeaf })
 if ($toastLeafSteps.Count -ne 1 -or -not [object]::ReferenceEquals($interactiveJobPlan[-1], $toastLeafSteps[0]) -or
@@ -450,13 +451,14 @@ if ($toastLeafSteps.Count -ne 1 -or -not [object]::ReferenceEquals($interactiveJ
 }
 $validateHarness = Join-Path $repoRoot 'test\windows\interactive-win11-validate.ps1'
 $flagshipInteractive = Join-Path $repoRoot 'test\windows\flagship\Invoke-InteractiveWin11.ps1'
+# Parses a script's text; -Tokens also returns its tokens.
 $parseToastScript = {
-    param([string] $Text, [string] $Name)
-    $tokens = $null
+    param([string] $Text, [string] $Name, [switch] $Tokens)
+    $parsedTokens = $null
     $errors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$parsedTokens, [ref]$errors)
     if ($errors.Count -ne 0) { throw "$Name does not parse: $($errors[0].Message)" }
-    $ast
+    if ($Tokens) { [pscustomobject]@{ Ast = $ast; Tokens = $parsedTokens } } else { $ast }
 }
 # A command's value for one named parameter (the element after it), or $null.
 $getNamedArgument = {
@@ -497,9 +499,14 @@ $isWithin = {
 }
 # The composite starts the command-finish leaf once, inside `$parallelRuns`, only
 # under an if whose one clause is `-not $DeferCommandFinish`; the progress leaf
-# beside it under no if; and it declares the switch.
+# beside it under no if; it declares the switch and only reads it, each read the
+# whole condition of an if (no assignment, increment, [ref], variable cmdlet or
+# `$PSBoundParameters` can change it); and it names the leaf's script once, so no
+# Start-Process, `&` or `-File` of it can run beside that launch.
 $testCompositeDeferral = {
-    param([System.Management.Automation.Language.ScriptBlockAst] $Ast)
+    param([string] $Text)
+    $parsed = & $parseToastScript $Text 'interactive-win11-validate.ps1' -Tokens
+    $Ast = $parsed.Ast
     $parameters = @($Ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'DeferCommandFinish' })
     if ($parameters.Count -ne 1 -or $parameters[0].StaticType -ne [switch]) { return $false }
     $launches = @(& $getLeafLaunches $Ast)
@@ -513,8 +520,8 @@ $testCompositeDeferral = {
             $node.Left.Extent.Text -ceq '[InteractiveWin11HarnessRun[]] $parallelRuns'
     }, $true))
     if ($parallel.Count -ne 1) { return $false }
-    foreach ($toastLaunch in @($toast[0], $progress[0])) {
-        if (-not (& $isWithin $toastLaunch.Command $parallel[0])) { return $false }
+    foreach ($launch in @($toast[0], $progress[0])) {
+        if (-not (& $isWithin $launch.Command $parallel[0])) { return $false }
     }
     $ifs = @(for ($at = $toast[0].Command.Parent; -not [object]::ReferenceEquals($at, $parallel[0]); $at = $at.Parent) {
         if ($at -is [System.Management.Automation.Language.IfStatementAst]) { $at }
@@ -525,25 +532,57 @@ $testCompositeDeferral = {
     for ($at = $progress[0].Command.Parent; -not [object]::ReferenceEquals($at, $parallel[0]); $at = $at.Parent) {
         if ($at -is [System.Management.Automation.Language.IfStatementAst]) { return $false }
     }
-    $true
+    $isIfCondition = {
+        param($Pipeline)
+        $Pipeline -is [System.Management.Automation.Language.PipelineAst] -and $Pipeline.Parent -is [System.Management.Automation.Language.IfStatementAst] -and
+            @($Pipeline.Parent.Clauses | Where-Object { [object]::ReferenceEquals($_.Item1, $Pipeline) }).Count -eq 1
+    }
+    foreach ($use in @($Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $node.VariablePath.UserPath -match '^(?i)((global|local|script|private|variable):)?DeferCommandFinish$'
+            }, $true))) {
+        if ($use.Parent -is [System.Management.Automation.Language.ParameterAst]) { continue }
+        $read = $use.Parent
+        if ($read -is [System.Management.Automation.Language.UnaryExpressionAst] -and
+            $read.TokenKind -in @([System.Management.Automation.Language.TokenKind]::Not, [System.Management.Automation.Language.TokenKind]::Exclaim)) { $read = $read.Parent }
+        if ($read -isnot [System.Management.Automation.Language.CommandExpressionAst] -or -not (& $isIfCondition $read.Parent)) { return $false }
+    }
+    if (@($Ast.FindAll({
+                param($node)
+                ($node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -match '(?i)DeferCommandFinish') -or
+                ($node -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -ieq 'PSBoundParameters')
+            }, $true)).Count -ne 0) { return $false }
+    $named = @($parsed.Tokens | Where-Object {
+        $_ -is [System.Management.Automation.Language.StringToken] -and $_.Value -match '(?i)command-finish[^\\/]*\.ps1'
+    })
+    $named.Count -eq 1
 }
 $validateText = Get-Content -LiteralPath $validateHarness -Raw
-if (-not (& $testCompositeDeferral (& $parseToastScript $validateText 'interactive-win11-validate.ps1'))) {
-    throw 'interactive-win11-validate.ps1 must start the command-finish leaf once, in $parallelRuns, only under if (-not $DeferCommandFinish), declare that switch, and start the progress leaf unconditionally.'
+if (-not (& $testCompositeDeferral $validateText)) {
+    throw 'interactive-win11-validate.ps1 must start the command-finish leaf once, in $parallelRuns, only under if (-not $DeferCommandFinish), name its script nowhere else, declare that switch and only read it, and start the progress leaf unconditionally.'
 }
 $deferGuardText = "    if (-not `$DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }"
+$parallelRunsText = '[InteractiveWin11HarnessRun[]] $parallelRuns = @('
 foreach ($toastControl in @(
         @{ Name = 'the guard removed'; From = $deferGuardText; To = "    Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12" },
         @{ Name = 'the guard inverted'; From = $deferGuardText; To = "    if (`$DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }" },
         @{ Name = 'an else that starts it'; From = $deferGuardText; To = "$deferGuardText else { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }" },
         @{ Name = 'a second launch after the parallel runs'; From = '$maxTimeoutSeconds = '; To = "Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12`n`$maxTimeoutSeconds = " },
         @{ Name = 'the progress leaf guarded too'; From = "    Start-Harness -ScriptName 'interactive-win11-progress.ps1' -TimeoutSeconds 20"; To = "    if (-not `$DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-progress.ps1' -TimeoutSeconds 20 }" },
-        @{ Name = 'the switch undeclared'; From = '    [switch] $DeferCommandFinish'; To = '    [string] $DeferCommandFinish' }
+        @{ Name = 'the switch undeclared'; From = '    [switch] $DeferCommandFinish'; To = '    [string] $DeferCommandFinish' },
+        @{ Name = 'the switch cleared before the parallel runs'; From = $parallelRunsText; To = "`$DeferCommandFinish = `$false`n$parallelRunsText" },
+        @{ Name = 'the switch cleared in script scope'; From = $parallelRunsText; To = "[bool]`$script:DeferCommandFinish = `$false`n$parallelRunsText" },
+        @{ Name = 'the switch cleared by Set-Variable'; From = $parallelRunsText; To = "Set-Variable -Name DeferCommandFinish -Value `$false`n$parallelRunsText" },
+        @{ Name = 'the switch read through PSBoundParameters'; From = $parallelRunsText; To = "`$null = `$PSBoundParameters.Remove('Rebuild')`n$parallelRunsText" },
+        @{ Name = 'the switch passed on'; From = $parallelRunsText; To = "Write-Host `$DeferCommandFinish`n$parallelRunsText" },
+        @{ Name = 'a direct Start-Process of the leaf'; From = '$maxTimeoutSeconds = '; To = "Start-Process -FilePath 'powershell.exe' -ArgumentList @('-File', (Join-Path `$PSScriptRoot 'interactive-win11-command-finish.ps1'))`n`$maxTimeoutSeconds = " },
+        @{ Name = 'the leaf run with &'; From = '$maxTimeoutSeconds = '; To = "& (Join-Path `$PSScriptRoot 'interactive-win11-command-finish.ps1')`n`$maxTimeoutSeconds = " }
     )) {
     if (([regex]::Matches($validateText, [regex]::Escape($toastControl.From))).Count -ne 1) {
         throw "Composite deferral control '$($toastControl.Name)' lost its anchor."
     }
-    if (& $testCompositeDeferral (& $parseToastScript $validateText.Replace($toastControl.From, $toastControl.To) $toastControl.Name)) {
+    if (& $testCompositeDeferral $validateText.Replace($toastControl.From, $toastControl.To)) {
         throw "The composite deferral check accepted $($toastControl.Name)."
     }
 }
@@ -553,40 +592,55 @@ if ([regex]::Matches($flagshipInteractiveText, '(?m)^\s*\[switch\] \$DeferComman
     throw 'Invoke-InteractiveWin11.ps1 must declare -DeferCommandFinish and pass it on to the composite.'
 }
 
-# Every file the job runs, the composite's leaves and the shared stateful library
-# included. Only the command-finish leaf may hold a toast source; only the
-# accessibility leaf may save Settings, from the processes pinned below.
+# OSC 9 is a desktop notification unless osc9.zig parses it as something else.
+# Exempt are only the two forms the job's leaves send and the parser proves are
+# no notification: progress, `9;4;` and a state its switch takes (`9;4;5` and a
+# bare `9;4;` are notifications), and a working directory, `9;9;`. Every other
+# OSC 9, ConEmu's included, is a source. The states come from the parser's
+# source, and every parser test's input, as text and as bytes, must be flagged
+# if and only if that test expects a notification, for the exempt kinds.
+$osc9Parser = Join-Path $repoRoot 'src\terminal\osc\parsers\osc9.zig'
+$osc9Text = Get-Content -LiteralPath $osc9Parser -Raw
+$progressBranch = [regex]::Match($osc9Text, "(?s)// OSC 9;4 progress report\s*'4' => \{\s*if \(data\.len < 2\) break :conemu;\s*if \(data\[1\] != ';'\) break :conemu;\s*if \(data\.len < 3\) break :conemu;\s*switch \(data\[2\]\) \{(?<cases>.*?)\n\s*else => break :conemu,")
+$cwdBranch = [regex]::Match($osc9Text, "(?s)// OSC 9;9 current working directory\s*'9' => \{\s*if \(data\.len < 2\) break :conemu;\s*if \(data\[1\] != ';'\) break :conemu;")
+$progressStates = @(if ($progressBranch.Success) {
+        [regex]::Matches($progressBranch.Groups['cases'].Value, "(?m)^\s*'(?<state>[0-9])' => \{") | ForEach-Object { $_.Groups['state'].Value }
+    })
+if (-not $progressBranch.Success -or -not $cwdBranch.Success -or $progressStates.Count -eq 0 -or
+    ($progressStates -join '') -cne (($progressStates | Sort-Object -Unique) -join '')) {
+    throw 'osc9.zig no longer has the OSC 9;4 progress and 9;9 working-directory branches the toast-source inventory reads; derive its exemptions again.'
+}
+$progressStateClass = '[' + ($progressStates -join '') + ']'
+$progressStateBytes = '(?:' + (($progressStates | ForEach-Object { '0x{0:x2}' -f [int][char]$_ }) -join '|') + ')'
+$osc9TextSource = '\]9;(?!4;' + $progressStateClass + '|9;)'
+$osc9ByteSource = '(?i)0x5d\s*,\s*0x39\s*,\s*0x3b(?!\s*,\s*0x34\s*,\s*0x3b\s*,\s*' + $progressStateBytes + '\b)(?!\s*,\s*0x39\s*,\s*0x3b\b)'
+
+# Every script the job runs: the workflow job's two scripts and each .ps1 a
+# script names in a string, as found, so the shared libraries the leaves load
+# (scripts\interactive-win11-lib.ps1 and the rest) are read too. Only the
+# command-finish leaf may hold a toast source; only the accessibility leaf may
+# save Settings, from the processes pinned below.
 $toastSources = [ordered]@{
     'a notify-on-command-finish setting' = 'notify-on-command-finish'
     'desktop-notifications = true' = '(?i)desktop-notifications\s*=\s*true'
-    'an OSC 9 notification (text)' = '\]9;(?![49];)'
+    'an OSC 9 notification (text)' = $osc9TextSource
     'an OSC 777 notification (text)' = '\]777;'
     'an OSC 99 notification (text)' = '\]99;'
     'an OSC 7501 program status (text)' = '\]7501;'
-    'an OSC 9 notification (bytes)' = '(?i)0x5d\s*,\s*0x39\s*,\s*0x3b\s*,\s*0x(?!34\b|39\b)'
+    'an OSC 9 notification (bytes)' = $osc9ByteSource
     'an OSC 777 notification (bytes)' = '(?i)0x5d\s*,\s*0x37\s*,\s*0x37\s*,\s*0x37'
     'an OSC 99 notification (bytes)' = '(?i)0x5d\s*,\s*0x39\s*,\s*0x39\s*,\s*0x3b'
     'an OSC 7501 program status (bytes)' = '(?i)0x5d\s*,\s*0x37\s*,\s*0x35\s*,\s*0x30\s*,\s*0x31'
     'a reload_config action' = '[''"]reload_config[''"]'
+    # A copy raises the clipboard-copy notice (`Surface.copySelectionToClipboards`,
+    # `copy_last_command_output`), which `desktop-notifications` does not gate.
+    'a clipboard copy' = '(?i)\bcopy_to_clipboard\b|\bcopy_last_command_output\b|\bcopy-or-paste\b|\bcopy-on-select\b|\bright-click-action\b'
 }
 $settingsSaves = [ordered]@{
     'a Settings Save and close' = "-ActionName\s+'Save and close'"
     'a Settings Save invoke' = '\.Save\.TryGetCurrentPattern\('
 }
 $accessibilityLeaf = 'test\windows\interactive-win11-accessibility.ps1'
-$jobFiles = [Collections.Generic.List[string]]::new()
-foreach ($toastStep in $interactiveJobPlan) {
-    if ($toastStep.Script -ceq 'test\windows\flagship\Invoke-InteractiveWin11.ps1') {
-        $jobFiles.Add('test\windows\interactive-win11-validate.ps1')
-        foreach ($toastLaunch in @(& $getLeafLaunches (& $parseToastScript $validateText 'interactive-win11-validate.ps1'))) {
-            $jobFiles.Add("test\windows\$($toastLaunch.Script)")
-        }
-    }
-    else { $jobFiles.Add($toastStep.Script) }
-}
-$jobFiles.Add('test\windows\interactive-win11-stateful-lib.ps1')
-$jobFiles.Add('test\windows\flagship\Invoke-InteractiveWin11.ps1')
-$jobFiles = @($jobFiles | Sort-Object -Unique)
 $findToastSources = {
     param([string] $File, [string] $Text)
     foreach ($toastSource in $toastSources.GetEnumerator()) {
@@ -596,15 +650,52 @@ $findToastSources = {
         if ($File -cne $accessibilityLeaf -and [regex]::IsMatch($Text, $toastSave.Value)) { "$File holds $($toastSave.Key)" }
     }
 }
-$jobFileTexts = @{}
-foreach ($toastFile in $jobFiles) {
-    $toastPath = Join-Path $repoRoot $toastFile
-    if (-not (Test-Path -LiteralPath $toastPath -PathType Leaf)) { throw "An interactive job file is missing: $toastFile" }
-    $jobFileTexts[$toastFile] = Get-Content -LiteralPath $toastPath -Raw
+# The scripts reachable from the workflow job's two, each read with $Read (a
+# repository-relative path to its text, or $null when there is no such file):
+# a string naming a .ps1 that exists, beside the naming script, at the
+# repository root, in test\windows or in scripts, is read too.
+$readJobFiles = {
+    param([scriptblock] $Read)
+    $texts = @{}
+    $queue = [Collections.Generic.Queue[string]]::new()
+    foreach ($root in @('test\windows\interactive-win11-job.ps1', 'test\windows\assert-interactive-runner.ps1')) { $queue.Enqueue($root) }
+    while ($queue.Count -ne 0) {
+        $file = $queue.Dequeue()
+        if ($texts.ContainsKey($file)) { continue }
+        $text = & $Read $file
+        if ($null -eq $text) { throw "An interactive job file is missing: $file" }
+        $texts[$file] = $text
+        $directory = Split-Path -Parent $file
+        foreach ($token in (& $parseToastScript $text $file -Tokens).Tokens) {
+            if ($token -isnot [System.Management.Automation.Language.StringToken] -or $token.Value -notmatch '\.ps1$') { continue }
+            foreach ($base in @($directory, '', 'test\windows', 'scripts')) {
+                $relative = if ($base) { Join-Path $base $token.Value } else { $token.Value }
+                $candidate = [IO.Path]::GetRelativePath($repoRoot, [IO.Path]::GetFullPath((Join-Path $repoRoot $relative)))
+                if ($null -ne (& $Read $candidate)) { $queue.Enqueue($candidate); break }
+            }
+        }
+    }
+    $texts
 }
-foreach ($toastCovered in @($accessibilityLeaf, $toastLeaf, 'test\windows\interactive-win11-shell-command-live.ps1', 'test\windows\interactive-win11-progress.ps1', 'test\windows\interactive-win11-shaders.ps1')) {
-    if ($jobFiles -cnotcontains $toastCovered) { throw "The interactive job file list lost $toastCovered`: $($jobFiles -join ', ')" }
+$readRepositoryFile = {
+    param([string] $File)
+    $path = Join-Path $repoRoot $File
+    if ([IO.File]::Exists($path)) { [IO.File]::ReadAllText($path) } else { $null }
 }
+$jobFileTexts = & $readJobFiles $readRepositoryFile
+$jobFiles = @($jobFileTexts.Keys | Sort-Object)
+# The list holds at least what the plan and the composite launch, and the
+# shared scripts they load.
+$toastExpectedFiles = [Collections.Generic.List[string]]::new()
+foreach ($toastStep in $interactiveJobPlan) { $toastExpectedFiles.Add($toastStep.Script) }
+foreach ($toastLaunch in @(& $getLeafLaunches (& $parseToastScript $validateText 'interactive-win11-validate.ps1'))) {
+    $toastExpectedFiles.Add("test\windows\$($toastLaunch.Script)")
+}
+foreach ($toastCovered in @('test\windows\interactive-win11-validate.ps1', 'test\windows\interactive-win11-stateful-lib.ps1',
+        'scripts\interactive-win11-lib.ps1', 'scripts\interactive-win11-window-lib.ps1', 'scripts\interactive-win11-measure-lib.ps1',
+        'scripts\interactive-win11-state-guard.ps1', 'scripts\windows-harness-history.ps1')) { $toastExpectedFiles.Add($toastCovered) }
+$toastMissing = @($toastExpectedFiles | Where-Object { $jobFiles -cnotcontains $_ } | Sort-Object -Unique)
+if ($toastMissing.Count -ne 0) { throw "The interactive job file list lost $($toastMissing -join ', ')." }
 $toastSourceProblems = @(foreach ($toastFile in $jobFiles) { & $findToastSources $toastFile $jobFileTexts[$toastFile] })
 if ($toastSourceProblems.Count -ne 0) {
     throw "Only the command-finish leaf may raise a toast in the interactive job: $($toastSourceProblems -join '; ')."
@@ -617,42 +708,218 @@ if (-not [regex]::IsMatch($jobFileTexts[$toastLeaf], $toastSources['a notify-on-
     throw 'The toast-source inventory no longer matches the sources it was written for.'
 }
 $nonToastLeaf = 'test\windows\interactive-win11-shaders.ps1'
+$isToastSourceIn = {
+    param([string] $Text)
+    @(& $findToastSources $nonToastLeaf ($jobFileTexts[$nonToastLeaf] + "`n" + $Text)).Count -ne 0
+}
+$asOscText = { param([string] $Body) '"' + [char]0x60 + 'e]' + $Body + [char]0x60 + 'a"' }
+$asOscBytes = { param([string] $Body) '[byte[]](0x1b,0x5d,' + ((@($Body.ToCharArray()) | ForEach-Object { '0x{0:x2}' -f [int]$_ }) -join ',') + ',0x07)' }
+# The parser's own tests, by the command each expects.
+$osc9Cases = @(foreach ($testBlock in ($osc9Text -split '(?=\ntest ")')) {
+        $testName = [regex]::Match($testBlock, '^\ntest "(?<name>[^"]*)" \{')
+        $testInputs = [regex]::Matches($testBlock, 'const input = "(?<input>[^"\\]*)";')
+        $testTag = [regex]::Match($testBlock, 'try testing\.expect\(cmd == \.(?<tag>[a-z_]+)\);')
+        if ($testName.Success -and $testInputs.Count -eq 1 -and $testTag.Success) {
+            [pscustomobject]@{ Name = $testName.Groups['name'].Value; Input = $testInputs[0].Groups['input'].Value; Tag = $testTag.Groups['tag'].Value }
+        }
+    })
+$osc9Notifications = @($osc9Cases | Where-Object { $_.Tag -ceq 'show_desktop_notification' })
+$osc9Exempt = @($osc9Cases | Where-Object { $_.Tag -cin @('conemu_progress_report', 'report_pwd') })
+foreach ($osc9Required in @('9;4', '9;4;', '9;4;5', '9;4;5a', '9;9')) {
+    if (@($osc9Notifications | Where-Object { $_.Input -ceq $osc9Required }).Count -ne 1) { throw "osc9.zig's tests no longer show '$osc9Required' as a notification; read them again." }
+}
+if ($osc9Cases.Count -lt 50 -or @($osc9Exempt | Where-Object { $_.Tag -ceq 'conemu_progress_report' }).Count -lt 10 -or
+    @($osc9Exempt | Where-Object { $_.Tag -ceq 'report_pwd' }).Count -lt 1) {
+    throw "The toast-source inventory read only $($osc9Cases.Count) of osc9.zig's test cases."
+}
+foreach ($osc9Case in $osc9Cases) {
+    $osc9Expected = $osc9Case.Tag -ceq 'show_desktop_notification'
+    foreach ($osc9Form in @((& $asOscText $osc9Case.Input), (& $asOscBytes $osc9Case.Input))) {
+        $osc9Flagged = & $isToastSourceIn $osc9Form
+        if (($osc9Expected -and -not $osc9Flagged) -or ($osc9Case.Tag -cin @('conemu_progress_report', 'report_pwd') -and $osc9Flagged)) {
+            throw "The toast-source inventory disagrees with osc9.zig's test '$($osc9Case.Name)' on $osc9Form (flagged: $osc9Flagged, the parser: $($osc9Case.Tag))."
+        }
+    }
+}
 foreach ($toastControl in @(
         @{ Name = 'notify-on-command-finish = always'; Text = "'notify-on-command-finish = always'" },
         @{ Name = 'notify-on-command-finish = never'; Text = "'notify-on-command-finish = never'" },
         @{ Name = 'desktop-notifications = true'; Text = "'desktop-notifications = true'" },
         @{ Name = 'an OSC 9 notification as text'; Text = '"`e]9;hello`a"' },
+        @{ Name = 'an OSC 9;4 with no state as text'; Text = '"`e]9;4;`a"' },
+        @{ Name = 'an OSC 9;4 with state 5 as text'; Text = '"`e]9;4;5`a"' },
         @{ Name = 'an OSC 777 notification as text'; Text = '"`e]777;notify;t;b`a"' },
         @{ Name = 'an OSC 99 notification as text'; Text = '"`e]99;;hi`a"' },
         @{ Name = 'an OSC 7501 report as text'; Text = '"`e]7501;state=blocked`a"' },
         @{ Name = 'an OSC 9 notification as bytes'; Text = '[byte[]](0x1b,0x5d,0x39,0x3b,0x68,0x07)' },
+        @{ Name = 'an OSC 9;4 with no state as bytes'; Text = '[byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x07)' },
+        @{ Name = 'an OSC 9;4 with state 5 as bytes'; Text = '[byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x35,0x07)' },
+        @{ Name = 'an empty OSC 9 ending the bytes'; Text = '[byte[]](0x1b,0x5d,0x39,0x3b)' },
         @{ Name = 'an OSC 777 notification as bytes'; Text = '[byte[]](0x1b, 0x5d, 0x37, 0x37, 0x37, 0x3b)' },
         @{ Name = 'an OSC 99 notification as bytes'; Text = '[byte[]](0x1b,0x5D,0x39,0x39,0x3b)' },
         @{ Name = 'an OSC 7501 report as bytes'; Text = '[byte[]](0x1b,0x5d,0x37,0x35,0x30,0x31,0x3b)' },
         @{ Name = 'a reload_config action'; Text = "Invoke-Action 'reload_config'" },
+        @{ Name = 'a copy_to_clipboard binding'; Text = "'keybind = ctrl+shift+c=copy_to_clipboard'" },
+        @{ Name = 'a copy-on-select setting'; Text = "'copy-on-select = clipboard'" },
         @{ Name = 'a Settings Save and close'; Text = "Invoke-AccessibilitySettingsCloseAction -ActionName 'Save and close'" },
         @{ Name = 'a Settings Save invoke'; Text = '$probe.Save.TryGetCurrentPattern($pattern, [ref]$invoke)' }
     )) {
-    if (@(& $findToastSources $nonToastLeaf ($jobFileTexts[$nonToastLeaf] + "`n" + $toastControl.Text)).Count -ne 1) {
-        throw "The toast-source inventory missed $($toastControl.Name) in a non-toast leaf."
-    }
+    if (-not (& $isToastSourceIn $toastControl.Text)) { throw "The toast-source inventory missed $($toastControl.Name) in a non-toast leaf." }
 }
-# OSC 9;4 (progress) and OSC 9;9 (a working directory) raise no toast.
-foreach ($toastAllowed in @('[byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x31,0x07)', '[byte[]](0x1b,0x5d,0x39,0x3b,0x39,0x3b)', '"`e]9;4;1;50`a"', '"`e]9;9;C:\x`a"')) {
-    if (@(& $findToastSources $nonToastLeaf $toastAllowed).Count -ne 0) {
-        throw "The toast-source inventory flagged $toastAllowed, which raises no toast."
-    }
+# What the progress leaf sends, and a working directory, raise no toast.
+foreach ($toastAllowed in @('[byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x31,0x3b,0x35,0x30,0x07)', '[byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x30,0x3b,0x07)',
+        '[byte[]](0x1b,0x5d,0x39,0x3b,0x39,0x3b)', '"`e]9;4;1;50`a"', '"`e]9;4;3`a"', '"`e]9;9;C:\x`a"')) {
+    if (& $isToastSourceIn $toastAllowed) { throw "The toast-source inventory flagged $toastAllowed, which osc9.zig parses as progress or a working directory." }
+}
+# A source in the shared launch library is found, and so is one in a script
+# that only another job script names.
+if (@(& $findToastSources 'scripts\interactive-win11-lib.ps1' ($jobFileTexts['scripts\interactive-win11-lib.ps1'] + "`n'--notify-on-command-finish=always'")).Count -ne 1) {
+    throw 'The toast-source inventory missed a source in the shared launch library.'
+}
+$toastExtraLibrary = 'scripts\interactive-win11-extra-control-lib.ps1'
+$toastDiscovered = & $readJobFiles {
+    param([string] $File)
+    if ($File -ceq $toastExtraLibrary) { return "`$null = [byte[]](0x1b,0x5d,0x37,0x37,0x37,0x3b)" }
+    $text = & $readRepositoryFile $File
+    if ($File -ceq $nonToastLeaf) { $text += "`n. (Join-Path `$repoRoot '$toastExtraLibrary')" }
+    $text
+}
+if (-not $toastDiscovered.ContainsKey($toastExtraLibrary) -or
+    @(& $findToastSources $toastExtraLibrary $toastDiscovered[$toastExtraLibrary]).Count -ne 1) {
+    throw 'The toast-source inventory must read a script that only another job script names.'
 }
 
 # The accessibility leaf's Settings saves run only in its two probe processes,
-# and each starts with notifications off: a save then shows its banner and,
-# with `config-reload` off and that banner shown, `settingsNotifySuccessThunk`
-# returns before the toast (settings.md PROFILES-4 trap 7).
-$testQuietSettingsSaves = {
+# and noctty starts each with every notification off. What counts is what the
+# command line leaves each setting at, as noctty reads it (`cli/args.zig`
+# `parse`, `parseBool`, `parsePackedStruct`; `Config.parseManuallyHook`): every
+# `--key=value` replaces the field whole, a packed value starting from the
+# defaults; the last one wins; a bare `--desktop-notifications` is true; a value
+# noctty cannot parse changes nothing; nothing after `-e`, `-Embedding` or
+# `-ToastActivated` is configuration. A save then shows its banner and, with
+# `config-reload` off and that banner shown, `settingsNotifySuccessThunk` returns
+# before the toast (settings.md PROFILES-4 trap 7).
+$parseNocttyBool = {
     param([string] $Text)
+    if ($Text -cin @('1', 't', 'T', 'true')) { $true } elseif ($Text -cin @('0', 'f', 'F', 'false')) { $false } else { $null }
+}
+$getEffectiveNotifications = {
+    param([string[]] $Arguments)
+    $state = [ordered]@{ Desktop = $true; ClipboardCopy = $true; ConfigReload = $true }
+    foreach ($argument in $Arguments) {
+        if ($argument -ceq '-e' -or $argument -ieq '-Embedding' -or $argument -ieq '-ToastActivated') { break }
+        if (-not $argument.StartsWith('--', [StringComparison]::Ordinal)) { continue }
+        $key = $argument.Substring(2)
+        $value = $null
+        $equals = $key.IndexOf('=')
+        if ($equals -ge 0) { $value = $key.Substring($equals + 1); $key = $key.Substring(0, $equals) }
+        if ($key -ceq 'desktop-notifications') {
+            $parsedBool = & $parseNocttyBool $(if ($null -eq $value) { 't' } else { $value })
+            if ($null -ne $parsedBool) { $state.Desktop = $parsedBool }
+        }
+        elseif ($key -ceq 'app-notifications' -and $null -ne $value) {
+            $parsedBool = & $parseNocttyBool $value
+            if ($null -ne $parsedBool) { $state.ClipboardCopy = $parsedBool; $state.ConfigReload = $parsedBool; continue }
+            $fields = [ordered]@{ ClipboardCopy = $true; ConfigReload = $true }
+            $valid = $true
+            foreach ($part in $value.Split(',')) {
+                $part = $part.Trim(' ', "`t")
+                $on = -not $part.StartsWith('no-', [StringComparison]::Ordinal)
+                if (-not $on) { $part = $part.Substring(3) }
+                if ($part -ceq 'clipboard-copy') { $fields.ClipboardCopy = $on }
+                elseif ($part -ceq 'config-reload') { $fields.ConfigReload = $on }
+                else { $valid = $false; break }
+            }
+            if ($valid) { $state.ClipboardCopy = $fields.ClipboardCopy; $state.ConfigReload = $fields.ConfigReload }
+        }
+    }
+    [pscustomobject]$state
+}
+$toastQuietPair = @('--app-notifications=false', '--desktop-notifications=false')
+foreach ($toastCase in @(
+        @{ Name = 'no arguments'; Arguments = @(); Expected = 'True True True' },
+        @{ Name = 'the quiet pair'; Arguments = $toastQuietPair; Expected = 'False False False' },
+        @{ Name = 'an override after it'; Arguments = $toastQuietPair + @('--app-notifications=true'); Expected = 'False True True' },
+        @{ Name = 'an override before it'; Arguments = @('--app-notifications=true', '--desktop-notifications=true') + $toastQuietPair; Expected = 'False False False' },
+        @{ Name = 'a later list from the defaults'; Arguments = @('--app-notifications=false', '--app-notifications=no-clipboard-copy'); Expected = 'True False True' },
+        @{ Name = 'a bare desktop flag'; Arguments = $toastQuietPair + @('--desktop-notifications'); Expected = 'True False False' },
+        @{ Name = 'desktop as 1'; Arguments = $toastQuietPair + @('--desktop-notifications=1'); Expected = 'True False False' },
+        @{ Name = 'desktop as F'; Arguments = @('--desktop-notifications=F'); Expected = 'False True True' },
+        @{ Name = 'an unparsed desktop value'; Arguments = $toastQuietPair + @('--desktop-notifications=yes'); Expected = 'False False False' },
+        @{ Name = 'a bare app flag'; Arguments = $toastQuietPair + @('--app-notifications'); Expected = 'False False False' },
+        @{ Name = 'an unparsed app list'; Arguments = $toastQuietPair + @('--app-notifications=no-config-reload,bogus'); Expected = 'False False False' },
+        @{ Name = 'an app list in another case'; Arguments = $toastQuietPair + @('--app-notifications=NO-CONFIG-RELOAD'); Expected = 'False False False' },
+        @{ Name = 'a spaced app list'; Arguments = @('--app-notifications= no-config-reload , no-clipboard-copy'); Expected = 'True False False' },
+        @{ Name = 'an override after -e'; Arguments = $toastQuietPair + @('-e', 'cmd.exe', '--app-notifications=true'); Expected = 'False False False' },
+        @{ Name = 'an override after -toastactivated'; Arguments = $toastQuietPair + @('-toastactivated', '--app-notifications=true'); Expected = 'False False False' },
+        @{ Name = 'a key in another case'; Arguments = $toastQuietPair + @('--App-Notifications=true'); Expected = 'False False False' }
+    )) {
+    $toastEffective = & $getEffectiveNotifications ([string[]]$toastCase.Arguments)
+    $toastActual = "$($toastEffective.Desktop) $($toastEffective.ClipboardCopy) $($toastEffective.ConfigReload)"
+    if ($toastActual -cne $toastCase.Expected) {
+        throw "The effective notification reading of $($toastCase.Name) is '$toastActual' (desktop, clipboard-copy, config-reload); noctty reads '$($toastCase.Expected)'."
+    }
+}
+# A launch's arguments as noctty gets them, from the parsed array literal; $null
+# when one cannot be known from the source (a variable without one literal
+# assignment, a command other than the shared containment arguments, or an
+# expanded string that could name either setting).
+$resolveLaunchArguments = {
+    param([System.Management.Automation.Language.ScriptBlockAst] $Ast, [System.Management.Automation.Language.ArrayExpressionAst] $Array, [string] $LibraryText)
+    $resolved = [Collections.Generic.List[string]]::new()
+    foreach ($statement in $Array.SubExpression.Statements) {
+        if ($statement -isnot [System.Management.Automation.Language.PipelineAst] -or $statement.PipelineElements.Count -ne 1) { return $null }
+        $element = $statement.PipelineElements[0]
+        if ($element -is [System.Management.Automation.Language.CommandAst]) {
+            if ($element.GetCommandName() -cne 'Get-InteractiveWin11ContainmentArguments' -or $element.CommandElements.Count -ne 1) { return $null }
+            $library = & $parseToastScript $LibraryText 'interactive-win11-lib.ps1'
+            $definition = @($library.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-InteractiveWin11ContainmentArguments'
+            }, $true))
+            if ($definition.Count -ne 1 -or $definition[0].Body.EndBlock.Statements.Count -ne 1 -or
+                $definition[0].Body.EndBlock.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst]) { return $null }
+            $returned = $definition[0].Body.EndBlock.Statements[0].Pipeline.PipelineElements[0].Expression
+            if ($returned -isnot [System.Management.Automation.Language.ArrayExpressionAst]) { return $null }
+            foreach ($item in $returned.SubExpression.Statements) {
+                $value = $item.PipelineElements[0].Expression
+                if ($item.PipelineElements.Count -ne 1 -or $value -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
+                $resolved.Add($value.Value)
+            }
+            continue
+        }
+        $expression = $element.Expression
+        if ($expression -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $resolved.Add($expression.Value); continue }
+        if ($expression -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
+            if ($expression.Value -notmatch '^--[a-z0-9-]+=' -or $expression.Value -match 'notifications') { return $null }
+            $resolved.Add($expression.Value)
+            continue
+        }
+        if ($expression -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            $name = $expression.VariablePath.UserPath
+            $writes = @($Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath -eq $name
+            }, $true))
+            if ($writes.Count -ne 1 -or [regex]::Matches($Ast.Extent.Text, "\`$$([regex]::Escape($name))\s*[+\-*/]?=(?!=)").Count -ne 1) { return $null }
+            $literal = $writes[0].Right.Expression
+            if ($literal -isnot [System.Management.Automation.Language.ArrayExpressionAst] -or $literal.SubExpression.Statements.Count -ne 1) { return $null }
+            $items = $literal.SubExpression.Statements[0].PipelineElements[0].Expression
+            $values = if ($items -is [System.Management.Automation.Language.ArrayLiteralAst]) { @($items.Elements) } else { @($items) }
+            foreach ($value in $values) {
+                if ($value -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
+                $resolved.Add($value.Value)
+            }
+            continue
+        }
+        return $null
+    }
+    , [string[]]$resolved
+}
+$testQuietSettingsSaves = {
+    param([string] $Text, [string] $LibraryText)
     $ast = & $parseToastScript $Text 'interactive-win11-accessibility.ps1'
-    if ([regex]::Matches($Text, [regex]::Escape("`$settingsSaveNotificationArguments = @('--app-notifications=no-config-reload', '--desktop-notifications=false')")).Count -ne 1 -or
-        [regex]::Matches($Text, '\$settingsSaveNotificationArguments\s*[+\-*/]?=(?!=)').Count -ne 1) { return $false }
     $starts = @($ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Start-AccessibilityProcessWithEnvironment'
@@ -674,8 +941,10 @@ $testQuietSettingsSaves = {
         if ($writes.Count -ne 1 -or [regex]::Matches($Text, "\`$$([regex]::Escape($arguments))\s*[+\-*/]?=(?!=)").Count -ne 1) { return $false }
         $array = $writes[0].Right.Expression
         if ($array -isnot [System.Management.Automation.Language.ArrayExpressionAst]) { return $false }
-        $elements = @($array.SubExpression.Statements | ForEach-Object { $_.Extent.Text })
-        if ($elements -cnotcontains '$settingsSaveNotificationArguments') { return $false }
+        $resolvedArguments = & $resolveLaunchArguments $ast $array $LibraryText
+        if ($null -eq $resolvedArguments) { return $false }
+        $effective = & $getEffectiveNotifications $resolvedArguments
+        if ($effective.Desktop -or $effective.ClipboardCopy -or $effective.ConfigReload) { return $false }
         $processes[$assignment.Left.VariablePath.UserPath] = $true
     }
     if ($processes.Count -ne 2 -or -not $processes.ContainsKey('saveProbeProcess') -or -not $processes.ContainsKey('saveVerifyProcess')) { return $false }
@@ -693,28 +962,54 @@ $testQuietSettingsSaves = {
     $true
 }
 $accessibilityText = $jobFileTexts[$accessibilityLeaf]
-if (-not (& $testQuietSettingsSaves $accessibilityText)) {
-    throw 'interactive-win11-accessibility.ps1 must save Settings only in its save probe and verifier processes, each started with $settingsSaveNotificationArguments (--app-notifications=no-config-reload, --desktop-notifications=false).'
+$launchLibraryText = $jobFileTexts['scripts\interactive-win11-lib.ps1']
+if (-not (& $testQuietSettingsSaves $accessibilityText $launchLibraryText)) {
+    throw 'interactive-win11-accessibility.ps1 must save Settings only in its save probe and verifier processes, and noctty must start each with desktop-notifications and both app-notifications off, as the last values on its command line.'
 }
 $toastEol = if ($accessibilityText.Contains("`r`n")) { "`r`n" } else { "`n" }
+$toastQuietLine = "        '--command=cmd.exe'`n        `$settingsSaveNotificationArguments`n"
+$toastProbeArguments = "`"--class=`$saveProbeClass`"`n$toastQuietLine"
+$toastVerifyArguments = "`"--class=`$saveVerifyClass`"`n$toastQuietLine"
+$toastQuietValue = "`$settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false')"
+$toastContainmentReturn = "        '--windows-job-object-kill-on-close=true'`n    )"
 foreach ($toastControl in @(
-        @{ Name = 'the save probe without the flags'; From = "`"--class=`$saveProbeClass`"`n        '--command=cmd.exe'`n        `$settingsSaveNotificationArguments`n"; To = "`"--class=`$saveProbeClass`"`n        '--command=cmd.exe'`n" },
-        @{ Name = 'the verifier without the flags'; From = "`"--class=`$saveVerifyClass`"`n        '--command=cmd.exe'`n        `$settingsSaveNotificationArguments`n"; To = "`"--class=`$saveVerifyClass`"`n        '--command=cmd.exe'`n" },
-        @{ Name = 'config-reload left on'; From = "'--app-notifications=no-config-reload', "; To = "'--app-notifications=no-clipboard-copy', " },
-        @{ Name = 'desktop notifications left on'; From = ", '--desktop-notifications=false')"; To = ", '--desktop-notifications=true')" },
-        @{ Name = 'the flags emptied later'; From = "    `$saveProbeClass = "; To = "    `$settingsSaveNotificationArguments = @()`n    `$saveProbeClass = " },
-        @{ Name = 'the save probe arguments rewritten'; From = "    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"; To = "    `$saveProbeArguments += @()`n    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment" },
-        @{ Name = 'a second Save invoke'; From = '    $restoreInvoke.Invoke()'; To = "    `$null = `$verifyTheme.Save.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]`$restoreInvoke)`n    `$restoreInvoke.Invoke()" },
-        @{ Name = 'Save and close on another probe'; From = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$saveProbe ``"; To = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$ownerProbe ``" }
+        @{ Name = 'the save probe without the flags'; From = $toastProbeArguments; To = "`"--class=`$saveProbeClass`"`n        '--command=cmd.exe'`n"; Accept = $false },
+        @{ Name = 'the verifier without the flags'; From = $toastVerifyArguments; To = "`"--class=`$saveVerifyClass`"`n        '--command=cmd.exe'`n"; Accept = $false },
+        @{ Name = 'config-reload left on'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=no-clipboard-copy', '--desktop-notifications=false')"; Accept = $false },
+        @{ Name = 'clipboard-copy left on'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=no-config-reload', '--desktop-notifications=false')"; Accept = $false },
+        @{ Name = 'desktop notifications left on'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=true')"; Accept = $false },
+        @{ Name = 'a later value in the flags themselves'; From = $toastQuietValue; To = "`$settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false', '--app-notifications=no-clipboard-copy')"; Accept = $false },
+        @{ Name = 'the flags emptied later'; From = "    `$saveProbeClass = "; To = "    `$settingsSaveNotificationArguments = @()`n    `$saveProbeClass = "; Accept = $false },
+        @{ Name = 'the save probe arguments rewritten'; From = "    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"; To = "    `$saveProbeArguments += @()`n    `$saveProbeProcess = Start-AccessibilityProcessWithEnvironment"; Accept = $false },
+        @{ Name = 'app notifications turned back on after the flags'; From = $toastProbeArguments; To = "$toastProbeArguments        '--app-notifications=true'`n"; Accept = $false },
+        @{ Name = 'a bare desktop flag after the flags'; From = $toastVerifyArguments; To = "$toastVerifyArguments        '--desktop-notifications'`n"; Accept = $false },
+        @{ Name = 'desktop notifications as 1 after the flags'; From = $toastVerifyArguments; To = "$toastVerifyArguments        '--desktop-notifications=1'`n"; Accept = $false },
+        @{ Name = 'an argument that cannot be read'; From = $toastProbeArguments; To = "$toastProbeArguments        `$extraProbeArguments`n"; Accept = $false },
+        @{ Name = 'an override in an expanded string'; From = $toastProbeArguments; To = "$toastProbeArguments        `"--app-notifications=`$probeNotifications`"`n"; Accept = $false },
+        @{ Name = 'an override before the flags (the flags win)'; From = $toastProbeArguments; To = "`"--class=`$saveProbeClass`"`n        '--app-notifications=true'`n$toastQuietLine"; Accept = $true },
+        @{ Name = 'a second Save invoke'; From = '    $restoreInvoke.Invoke()'; To = "    `$null = `$verifyTheme.Save.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]`$restoreInvoke)`n    `$restoreInvoke.Invoke()"; Accept = $false },
+        @{ Name = 'Save and close on another probe'; From = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$saveProbe ``"; To = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$ownerProbe ``"; Accept = $false }
     )) {
     $toastFrom = $toastControl.From.Replace("`n", $toastEol).Replace("`r`r", "`r")
     $toastTo = $toastControl.To.Replace("`n", $toastEol).Replace("`r`r", "`r")
     if (([regex]::Matches($accessibilityText, [regex]::Escape($toastFrom))).Count -ne 1) {
         throw "Quiet Settings save control '$($toastControl.Name)' lost its anchor."
     }
-    if (& $testQuietSettingsSaves $accessibilityText.Replace($toastFrom, $toastTo)) {
-        throw "The quiet Settings save check accepted $($toastControl.Name)."
+    if ((& $testQuietSettingsSaves $accessibilityText.Replace($toastFrom, $toastTo) $launchLibraryText) -ne $toastControl.Accept) {
+        throw "The quiet Settings save check $(if ($toastControl.Accept) { 'refused' } else { 'accepted' }) $($toastControl.Name)."
     }
+}
+# The shared containment arguments come first on both command lines, so an
+# override there loses to the flags; a containment list noctty's reading cannot
+# know refuses the launch.
+$toastLibraryEol = if ($launchLibraryText.Contains("`r`n")) { "`r`n" } else { "`n" }
+$toastContainmentFrom = $toastContainmentReturn.Replace("`n", $toastLibraryEol)
+if (([regex]::Matches($launchLibraryText, [regex]::Escape($toastContainmentFrom))).Count -ne 1) { throw 'The containment-arguments control lost its anchor.' }
+if (-not (& $testQuietSettingsSaves $accessibilityText $launchLibraryText.Replace($toastContainmentFrom, "        '--windows-job-object-kill-on-close=true'$toastLibraryEol        '--app-notifications=true'$toastLibraryEol    )"))) {
+    throw 'The quiet Settings save check refused an override in the containment arguments, which come before the flags.'
+}
+if (& $testQuietSettingsSaves $accessibilityText $launchLibraryText.Replace($toastContainmentFrom, "        '--windows-job-object-kill-on-close=true'$toastLibraryEol        `$extraContainment$toastLibraryEol    )")) {
+    throw 'The quiet Settings save check accepted containment arguments it cannot read.'
 }
 foreach ($leafHarness in @($shaderHarness, (Join-Path $repoRoot 'test\windows\interactive-win11-shader-pacing.ps1'))) {
     # A leaf rebuild in measurement mode rebuilds the measurement generation,

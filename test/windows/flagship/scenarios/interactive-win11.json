@@ -11,10 +11,10 @@
   "timeout_seconds": 1800,
   "steps": [
     { "id": "build", "description": "Build the current executable once when required." },
-    { "id": "composite", "description": "Run the existing Win11 interaction, rendering, IME, notification, and undo harnesses." }
+    { "id": "composite", "description": "Run the existing Win11 interaction, rendering, IME, notification, and undo harnesses; with -DeferCommandFinish (the interactive job) the command-finish notification harness is left to the job's last step." }
   ],
   "assertions": [
-    { "id": "composite-pass", "description": "Every required harness reports PASS without timeout or crash." }
+    { "id": "composite-pass", "description": "Every harness the composite runs reports PASS without timeout or crash; a deferred command-finish harness is not part of this result." }
   ],
   "artifacts": [
     { "kind": "result", "path": "result.json" },
