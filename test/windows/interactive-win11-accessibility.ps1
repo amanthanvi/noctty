@@ -3677,6 +3677,115 @@ function Invoke-AccessibilitySettingsCloseAction {
     $invoke.Invoke()
 }
 
+# What a command line's arguments leave noctty's notification settings at,
+# by noctty's rules (`cli/args.zig` `parse`, `parseIntoField`, `parseBool`,
+# `parsePackedStruct`; `Config.parseManuallyHook`): every `--key=value`
+# replaces the field whole, a packed value starting from the defaults; an
+# empty value resets the field to its default; the last one wins; a bare
+# `--desktop-notifications` is true; a value noctty cannot parse changes
+# nothing; nothing after `-e`, `-Embedding` or `-ToastActivated` is
+# configuration. `ConfigFile` says whether any `--config-file` appears, whose
+# include noctty reads after the command line (EVIDENCE-TOAST-FOREGROUND;
+# Contracts.90-Workflows.ps1 tests this function).
+function Get-AccessibilityNotificationSettings {
+    param([AllowEmptyCollection()][string[]] $Arguments)
+
+    $settings = [ordered]@{ Desktop = $true; ClipboardCopy = $true; ConfigReload = $true; ConfigFile = $false }
+    foreach ($argument in $Arguments) {
+        if ($argument -ceq '-e' -or $argument -ieq '-Embedding' -or $argument -ieq '-ToastActivated') { break }
+        if (-not $argument.StartsWith('--', [StringComparison]::Ordinal)) { continue }
+        $key = $argument.Substring(2)
+        $value = $null
+        $equals = $key.IndexOf('=')
+        if ($equals -ge 0) {
+            $value = $key.Substring($equals + 1)
+            $key = $key.Substring(0, $equals)
+        }
+        if ($key -ieq 'config-file') { $settings.ConfigFile = $true; continue }
+        $bool = $null
+        if ($null -ne $value) {
+            if ($value -cin @('1', 't', 'T', 'true')) { $bool = $true } elseif ($value -cin @('0', 'f', 'F', 'false')) { $bool = $false }
+        }
+        if ($key -ceq 'desktop-notifications') {
+            if ($null -eq $value -or $value.Length -eq 0) { $settings.Desktop = $true }
+            elseif ($null -ne $bool) { $settings.Desktop = $bool }
+        }
+        elseif ($key -ceq 'app-notifications' -and $null -ne $value) {
+            if ($value.Length -eq 0) { $settings.ClipboardCopy = $true; $settings.ConfigReload = $true; continue }
+            if ($null -ne $bool) { $settings.ClipboardCopy = $bool; $settings.ConfigReload = $bool; continue }
+            $clipboardCopy = $true
+            $configReload = $true
+            $valid = $true
+            foreach ($part in $value.Split(',')) {
+                $part = $part.Trim(' ', "`t")
+                $on = -not $part.StartsWith('no-', [StringComparison]::Ordinal)
+                if (-not $on) { $part = $part.Substring(3) }
+                if ($part -ceq 'clipboard-copy') { $clipboardCopy = $on }
+                elseif ($part -ceq 'config-reload') { $configReload = $on }
+                else { $valid = $false; break }
+            }
+            if ($valid) { $settings.ClipboardCopy = $clipboardCopy; $settings.ConfigReload = $configReload }
+        }
+    }
+    [pscustomobject]$settings
+}
+
+# Whether a saving process's own command line leaves every notification off:
+# 'quiet', or why not, never quoting the command line. Its program name is
+# dropped; after it, a quote (which would need noctty's quoting rules to read)
+# is refused, the rest splits on spaces and tabs as noctty's does, and any
+# `--config-file` is refused.
+function Get-AccessibilitySaveLaunchVerdict {
+    param([AllowNull()][AllowEmptyString()][string] $CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return 'its command line could not be read' }
+    $rest = $CommandLine.TrimStart(' ', "`t")
+    if ($rest.StartsWith('"', [StringComparison]::Ordinal)) {
+        $close = $rest.IndexOf('"', 1)
+        if ($close -lt 0) { return 'its program name is not closed' }
+        $rest = $rest.Substring($close + 1)
+    }
+    else {
+        $end = $rest.IndexOfAny([char[]]@(' ', "`t"))
+        $rest = if ($end -lt 0) { '' } else { $rest.Substring($end) }
+    }
+    if ($rest.Contains('"')) { return 'its arguments hold a quote' }
+    $settings = Get-AccessibilityNotificationSettings -Arguments ([string[]]@($rest -split '[ \t]+' | Where-Object { $_.Length -gt 0 }))
+    if ($settings.ConfigFile) { return 'it names a --config-file' }
+    $on = @(
+        if ($settings.Desktop) { 'desktop-notifications' }
+        if ($settings.ClipboardCopy) { 'the clipboard-copy notice' }
+        if ($settings.ConfigReload) { 'config-reload notifications' }
+    )
+    if ($on.Count -ne 0) { return "it leaves $($on -join ', ') on" }
+    'quiet'
+}
+
+# Read the command line of the process just started, by its id, and stop the
+# leaf unless it leaves every notification off. It reads only that process
+# and never prints or logs the command line; only the verdict reaches the
+# error. This sees what noctty was given, whatever built the arguments, so it
+# covers what Contracts.90's static grammar cannot.
+function Assert-AccessibilitySaveLaunchQuiet {
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    $commandLine = $null
+    try {
+        $commandLine = (CimCmdlets\Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($Process.Id)" -ErrorAction Stop).CommandLine
+    }
+    catch {
+        $commandLine = $null
+    }
+    $verdict = Get-AccessibilitySaveLaunchVerdict -CommandLine $commandLine
+    $commandLine = $null
+    if ($verdict -cne 'quiet') {
+        throw "The $Description did not start with every notification off: $verdict."
+    }
+}
+
 function Restore-AccessibilityConfigBaseline {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -7058,12 +7167,15 @@ try {
     # `desktop-notifications` does not gate; this leaf tests none of them.
     # noctty takes the last value of each and resets one to its default on an
     # empty value, so nothing may follow these, and it reads a config-file
-    # include after the command line. Contracts.90-Workflows.ps1 checks these
-    # two launches against a closed grammar and fails on any form outside it:
-    # the flags one literal array of single-quoted strings, assigned once; each
-    # launch's arguments, class name, process and probe assigned once, in the
-    # forms it lists; no element with whitespace or a quote (Start-Process
-    # joins them unquoted); no --config-file.
+    # include after the command line. Two layers keep it so. Contracts.90-
+    # Workflows.ps1's static grammar refuses the forms it does not list: the
+    # flags one literal array of single-quoted strings, assigned once and read
+    # only in the two launch arrays; each launch's arguments, class name,
+    # process and probe assigned once, in the forms and order it lists; no
+    # element with whitespace or a quote (Start-Process joins them unquoted);
+    # no --config-file. What static analysis cannot see, a name built at run
+    # time, the run-time check after each launch covers: it reads what the
+    # process was actually given (Assert-AccessibilitySaveLaunchQuiet).
     $settingsSaveNotificationArguments = @('--app-notifications=false', '--desktop-notifications=false')
     $saveProbeClass = "noctty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
     $saveProbeArguments = @(
@@ -7081,6 +7193,7 @@ try {
         -RedirectStandardOutput (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-stdout.log') `
         -RedirectStandardError (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-stderr.log')
     $saveProbeCleanup = $saveProbeProcess
+    Assert-AccessibilitySaveLaunchQuiet -Process $saveProbeProcess -Description 'settings save probe'
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings save probe main HWND' -Condition {
         $saveProbeProcess.Refresh()
         return -not $saveProbeProcess.HasExited -and $saveProbeProcess.MainWindowHandle -ne [IntPtr]::Zero
@@ -7164,6 +7277,7 @@ try {
         -RedirectStandardOutput (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-verify-stdout.log') `
         -RedirectStandardError (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-verify-stderr.log')
     $saveVerifyCleanup = $saveVerifyProcess
+    Assert-AccessibilitySaveLaunchQuiet -Process $saveVerifyProcess -Description 'settings persistence verifier'
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings persistence verifier main HWND' -Condition {
         $saveVerifyProcess.Refresh()
         return -not $saveVerifyProcess.HasExited -and $saveVerifyProcess.MainWindowHandle -ne [IntPtr]::Zero

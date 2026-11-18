@@ -699,9 +699,21 @@ to hold it) and no toast. The leaf checks at run time that the saving sandbox
 has no default config file before the first launch and that the saved file
 names no `config-file` include before the verifier starts.
 
-`flagship/contracts/Contracts.90-Workflows.ps1` checks those two launches
-against a closed grammar, and any form outside it fails the contract; it
-evaluates no PowerShell. The grammar: the flags are one literal array of
+Two layers keep those launches quiet. The decisive one runs in the leaf: right
+after each saving launch, before any save, `Assert-AccessibilitySaveLaunchQuiet`
+reads that process's own command line (only that process, by its id; it never
+prints or logs it), reads it with `Get-AccessibilitySaveLaunchVerdict` (last
+value wins, an empty value resets a setting to its default, `--config-file` and
+a quote after the program name are refused), and stops the leaf unless desktop
+notifications, the clipboard-copy notice and config-reload notifications are
+all off. It sees what noctty was given, however PowerShell built it.
+
+The other layer is static. `flagship/contracts/Contracts.90-Workflows.ps1`
+checks those two launches against a grammar and refuses every form it does not
+list; it evaluates no PowerShell, so a name or command built at run time is
+the run-time check's to catch. The contract also pins that check: that it
+exists, follows each launch before its probe opens, and stops the leaf, and it
+runs the leaf's reading on synthetic command lines. The grammar: the flags are one literal array of
 single-quoted strings, assigned exactly once as `$name = @('...', '...')` or
 `$name = '...', '...'`. Each launch's `-ArgumentList` is a variable assigned
 once as `$name = @( ... )`, each element one of
@@ -714,10 +726,18 @@ launch, and each probe once, from that process. Every one of those variables is
 written only by that one plain assignment and named nowhere else: no scoped
 spelling, other assignment, index, member, `[ref]`, loop or parameter of that
 name, no `-OutVariable`, `-PipelineVariable` or `Set-Variable` naming it, and no
-other job script naming it. The leaf uses no variable or alias cmdlet,
-`Invoke-Expression`, common variable parameter or `$ExecutionContext`. The
-arguments those forms give hold no whitespace, quote or backtick and no
-`--config-file`, and leave every notification setting off.
+other job script naming it. The three arrays are read only where the grammar
+puts them, so no alias, method call or parameter reaches them. The leaf uses no
+variable or alias cmdlet, `Invoke-Expression`, common variable parameter or
+`$ExecutionContext`, and no job script uses a variable or alias cmdlet,
+`Import-Alias`, `Invoke-Expression`, a `function:`, `variable:` or `alias:`
+drive, a `data` section, `[scriptblock]::Create`, `SessionState`, `$PSCmdlet`,
+or `&`/`.` on a name built by an expression. Every statement of the save flow
+(the flags, class names and arrays, both launches and their run-time checks,
+the probes and both config checks) is a direct statement of the one block that
+holds the launches, in order, with `-EnvironmentVariables $settingsProbeEnvironment`
+on both launches. The arguments those forms give hold no whitespace, quote or
+backtick and no `--config-file`, and leave every notification setting off.
 
 The job's steps all run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
