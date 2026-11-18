@@ -617,10 +617,13 @@ that govern each symbol you change, or that none does.
   evidence job may raise a real toast (the job's order,
   `Get-InteractiveWin11JobPlan`, the composite's `-DeferCommandFinish`,
   `$settingsSaveNotificationArguments` in the accessibility leaf and its
-  run-time check of each saving launch's command line,
-  `Assert-AccessibilitySaveLaunchQuiet`, `Get-AccessibilitySaveLaunchVerdict`
-  and `Get-AccessibilityNotificationSettings`, and the toast-source inventory
-  and the quiet-save grammar in `Contracts.90-Workflows.ps1`), CI test steps (the raw
+  run-time checks of each saving launch's command line and sandbox,
+  `Assert-AccessibilitySaveLaunchQuiet`, `Get-AccessibilitySaveLaunchVerdict`,
+  `Get-AccessibilityNotificationSettings` and
+  `Assert-AccessibilitySaveSandboxQuiet`, the leaf's `# pin-begin:` regions and
+  their SHA-256 pins, `$saveLeafPins`, and the toast-source inventory, who may
+  name the command-finish leaf and the quiet-save grammar in
+  `Contracts.90-Workflows.ps1`), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
   `win32/sys.zig`'s imports to `src/apprt`), the Zig test runner and its
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
