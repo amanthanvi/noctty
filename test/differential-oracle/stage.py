@@ -9,6 +9,8 @@ from a changed production source. Never use this on a retained read-only tree.
 import argparse
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -74,13 +76,29 @@ def main():
     overlay = sources(source)
     record_path = repo / "test/differential-oracle/staged-source.json"
     targets = [repo / path.relative_to(source) for path in overlay] + [record_path]
-    if any(target.exists() or target.is_symlink() for target in targets):
+    if any(os.path.lexists(target) for target in targets):
         raise ValueError("oracle instrumentation already exists in source copy")
-    for path in overlay:
-        relative = path.relative_to(source)
-        target = repo / relative
+    for target in targets:
+        for parent in target.parents:
+            if not parent.is_relative_to(repo):
+                break
+            if os.path.lexists(parent) and (
+                not parent.is_dir()
+                or parent.is_symlink()
+                or getattr(parent.lstat(), "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise ValueError(
+                    "oracle instrumentation destination parent is obstructed"
+                )
+            if parent == repo:
+                break
+    contents = [
+        (repo / path.relative_to(source), path.read_bytes()) for path in overlay
+    ]
+    for target, data in contents:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(path.read_bytes())
+        target.write_bytes(data)
     (repo / "build.zig").write_bytes(after)
     record = {
         "production_revision": revision,

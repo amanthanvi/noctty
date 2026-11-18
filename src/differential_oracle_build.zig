@@ -83,6 +83,12 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool) !void {
     // HEAD and cleanliness are not file inputs in the build cache.
     identity.has_side_effects = true;
     identity.addArgs(&.{ b.graph.zig_exe, compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
+    var dependencies = b.graph.dependency_cache.iterator();
+    while (dependencies.next()) |entry| {
+        const dep = entry.value_ptr.*;
+        identity.addArgs(&.{ "--dependency", dep.builder.pkg_hash });
+        identity.addDirectoryArg(dep.path(""));
+    }
     mod.addImport("oracle_identity", b.createModule(.{
         .root_source_file = identity.addOutputFileArg("oracle_identity.zig"),
         .target = source.resolved_target,

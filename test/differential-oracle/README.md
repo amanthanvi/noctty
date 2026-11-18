@@ -35,7 +35,8 @@ installed path, with a fresh scratch directory as its working directory. It writ
   and `p_valid=0`; all other weights are the generators' defaults.
 
 Run the generator twice in separate directories and compare `synthetic.bin`
-byte for byte. Freeze the corpus **once on the pre side**:
+byte for byte. Freeze the corpus **once for each migration gate**, before
+capturing any of its sides:
 
 ```text
 python test/differential-oracle/oracle.py prepare --repo PRE_TREE --synthetic SYNTHETIC_BIN --out FROZEN_DIR
@@ -107,6 +108,14 @@ change the CI oracle step from `-Dvt-api=fork` to **`-Dvt-api=stone_flag`** when
 it retains `resize_pull_scrollback`, or **`-Dvt-api=stone`** when that flag is absent.
 Keep the legacy IO adapter until 1B.
 
+At the **1A tip**, before the 1B cutover deletes the legacy generator, build and
+run that tip's generator twice, freeze its corpus, and record its SHA-256.
+Keep the frozen `corpus.json` and both generator outputs outside the source
+trees in a retained gate directory, for example `EVIDENCE_ROOT/1b-corpus/`.
+Use that exact `corpus.json` for the 1A-tip, 1B and v1.4.0 captures and pass its
+recorded hash as `--expected-corpus` on every 1B gate comparison. Do not silently
+reuse Phase 0's `synthetic.bin`; generate the 1A-tip inputs before deletion.
+
 At **1B.3/1B.5**, delete these whole files:
 
 - `src/differential_oracle_adapter_legacy.zig`
@@ -115,7 +124,7 @@ At **1B.3/1B.5**, delete these whole files:
 In `.github/workflows/test.yml`, change the **Build app-profile differential
 oracle (no capture)** step from `-Dvt-api=fork` to **`-Dvt-api=v140_fork`** for
 the retained positional-resize 1B API. If the resolved 1B API uses structured
-resize, use `-Dvt-api=v140` instead. Reuse the frozen corpus; stop building the
+resize, use `-Dvt-api=v140` instead. Reuse the retained **1A-tip frozen corpus**; stop building the
 legacy generator. The build rejects legacy API/generator selection on a modern
 compiler with a clear error. For a modern **app** build, the always-run identity
 step also refuses either retained legacy file by checking its actual presence,
@@ -141,10 +150,15 @@ to match the clean `--source-root` HEAD, validates API/ConPTY policy, and checks
 that the source and executable remain unchanged during both runs. A stale exe,
 wrong tree or dirty build is invalid evidence. Compare also refuses one exe
 hash attributed to different production or instrumented revisions.
-On the modern compiler, identity generation also runs that exact compiler's
-`zig fetch DIR` on every in-tree `zig-pkg` package and refuses any content hash
-that differs from its package directory name. Git ignores these dependencies;
-their edits must not masquerade as a clean build.
+Identity generation verifies the paths and pinned hashes of the packages the
+**build graph actually resolved**, on both compilers. This includes
+`ZIG_LOCAL_PKG_DIR`, `--pkg-dir`, `--system` and global-cache locations; overrides
+are supported by verifying their actual contents. It computes Zig's SHA-256
+package tree hash read-only, without `zig fetch` copies, archives or temporary
+package directories. Hashes are checked against build-graph pins, not directory
+names. Extra files or unsupported reparse points fail closed. Unhashed local
+package wrappers must be inside the authenticated source tree. Git ignores
+cached dependencies; their edits must not masquerade as a clean build.
 
 The request and response have checked versioned headers, counts, lengths,
 ordered record indices and exact EOF. For each input/initial size, both plain
@@ -176,8 +190,12 @@ Declarations do not bypass profile, corpus, provenance, determinism or dump chec
 Use `--expected-corpus SHA256` on compare to pin the real baseline corpus. Keep large dumps and their frozen corpus outside the
 repository.
 
-Compare binds the `pre` production revision to the frozen corpus's
-`source_revision`; the branch and upstream revisions may differ. It records
+Compare pins corpus **content**, independently of its origin revision. A pre
+capture from a later authenticated revision (including the 1A tip for a 1B
+comparison) is accepted when it used the same pinned corpus. `source_revision`
+records where the inputs originated; it does not restrict which revision can
+occupy the pre slot. Every supplied `--expected-corpus` must be a nonempty
+64-digit SHA-256 and must match the admitted corpus bytes. Compare records
 `corpus_sha256` and `expected_corpus` (null if unpinned) in the report. Report
 manifest/completion hashes describe the exact bytes used during admission,
 including when a run is reached through a junction alias.
@@ -298,7 +316,10 @@ distinguish applying the no-pull flag from ignoring it. Stone explicitly checks
 the pull result for both cases because that API lacks the flag. Run all six
 sentinels on every adapter. `--source-revision` identifies the pre production
 revision in this native-only corpus; it defaults to the running tool's HEAD.
-Positive control checks remain active under Python optimization.
+Native controls first require the canonical request digest for all six cases;
+sending the expected text without resize/no-pull operations is refused.
+Positive control checks remain active under Python optimization and check each
+item's class label, including both fork classes, in addition to total counts.
 
 ```text
 python test/differential-oracle/oracle.py native-controls NATIVE_DUMPS/run-1 --report NATIVE_CONTROLS.json

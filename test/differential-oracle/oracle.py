@@ -132,7 +132,7 @@ def replay(data):
                 raise ValueError("bad replay expectation")
             continue
         cmd, _, rest = line.partition(" ")
-        words = rest.split()
+        words = [word for word in rest.split(" ") if word]
         if initial is None and cmd != "size":
             raise ValueError("replay must begin with size")
         if cmd == "size":
@@ -846,7 +846,12 @@ def native_corpus(revision):
                 ],
             }
         )
-    return {"schema": 1, "source_revision": revision, "sizes": SIZES, "cases": cases}
+    return {
+        "schema": 1,
+        "source_revision": revision,
+        "sizes": [list(s) for s in SIZES],
+        "cases": cases,
+    }
 
 
 def native_plain(name, flag_supported):
@@ -864,6 +869,11 @@ def native_controls(args):
     capture = load_set(args.dumps, args.declare_harness_change, used)
     items = capture.items
     validate_harness_declarations(args.declare_harness_change, used)
+    canonical_request = requests(native_corpus(capture.corpus_source_revision))[0]
+    if capture.manifest["request_sha256"] != digest(canonical_request):
+        raise ValueError(
+            "native controls require the canonical resize/no-pull requests"
+        )
     names = {"text", "sgr", "reset", "resize", "conpty-on", "conpty-off"}
     if {key[0] for key in items} != names:
         raise ValueError("native controls require the six sentinel inputs")
@@ -901,16 +911,16 @@ def compare(
     profile_declarations=None,
     shipped_declarations=None,
 ):
+    if expected_corpus is not None and not re.fullmatch(
+        "[0-9a-f]{64}", expected_corpus
+    ):
+        raise ValueError("--expected-corpus must be a nonempty SHA-256 hash")
     used = set()
     sets = [
         load_set(root, declarations, used)
         for root in (pre_root, branch_root, upstream_root)
         if root is not None
     ]
-    if sets[0].manifest["revision"] != sets[0].corpus_source_revision:
-        raise ValueError(
-            "pre capture production revision does not match frozen corpus source_revision"
-        )
     validate_harness_declarations(declarations, used)
     for index, capture in enumerate(sets):
         manifest = capture.manifest
@@ -928,7 +938,10 @@ def compare(
         or len({s.manifest["request_sha256"] for s in sets}) != 1
     ):
         raise ValueError("compared corpus/request identities differ")
-    if expected_corpus and sets[0].manifest["corpus_sha256"] != expected_corpus:
+    if (
+        expected_corpus is not None
+        and sets[0].manifest["corpus_sha256"] != expected_corpus
+    ):
         raise ValueError("corpus differs from the operator pin")
     profiles = {
         side: s.manifest["profile"]
@@ -1012,6 +1025,7 @@ def compare(
         "sides": {
             side: {
                 "revision": m["revision"],
+                "corpus_source_revision": s.corpus_source_revision,
                 "harness_sources_sha256": digest(
                     json.dumps(m["harness_sources"], sort_keys=True).encode()
                 ),
@@ -1225,6 +1239,25 @@ def controls(args):
         }
     )
     check(result["untriaged"] == 16 and len(result["differences"]) == 16)
+    expected_classes = (
+        "no change",
+        "fork behaviour removed",
+        "fork-owned semantics",
+        "bug candidate",
+        "bug candidate",
+    )
+    expected_items = {
+        (str(n), cols, rows, fmt): category
+        for n, category in enumerate(expected_classes)
+        for cols, rows in SIZES
+        for fmt in FORMATS
+    }
+    actual_items = dict.fromkeys(expected_items, "no change")
+    for row in result["differences"]:
+        actual_items[(row["input"], row["cols"], row["rows"], row["format"])] = row[
+            "classification"
+        ]
+    check(actual_items == expected_items)
     triage = [
         dict(row, reason="synthetic control", ledger="control ledger row")
         for row in result["differences"]
@@ -1234,6 +1267,7 @@ def controls(args):
     check(compare(roots[0], roots[1])["counts"] == {"no change": 8, "different": 12})
     checks = [
         "five equality partitions",
+        "every item has its expected class label",
         "complete three-way listing",
         "hash-bound triage",
         "pair identical",
@@ -1301,6 +1335,12 @@ def controls(args):
         payload = "A\u2028#B\u0085C\vD\fE".encode()
         script = ("size 4 2" + newline).encode() + b"send " + payload + newline.encode()
         check(replay(script)[0] == [send(payload)])
+        for separator in ("\u2028", "\u0085", "\v", "\f", "\t"):
+            prefix = "A" + separator + "#B"
+            script = (
+                "size 4 2" + newline + "seq " + prefix + " 1 1" + newline
+            ).encode()
+            check(replay(script)[0] == [send(prefix.encode() + b"1\r\n")])
     checks.append("replay splits only LF and preserves Unicode separators")
     completion = roots[1].parent / "completion.json"
     saved = completion.read_bytes()
@@ -1358,6 +1398,11 @@ def controls(args):
         lambda: compare(roots[0], roots[1], triage=pair_triage),
     )
     rejects("operator corpus pin", lambda: compare(*roots, expected_corpus="0" * 64))
+    rejects(
+        "empty corpus pin",
+        lambda: compare(*roots, expected_corpus=""),
+        "--expected-corpus",
+    )
 
     def change_manifests(mutate):
         for run in ("run-1", "run-2"):
@@ -1514,10 +1559,13 @@ def controls(args):
         )
     )
     check(compare(*roots)["counts"] == result["counts"])
+    pin = read_json(roots[1] / "manifest.json")["corpus_sha256"]
+    check(compare(roots[1], roots[1], expected_corpus=pin)["untriaged"] == 0)
+    checks.append("successor production revision accepted in pinned pre slot")
     rejects(
-        "wrong production revision in pre slot",
-        lambda: compare(roots[1], roots[1]),
-        "corpus source_revision",
+        "successor pre with different corpus pin",
+        lambda: compare(roots[1], roots[1], expected_corpus="f" * 64),
+        "operator pin",
     )
     checks.append("branch revision may differ from frozen corpus source")
     for run in ("run-1", "run-2"):
@@ -1691,6 +1739,48 @@ def controls(args):
         )
     )
     checks.append("complete valid native sentinel fixture")
+    forged = json.loads(json.dumps(native))
+    for case in forged["cases"]:
+        if case["id"] in ("resize", "conpty-on", "conpty-off"):
+            case["operations"] = [
+                send(native_plain(case["id"], True).replace(b"\n", b"\r\n"))
+            ]
+            case["conpty"] = False
+    forged_packet = requests(forged)[0]
+    forged_manifest = dict(
+        manifest,
+        corpus_sha256=digest(json.dumps(forged).encode()),
+        request_sha256=digest(forged_packet),
+    )
+    for name in ("run-1", "run-2"):
+        (native_root.parent / name / "corpus.json").write_text(
+            json.dumps(forged), encoding="utf-8"
+        )
+        (native_root.parent / name / "manifest.json").write_text(
+            json.dumps(forged_manifest), encoding="utf-8"
+        )
+    (native_root.parent / "completion.json").unlink()
+    complete_capture(native_root.parent)
+    rejects(
+        "native expected text without resize or no-pull requests",
+        lambda: native_controls(
+            argparse.Namespace(
+                dumps=native_root,
+                declare_harness_change=[],
+                report=args.out / "forged-must-not-exist.json",
+            )
+        ),
+        "canonical resize/no-pull requests",
+    )
+    for name in ("run-1", "run-2"):
+        (native_root.parent / name / "corpus.json").write_bytes(
+            json.dumps(native, indent=2, sort_keys=True).encode() + b"\n"
+        )
+        (native_root.parent / name / "manifest.json").write_bytes(
+            json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+        )
+    (native_root.parent / "completion.json").unlink()
+    complete_capture(native_root.parent)
     (native_root.parent / "completion.json").unlink()
     rejects(
         "native controls require completion",
