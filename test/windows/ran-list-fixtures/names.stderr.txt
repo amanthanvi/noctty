@@ -1,0 +1,8 @@
+1/7 names.test.wait...done...OK
+2/7 names.test.test_0...OK
+3/7 names.test.test_1...OK
+4/7 names.test_0...OK
+5/7 names.test_1...OK
+6/7 names.Inner.test.nested...OK
+7/7 names.Inner.test_0...OK
+All 7 tests passed.

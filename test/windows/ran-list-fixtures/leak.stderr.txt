@@ -1,0 +1,21 @@
+1/2 leak.test.leaks one byte...OK
+[gpa] (err): memory address 0x1ce39c20000 leaked: 
+<path line>
+    _ = try std.testing.allocator.alloc(u8, 1);
+                                       ^
+<path line>
+        if (test_fn.func()) |_| {
+                        ^
+<path line>
+        return mainTerminal();
+                           ^
+<path line>
+    std.os.windows.ntdll.RtlExitUserProcess(callMain());
+                                                    ^
+???:?:?: 0x7ff99f9cdda6 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff9a1579c5b in ??? (ntdll.dll)
+
+2/2 leak.test.fine...OK
+All 2 tests passed.
+1 errors were logged.
+1 tests leaked memory.
