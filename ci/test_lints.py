@@ -2,11 +2,13 @@
 
 import contextlib
 import io
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lint_common as common
@@ -87,7 +89,8 @@ class BaselineControls(unittest.TestCase):
         findings = zig.check_file("x.zig", "", source, set(range(1, 8)), {})
         self.assertEqual(8, len(findings))
         self.assertTrue(all(f[2] == "review" for f in findings))
-        with contextlib.redirect_stdout(io.StringIO()):
+        # Expected control findings must not enter the real Actions summary.
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(0, common.emit("control", findings))
 
     def test_private_hasdecl_and_pub_twin(self):
@@ -149,7 +152,7 @@ class Win32Controls(unittest.TestCase):
 
     def test_report_switch(self):
         rows = [("x.zig", 1, "error", "removed std.os.windows.kernel32.Sleep")]
-        with contextlib.redirect_stdout(io.StringIO()):
+        with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(0, common.emit("control", rows, "report"))
             self.assertEqual(1, common.emit("control", rows, "enforce"))
 
