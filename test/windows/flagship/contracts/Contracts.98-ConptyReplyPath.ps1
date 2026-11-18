@@ -20,24 +20,29 @@
 #     `# pin-begin:` and `# pin-end:` comments (the reader list, the whole
 #     outer phase, case 7, the driver's results) and the functions in
 #     $replyPathFunctionPins are pinned again, so a failure also names the
-#     block that changed. Not pinned here: console-attach-info.c, which case 7
-#     reads the prompt with and four other harnesses share.
-# The contract then applies the council's mutations from rounds 1-4 (and its
+#     block that changed. Not pinned here, since other harnesses share them:
+#     console-attach-info.c (case 7's prompt reader),
+#     scripts\windows-harness-history.ps1 (its guard decides exit 3's history
+#     branch) and scripts\dev-windows.cmd (the helper compile, exit 2).
+# The contract then applies the council's mutations from rounds 1-5 (and its
 # own) to the harness and the reader. Each must give a problem, and, through
 # the pins, the whole-file pin's problem and that of every pinned region or
-# function the mutation changes.
+# function the mutation changes. Unless it is marked PinOnly, the content
+# checks alone (-SkipPins) must refuse it too, so they are shown to work once
+# a pin moves; a PinOnly mutation must get nothing from them, so the mark
+# stays true.
 
 $replyPathScript = Join-Path $repoRoot 'test\windows\hidden-win11-conpty-reply-path.ps1'
 $replyPathReader = Join-Path $repoRoot 'test\windows\console-reply-reader.c'
 
 # The pins, by SHA-256 with LF line ends. A change to the harness or the reader must update its pin
 # here, on purpose, in the same change.
-$replyPathHarnessPin = '08D2DFFCB1B44E43AF63100DAFD3740ABE49F077CF2706B1610522FE1DA880EE'
-$replyPathReaderPin = '6C476A3E8670FE6E90D2A8DD426C0176DFF9BAED6976F53B62AF96F3DE11BC98'
+$replyPathHarnessPin = '9A8157F6D684859052B892D1647EFC40FB273A80F6D95B0DB822F1CD3164484C'
+$replyPathReaderPin = '58AE918EBB70275F906043F2093E27ECE2410A9A885FD1D8063AB8152FDE1C86'
 $replyPathRegionPins = [ordered]@{
-    'reader-list' = '6C6783C2701572894B46C791C4D5FB3F4356C26BEE171EC2ACE83C1E77DCE9EA'
-    'outer-run' = 'E5E01BC4CCD53D0F9D418813403384C0CF88352B429A08356189E40CD61CA671'
-    'case-7' = '47B9FE392B154C7B0C0380D8915C96465DCCA0F8034DA502BD705CEE4E8CA622'
+    'reader-list' = '9E5CB8938C4BEA431C33149E32A793E92567904865F64FC6FB5933FCE553F942'
+    'outer-run' = 'A6F8DD0AF26F947628B1693177A40DAAD06BDB841CDBDCC1F01406A1839434B0'
+    'case-7' = 'E2C4B68078D36D0F1AC3B2082783F0AC9E9D9FB5481B93173DD9C48EF64FE904'
     'driver-results' = '8398372CF4B302FE3560D39C2C24C6F145ABDD90D2797D7BE83F7238D4CA0B24'
 }
 $replyPathFunctionPins = [ordered]@{
@@ -47,8 +52,8 @@ $replyPathFunctionPins = [ordered]@{
     'Read-Log' = '042B0B922955FFA1BE38F9B75823A925A7C4AAA22301A66DB4CFD3ABDB522631'
     'Delimiters' = 'FB18706C2359BB0FBEE037A4D4605ABB1D080AE55EF492A56CC23802AA24C95C'
     'Wait-Ready' = '21759327C7C7875427A99456403A0AC7C7DAF622C725C3EE1075638A61B72CF3'
-    'Invoke-ReaderSession' = '896111CDFF3D2367E4CC6DBC07EECFEB08C282EF00986BB0D2F36A96E6D52776'
-    'Get-ReaderStateProblems' = '142ACF57B19C5CAE625B2BF6760AECF007BFFD692DE251424F6931BFB167A0FD'
+    'Invoke-ReaderSession' = '27E9C4983B9F70DF0F43FEF49FD7A2AE5FB44C362950EB26A441866AF7948F8A'
+    'Get-ReaderStateProblems' = '6E518B13B31F4B5FA306499A27A52AFCE7D4B225D740140C83E123682B569D95'
     'Get-Segments' = '6185E4EC4F567726CE54703AC1F5F4CAFC9E3798EA73CD73B22688D6525240B7'
     'Get-Prediction' = 'ADA5A9CACC21FB044994013F9006520E784514E2A9430B41893E872407726A3A'
     'Get-Verdict' = '9C3EA7D71286F1EC81CA0A5CD08974F6E0E01B8DF2A2ABB0056F6C8F4F19DE93'
@@ -60,7 +65,9 @@ function Get-ReplyPathProblems {
         [Parameter(Mandatory)] [string] $Harness,
         [Parameter(Mandatory)] [string] $Reader,
         # For mutations: one static problem is enough, so the evaluated checks are skipped.
-        [switch] $StopAtFirst
+        [switch] $StopAtFirst,
+        # For mutations: the content checks alone, without the file, region and function pins.
+        [switch] $SkipPins
     )
     $problems = [Collections.Generic.List[string]]::new()
     $Harness = $Harness -replace "`r`n", "`n"; $Reader = $Reader -replace "`r`n", "`n"
@@ -173,38 +180,47 @@ function Get-ReplyPathProblems {
         }
     }
     Need '        $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;' 'case 7 no longer starts incomplete'
-    # The blocks that decide or feed an exit or a verdict, by SHA-256 with LF line ends, so a failure
-    # names the block. The whole-file pins below close the set.
-    $regionPins = $replyPathRegionPins
-    $regionsFound = @([regex]::Matches($Harness, '(?m)^[ \t]*# pin-begin: ([a-z0-9-]+)') | ForEach-Object { $_.Groups[1].Value })
-    if (-not [string]::Equals(($regionsFound -join ','), (@($regionPins.Keys) -join ','), [StringComparison]::Ordinal)) {
-        $problems.Add("the pinned regions are '$($regionsFound -join ',')' where '$(@($regionPins.Keys) -join ',')' are pinned")
-    }
-    foreach ($name in $regionPins.Keys) {
-        $begin = [regex]::Match($Harness, "(?m)^[ \t]*# pin-begin: $([regex]::Escape($name))[^\n]*\n")
-        $hash = ''
-        if ($begin.Success) {
-            $end = [regex]::Match($Harness.Substring($begin.Index), "(?m)^[ \t]*# pin-end: $([regex]::Escape($name))[ \t]*(\n|$)")
-            if ($end.Success) { $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Harness.Substring($begin.Index, $end.Index + $end.Length)))) }
+    if (-not $SkipPins) {
+        # The blocks that decide or feed an exit or a verdict, by SHA-256 with LF line ends, so a failure
+        # names the block. The whole-file pins below close the set.
+        $regionPins = $replyPathRegionPins
+        $regionsFound = @([regex]::Matches($Harness, '(?m)^[ \t]*# pin-begin: ([a-z0-9-]+)') | ForEach-Object { $_.Groups[1].Value })
+        if (-not [string]::Equals(($regionsFound -join ','), (@($regionPins.Keys) -join ','), [StringComparison]::Ordinal)) {
+            $problems.Add("the pinned regions are '$($regionsFound -join ',')' where '$(@($regionPins.Keys) -join ',')' are pinned")
         }
-        if ($hash -cne $regionPins[$name]) { $problems.Add("pinned region $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
+        foreach ($name in $regionPins.Keys) {
+            $begin = [regex]::Match($Harness, "(?m)^[ \t]*# pin-begin: $([regex]::Escape($name))[^\n]*\n")
+            $hash = ''
+            if ($begin.Success) {
+                $end = [regex]::Match($Harness.Substring($begin.Index), "(?m)^[ \t]*# pin-end: $([regex]::Escape($name))[ \t]*(\n|$)")
+                if ($end.Success) { $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Harness.Substring($begin.Index, $end.Index + $end.Length)))) }
+            }
+            if ($hash -cne $regionPins[$name]) { $problems.Add("pinned region $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
+        }
+        $functionPins = $replyPathFunctionPins
+        foreach ($name in $functionPins.Keys) {
+            $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))
+            $hash = if ($definition.Count -eq 1) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($definition[0].Extent.Text))) } else { '' }
+            if ($hash -cne $functionPins[$name]) { $problems.Add("pinned function $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
+        }
+        # The reader, whole: every line of it decides what a reader records.
+        $readerHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Reader)))
+        if ($readerHash -cne $replyPathReaderPin) { $problems.Add("the reader changed (SHA-256 $readerHash); review it and update its pin here") }
+        # The harness, whole: what closes the set. The region and function pins above name the block.
+        $harnessHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Harness)))
+        if ($harnessHash -cne $replyPathHarnessPin) { $problems.Add("the harness changed (SHA-256 $harnessHash); review it and update its pin here") }
     }
-    $functionPins = $replyPathFunctionPins
-    foreach ($name in $functionPins.Keys) {
-        $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))
-        $hash = if ($definition.Count -eq 1) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($definition[0].Extent.Text))) } else { '' }
-        if ($hash -cne $functionPins[$name]) { $problems.Add("pinned function $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
-    }
-    # The reader, whole: every line of it decides what a reader records.
-    $readerHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Reader)))
-    if ($readerHash -cne $replyPathReaderPin) { $problems.Add("the reader changed (SHA-256 $readerHash); review it and update its pin here") }
-    # The harness, whole: what closes the set. The region and function pins above name the block.
-    $harnessHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Harness)))
-    if ($harnessHash -cne $replyPathHarnessPin) { $problems.Add("the harness changed (SHA-256 $harnessHash); review it and update its pin here") }
 
     # Case 7: pwsh without a profile, history read back before anything is typed.
     Need '-e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' 'case 7''s pwsh must start -NoLogo -NoProfile -NoExit'
-    if ($code -notmatch '(?s)Set-PSReadLineOption -HistorySavePath ''\$shellHistory'' -HistorySaveStyle SaveNothing; if\(\(Get-PSReadLineOption\)\.HistorySaveStyle -eq ''SaveNothing'' -and \(Get-PSReadLineOption\)\.HistorySavePath -ceq ''\$shellHistory''\).*?did not become ready \(history isolation not confirmed\); nothing typed') {
+    Need '$historyLiteral=[Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($shellHistory)' 'case 7''s history path is no longer escaped as a literal'
+    Need '$readyLiteral=[Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($shellReady)' 'case 7''s ready path is no longer escaped as a literal'
+    Need 'Set-Content -LiteralPath ''$readyLiteral'' -Value ready }"' 'case 7''s ready file no longer takes the escaped path'
+    if ($code -match '''\$shell(History|Ready)''') { $problems.Add('a case 7 path goes into the startup unescaped') }
+    if ($code -notmatch '(?s)if\(@\(\$shellBefore\.Prompt\)\.Count -ne 1 -or @\(\$afterSwitch\.Prompt\)\.Count -ne 1\) \{ throw ''No PS prompt row before or after the tab switch[^\n]*\n\s*\$case7\.Complete=\$true') {
+        $problems.Add('case 7 completes without a prompt row before and after the switch')
+    }
+    if ($code -notmatch '(?s)Set-PSReadLineOption -HistorySavePath ''\$historyLiteral'' -HistorySaveStyle SaveNothing; if\(\(Get-PSReadLineOption\)\.HistorySaveStyle -eq ''SaveNothing'' -and \(Get-PSReadLineOption\)\.HistorySavePath -ceq ''\$historyLiteral''\).*?did not become ready \(history isolation not confirmed\); nothing typed') {
         $problems.Add('PSReadLine''s history is no longer read back before anything is typed')
     }
     # Every noctty launch: no saved window state, later tabs on System32's cmd.exe /D (no AutoRun), no clipboard.
@@ -220,6 +236,18 @@ function Get-ReplyPathProblems {
     if ($code -match '--command=cmd\.exe|\$env:ComSpec') { $problems.Add('a cmd.exe is started without /D or from ComSpec, where the user''s AutoRun can run') }
     Need '$links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })' 'the run directory is no longer checked for links'
     Need 'finally { if($Mode -eq ''c-inbox'') { Remove-Item Env:NOCTTY_CONPTY } }' 'NOCTTY_CONPTY is not cleared after the in-box launch'
+    Need 'if($null -ne [Environment]::GetEnvironmentVariable(''NOCTTY_CONPTY'')) { throw' 'an inherited NOCTTY_CONPTY is no longer refused (it would run the bundled readers on another host)'
+    # The run tree: made with a protected DACL for this user, SYSTEM and Administrators, and read back before anything is written to it.
+    Need '$runSids=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,''S-1-5-18'',''S-1-5-32-544'')' 'the Run directory''s accounts changed'
+    Need '$runAcl=[Security.AccessControl.DirectorySecurity]::new(); $runAcl.SetAccessRuleProtection($true,$false)' 'the Run directory''s DACL is no longer protected'
+    Need 'foreach($sid in $runSids) { $runAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),''FullControl'',''ContainerInherit,ObjectInherit'',''None'',''Allow'')) }' 'the Run directory''s rules changed'
+    Need '$runOthers=@($runRead.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -ne ''Allow'' -or $runSids -notcontains $_.IdentityReference.Value })' 'the Run directory''s read-back no longer refuses another account''s rule'
+    Need 'if(-not $runRead.AreAccessRulesProtected -or $runOthers.Count -gt 0 -or @($runSids[0],''S-1-5-32-544'') -notcontains $runRead.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw ''The Run directory''''s ACL did not read back as this user''''s alone; nothing runs from it.'' }' 'the Run directory''s ACL is no longer read back and refused unless it is this user''s alone'
+    if ($code -notmatch '(?s)\[void\]\[IO\.FileSystemAclExtensions\]::Create\(\[IO\.DirectoryInfo\]::new\(\$Run\),\$runAcl\)\s*if\(\$Sabotage -eq ''acl''\) \{[^\n]*\}\s*\$runRead=\[IO\.FileSystemAclExtensions\]::GetAccessControl\(\[IO\.DirectoryInfo\]::new\(\$Run\)\)\s*\$runOthers=[^\n]*\s*if\(-not \$runRead\.AreAccessRulesProtected [^\n]*\s*\$root=') {
+        $problems.Add('the Run directory is no longer made with its ACL and read back before anything is written to it')
+    }
+    if ($code -match 'New-Item -ItemType Directory -Path \$Run\)') { $problems.Add('the Run directory is made without its ACL') }
+    Need 'if($sshReaders.Count -gt 0 -and $Run -cnotmatch ''^[A-Za-z]:\\[A-Za-z0-9_.\\-]*$'') { throw' 'the ssh readers no longer refuse a Run path their far side''s shell could parse'
 
     # Reader d: off by default, opt-in only, hardened, its keys deleted.
     Need '[string[]] $Readers = @(''a'',''a16'',''b'',''c''),' 'the default readers changed (d and d-notiming must stay opt-in)'
@@ -237,8 +265,9 @@ function Get-ReplyPathProblems {
     Need 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add(' 'the run''s ssh keys are no longer deleted best effort, each failure recorded'
 
     # Controls: sabotage off by default and limited to its three uses.
-    Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'',''setup'',''key'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
-    NeedCount '$Sabotage -eq' 5 'sabotage must break exactly five things'
+    Need '[ValidateSet(''none'',''delimiter'',''reader'',''control'',''setup'',''key'',''acl'')] [string] $Sabotage = ''none'',' 'sabotage is not off by default'
+    NeedCount '$Sabotage -eq' 6 'sabotage must break exactly six things'
+    Need 'LocalAppDataInRun=$(switch($probe[6]) { ''1'' { $true } ''0'' { $false } ''2'' { ''unset'' } default { ''unknown'' } })}' 'the reader''s LOCALAPPDATA answer no longer tells unset from unknown'
 
     # The run's config, case 7's injections, the split gap, readiness and the reader states.
     Need ("`$configLines=@('shell-integration = none','single-instance = false','window-save-state = never','confirm-close-surface = false',`n" +
@@ -260,7 +289,11 @@ function Get-ReplyPathProblems {
             'else if (wcscmp(argv[1], L"c") == 0) { wanted = (before & ~0x7u) | 0x200; }',
             'if (swprintf_s(ready_tmp, MAX_PATH, L"%ls.tmp", argv[3]) < 0) return 8;',
             'if (_wfopen_s(&ready, ready_tmp, L"wb") || !ready) return 8;',
-            'if (!MoveFileExW(ready_tmp, argv[3], MOVEFILE_REPLACE_EXISTING)) return 13;')) {
+            'if (!MoveFileExW(ready_tmp, argv[3], MOVEFILE_REPLACE_EXISTING)) return 13;',
+            'DWORD got = GetEnvironmentVariableW(L"LOCALAPPDATA", value, 32768);',
+            'if (got == 0) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 2 : 3;',
+            'if (got >= 32768) return 3;',
+            ('if (GetFileAttributesW(argv[4]) != INVALID_FILE_ATTRIBUTES) fprintf(g_log, "STOP,%lld\n", now_ticks());' + "`n" + '    fclose(g_log);'))) {
         if (-not $Reader.Contains($line)) { $problems.Add("the reader no longer has: $line") }
     }
 
@@ -417,8 +450,8 @@ $script:ReplyPathEvaluation = {
         $got = Get-Verdict $v[0] $v[1] $v[2]
         if ($got -cne $v[3]) { $out.Add("Get-Verdict gives '$got' where '$($v[3])' is right ($($v[2]))") }
     }
-    # Reader states: the input mode each reader is named for, and the record readers' read sizes.
-    $state = { param($Mode, $Mode0, $Mode1, $Reads, $Done = 1) @{ Mode = $Mode; Ready = @{ InputModeBefore = $Mode0; InputMode = $Mode1 }; Log = @($Reads | ForEach-Object { "READ,1,$_" }); Planned = 1; Steps = @(1..1 | Where-Object { $Done } | ForEach-Object { @{ Barrier = 'OK' } }) } }
+    # Reader states: the input mode each reader is named for, the record readers' read sizes, and a clean stop.
+    $state = { param($Mode, $Mode0, $Mode1, $Reads, $Done = 1, $Stop = 1) @{ Mode = $Mode; Ready = @{ InputModeBefore = $Mode0; InputMode = $Mode1 }; Log = @(@($Reads | ForEach-Object { "READ,1,$_" }) + @(if ($Stop) { 'STOP,1' })); Planned = 1; Steps = @(1..1 | Where-Object { $Done } | ForEach-Object { @{ Barrier = 'OK' } }) } }
     $states = @(
         ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 16, 9)), 0)
         ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 30)), 1)
@@ -432,6 +465,9 @@ $script:ReplyPathEvaluation = {
         ,@((& $state 'a16' '0x1f7' '0x3f0' @(1, 9) 0), 0)
         ,@((& $state 'b' '0x1f7' '0x98' @(4) 0), 0)
         ,@((& $state 'b' '0x1f7' '0x298' @(4) 0), 1)
+        ,@((& $state 'b' '0x1f7' '0x98' @(4, 25) 1 0), 1)
+        ,@((& $state 'c' '0x1f7' '0x3f0' @() 1 0), 1)
+        ,@((& $state 'b' '0x1f7' '0x98' @(4) 0 0), 0)
     )
     foreach ($x in $states) {
         $got = @(Get-ReaderStateProblems $x[0]).Count
@@ -478,8 +514,9 @@ if ($replyPathProblems.Count -gt 0) { throw "The ConPTY reply-path harness break
 # Every mutation the council ran (round 1: Sol's 3, Opus's 22, Muse's 8, the
 # duplicates kept once; round 2: Opus's 25, those it did not name rebuilt and
 # marked so; round 3: Opus's survivors and his reader-a read, Sol's discarded
-# result; round 4: Opus's probes and Sol's five, one shared) and the
-# contract's own. An entry has Old and New, or Edits for several.
+# result; round 4: Opus's probes and Sol's five, one shared; round 5: the
+# bots' threads and Opus's Lows) and the contract's own. An entry has Old and
+# New, or Edits for several; PinOnly marks one only a pin can see.
 $replyPathMutations = @(
     @{ Name = 'Sol 1 / Opus 1: the reader session''s noctty on a null desktop'; Old = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)'; New = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,$null,$job,0x08000000)' }
     @{ Name = 'Sol 2: no job assignment before resume'; Old = 'if(!AssignProcessToJobObject(job,p.process)||ResumeThread(p.thread)==0xFFFFFFFF) {'; New = 'if(ResumeThread(p.thread)==0xFFFFFFFF) {' }
@@ -514,8 +551,8 @@ $replyPathMutations = @(
     @{ Name = 'round 2b: clipboard writes allowed'; Old = '--clipboard-write=deny --clipboard-read=deny -e "{3}" {4} {5} {6}'; New = '--clipboard-read=deny -e "{3}" {4} {5} {6}' }
     @{ Name = 'round 2b: clipboard reads allowed'; Old = '--clipboard-read=deny -e "{3}" {4}'' -f'; New = '-e "{3}" {4}'' -f' }
     @{ Name = 'round 2b: links in the run not checked'; Old = 'if(-not $keysDeleted -or $links.Count -gt 0 -or ($guardsRead'; New = 'if(-not $keysDeleted -or ($guardsRead' }
-    @{ Name = 'Opus r2 N1: the AUMID fingerprint matches no key'; Old = 'Where-Object { $_.PSChildName -like ''io.github.amanthanvi.noctty*'' }'; New = 'Where-Object { $_.PSChildName -like ''no-such-key*'' }' }
-    @{ Name = 'Opus r2 N2: the startup-ledger path changed'; Old = '''noctty\startup-attempts.json'''; New = '''noctty\no-such-ledger.json''' }
+    @{ Name = 'Opus r2 N1: the AUMID fingerprint matches no key'; PinOnly = $true; Old = 'Where-Object { $_.PSChildName -like ''io.github.amanthanvi.noctty*'' }'; New = 'Where-Object { $_.PSChildName -like ''no-such-key*'' }' }
+    @{ Name = 'Opus r2 N2: the startup-ledger path changed'; PinOnly = $true; Old = '''noctty\startup-attempts.json'''; New = '''noctty\no-such-ledger.json''' }
     @{ Name = 'Opus r2 N3: the clipboard read after the run fed the one before'; Old = '$clipboardAfter=[ReplyPath]::GetClipboardSequenceNumber()'; New = '$clipboardAfter=$clipboardBefore' }
     @{ Name = 'Opus r2 N4: an incomplete run exits 0 in the outer'; Old = 'or a positive control failed); see $(Join-Path $Run ''results.md'')."; exit 1 }'; New = 'or a positive control failed); see $(Join-Path $Run ''results.md'')."; exit 0 }' }
     @{ Name = 'Opus r2 N5: the driver exits 0'; Old = 'exit $exit.Code'; New = 'exit 0' }
@@ -549,45 +586,64 @@ $replyPathMutations = @(
     @{ Name = 'round 3: reader states not checked'; Old = 'foreach($s in $Sessions) { foreach($q in @($s.StateProblems)) { if($q) { $why.Add($q) } } }'; New = '' }
     @{ Name = 'round 3: a16''s read size not checked'; Old = 'if($Session.Mode -eq ''a16'' -and $largest -ne 16)'; New = 'if($false)' }
     @{ Name = 'round 3: the guards compared without their first reading'; Old = '        $guardsRead=$true' + "`n"; New = '' }
-    @{ Name = 'Opus r3 P1: no row is a control'; Old = 'Control=[bool]($prediction -and $prediction.Control)'; New = 'Control=$false' }
-    @{ Name = 'Opus r3 P4: the reader-state result replaced'; Old = '$session.StateProblems=@(Get-ReaderStateProblems $session)'; New = '$session.StateProblems=@()' }
-    @{ Name = 'Sol r3: the reader-state result discarded'; Old = '$session.StateProblems=@(Get-ReaderStateProblems $session)'; New = '$null=@(Get-ReaderStateProblems $session)' }
-    @{ Name = 'Opus r3 P5: case 7 always skipped'; Old = 'if($SkipPSReadLine) { $command+='' -SkipPSReadLine'' }'; New = '$command+='' -SkipPSReadLine''' }
-    @{ Name = 'Opus r3 P6: the driver told one reader'; Old = '$Run,($Readers -join '',''),$Sabotage'; New = '$Run,$Readers[0],$Sabotage' }
-    @{ Name = 'Opus r3 P7: the outer exit switch on a constant'; Old = '    switch($code) {'; New = '    switch(0) {' }
-    @{ Name = 'Opus r3 P22: the tab-switch inputs forced'; Old = '$surfacesDuring=@([ReplyPath]::Surfaces($shell.pid)).Count; $visibleDuring=[ReplyPath]::IsWindowVisible($surface)'; New = '$surfacesDuring=2; $visibleDuring=$false' }
-    @{ Name = 'Opus r3 P29a: every run stops after the compile'; Old = 'if($CompileOnly) { Write-Host ''ConPTY reply-path harness C/C# compilation: PASS; no launches.''; exit 0 }'; New = 'if($true) { Write-Host ''ConPTY reply-path harness C/C# compilation: PASS; no launches.''; exit 0 }' }
-    @{ Name = 'Opus r3 L2: reader a reads W records'; File = 'reader'; Old = 'BOOL ok = ansi ? ReadConsoleInputA(in, batch, per_read, &count) : ReadConsoleInputW(in, batch, per_read, &count);'; New = 'BOOL ok = ReadConsoleInputW(in, batch, per_read, &count);' }
-    @{ Name = 'Opus r3 P2: no row has a prediction'; Old = '$prediction=Get-Prediction $step.Name $session.Mode $written'; New = '$prediction=$null' }
-    @{ Name = 'Opus r3 P3: no row is built'; Old = 'for($i=0;$i -lt $session.Steps.Count;$i++) {'; New = 'for($i=0;$i -lt 0;$i++) {' }
-    @{ Name = 'Opus r3 P23: case 7''s prompt record forced'; Old = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=$screen.Prompt;'; New = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=''PS> [?999;2n'';' }
-    @{ Name = 'Opus r3 P28: the reader list cut to one'; Old = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })'; New = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 1)' }
-    @{ Name = 'Opus r4 Q4: the driver''s exit code read as 0'; Old = '[DllImport("kernel32.dll")] public static extern bool GetExitCodeProcess(IntPtr p,out uint code);'; New = 'public static bool GetExitCodeProcess(IntPtr p,out uint code) { code=0; return true; }' }
-    @{ Name = 'Opus r4 Q1: the exit forced after the results'; Old = '# pin-end: driver-results' + "`n"; New = '# pin-end: driver-results' + "`n" + '$exit.Code=0' + "`n" }
-    @{ Name = 'Opus r4 Q23: the results region never runs'; Edits = @(@{ Old = '# pin-begin: driver-results'; New = 'if($false) {' + "`n" + '# pin-begin: driver-results' }, @{ Old = '# pin-end: driver-results' + "`n"; New = '# pin-end: driver-results' + "`n" + '}' + "`n" }) }
-    @{ Name = 'Opus r4 Q24: Get-Verdict aliased to a stub'; Old = '# pin-begin: driver-results'; New = 'function Get-VerdictStub { ''as predicted'' }; Set-Alias Get-Verdict Get-VerdictStub' + "`n" + '# pin-begin: driver-results' }
-    @{ Name = 'Opus r4 Q12: Get-RunExit replaced at run time'; Old = 'try {' + "`n" + '    foreach($mode in $Readers) { Invoke-ReaderSession $mode }'; New = '${function:Get-RunExit}={ @{Code=0;Why=@()} }' + "`n" + 'try {' + "`n" + '    foreach($mode in $Readers) { Invoke-ReaderSession $mode }' }
-    @{ Name = 'Opus r4 Q22: case 7''s controls set by index'; Old = '# pin-begin: driver-results'; New = 'if($case7) { $case7[''Complete'']=$true; $case7[''InjectedReportShown'']=$true; $case7[''TabSwitched'']=$true }' + "`n" + '# pin-begin: driver-results' }
-    @{ Name = 'Opus r4 Q14: the failures cleared before the results'; Old = '# pin-begin: driver-results'; New = '$failures.Clear()' + "`n" + '# pin-begin: driver-results' }
-    @{ Name = 'Opus r4 Q2 (r3 P10): the driver''s infrastructure failure dropped'; Old = '    $failures.Add("infrastructure: $($_.Exception.Message) $($_.InvocationInfo.PositionMessage)")'; New = '    $null=1' }
-    @{ Name = 'Opus r4 Q3 (r3 P9): the driver''s cleanup failure dropped'; Old = 'catch { $failures.Add("owned job cleanup: $($_.Exception.Message)") }'; New = 'catch { }' }
-    @{ Name = 'Opus r4 Q3b: the driver''s cleanup failure filed elsewhere'; Old = '$failures.Add("owned job cleanup:'; New = '$sessions.Add("owned job cleanup:' }
-    @{ Name = 'Sol r4 4: the driver''s cleanup failure discarded'; Old = '$failures.Add("owned job cleanup: $($_.Exception.Message)")'; New = '$null = "owned job cleanup: $($_.Exception.Message)"' }
-    @{ Name = 'Opus r4 Q6: a stuck owned process passes'; Old = 'throw new Exception("Owned job cleanup exceeded five seconds");'; New = 'return 0;' }
-    @{ Name = 'Opus r4 Q6b / Sol r4 5: the cleanup always complete'; Old = 'if(a.activeProcesses==0) return a.totalProcesses;'; New = 'if(a.activeProcesses>=0) return a.totalProcesses;' }
-    @{ Name = 'Opus r4 Q5: the clipboard sequence a constant'; Old = '[DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();'; New = 'public static uint GetClipboardSequenceNumber() { return 1; }' }
-    @{ Name = 'Opus r4 Q7: every window on the private desktop'; Old = 'bool found=false;'; New = 'bool found=true;' }
-    @{ Name = 'Opus r4 Q8: the delimiter sabotage a real delimiter'; Old = 'if($Sabotage -eq ''delimiter'') { $bindings.f1.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''delimiter'') { $bindings.f1.Bytes="$([char]2)" }' }
-    @{ Name = 'Opus r4 Q9: the control sabotage a real DA1'; Old = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]4)" }' }
-    @{ Name = 'Opus r4 Q11: a case''s bytes changed after the table'; Old = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }' + "`n" + '$bindings.f8.Bytes=''x''' }
-    @{ Name = 'Sol r4 1: CompileOnly on by default'; Old = '[switch] $CompileOnly,'; New = '[switch] $CompileOnly=$true,' }
-    @{ Name = 'Sol r4 2: SkipPSReadLine on by default'; Old = '[switch] $SkipPSReadLine,'; New = '[switch] $SkipPSReadLine=$true,' }
-    @{ Name = 'Sol r4 3: the escape byte a SUB'; Old = '$esc = [char]27'; New = '$esc = [char]26' }
+    @{ Name = 'Opus r3 P1: no row is a control'; PinOnly = $true; Old = 'Control=[bool]($prediction -and $prediction.Control)'; New = 'Control=$false' }
+    @{ Name = 'Opus r3 P4: the reader-state result replaced'; PinOnly = $true; Old = '$session.StateProblems=@(Get-ReaderStateProblems $session)'; New = '$session.StateProblems=@()' }
+    @{ Name = 'Sol r3: the reader-state result discarded'; PinOnly = $true; Old = '$session.StateProblems=@(Get-ReaderStateProblems $session)'; New = '$null=@(Get-ReaderStateProblems $session)' }
+    @{ Name = 'Opus r3 P5: case 7 always skipped'; PinOnly = $true; Old = 'if($SkipPSReadLine) { $command+='' -SkipPSReadLine'' }'; New = '$command+='' -SkipPSReadLine''' }
+    @{ Name = 'Opus r3 P6: the driver told one reader'; PinOnly = $true; Old = '$Run,($Readers -join '',''),$Sabotage'; New = '$Run,$Readers[0],$Sabotage' }
+    @{ Name = 'Opus r3 P7: the outer exit switch on a constant'; PinOnly = $true; Old = '    switch($code) {'; New = '    switch(0) {' }
+    @{ Name = 'Opus r3 P22: the tab-switch inputs forced'; PinOnly = $true; Old = '$surfacesDuring=@([ReplyPath]::Surfaces($shell.pid)).Count; $visibleDuring=[ReplyPath]::IsWindowVisible($surface)'; New = '$surfacesDuring=2; $visibleDuring=$false' }
+    @{ Name = 'Opus r3 P29a: every run stops after the compile'; PinOnly = $true; Old = 'if($CompileOnly) { Write-Host ''ConPTY reply-path harness C/C# compilation: PASS; no launches.''; exit 0 }'; New = 'if($true) { Write-Host ''ConPTY reply-path harness C/C# compilation: PASS; no launches.''; exit 0 }' }
+    @{ Name = 'Opus r3 L2: reader a reads W records'; PinOnly = $true; File = 'reader'; Old = 'BOOL ok = ansi ? ReadConsoleInputA(in, batch, per_read, &count) : ReadConsoleInputW(in, batch, per_read, &count);'; New = 'BOOL ok = ReadConsoleInputW(in, batch, per_read, &count);' }
+    @{ Name = 'Opus r3 P2: no row has a prediction'; PinOnly = $true; Old = '$prediction=Get-Prediction $step.Name $session.Mode $written'; New = '$prediction=$null' }
+    @{ Name = 'Opus r3 P3: no row is built'; PinOnly = $true; Old = 'for($i=0;$i -lt $session.Steps.Count;$i++) {'; New = 'for($i=0;$i -lt 0;$i++) {' }
+    @{ Name = 'Opus r3 P23: case 7''s prompt record forced'; PinOnly = $true; Old = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=$screen.Prompt;'; New = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=''PS> [?999;2n'';' }
+    @{ Name = 'Opus r3 P28: the reader list cut to one'; PinOnly = $true; Old = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })'; New = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 1)' }
+    @{ Name = 'Opus r4 Q4: the driver''s exit code read as 0'; PinOnly = $true; Old = '[DllImport("kernel32.dll")] public static extern bool GetExitCodeProcess(IntPtr p,out uint code);'; New = 'public static bool GetExitCodeProcess(IntPtr p,out uint code) { code=0; return true; }' }
+    @{ Name = 'Opus r4 Q1: the exit forced after the results'; PinOnly = $true; Old = '# pin-end: driver-results' + "`n"; New = '# pin-end: driver-results' + "`n" + '$exit.Code=0' + "`n" }
+    @{ Name = 'Opus r4 Q23: the results region never runs'; PinOnly = $true; Edits = @(@{ Old = '# pin-begin: driver-results'; New = 'if($false) {' + "`n" + '# pin-begin: driver-results' }, @{ Old = '# pin-end: driver-results' + "`n"; New = '# pin-end: driver-results' + "`n" + '}' + "`n" }) }
+    @{ Name = 'Opus r4 Q24: Get-Verdict aliased to a stub'; PinOnly = $true; Old = '# pin-begin: driver-results'; New = 'function Get-VerdictStub { ''as predicted'' }; Set-Alias Get-Verdict Get-VerdictStub' + "`n" + '# pin-begin: driver-results' }
+    @{ Name = 'Opus r4 Q12: Get-RunExit replaced at run time'; PinOnly = $true; Old = 'try {' + "`n" + '    foreach($mode in $Readers) { Invoke-ReaderSession $mode }'; New = '${function:Get-RunExit}={ @{Code=0;Why=@()} }' + "`n" + 'try {' + "`n" + '    foreach($mode in $Readers) { Invoke-ReaderSession $mode }' }
+    @{ Name = 'Opus r4 Q22: case 7''s controls set by index'; PinOnly = $true; Old = '# pin-begin: driver-results'; New = 'if($case7) { $case7[''Complete'']=$true; $case7[''InjectedReportShown'']=$true; $case7[''TabSwitched'']=$true }' + "`n" + '# pin-begin: driver-results' }
+    @{ Name = 'Opus r4 Q14: the failures cleared before the results'; PinOnly = $true; Old = '# pin-begin: driver-results'; New = '$failures.Clear()' + "`n" + '# pin-begin: driver-results' }
+    @{ Name = 'Opus r4 Q2 (r3 P10): the driver''s infrastructure failure dropped'; PinOnly = $true; Old = '    $failures.Add("infrastructure: $($_.Exception.Message) $($_.InvocationInfo.PositionMessage)")'; New = '    $null=1' }
+    @{ Name = 'Opus r4 Q3 (r3 P9): the driver''s cleanup failure dropped'; PinOnly = $true; Old = 'catch { $failures.Add("owned job cleanup: $($_.Exception.Message)") }'; New = 'catch { }' }
+    @{ Name = 'Opus r4 Q3b: the driver''s cleanup failure filed elsewhere'; PinOnly = $true; Old = '$failures.Add("owned job cleanup:'; New = '$sessions.Add("owned job cleanup:' }
+    @{ Name = 'Sol r4 4: the driver''s cleanup failure discarded'; PinOnly = $true; Old = '$failures.Add("owned job cleanup: $($_.Exception.Message)")'; New = '$null = "owned job cleanup: $($_.Exception.Message)"' }
+    @{ Name = 'Opus r4 Q6: a stuck owned process passes'; PinOnly = $true; Old = 'throw new Exception("Owned job cleanup exceeded five seconds");'; New = 'return 0;' }
+    @{ Name = 'Opus r4 Q6b / Sol r4 5: the cleanup always complete'; PinOnly = $true; Old = 'if(a.activeProcesses==0) return a.totalProcesses;'; New = 'if(a.activeProcesses>=0) return a.totalProcesses;' }
+    @{ Name = 'Opus r4 Q5: the clipboard sequence a constant'; PinOnly = $true; Old = '[DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();'; New = 'public static uint GetClipboardSequenceNumber() { return 1; }' }
+    @{ Name = 'Opus r4 Q7: every window on the private desktop'; PinOnly = $true; Old = 'bool found=false;'; New = 'bool found=true;' }
+    @{ Name = 'Opus r4 Q8: the delimiter sabotage a real delimiter'; PinOnly = $true; Old = 'if($Sabotage -eq ''delimiter'') { $bindings.f1.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''delimiter'') { $bindings.f1.Bytes="$([char]2)" }' }
+    @{ Name = 'Opus r4 Q9: the control sabotage a real DA1'; PinOnly = $true; Old = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]4)" }' }
+    @{ Name = 'Opus r4 Q11: a case''s bytes changed after the table'; PinOnly = $true; Old = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }' + "`n" + '$bindings.f8.Bytes=''x''' }
+    @{ Name = 'Sol r4 1: CompileOnly on by default'; PinOnly = $true; Old = '[switch] $CompileOnly,'; New = '[switch] $CompileOnly=$true,' }
+    @{ Name = 'Sol r4 2: SkipPSReadLine on by default'; PinOnly = $true; Old = '[switch] $SkipPSReadLine,'; New = '[switch] $SkipPSReadLine=$true,' }
+    @{ Name = 'Sol r4 3: the escape byte a SUB'; PinOnly = $true; Old = '$esc = [char]27'; New = '$esc = [char]26' }
+    @{ Name = 'r5 Opus L3: an inherited NOCTTY_CONPTY not refused'; Old = 'if($null -ne [Environment]::GetEnvironmentVariable(''NOCTTY_CONPTY'')) { throw'; New = 'if($false) { throw' }
+    @{ Name = 'r5 Sourcery: the Run directory''s DACL not protected'; Old = '$runAcl.SetAccessRuleProtection($true,$false)'; New = '$runAcl.SetAccessRuleProtection($false,$true)' }
+    @{ Name = 'r5 Sourcery: the Run directory made without its ACL'; Old = '[void][IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($Run),$runAcl)'; New = '[void](New-Item -ItemType Directory -Path $Run)' }
+    @{ Name = 'r5 Sourcery: the ACL read-back refuses nothing'; Old = '{ throw ''The Run directory''''s ACL did not read back as this user''''s alone; nothing runs from it.'' }'; New = '{ }' }
+    @{ Name = 'r5 Sourcery: another account''s rule accepted'; Old = 'Where-Object { $_.AccessControlType -ne ''Allow'' -or $runSids -notcontains $_.IdentityReference.Value }'; New = 'Where-Object { $_.AccessControlType -ne ''Allow'' }' }
+    @{ Name = 'r5 Sourcery: Everyone among the run''s accounts'; Old = '$runSids=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,''S-1-5-18'',''S-1-5-32-544'')'; New = '$runSids=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,''S-1-5-18'',''S-1-5-32-544'',''S-1-1-0'')' }
+    @{ Name = 'r5 Sourcery / CodeRabbit: the history path unescaped'; Old = '-HistorySavePath ''$historyLiteral'' -HistorySaveStyle'; New = '-HistorySavePath ''$shellHistory'' -HistorySaveStyle' }
+    @{ Name = 'r5 CodeRabbit: the ready path unescaped'; Old = 'Set-Content -LiteralPath ''$readyLiteral'' -Value ready'; New = 'Set-Content -LiteralPath ''$shellReady'' -Value ready' }
+    @{ Name = 'r5: the history escape a no-op'; Old = '$historyLiteral=[Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($shellHistory)'; New = '$historyLiteral=$shellHistory' }
+    @{ Name = 'r5 CodeRabbit: case 7 complete without prompt evidence'; Old = 'if(@($shellBefore.Prompt).Count -ne 1 -or @($afterSwitch.Prompt).Count -ne 1) { throw'; New = 'if($false) { throw' }
+    @{ Name = 'r5 CodeRabbit: a prompt before the switch is enough'; Old = 'if(@($shellBefore.Prompt).Count -ne 1 -or @($afterSwitch.Prompt).Count -ne 1)'; New = 'if(@($shellBefore.Prompt).Count -ne 1)' }
+    @{ Name = 'r5 CodeRabbit: no clean stop needed'; Old = 'if($finished -and -not @($Session.Log | Where-Object { $_ -like ''STOP,*'' }).Count) {'; New = 'if($false) {' }
+    @{ Name = 'r5 CodeRabbit: the reader writes no STOP'; File = 'reader'; Old = 'if (GetFileAttributesW(argv[4]) != INVALID_FILE_ATTRIBUTES) fprintf(g_log, "STOP,%lld\n", now_ticks());'; New = '' }
+    @{ Name = 'r5 CodeRabbit: the reader writes STOP on every exit'; File = 'reader'; Old = 'if (GetFileAttributesW(argv[4]) != INVALID_FILE_ATTRIBUTES) fprintf(g_log, "STOP'; New = 'fprintf(g_log, "STOP' }
+    @{ Name = 'r5 CodeRabbit: a long LOCALAPPDATA reported unset'; File = 'reader'; Old = 'if (got >= 32768) return 3;'; New = 'if (got >= 32768) return 2;' }
+    @{ Name = 'r5: a failed LOCALAPPDATA read reported unset'; File = 'reader'; Old = 'if (got == 0) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 2 : 3;'; New = 'if (got == 0) return 2;' }
+    @{ Name = 'r5: an unknown LOCALAPPDATA published as unset'; Old = '''2'' { ''unset'' } default { ''unknown'' }'; New = 'default { ''unset'' }' }
+    @{ Name = 'r5: the ssh readers take a Run with shell syntax'; Old = '$Run -cnotmatch ''^[A-Za-z]:\\[A-Za-z0-9_.\\-]*$'''; New = '$Run -match ''\s''' }
+    @{ Name = 'r5: the ACL sabotage always on'; Old = 'if($Sabotage -eq ''acl'') {'; New = 'if($true) {' }
     @{ Name = 'round 4: a held key ends the cleanup'; Old = 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add((''{0}: {1}'' -f $name,$_.Exception.GetType().Name)) }'; New = 'Remove-Item -LiteralPath $path -Force' }
-    @{ Name = 'round 4: the kept-key hold never released'; Old = 'if($keyHold) { $keyHold.Dispose() }'; New = '' }
+    @{ Name = 'round 4: the kept-key hold never released'; PinOnly = $true; Old = 'if($keyHold) { $keyHold.Dispose() }'; New = '' }
     @{ Name = 'round 4: read sizes judged on an unfinished run'; Old = '$finished=@($Session.Steps | Where-Object { $_.Barrier -eq ''OK'' }).Count -eq $Session.Planned'; New = '$finished=$true' }
-    @{ Name = 'round 4: case 7''s pin markers removed'; Old = '    # pin-end: case-7' + "`n"; New = '' }
-    @{ Name = 'round 4: any command counted as a delimiter'; Old = 'Where-Object { $_ -like ''CMD,*,02,*'' }'; New = 'Where-Object { $_ -like ''CMD,*'' }' }
+    @{ Name = 'round 4: case 7''s pin markers removed'; PinOnly = $true; Old = '    # pin-end: case-7' + "`n"; New = '' }
+    @{ Name = 'round 4: any command counted as a delimiter'; PinOnly = $true; Old = 'Where-Object { $_ -like ''CMD,*,02,*'' }'; New = 'Where-Object { $_ -like ''CMD,*'' }' }
     @{ Name = 'Muse 4: the APC-on-b prediction'; Old = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''\''} }'; New = 'if(-not $vtInput) { $prediction=@{Text=''lone \'';Exact=''''} }' }
     @{ Name = 'Muse 5: case 4 without its space'; Old = 'Bytes="${esc}[>1;2;3;29;30;40;100;101 q"'; New = 'Bytes="${esc}[>1;2;3;29;30;40;100;101q"' }
     @{ Name = 'Muse 7: no case 2 step'; Old = '    @{ Name=''case 2: APC feature-shaped''; Keys=@(''f16'') }'; New = '' }
@@ -656,5 +712,9 @@ foreach ($mutation in $replyPathMutations) {
     foreach ($want in $expected) {
         if (-not @($found | Where-Object { $_.StartsWith($want, [StringComparison]::Ordinal) }).Count) { $replyPathMissed.Add("$($mutation.Name): refused, but not by '$want'") }
     }
+    # The content checks alone must refuse it too, unless only a pin can see it: so they are shown to work.
+    $content = if ($isReader) { @(Get-ReplyPathProblems -Harness $replyPathHarnessLf -Reader $mutated -StopAtFirst -SkipPins) } else { @(Get-ReplyPathProblems -Harness $mutated -Reader $replyPathReaderLf -StopAtFirst -SkipPins) }
+    if ($mutation.PinOnly -and $content.Count -gt 0) { $replyPathMissed.Add("$($mutation.Name): marked PinOnly, but a content check refuses it ('$($content[0])'); drop the mark") }
+    elseif (-not $mutation.PinOnly -and $content.Count -eq 0) { $replyPathMissed.Add("$($mutation.Name): only a pin refuses it; a content check must too, or mark it PinOnly") }
 }
 if ($replyPathMissed.Count -gt 0) { throw "The reply-path contract lets mutations through: $($replyPathMissed -join '; ')" }
