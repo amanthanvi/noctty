@@ -653,7 +653,10 @@ that govern each symbol you change, or that none does.
   `$saveRegionCmdlets`, the flow statements its finally blocks may hold,
   `$saveFinallyFlows`, and the toast-source inventory, who may
   name the command-finish leaf and the quiet-save grammar in
-  `Contracts.90-Workflows.ps1`), CI test steps (the raw
+  `Contracts.90-Workflows.ps1`), the soak
+  (`test/windows/interactive-win11-soak.ps1`, its judge `ci/soak_judge.py`
+  with `ci/test_soak_judge.py`, and the slope thresholds
+  `ci/soak-thresholds.tsv`), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
   `win32/sys.zig`'s imports to `src/apprt`), the Zig test runner and its
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,
