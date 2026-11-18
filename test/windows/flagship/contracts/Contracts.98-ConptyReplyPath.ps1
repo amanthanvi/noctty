@@ -13,17 +13,47 @@
 #     checks and the exit policy, driven by AST extraction on synthetic inputs;
 #   - how its result is wired: every exit statement in order, every assignment
 #     to a guard, exit or case-7 control variable;
-#   - as a closed set, by SHA-256: every block that decides or feeds an exit or
-#     a verdict. These are the regions between `# pin-begin:` and `# pin-end:`
-#     comments (the reader list, the whole outer phase, case 7, the driver's
-#     results), the functions in $replyPathPinnedFunctions, and the whole
-#     reader. An edit to any of them fails this contract until the pin here is
-#     updated, so the reviewer sees each one.
-# The contract then applies the council's mutations from rounds 1-3 (and its
-# own) to the harness and the reader, and each one must give a problem.
+#   - as a closed set, by SHA-256 with LF line ends: the whole harness and the
+#     whole reader ($replyPathHarnessPin, $replyPathReaderPin). An edit anywhere
+#     in either fails this contract until its pin here is updated in the same
+#     change, so the reviewer sees each one. The regions between
+#     `# pin-begin:` and `# pin-end:` comments (the reader list, the whole
+#     outer phase, case 7, the driver's results) and the functions in
+#     $replyPathFunctionPins are pinned again, so a failure also names the
+#     block that changed. Not pinned here: console-attach-info.c, which case 7
+#     reads the prompt with and four other harnesses share.
+# The contract then applies the council's mutations from rounds 1-4 (and its
+# own) to the harness and the reader. Each must give a problem, and, through
+# the pins, the whole-file pin's problem and that of every pinned region or
+# function the mutation changes.
 
 $replyPathScript = Join-Path $repoRoot 'test\windows\hidden-win11-conpty-reply-path.ps1'
 $replyPathReader = Join-Path $repoRoot 'test\windows\console-reply-reader.c'
+
+# The pins, by SHA-256 with LF line ends. A change to the harness or the reader must update its pin
+# here, on purpose, in the same change.
+$replyPathHarnessPin = '08D2DFFCB1B44E43AF63100DAFD3740ABE49F077CF2706B1610522FE1DA880EE'
+$replyPathReaderPin = '6C476A3E8670FE6E90D2A8DD426C0176DFF9BAED6976F53B62AF96F3DE11BC98'
+$replyPathRegionPins = [ordered]@{
+    'reader-list' = '6C6783C2701572894B46C791C4D5FB3F4356C26BEE171EC2ACE83C1E77DCE9EA'
+    'outer-run' = 'E5E01BC4CCD53D0F9D418813403384C0CF88352B429A08356189E40CD61CA671'
+    'case-7' = '47B9FE392B154C7B0C0380D8915C96465DCCA0F8034DA502BD705CEE4E8CA622'
+    'driver-results' = '8398372CF4B302FE3560D39C2C24C6F145ABDD90D2797D7BE83F7238D4CA0B24'
+}
+$replyPathFunctionPins = [ordered]@{
+    'Startup-Fingerprint' = '428312CE8A516CD82051CC64ABFB2400B5270440636283E0940EA1571272E84A'
+    'Aumid-Fingerprint' = '72A98C045416F788C4EAA9ACD2E4D3ECA1B0CC0D2A8DCCE0566E04F0FD757220'
+    'Get-PlannedSteps' = 'EB0D20B78CD38D490CB6E66580B296ED10C245158E586405BFDCD61CB56476F2'
+    'Read-Log' = '042B0B922955FFA1BE38F9B75823A925A7C4AAA22301A66DB4CFD3ABDB522631'
+    'Delimiters' = 'FB18706C2359BB0FBEE037A4D4605ABB1D080AE55EF492A56CC23802AA24C95C'
+    'Wait-Ready' = '21759327C7C7875427A99456403A0AC7C7DAF622C725C3EE1075638A61B72CF3'
+    'Invoke-ReaderSession' = '896111CDFF3D2367E4CC6DBC07EECFEB08C282EF00986BB0D2F36A96E6D52776'
+    'Get-ReaderStateProblems' = '142ACF57B19C5CAE625B2BF6760AECF007BFFD692DE251424F6931BFB167A0FD'
+    'Get-Segments' = '6185E4EC4F567726CE54703AC1F5F4CAFC9E3798EA73CD73B22688D6525240B7'
+    'Get-Prediction' = 'ADA5A9CACC21FB044994013F9006520E784514E2A9430B41893E872407726A3A'
+    'Get-Verdict' = '9C3EA7D71286F1EC81CA0A5CD08974F6E0E01B8DF2A2ABB0056F6C8F4F19DE93'
+    'Get-RunExit' = '8EDA51E33F1186A6403BD1359DD2AB071786BE6C8D298A99D5C943BF782C94A7'
+}
 
 function Get-ReplyPathProblems {
     param(
@@ -145,12 +175,7 @@ function Get-ReplyPathProblems {
     Need '        $case7=@{Steps=[Collections.Generic.List[object]]::new();Complete=$false;' 'case 7 no longer starts incomplete'
     # The closed set, by SHA-256 with LF line ends: every block that decides or feeds an exit or a
     # verdict. A change to any of them must update its pin here, on purpose.
-    $regionPins = [ordered]@{
-        'reader-list' = '6C6783C2701572894B46C791C4D5FB3F4356C26BEE171EC2ACE83C1E77DCE9EA'
-        'outer-run' = 'E5E01BC4CCD53D0F9D418813403384C0CF88352B429A08356189E40CD61CA671'
-        'case-7' = '47B9FE392B154C7B0C0380D8915C96465DCCA0F8034DA502BD705CEE4E8CA622'
-        'driver-results' = '8398372CF4B302FE3560D39C2C24C6F145ABDD90D2797D7BE83F7238D4CA0B24'
-    }
+    $regionPins = $replyPathRegionPins
     $regionsFound = @([regex]::Matches($Harness, '(?m)^[ \t]*# pin-begin: ([a-z0-9-]+)') | ForEach-Object { $_.Groups[1].Value })
     if (-not [string]::Equals(($regionsFound -join ','), (@($regionPins.Keys) -join ','), [StringComparison]::Ordinal)) {
         $problems.Add("the pinned regions are '$($regionsFound -join ',')' where '$(@($regionPins.Keys) -join ',')' are pinned")
@@ -164,20 +189,7 @@ function Get-ReplyPathProblems {
         }
         if ($hash -cne $regionPins[$name]) { $problems.Add("pinned region $name changed (SHA-256 $(if ($hash) { $hash } else { 'missing' })); review it and update its pin here") }
     }
-    $functionPins = [ordered]@{
-        'Startup-Fingerprint' = '428312CE8A516CD82051CC64ABFB2400B5270440636283E0940EA1571272E84A'
-        'Aumid-Fingerprint' = '72A98C045416F788C4EAA9ACD2E4D3ECA1B0CC0D2A8DCCE0566E04F0FD757220'
-        'Get-PlannedSteps' = 'EB0D20B78CD38D490CB6E66580B296ED10C245158E586405BFDCD61CB56476F2'
-        'Read-Log' = '042B0B922955FFA1BE38F9B75823A925A7C4AAA22301A66DB4CFD3ABDB522631'
-        'Delimiters' = 'FB18706C2359BB0FBEE037A4D4605ABB1D080AE55EF492A56CC23802AA24C95C'
-        'Wait-Ready' = '21759327C7C7875427A99456403A0AC7C7DAF622C725C3EE1075638A61B72CF3'
-        'Invoke-ReaderSession' = '896111CDFF3D2367E4CC6DBC07EECFEB08C282EF00986BB0D2F36A96E6D52776'
-        'Get-ReaderStateProblems' = '142ACF57B19C5CAE625B2BF6760AECF007BFFD692DE251424F6931BFB167A0FD'
-        'Get-Segments' = '6185E4EC4F567726CE54703AC1F5F4CAFC9E3798EA73CD73B22688D6525240B7'
-        'Get-Prediction' = 'ADA5A9CACC21FB044994013F9006520E784514E2A9430B41893E872407726A3A'
-        'Get-Verdict' = '9C3EA7D71286F1EC81CA0A5CD08974F6E0E01B8DF2A2ABB0056F6C8F4F19DE93'
-        'Get-RunExit' = '8EDA51E33F1186A6403BD1359DD2AB071786BE6C8D298A99D5C943BF782C94A7'
-    }
+    $functionPins = $replyPathFunctionPins
     foreach ($name in $functionPins.Keys) {
         $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))
         $hash = if ($definition.Count -eq 1) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($definition[0].Extent.Text))) } else { '' }
@@ -185,7 +197,10 @@ function Get-ReplyPathProblems {
     }
     # The reader, whole: every line of it decides what a reader records.
     $readerHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Reader)))
-    if ($readerHash -cne '6C476A3E8670FE6E90D2A8DD426C0176DFF9BAED6976F53B62AF96F3DE11BC98') { $problems.Add("the reader changed (SHA-256 $readerHash); review it and update its pin here") }
+    if ($readerHash -cne $replyPathReaderPin) { $problems.Add("the reader changed (SHA-256 $readerHash); review it and update its pin here") }
+    # The harness, whole: what closes the set. The region and function pins above name the block.
+    $harnessHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Harness)))
+    if ($harnessHash -cne $replyPathHarnessPin) { $problems.Add("the harness changed (SHA-256 $harnessHash); review it and update its pin here") }
 
     # Case 7: pwsh without a profile, history read back before anything is typed.
     Need '-e "{3}" -NoLogo -NoProfile -NoExit -Command "{4}"' 'case 7''s pwsh must start -NoLogo -NoProfile -NoExit'
@@ -462,8 +477,9 @@ if ($replyPathProblems.Count -gt 0) { throw "The ConPTY reply-path harness break
 
 # Every mutation the council ran (round 1: Sol's 3, Opus's 22, Muse's 8, the
 # duplicates kept once; round 2: Opus's 25, those it did not name rebuilt and
-# marked so; round 3: Opus's 7 named survivors and his reader-a read, Sol's
-# discarded result) and the contract's own: each must give a problem.
+# marked so; round 3: Opus's survivors and his reader-a read, Sol's discarded
+# result; round 4: Opus's probes and Sol's five, one shared) and the
+# contract's own. An entry has Old and New, or Edits for several.
 $replyPathMutations = @(
     @{ Name = 'Sol 1 / Opus 1: the reader session''s noctty on a null desktop'; Old = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)'; New = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,$null,$job,0x08000000)' }
     @{ Name = 'Sol 2: no job assignment before resume'; Old = 'if(!AssignProcessToJobObject(job,p.process)||ResumeThread(p.thread)==0xFFFFFFFF) {'; New = 'if(ResumeThread(p.thread)==0xFFFFFFFF) {' }
@@ -546,6 +562,27 @@ $replyPathMutations = @(
     @{ Name = 'Opus r3 P3: no row is built'; Old = 'for($i=0;$i -lt $session.Steps.Count;$i++) {'; New = 'for($i=0;$i -lt 0;$i++) {' }
     @{ Name = 'Opus r3 P23: case 7''s prompt record forced'; Old = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=$screen.Prompt;'; New = '$case7.Steps.Add(@{Name=$inject.Name;Written=(Show $bindings[$inject.Key].Bytes);Prompt=''PS> [?999;2n'';' }
     @{ Name = 'Opus r3 P28: the reader list cut to one'; Old = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })'; New = '$Readers = @($Readers | ForEach-Object { $_ -split '','' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 1)' }
+    @{ Name = 'Opus r4 Q4: the driver''s exit code read as 0'; Old = '[DllImport("kernel32.dll")] public static extern bool GetExitCodeProcess(IntPtr p,out uint code);'; New = 'public static bool GetExitCodeProcess(IntPtr p,out uint code) { code=0; return true; }' }
+    @{ Name = 'Opus r4 Q1: the exit forced after the results'; Old = '# pin-end: driver-results' + "`n"; New = '# pin-end: driver-results' + "`n" + '$exit.Code=0' + "`n" }
+    @{ Name = 'Opus r4 Q23: the results region never runs'; Edits = @(@{ Old = '# pin-begin: driver-results'; New = 'if($false) {' + "`n" + '# pin-begin: driver-results' }, @{ Old = '# pin-end: driver-results' + "`n"; New = '# pin-end: driver-results' + "`n" + '}' + "`n" }) }
+    @{ Name = 'Opus r4 Q24: Get-Verdict aliased to a stub'; Old = '# pin-begin: driver-results'; New = 'function Get-VerdictStub { ''as predicted'' }; Set-Alias Get-Verdict Get-VerdictStub' + "`n" + '# pin-begin: driver-results' }
+    @{ Name = 'Opus r4 Q12: Get-RunExit replaced at run time'; Old = 'try {' + "`n" + '    foreach($mode in $Readers) { Invoke-ReaderSession $mode }'; New = '${function:Get-RunExit}={ @{Code=0;Why=@()} }' + "`n" + 'try {' + "`n" + '    foreach($mode in $Readers) { Invoke-ReaderSession $mode }' }
+    @{ Name = 'Opus r4 Q22: case 7''s controls set by index'; Old = '# pin-begin: driver-results'; New = 'if($case7) { $case7[''Complete'']=$true; $case7[''InjectedReportShown'']=$true; $case7[''TabSwitched'']=$true }' + "`n" + '# pin-begin: driver-results' }
+    @{ Name = 'Opus r4 Q14: the failures cleared before the results'; Old = '# pin-begin: driver-results'; New = '$failures.Clear()' + "`n" + '# pin-begin: driver-results' }
+    @{ Name = 'Opus r4 Q2 (r3 P10): the driver''s infrastructure failure dropped'; Old = '    $failures.Add("infrastructure: $($_.Exception.Message) $($_.InvocationInfo.PositionMessage)")'; New = '    $null=1' }
+    @{ Name = 'Opus r4 Q3 (r3 P9): the driver''s cleanup failure dropped'; Old = 'catch { $failures.Add("owned job cleanup: $($_.Exception.Message)") }'; New = 'catch { }' }
+    @{ Name = 'Opus r4 Q3b: the driver''s cleanup failure filed elsewhere'; Old = '$failures.Add("owned job cleanup:'; New = '$sessions.Add("owned job cleanup:' }
+    @{ Name = 'Sol r4 4: the driver''s cleanup failure discarded'; Old = '$failures.Add("owned job cleanup: $($_.Exception.Message)")'; New = '$null = "owned job cleanup: $($_.Exception.Message)"' }
+    @{ Name = 'Opus r4 Q6: a stuck owned process passes'; Old = 'throw new Exception("Owned job cleanup exceeded five seconds");'; New = 'return 0;' }
+    @{ Name = 'Opus r4 Q6b / Sol r4 5: the cleanup always complete'; Old = 'if(a.activeProcesses==0) return a.totalProcesses;'; New = 'if(a.activeProcesses>=0) return a.totalProcesses;' }
+    @{ Name = 'Opus r4 Q5: the clipboard sequence a constant'; Old = '[DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();'; New = 'public static uint GetClipboardSequenceNumber() { return 1; }' }
+    @{ Name = 'Opus r4 Q7: every window on the private desktop'; Old = 'bool found=false;'; New = 'bool found=true;' }
+    @{ Name = 'Opus r4 Q8: the delimiter sabotage a real delimiter'; Old = 'if($Sabotage -eq ''delimiter'') { $bindings.f1.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''delimiter'') { $bindings.f1.Bytes="$([char]2)" }' }
+    @{ Name = 'Opus r4 Q9: the control sabotage a real DA1'; Old = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]4)" }' }
+    @{ Name = 'Opus r4 Q11: a case''s bytes changed after the table'; Old = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }'; New = 'if($Sabotage -eq ''control'') { $bindings.f4.Bytes="$([char]23)" }' + "`n" + '$bindings.f8.Bytes=''x''' }
+    @{ Name = 'Sol r4 1: CompileOnly on by default'; Old = '[switch] $CompileOnly,'; New = '[switch] $CompileOnly=$true,' }
+    @{ Name = 'Sol r4 2: SkipPSReadLine on by default'; Old = '[switch] $SkipPSReadLine,'; New = '[switch] $SkipPSReadLine=$true,' }
+    @{ Name = 'Sol r4 3: the escape byte a SUB'; Old = '$esc = [char]27'; New = '$esc = [char]26' }
     @{ Name = 'round 4: a held key ends the cleanup'; Old = 'try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add((''{0}: {1}'' -f $name,$_.Exception.GetType().Name)) }'; New = 'Remove-Item -LiteralPath $path -Force' }
     @{ Name = 'round 4: the kept-key hold never released'; Old = 'if($keyHold) { $keyHold.Dispose() }'; New = '' }
     @{ Name = 'round 4: read sizes judged on an unfinished run'; Old = '$finished=@($Session.Steps | Where-Object { $_.Barrier -eq ''OK'' }).Count -eq $Session.Planned'; New = '$finished=$true' }
@@ -572,13 +609,52 @@ $replyPathMutations = @(
     @{ Name = 'round 2: the in-box DA1 control dropped'; Old = 'if($inbox) { return @{Text=''the in-box conhost''''s own DA1'';Regex=''^\x1b\[\?61;[0-9;]+c$'';Control=$true} }'; New = 'if($inbox) { return @{Text=''the in-box conhost''''s own DA1'';Regex=''^\x1b\[\?61;[0-9;]+c$''} }' }
 )
 $replyPathMissed = [Collections.Generic.List[string]]::new()
+# Where each pinned region and function lies in the harness, so a mutation must also trip the pin of
+# every pinned block it changes.
+$replyPathHarnessLf = $replyPathHarnessText -replace "`r`n", "`n"
+$replyPathReaderLf = $replyPathReaderText -replace "`r`n", "`n"
+$replyPathSpans = [Collections.Generic.List[object]]::new()
+foreach ($begin in [regex]::Matches($replyPathHarnessLf, '(?m)^[ \t]*# pin-begin: ([a-z0-9-]+)[^\n]*\n')) {
+    $name = $begin.Groups[1].Value
+    $end = [regex]::Match($replyPathHarnessLf.Substring($begin.Index), "(?m)^[ \t]*# pin-end: $([regex]::Escape($name))[ \t]*(\n|$)")
+    $replyPathSpans.Add(@{ Problem = "pinned region $name changed"; Start = $begin.Index; End = $begin.Index + $end.Index + $end.Length })
+}
+$replyPathSpanTokens = $null; $replyPathSpanErrors = $null
+$replyPathSpanAst = [Management.Automation.Language.Parser]::ParseInput($replyPathHarnessLf, [ref]$replyPathSpanTokens, [ref]$replyPathSpanErrors)
+foreach ($name in $replyPathFunctionPins.Keys) {
+    $definition = @($replyPathSpanAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true))[0]
+    $replyPathSpans.Add(@{ Problem = "pinned function $name changed"; Start = $definition.Extent.StartOffset; End = $definition.Extent.EndOffset })
+}
 foreach ($mutation in $replyPathMutations) {
     $isReader = $mutation.File -eq 'reader'
-    $text = if ($isReader) { $replyPathReaderText } else { $replyPathHarnessText }
-    $at = $text.IndexOf($mutation.Old, [StringComparison]::Ordinal)
-    if ($at -lt 0 -or $text.IndexOf($mutation.Old, $at + 1, [StringComparison]::Ordinal) -ge 0) { $replyPathMissed.Add("$($mutation.Name): its text is not in the file exactly once"); continue }
-    $mutated = $text.Substring(0, $at) + $mutation.New + $text.Substring($at + $mutation.Old.Length)
-    $found = if ($isReader) { @(Get-ReplyPathProblems -Harness $replyPathHarnessText -Reader $mutated -StopAtFirst) } else { @(Get-ReplyPathProblems -Harness $mutated -Reader $replyPathReaderText -StopAtFirst) }
-    if ($found.Count -eq 0) { $replyPathMissed.Add("$($mutation.Name): not refused") }
+    $original = if ($isReader) { $replyPathReaderLf } else { $replyPathHarnessLf }
+    $edits = if ($mutation.Edits) { @($mutation.Edits) } else { @(@{ Old = $mutation.Old; New = $mutation.New }) }
+    $mutated = $original; $applies = $true
+    $expected = [Collections.Generic.List[string]]::new()
+    $expected.Add($(if ($isReader) { 'the reader changed' } else { 'the harness changed' }))
+    foreach ($edit in $edits) {
+        $old = $edit.Old -replace "`r`n", "`n"; $new = $edit.New -replace "`r`n", "`n"
+        $at = $original.IndexOf($old, [StringComparison]::Ordinal)
+        $here = $mutated.IndexOf($old, [StringComparison]::Ordinal)
+        if ($at -lt 0 -or $original.IndexOf($old, $at + 1, [StringComparison]::Ordinal) -ge 0 -or
+            $here -lt 0 -or $mutated.IndexOf($old, $here + 1, [StringComparison]::Ordinal) -ge 0) { $applies = $false; break }
+        $mutated = $mutated.Substring(0, $here) + $new + $mutated.Substring($here + $old.Length)
+        if (-not $isReader) {
+            # The changed span in the original text: what differs once the common prefix and suffix are set aside.
+            $prefix = 0; while ($prefix -lt $old.Length -and $prefix -lt $new.Length -and $old[$prefix] -ceq $new[$prefix]) { $prefix++ }
+            $suffix = 0; while ($suffix -lt ($old.Length - $prefix) -and $suffix -lt ($new.Length - $prefix) -and $old[$old.Length - 1 - $suffix] -ceq $new[$new.Length - 1 - $suffix]) { $suffix++ }
+            $from = $at + $prefix; $to = $at + $old.Length - $suffix
+            foreach ($span in $replyPathSpans) {
+                $inside = if ($from -eq $to) { $from -gt $span.Start -and $from -lt $span.End } else { $from -lt $span.End -and $to -gt $span.Start }
+                if ($inside -and -not $expected.Contains($span.Problem)) { $expected.Add($span.Problem) }
+            }
+        }
+    }
+    if (-not $applies) { $replyPathMissed.Add("$($mutation.Name): its text is not in the file exactly once"); continue }
+    $found = if ($isReader) { @(Get-ReplyPathProblems -Harness $replyPathHarnessLf -Reader $mutated -StopAtFirst) } else { @(Get-ReplyPathProblems -Harness $mutated -Reader $replyPathReaderLf -StopAtFirst) }
+    if ($found.Count -eq 0) { $replyPathMissed.Add("$($mutation.Name): not refused"); continue }
+    foreach ($want in $expected) {
+        if (-not @($found | Where-Object { $_.StartsWith($want, [StringComparison]::Ordinal) }).Count) { $replyPathMissed.Add("$($mutation.Name): refused, but not by '$want'") }
+    }
 }
 if ($replyPathMissed.Count -gt 0) { throw "The reply-path contract lets mutations through: $($replyPathMissed -join '; ')" }
