@@ -73,7 +73,8 @@ Results: Run\results.json and Run\results.md. Exit codes:
      without 16-record reads);
   2  infrastructure failure, in the driver or the outer phase;
   3  an isolation guard changed (startup ledger, history, AUMID key,
-     clipboard sequence number), or a link was left in the run directory.
+     clipboard sequence number), a link was left in the run directory, or
+     an ssh secret could not be deleted (kept, recorded, guards compared).
 -Sabotage is for the harness's own controls: it breaks one thing on purpose
 (the delimiter, the reader mid-run, or the DA1 control), and the run must
 then exit 1. -Sabotage setup fails the setup at the point where reader d's
@@ -83,10 +84,13 @@ cleanup, and the run must exit 3 with the guards compared and the failure
 recorded.
 
 Contracts.98-ConptyReplyPath.ps1 pins this script and the reader in two
-ways: checks and mutations for each safety property, and SHA-256 pins of
-every block that decides or feeds an exit or a verdict (the regions between
-`# pin-begin:` and `# pin-end:` comments, and the functions it names). An
-edit to a pinned block fails the contract until its pin is updated there.
+ways: checks and mutations for each safety property, and SHA-256 pins. This
+whole script and the whole reader are pinned, and so, again, are the regions
+between `# pin-begin:` and `# pin-end:` comments and the functions the
+contract names, so a failure also says which block changed. Any edit to this
+script or the reader fails the contract until its pin is updated in the same
+change. Not pinned: console-attach-info.c, which case 7 reads the prompt with
+and four other harnesses share.
 #>
 [CmdletBinding()]
 param(
