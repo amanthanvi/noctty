@@ -325,6 +325,122 @@ Assert-True ($trendCalls[0] -like '*event=schedule*' -and -not ($trendCalls -lik
 Assert-True ($trendCalls[0] -like '*per_page=100*') 'The run listing must cover the whole 90-day artifact retention window.'
 Assert-True ($null -eq (Get-PreviousTrendArtifact -Repository 'owner/repo' -CurrentRunId '300' -Api { param($Path) '{"workflow_runs":[],"artifacts":[]}' | ConvertFrom-Json })) 'With no earlier nightly there is no baseline.'
 
+# --- Ran list: capture parser and compare (PLAN.md §3.2) --------------------
+. (Join-Path $repoRoot 'scripts\capture-test-ran-list.ps1') -LibraryOnly
+. (Join-Path $repoRoot 'scripts\compare-test-ran-list.ps1') -LibraryOnly
+$ranLog = ConvertFrom-ZigRunnerLog -Lines @('1/4 a.test.one...OK', '2/4 a.test.two...[default] (warn): x', 'more', 'SKIP', '3/4 b.test_0...OK', '4/4 b.test.f...error: no', 'FAIL (TestUnexpectedResult)', '3 passed; 0 skipped; 1 failed.')
+Assert-True ($ranLog.Problems.Count -eq 2 -and $ranLog.Problems[0] -like 'Parsed 2 passed tests*') 'The ran-list parser checks the closing counts against the results it read.'
+$ranLog = ConvertFrom-ZigRunnerLog -Lines @('1/4 a.test.one...OK', '2/4 a.test.two...[default] (warn): x', 'more', 'SKIP', '3/4 b.test_0...OK', '4/4 b.test.f...error: no', 'FAIL (TestUnexpectedResult)', '2 passed; 1 skipped; 1 failed.')
+Assert-True ($ranLog.Problems.Count -eq 0 -and $ranLog.Tests.Count -eq 4 -and $ranLog.Tests[1].Result -ceq 'SKIP' -and $ranLog.Tests[3].Result -ceq 'FAIL') 'A logging test keeps its result for its own line, and FAIL stands alone after its message.'
+Assert-True ((ConvertFrom-ZigRunnerLog -Lines @('1/3 a.test.one...OK', '2/3 a.test.two...')).Problems -join ' ' -like '*did not finish*') 'A log that stops inside the run is refused, so a crash cannot shrink a list.'
+Assert-True ((ConvertFrom-ZigRunnerLog -Lines @('1/3 a.test.one...OK', 'All 1 tests passed.')).Problems -join ' ' -like '*inconsistent*') 'A closing line that does not cover the announced tests is refused.'
+Assert-True ((ConvertFrom-ZigRunnerLog -Lines @('All 0 tests passed.')).Problems -join ' ' -like '*no per-test lines*') 'A log without per-test lines (a build-runner log) is refused.'
+
+$ranTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ran-list-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $ranTemp | Out-Null
+function New-RanListFile {
+    param([string] $Name, [object[]] $Tests, [string] $Build = '-Demit-test-exe=true', [string] $SuiteName = 'ghostty-test')
+    $rows = @(Get-RanListRows -SuiteName $SuiteName -Tests @($Tests | ForEach-Object { [pscustomobject]@{ Name = $_[0]; Result = $_[1] } }))
+    $suite = [pscustomobject]@{ Name = $SuiteName; Tests = $Tests.Count; Ok = 0; Skip = 0; Fail = 0; Exit = 0 }
+    $path = Join-Path $ranTemp $Name
+    [System.IO.File]::WriteAllText($path, (Format-RanList -Rows $rows -Suites @($suite) -Revision 'r' -BuildOptions $Build), [System.Text.UTF8Encoding]::new($false))
+    return $path
+}
+function New-RanLedger {
+    param([string] $Name, [string[]] $Lines)
+    $path = Join-Path $ranTemp $Name
+    [System.IO.File]::WriteAllText($path, (($Lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+    return $path
+}
+function Get-RanVerdict {
+    param([string[]] $Baselines, [string] $Later, [string] $RemovalFile, [string] $SkipFile)
+    $ledgerProblems = [Collections.Generic.List[string]]::new()
+    $ranRemovals = Read-RanListLedger -Path $RemovalFile -Kind 'removals' -Problems $ledgerProblems
+    $skips = Read-RanListLedger -Path $SkipFile -Kind 'approved skips' -Problems $ledgerProblems
+    $v = Compare-RanList -BaselineLists @($Baselines | ForEach-Object { Read-RanList -Path $_ }) -CandidateList (Read-RanList -Path $Later) -RemovalEntries $ranRemovals -SkipEntries $skips
+    return [pscustomobject]@{ Problems = @($ledgerProblems) + @($v.Problems); Notes = $v.Notes }
+}
+try {
+    $base = New-RanListFile 'base.tsv' @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('B.test.upper', 'OK'))
+    $text = [System.IO.File]::ReadAllText($base)
+    Assert-True ($text -cmatch "(?s)ghostty-test`tOK`t1`tB\.test\.upper\n.*ghostty-test`tOK`t1`ta\.test\.one\n" -and $text.EndsWith("# end: rows=6 tests=6`n") -and -not $text.Contains("`r")) 'A list is sorted ordinally, LF-terminated and closed by its end line.'
+    $read = Read-RanList -Path $base
+    Assert-True ($read.Problems.Count -eq 0 -and $read.Rows.Count -eq 6 -and $read.Build -ceq '-Demit-test-exe=true') 'A written list reads back whole.'
+
+    $v = Get-RanVerdict -Baselines @($base) -Later $base
+    Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join "`n") -like '*CARRIED-SKIP ghostty-test a.test.font*') 'Control: the same list passes, and a test the baseline already skipped is carried.'
+
+    $dropped = New-RanListFile 'dropped.tsv' @(@('a.test.one', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('B.test.upper', 'OK'))
+    $v = Get-RanVerdict -Baselines @($base) -Later $dropped
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -ceq 'DROPPED ghostty-test a.test.two (ran 1 in the baseline, 0 now)') 'Control: a dropped test fails.'
+    $ranRemovals = New-RanLedger 'removals.tsv' @('# suite, name, the ledger entry', "ghostty-test`ta.test.two`tdropped-delta ledger D-1: the subject was not taken")
+    $v = Get-RanVerdict -Baselines @($base) -Later $dropped -RemovalFile $ranRemovals
+    Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join "`n") -like '*LEDGERED-REMOVAL ghostty-test a.test.two (1 of 1): dropped-delta ledger D-1*') 'Control: a ledgered removal passes.'
+    $noReason = New-RanLedger 'no-reason.tsv' @("ghostty-test`ta.test.two`t ")
+    Assert-True ((Get-RanVerdict -Baselines @($base) -Later $dropped -RemovalFile $noReason).Problems.Count -eq 2) 'A removal without a reason is no ledger entry.'
+
+    $turned = New-RanListFile 'turned.tsv' @(@('a.test.one', 'SKIP'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('B.test.upper', 'OK'))
+    $v = Get-RanVerdict -Baselines @($base) -Later $turned
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -ceq 'TURNED-SKIP ghostty-test a.test.one (OK in the baseline, SKIP now)') 'Control: a test turned SKIP fails unless approved.'
+    $skips = New-RanLedger 'skips.tsv' @("ghostty-test`ta.test.one`tglyph gating while glyph_protocol = false")
+    $v = Get-RanVerdict -Baselines @($base) -Later $turned -SkipFile $skips
+    Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join "`n") -like '*APPROVED-SKIP ghostty-test a.test.one: glyph gating*') 'An approved SKIP passes.'
+
+    $missing = Join-Path $ranTemp 'no-such-baseline.tsv'
+    $v = Get-RanVerdict -Baselines @($missing) -Later $base
+    Assert-True ($v.Problems.Count -ge 1 -and $v.Problems[0] -like "*no-such-baseline.tsv' does not exist.") 'Control: a missing baseline fails.'
+    Assert-True ((Compare-RanList -BaselineLists @() -CandidateList (Read-RanList -Path $base)).Problems[0] -like 'No baseline was given*') 'No baseline at all fails; it is never taken as empty.'
+    $empty = New-RanListFile 'empty.tsv' @()
+    Assert-True ((Get-RanVerdict -Baselines @($empty) -Later $base).Problems -join ' ' -like '*holds no tests*') 'An empty baseline fails.'
+    $cut = Join-Path $ranTemp 'cut.tsv'
+    [System.IO.File]::WriteAllText($cut, ($text -replace '# end: .*\n$', ''), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-RanVerdict -Baselines @($cut) -Later $base).Problems -join ' ' -like '*cut short*') 'A list cut short before its end line fails.'
+    $lost = Join-Path $ranTemp 'lost-row.tsv'
+    [System.IO.File]::WriteAllText($lost, ($text -replace "ghostty-test`tOK`t1`ta\.test\.two\n", ''), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-RanVerdict -Baselines @($lost) -Later $base).Problems -join ' ' -like '*does not match its end line*') 'A list that lost a row no longer matches its end line.'
+
+    $failing = New-RanListFile 'failing.tsv' @(@('a.test.one', 'FAIL'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('B.test.upper', 'OK'))
+    $v = Get-RanVerdict -Baselines @($base) -Later $failing
+    Assert-True (($v.Problems -join "`n") -like '*FAILED ghostty-test a.test.one (1)*' -and ($v.Problems -join "`n") -like '*DROPPED ghostty-test a.test.one*') 'A FAIL in the later list fails.'
+    Assert-True ((Get-RanVerdict -Baselines @($failing) -Later $base).Problems -join ' ' -like '*is not green*') 'A baseline with a FAIL row is refused.'
+
+    $renumbered = New-RanListFile 'renumbered.tsv' @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
+    Assert-True ((Get-RanVerdict -Baselines @($base) -Later $renumbered).Problems.Count -eq 0) 'Renumbered unnamed blocks pass (an added block above them).'
+    $lessUnnamed = New-RanListFile 'less-unnamed.tsv' @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_1', 'OK'), @('B.test.upper', 'OK'))
+    Assert-True (((Get-RanVerdict -Baselines @($base) -Later $lessUnnamed).Problems -join ' ') -ceq 'DROPPED ghostty-test b.test_# (ran 2 in the baseline, 1 now)') 'A dropped unnamed block fails by its file''s count.'
+
+    $otherBuild = New-RanListFile 'other-build.tsv' @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('B.test.upper', 'OK')) -Build '-Demit-test-exe=true -Dcustom-shaders=true'
+    Assert-True (((Get-RanVerdict -Baselines @($base) -Later $otherBuild).Problems -join ' ') -like 'Build options differ*') 'Lists built with different options are not compared.'
+
+    $phase = New-RanListFile 'phase.tsv' @(@('a.test.one', 'OK'), @('c.test.phase', 'OK'))
+    $v = Get-RanVerdict -Baselines @($base, $phase) -Later $base
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -like 'DROPPED ghostty-test c.test.phase*') 'Two baselines are united: a test only the second ran must run again.'
+    $twice = New-RanListFile 'twice.tsv' @(@('a.test.one', 'OK'), @('a.test.one', 'OK'))
+    Assert-True ((Get-RanListRows -SuiteName 's' -Tests @([pscustomobject]@{ Name = 'x'; Result = 'OK' }, [pscustomobject]@{ Name = 'x'; Result = 'OK' }))[0].Count -eq 2) 'A test that runs twice is one row of multiplicity 2.'
+    Assert-True (((Get-RanVerdict -Baselines @($twice) -Later $phase).Problems -join ' ') -like 'DROPPED ghostty-test a.test.one (ran 2 in the baseline, 1 now)*') 'A lower multiplicity is a drop.'
+    $vt = New-RanListFile 'vt.tsv' @(, @('a.test.one', 'OK')) -SuiteName 'ghostty-vt-test'
+    Assert-True (((Get-RanVerdict -Baselines @($vt) -Later $base).Problems -join ' ') -like 'DROPPED ghostty-vt-test a.test.one*') 'The suite is part of the identity: a test that ran in another executable does not count.'
+
+    # The four controls PLAN.md §3.2 names, through the script's own exit code.
+    $compareScript = Join-Path $repoRoot 'scripts\compare-test-ran-list.ps1'
+    $cliCases = @(
+        @{ Name = 'same list'; Args = @('-Baseline', $base, '-Candidate', $base); Exit = 0 }
+        @{ Name = 'dropped test'; Args = @('-Baseline', $base, '-Candidate', $dropped); Exit = 1 }
+        @{ Name = 'turned SKIP'; Args = @('-Baseline', $base, '-Candidate', $turned); Exit = 1 }
+        @{ Name = 'approved SKIP'; Args = @('-Baseline', $base, '-Candidate', $turned, '-ApprovedSkips', $skips); Exit = 0 }
+        @{ Name = 'ledgered removal'; Args = @('-Baseline', $base, '-Candidate', $dropped, '-Removals', $ranRemovals); Exit = 0 }
+        @{ Name = 'missing baseline'; Args = @('-Baseline', $missing, '-Candidate', $base); Exit = 1 }
+        @{ Name = 'no baseline'; Args = @('-Candidate', $base); Exit = 1 }
+    )
+    foreach ($case in $cliCases) {
+        $output = & pwsh -NoProfile -NonInteractive -File $compareScript @($case.Args) 2>&1
+        Assert-True ($LASTEXITCODE -eq $case.Exit) "Ran list compare, $($case.Name): expected exit $($case.Exit), got $LASTEXITCODE ($($output -join ' | '))."
+    }
+}
+finally {
+    Remove-Item -LiteralPath $ranTemp -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- Installer: what Setup asks Restart Manager to close --------------------
 # The native ARM64 build job compiles dist/windows/noctty.iss on a pull request
 # that touches it, with the runner image's Inno Setup (6.7.1 when measured; the
