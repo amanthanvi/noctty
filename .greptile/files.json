@@ -404,7 +404,8 @@
         "src/test_shard.zig",
         "ci/soak_judge.py",
         "ci/test_soak_judge.py",
-        "ci/soak-thresholds.tsv"
+        "ci/soak-thresholds.tsv",
+        "scripts/package-windows.ps1"
       ]
     },
     {

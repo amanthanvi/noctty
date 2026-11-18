@@ -995,7 +995,9 @@ use a private window station because desktops on WinSta0 share the clipboard.
 ## interactive-win11-soak.ps1
 
 The soak (`PLAN.md` §3.5): one portable copy on a private desktop for
-`-Minutes`, with its own job, `LOCALAPPDATA`, class and IPC pipe, started
+`-Minutes`, with its own job, `LOCALAPPDATA` and class (with
+`--single-instance=false` there is no IPC pipe at all: neither server nor
+client starts), started
 through `Get-InteractiveWin11LaunchArguments` after its build mode is checked
 through `+version`. Its shells are `direct:<System32>\cmd.exe /D` (no cmd
 AutoRun), the clipboard is denied, the copy carries no `noctty.ico`, and it
@@ -1024,12 +1026,21 @@ python -I ci/soak_judge.py <run dir> --min-minutes 480 --other-run <the other co
 `ci/soak_judge.py` fails a run by the process rules (a gone, changed or hung
 process, an early or non-zero end, a crash file, WER not suppressed, incomplete
 or duplicated records, a short plan, a class not of the helper's shape or
-shared with the other copy) and by the slope check: a least-squares slope per
-metric over the minutes after a 30-minute warm-up, against
-`ci/soak-thresholds.tsv`, and bounds on threads by count and by kind.
+shared with the other copy) and by the slope check: "no upward slope after
+warm-up", a metric failing when its least-squares slope over the minutes after
+the warm-up rises with confidence (its lower bound, slope minus 3 standard
+errors, above the metric's floor in `ci/soak-thresholds.tsv`), and bounds on
+threads by count and by kind. The warm-up is 60 minutes, measured: a clean
+copy's heap grows under the churn for about an hour and then holds flat, so
+the shortest run the judge accepts is 90 minutes (warm-up plus a 30-minute
+window); a shorter `--min-minutes` is refused.
 `-InjectHandleEachMinute` (one duplicated handle a minute) and
-`-KillAtMinute 5` (`TerminateProcess` with exit code 3) are its two controls;
-the judge must fail both. `ci/test_soak_judge.py` holds the judge's controls
+`-KillAtMinute 5` (`TerminateProcess` with exit code 3) are its first two
+controls; `-HangAtMinute N -HangAt resize|sample` (the copy's UI thread
+suspended for `-HangSeconds`, right after a resize or 10 s before a sample) are
+the other two. The judge must fail all four. A sample taken more than 5 s after
+its due time fails `LATE-SAMPLE`, and the driver never waits on the copy
+without a bound. `ci/test_soak_judge.py` holds the judge's controls
 and runs in the checks job; Contracts.98 pins the harness.
 
 ## Style
