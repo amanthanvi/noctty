@@ -89,7 +89,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     $clipboardTry=@((Function-Statements 'Invoke-ClipboardPositive') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
     Need ClipboardSupported (Direct $clipboardTry.Body.Statements "if(-not `$fact.Supported -or -not `$fact.IsolatedStation -or -not `$fact.SequenceAdvanced){throw 'Clipboard positive control failed'}")
     $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'New-DriverEnvironment'})
-    Need MinimalEnvironmentPolicy ($node.Count -eq 1 -and (Same $node[0].Body '{ $minimal=@{} foreach($name in @(''SystemRoot'',''WINDIR'',''COMSPEC'',''PATH'',''PATHEXT'',''GITHUB_ACTIONS'',''RUNNER_ENVIRONMENT'')){ if($Parent.Contains($name)){$minimal[$name]=[string]$Parent[$name]} } $minimal.LOCALAPPDATA=Join-Path $Root ''localappdata''; $minimal.APPDATA=Join-Path $Root ''appdata'' $minimal.TEMP=Join-Path $Root ''temp''; $minimal.TMP=$minimal.TEMP $minimal.USERPROFILE=Join-Path $Root ''profile'' return $minimal }'))
+    Need MinimalEnvironmentPolicy ($node.Count -eq 1 -and (Same $node[0].Body '{ $minimal=@{} foreach($name in @(''SystemRoot'',''WINDIR'',''COMSPEC'',''PATH'',''PATHEXT'',''GITHUB_ACTIONS'',''RUNNER_ENVIRONMENT'')){ foreach($key in $Parent.Keys){ if([string]::Equals([string]$key,$name,[StringComparison]::OrdinalIgnoreCase)){$minimal[$name]=[string]$Parent[$key];break} } } $minimal.LOCALAPPDATA=Join-Path $Root ''localappdata''; $minimal.APPDATA=Join-Path $Root ''appdata'' $minimal.TEMP=Join-Path $Root ''temp''; $minimal.TMP=$minimal.TEMP $minimal.USERPROFILE=Join-Path $Root ''profile'' return $minimal }'))
     $node=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'Invoke-MinimalDriverEnvironment'})
     Need MinimalEnvironmentScope ($node.Count -eq 1 -and (Same $node[0].Body '{ # CreateProcess inherits this explicit whitelist; restore only this controller. # Never log the saved environment or its values. $parent=[Environment]::GetEnvironmentVariables(''Process'') $minimal=New-DriverEnvironment $parent $Run try{ foreach($name in @($parent.Keys)){[Environment]::SetEnvironmentVariable($name,$null,''Process'')} foreach($name in $minimal.Keys){[Environment]::SetEnvironmentVariable($name,$minimal[$name],''Process'')} & $Start }finally{ foreach($name in @([Environment]::GetEnvironmentVariables(''Process'').Keys)){[Environment]::SetEnvironmentVariable($name,$null,''Process'')} foreach($name in $parent.Keys){[Environment]::SetEnvironmentVariable($name,[string]$parent[$name],''Process'')} } }'))
     Need PublisherVerification (Direct (Function-Statements 'Get-ReleaseCopy') '$publishers=@(foreach($name in @(''noctty.exe'',''noctty.com'')){ $binary=Join-Path $executables[0].DirectoryName $name $signature=Assert-ReleaseSignature -Path $binary -Label ''Published portable executable'' -AllowedPins @(Get-StubPublisherPins) -TrustSelfSigned $true @{File=$name;Sha256=Get-Sha $binary;SignerSpkiSha256=$signature.SpkiSha256;CryptographicallyVerified=$true} })')
@@ -253,6 +253,11 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         $minimal=New-DriverEnvironment @{PATH='fixture';GH_TOKEN='fixture-secret';GITHUB_TOKEN='fixture-secret';UNRELATED_SECRET='fixture-secret';GITHUB_ACTIONS='true'} $Root
         if($minimal.Contains('GH_TOKEN') -or $minimal.Contains('GITHUB_TOKEN') -or $minimal.Contains('UNRELATED_SECRET') -or $minimal.PATH -cne 'fixture' -or $minimal.LOCALAPPDATA -cne (Join-Path $Root 'localappdata')){$failures.Add('MinimalEnvironment')}
 
+        $caseSensitive=[Collections.Hashtable]::new([StringComparer]::Ordinal)
+        $caseSensitive.Add('Path','fixture-path'); $caseSensitive.Add('windir','fixture-windir'); $caseSensitive.Add('ComSpec','fixture-comspec')
+        $caseSensitive.Add('gh_token','fixture-secret')
+        $windowsNames=New-DriverEnvironment $caseSensitive $Root
+        if($windowsNames.PATH -cne 'fixture-path' -or $windowsNames.WINDIR -cne 'fixture-windir' -or $windowsNames.COMSPEC -cne 'fixture-comspec' -or $windowsNames.Contains('GH_TOKEN')){$failures.Add('WindowsEnvironmentNames')}
         Assert-NativeArchitecture x64 x64 x64
         Refuses Native {Assert-NativeArchitecture arm64 x64 x64}
         Refuses NewRun {Assert-NewRun $Root}
@@ -448,6 +453,7 @@ $baseline=Join-Path $fixtures 'baseline'; $null=New-Item -ItemType Directory -Pa
 $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
+    WindowsEnvironmentNames=@('OrdinalIgnoreCase)){$minimal[$name]', 'Ordinal)){$minimal[$name]')
     HiddenInventory=@('-File -Recurse -Force','-File -Recurse')
     MinimalEnvironment=@("'PATH','PATHEXT'","'PATH','GH_TOKEN','PATHEXT'")
     StubAlias=@('$result.FinalStub=Get-Stub $Path','$result.FinalStub=$result.TargetStub')

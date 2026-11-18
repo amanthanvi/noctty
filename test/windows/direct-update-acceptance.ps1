@@ -63,7 +63,9 @@ function Get-RunPath([string] $Path) {
 function New-DriverEnvironment($Parent,[string] $Root) {
     $minimal=@{}
     foreach($name in @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','GITHUB_ACTIONS','RUNNER_ENVIRONMENT')){
-        if($Parent.Contains($name)){$minimal[$name]=[string]$Parent[$name]}
+        foreach($key in $Parent.Keys){
+            if([string]::Equals([string]$key,$name,[StringComparison]::OrdinalIgnoreCase)){$minimal[$name]=[string]$Parent[$key];break}
+        }
     }
     $minimal.LOCALAPPDATA=Join-Path $Root 'localappdata'; $minimal.APPDATA=Join-Path $Root 'appdata'
     $minimal.TEMP=Join-Path $Root 'temp'; $minimal.TMP=$minimal.TEMP
@@ -517,7 +519,7 @@ try {
     # EnumDesktopWindows returns false/error 0 on a genuinely empty desktop.
     # This hidden driver-owned window gives the parent's oracle a positive control.
     $sentinel=[DirectUpdateUi]::CreateSentinel()
-    Save-Receipt 'driver-ready.json' @{ ProcessId=$PID; Desktop=$DesktopName; IsolatedProfile=$isolated; WorkflowCredentialsAbsent=$credentialsAbsent }
+    Save-Receipt 'driver-ready.json' @{ ProcessId=$PID; Desktop=$DesktopName; IsolatedProfile=$isolated; WorkflowCredentialsAbsent=$credentialsAbsent; SystemRootPresent=(-not [string]::IsNullOrEmpty($env:SystemRoot)); WindirPresent=(-not [string]::IsNullOrEmpty($env:WINDIR)); PathPresent=(-not [string]::IsNullOrEmpty($env:PATH)); ComSpecPresent=(-not [string]::IsNullOrEmpty($env:COMSPEC)) }
     $approvalDeadline=[datetime]::UtcNow.AddSeconds(30)
     while(-not (Test-Path -LiteralPath (Join-Path $Run 'driver-approved'))){if([datetime]::UtcNow -ge $approvalDeadline){throw 'Parent desktop approval timed out'}; Start-Sleep -Milliseconds 100}
     $inputs=Get-Content -LiteralPath (Join-Path $Run 'inputs.json') -Raw | ConvertFrom-Json
@@ -541,7 +543,16 @@ try {
     $line='"{0}" --window-save-state=never "--command=direct:{3} /D" --clipboard-write=deny --clipboard-read=deny --single-instance=false --class={1} --auto-update=download --auto-update-feed-url={2} --confirm-close-surface=false --keybind=f7=check_for_updates' -f $exe,$class,$feed,$shell
     $app=[HiddenWin]::Launch($exe,$line,$script:install,"WinSta0\$DesktopName",$script:caseJob,(Join-Path $Run 'app-raw.log'))
     $script:hostWindow=[IntPtr]::Zero
-    Wait-Check 'source window' { $windows=@([HiddenWin]::Hosts($app.pid)); if($windows.Count -eq 1){$script:hostWindow=$windows[0];return $true};return $false }
+    Wait-Check 'source window' {
+        $windows=@([HiddenWin]::Hosts($app.pid))
+        if($windows.Count -eq 1){$script:hostWindow=$windows[0];return $true}
+        if([HiddenWin]::WaitForSingleObject($app.process,0) -eq 0){
+            [uint32]$startupExit=259; $null=[HiddenWin]::GetExitCodeProcess($app.process,[ref]$startupExit)
+            $result.SourceStartupExit=$startupExit
+            throw 'Old application exited before a source window'
+        }
+        return $false
+    }
     Wait-Check 'source pane ready' { @([HiddenWin]::Surfaces($script:hostWindow)).Count -eq 1 } ([Math]::Min(60,$TimeoutSeconds))
     $panes=@([HiddenWin]::Surfaces($script:hostWindow))
     $legacyPainted=$FromVersion -ceq '1.3.125'
@@ -626,6 +637,11 @@ try {
     $result.ErrorType=$_.Exception.GetType().Name
     $result.ErrorStage=if($_.Exception.Message -cmatch '^(Timed out: |Observed |Wrong |Expected |Driver |Parent |Install did not |Old application |Final application |Rejected update |Update did not |Acceptance |Stub |Owned )'){$_.Exception.Message}else{'Driver operation failed; inspect retained local raw evidence'}
     $result.ErrorLine=$_.InvocationInfo.ScriptLineNumber
+    $rawStartup=Join-Path $Run 'app-raw.log'
+    if(Test-Path -LiteralPath $rawStartup){
+        $startupText=Get-Content -LiteralPath $rawStartup -Raw
+        $result.StartupErrorKinds=@{EnvironmentVariableNotFound=$startupText.Contains('EnvironmentVariableNotFound');FontFailure=($startupText -match '(?i)(font.*(?:fail|error)|(?:fail|error).*font)');RendererFailure=($startupText -match '(?i)(renderer.*(?:fail|error)|(?:fail|error).*renderer)')}
+    }
     if($app){
         try {
             $result.StartupWindows=@([DirectUpdateUi]::StartupFacts($app.pid) | ForEach-Object {
