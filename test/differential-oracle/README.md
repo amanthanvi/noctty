@@ -2,7 +2,7 @@
 
 This implements migration-plan sections 3.3 and 3.4. It captures the active
 terminal screen and retained history through `TerminalFormatter` after feeding
-the same frozen corpus into the app's `Terminal`, with its actual options and dependencies. It opens no window or
+the same frozen corpus into each side's `Terminal`: the fork's app profile and upstream's public lib-vt profile. It opens no window or
 PTY and uses no clipboard, shell integration, application configuration or user
 state.
 
@@ -57,13 +57,25 @@ or the original fixture's golden expectations.
 
 ## Capture each tree
 
-The root `oracle` step inherits the app module's generated Terminal options,
-imports, include paths, C macros and link dependencies. It does not use the
-public lib-vt defaults: Oniguruma, Kitty graphics and tmux control mode stay
-enabled as selected by that tree's own app build. Dependency failures stop that
-side; there is no reduced-feature fallback. The response records target, CPU
-model and features, optimization, and **all** generated Terminal options,
-including the version fields. Compare refuses any unequal profiles.
+For fork, stone and the eventual 1B app, the root `oracle` step inherits the
+app module's generated Terminal options, imports, include paths, C macros and
+link dependencies. Oniguruma, Kitty graphics and tmux control mode remain
+selected by that tree's own app build.
+
+The upstream side is **v1.4.0's public lib-vt module**, exactly as §3.4 names it.
+Staging `--api v140` connects the harness to that module and its own generated
+option module. Its measured Windows defaults disable Oniguruma and tmux, while
+**Kitty graphics remains enabled**; every other public feature default is also
+preserved. Do not substitute app options or disable features to make profiles
+match. The v1.4.0 app graph unconditionally includes POSIX `pwd.h` and cannot
+build on Windows; that blocker belongs to the **1B Windows app port**.
+
+Both paths record target, CPU model and named features, optimization, and all
+generated Terminal options, including artifact and version fields. Equivalent
+optimization levels use the same profile names across the API lines. Compare
+refuses undeclared profile differences; each actual difference must be named
+with a reason as described below. Dependency failures stop that side rather
+than selecting another profile.
 
 Select the Terminal API explicitly with `-Dvt-api=fork|stone|v140|v140_fork`.
 The choice never depends on compiler version or std-origin feature detection.
@@ -134,6 +146,36 @@ repository.
 python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 --report PAIR.json
 python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 UPSTREAM/run-1 --report TRIAGE.json
 ```
+
+An intentional profile difference requires `--declare-profile-differences
+DECLARATIONS.json`. The file is a JSON array; each row contains exactly `side`,
+`option` and a nonempty `reason`. `side` is `branch` or `upstream`, compared with
+`pre`; `option` is a dotted path in the recorded profile. For example:
+
+```json
+[
+  {
+    "side": "upstream",
+    "option": "terminal_options.oniguruma",
+    "reason": "v1.4.0 public lib-vt disables Oniguruma"
+  },
+  {
+    "side": "upstream",
+    "option": "terminal_options.tmux_control_mode",
+    "reason": "v1.4.0 public lib-vt derives tmux support from Oniguruma"
+  }
+]
+```
+
+The example covers only those two differences. A real declaration must name
+**every** measured difference, including artifact, version fields and options
+present on only one side. Kitty graphics is not a difference when enabled on
+both sides. Missing, extra, duplicate, unchanged or wrong-side option names and
+empty reasons are errors. The comparison report retains the complete profiles
+and every accepted declaration with the measured values and presence on each
+side. It still lists and requires triage for every dump difference; declaring a
+profile difference does not disposition behavior. Harness-change declarations
+remain separate and do not authorize profile changes.
 
 The pair report lists every differing `(input, cols, rows, format)`. Three-way
 comparison implements the plan's table exactly:

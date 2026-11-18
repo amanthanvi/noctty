@@ -19,6 +19,9 @@ def instrument_build(data, api):
     if api == "fork":
         anchor = "    // Standalone feasibility spike."
         addition = '    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe);\n\n'
+    elif api == "v140":
+        anchor = "    // All our steps which we'll hook up later."
+        addition = '    try @import("src/differential_oracle_build.zig").addPublic(b, mod.vt);\n\n'
     else:
         anchor = "    const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);\n"
         addition = (

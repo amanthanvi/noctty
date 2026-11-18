@@ -670,6 +670,7 @@ def compare(
     triage=None,
     declarations=(),
     expected_corpus=None,
+    profile_declarations=None,
 ):
     sets = [
         load_set(root, declarations)
@@ -683,8 +684,10 @@ def compare(
         raise ValueError("compared corpus/request identities differ")
     if expected_corpus and sets[0][0]["corpus_sha256"] != expected_corpus:
         raise ValueError("corpus differs from the operator pin")
-    if any(m["profile"] != sets[0][0]["profile"] for m, _ in sets[1:]):
-        raise ValueError("compared build profiles differ")
+    profiles = {
+        side: m["profile"] for side, (m, _) in zip(("pre", "branch", "upstream"), sets)
+    }
+    declared_profiles = validate_profile_declarations(profiles, profile_declarations)
     if (
         any(m["harness_sources"] != sets[0][0]["harness_sources"] for m, _ in sets[1:])
         and not declarations
@@ -740,11 +743,72 @@ def compare(
     if triaged:
         raise ValueError("triage names an absent or unchanged item")
     return {
+        "profiles": profiles,
+        "profile_declarations": declared_profiles,
         "counts": dict(sorted(counts.items())),
         "items": len(sets[0][1]),
         "differences": differences,
         "untriaged": sum(not r["triaged"] for r in differences),
     }
+
+
+def profile_options(profile, prefix=""):
+    result = {}
+    for key, value in profile.items():
+        if not isinstance(key, str) or not key or "." in key:
+            raise ValueError("invalid profile option name")
+        name = prefix + key
+        if isinstance(value, dict) and value:
+            result.update(profile_options(value, name + "."))
+        else:
+            result[name] = value
+    return result
+
+
+def validate_profile_declarations(profiles, declarations):
+    pre = profile_options(profiles["pre"])
+    differing = {}
+    for side, profile in profiles.items():
+        if side == "pre":
+            continue
+        options = profile_options(profile)
+        for name in sorted(pre.keys() | options.keys()):
+            before = {"present": name in pre}
+            after = {"present": name in options}
+            if name in pre:
+                before["value"] = pre[name]
+            if name in options:
+                after["value"] = options[name]
+            if before != after:
+                differing[(side, name)] = {
+                    "side": side,
+                    "option": name,
+                    "pre": before,
+                    "compared": after,
+                }
+    if declarations is None:
+        declarations = []
+    if not isinstance(declarations, list):
+        raise TypeError("profile declarations must be a list")
+    accepted = {}
+    for row in declarations:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"side", "option", "reason"}
+            or any(not isinstance(row[k], str) or not row[k].strip() for k in row)
+        ):
+            raise ValueError("invalid profile declaration")
+        key = row["side"], row["option"]
+        if key not in differing or key in accepted:
+            raise ValueError(
+                "profile declaration names an unchanged, absent or duplicate option"
+            )
+        accepted[key] = {**differing[key], "reason": row["reason"]}
+    if set(accepted) != set(differing):
+        raise ValueError(
+            "compared build profiles differ without a declaration for every differing option"
+        )
+    return [accepted[key] for key in sorted(accepted)]
 
 
 def controls(args):
@@ -852,7 +916,7 @@ def controls(args):
     def rejects(label, action):
         try:
             action()
-        except (ValueError, KeyError, FileNotFoundError):
+        except (ValueError, TypeError, KeyError, FileNotFoundError):
             checks.append(label)
         else:
             raise AssertionError(label + " accepted")
@@ -954,6 +1018,56 @@ def controls(args):
 
     change_manifests(lambda m: m["profile"].update(optimize="different"))
     rejects("different complete build profiles", lambda: compare(*roots))
+    declaration = [
+        {"side": "branch", "option": "optimize", "reason": "synthetic profile control"}
+    ]
+    declared = compare(*roots, profile_declarations=declaration)
+    assert declared["profile_declarations"] == [
+        {
+            "side": "branch",
+            "option": "optimize",
+            "reason": "synthetic profile control",
+            "pre": {"present": True, "value": "control"},
+            "compared": {"present": True, "value": "different"},
+        }
+    ]
+    assert declared["counts"] == result["counts"] and declared["untriaged"] == 16
+    checks.append(
+        "declared profile difference accepted and recorded without triaging dumps"
+    )
+    rejects(
+        "wrong profile option declaration",
+        lambda: compare(
+            *roots,
+            profile_declarations=[
+                dict(declaration[0], option="terminal_options.oniguruma")
+            ],
+        ),
+    )
+    rejects(
+        "empty profile reason",
+        lambda: compare(
+            *roots, profile_declarations=[dict(declaration[0], reason=" ")]
+        ),
+    )
+    rejects(
+        "duplicate profile declaration",
+        lambda: compare(*roots, profile_declarations=declaration * 2),
+    )
+    rejects(
+        "wrong profile side",
+        lambda: compare(
+            *roots, profile_declarations=[dict(declaration[0], side="upstream")]
+        ),
+    )
+    rejects(
+        "malformed profile declaration",
+        lambda: compare(*roots, profile_declarations={"option": "optimize"}),
+    )
+    rejects(
+        "unused profile declaration",
+        lambda: compare(roots[0], roots[0], profile_declarations=declaration),
+    )
     change_manifests(
         lambda m: m["harness_sources"].update({"src/control.zig": "2" * 64})
     )
@@ -1039,6 +1153,11 @@ def main():
     command.add_argument("--triage", type=Path)
     command.add_argument("--declare-harness-change", action="append", default=[])
     command.add_argument(
+        "--declare-profile-differences",
+        type=Path,
+        help="JSON array naming each differing side/option and a reason",
+    )
+    command.add_argument(
         "--expected-corpus", help="required corpus SHA-256 for a real gate"
     )
     command.add_argument("--report", type=Path, required=True)
@@ -1064,6 +1183,9 @@ def main():
                 read_json(args.triage) if args.triage else None,
                 args.declare_harness_change,
                 args.expected_corpus,
+                read_json(args.declare_profile_differences)
+                if args.declare_profile_differences
+                else None,
             )
             write_json(args.report, result)
             print(

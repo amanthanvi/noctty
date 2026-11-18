@@ -5,6 +5,12 @@ const api = @import("oracle_api").api;
 pub const Context = struct {};
 pub const alloc = std.heap.page_allocator;
 pub const conpty_no_pull_supported = api == .fork;
+pub const option_names = names: {
+    const decls = @typeInfo(vt.options).@"struct".decls;
+    var result: [decls.len][]const u8 = undefined;
+    for (decls, 0..) |decl, index| result[index] = decl.name;
+    break :names result;
+};
 
 pub fn Entry(comptime run: anytype) type {
     return struct {

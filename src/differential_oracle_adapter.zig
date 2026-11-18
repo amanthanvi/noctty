@@ -5,6 +5,7 @@ const api = @import("oracle_api").api;
 pub const Context = struct { io: std.Io };
 pub const alloc = std.heap.page_allocator;
 pub const conpty_no_pull_supported = true;
+pub const option_names = @typeInfo(vt.options).@"struct".decl_names;
 
 pub fn Entry(comptime run: anytype) type {
     return struct {

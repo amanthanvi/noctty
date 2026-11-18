@@ -47,11 +47,11 @@ fn run(ctx: adapter.Context) !void {
     try std.json.Stringify.value(adapter.conpty_no_pull_supported, .{}, &profile.writer);
     try profile.writer.writeAll(",\"terminal_options\":{");
     var comma = false;
-    inline for (@typeInfo(vt.options).@"struct".decls) |decl| {
-        const value = @field(vt.options, decl.name);
+    inline for (adapter.option_names) |name| {
+        const value = @field(vt.options, name);
         if (@TypeOf(value) != type) {
             if (comma) try profile.writer.writeByte(',');
-            try std.json.Stringify.value(decl.name, .{}, &profile.writer);
+            try std.json.Stringify.value(name, .{}, &profile.writer);
             try profile.writer.writeByte(':');
             try std.json.Stringify.value(value, .{}, &profile.writer);
             comma = true;
