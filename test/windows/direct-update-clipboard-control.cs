@@ -39,6 +39,14 @@ public static class DirectUpdateClipboardControl {
             throw new Exception("Private station identity check failed");
     }
     public static Fact Run() {
+        // PowerShell's calling thread can already own hidden windows, which
+        // makes SetThreadDesktop fail. The control owns a fresh windowless thread.
+        Fact result=null;
+        var thread=new System.Threading.Thread(() => { result=RunOnFreshThread(); });
+        thread.Start(); thread.Join();
+        return result;
+    }
+    static Fact RunOnFreshThread() {
         var fact=new Fact(); string stage="CreateWindowStationW";
         IntPtr oldStation=GetProcessWindowStation(), oldDesktop=GetThreadDesktop(GetCurrentThreadId());
         IntPtr station=IntPtr.Zero, desktop=IntPtr.Zero, window=IntPtr.Zero, memory=IntPtr.Zero;
@@ -75,8 +83,8 @@ public static class DirectUpdateClipboardControl {
             if(opened) { RequirePrivate(station); CloseClipboard(); }
             if(memory!=IntPtr.Zero) GlobalFree(memory);
             if(window!=IntPtr.Zero) DestroyWindow(window);
-            if(threadSwitched) SetThreadDesktop(oldDesktop);
             if(switched) SetProcessWindowStation(oldStation);
+            if(threadSwitched) SetThreadDesktop(oldDesktop);
             if(desktop!=IntPtr.Zero) CloseDesktop(desktop);
             if(station!=IntPtr.Zero) CloseWindowStation(station);
         }

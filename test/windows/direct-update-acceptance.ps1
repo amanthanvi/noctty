@@ -357,10 +357,15 @@ if (-not $Driver) {
             $clipboardAfter=[HiddenWin]::GetClipboardSequenceNumber()
             Assert-WindowsHarnessHistoryGuard -Guard $historyGuard
             $localStateUnchanged=$null
+            $realStartupChanged=$null
             $localStateFailure=$null
-            if(-not $ephemeral){try{$localStateUnchanged=Assert-LocalState $startupBefore (Startup-Fingerprint) $jumpsBefore @(Jump-List-Files)}catch{$localStateUnchanged=$false;$localStateFailure=$_}}
+            if(-not $ephemeral){
+                $startupAfter=Startup-Fingerprint
+                $realStartupChanged=$startupBefore.Exists -ne $startupAfter.Exists -or $startupBefore.Hash -ne $startupAfter.Hash -or $startupBefore.Modified -ne $startupAfter.Modified
+                try{$localStateUnchanged=Assert-LocalState $startupBefore $startupAfter $jumpsBefore @(Jump-List-Files)}catch{$localStateUnchanged=$false;$localStateFailure=$_}
+            }
             Save-Receipt 'private-windows.json' @($privateSamples.ToArray())
-            Save-Receipt 'isolation.json' @{ Desktop=$DesktopName; ExplicitDesktopOnHarnessLaunchesByConstruction=$true; OwnLocalAppData=$profileObserved; OwnAppData=$profileObserved; RealNocttyDirectoryAccessed=$(if($localStateUnchanged -eq $false){$true}else{$null}); RealNocttyAccessMeasurement='Startup/jump-list mutation fingerprints only; reads and unchanged writes unobserved'; LocalStateUnchanged=$localStateUnchanged; HistoryUnchanged=$true; ClipboardBefore=$clipboardBefore; ClipboardAfter=$clipboardAfter; ClipboardNativePositiveControl=($clipboardPositive.Supported -and $clipboardPositive.SequenceAdvanced); ClipboardControl=$clipboardPositive; DefaultWindowSamples=$defaultSamples; PrivateWindowSamples=$privateSamples.Count; OwnedJobCleanedUp=$cleanup; DriverExit=$exitCode }
+            Save-Receipt 'isolation.json' @{ Desktop=$DesktopName; ExplicitDesktopOnHarnessLaunchesByConstruction=$true; OwnLocalAppData=$profileObserved; OwnAppData=$profileObserved; RealNocttyDirectoryAccessed=$(if($realStartupChanged -eq $true){$true}else{$null}); RealNocttyAccessMeasurement='Startup mutation detected; reads and unchanged writes unobserved'; LocalStateUnchanged=$localStateUnchanged; HistoryUnchanged=$true; ClipboardBefore=$clipboardBefore; ClipboardAfter=$clipboardAfter; ClipboardNativePositiveControl=($clipboardPositive.Supported -and $clipboardPositive.SequenceAdvanced); ClipboardControl=$clipboardPositive; DefaultWindowSamples=$defaultSamples; PrivateWindowSamples=$privateSamples.Count; OwnedJobCleanedUp=$cleanup; DriverExit=$exitCode }
             Assert-ClipboardSequence $clipboardBefore $clipboardAfter
             if($localStateFailure){throw $localStateFailure}
         }
@@ -485,6 +490,7 @@ try {
     if(-not [HiddenWin]::GetExitCodeProcess($finalHandle,[ref]$finalCode) -or $finalCode -ne 0){throw 'Final application exited unsuccessfully'}
     $result.FinalAppExit=$finalCode
     Wait-Check 'normal final application shutdown' { @([HiddenWin]::JobProcessIds($script:caseJob)).Count -eq 0 } 40
+    if($Expected -ceq 'Rejected'){Assert-RejectedCopy $sourceSnapshot $script:install (Get-UpdateState $script:install)}
     $result.NoRollbackObserved=$true; $result.Passed=$true
 } catch {
     # Fixed stage names above and error types only; never export arbitrary native errors/logs.
