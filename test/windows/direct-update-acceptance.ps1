@@ -276,7 +276,7 @@ function Get-Version([string] $Exe,[string] $Name) {
 }
 function Get-Stub([string] $Path) {
     Assert-GhosttyVtStub -Path $Path
-    $pins=@(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PSScriptRoot '..\..\src\update\github_releases.zig'))
+    $pins=@(Get-StubPublisherPins)
     # The published releases use the updater's pinned self-signed publisher.
     # Verify PKCS#7 + file hash and the pin without importing a trust root.
     $signature=Assert-ReleaseSignature -Path $Path -Label 'Portable stub' -AllowedPins $pins -TrustSelfSigned $true
@@ -284,6 +284,7 @@ function Get-Stub([string] $Path) {
     if ($errorCode -ne 1114) { throw 'Stub did not refuse loading with ERROR_DLL_INIT_FAILED' }
     return @{ Sha256=Get-Sha $Path; Bytes=(Get-Item -LiteralPath $Path).Length; Description=[Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileDescription; Signature=$signature.Status; SignatureCryptographicallyVerified=$true; SignerThumbprint=$signature.Thumbprint; SignerSpkiSha256=$signature.SpkiSha256; ExportDirectory=@(Get-PeDataDirectories $Path)[0]; ImportDirectory=@(Get-PeDataDirectories $Path)[1]; LoadError=$errorCode }
 }
+function Get-StubPublisherPins { @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PSScriptRoot '..\..\src\update\github_releases.zig')) }
 
 $native=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 $processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()

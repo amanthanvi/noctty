@@ -71,6 +71,7 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         function Get-StubLoadError($Path){$script:fakeLoadError}
         function Assert-GhosttyVtStub($Path){}
         function Get-UpdaterPublisherSpkiPins($SourcePath){'fixture-pin'}
+        function Get-StubPublisherPins {'fixture-pin'}
         function Assert-ReleaseSignature($Path,$Label,$AllowedPins,$TrustSelfSigned){@{Status='fixture';Thumbprint='fixture';SpkiSha256='fixture'}}
         function Get-PeDataDirectories($Path){@(@{Rva=0;Size=0},@{Rva=0;Size=0})}
         Assert-NativeArchitecture x64 x64 x64
