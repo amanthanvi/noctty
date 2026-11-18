@@ -125,14 +125,14 @@ function Get-Stub([string] $Path) {
     return @{ Sha256=Get-Sha $Path; Bytes=(Get-Item -LiteralPath $Path).Length; Description=[Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileDescription; Signature=$signature.Status; SignatureCryptographicallyVerified=$true; SignerThumbprint=$signature.Thumbprint; SignerSpkiSha256=$signature.SpkiSha256; ExportDirectory=@(Get-PeDataDirectories $Path)[0]; ImportDirectory=@(Get-PeDataDirectories $Path)[1]; LoadError=$errorCode }
 }
 
+$native=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+$processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
+if ($native -cne $Architecture -or $processArchitecture -cne $Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }
+$ephemeral=$env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
+if ([version]$FromVersion -lt [version]'1.3.136' -and -not $ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }
 if (-not $Driver) {
     $Run=[IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new' }
-    $native=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-    $processArchitecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
-    if ($native -cne $Architecture -or $processArchitecture -cne $Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }
-    $ephemeral=$env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
-    if ([version]$FromVersion -lt [version]'1.3.136' -and -not $ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }
     if (-not $ephemeral) {
         $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes\AppUserModelId\io.github.amanthanvi.noctty',$false)
         if ($null -eq $key) { throw 'Product AUMID registration is absent; refusing a portable registration write' }
@@ -196,6 +196,7 @@ $script:states=[Collections.Generic.List[object]]::new()
 $script:caseJob=[HiddenWin]::CreateOwnedJob()
 $script:install=$null
 $app=$null; $relaunch=$null
+$finalProcess=$null
 $sentinel=[IntPtr]::Zero
 $result=@{ Passed=$false; FromVersion=$FromVersion; TargetVersion=$TargetVersion; Architecture=$Architecture; Expected=$Expected; Steps=[Collections.Generic.List[string]]::new() }
 try {
@@ -271,8 +272,15 @@ try {
     $windows=@([HiddenWin]::PrivateJobWindows($script:caseJob,$DesktopName) | Where-Object ClassName -CEQ 'noctty.win32.host')
     if($windows.Count -ne 1){throw 'Final application is not running on the private desktop'}
     $result.FinalWindowProcessId=$windows[0].ProcessId
+    if(@([HiddenWin]::JobProcessIds($script:caseJob)) -notcontains $windows[0].ProcessId){throw 'Final application is not in the owned job'}
+    $finalProcess=[Diagnostics.Process]::GetProcessById($windows[0].ProcessId)
+    $null=$finalProcess.Handle
+    if($finalProcess.MainModule.FileName -ine $exe){throw 'Final application identity does not match the portable copy'}
     $hosts=@([HiddenWin]::Hosts($windows[0].ProcessId))
     foreach($hwnd in $hosts){$null=[HiddenWin]::PostMessageW($hwnd,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)}
+    if(-not $finalProcess.WaitForExit(40000)){throw 'Final application did not shut down normally'}
+    $result.FinalAppExit=$finalProcess.ExitCode
+    if($finalProcess.ExitCode -ne 0){throw 'Final application exited unsuccessfully'}
     Wait-Check 'normal final application shutdown' { @([HiddenWin]::JobProcessIds($script:caseJob)).Count -eq 0 } 40
     $result.NoRollbackObserved=$true; $result.Passed=$true
 } catch {
@@ -281,16 +289,19 @@ try {
     $result.ErrorStage=if($_.Exception.Message -cmatch '^(Timed out: |Observed |Wrong |Expected |Driver |Parent |Install did not |Old application |Final application |Rejected update |Update did not |Acceptance |Stub |Owned )'){$_.Exception.Message}else{'Driver operation failed; inspect retained local raw evidence'}
     $result.ErrorLine=$_.InvocationInfo.ScriptLineNumber
     if($app){
-        $result.StartupWindows=@([DirectUpdateUi]::StartupFacts($app.pid) | ForEach-Object {
-            @{ ClassName=$_.ClassName; ControlId=$_.ControlId; Visible=$_.Visible;
-                GraphicsDialogText=($_.GraphicsDialogText -replace '[A-Za-z]:[\\/][^\s,;]+','[path]') }
-        })
+        try {
+            $result.StartupWindows=@([DirectUpdateUi]::StartupFacts($app.pid) | ForEach-Object {
+                @{ ClassName=$_.ClassName; ControlId=$_.ControlId; Visible=$_.Visible;
+                    GraphicsDialogText=($_.GraphicsDialogText -replace '(?<![A-Za-z])[A-Za-z]:[\\/][^\s,;]+','[path]') }
+            })
+        } catch { $result.StartupDiagnosticErrorType=$_.Exception.GetType().Name }
     }
 } finally {
     Save-Receipt 'state-timeline.json' @($script:states.ToArray())
     $cleaned=$false
     try{$null=[HiddenWin]::StopOwnedJob($script:caseJob);$cleaned=$true}finally{
         Close-Launch $app; Close-Launch $relaunch; $result.OwnedJobCleanedUp=$cleaned
+        if($finalProcess){$finalProcess.Dispose()}
         $lines=[Collections.Generic.List[string]]::new()
         foreach($file in @('app-raw.log','relaunch-raw.log')){
             $path=Join-Path $Run $file

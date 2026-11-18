@@ -869,7 +869,7 @@ and offers Open Release. `-Expected Removed`, from the previous stub-bearing
 page and checking its manual instructions is a separate browser check. Neither
 future boundary is established by the 1.3.137 acceptance run.
 
-Run `direct-update-contract.ps1` for the admission baseline and its twelve
+Run `direct-update-contract.ps1` for the admission baseline and its thirteen
 parse-checked refusal controls; the flagship contracts include it. Public
 artifacts should contain only the named JSON receipts, never the raw child logs,
 copied profiles or binaries. The hosted workflow used to gather W10 evidence is

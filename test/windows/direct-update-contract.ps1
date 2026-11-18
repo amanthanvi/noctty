@@ -26,6 +26,7 @@ function Get-DirectUpdateProblems([string] $Text) {
         Rollback="\`$state.Phase -ceq 'rollback'\) \{ throw"
         CryptographicSignature='Assert-ReleaseSignature -Path \$Path -Label .Portable stub. -AllowedPins \$pins -TrustSelfSigned \$true'
         StubLoad='if \(\$errorCode -ne 1114\) \{ throw'
+        FinalExit='if\(\$finalProcess\.ExitCode -ne 0\)\{throw'
     }
     $problems=[Collections.Generic.List[string]]::new()
     foreach($entry in $requirements.GetEnumerator()){if($code -cnotmatch $entry.Value){$problems.Add($entry.Key)}}
@@ -48,6 +49,7 @@ $controls=[ordered]@{
     Rollback=@("`$state.Phase -ceq 'rollback') { throw","`$state.Phase -ceq 'ignored') { throw")
     CryptographicSignature=@('Assert-ReleaseSignature -Path $Path -Label ''Portable stub'' -AllowedPins $pins -TrustSelfSigned $true','Get-AuthenticodeSignature -LiteralPath $Path')
     StubLoad=@('if ($errorCode -ne 1114) { throw','if ($false) { throw')
+    FinalExit=@('if($finalProcess.ExitCode -ne 0){throw','if($false){throw')
 }
 foreach($control in $controls.GetEnumerator()){
     $anchor=$control.Value[0]
