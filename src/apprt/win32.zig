@@ -7179,6 +7179,33 @@ test "win32 a Settings save does not replace the config problems banner with its
     try host.setBanner(.none, null);
 }
 
+test "win32 a Settings save toasts unless config-reload notifications are off and its banner showed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+
+    // By default a save shows its banner and a toast from noctty itself,
+    // which has no tag, so noctty never takes it down. The interactive
+    // accessibility harness saves twice, and so launches both of its saving
+    // processes with `--app-notifications=no-config-reload`
+    // (EVIDENCE-TOAST-FOREGROUND).
+    settingsNotifySuccessThunk(&w.app, "Settings saved", "");
+    try std.testing.expectEqual(HostBannerKind.info, w.host.banner_kind);
+    try std.testing.expectEqual(@as(usize, 1), w.recorder.shown);
+    try w.recorder.expect(.title, "Settings saved");
+    try std.testing.expect(w.recorder.tag == null);
+    try w.host.setBanner(.none, null);
+
+    // With config-reload notifications off, the banner alone.
+    w.app.config.@"app-notifications".@"config-reload" = false;
+    settingsNotifySuccessThunk(&w.app, "Settings saved", "");
+    try std.testing.expectEqual(HostBannerKind.info, w.host.banner_kind);
+    try std.testing.expect(std.mem.startsWith(u8, w.host.banner_text.?, "Settings saved"));
+    try std.testing.expectEqual(@as(usize, 1), w.recorder.shown);
+    try w.host.setBanner(.none, null);
+}
+
 test "win32 settings disk edit is a conflict only for an edited setting the file now says differently" {
     const alloc = std.testing.allocator;
     const light: configpkg.ConditionalState = .{};

@@ -7037,12 +7037,21 @@ try {
         [byte[]]@()
     }
     $settingsConfigBaselineCaptured = $true
+    # Both processes below save Settings. A save raises a real toast, "Settings
+    # saved", through the product notifier unless `config-reload` notifications
+    # are off and its in-window banner showed (`settingsNotifySuccessThunk`), and
+    # noctty never takes down an untagged `.app` toast: it would stay on the
+    # visible desktop over this leaf and the ones after it
+    # (EVIDENCE-TOAST-FOREGROUND; settings.md PROFILES-4 trap 7). So both run with
+    # notifications off, and a save shows only its banner.
+    $settingsSaveNotificationArguments = @('--app-notifications=no-config-reload', '--desktop-notifications=false')
     $saveProbeClass = "noctty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
     $saveProbeArguments = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
         "--class=$saveProbeClass"
         '--command=cmd.exe'
+        $settingsSaveNotificationArguments
     )
     $saveProbeProcess = Start-AccessibilityProcessWithEnvironment `
         -FilePath $exe `
@@ -7119,6 +7128,7 @@ try {
         '--single-instance=false'
         "--class=$saveVerifyClass"
         '--command=cmd.exe'
+        $settingsSaveNotificationArguments
     )
     $saveVerifyProcess = Start-AccessibilityProcessWithEnvironment `
         -FilePath $exe `
