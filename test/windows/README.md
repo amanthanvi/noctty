@@ -854,8 +854,10 @@ real history before this script starts; the metadata guard cannot prevent that.
 ```
 
 The run directory must not exist. Every harness launch names a private desktop;
-the driver inherits a small explicit environment whitelist with separate profile,
-LOCALAPPDATA, APPDATA and temporary directories, excluding workflow credentials.
+the driver inherits an explicit whitelist of standard Windows runtime/profile
+variables with separate LOCALAPPDATA, APPDATA and temporary directories, excluding
+workflow credentials and other caller-defined variables. Standard Windows profile
+identity is retained; this is application-state isolation, not a separate OS account.
 The controller must observe Default. Downloads check both system and run-volume
 space, use bounded GitHub CLI calls, and verify the publisher of both noctty.exe
 and its console shim before either runs. Receipts publish by a sibling-file rename

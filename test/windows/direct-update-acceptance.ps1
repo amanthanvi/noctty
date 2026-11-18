@@ -62,14 +62,13 @@ function Get-RunPath([string] $Path) {
 }
 function New-DriverEnvironment($Parent,[string] $Root) {
     $minimal=@{}
-    foreach($name in @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','GITHUB_ACTIONS','RUNNER_ENVIRONMENT')){
+    foreach($name in @('SystemRoot','WINDIR','COMSPEC','PATH','PATHEXT','OS','SystemDrive','ProgramData','ProgramFiles','ProgramFiles(x86)','ProgramW6432','CommonProgramFiles','CommonProgramFiles(x86)','CommonProgramW6432','PROCESSOR_ARCHITECTURE','PROCESSOR_ARCHITEW6432','PROCESSOR_IDENTIFIER','PROCESSOR_LEVEL','PROCESSOR_REVISION','NUMBER_OF_PROCESSORS','COMPUTERNAME','USERNAME','USERDOMAIN','USERDNSDOMAIN','SESSIONNAME','USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','GITHUB_ACTIONS','RUNNER_ENVIRONMENT')){
         foreach($key in $Parent.Keys){
             if([string]::Equals([string]$key,$name,[StringComparison]::OrdinalIgnoreCase)){$minimal[$name]=[string]$Parent[$key];break}
         }
     }
     $minimal.LOCALAPPDATA=Join-Path $Root 'localappdata'; $minimal.APPDATA=Join-Path $Root 'appdata'
     $minimal.TEMP=Join-Path $Root 'temp'; $minimal.TMP=$minimal.TEMP
-    $minimal.USERPROFILE=Join-Path $Root 'profile'
     return $minimal
 }
 function Invoke-MinimalDriverEnvironment([scriptblock] $Start) {
@@ -430,7 +429,7 @@ if (-not $Driver) {
     $commit=git -C $PSScriptRoot rev-parse HEAD
     if($LASTEXITCODE -ne 0 -or $commit -cnotmatch '^[0-9a-f]{40}$'){throw 'Harness commit provenance unavailable'}
     Save-Receipt 'inputs.json' @{ SourceRelative=[IO.Path]::GetRelativePath($Run,$source); TargetRelative=[IO.Path]::GetRelativePath($Run,$target); NativeArchitecture=$native; EphemeralRunner=$ephemeral; HarnessCommit=$commit; HarnessSha256=Get-Sha $PSCommandPath; UiSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-ui.cs'); ContractSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-contract.ps1'); ClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-clipboard-control.cs'); HostedClipboardControlSha256=Get-Sha (Join-Path $PSScriptRoot 'direct-update-hosted-clipboard-control.cs') }
-    foreach ($directory in @('localappdata','appdata','temp','profile')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
+    foreach ($directory in @('localappdata','appdata','temp')) { $null=New-Item -ItemType Directory -Path (Join-Path $Run $directory) }
     $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'
     $clipboardBefore=[HiddenWin]::GetClipboardSequenceNumber()
     $DesktopName='noctty-hw-'+[guid]::NewGuid().ToString('N')
@@ -641,6 +640,8 @@ try {
     if(Test-Path -LiteralPath $rawStartup){
         $startupText=[string](Get-Content -LiteralPath $rawStartup -Raw)
         $result.StartupErrorKinds=@{EnvironmentVariableNotFound=$startupText.Contains('EnvironmentVariableNotFound');FontFailure=($startupText -match '(?i)(font.*(?:fail|error)|(?:fail|error).*font)');RendererFailure=($startupText -match '(?i)(renderer.*(?:fail|error)|(?:fail|error).*renderer)')}
+        $result.StartupErrorTags=@('AccessDenied','FileNotFound','PathNotFound','OutOfMemory','SystemResources','FontNotFound','NoFonts','Unexpected','SystemError','EnvironmentVariableNotFound' | Where-Object {$startupText.Contains('error.'+$_)})
+        $result.StartupPanicked=$startupText.Contains('panic:') -or $startupText.Contains('reached unreachable code')
     }
     if($app){
         try {
