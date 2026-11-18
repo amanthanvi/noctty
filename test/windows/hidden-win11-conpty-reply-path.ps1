@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 7.1
 <#
 The ConPTY reply path (the kitty report's shortlist #0): which terminal replies
 reach a console program through the bundled ConPTY's input, and in what shape,
@@ -76,8 +76,17 @@ Results: Run\results.json and Run\results.md. Exit codes:
      clipboard sequence number), or a link was left in the run directory.
 -Sabotage is for the harness's own controls: it breaks one thing on purpose
 (the delimiter, the reader mid-run, or the DA1 control), and the run must
-then exit 1; -Sabotage setup fails the setup once reader d's ssh keys exist,
-and the run must exit 2 with the keys deleted.
+then exit 1. -Sabotage setup fails the setup at the point where reader d's
+ssh keys already exist (when d is requested), and the run must exit 2 with
+any keys deleted. -Sabotage key holds an ssh secret's file open through the
+cleanup, and the run must exit 3 with the guards compared and the failure
+recorded.
+
+Contracts.98-ConptyReplyPath.ps1 pins this script and the reader in two
+ways: checks and mutations for each safety property, and SHA-256 pins of
+every block that decides or feeds an exit or a verdict (the regions between
+`# pin-begin:` and `# pin-end:` comments, and the functions it names). An
+edit to a pinned block fails the contract until its pin is updated there.
 #>
 [CmdletBinding()]
 param(
@@ -88,7 +97,7 @@ param(
     [string[]] $Readers = @('a','a16','b','c'),
     [switch] $AllowSshFarSideUserProfileAndLocalAppData,
     [switch] $SkipPSReadLine,
-    [ValidateSet('none','delimiter','reader','control','setup')] [string] $Sabotage = 'none',
+    [ValidateSet('none','delimiter','reader','control','setup','key')] [string] $Sabotage = 'none',
     [ValidateRange(60,1800)] [int] $DriverTimeoutSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
@@ -102,6 +111,7 @@ trap {
 # Every cmd.exe the harness starts itself is System32's, with /D, so the user's AutoRun stays out of the
 # run (the helper compile's dev-windows.cmd is the exception; see the header).
 $cmdExe = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+# pin-begin: reader-list (Contracts.98 pins this block by hash; it decides which readers run and are required)
 # pwsh -File passes a list as one string; accept "a,b" and @('a','b') alike.
 $readerStates = @('a','a16','b','c','c-inbox','d','d-notiming')
 $Readers = @($Readers | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -111,6 +121,7 @@ $sshReaders = @($Readers | Where-Object { $_ -in @('d','d-notiming') })
 if($sshReaders.Count -gt 0 -and -not $AllowSshFarSideUserProfileAndLocalAppData) {
     throw 'Readers d and d-notiming run the far side through sshd''s DefaultShell (HKLM\SOFTWARE\OpenSSH) as this user, which loads the user''s own PowerShell profile and uses the real LOCALAPPDATA, not the run''s. Pass -AllowSshFarSideUserProfileAndLocalAppData to accept that.'
 }
+# pin-end: reader-list
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -403,6 +414,7 @@ function Aumid-Fingerprint {
 }
 
 if(-not $Driver) {
+    # pin-begin: outer-run (Contracts.98 pins the whole outer phase by hash: the compile, what the driver is told, the guards and the outer exit)
     $Bin=(Resolve-Path -LiteralPath $Bin).Path; $Run=[IO.Path]::GetFullPath($Run)
     if(Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
     if(-not $CompileOnly -and -not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Bin must contain a built noctty.exe.' }
@@ -434,7 +446,7 @@ if(-not $Driver) {
     $sshDir=Join-Path $Run 'sshd'; $sshSecrets=@('host_ed25519','host_ed25519.pub','client_ed25519','client_ed25519.pub','authorized_keys')
     # Everything from the ssh keys to the last launch runs in one try: the keys go on every exit
     # path, and the guards are compared once their first reading exists.
-    $desktop=[IntPtr]::Zero; $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA; $job=[IntPtr]::Zero; $pi=$null; [uint32]$code=2; $guardsRead=$false
+    $desktop=[IntPtr]::Zero; $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA; $job=[IntPtr]::Zero; $pi=$null; [uint32]$code=2; $guardsRead=$false; $keyHold=$null
     try {
         if($sshReaders.Count -gt 0) {
             [void](New-Item -ItemType Directory -Path $sshDir)
@@ -467,10 +479,12 @@ if(-not $Driver) {
                 ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sshDir 'ssh.json')
         }
         # The keys-on-failure control: a setup step that fails once the keys exist.
-        if($Sabotage -eq 'setup') { throw 'Sabotage setup: a setup step failed after the ssh keys were made.' }
+        if($Sabotage -eq 'setup') { throw 'Sabotage setup: a setup step failed (after reader d''s ssh keys, when it made them).' }
         $before=Startup-Fingerprint; $aumidBefore=Aumid-Fingerprint; $clipboardBefore=[ReplyPath]::GetClipboardSequenceNumber()
         $historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-conpty-reply-path.ps1'
         $guardsRead=$true
+        # The kept-key control: an ssh secret's file held open, so the cleanup cannot delete it.
+        if($Sabotage -eq 'key') { [void](New-Item -ItemType Directory -Force -Path $sshDir); $keyHold=[IO.File]::Open((Join-Path $sshDir 'authorized_keys'),[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
         $portable=Join-Path $Run 'source\bin'; [void](New-Item -ItemType Directory -Path $portable)
         # No noctty.ico: a portable copy publishes the product AUMID's registration only with the icon beside it.
         Get-ChildItem -LiteralPath $Bin -File | Where-Object { $_.Name -ne 'noctty.ico' } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $portable }
@@ -503,12 +517,20 @@ if(-not $Driver) {
         if($job -ne [IntPtr]::Zero) { try { $owned=[ReplyPath]::StopOwnedJob($job) } catch { $cleanupError=$_.Exception.Message } }
         if($pi) { [void][ReplyPath]::CloseHandle($pi.thread); [void][ReplyPath]::CloseHandle($pi.process) }
         if($desktop -ne [IntPtr]::Zero) { [void][ReplyPath]::CloseDesktop($desktop) }
-        # The run's ssh keys go once the run is over, on every path; each by its exact path.
-        $keysDeleted=$true
-        foreach($name in $sshSecrets) { $path=Join-Path $sshDir $name; if(Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force; if(Test-Path -LiteralPath $path) { $keysDeleted=$false } } }
+        # The run's ssh keys go once the run is over, on every path; each by its exact path, best effort:
+        # a file that cannot go is recorded and left for the guards, which then exit 3.
+        $keysDeleted=$true; $keyFailures=[Collections.Generic.List[string]]::new()
+        foreach($name in $sshSecrets) {
+            $path=Join-Path $sshDir $name
+            if(Test-Path -LiteralPath $path) {
+                try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { $keyFailures.Add(('{0}: {1}' -f $name,$_.Exception.GetType().Name)) }
+                if(Test-Path -LiteralPath $path) { $keysDeleted=$false }
+            }
+        }
+        if($keyHold) { $keyHold.Dispose() }
         # No link may stay in the run (listed, never followed): a cmd AutoRun hook once left a junction under its LOCALAPPDATA.
         $links=@(Get-ChildItem -LiteralPath $Run -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Run.Length) })
-        $guards=[ordered]@{GuardsRead=$guardsRead;SshKeysDeleted=$keysDeleted;LinksInRun=$links;OwnedJobCleanedUp=($null -eq $cleanupError);OwnedProcessCount=$owned;DriverExit=$code}
+        $guards=[ordered]@{GuardsRead=$guardsRead;SshKeysDeleted=$keysDeleted;SshKeyDeleteFailures=@($keyFailures);LinksInRun=$links;OwnedJobCleanedUp=($null -eq $cleanupError);OwnedProcessCount=$owned;DriverExit=$code}
         if($guardsRead) {
             $after=Startup-Fingerprint; $aumidAfter=Aumid-Fingerprint; $clipboardAfter=[ReplyPath]::GetClipboardSequenceNumber()
             $unchanged=$before.Exists -eq $after.Exists -and $before.Hash -eq $after.Hash -and $before.Modified -eq $after.Modified
@@ -522,7 +544,8 @@ if(-not $Driver) {
         if(Test-Path -LiteralPath $Run) { $guards | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'startup-state.json') }
     }
     if(-not $keysDeleted -or $links.Count -gt 0 -or ($guardsRead -and ($historyFailure -or -not $unchanged -or -not $aumidUnchanged -or -not $clipboardUnchanged))) {
-        Write-Host ('ISOLATION GUARD CHANGED: startup ledger unchanged={0}, history unchanged={1}, AUMID key unchanged={2}, clipboard sequence unchanged={3}, ssh keys deleted={4}, links left in the run={5}; stop launches.' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged,$keysDeleted,$links.Count)
+        $compared=if($guardsRead) { 'startup ledger unchanged={0}, history unchanged={1}, AUMID key unchanged={2}, clipboard sequence unchanged={3}' -f $unchanged,($null -eq $historyFailure),$aumidUnchanged,$clipboardUnchanged } else { 'ledger, history, AUMID key and clipboard not compared (setup failed before their first reading)' }
+        Write-Host ('ISOLATION GUARD CHANGED: {0}, ssh keys deleted={1}, links left in the run={2}; stop launches.' -f $compared,$keysDeleted,$links.Count)
         exit 3
     }
     if($cleanupError) { Write-Host "Infrastructure: $cleanupError"; exit 2 }
@@ -531,6 +554,7 @@ if(-not $Driver) {
         1 { Write-Host "ConPTY reply-path harness: INCOMPLETE (a reader, case 7 or a positive control failed); see $(Join-Path $Run 'results.md')."; exit 1 }
         default { Write-Host "ConPTY reply-path harness: infrastructure failure ($code); inspect results.json and driver-error.txt in Run."; exit 2 }
     }
+    # pin-end: outer-run
 }
 
 # Driver: on the private desktop, with sandboxed AppData.
@@ -693,9 +717,10 @@ function Invoke-ReaderSession([string] $Mode) {
 }
 
 # Whether a reader ran in the state it is named for: its console input mode
-# (b 0x98; the others VT input on, line, echo and processed input off), and
-# for the record readers its read size (a16 never more than 16 records a read
-# and at least one read of 16; a and b at least one read above 16).
+# (b 0x98; the others VT input on, line, echo and processed input off), and,
+# once every planned step finished, the record readers' read size (a16 never
+# more than 16 records a read and at least one read of 16; a and b at least
+# one read above 16).
 function Get-ReaderStateProblems($Session) {
     $p=[Collections.Generic.List[string]]::new()
     if(-not $Session.Ready) { return @() }
@@ -703,7 +728,8 @@ function Get-ReaderStateProblems($Session) {
     $mode=[Convert]::ToUInt32($Session.Ready.InputMode.Substring(2),16)
     $wanted=if($Session.Mode -eq 'b') { [uint32]0x98 } else { (($modeBefore -bor 7) -bxor 7) -bor 0x200 }
     if($mode -ne $wanted) { $p.Add(('reader {0}: input mode 0x{1:x}, expected 0x{2:x}' -f $Session.Mode,$mode,$wanted)) }
-    if($Session.Mode -in @('a','a16','b')) {
+    $finished=@($Session.Steps | Where-Object { $_.Barrier -eq 'OK' }).Count -eq $Session.Planned
+    if($finished -and $Session.Mode -in @('a','a16','b')) {
         $reads=@($Session.Log | Where-Object { $_ -like 'READ,*' } | ForEach-Object { [int]$_.Split(',')[2] })
         $largest=if($reads.Count) { ($reads | Measure-Object -Maximum).Maximum } else { 0 }
         if($Session.Mode -eq 'a16' -and $largest -ne 16) { $p.Add("reader a16: its largest read was $largest records, expected 16") }
@@ -823,6 +849,7 @@ function Get-RunExit($Failures, $Rows, $Sessions, $Requested, $Case7, [bool] $Ca
 try {
     foreach($mode in $Readers) { Invoke-ReaderSession $mode }
 
+    # pin-begin: case-7 (Contracts.98 pins this block by hash: its rows and its two positive controls)
     if(-not $SkipPSReadLine) {
         # Case 7: PSReadLine. History goes to a run-local file, never saved, before the first read;
         # the ready file is written only once both options read back. The shell then sets ?2033h.
@@ -898,12 +925,14 @@ try {
             [void][ReplyPath]::CloseHandle($shell.thread); [void][ReplyPath]::CloseHandle($shell.process)
         }
     }
+    # pin-end: case-7
 } catch {
     $failures.Add("infrastructure: $($_.Exception.Message) $($_.InvocationInfo.PositionMessage)")
 } finally {
     $owned=0; try { $owned=[ReplyPath]::StopOwnedJob($job) } catch { $failures.Add("owned job cleanup: $($_.Exception.Message)") }
 }
 
+# pin-begin: driver-results (Contracts.98 pins this block by hash: each row, its control flag and the run's exit)
 # Results.
 $rows=[Collections.Generic.List[object]]::new()
 foreach($session in $sessions) {
@@ -921,6 +950,7 @@ foreach($session in $sessions) {
     }
 }
 $exit=Get-RunExit $failures $rows $sessions $Readers $case7 (-not $SkipPSReadLine)
+# pin-end: driver-results
 $os=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $inboxConhost=Join-Path ([Environment]::GetFolderPath('System')) 'conhost.exe'
 $controls=@($rows | Where-Object { $_.Control })
