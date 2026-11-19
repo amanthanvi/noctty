@@ -3002,7 +3002,8 @@ and the
   part as its own channel write is inferred, not observed (no channel trace
   was taken): with `ObscureKeystrokeTiming` off, a Windows far end lost
   exactly the first 16 bytes of most such replies, though not all (a 28-byte
-  split reply arrived whole), and with the default timing, 1 of 5. A tool run
+  split reply arrived whole), and with the default timing, at most 1 of 5 in
+  a run. A tool run
   directly under ConPTY that does not parse APC replies should send `q=2`.
 - **Sixel is passed through but not rendered.** The bundled ConPTY delivers a
   Sixel DCS payload byte-for-byte (see the

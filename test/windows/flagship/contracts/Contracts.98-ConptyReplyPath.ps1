@@ -24,7 +24,7 @@
 #     console-attach-info.c (case 7's prompt reader),
 #     scripts\windows-harness-history.ps1 (its guard decides exit 3's history
 #     branch) and scripts\dev-windows.cmd (the helper compile, exit 2).
-# The contract then applies the council's mutations from rounds 1-5 (and its
+# The contract then applies the council's mutations from rounds 1-6 (and its
 # own) to the harness and the reader. Each must give a problem, and, through
 # the pins, the whole-file pin's problem and that of every pinned region or
 # function the mutation changes. Unless it is marked PinOnly, a run with the
@@ -519,9 +519,10 @@ if ($replyPathProblems.Count -gt 0) { throw "The ConPTY reply-path harness break
 # duplicates kept once; round 2: Opus's 25, those it did not name rebuilt and
 # marked so; round 3: Opus's survivors and his reader-a read, Sol's discarded
 # result; round 4: Opus's probes and Sol's five, one shared; round 5: the
-# bots' threads and Opus's Lows) and the contract's own. An entry has Old and
-# New, or Edits for several; PinOnly marks one only a pin can see, and Check
-# names the content check that must refuse it.
+# bots' threads and Opus's Lows; round 6: Opus's two unreached checks and
+# Sol's escaped pipe) and the contract's own. An entry has Old and New, or
+# Edits for several; PinOnly marks one only a pin can see, and Check names the
+# content check that must refuse it.
 $replyPathMutations = @(
     @{ Name = 'Sol 1 / Opus 1: the reader session''s noctty on a null desktop'; Old = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,"WinSta0\$driverDesktop",$job,0x08000000)'; New = '$terminal=[ReplyPath]::Launch($exe,$command,$Bin,$null,$job,0x08000000)' }
     @{ Name = 'Sol 2: no job assignment before resume'; Old = 'if(!AssignProcessToJobObject(job,p.process)||ResumeThread(p.thread)==0xFFFFFFFF) {'; New = 'if(ResumeThread(p.thread)==0xFFFFFFFF) {' }
@@ -721,7 +722,8 @@ foreach ($mutation in $replyPathMutations) {
     foreach ($want in $expected) {
         if (-not @($found | Where-Object { $_.StartsWith($want, [StringComparison]::Ordinal) }).Count) { $replyPathMissed.Add("$($mutation.Name): refused, but not by '$want'") }
     }
-    # The content checks alone must refuse it too, unless only a pin can see it: so they are shown to work.
+    # The content checks alone must refuse it too, unless only a pin can see it: so each such mutation is shown to be
+    # refused by a content check, not that every check is exercised.
     $content = if ($isReader) { @(Get-ReplyPathProblems -Harness $replyPathHarnessLf -Reader $mutated -StopAtFirst -SkipPins) } else { @(Get-ReplyPathProblems -Harness $mutated -Reader $replyPathReaderLf -StopAtFirst -SkipPins) }
     if ($mutation.PinOnly -and $content.Count -gt 0) { $replyPathMissed.Add("$($mutation.Name): marked PinOnly, but a content check refuses it ('$($content[0])'); drop the mark") }
     elseif (-not $mutation.PinOnly -and $content.Count -eq 0) { $replyPathMissed.Add("$($mutation.Name): only a pin refuses it; a content check must too, or mark it PinOnly") }

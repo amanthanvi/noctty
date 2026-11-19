@@ -471,7 +471,7 @@ safety and measurement properties in two ways:
 - **Checks and mutations.** It checks each launch's desktop and job, the
   isolation flags and guards, the bindings' bytes, the step plan, the
   predictions, the verdicts and the exit policy. It then applies 149 mutations
-  (the council's from rounds 1 to 5, the review bots', and its own). Each must
+  (the council's from rounds 1 to 6, the review bots', and its own). Each must
   be refused by the whole-file pin and by the pin of every pinned region or
   function it changes. All but the 39 marked `PinOnly` must also be refused
   with the pins skipped (`-SkipPins`), so each of those mutations is shown to
