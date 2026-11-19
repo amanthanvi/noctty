@@ -49,8 +49,10 @@ gives) right after minute 5's sample, so the process rules must fail it. -HangAt
 thread for -HangSeconds (120): with -HangAt resize right after minute N's first resize (the case a blocking
 resize once hid, round 1's Opus H1), with -HangAt sample 10 s before minute N's sample (its positive twin);
 the judge must fail both as HUNG. A resize hang needs a churn minute (the first and every tenth minute run no
-resize), so an idle one is refused before the launch. No control is written to the judge's records: a control
-is judged blind. So a control asked for that did not take effect (the hang never suspended the copy, the kill
+resize), so an idle one is refused before the launch, and a hang must outlast its minute's sample (-HangSeconds
+at least 20 with sample, 70 with resize). No control is written to the judge's records: a control
+is judged blind. So a control asked for that did not take effect (the hang never suspended the copy or ended
+before its minute's sample, the kill
 did not end it with exit code 3, an injection failed) fails the harness itself: the driver exits 4, and
 harness.json lists each in ControlMisses.
 
@@ -818,6 +820,11 @@ function Invoke-SoakDriver {
             $sampledMs = $clock.ElapsedMilliseconds
             $late = $sampledMs - $due
             if ($late -gt 5000) { $harness.LateSamples++ }
+            # A hang that ended before this sample's response bound ran out is one the judge never sees.
+            if ($HangAtMinute -eq $minute -and $null -ne $harness.HungAtMs -and
+                $harness.HungAtMs + $HangSeconds * 1000 -lt $sampledMs + $script:ResponseBoundMs) {
+                $harness.ControlMisses.Add("the hang ended before minute $($minute)'s sample could see it")
+            }
             $harness.WorstLatenessMs = [Math]::Max($harness.WorstLatenessMs, $late)
             $harness.Churn += $load.Churn; $harness.Missed += $load.Missed
             if (-not [SoakNative]::Alive($process)) {
@@ -988,6 +995,12 @@ function Invoke-SoakOuter {
     if ($HangAtMinute -gt $Minutes) { throw '-HangAtMinute is past the planned minutes.' }
     if ($HangAt -eq 'resize' -and $HangAtMinute -gt 0 -and ($HangAtMinute -eq 1 -or $HangAtMinute % 10 -eq 0)) {
         throw '-HangAt resize needs a churn minute: the first and every tenth minute are idle, with no resize.'
+    }
+    # The hang has to outlast its minute's sample and that sample's response bound: it starts 10 s before the
+    # sample (`sample`), or after the minute's first resize, at most 60 s before it (`resize`).
+    $hangNeeds = [int]$(if ($HangAt -eq 'sample') { 10 } else { 60 }) + [int]($script:ResponseBoundMs / 1000) + 5
+    if ($HangAtMinute -gt 0 -and $HangSeconds -lt $hangNeeds) {
+        throw "-HangSeconds must be at least $hangNeeds with -HangAt ${HangAt}: a shorter hang ends before its minute's sample sees it."
     }
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'The run directory must be new.' }

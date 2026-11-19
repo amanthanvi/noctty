@@ -162,6 +162,11 @@ $soakRules = @(
         Mutation = @('$HangAtMinute -eq 1 -or $HangAtMinute % 10 -eq 0', '$HangAtMinute % 10 -eq 0')
     }
     @{
+        Description = 'a hang must outlast its minute''s sample and its response bound: a shorter -HangSeconds is refused before the launch, and a hang that ended before the sample is a control miss (CodeRabbit, round 2)'
+        Pattern = '(?s)if \(\$HangAtMinute -eq \$minute -and \$null -ne \$harness\.HungAtMs -and\s*\$harness\.HungAtMs \+ \$HangSeconds \* 1000 -lt \$sampledMs \+ \$script:ResponseBoundMs\) \{\s*\$harness\.ControlMisses\.Add\(.*?\$hangNeeds = \[int\]\$\(if \(\$HangAt -eq ''sample''\) \{ 10 \} else \{ 60 \}\) \+ \[int\]\(\$script:ResponseBoundMs / 1000\) \+ 5\s*if \(\$HangAtMinute -gt 0 -and \$HangSeconds -lt \$hangNeeds\) \{\s*throw'
+        Mutation = @('{ 10 } else { 60 }', '{ 1 } else { 1 }')
+    }
+    @{
         Description = 'a control asked for that did not take effect (no hang, no kill with exit code 3, no injection) fails the harness, since the judge never sees a control (Greptile, round 2)'
         Pattern = '(?s)if \(\$HangAtMinute -gt 0 -and \$null -eq \$harness\.HungAtMs\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$KillAtMinute -gt 0 -and \$null -eq \$harness\.Killed\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$InjectHandleEachMinute -and \$harness\.Injected -eq 0\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$harness\.ControlMisses\.Count -gt 0\) \{\s*Log [^\r\n]*\s*return 4\s*\}.*?elseif \(\$driverExit -eq 4\) \{ \$failed \+= '
         Mutation = @('$null -eq $harness.HungAtMs', '$false')
@@ -322,18 +327,24 @@ using System.Threading;
 public static class SoakStalledWindow {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateWindowExW(uint ex, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
     [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr h);
-    // A hidden, never-shown popup on a thread that stops pumping for `holdMs` and then ends.
+    static ManualResetEvent release;
+    // A hidden, never-shown popup on a (MTA, so non-pumping) thread that stops pumping from its creation: it
+    // waits for Go(), then holds `holdMs` more and ends. The caller starts its clock before Go(), so a blocking
+    // resize measures the whole hold however the caller is scheduled (CodeRabbit, round 2).
     public static IntPtr Start(int holdMs) {
-        IntPtr window = IntPtr.Zero; var made = new ManualResetEvent(false);
+        IntPtr window = IntPtr.Zero; var made = new ManualResetEvent(false); var go = new ManualResetEvent(false);
+        release = go;
         var t = new Thread(() => {
             window = CreateWindowExW(0x08000080, "STATIC", "", 0x80000000, 0, 0, 100, 100, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             made.Set();
+            go.WaitOne();
             Thread.Sleep(holdMs);
             DestroyWindow(window);
         });
         t.IsBackground = true; t.Start(); made.WaitOne();
         return window;
     }
+    public static void Go() { release.Set(); }
 }
 '@
 $blockingName = 'SoakNativeBlocking' + [guid]::NewGuid().ToString('N')
@@ -343,6 +354,7 @@ foreach ($case in @(@{ Type = $native; Async = $true }, @{ Type = ($blockingName
     $stalled = [SoakStalledWindow]::Start(3000)
     if ($stalled -eq [IntPtr]::Zero) { throw 'The stalled-window probe made no window.' }
     $timer = [Diagnostics.Stopwatch]::StartNew()
+    [SoakStalledWindow]::Go()
     [void]$case.Type::Resize($stalled, 321, 123, 500)
     $elapsed = $timer.ElapsedMilliseconds
     if ($case.Async -and $elapsed -gt 2000) { throw "The soak's resize waited $elapsed ms for a thread that stopped pumping." }

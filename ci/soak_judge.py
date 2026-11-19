@@ -63,7 +63,8 @@ Run directory, metrics stage (new):
                 thread's kind is its name, else its start address.
   timing.tsv    the header `minute sampled_ms late_ms workload_ms`, then one row per sampled minute
                 (MISSING-TIMING, DUPLICATE-TIMING): when the sample was taken (ms after the launch), how late
-                that was against its due time (minute x 60 s), and how long the minute's churn ran. A sample
+                that was against its due time (minute x 60 s; a late_ms that is not sampled_ms less it is
+                MALFORMED), and how long the minute's churn ran. A sample
                 more than LATE_SAMPLE_MS late fails (LATE-SAMPLE): for that long nothing looked at the copy at
                 its due time, so a hang there would read as an answer once it ended.
 Fails (metrics stage): NO-METRICS, NO-THREADS, NO-TIMING, MISSING-METRIC, DUPLICATE-METRIC, MISSING-TIMING,
@@ -432,10 +433,14 @@ class Judge:
                 if timed[m] > 1:
                     self.fail(f"DUPLICATE-TIMING minute {m} has {timed[m]} timing rows")
                     continue
+                late = int(p[1]) - m * 60000   # the driver's clock: minute m is due at m * 60000 ms
                 if m not in self.minutes:
                     self.fail(f"MALFORMED timing.tsv minute {m} has a time and no sample")
-                elif int(p[2]) > LATE_SAMPLE_MS:
-                    self.fail(f"LATE-SAMPLE minute {m} sampled {int(p[2])} ms after its due time, beyond "
+                elif int(p[2]) != late:
+                    self.fail(f"MALFORMED timing.tsv minute {m}: late_ms {int(p[2])} is not sampled_ms less the "
+                              f"minute's due time ({late})")
+                elif late > LATE_SAMPLE_MS:
+                    self.fail(f"LATE-SAMPLE minute {m} sampled {late} ms after its due time, beyond "
                               f"{LATE_SAMPLE_MS} ms")
             for m in sorted(self.minutes):
                 if timed[m] == 0:

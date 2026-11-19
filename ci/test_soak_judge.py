@@ -414,6 +414,12 @@ class Records(JudgeCase):
     def test_a_sample_at_the_bound_passes(self):
         self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=flat_timing(SOAK_OK, lambda m: 5000)), {})
 
+    def test_a_lateness_that_disagrees_with_its_time_is_malformed(self):
+        # CodeRabbit (round 2): a row claiming 0 ms late for a sample taken 10 s after minute 3 was due.
+        timing = [(3, 190000, 0, 8000) if r[0] == 3 else r for r in flat_timing(SOAK_OK)]
+        out = self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=timing), {"MALFORMED": 1})
+        self.assertIn("late_ms 0 is not sampled_ms less the minute's due time (10000)", out)
+
     def test_no_timing_file(self):
         self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=None), {"NO-TIMING": 1})
 
