@@ -1023,6 +1023,9 @@ pwsh -NoProfile -File test/windows/interactive-win11-soak.ps1 `
 python -I ci/soak_judge.py <run dir> --min-minutes 480 --other-run <the other copy's run dir>
 ```
 
+Release coverage runs 480 minutes; Phase 0a's runs are 120 (`-Minutes 120`,
+`--min-minutes 120`).
+
 `ci/soak_judge.py` fails a run by the process rules (a gone, changed or hung
 process, an early or non-zero end, a crash file, WER not suppressed, incomplete
 or duplicated records, a short plan, a class not of the helper's shape or
@@ -1032,8 +1035,10 @@ the warm-up rises with confidence (its lower bound, slope minus 3 standard
 errors, above the metric's floor in `ci/soak-thresholds.tsv`), and bounds on
 threads by count and by kind. The warm-up is 60 minutes, measured: a clean
 copy's heap grows under the churn for about an hour and then holds flat, so
-the shortest run the judge accepts is 90 minutes (warm-up plus a 30-minute
-window); a shorter `--min-minutes` is refused.
+the shortest run the judge accepts is 120 minutes (warm-up plus a 60-minute
+window); a shorter `--min-minutes` is refused. A 120-minute run sees only a
+fast leak (about 12 MiB/h and up on the clean 4-hour run's noise); 8 hours
+hold one to the 4 MiB/h floor.
 `-InjectHandleEachMinute` (one duplicated handle a minute) and
 `-KillAtMinute 5` (`TerminateProcess` with exit code 3) are its first two
 controls; `-HangAtMinute N -HangAt resize|sample` (the copy's UI thread
@@ -1043,9 +1048,13 @@ minute, so `-HangAt resize` on the first or a tenth minute is refused, and a
 hang must outlast its minute's sample (`-HangSeconds` at least 20 with `sample`,
 70 with `resize`). Since a control never reaches the judge's records, a control
 that did not take effect fails the harness itself (`ControlMisses` in
-`harness.json`). A sample taken more than 5 s after
-its due time fails `LATE-SAMPLE`, and the driver never waits on the copy
-without a bound. `ci/test_soak_judge.py` holds the judge's controls
+`harness.json`); a hang counts only when its minute's own sample saw the copy
+fail to answer. Each minute's probe (liveness, the windows, their `WM_NULL`
+answers) is timed where it runs, and `timing.tsv` keeps its start and end: a
+probe that starts more than 5 s after its due time, or ends more than 5 s plus
+the 5 s response bound after it, fails `LATE-SAMPLE`; one that starts before it
+fails `EARLY-SAMPLE`; times that do not increase are `MALFORMED`. The driver
+never waits on the copy without a bound. `ci/test_soak_judge.py` holds the judge's controls
 and runs in the checks job; Contracts.98 pins the harness.
 
 ## Style
