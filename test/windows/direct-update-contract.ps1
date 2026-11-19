@@ -126,6 +126,9 @@ function Get-DirectUpdateProblems([string] $Text) {
     Need NativeStatement (Direct (Function-Statements 'Assert-NativeArchitecture') "if (`$native -cne `$Architecture -or `$processArchitecture -cne `$Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }")
     $controller=Find-If $ast.EndBlock.Statements '-not $Driver'
     Need ControllerExit (Same $controller.Clauses[0].Item2.Statements[-1] 'exit 0')
+    $failure=@($controller.Clauses[0].Item2.Statements | Where-Object {Same $_ 'if($exitCode -ne 0){throw ''Acceptance driver failed; read sanitized result.json''}'})
+    $success=@($controller.Clauses[0].Item2.Statements | Where-Object {Same $_ 'Write-Host "direct-update acceptance: PASS ($FromVersion -> $TargetVersion, $Architecture, $Expected); evidence=$Run"'})
+    Need ControllerFailure ($failure.Count -eq 1 -and $success.Count -eq 1 -and $failure[0].Extent.EndOffset -lt $success[0].Extent.StartOffset -and $success[0].Extent.EndOffset -lt $controller.Clauses[0].Item2.Statements[-1].Extent.StartOffset)
     Need DriverExit ((Same $ast.EndBlock.Statements[-2] 'if(-not $result.Passed){exit 1}') -and (Same $ast.EndBlock.Statements[-1] 'exit 0'))
     Need RunPathCall (Direct $controller.Clauses[0].Item2.Statements '$Run=Get-RunPath $Run')
     Need ParentDesktop (Direct $controller.Clauses[0].Item2.Statements "if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}")
@@ -412,6 +415,14 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         try{Refuses RejectedDirectory {Assert-RejectedCopy $before $good}}finally{[IO.Directory]::Delete($journal)}
         [IO.File]::WriteAllText($journal,$clearJson)
         try{Assert-RejectedCopy $before $good}catch{$failures.Add('RejectedClearPositive')}
+        # Corruption in an unused field must fail decoding, not become U+FFFD.
+        $withUrl=$clearJson.Replace('"release_url":null','"release_url":"fixture"')
+        $offset=$withUrl.IndexOf('fixture',[StringComparison]::Ordinal)
+        if($offset -lt 0){throw 'Invalid UTF-8 fixture anchor absent'}
+        $invalidUtf8=[Text.Encoding]::UTF8.GetBytes($withUrl); $invalidUtf8[$offset]=0xff
+        [IO.File]::WriteAllBytes($journal,$invalidUtf8)
+        Refuses RejectedInvalidUtf8 {Assert-RejectedCopy $before $good}
+        [IO.File]::WriteAllText($journal,$clearJson)
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
         Refuses Startup {Assert-LocalState $fingerprint @{Exists=$true;Hash='b';Modified='t'} @() @()}
@@ -466,6 +477,7 @@ $controls=[ordered]@{
     ClipboardSupported=@('if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw','if($false){throw')
 }
 $sites=[ordered]@{
+    ControllerFailure=@('if($exitCode -ne 0){throw ''Acceptance driver failed; read sanitized result.json''}','')
     ControllerExit=@("    exit 0`n}","}")
     DriverExit=@('if(-not $result.Passed){exit 1}','if(-not $result.Passed){exit 0}')
     TrapExit=@("    break`n}","    continue`n}")
@@ -580,6 +592,7 @@ $baseline=Join-Path $fixtures 'baseline'; $null=New-Item -ItemType Directory -Pa
 $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
+    JournalUtf8Replacement=@('[Text.UTF8Encoding]::new($false,$true)','[Text.UTF8Encoding]::new($false,$false)')
     JournalDuplicateKeys=@('        Assert-JournalKeys $value','')
     JournalSchema=@('if($RequireReadable){Assert-JournalSchema $value}','')
     JournalTrailingComma=@('$options.AllowTrailingCommas=$false','$options.AllowTrailingCommas=$true')

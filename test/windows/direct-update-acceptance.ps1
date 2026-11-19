@@ -410,7 +410,7 @@ function Get-UpdateState([string] $Root,[switch] $RequireReadable) {
         $options=[Text.Json.JsonDocumentOptions]::new()
         $options.AllowTrailingCommas=$false
         $options.CommentHandling=[Text.Json.JsonCommentHandling]::Disallow
-        $document=[Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($path),$options)
+        $document=[Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($path,[Text.UTF8Encoding]::new($false,$true)),$options)
         $value=$document.RootElement
         if($value.ValueKind -ne [Text.Json.JsonValueKind]::Object){throw 'Journal is not a JSON object'}
         Assert-JournalKeys $value
