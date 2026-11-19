@@ -187,6 +187,28 @@ class BaselineControls(unittest.TestCase):
                                 text=True, timeout=20)
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_parameter_discovery_stress_bound(self):
+        directory = str(Path(__file__).resolve().parent)
+        script = ("import sys, time, json\nsys.path.insert(0, " + repr(directory) + ")\n"
+                  "import zig017_lint as zig\nimport win32_ident_lint as win\nrows=[]\n"
+                  "for shape, n in [('unclosed',8000), ('signatures',8000), ('balanced',1024), "
+                  "('balanced',2048), ('parameterized',2048)]:\n"
+                  " if shape == 'unclosed':\n  text=''.join(f'fn f{i}() void {{\\n' for i in range(n))\n"
+                  " elif shape == 'signatures':\n  text=''.join(f'fn f{i}(p{i}: u8) void\\n' for i in range(n))\n"
+                  " elif shape == 'balanced':\n  text=''.join(f'fn f{i}() struct {{\\n' for i in range(n))\n"
+                  "  text+='} { return .{}; }\\n' * n\n"
+                  " else:\n  text=''.join(f'fn f{i}(p{i}: u8) struct {{\\n' for i in range(n))\n"
+                  "  text+=''.join(f'}} {{ _ = p{i}; return .{{}}; }}\\n' for i in reversed(range(n)))\n"
+                  " start=time.perf_counter()\n a=zig.matches(text)\n"
+                  " b=list(win.Bindings(text).uses({'kernel32.Sleep'}))\n"
+                  " elapsed=time.perf_counter()-start\n assert not a and not b\n"
+                  " assert elapsed < 5.5, (shape,n,elapsed)\n"
+                  " rows.append(dict(shape=shape,count=n,seconds=elapsed))\nprint(json.dumps(rows))\n")
+        result = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stderr)
+        print("Parameter discovery stress:", result.stdout.strip())
+
 
 class Win32Controls(unittest.TestCase):
     def uses(self, source):
@@ -214,13 +236,22 @@ class Win32Controls(unittest.TestCase):
                 self.assertTrue(self.uses(source))
 
     def test_rehomed_call_passes_and_std_twin_fails(self):
-        for source in ('const sys = @import("win32/sys.zig"); sys.Sleep(1);', 'win32.sys.Sleep(1);'):
-            bindings = win.Bindings(source, EXPORTS)
-            origins = [origin for _, _, origin in bindings.accesses() if origin.parts == ("Sleep",)]
+        from zig_bindings import public_names
+        repo = Path(__file__).resolve().parent.parent
+        module = "src/apprt/win32/sys.zig"
+        native = common.sources(repo, "263eacfa08ba4c4e550364760a935149863d41ec", {module})[module]
+        self.assertIn("GetCurrentThreadId", public_names(native))
+        removed = REMOVED | {"kernel32.GetCurrentThreadId"}
+        for path, route in (("src/pty_transport_probe.zig", "apprt/win32/sys.zig"),
+                            ("src/apprt/win32/ipc_server.zig", "sys.zig")):
+            source = 'const sys = @import(' + json.dumps(route) + '); sys.GetCurrentThreadId();'
+            bindings = win.Bindings(source, EXPORTS, path)
+            origins = [origin for _, _, origin in bindings.accesses() if origin.parts == ("GetCurrentThreadId",)]
             self.assertTrue(origins, "re-home must resolve; an unresolved use is not a passing control")
             self.assertTrue(all(origin.kind == "native" for origin in origins))
-            self.assertEqual([], list(bindings.uses(REMOVED)))
-        self.assertTrue(self.uses('const k32 = std.os.windows.kernel32; k32.Sleep(1);'))
+            self.assertEqual([], list(bindings.uses(removed)))
+            twin = win.Bindings('std.os.windows.kernel32.GetCurrentThreadId();', EXPORTS, path)
+            self.assertTrue(list(twin.uses(removed)))
 
     def test_parameters_shadow_implicit_namespaces_and_keep_hasdecl_unknown(self):
         from lint_compiler_control import PARAMETER_SOURCE
@@ -469,6 +500,19 @@ class GitControls(unittest.TestCase):
         self.write("probe.zig", before.replace("// removable comment\n", ""))
         same = self.commit()
         self.assertEqual([], win.check(self.repo, base, same, upstream, removed))
+
+    def test_labeled_return_type_parameter_scope_in_real_entry(self):
+        from lint_compiler_control import PARAMETER_SOURCE
+        self.write("src/os/windows.zig", "// reexports\n")
+        base = self.commit()
+        self.write("probe.zig", PARAMETER_SOURCE)
+        head = self.commit()
+        result = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("run_lints.py")),
+            "--win32-mode", "enforce"], cwd=self.repo, capture_output=True, text=True,
+            env={**os.environ, "LINT_EVENT": "pull_request", "LINT_BASE": base, "LINT_HEAD": head,
+                 "GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": "false"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("removed std.os.windows", result.stdout)
 
     def test_real_diff_added_lines_and_rename(self):
         unchanged = "".join(f"const a{i} = {i};\n" for i in range(10))
@@ -857,6 +901,41 @@ class HistoryControls(unittest.TestCase):
         lines.insert(at + 2, line)
         self.assertEqual([], self.check(self.base, self.fixture(path, "".join(lines))))
 
+    def test_rekeyed_alias_owner_fixtures_keep_unchanged_uses(self):
+        path = "src/os/monotonic.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        variants = (
+            source.replace("if (comptime builtin.os.tag == .windows)", "if (builtin.os.tag == .windows)"),
+            source.replace("fn nowNs(", "fn ownerRenamed("),
+            source.replace("///", "/// Comment-only control.", 1),
+        )
+        for variant in variants:
+            self.assertNotEqual(source, variant)
+            self.assertEqual([], self.check(self.base, self.fixture(path, variant)))
+        path = "src/update/github_releases.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        first_test = re.search(r"(?m)^test ", source).start()
+        inserted = source[:first_test] + 'test "owner ordinal control" {}\n\n' + source[first_test:]
+        variants = [source.replace("fn " + name + "(", "fn ownerRenamed(")
+                    for name in ("handleIsReparsePoint", "processRunsFromStage", "openLockedInstaller")]
+        variants += [inserted, source + '\ntest "owner ordinal control" {}\n',
+                     source[:first_test] + source[first_test:].replace('test "', 'test "renamed description ', 1)]
+        for variant in variants:
+            self.assertNotEqual(source, variant)
+            self.assertEqual([], self.check(self.base, self.fixture(path, variant)))
+        before = self.fixture(path, inserted)
+        after = self.fixture(path, source, parent=before)
+        self.assertEqual([], self.check(before, after))
+
+    def test_real_owner_rename_and_test_deletion_preserve_added_findings(self):
+        for head, expected in (("9c9de2aa23bf5f58a68f730b051d28bafb2c5364", 0),
+                               ("2e8b1bf6d39a314f0efcc1bdabd0db9c55876a88", 2)):
+            base = common.revision(self.repo, head + "^")
+            rows = self.check(base, head)
+            added = common.added_lines(self.repo, base, head)
+            self.assertEqual(expected, len(rows))
+            self.assertTrue(all(row[1] in added.get(row[0], ()) for row in rows))
+            print("Owner-key history control:", head[:9], "genuine added-line findings", len(rows))
     def test_real_refactors_do_not_recheck_unchanged_uses(self):
         for head in ("1c8d4d39463e43415f8e8de603ed7312ad907420", "2ec37a2c80f9dab40b06b036b66ca575487d633b"):
             base = common.revision(self.repo, head + "^")

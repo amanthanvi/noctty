@@ -23,7 +23,8 @@ class Bindings(LiteralBindings):
                 if len(parts) >= size and key in removed:
                     span = self.span(start, end, origin)
                     alias_changed = self.previous is not None and any(
-                        self.declaration_changed(index) for index in origin.declarations)
+                        self.declared_before(index) and self.declaration_changed(index)
+                        for index in origin.declarations)
                     if added is None or span & added or origin.exports & self.changed_exports or alias_changed:
                         yield key, span, self.tokens[start].line + 1
                     break

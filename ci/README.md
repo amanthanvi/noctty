@@ -81,6 +81,11 @@ tokenizer is the plan's measured `zigtok.py`, copied without changes.
 The separate span helper indexes brackets once, peels nested groups without
 repeated suffix scans, and keeps overlapping line spans compact. Malformed
 unclosed `@hasDecl` calls remain review flags; syntax validation belongs to Zig.
+Parameter discovery also uses indexed bracket jumps, including labeled
+return-type blocks before the true body. Per-name scope intervals replace
+expanded token ranges. The timed control bounds both lints on 8,000 unclosed
+function starts and balanced nested functions to 5.5 seconds per case, about
+three times the measured Round 4 time for the 8,000-line specimen.
 
 The Win32 lint resolves the inventory's namespace binding paths and local const
 aliases, with block scope, literal imports, quoted identifiers, and alias chains.
@@ -102,6 +107,11 @@ explicitly; their passing controls assert a native origin. Function parameters
 mask implicit namespace names in their signatures and bodies, so a parameter named `std` is
 not mistaken for the std module. Alias-origin rechecks also include deletion-only
 edits, independently of added-line overlap.
+That unconditional alias recheck requires the declaration's stable key to
+exist in the previous snapshot. New or re-keyed declarations keep the added-line
+rule, so enclosing renames, test ordinal shifts and header edits cannot recheck
+unchanged aliases. A simultaneous owner re-keying and deletion-only origin
+change remains bounded by that added-line rule.
 The generated list covers **1,534 removed names**: the 1,485 root/file-namespace
 names plus 49 nested declarations (including `REG.*`, `ws2_32.SOCK.*` and
 `ws2_32.MSG.ERRQUEUE`), checked against both compiler std trees. The plan's 124 is

@@ -95,7 +95,14 @@ fn call(comptime std: type) void { std.os.windows.kernel32.Sleep(1); }
 fn choose(comptime std: type) @TypeOf(std.os.windows.kernel32.Sleep) {
     return std.os.windows.kernel32.Sleep;
 }
-test "a parameter named std is not the std module" { call(Native); choose(Native)(1); }
+fn chooseLabeled(comptime std: type) blk: {
+    break :blk @TypeOf(std.os.windows.kernel32.Sleep);
+} {
+    return std.os.windows.kernel32.Sleep;
+}
+test "a parameter named std is not the std module" {
+    call(Native); choose(Native)(1); chooseLabeled(Native)(1);
+}
 '''
 
 

@@ -4,6 +4,7 @@ This deliberately does not evaluate computed expressions or container members.
 """
 
 from dataclasses import dataclass, replace
+from bisect import bisect_right
 import posixpath
 
 import zigtok
@@ -63,6 +64,72 @@ class Origin:
     exports: frozenset = frozenset()
 
 
+def parameter_ranges(tokens, brackets):
+    """Indexed named-function signatures, with compact per-name scope ranges.
+
+    Bracket jumps avoid rescanning nested parameters, return types and bodies.
+    A labeled return-type block precedes the true function body. Overlapping
+    scopes for the same name merge without expanding signatures token by token.
+    """
+    reverse = {end: start for start, end in brackets.items()}
+    result, length = {}, len(tokens)
+    for at, token in enumerate(tokens):
+        if (token.text != "fn" or token.kind != "keyword" or at + 2 >= length
+                or tokens[at + 1].kind != "identifier" or not zigtok.is_op(tokens[at + 2], "(")):
+            continue
+        opening = at + 2
+        closing = brackets.get(opening)
+        if closing is None:
+            continue
+        names, cursor = set(), opening + 1
+        while cursor < closing:
+            current = tokens[cursor]
+            if zigtok.is_op(current, "(", "[", "{"):
+                cursor = brackets.get(cursor, closing) + 1
+                continue
+            if zigtok.is_op(current, ":") and tokens[cursor - 1].kind == "identifier":
+                names.add(identifier(tokens[cursor - 1]))
+            cursor += 1
+        if not names:
+            continue
+        cursor, body = closing + 1, None
+        while cursor < length:
+            current = tokens[cursor]
+            if (current.kind == "keyword" and current.text == "fn" and cursor + 1 < length
+                    and tokens[cursor + 1].kind == "identifier"):
+                break  # a new declaration, not the missing body of this one
+            if zigtok.is_op(current, ";", ",", "=", "}", ")", "]"):
+                break
+            if zigtok.is_op(current, "(", "["):
+                cursor = brackets.get(cursor, length) + 1
+                continue
+            if zigtok.is_op(current, "{"):
+                previous = tokens[cursor - 1]
+                type_brace = (previous.kind == "keyword" and previous.text in ("error", *zigtok.CONTAINERS))
+                type_brace |= (zigtok.is_op(previous, ":") and cursor >= 2
+                               and tokens[cursor - 2].kind == "identifier")
+                if zigtok.is_op(previous, ")"):
+                    start = reverse.get(cursor - 1)
+                    type_brace |= (start is not None and start > 0
+                                   and tokens[start - 1].text in (*zigtok.CONTAINERS, "switch"))
+                if type_brace:
+                    cursor = brackets.get(cursor, length) + 1
+                    continue
+                body = cursor
+                break
+            cursor += 1
+        if body is None:
+            continue
+        end = brackets.get(body, length - 1)
+        for name in names:
+            ranges = result.setdefault(name, [])
+            if ranges and opening + 1 <= ranges[-1][1] + 1:
+                ranges[-1] = ranges[-1][0], max(ranges[-1][1], end)
+            else:
+                ranges.append((opening + 1, end))
+    return result
+
+
 class Bindings:
     def __init__(self, text, reexports=None, path=""):
         self.tokens = zigtok.code(text)
@@ -92,34 +159,20 @@ class Bindings:
             if equals is not None:
                 self.decls[self.scopes[i], identifier(self.tokens[i + 1])] = (i, self.tokens[equals + 1:end])
                 self.ends[i] = end
-        self.parameters, self.parameter_headers = set(), {}
-        for function in zigtok.functions_of_tokens(self.tokens):
-            if function["params"] is None or function["body"] is None:
-                continue
-            opening, closing = function["params"]
-            depth, names = 0, set()
-            for i in range(opening + 1, min(closing, len(self.tokens))):
-                token = self.tokens[i]
-                if depth == 0 and zigtok.is_op(token, ":") and self.tokens[i - 1].kind == "identifier":
-                    name = identifier(self.tokens[i - 1])
-                    names.add(name)
-                    self.parameters.add((function["body"][0] + 1, name))
-                if zigtok.is_op(token, "(", "[", "{"):
-                    depth += 1
-                elif zigtok.is_op(token, ")", "]", "}"):
-                    depth -= 1
-            for i in range(opening + 1, function["body"][0] + 1):
-                self.parameter_headers[i] = self.parameter_headers.get(i, frozenset()) | names
+        self.parameter_ranges = parameter_ranges(self.tokens, self.brackets)
+        self.declaration_names = {name for _, name in self.decls}
 
     def lookup(self, name, at):
-        if name in self.parameter_headers.get(at, ()):
+        ranges = self.parameter_ranges.get(name, ())
+        position = bisect_right(ranges, (at, len(self.tokens))) - 1
+        if position >= 0 and at <= ranges[position][1]:
             return None, ()
+        if name not in self.declaration_names:
+            return None
         scope = self.scopes[at]
         while scope is not None:
             if (scope, name) in self.decls:
                 return self.decls[scope, name]
-            if (scope, name) in self.parameters:
-                return None, ()  # unknown runtime/type value, not an implicit namespace
             scope = self.parents[scope]
         return None
 
@@ -261,6 +314,13 @@ class Bindings:
                 return (origin.kind, origin.parts) if origin else None
             self.changed_declarations[index] = binding_origin(current) != binding_origin(old)
         return self.changed_declarations[index]
+
+    def declared_before(self, index):
+        if self.previous is None:
+            return False
+        self.stable_declarations()
+        key = self.scope_keys[self.scopes[index]], identifier(self.tokens[index + 1])
+        return key in self.previous.stable_declarations()
 
     def span(self, start, end, origin=None):
         result = {t.line + 1 for t in self.tokens[start:end]}
