@@ -696,8 +696,11 @@ leaf's two processes that save Settings run with `--app-notifications=false`
 and `--desktop-notifications=false` as the last notification values on their
 command lines (no empty value of either after them, which would reset it to
 its default, and no `--config-file`, whose include noctty reads after the
-command line), so a save shows its in-window banner (each has a terminal window
-to hold it) and no toast.
+command line), so a save shows its in-window banner and no toast. The banner
+needs a terminal window: with none open, `settingsNotifySuccessThunk` toasts
+whatever `config-reload` says (`showHostBanner` finds no surface). Each saving
+process keeps its own terminal window open through its save, and the leaf
+checks that window right before each save.
 
 Three layers keep those launches quiet.
 
@@ -712,7 +715,10 @@ Three layers keep those launches quiet.
   each save and before the verifier starts, `Assert-AccessibilitySaveSandboxQuiet`
   finds no default config file but noctty's own `config.ghostty` in the
   directory the saving environment's `XDG_CONFIG_HOME` names, and no
-  `config-file` line in it. Both compare ordinally, as noctty compares bytes:
+  `config-file` key in it, its lines read as noctty's `LineIterator` reads them
+  (any other byte, such as the template's path in its comments, does not
+  matter); before each save it also stops the leaf if the saving process's
+  terminal window has closed. Both compare ordinally, as noctty compares bytes:
   PowerShell's `-eq` family ignores some characters (a soft hyphen; under
   PowerShell 7, ASCII controls), so `-ceq` read `fa`U+00AD`lse` as `false`,
   where noctty keeps the default on (the Zig test "a command line's

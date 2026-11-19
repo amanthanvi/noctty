@@ -605,7 +605,8 @@ foreach ($toastControl in @(
 }
 # The wrapper declares -DeferCommandFinish and passes it on: in one block,
 # `$arguments = @(...)`, the only plain assignment of `$arguments`, comes first,
-# then `if ($DeferCommandFinish) { $arguments += '-DeferCommandFinish' }`, then
+# then `if ($DeferCommandFinish) { $arguments += '-DeferCommandFinish' }`, then,
+# as the very next statement, so nothing can write `$arguments` between them,
 # the one `powershell.exe` call, which splats `@arguments`.
 $testWrapperForwarding = {
     param([string] $Text)
@@ -629,7 +630,7 @@ $testWrapperForwarding = {
     $buildAt = & $at $builds[0]
     $appendAt = & $at $appends[0]
     $callAt = & $at $calls[0].Parent
-    $buildAt -ge 0 -and $buildAt -lt $appendAt -and $appendAt -lt $callAt
+    $buildAt -ge 0 -and $buildAt -lt $appendAt -and $appendAt -ge 0 -and $appendAt + 1 -eq $callAt
 }
 $flagshipInteractiveText = Get-Content -LiteralPath $flagshipInteractive -Raw
 if (-not (& $testWrapperForwarding $flagshipInteractiveText)) {
@@ -640,6 +641,7 @@ $wrapperCall = "    & powershell.exe @arguments *> `$rawTranscriptPath`n"
 foreach ($toastControl in @(
         @{ Name = 'the append after the call (CodeRabbit)'; From = $wrapperAppend; To = ''; Then = @(, @($wrapperCall, "$wrapperCall$wrapperAppend")) },
         @{ Name = 'the arguments built again between the append and the call'; From = $wrapperCall; To = "    `$arguments = @('-NoLogo')`n$wrapperCall" },
+        @{ Name = 'a typed write that drops the switch before the call (CodeRabbit)'; From = $wrapperCall; To = "    [string[]] `$arguments = `$arguments | Where-Object { `$_ -ne '-DeferCommandFinish' }`n$wrapperCall" },
         @{ Name = 'the call splatting another array'; From = $wrapperCall; To = "    & powershell.exe @otherArguments *> `$rawTranscriptPath`n" },
         @{ Name = 'the append to another array'; From = $wrapperAppend; To = "    if (`$DeferCommandFinish) { `$otherArguments += '-DeferCommandFinish' }`n" },
         @{ Name = 'the switch undeclared'; From = '    [switch] $DeferCommandFinish'; To = '    [string] $DeferCommandFinish' }
@@ -756,11 +758,13 @@ $readJobFiles = {
                 $name = $name.Substring($rooted.Length)
                 $bases = if ([string]::Equals($rooted.Groups['root'].Value, 'PSScriptRoot', [StringComparison]::OrdinalIgnoreCase)) { @($directory) } else { @('') }
             }
+            # Every base the name resolves against is read, not only the first
+            # (`Join-Path $repoRoot 'x.ps1'` and a sibling x.ps1 both are).
             $found = $false
             foreach ($base in $bases) {
                 $relative = if ($base) { Join-Path $base $name } else { $name }
                 $candidate = [IO.Path]::GetRelativePath($repoRoot, [IO.Path]::GetFullPath((Join-Path $repoRoot $relative)))
-                if ($null -ne (& $Read $candidate)) { $queue.Enqueue($candidate); $found = $true; break }
+                if ($null -ne (& $Read $candidate)) { $queue.Enqueue($candidate); $found = $true }
             }
             if (-not $found -and -not $toastGeneratedSet.Contains("$file|$($token.Value)")) {
                 throw "$file names $($token.Value), which the toast-source inventory cannot find; name it from `$PSScriptRoot or `$repoRoot, or list it as a payload the leaf writes."
@@ -830,6 +834,13 @@ $testToastLeafNamers = {
                 [string]::Equals($node.Clauses[0].Item1.Extent.Text, '$Runtime', [StringComparison]::Ordinal) -and
                 $probeName.Extent.StartOffset -ge $node.Clauses[0].Item2.Extent.StartOffset -and $probeName.Extent.EndOffset -le $node.Clauses[0].Item2.Extent.EndOffset }, $true))
     if ($runtimeIfs.Count -ne 1) { return $false }
+    # `-Runtime` is a switch with no default, and nothing writes it, so the
+    # branch runs only when a caller passes it.
+    $runtimeParameters = @($probeAst.ParamBlock.Parameters | Where-Object { [string]::Equals($_.Name.VariablePath.UserPath, 'Runtime', [StringComparison]::OrdinalIgnoreCase) })
+    if ($runtimeParameters.Count -ne 1 -or $runtimeParameters[0].StaticType -ne [switch] -or $null -ne $runtimeParameters[0].DefaultValue) { return $false }
+    if (@($probeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    @($node.Left.FindAll({ param($inner) $inner -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                                $inner.VariablePath.UserPath -match '^(?i)((global|local|script|private|variable):)?Runtime$' }, $true)).Count -ne 0 }, $true)).Count -ne 0) { return $false }
     # Only the composite launches it, once, with no -Runtime, and names Runtime nowhere.
     if (-not [string]::Equals(($probeNamers.Keys -join ','), 'test\windows\interactive-win11-validate.ps1', [StringComparison]::Ordinal)) { return $false }
     $validate = $probeNamers['test\windows\interactive-win11-validate.ps1']
@@ -847,7 +858,9 @@ foreach ($toastControl in @(
         @{ Name = 'the job driver naming it twice'; File = 'test\windows\interactive-win11-job.ps1'; Append = "`$extra = 'test\windows\interactive-win11-command-finish.ps1'" },
         @{ Name = 'vt-probe naming it outside its -Runtime branch'; File = 'test\windows\vt-probe-win32-conformance.ps1'; Append = "& powershell.exe -File (Join-Path `$PSScriptRoot 'interactive-win11-command-finish.ps1')"; Replace = "        @{ Script = 'interactive-win11-command-finish.ps1'; Timeout = 12 },`n" },
         @{ Name = 'the composite passing -Runtime'; File = 'test\windows\interactive-win11-validate.ps1'; From = "Invoke-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -PassResetState"; To = "Start-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -AdditionalArguments @('-Runtime')" },
-        @{ Name = 'another job script launching vt-probe'; File = 'test\windows\interactive-win11-stateful-lib.ps1'; Append = "function Invoke-Probe { & (Join-Path `$PSScriptRoot 'vt-probe-win32-conformance.ps1') -Runtime }" }
+        @{ Name = 'another job script launching vt-probe'; File = 'test\windows\interactive-win11-stateful-lib.ps1'; Append = "function Invoke-Probe { & (Join-Path `$PSScriptRoot 'vt-probe-win32-conformance.ps1') -Runtime }" },
+        @{ Name = 'vt-probe''s -Runtime on by default (CodeRabbit)'; File = 'test\windows\vt-probe-win32-conformance.ps1'; From = '    [switch] $Runtime,'; To = '    [switch] $Runtime = $true,' },
+        @{ Name = 'vt-probe setting -Runtime itself'; File = 'test\windows\vt-probe-win32-conformance.ps1'; From = '$mode = if ($Runtime)'; To = "`$Runtime = `$true`n`$mode = if (`$Runtime)" }
     )) {
     $toastNamerTexts = $jobFileTexts.Clone()
     if ($toastControl.ContainsKey('Append')) { $toastNamerTexts[$toastControl.File] += "`n$($toastControl.Append)" }
@@ -970,6 +983,21 @@ $toastSiblingDiscovered = & $readJobFiles {
 if (-not $toastSiblingDiscovered.ContainsKey($toastSiblingHelper) -or
     @(& $findToastSources $toastSiblingHelper $toastSiblingDiscovered[$toastSiblingHelper]).Count -ne 1) {
     throw 'The toast-source inventory must read a script a job script names from $PSScriptRoot.'
+}
+# A name two scripts answer to, a quiet one beside the leaf and one at the
+# root that holds a source, is read in both places (CodeRabbit).
+$toastRootHelper = 'interactive-win11-extra-root-helper.ps1'
+$toastBothDiscovered = & $readJobFiles {
+    param([string] $File)
+    if ($File -ceq $toastRootHelper) { return "`$null = '--notify-on-command-finish=always'" }
+    if ($File -ceq "test\windows\$toastRootHelper") { return "`$null = 'quiet'" }
+    $text = & $readRepositoryFile $File
+    if ($File -ceq $nonToastLeaf) { $text += "`n. (Join-Path `$repoRoot '$toastRootHelper')" }
+    $text
+}
+if (-not $toastBothDiscovered.ContainsKey($toastRootHelper) -or -not $toastBothDiscovered.ContainsKey("test\windows\$toastRootHelper") -or
+    @(& $findToastSources $toastRootHelper $toastBothDiscovered[$toastRootHelper]).Count -ne 1) {
+    throw 'The toast-source inventory must read every script a name resolves to, the root one beside a sibling of that name too.'
 }
 # And a script it cannot find fails it.
 $toastUnfound = $null
@@ -1330,8 +1358,9 @@ finally {
 }
 
 # The run-time check itself, with the process lookup swapped for a stand-in:
-# it reads the process it is given, by its id, returns nothing when the launch
-# is quiet, throws otherwise, and never puts the command line in its error.
+# it reads the process it is given, by its id, writes nothing to any stream on
+# any row (a quiet launch or one it stops), throws unless the launch is quiet,
+# and never puts the command line in its error.
 $saveAssertText = $saveRuntimeFunctions['Assert-AccessibilitySaveLaunchQuiet'].Extent.Text
 $saveCimCall = 'CimCmdlets\Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($Process.Id)" -ErrorAction Stop'
 if ([regex]::Matches($saveAssertText, [regex]::Escape($saveCimCall)).Count -ne 1 -or
@@ -1361,8 +1390,9 @@ try {
         $script:toastCimThrows = $toastCase.Throws
         $script:toastCimRead = $null
         $toastError = $null
-        $toastOutput = @()
-        try { $toastOutput = @(Assert-AccessibilitySaveLaunchQuiet -Process $toastSelf -Description 'contract probe' 6>&1 5>&1 4>&1 3>&1) }
+        # Collected as it streams, so output written before a throw is seen too.
+        $toastOutput = [Collections.Generic.List[object]]::new()
+        try { Assert-AccessibilitySaveLaunchQuiet -Process $toastSelf -Description 'contract probe' 6>&1 5>&1 4>&1 3>&1 2>&1 | ForEach-Object { $toastOutput.Add($_) } }
         catch { $toastError = $_.Exception.Message }
         if (-not (& $saveSame $script:toastCimRead "Win32_Process|ProcessId = $($toastSelf.Id)")) {
             throw "Assert-AccessibilitySaveLaunchQuiet on $($toastCase.Name) read '$($script:toastCimRead)', not the process it was given."
@@ -1382,47 +1412,65 @@ finally {
     Remove-Variable -Scope Script -Name toastCimLine, toastCimThrows, toastCimRead -ErrorAction SilentlyContinue
 }
 
-# The sandbox check, on files in a scratch directory: the template noctty
-# writes at its first start (src\config\config-template) passes once the
-# sandbox may hold it; any other default file, an include in any spelling
-# noctty or this check could read as one, a byte outside printable ASCII, or
-# an environment that points elsewhere stops it.
+# The sandbox check, on files in scratch directories under a non-ASCII path:
+# the template noctty writes at its first start (src\config\config-template,
+# rendered as writeConfigTemplate renders it, with that path in a comment)
+# passes once the sandbox may hold it; so does any byte in a comment or a
+# value. Any other default file, an include in any spelling noctty could read
+# as one (and the CR-split lines this check reads besides), a UTF-16 file, an
+# environment that points elsewhere, or a save with its terminal window
+# closed stops it. It writes nothing on any of them.
 . ([scriptblock]::Create($saveRuntimeFunctions['Assert-AccessibilitySaveSandboxQuiet'].Extent.Text))
-$saveTemplate = [IO.File]::ReadAllBytes((Join-Path $repoRoot 'src\config\config-template'))
 $saveSandboxRoot = Join-Path ([IO.Path]::GetTempPath()) ("noctty-contract-sandbox-$([Guid]::NewGuid().ToString('N'))")
 try {
     $saveAscii = [Text.Encoding]::ASCII
+    $saveUtf8 = [Text.UTF8Encoding]::new($false)
+    $saveUnicodeDirectory = 'Jos' + [char]0x00E9
+    $saveTemplateText = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\config\config-template'))
+    if (-not $saveTemplateText.Contains('{[path]s}')) { throw 'src\config\config-template no longer writes its path; render it again here.' }
     foreach ($toastCase in @(
             @{ Name = 'an empty sandbox before the first launch'; Files = @{}; Empty = $true; Fails = $false },
-            @{ Name = 'the template before the first launch'; Files = @{ 'noctty\config.ghostty' = $saveTemplate }; Empty = $true; Fails = $true },
-            @{ Name = 'the template before a save'; Files = @{ 'noctty\config.ghostty' = $saveTemplate }; Empty = $false; Fails = $false },
+            @{ Name = 'the rendered template before the first launch'; Files = @{ 'noctty\config.ghostty' = 'template' }; Empty = $true; Fails = $true },
+            @{ Name = 'the rendered template under a non-ASCII path before a save (Greptile, CodeRabbit)'; Files = @{ 'noctty\config.ghostty' = 'template' }; Empty = $false; Fails = $false },
             @{ Name = 'a saved file'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("scrollback-limit = 10001`r`nwindow-theme = dark`n# config-file = notify.conf`n") }; Empty = $false; Fails = $false },
+            @{ Name = 'a soft hyphen in a value'; Files = @{ 'noctty\config.ghostty' = $saveUtf8.GetBytes("font-family = a$([char]0x00AD)b`n") }; Empty = $false; Fails = $false },
+            @{ Name = 'a soft hyphen inside the key (noctty reads no include)'; Files = @{ 'noctty\config.ghostty' = $saveUtf8.GetBytes("config-$([char]0x00AD)file = notify.conf`n") }; Empty = $false; Fails = $false },
+            @{ Name = 'a form feed before the key (noctty trims only spaces and tabs)'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("`fconfig-file = notify.conf`n") }; Empty = $false; Fails = $false },
             @{ Name = 'a legacy ghostty\config'; Files = @{ 'ghostty\config' = $saveAscii.GetBytes("`n") }; Empty = $false; Fails = $true },
             @{ Name = 'a pre-rename winghostty config'; Files = @{ 'winghostty\config.ghostty' = $saveAscii.GetBytes("`n") }; Empty = $false; Fails = $true },
             @{ Name = 'an include'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("scrollback-limit = 1`nconfig-file = notify.conf`n") }; Empty = $false; Fails = $true },
+            @{ Name = 'an include with no spaces, last'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("scrollback-limit = 1`r`nconfig-file=notify.conf") }; Empty = $false; Fails = $true },
+            @{ Name = 'an include with no value'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("config-file`n") }; Empty = $false; Fails = $true },
             @{ Name = 'an include after a bare CR'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("scrollback-limit = 1`rconfig-file=notify.conf") }; Empty = $false; Fails = $true },
             @{ Name = 'an indented include in another case'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes(" `tCONFIG-FILE = notify.conf`n") }; Empty = $false; Fails = $true },
-            @{ Name = 'a soft hyphen in a line'; Files = @{ 'noctty\config.ghostty' = [byte[]]@(0x61, 0xC2, 0xAD, 0x0A) }; Empty = $false; Fails = $true },
-            @{ Name = 'a form feed before an include'; Files = @{ 'noctty\config.ghostty' = $saveAscii.GetBytes("`fconfig-file = notify.conf`n") }; Empty = $false; Fails = $true },
+            @{ Name = 'an include after a UTF-8 byte order mark'; Files = @{ 'noctty\config.ghostty' = [byte[]](@(0xEF, 0xBB, 0xBF) + $saveAscii.GetBytes("config-file = notify.conf`n")) }; Empty = $false; Fails = $true },
+            @{ Name = 'a UTF-16 file'; Files = @{ 'noctty\config.ghostty' = [byte[]](@(0xFF, 0xFE) + [Text.Encoding]::Unicode.GetBytes("scrollback-limit = 1`n")) }; Empty = $false; Fails = $true },
             @{ Name = 'no XDG_CONFIG_HOME'; Files = @{}; Empty = $true; Fails = $true; NoHome = $true },
-            @{ Name = 'another saved file than the environment reads'; Files = @{}; Empty = $true; Fails = $true; Elsewhere = $true }
+            @{ Name = 'another saved file than the environment reads'; Files = @{}; Empty = $true; Fails = $true; Elsewhere = $true },
+            @{ Name = 'a save with its terminal window open'; Files = @{ 'noctty\config.ghostty' = 'template' }; Empty = $false; Fails = $false; HostOpen = $true },
+            @{ Name = 'a save with its terminal window closed (CodeRabbit)'; Files = @{ 'noctty\config.ghostty' = 'template' }; Empty = $false; Fails = $true; HostOpen = $false }
         )) {
-        $saveCaseRoot = Join-Path $saveSandboxRoot ([Guid]::NewGuid().ToString('N'))
+        $saveCaseRoot = Join-Path $saveSandboxRoot "$([Guid]::NewGuid().ToString('N'))\$saveUnicodeDirectory"
         foreach ($saveFile in $toastCase.Files.GetEnumerator()) {
             $saveFilePath = Join-Path $saveCaseRoot $saveFile.Key
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $saveFilePath))
-            [IO.File]::WriteAllBytes($saveFilePath, [byte[]]$saveFile.Value)
+            $saveBytes = if ($saveFile.Value -is [string]) { $saveUtf8.GetBytes($saveTemplateText.Replace('{[path]s}', $saveFilePath)) } else { [byte[]]$saveFile.Value }
+            [IO.File]::WriteAllBytes($saveFilePath, $saveBytes)
         }
         [void][IO.Directory]::CreateDirectory($saveCaseRoot)
         $saveEnvironment = [ordered]@{ LOCALAPPDATA = $saveCaseRoot }
         if (-not $toastCase.ContainsKey('NoHome')) { $saveEnvironment['XDG_CONFIG_HOME'] = $saveCaseRoot }
         $saveSavedPath = if ($toastCase.ContainsKey('Elsewhere')) { Join-Path $saveSandboxRoot 'elsewhere\noctty\config.ghostty' } else { Join-Path $saveCaseRoot 'noctty\config.ghostty' }
+        $saveArguments = @{ Environment = $saveEnvironment; SavedConfigPath = $saveSavedPath; When = 'in the contract'; Empty = [bool]$toastCase.Empty }
+        if ($toastCase.ContainsKey('HostOpen')) { $saveArguments['HostOpen'] = $toastCase.HostOpen }
         $toastError = $null
-        try { Assert-AccessibilitySaveSandboxQuiet -Environment $saveEnvironment -SavedConfigPath $saveSavedPath -When 'in the contract' -Empty:$toastCase.Empty }
+        $toastOutput = [Collections.Generic.List[object]]::new()
+        try { Assert-AccessibilitySaveSandboxQuiet @saveArguments 6>&1 5>&1 4>&1 3>&1 2>&1 | ForEach-Object { $toastOutput.Add($_) } }
         catch { $toastError = $_.Exception.Message }
         if ($toastCase.Fails -ne ($null -ne $toastError)) {
             throw "Assert-AccessibilitySaveSandboxQuiet $(if ($toastCase.Fails) { 'let through' } else { 'stopped' }) $($toastCase.Name)$(if ($toastError) { ": $toastError" })."
         }
+        if ($toastOutput.Count -ne 0) { throw "Assert-AccessibilitySaveSandboxQuiet wrote output on $($toastCase.Name)." }
         if ($null -ne $toastError -and $toastError.Contains('notify.conf')) { throw "Assert-AccessibilitySaveSandboxQuiet quoted the file on $($toastCase.Name)." }
     }
 }
@@ -1430,13 +1478,12 @@ finally {
     Remove-Item -LiteralPath Function:\Assert-AccessibilitySaveSandboxQuiet -ErrorAction SilentlyContinue
     if ([IO.Directory]::Exists($saveSandboxRoot)) { [IO.Directory]::Delete($saveSandboxRoot, $true) }
 }
-
 # (A) The pins, by SHA-256 of each region's text with LF line ends. An edit in
 # a region must update its pin here, in the same change.
 $saveLeafPins = [ordered]@{
-    'save-functions' = 'F7B7371F565B4271AF50A9601C327D983C976B7D123F4D42BC4DADEDA4D6A547'
+    'save-functions' = '16AF9A3CDCC180C93D5C742F74C4082116AC23B2508B702C8B51C36612E571B7'
     'save-sandbox' = '53CA9237BC53DF03079BC9BFAE41EA2DEC80EABF2726D57BC5550C66C1DCB1F8'
-    'save-flow' = 'CB1A082D258F18BE20DF13D59696F51EC358032D02538E9838D7D79DBEBC671E'
+    'save-flow' = '2F0C83B8C1FA687D68D127F11793BEB47535E93A16FEF9EFC323AAAA629EF667'
     'failure-path' = '2C488B0A4E92E3C4846520BE1F40C5D6FF7BA9B83BC7F175D588723D2DF859DE'
 }
 # Each region of a text: from its begin marker's line to its end marker's line,
@@ -1719,9 +1766,9 @@ $isPlainArgument = {
 }
 $saveSandboxCalls = [ordered]@{
     FirstLaunchCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the first launch'' -Empty'
-    ProbeSaveCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the probe saves'''
+    ProbeSaveCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the probe saves'' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveProbeHost))'
     VerifyStartCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the verifier starts'''
-    VerifySaveCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the verifier saves'''
+    VerifySaveCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the verifier saves'' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveVerifyHost))'
 }
 $testQuietSettingsSaves = {
     param([string] $Text, [string] $LibraryText, $Others)
@@ -1821,6 +1868,12 @@ $testQuietSettingsSaves = {
         if ($null -eq $write -or -not (& $saveSame $write.Right.Extent.Text $pin.Right)) { return $false }
         $sandboxWrites[$pin.Name] = $write
     }
+    # (5), the terminal window each save's banner needs, taken once from its
+    # process and read only by its pre-save check.
+    foreach ($window in @(@{ Name = 'saveProbeHost'; Right = '$saveProbeProcess.MainWindowHandle' }, @{ Name = 'saveVerifyHost'; Right = '$saveVerifyProcess.MainWindowHandle' })) {
+        $write = & $soleWrite $index $window.Name $Others
+        if ($null -eq $write -or -not (& $saveSame $write.Right.Extent.Text $window.Right) -or (& $saveUsesOf $index $window.Name).Count -ne 2) { return $false }
+    }
     $layoutWrite = & $soleWrite $index 'settingsPersistenceLayout' $Others
     $layoutCall = if ($null -ne $layoutWrite) { & $soleElement $layoutWrite.Right } else { $null }
     if ($layoutCall -isnot [System.Management.Automation.Language.CommandAst] -or
@@ -1871,6 +1924,7 @@ $testQuietSettingsSaves = {
     $order['ProbeArguments'] = & $writeIndex 'saveProbeArguments'
     $order['ProbeStart'] = & $writeIndex 'saveProbeProcess'
     $order['ProbeCheck'] = & $callIndex 'Assert-AccessibilitySaveLaunchQuiet' 'Process' 'saveProbeProcess'
+    $order['ProbeHost'] = & $writeIndex 'saveProbeHost'
     $order['ProbeOpen'] = & $writeIndex 'saveProbe'
     $order['ProbeSave'] = & $statementOf $saveCloses[0]
     $order['ProbeStop'] = & $callIndex 'Stop-InteractiveWin11Process' 'Process' 'saveProbeProcess'
@@ -1878,16 +1932,17 @@ $testQuietSettingsSaves = {
     $order['VerifyArguments'] = & $writeIndex 'saveVerifyArguments'
     $order['VerifyStart'] = & $writeIndex 'saveVerifyProcess'
     $order['VerifyCheck'] = & $callIndex 'Assert-AccessibilitySaveLaunchQuiet' 'Process' 'saveVerifyProcess'
+    $order['VerifyHost'] = & $writeIndex 'saveVerifyHost'
     $order['VerifyOpen'] = & $writeIndex 'saveVerifyProbe'
     $order['VerifyScrollback'] = & $writeIndex 'verifyScrollback'
     $order['VerifySave'] = & $indexOf ($restoreInvokes[0].Parent.Parent)
     if (@($order.Values | Where-Object { $_ -lt 0 }).Count -ne 0) { return $false }
     foreach ($before in @(
             @('FirstLaunchCheck', 'ProbeStart'), @('Flags', 'ProbeArguments'), @('Flags', 'VerifyArguments'),
-            @('ProbeClass', 'ProbeArguments'), @('ProbeArguments', 'ProbeStart'), @('ProbeStart', 'ProbeCheck'), @('ProbeCheck', 'ProbeOpen'),
+            @('ProbeClass', 'ProbeArguments'), @('ProbeArguments', 'ProbeStart'), @('ProbeStart', 'ProbeCheck'), @('ProbeCheck', 'ProbeHost'), @('ProbeHost', 'ProbeOpen'),
             @('ProbeOpen', 'ProbeSaveCheck'), @('ProbeSaveCheck', 'ProbeSave'), @('ProbeSave', 'ProbeStop'), @('ProbeStop', 'VerifyStartCheck'),
             @('VerifyStartCheck', 'VerifyStart'), @('VerifyClass', 'VerifyArguments'), @('VerifyArguments', 'VerifyStart'), @('VerifyStart', 'VerifyCheck'),
-            @('VerifyCheck', 'VerifyOpen'), @('VerifyOpen', 'VerifyScrollback'), @('VerifyScrollback', 'VerifySaveCheck'), @('VerifySaveCheck', 'VerifySave'))) {
+            @('VerifyCheck', 'VerifyHost'), @('VerifyHost', 'VerifyOpen'), @('VerifyOpen', 'VerifyScrollback'), @('VerifyScrollback', 'VerifySaveCheck'), @('VerifySaveCheck', 'VerifySave'))) {
         if ($order[$before[0]] -ge $order[$before[1]]) { return $false }
     }
     # (7): that block is the leaf's normal-mode branch, a direct statement of
@@ -2095,6 +2150,11 @@ foreach ($toastControl in @(
         @{ Name = 'the verifier-start check after the verifier starts'; From = $saveSandboxVerifyStart; To = ''; Then = @(, @("    `$saveVerifyCleanup = `$saveVerifyProcess`n", "    `$saveVerifyCleanup = `$saveVerifyProcess`n$saveSandboxVerifyStart")); Accept = $false },
         @{ Name = 'the verifier-save check removed (Opus L1, round 5)'; From = $saveSandboxVerifySave; To = ''; Accept = $false },
         @{ Name = 'a sandbox check on another environment'; From = $saveSandboxVerifySave; To = $saveSandboxVerifySave.Replace('-Environment $settingsProbeEnvironment', '-Environment $otherEnvironment'); Accept = $false },
+        @{ Name = 'the probe-save check without its window (CodeRabbit)'; From = $saveSandboxProbeSave; To = $saveSandboxProbeSave.Replace(' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveProbeHost))', ''); Accept = $false; Pin = 'save-flow' },
+        @{ Name = 'the probe-save check on another window'; From = $saveSandboxProbeSave; To = $saveSandboxProbeSave.Replace('IsWindow($saveProbeHost)', 'IsWindow($saveProbe.Hwnd)'); Accept = $false },
+        @{ Name = 'the probe window taken after its probe opens'; From = "    `$saveProbeHost = `$saveProbeProcess.MainWindowHandle`n"; To = ''; Then = @(, @($toastProbeOpenLine, "$toastProbeOpenLine    `$saveProbeHost = `$saveProbeProcess.MainWindowHandle`n")); Accept = $false },
+        @{ Name = 'the verifier window from another process'; From = "    `$saveVerifyHost = `$saveVerifyProcess.MainWindowHandle`n"; To = "    `$saveVerifyHost = `$saveProbeProcess.MainWindowHandle`n"; Accept = $false },
+        @{ Name = 'the probe window written again'; From = $toastProbeOpenLine; To = "$toastProbeOpenLine    `$saveProbeHost = [IntPtr]::Zero`n"; Accept = $false },
         @{ Name = 'the first sandbox check in a block comment'; From = $saveSandboxFirst; To = "    <#`n$saveSandboxFirst    #>`n"; Accept = $false },
         @{ Name = 'the first sandbox check under if ($false)'; From = $saveSandboxFirst; To = "    if (`$false) {`n$saveSandboxFirst    }`n"; Accept = $false },
         @{ Name = 'an include written between the first check and the flags (Opus L1 P1, round 5)'; From = $toastProbeClass; To = "    Set-Content -LiteralPath (Join-Path `$settingsPersistenceLayout.LocalAppData 'ghostty\config') -Value 'config-file = notify.conf'`n$toastProbeClass"; Accept = $true; Pin = 'save-flow' },

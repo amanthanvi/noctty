@@ -3822,17 +3822,28 @@ function Assert-AccessibilitySaveLaunchQuiet {
 # command line any `config-file` include one of them names. Before the first
 # launch (-Empty) that directory holds none of them. Later it holds only
 # noctty's own config.ghostty, the file the saves write, and that names no
-# include. Its bytes must be printable ASCII, tabs and line ends, and every
-# line, split at CR and at LF, is read byte for byte, so no spelling hides a
-# key from this check.
+# include. Only that key matters: the command line's values win over the
+# file's, and an include is read after them. Its lines are read as noctty's
+# `LineIterator` reads them, byte for byte: past a UTF-8 byte order mark (a
+# UTF-16 one, which noctty would decode, is refused), split at LF (and at CR
+# too, which only finds more lines), trimmed of spaces and tabs, `#` lines
+# skipped, the key the bytes before the first `=`. Other bytes, the
+# template's path in its comments included, do not matter. Before each save,
+# -HostOpen says whether the saving process's terminal window is still open:
+# the save's banner needs one, and with none `settingsNotifySuccessThunk`
+# toasts whatever `config-reload` says.
 function Assert-AccessibilitySaveSandboxQuiet {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary] $Environment,
         [Parameter(Mandatory)][string] $SavedConfigPath,
         [Parameter(Mandatory)][string] $When,
-        [switch] $Empty
+        [switch] $Empty,
+        [AllowNull()][object] $HostOpen = $null
     )
 
+    if ($null -ne $HostOpen -and -not [bool]$HostOpen) {
+        throw "The settings saving process has no terminal window open $When; its save would raise a toast."
+    }
     $configHome = [string]$Environment['XDG_CONFIG_HOME']
     if ([string]::IsNullOrEmpty($configHome)) { throw "The settings save environment names no XDG_CONFIG_HOME $When." }
     if (-not [string]::Equals((Join-Path $configHome 'noctty\config.ghostty'), $SavedConfigPath, [StringComparison]::OrdinalIgnoreCase)) {
@@ -3845,13 +3856,20 @@ function Assert-AccessibilitySaveSandboxQuiet {
             throw "The settings save sandbox holds $name $When; the saving processes would read it."
         }
         $bytes = [System.IO.File]::ReadAllBytes($path)
-        foreach ($byte in $bytes) {
-            if ($byte -ne 0x09 -and $byte -ne 0x0A -and $byte -ne 0x0D -and ($byte -lt 0x20 -or $byte -gt 0x7E)) {
-                throw "The saved settings file holds a byte outside printable ASCII $When; its keys are read byte for byte."
-            }
+        $start = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+        if ($bytes.Length -ge $start + 2 -and (($bytes[$start] -eq 0xFF -and $bytes[$start + 1] -eq 0xFE) -or
+                ($bytes[$start] -eq 0xFE -and $bytes[$start + 1] -eq 0xFF))) {
+            throw "The saved settings file is UTF-16 $When; noctty would decode it, and this check reads bytes."
         }
-        foreach ($line in [System.Text.Encoding]::ASCII.GetString($bytes).Split([char[]]@("`r", "`n"))) {
-            if ($line.TrimStart([char[]]@(' ', "`t")).StartsWith('config-file', [StringComparison]::OrdinalIgnoreCase)) {
+        # Latin-1 maps each byte to the one character with its value.
+        $text = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes, $start, $bytes.Length - $start)
+        foreach ($line in $text.Split([char[]]@("`r", "`n"))) {
+            $entry = $line.Trim([char[]]@(' ', "`t"))
+            if ($entry.Length -eq 0 -or [int]$entry[0] -eq 0x23) { continue }
+            $equals = $entry.IndexOf([char]'=')
+            $key = if ($equals -ge 0) { $entry.Substring(0, $equals).Trim([char[]]@(' ', "`t")) } else { $entry }
+            if ([string]::Equals($key, 'config-file', [StringComparison]::OrdinalIgnoreCase)) {
                 throw "The saved settings file names a config-file include $When; noctty would read it after the command line."
             }
         }
@@ -7231,7 +7249,9 @@ try {
     # empty value, so nothing may follow these. A save's reload also reads the
     # default config files and, after the command line, an include one names,
     # so the sandbox is checked before the first launch, before each save and
-    # before the verifier starts (Assert-AccessibilitySaveSandboxQuiet).
+    # before the verifier starts, and before each save that the saving
+    # process's terminal window, which holds the banner, is still open
+    # (Assert-AccessibilitySaveSandboxQuiet).
     # Three layers keep it so. Right after each launch, before its probe opens,
     # the run-time check reads the command line the process was actually given
     # (Assert-AccessibilitySaveLaunchQuiet). Contracts.90-Workflows.ps1 pins
@@ -7273,6 +7293,7 @@ try {
         $saveProbeProcess.Refresh()
         return -not $saveProbeProcess.HasExited -and $saveProbeProcess.MainWindowHandle -ne [IntPtr]::Zero
     }
+    $saveProbeHost = $saveProbeProcess.MainWindowHandle
     $saveProbe = Open-AccessibilitySettingsProbe -Process $saveProbeProcess -Description 'settings save probe'
     $saveScrollback = Get-AccessibilityScrollbackProbe -SettingsProbe $saveProbe -Description 'settings save probe'
     $saveTheme = Get-AccessibilityThemeProbe -SettingsProbe $saveProbe -Description 'settings save probe'
@@ -7315,7 +7336,7 @@ try {
             ).ToInt64() -eq 3 -and
             $saveScrollback.Save.Current.IsEnabled
     }
-    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the probe saves'
+    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the probe saves' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveProbeHost))
     Invoke-AccessibilitySettingsCloseAction `
         -SettingsProbe $saveProbe `
         -ActionName 'Save and close' `
@@ -7356,6 +7377,7 @@ try {
         $saveVerifyProcess.Refresh()
         return -not $saveVerifyProcess.HasExited -and $saveVerifyProcess.MainWindowHandle -ne [IntPtr]::Zero
     }
+    $saveVerifyHost = $saveVerifyProcess.MainWindowHandle
     $saveVerifyProbe = Open-AccessibilitySettingsProbe -Process $saveVerifyProcess -Description 'settings persistence verifier'
     $verifyScrollback = Get-AccessibilityScrollbackProbe -SettingsProbe $saveVerifyProbe -Description 'settings persistence verifier'
     $verifyTheme = Get-AccessibilityThemeProbe -SettingsProbe $saveVerifyProbe -Description 'settings persistence verifier'
@@ -7434,7 +7456,7 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings persistence restore draft' -Condition {
         return $verifyScrollback.Save.Current.IsEnabled
     }
-    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the verifier saves'
+    Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When 'before the verifier saves' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveVerifyHost))
     $restoreInvoke.Invoke()
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings persistence baseline restoration' -Condition {
         if ($verifyScrollback.Save.Current.IsEnabled) { return $false }
