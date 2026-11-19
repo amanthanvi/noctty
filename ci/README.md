@@ -69,13 +69,7 @@ operator line. Thus an operand-only edit cannot turn an untouched pointer
 prefix into an undetected repeat.
 
 Both lints tokenize complete files before intersecting matches with added diff
-lines. A Win32 use is also rechecked if an alias definition it depends on changes
-its full normalized `(kind, parts)` origin relative to the merge base, including
-fork modules, os modules and the Win32 facade before a member reaches std.
-Declarations are matched
-by name within their lexical owner; moves, visibility and comments with the
-same binding do not recheck unchanged uses. Comments and
-string/character literals are opaque. A multiline match
+lines. Comments and string/character literals are opaque. A multiline match
 counts when any of its participating code tokens is on an added line. The
 tokenizer is the plan's measured `zigtok.py`, copied without changes.
 The separate span helper indexes brackets once, peels nested groups without
@@ -85,15 +79,15 @@ Parameter discovery also uses indexed bracket jumps, including labeled
 return-type blocks before the true body. Per-name scope intervals replace
 expanded token ranges. The timed control bounds both lints on 8,000 unclosed
 function starts and balanced nested functions to 5.5 seconds per case, about
-three times the measured Round 4 time for the 8,000-line specimen.
+three times the measured 1.8-second baseline for the 8,000-line specimen.
 
 The Win32 lint resolves the inventory's namespace binding paths and local const
 aliases, with block scope, literal imports, quoted identifiers, and alias chains.
 It follows `internal_os.windows` through the current head's public re-exports,
 resolved through the same literal bindings regardless of their alias/import
-spelling. A changed re-export's std origin rechecks dependent uses throughout
-the head's fork-added Zig files, including files without a diff. A spelling,
-move or comment with the same origin does not trigger that scan.
+spelling. Re-export definition changes recheck dependent uses throughout
+the head's fork-added Zig files, including files without a diff. Changes to
+their literal alias dependencies propagate through those exports too.
 Inline `@import("std").os.windows` and relative imports of `src/os/windows.zig`
 are recognized. Decoded file paths normalize `/` and Windows `\` separators,
 `.`/`..` segments and repeated separators before resolution. Windows file-case
@@ -102,16 +96,29 @@ conservatively despite the native layout limit described above.
 Filename suffix dots/spaces, directory spaces and repeated
 trailing dots were rejected in those controls. Uses behind pointer/slice qualifiers and bare aliases of leaf
 types (for example `HRESULT`) count. Calls re-homed to fork declarations pass.
-The native `win32/sys.zig`, `win32_types.zig` and `win32.sys` routes resolve
-explicitly; their passing controls assert a native origin. Function parameters
+The real-path `win32/sys.zig` and `win32_types.zig` controls assert a native
+origin and a public target declaration. A separate token control asserts the
+native `win32.sys` route; `sys` is private in the facade, so this does not claim
+that other compiled modules may access it. Function parameters
 mask implicit namespace names in their signatures and bodies, so a parameter named `std` is
-not mistaken for the std module. Alias-origin rechecks also include deletion-only
-edits, independently of added-line overlap.
-That unconditional alias recheck requires the declaration's stable key to
-exist in the previous snapshot. New or re-keyed declarations keep the added-line
-rule, so enclosing renames, test ordinal shifts and header edits cannot recheck
-unchanged aliases. A simultaneous owner re-keying and deletion-only origin
-change remains bounded by that added-line rule.
+not mistaken for the std module.
+
+Win32 selection uses only the head file and the merge-base diff's hunks:
+
+- A reference is checked when one of its own lines is added.
+- An alias definition, including its modifiers, is changed when its head line span contains an added
+  line, or a deletion gap lies inside that span or on either boundary. A gap
+  numbered `p` is between head lines `p` and `p+1`; a definition on lines
+  `first..last` includes gaps `first-1..last`. Pure-deletion hunks therefore
+  recheck affected aliases even when no surviving alias line is added.
+- Every alias and reference that resolves through a changed alias is rechecked,
+  transitively. The same rule applies to literal public exports and their
+  dependencies in `src/os/windows.zig`.
+- Nothing else is rechecked. No declaration name, test ordinal or enclosing
+  function is matched against a base declaration. Enclosing renames, test
+  insertion/deletion and header edits leave untouched definitions alone.
+
+A deletion-only definition change remains covered when its owner is renamed.
 The generated list covers **1,534 removed names**: the 1,485 root/file-namespace
 names plus 49 nested declarations (including `REG.*`, `ws2_32.SOCK.*` and
 `ws2_32.MSG.ERRQUEUE`), checked against both compiler std trees. The plan's 124 is
@@ -127,15 +134,19 @@ the cross-file recheck is bounded to resolved literal exports of
 `src/os/windows.zig`, not arbitrary module evaluation. They are not evaluated
 by this lint.
 
-**Known conservative over-report:** rechecks compare dependency declarations,
-rather than the final origin of each individual use. Introducing an intermediate
+**Known conservative over-report:** a touched definition rechecks its uses
+even if the final origin stayed the same. Moving, re-spelling or editing a
+comment on an alias's definition line can therefore report unchanged legacy
+uses. Deleting a line immediately before or after the definition also touches
+its boundary. Introducing an intermediate
 alias (for example `const os = std.os; const windows = os.windows;`), or routing
 an existing std alias through the fork's re-exports, can recheck uses whose final
 binding stayed the same. This may report existing removed uses even though that
 edit changed no call's meaning. The real IPC fixture retains the measured
-40/40/32 reports for these cases. This safe-side behavior is intentional for now;
-origin-preserving moves, visibility changes and comments on the same declarations
-still pass their controls.
+40/40/32 reports for these cases. This safe-side behavior follows the explicit
+head-span rule; edits outside the definition and its boundaries do not recheck
+it. These are definition-change detections, not claims that every reported
+call acquired a different semantic meaning.
 
 The fork-added file set is computed at each head, by subtracting
 `upstream-paths.txt` from its tree. That list includes upstream rename sources.
@@ -233,9 +244,11 @@ It needs the already-extracted
 compiler sources, not a download. The path generator unions all three trees
 and rename sources, writes only the supplied output, and is deterministic.
 
-The controls retain their temporary Git repositories and print their location,
-so failed cases can be inspected. Set `TEMP`/`TMP` to a task-owned scratch root
-when running locally and clean that root using the approved local cleanup tool.
+The ordinary controls automatically remove their temporary fixtures and Git
+repositories with unittest cleanup callbacks, including after failed cases.
+Set `TEMP`/`TMP` to a task-owned scratch root when running locally so creation
+also stays on the intended drive. Keep compiler/proxy outputs there, preserve
+only text evidence, and clean the run root with the approved local cleanup tool.
 
 For a bounded history sanity check, run
 `python -I ci/audit_lints.py --since YYYY-MM-DD --output <report.json>`.

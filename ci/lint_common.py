@@ -76,30 +76,42 @@ def changed_paths(repo, base, head, *pathspecs):
     ]
 
 
-def added_lines(repo, base, head):
+def line_changes(repo, base, head):
+    """Added head lines and deletion gaps (number of head lines before the gap).
+
+    A zero-length head hunk starts after its numbered line. Other hunks start
+    on that line; each deleted run is at the gap before the next head line.
+    """
     base = merge_base(repo, base, head)
     names = changed_paths(repo, base, head, "*.zig")
     result = {}
     for name in names:
         diff = git(repo, "diff", *DIFF_OPTIONS, base, head,
                    "--", ":(literal)" + name).decode("utf-8")
-        rows, current, had_hunk = set(), None, False
+        rows, deleted, current, had_hunk = set(), set(), None, False
         for line in diff.split("\n"):
-            match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
             if match:
-                current, had_hunk = int(match[1]), True
+                current = int(match[1]) + (match[2] == "0")
+                had_hunk = True
             elif current is not None and line.startswith("+"):
                 rows.add(current)
                 current += 1
+            elif current is not None and line.startswith("-"):
+                deleted.add(current - 1)
             elif current is not None and line.startswith(" "):
                 current += 1
         if not had_hunk and name in paths(repo, head):
             before = sources(repo, base, {name})[name] if name in paths(repo, base) else ""
             if sources(repo, head, {name})[name] != before:
                 raise ValueError("changed Zig content produced no diff hunk")
-        if rows:
-            result[name] = rows
+        if rows or deleted:
+            result[name] = rows, deleted
     return result
+
+
+def added_lines(repo, base, head):
+    return {name: added for name, (added, _) in line_changes(repo, base, head).items() if added}
 
 
 def ci_revisions(repo, event):

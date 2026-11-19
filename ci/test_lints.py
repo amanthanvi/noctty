@@ -253,6 +253,49 @@ class Win32Controls(unittest.TestCase):
             twin = win.Bindings('std.os.windows.kernel32.GetCurrentThreadId();', EXPORTS, path)
             self.assertTrue(list(twin.uses(removed)))
 
+    def test_win32_types_real_path_and_private_facade_native_origins(self):
+        from zig_bindings import public_names
+        repo = Path(__file__).resolve().parent.parent
+        module = "src/apprt/win32_types.zig"
+        native = common.sources(repo, "263eacfa08ba4c4e550364760a935149863d41ec", {module})[module]
+        self.assertIn("RECT", public_names(native))
+        cases = (("src/pty_transport_probe.zig", 'const w = @import("apprt/win32_types.zig"); w.RECT;', "RECT"),
+                 ("src/apprt/win32/probe.zig", 'const w = @import("../win32_types.zig"); w.RECT;', "RECT"),
+                 # sys is private in the facade: this checks the token resolver,
+                 # not whether another compiled module may access that member.
+                 ("src/apprt/win32.zig", "win32.sys.GetCurrentThreadId();", "GetCurrentThreadId"))
+        for path, source, member in cases:
+            with self.subTest(path=path):
+                bindings = win.Bindings(source, EXPORTS, path)
+                origins = [origin for _, _, origin in bindings.accesses() if origin.parts == (member,)]
+                self.assertTrue(origins, "native route must resolve")
+                self.assertTrue(all(origin.kind == "native" for origin in origins))
+                self.assertEqual([], list(bindings.uses({"RECT", "kernel32.GetCurrentThreadId"})))
+                route = "std.os.windows." + ("RECT" if member == "RECT" else "kernel32.GetCurrentThreadId")
+                self.assertTrue(list(win.Bindings(route, path=path).uses({"RECT", "kernel32.GetCurrentThreadId"})))
+
+    def test_alias_definition_head_lines_and_deletion_boundaries(self):
+        source = ('\nconst api = @import("std").os.windows\n .kernel32\n;\n'
+                  'fn f() void { api.Sleep(1); }\n')
+        bindings = win.Bindings(source)
+        for gap in range(6):
+            with self.subTest(gap=gap):
+                rows = list(bindings.uses(REMOVED, set(), {gap}))
+                self.assertEqual(1 <= gap <= 4, bool(rows))
+        for line in range(1, 7):
+            with self.subTest(added=line):
+                rows = list(bindings.uses(REMOVED, {line}))
+                self.assertEqual(2 <= line <= 5, bool(rows))
+
+    def test_definition_modifiers_belong_to_the_head_span(self):
+        for prefix in ("threadlocal", "pub\nthreadlocal"):
+            source = ('const std = @import("std");\n' + prefix + '\n'
+                      'var call: *const @TypeOf(std.os.windows.kernel32.Sleep) = std.os.windows.kernel32.Sleep;\n'
+                      'fn run() void { call(1); }\n')
+            bindings = win.Bindings(source)
+            rows = list(bindings.uses(REMOVED, {2}))
+            self.assertEqual([4 + prefix.count("\n")], [line for _, _, line in rows])
+
     def test_parameters_shadow_implicit_namespaces_and_keep_hasdecl_unknown(self):
         from lint_compiler_control import PARAMETER_SOURCE
         self.assertEqual([], self.uses(PARAMETER_SOURCE))
@@ -378,7 +421,9 @@ class Win32Controls(unittest.TestCase):
         self.assertTrue(list(win.Bindings('internal_os.windows.s.os.windows.kernel32.Sleep(1);', exports).uses(REMOVED)))
 
     def test_generator_enumerates_public_names_without_a_repo(self):
-        root = Path(tempfile.mkdtemp(prefix="lint-std-control-"))
+        temporary = tempfile.TemporaryDirectory(prefix="lint-std-control-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
         for name in ("std15", "std17"):
             (root / name / "os/windows").mkdir(parents=True)
         (root / "std15/os/windows.zig").write_text('pub const kernel32 = @import("windows/kernel32.zig");\n'
@@ -392,7 +437,9 @@ class Win32Controls(unittest.TestCase):
                          set(generate_removed(root / "std17", root / "std15").splitlines()))
 
     def test_generator_follows_nested_containers_imports_and_aliases(self):
-        root = Path(tempfile.mkdtemp(prefix="lint-nested-control-"))
+        temporary = tempfile.TemporaryDirectory(prefix="lint-nested-control-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
         for version in ("15", "17"):
             (root / version / "os/windows").mkdir(parents=True)
             (root / version / "os/windows.zig").write_text(
@@ -410,8 +457,9 @@ class Win32Controls(unittest.TestCase):
 class GitControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.scratch = Path(tempfile.mkdtemp(prefix="noctty-lint-controls-"))
-        print("Retained Git control fixtures:", cls.scratch)
+        temporary = tempfile.TemporaryDirectory(prefix="noctty-lint-controls-")
+        cls.addClassCleanup(temporary.cleanup)
+        cls.scratch = Path(temporary.name)
 
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp(dir=self.scratch))
@@ -500,6 +548,78 @@ class GitControls(unittest.TestCase):
         self.write("probe.zig", before.replace("// removable comment\n", ""))
         same = self.commit()
         self.assertEqual([], win.check(self.repo, base, same, upstream, removed))
+
+    def test_test_insertion_does_not_pair_same_named_aliases(self):
+        path = "src/probe.zig"
+        self.write("src/os/windows.zig", "// reexports\n")
+        self.write("src/apprt/win32/sys.zig", "pub fn GetCurrentThreadId() u32 { return 1; }\n")
+        source = ('test "std alias" {\n const api = @import("std").os.windows.kernel32;\n'
+                  ' _ = @TypeOf(api.GetCurrentThreadId);\n}\n'
+                  'test "native alias" {\n const api = @import("apprt/win32/sys.zig");\n'
+                  ' _ = @TypeOf(api.GetCurrentThreadId);\n}\n')
+        self.write(path, source)
+        base = self.commit()
+        self.write(path, 'test "unrelated" {}\n\n' + source)
+        head = self.commit()
+        upstream, removed, _ = self.inputs()
+        removed.write_text("kernel32.GetCurrentThreadId\n", encoding="utf-8")
+        self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
+        result = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("run_lints.py")),
+            "--win32-mode", "enforce"], cwd=self.repo, capture_output=True, text=True,
+            env={**os.environ, "LINT_EVENT": "pull_request", "LINT_BASE": base, "LINT_HEAD": head,
+                 "GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": "false"})
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.write(path, source.replace('@import("apprt/win32/sys.zig")', '@import("std").os.windows.kernel32'))
+        changed = self.commit()
+        self.assertEqual(1, len(win.check(self.repo, base, changed, upstream, removed)))
+
+    def test_deletion_and_owner_rename_recheck_unchanged_uses(self):
+        path = "src/probe.zig"
+        self.write("src/os/windows.zig", "// reexports\n")
+        source = ('fn before() void {\n const api = @import("std").os.windows\n'
+                  '  .kernel32\n ;\n _ = @TypeOf(api.CreateProcessW);\n}\ntest { before(); }\n')
+        self.write(path, source)
+        base = self.commit()
+        after = source.replace("  .kernel32\n", "").replace("before", "after")
+        self.write(path, after)
+        head = self.commit()
+        upstream, removed, _ = self.inputs()
+        removed.write_text("CreateProcessW\n", encoding="utf-8")
+        added, gaps = common.line_changes(self.repo, base, head)[path]
+        self.assertIn(2, gaps)
+        self.assertNotIn(4, added)
+        self.assertEqual([(path, 4)], [(r[0], r[1]) for r in win.check(self.repo, base, head, upstream, removed)])
+        result = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("run_lints.py")),
+            "--win32-mode", "enforce"], cwd=self.repo, capture_output=True, text=True,
+            env={**os.environ, "LINT_EVENT": "pull_request", "LINT_BASE": base, "LINT_HEAD": head,
+                 "GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": "false"})
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn("removed std.os.windows.CreateProcessW", result.stdout)
+        self.write(path, source.replace("before", "after"))
+        twin = self.commit()
+        self.assertEqual([], win.check(self.repo, base, twin, upstream, removed))
+
+    def test_deletion_and_rename_recheck_transitive_alias_dependencies(self):
+        self.write("src/os/windows.zig", 'pub const kernel32 = windows.kernel32;\n')
+        source = ('fn before() void {\n const source = @import("src/os/windows.zig")\n'
+                  '  .Local\n ;\n const w = source;\n const indirect = w;\n'
+                  ' indirect.kernel32.Sleep(1);\n}\n')
+        self.write("probe.zig", source)
+        base = self.commit()
+        self.write("probe.zig", source.replace("  .Local\n", "").replace("before", "after"))
+        head = self.commit()
+        upstream, removed, _ = self.inputs()
+        self.assertEqual([("probe.zig", 6)], [(r[0], r[1]) for r in win.check(self.repo, base, head, upstream, removed)])
+        self.write("probe.zig", source.replace("before", "after"))
+        twin = self.commit()
+        self.assertEqual([], win.check(self.repo, base, twin, upstream, removed))
+
+    def test_pure_deletion_head_gaps_at_start_middle_and_end(self):
+        self.write("probe.zig", "// first\n// keep A\n// middle\n// keep B\n// last\n")
+        base = self.commit()
+        self.write("probe.zig", "// keep A\n// keep B\n")
+        head = self.commit()
+        self.assertEqual((set(), {0, 1, 2}), common.line_changes(self.repo, base, head)["probe.zig"])
 
     def test_labeled_return_type_parameter_scope_in_real_entry(self):
         from lint_compiler_control import PARAMETER_SOURCE
@@ -673,8 +793,8 @@ class GitControls(unittest.TestCase):
                      "GITHUB_STEP_SUMMARY": "", "GITHUB_ACTIONS": "false"})
             self.assertEqual(1, result.returncode, (label, result.stderr))
             self.assertIn("kernel32.GetLastError", result.stdout)
-        # Re-spelling only the import must preserve the declaration origin;
-        # the legacy call line itself did not change.
+        # Re-spelling an alias definition touches its head span, so its
+        # unchanged legacy caller is rechecked even if the origin is the same.
         forward = ('const w = @import("../../os/windows.zig");\n'
                    'pub fn call() void { _ = w.kernel32.GetLastError(); }\n')
         self.write(path, forward)
@@ -682,10 +802,10 @@ class GitControls(unittest.TestCase):
         self.write(path, forward.replace("../../os/windows.zig", r"..\\..\\os\\windows.zig"))
         after = self.commit()
         here = Path(__file__).resolve().parent
-        self.assertEqual([], win.check(self.repo, before, after, here / "upstream-paths.txt",
-                                       here / "win32-removed-identifiers.txt"))
+        self.assertEqual([(path, 2)], [(r[0], r[1]) for r in win.check(
+            self.repo, before, after, here / "upstream-paths.txt", here / "win32-removed-identifiers.txt")])
 
-    def test_alias_move_visibility_comment_and_equivalent_origin_pass(self):
+    def test_touched_alias_moves_visibility_comments_and_spellings_recheck(self):
         self.write("src/os/windows.zig", "// reexports\n")
         source = ('const std = @import("std");\nconst w = std.os.windows.kernel32;\n'
                   'const unrelated = 1;\nfn f() void { w.Sleep(1); }\n')
@@ -700,9 +820,11 @@ class GitControls(unittest.TestCase):
         for variant in variants:
             self.write("probe.zig", variant)
             head = self.commit()
-            self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
+            rows = win.check(self.repo, base, head, upstream, removed)
+            self.assertEqual(1, len(rows))
+            self.assertNotIn(rows[0][1], common.added_lines(self.repo, base, head)["probe.zig"])
 
-    def test_alias_matching_keeps_function_scopes(self):
+    def test_changed_alias_dependencies_keep_function_scopes(self):
         self.write("src/os/windows.zig", "// reexports\n")
         first = 'fn first() void { const k = local.sys; k.Sleep(1); }\n'
         second = 'fn second() void { const k = std.os.windows.kernel32; k.Sleep(1); }\n'
@@ -714,7 +836,7 @@ class GitControls(unittest.TestCase):
         rows = win.check(self.repo, base, head, upstream, removed)
         self.assertEqual([1], [row[1] for row in rows])
 
-    def test_reexport_changes_recheck_other_files_and_same_origin_twin(self):
+    def test_reexport_definition_edits_and_unrelated_comment_twin(self):
         module = "src/os/windows.zig"
         source = 'const std = @import("std"); const windows = std.os.windows; const w = windows;\n'
         self.write(module, source + "pub const call = local.sys.Sleep;\n")
@@ -727,12 +849,13 @@ class GitControls(unittest.TestCase):
             head = self.commit()
             rows = win.check(self.repo, base, head, upstream, removed)
             self.assertEqual([("probe.zig", 2)], [(r[0], r[1]) for r in rows])
-        # Changing the spelling or moving a re-export without changing its origin
-        # does not recheck the unchanged caller.
+        # A re-export definition edit rechecks its caller independently of
+        # whether the final origin changed.
         old = head
         self.write(module, source + '// moved\npub const call = windows.kernel32.Sleep; // comment\n')
         same = self.commit()
-        self.assertEqual([], win.check(self.repo, old, same, upstream, removed))
+        self.assertEqual([("probe.zig", 2)], [(r[0], r[1]) for r in win.check(
+            self.repo, old, same, upstream, removed)])
         self.write(module, source + "pub const call = windows.kernel32.GetLastError;\n")
         changed = self.commit()
         removed.write_text("kernel32.GetLastError\nkernel32.Sleep\n", encoding="utf-8")
@@ -740,6 +863,24 @@ class GitControls(unittest.TestCase):
         self.write(module, source + "pub const call = local.sys.Sleep;\n")
         rehomed = self.commit()
         self.assertEqual([], win.check(self.repo, changed, rehomed, upstream, removed))
+
+    def test_reexport_dependency_deletion_and_unrelated_twin(self):
+        module = "src/os/windows.zig"
+        source = ('const k = @import("std").os.windows.kernel32\n .Local\n;\n'
+                  'pub const call = k.Sleep;\npub const other = @import("std").os.windows.kernel32.Sleep;\n'
+                  '\n// unrelated comment\n')
+        self.write(module, source)
+        self.write("probe.zig", 'const w = @import("src/os/windows.zig");\n'
+                   'fn call() void { w.call(1); }\nfn other() void { w.other(1); }\n')
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        self.write(module, source.replace(" .Local\n", ""))
+        head = self.commit()
+        self.assertEqual([("probe.zig", 2)], [(r[0], r[1]) for r in win.check(
+            self.repo, base, head, upstream, removed)])
+        self.write(module, source.replace("unrelated comment", "changed unrelated comment"))
+        twin = self.commit()
+        self.assertEqual([], win.check(self.repo, base, twin, upstream, removed))
 
     def test_git_environment_cannot_hide_paths_or_choose_another_repo(self):
         self.write("src/os/windows.zig", "// reexports\n")
@@ -857,7 +998,9 @@ class HistoryControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = Path(__file__).resolve().parent.parent
-        cls.repo = Path(tempfile.mkdtemp(prefix="lint-history-controls-"))
+        temporary = tempfile.TemporaryDirectory(prefix="lint-history-controls-")
+        cls.addClassCleanup(temporary.cleanup)
+        cls.repo = Path(temporary.name)
         common.git(cls.repo, "init", "-q")
         common.git(cls.repo, "config", "user.name", "Lint History Control")
         common.git(cls.repo, "config", "user.email", "lint@example.invalid")
@@ -886,20 +1029,20 @@ class HistoryControls(unittest.TestCase):
     def check(self, base, head):
         return win.check(self.repo, base, head, self.ci / "upstream-paths.txt", self.ci / "win32-removed-identifiers.txt")
 
-    def test_real_import_swap_and_ipc_alias_move(self):
+    def test_real_import_swap_and_ipc_alias_move_touch_definitions(self):
         path = "src/apprt/win32.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
         self.assertEqual('const std = @import("std");\n', lines[10])
         lines[10], lines[11] = lines[11], lines[10]
-        self.assertEqual([], self.check(self.base, self.fixture(path, "".join(lines))))
+        self.assertEqual(48, len(self.check(self.base, self.fixture(path, "".join(lines)))))
         path = "src/apprt/win32/ipc_server.zig"
         source = common.sources(self.repo, self.base, {path})[path]
         lines = source.splitlines(keepends=True)
         at = lines.index("const windows = std.os.windows;\n")
         line = lines.pop(at)
         lines.insert(at + 2, line)
-        self.assertEqual([], self.check(self.base, self.fixture(path, "".join(lines))))
+        self.assertEqual(40, len(self.check(self.base, self.fixture(path, "".join(lines)))))
 
     def test_rekeyed_alias_owner_fixtures_keep_unchanged_uses(self):
         path = "src/os/monotonic.zig"
@@ -927,6 +1070,16 @@ class HistoryControls(unittest.TestCase):
         after = self.fixture(path, source, parent=before)
         self.assertEqual([], self.check(before, after))
 
+    def test_deleted_test_does_not_pair_with_another_test_alias(self):
+        path = "src/update/github_releases.zig"
+        source = common.sources(self.repo, self.base, {path})[path]
+        at = re.search(r"(?m)^test ", source).start()
+        for origin in ('@import("../os/windows.zig")', "std.os.windows"):
+            collision = 'test "collision probe" { const windows = ' + origin + '; _ = windows; }\n\n'
+            before = self.fixture(path, source[:at] + collision + source[at:])
+            after = self.fixture(path, source, parent=before)
+            self.assertEqual([], self.check(before, after))
+
     def test_real_owner_rename_and_test_deletion_preserve_added_findings(self):
         for head, expected in (("9c9de2aa23bf5f58a68f730b051d28bafb2c5364", 0),
                                ("2e8b1bf6d39a314f0efcc1bdabd0db9c55876a88", 2)):
@@ -936,29 +1089,30 @@ class HistoryControls(unittest.TestCase):
             self.assertEqual(expected, len(rows))
             self.assertTrue(all(row[1] in added.get(row[0], ()) for row in rows))
             print("Owner-key history control:", head[:9], "genuine added-line findings", len(rows))
-    def test_real_refactors_do_not_recheck_unchanged_uses(self):
+    def test_real_refactors_recheck_touched_alias_definitions(self):
         for head in ("1c8d4d39463e43415f8e8de603ed7312ad907420", "2ec37a2c80f9dab40b06b036b66ca575487d633b"):
             base = common.revision(self.repo, head + "^")
             rows = self.check(base, head)
             added = common.added_lines(self.repo, base, head)
             unchanged = [row for row in rows if row[1] not in added.get(row[0], ())]
-            self.assertEqual([], unchanged)
             if head.startswith("1c8d4d394"):
-                self.assertEqual([], rows)
+                self.assertEqual(2, len(rows))
+                self.assertEqual(2, len(unchanged))
             else:
-                self.assertEqual(45, len(rows))
+                self.assertEqual(74, len(rows))
+                self.assertEqual(29, len(unchanged))
                 path = "src/apprt/win32.zig"
                 module = "src/os/windows.zig"
                 texts = common.sources(self.repo, head, {path, module})
-                # With no previous snapshot, span() reproduces the old
-                # declaration-touch rule, accounting for the removed 29 errors.
+                # Dependency spans account for the 29 unchanged references
+                # admitted by the touched-definition rule, alongside 45 added.
                 legacy = win.Bindings(texts[path], win.reexports(texts[module]), path)
-                old_false = {(key, line) for key, span, line in legacy.uses(
+                dependent = {(key, line) for key, span, line in legacy.uses(
                     set((self.ci / "win32-removed-identifiers.txt").read_text().splitlines()))
                     if span & added.get(path, set()) and line not in added.get(path, set())}
-                self.assertEqual(29, len(old_false))
+                self.assertEqual(29, len(dependent))
             print("Historical alias control:", head[:9], "unchanged-use errors", len(unchanged),
-                  "genuine added-line errors", len(rows))
+                  "added-line errors", len(rows) - len(unchanged))
 
     def test_real_pty_alias_revert_rechecks_46_unchanged_uses(self):
         base = self.base

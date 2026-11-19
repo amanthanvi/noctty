@@ -4,7 +4,7 @@ This deliberately does not evaluate computed expressions or container members.
 """
 
 from dataclasses import dataclass, replace
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 import posixpath
 
 import zigtok
@@ -137,8 +137,6 @@ class Bindings:
         self.reexports, self.path = reexports or {}, path
         self.scopes, self.parents = scopes(self.tokens)
         self.decls, self.ends, self.resolved = {}, {}, {}
-        self.previous, self.changed_exports = None, frozenset()
-        self.scope_keys, self.declaration_keys, self.changed_declarations = None, None, {}
         for i, token in enumerate(self.tokens):
             if not zigtok.declaration_at(self.tokens, i):
                 continue
@@ -264,70 +262,43 @@ class Bindings:
             if origin:
                 yield i, end, origin
 
-    def stable_declarations(self):
-        """Match declaration names within lexical owners, independent of lines.
-
-        Named functions/containers/labels keep their names when moved. Unnamed
-        sibling blocks use their token header and ordinal within the parent.
-        """
-        if self.declaration_keys is not None:
-            return self.declaration_keys
-        functions = zigtok.functions_of_tokens(self.tokens)
-        named = {f["body"][0] + 1: (f["kind"], f["name"])
-                 for f in functions if f["body"]}
-        for container in zigtok.containers_of_tokens(self.tokens, functions):
-            if container["naming"] == "declaration":
-                named[container["open"] + 1] = ("container", container["name"])
-        keys, siblings = {0: ()}, {}
-        for scope, parent in self.parents.items():
-            if parent is None:
-                continue
-            opening = scope - 1
-            if opening >= 2 and zigtok.is_op(self.tokens[opening - 1], ":"):
-                label = ("label", identifier(self.tokens[opening - 2]))
-            elif scope in named:
-                label = named[scope]
+    def definition_lines(self, index):
+        start = index
+        while start:
+            token = self.tokens[start - 1]
+            if token.kind == "keyword" and token.text in ("pub", "export", "extern", "threadlocal", "comptime"):
+                start -= 1
+            elif (token.kind == "string" and start >= 2
+                    and self.tokens[start - 2].text == "extern"):
+                start -= 2
             else:
-                start = opening - 1
-                while start >= 0 and not zigtok.is_op(self.tokens[start], "{", "}", ";"):
-                    start -= 1
-                label = ("block", tuple((t.kind, t.text) for t in self.tokens[start + 1:opening]))
-            sibling = parent, label
-            ordinal = siblings.get(sibling, 0)
-            siblings[sibling] = ordinal + 1
-            keys[scope] = keys[parent] + ((label, ordinal),)
-        self.scope_keys = keys
-        self.declaration_keys = {(keys[scope], name): at
-                                 for (scope, name), (at, _) in self.decls.items()}
-        return self.declaration_keys
+                break
+        return (self.tokens[start].line + 1,
+                self.tokens[min(self.ends[index], len(self.tokens) - 1)].line + 1)
 
-    def declaration_changed(self, index):
-        if self.previous is None:
-            return True
-        if index not in self.changed_declarations:
-            self.stable_declarations()
-            key = self.scope_keys[self.scopes[index]], identifier(self.tokens[index + 1])
-            prior = self.previous.stable_declarations().get(key)
-            current = self.resolve([key[1]], index)
-            old = self.previous.resolve([key[1]], prior) if prior is not None else None
-            def binding_origin(origin):
-                return (origin.kind, origin.parts) if origin else None
-            self.changed_declarations[index] = binding_origin(current) != binding_origin(old)
-        return self.changed_declarations[index]
+    def changed_aliases(self, added, deleted):
+        """Head definitions touched by added lines or deletion gaps, boundaries included.
 
-    def declared_before(self, index):
-        if self.previous is None:
-            return False
-        self.stable_declarations()
-        key = self.scope_keys[self.scopes[index]], identifier(self.tokens[index + 1])
-        return key in self.previous.stable_declarations()
+        Gap p lies after head line p and before p+1. A definition on lines
+        first..last therefore contains gaps first-1..last. No base declarations
+        or lexical-owner identities participate in this test.
+        """
+        added, deleted = sorted(added), sorted(deleted)
+        changed = set()
+        for index in self.ends:
+            first, last = self.definition_lines(index)
+            at = bisect_left(added, first)
+            gap = bisect_left(deleted, first - 1)
+            if ((at < len(added) and added[at] <= last)
+                    or (gap < len(deleted) and deleted[gap] <= last)):
+                changed.add(index)
+        return frozenset(changed)
 
     def span(self, start, end, origin=None):
         result = {t.line + 1 for t in self.tokens[start:end]}
         if origin:
             for index in origin.declarations:
-                if self.declaration_changed(index):
-                    result.update(t.line + 1 for t in self.tokens[index:self.ends[index] + 1])
+                result.update(t.line + 1 for t in self.tokens[index:self.ends[index] + 1])
         return result
 
 
