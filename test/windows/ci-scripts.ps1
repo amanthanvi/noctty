@@ -623,6 +623,20 @@ try {
         $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranCrossed -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1'
         Assert-True ((($v.Problems -join ' ') -like $ranCase.Expect) -and ($v.Problems -join ' ') -notlike '*BUILD-DIFFERS zig*') "Across the crossing a list that differs in $($ranCase.Key) still fails ($($v.Problems -join ' | '))."
     }
+    # Values read from a list compare ordinally: pwsh 7.6's -ceq ignores a control
+    # character (common brief, PWSH-CEQ-ICU), so `<ESC>0` would equal `0`.
+    $ranEsc = [string][char]27
+    Assert-True (-not (Test-RanListSame "${ranEsc}A" 'A') -and -not (Test-RanListSame (Get-RanListModeMeaning "${ranEsc}Debug") 'debug')) 'Values and modes compare ordinally, control characters included.'
+    $ranEscOptions = New-RanListFile 'esc-options.tsv' $ranBaseTests -Build (New-RanBuild @{ options = "(none)$ranEsc" })
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranEscOptions -SkipFiles @($ranSkips)).Problems -join ' ') -like '*BUILD-DIFFERS options*') 'Options that differ only by a control character are not the same build.'
+    $ranEscFact = New-RanListFile 'esc-fact.tsv' $ranBaseTests -Environment (New-RanEnv @{ 'cwd-on-temp-drive' = "true$ranEsc" })
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranEscFact -SkipFiles @($ranSkips)).Problems -join ' ') -like '*ENV-DIFFERS cwd-on-temp-drive*') 'Facts that differ only by a control character differ.'
+    $ranEscExit = Join-Path $ranTemp 'esc-exit.tsv'
+    [System.IO.File]::WriteAllText($ranEscExit, ($ranText -replace 'exit=0', "exit=${ranEsc}0"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True (((Get-RanVerdict -Baselines @($ranEscExit) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*is not a suite record*') 'A suite record whose exit is not a number is refused, not read as green.'
+    $ranEscResult = Join-Path $ranTemp 'esc-result.tsv'
+    [System.IO.File]::WriteAllText($ranEscResult, ($ranText -replace "ghostty-test`tOK`t1`ta\.test\.two", "ghostty-test`t${ranEsc}OK`t1`ta.test.two"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True (((Get-RanVerdict -Baselines @($ranEscResult) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like "*is not '<suite><TAB><OK|SKIP|FAIL>*") 'A row whose result is not exactly OK, SKIP or FAIL is refused.'
     $ranUnknown = New-RanListFile 'unknown-build.tsv' $ranBaseTests -Build ([ordered]@{ source = 'declared'; options = 'unknown'; zig = 'unknown'; filtered = 'false' })
     Assert-True (((Get-RanVerdict -Baselines @($ranUnknown) -Later $ranUnknown -SkipFiles @($ranSkips)).Problems -join ' ') -like '*records no real build options*') 'A list whose build is unknown is refused.'
     $ranNoMode = New-RanListFile 'no-mode.tsv' $ranBaseTests -Build ([ordered]@{ source = 'declared'; options = '(none)'; zig = '0.15.2'; filtered = 'false' })

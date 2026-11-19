@@ -99,13 +99,18 @@ function Resolve-RanListPath {
 # ReleaseFast and ReleaseSmall to debug, safe, fast and small.
 function Get-RanListModeMeaning {
     param([AllowEmptyString()] [string] $Mode)
-    switch -CaseSensitive ($Mode) {
-        { $_ -cin 'Debug', 'debug' } { return 'debug' }
-        { $_ -cin 'ReleaseSafe', 'safe' } { return 'safe' }
-        { $_ -cin 'ReleaseFast', 'fast' } { return 'fast' }
-        { $_ -cin 'ReleaseSmall', 'small' } { return 'small' }
-        default { return $Mode }
+    foreach ($pair in @(@('Debug', 'debug'), @('ReleaseSafe', 'safe'), @('ReleaseFast', 'fast'), @('ReleaseSmall', 'small'))) {
+        if ((Test-RanListSame $Mode $pair[0]) -or (Test-RanListSame $Mode $pair[1])) { return $pair[1] }
     }
+    return $Mode
+}
+
+# Whether two values read from files are the same text. PowerShell 7.6's -ceq,
+# -eq, -cin and switch ignore control characters ("<ESC>A" -ceq "A" is true),
+# so values are compared ordinally.
+function Test-RanListSame {
+    param([AllowNull()] [AllowEmptyString()] [string] $A, [AllowNull()] [AllowEmptyString()] [string] $B)
+    return [string]::Equals($A, $B, [StringComparison]::Ordinal)
 }
 
 # The identity the compare keys on. A real unnamed block, `<container>.test_<n>`
@@ -114,7 +119,7 @@ function Get-RanListModeMeaning {
 function Get-RanListIdentity {
     param([Parameter(Mandatory)] [string] $Suite, [Parameter(Mandatory)] [string] $Name)
     $m = [regex]::Match($Name, '^(?<c>[^\s.]+(?:\.[^\s.]+)*)\.test_\d+$')
-    if ($m.Success -and -not (@($m.Groups['c'].Value -split '\.') | Where-Object { $_ -ceq 'test' -or $_ -ceq 'decltest' })) {
+    if ($m.Success -and -not (@($m.Groups['c'].Value -split '\.') | Where-Object { (Test-RanListSame $_ 'test') -or (Test-RanListSame $_ 'decltest') })) {
         return "$Suite`t$($m.Groups['c'].Value).test_#"
     }
     return "$Suite`t$Name"
@@ -133,7 +138,7 @@ function Read-RanList {
         return $result
     }
     $lines = [System.IO.File]::ReadAllLines($full, [System.Text.UTF8Encoding]::new($false))
-    if ($lines.Count -eq 0 -or $lines[0] -cne $script:RanListFormat) {
+    if ($lines.Count -eq 0 -or -not (Test-RanListSame $lines[0] $script:RanListFormat)) {
         $problems.Add("'$full' is not a ran list (its first line is not '$($script:RanListFormat)').")
         return $result
     }
@@ -153,7 +158,7 @@ function Read-RanList {
         }
         if ($line -match '^# env: ([^=]+)=(.*)$') { $result.Environment[$Matches[1]] = $Matches[2]; continue }
         if ($line.StartsWith('# suite: ')) {
-            if ($line -notmatch '^# suite: (\S+) tests=(\d+) ok=(\d+) skip=(\d+) fail=(\d+) exit=(\S+) errors-logged=(\d+) leaked=(\d+) panics=(\d+)$') {
+            if ($line -cnotmatch '^# suite: ([A-Za-z0-9._-]+) tests=(\d+) ok=(\d+) skip=(\d+) fail=(\d+) exit=(-?\d+) errors-logged=(\d+) leaked=(\d+) panics=(\d+)$') {
                 $problems.Add("'$full' line $($i + 1) is not a suite record.")
                 continue
             }
@@ -166,7 +171,7 @@ function Read-RanList {
         }
         if ($line.StartsWith('#')) { continue }
         $fields = $line -split "`t", 4
-        if ($fields.Count -ne 4 -or $fields[1] -cnotin @('OK', 'SKIP', 'FAIL') -or $fields[2] -notmatch '^[1-9]\d*$' -or $fields[3].Length -eq 0) {
+        if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '^[A-Za-z0-9._-]+$' -or $fields[1] -cnotmatch '^(OK|SKIP|FAIL)$' -or $fields[2] -notmatch '^[1-9]\d*$' -or $fields[3].Length -eq 0) {
             $problems.Add("'$full' line $($i + 1) is not '<suite><TAB><OK|SKIP|FAIL><TAB><count><TAB><name>'.")
             continue
         }
@@ -174,7 +179,7 @@ function Read-RanList {
         $total += [int]$fields[2]
     }
     if ($null -eq $end) { $problems.Add("'$full' has no '# end:' line, so it was cut short.") }
-    elseif ($end -cne "# end: rows=$($rows.Count) tests=$total") { $problems.Add("'$full' does not match its end line ($end; read rows=$($rows.Count) tests=$total).") }
+    elseif (-not (Test-RanListSame $end "# end: rows=$($rows.Count) tests=$total")) { $problems.Add("'$full' does not match its end line ($end; read rows=$($rows.Count) tests=$total).") }
     if ([string]::IsNullOrWhiteSpace($revision) -or $revision -ieq 'unknown') { $problems.Add("'$full' names no revision.") }
     foreach ($key in 'source', 'options', 'mode', 'zig') {
         if (-not $result.Build.Contains($key) -or [string]::IsNullOrWhiteSpace($result.Build[$key]) -or $result.Build[$key] -ieq 'unknown') {
@@ -235,7 +240,7 @@ function Read-RanListLedger {
             $fields = $line -split "`t"
             $ok = $fields.Count -eq $width -and $fields[0].Length -gt 0 -and $fields[1].Length -gt 0 -and $fields[$width - 1].Trim().Length -gt 0
             $requires = @()
-            if ($ok -and $width -eq 4 -and $fields[2] -cne '-') {
+            if ($ok -and $width -eq 4 -and -not (Test-RanListSame $fields[2] '-')) {
                 $requires = @($fields[2] -split ';' | ForEach-Object { $_.Trim() })
                 # `unknown` is what a list records for a fact it could not
                 # measure; no condition may ask for it.
@@ -276,11 +281,11 @@ function Get-RanListUnmetConditions {
         if ($key.StartsWith('build:')) {
             $buildKey = $key.Substring(6)
             $have = "$($List.Build[$buildKey])"
-            $holds = if ($buildKey -ceq 'mode') { (Get-RanListModeMeaning $have) -ceq (Get-RanListModeMeaning $value) } else { $have -ceq $value }
+            $holds = if (Test-RanListSame $buildKey 'mode') { Test-RanListSame (Get-RanListModeMeaning $have) (Get-RanListModeMeaning $value) } else { Test-RanListSame $have $value }
         }
         else {
             $have = "$($List.Environment[$key])"
-            $holds = $have -ceq $value
+            $holds = Test-RanListSame $have $value
         }
         # A value the list could not measure meets no condition, whatever the
         # condition names.
@@ -307,20 +312,20 @@ function Compare-RanList {
     foreach ($list in @($BaselineLists) + @($CandidateList)) { foreach ($p in $list.Problems) { $problems.Add($p) } }
     $crossFrom = $null; $crossTo = $null
     if (-not [string]::IsNullOrWhiteSpace($CompilerCrossing)) {
-        if ($CompilerCrossing -notmatch '^([^=\s]+)=([^=\s]+)$' -or $Matches[1] -ceq $Matches[2]) { $problems.Add("-CompilerCrossing '$CompilerCrossing' is not '<from>=<to>' with two compilers.") }
+        if ($CompilerCrossing -notmatch '^([^=\s]+)=([^=\s]+)$' -or (Test-RanListSame $Matches[1] $Matches[2])) { $problems.Add("-CompilerCrossing '$CompilerCrossing' is not '<from>=<to>' with two compilers.") }
         else { $crossFrom = $Matches[1]; $crossTo = $Matches[2] }
     }
     if ($problems.Count -gt 0) { return [pscustomobject]@{ Problems = $problems.ToArray(); Notes = $notes.ToArray() } }
 
     foreach ($list in @($BaselineLists) + @($CandidateList)) {
-        if ($list.Build['dirty'] -ceq 'true' -and -not $AllowDirty) { $problems.Add("'$($list.Path)' was built from a checkout with tracked changes (dirty=true), so its tests are not its revision's.") }
+        if ((Test-RanListSame $list.Build['dirty'] 'true') -and -not $AllowDirty) { $problems.Add("'$($list.Path)' was built from a checkout with tracked changes (dirty=true), so its tests are not its revision's.") }
     }
     $crossings = 0
     foreach ($list in $BaselineLists) {
-        if ($list.Build['filtered'] -ceq 'true' -and -not $AllowFilteredBaseline) { $problems.Add("'$($list.Path)' is a filtered build (-Dtest-filter), so it is no baseline.") }
+        if ((Test-RanListSame $list.Build['filtered'] 'true') -and -not $AllowFilteredBaseline) { $problems.Add("'$($list.Path)' is a filtered build (-Dtest-filter), so it is no baseline.") }
         $crossed = $false
-        if ("$($list.Build['zig'])" -cne "$($CandidateList.Build['zig'])") {
-            if ($null -ne $crossFrom -and $list.Build['zig'] -ceq $crossFrom -and $CandidateList.Build['zig'] -ceq $crossTo) { $crossed = $true; $crossings++ }
+        if (-not (Test-RanListSame $list.Build['zig'] $CandidateList.Build['zig'])) {
+            if ($null -ne $crossFrom -and (Test-RanListSame $list.Build['zig'] $crossFrom) -and (Test-RanListSame $CandidateList.Build['zig'] $crossTo)) { $crossed = $true; $crossings++ }
             else {
                 $hint = if ($null -eq $crossFrom) { ' (declare -CompilerCrossing <from>=<to> for a planned compiler change)' } else { " (the declared crossing is $crossFrom=$crossTo)" }
                 $problems.Add("BUILD-DIFFERS zig: '$($list.Path)' has '$($list.Build['zig'])', '$($CandidateList.Path)' has '$($CandidateList.Build['zig'])'$hint.")
@@ -328,16 +333,16 @@ function Compare-RanList {
         }
         foreach ($key in 'source', 'options', 'mode', 'target', 'filtered') {
             $a = "$($list.Build[$key])"; $b = "$($CandidateList.Build[$key])"
-            if ($key -ceq 'source') {
+            if (Test-RanListSame $key 'source') {
                 # A declared or imported list and a built one can be compared only when both are of one kind.
-                $a = $(if ($a -ceq 'built') { 'built' } else { 'not built' }); $b = $(if ($b -ceq 'built') { 'built' } else { 'not built' })
+                $a = $(if (Test-RanListSame $a 'built') { 'built' } else { 'not built' }); $b = $(if (Test-RanListSame $b 'built') { 'built' } else { 'not built' })
             }
-            $same = if ($key -ceq 'mode' -and $crossed) { (Get-RanListModeMeaning $a) -ceq (Get-RanListModeMeaning $b) } else { $a -ceq $b }
+            $same = if ((Test-RanListSame $key 'mode') -and $crossed) { Test-RanListSame (Get-RanListModeMeaning $a) (Get-RanListModeMeaning $b) } else { Test-RanListSame $a $b }
             if (-not $same) { $problems.Add("BUILD-DIFFERS $key`: '$($list.Path)' has '$($list.Build[$key])', '$($CandidateList.Path)' has '$($CandidateList.Build[$key])'.") }
         }
         $facts = @(@($list.Environment.Keys) + @($CandidateList.Environment.Keys) | Sort-Object -Unique -CaseSensitive)
         foreach ($key in $facts) {
-            if ("$($list.Environment[$key])" -cne "$($CandidateList.Environment[$key])") {
+            if (-not (Test-RanListSame $list.Environment[$key] $CandidateList.Environment[$key])) {
                 $problems.Add("ENV-DIFFERS $key`: '$($list.Path)' has '$($list.Environment[$key])', '$($CandidateList.Path)' has '$($CandidateList.Environment[$key])'.")
             }
         }

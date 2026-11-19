@@ -379,7 +379,7 @@ function Get-RanListEnvironment {
     }
     foreach ($name in $script:RanListProbeVariables) {
         $value = [Environment]::GetEnvironmentVariable($name)
-        $facts["env:$name"] = $(if ($null -eq $value) { 'unset' } elseif ($value -ceq '1') { '1' } else { 'other' })
+        $facts["env:$name"] = $(if ($null -eq $value) { 'unset' } elseif ([string]::Equals($value, '1', [StringComparison]::Ordinal)) { '1' } else { 'other' })
     }
     return $facts
 }
@@ -469,7 +469,7 @@ function Get-RanListCheckoutState {
 function Assert-RanListCheckoutUnchanged {
     param([Parameter(Mandatory)] [string] $Root, [Parameter(Mandatory)] [object] $Before, [Parameter(Mandatory)] [string] $When)
     $now = Get-RanListCheckoutState -Root $Root
-    if ($now.Head -cne $Before.Head -or $now.Status -cne $Before.Status) {
+    if (-not [string]::Equals($now.Head, $Before.Head, [StringComparison]::Ordinal) -or -not [string]::Equals($now.Status, $Before.Status, [StringComparison]::Ordinal)) {
         throw "$Root changed $When (HEAD or tracked files), so the list would not be $($Before.Head)'s; no list written."
     }
 }
@@ -481,7 +481,7 @@ function Assert-RanListEnvironmentOf {
     if (-not (Test-Path -LiteralPath $basePath -PathType Leaf)) { throw "The baseline '$basePath' does not exist." }
     $baseFacts = @{}
     foreach ($l in [System.IO.File]::ReadAllLines($basePath)) { if ($l -match '^# env: ([^=]+)=(.*)$') { $baseFacts[$Matches[1]] = $Matches[2] } }
-    $differ = @(@($Facts.Keys) + @($baseFacts.Keys) | Sort-Object -Unique -CaseSensitive | Where-Object { "$($Facts[$_])" -cne "$($baseFacts[$_])" })
+    $differ = @(@($Facts.Keys) + @($baseFacts.Keys) | Sort-Object -Unique -CaseSensitive | Where-Object { -not [string]::Equals("$($Facts[$_])", "$($baseFacts[$_])", [StringComparison]::Ordinal) })
     if ($differ.Count -gt 0) {
         foreach ($key in $differ) { [Console]::Error.WriteLine("RAN LIST: environment fact $key is '$($Facts[$key])' here and '$($baseFacts[$key])' in the baseline.") }
         [Console]::Error.WriteLine('RAN LIST: this run would not be like for like with its baseline; nothing was built or run.')
@@ -644,7 +644,7 @@ finally {
 # One list is one compiler and one mode: the runner's record names them.
 if ($compilers.Count -gt 1) { $problems.Add("The compiler differs: 'zig version' and the records name $(@($compilers) -join ', ').") }
 if ($modes.Count -gt 1) { $problems.Add("The records name more than one mode: $(@($modes) -join ', ').") }
-if ($null -ne $builtMode -and $modes.Count -eq 1 -and @($modes)[0] -cne $builtMode) { $problems.Add("The build summary's mode is $builtMode, the record's $(@($modes)[0]).") }
+if ($null -ne $builtMode -and $modes.Count -eq 1 -and -not [string]::Equals(@($modes)[0], $builtMode, [StringComparison]::Ordinal)) { $problems.Add("The build summary's mode is $builtMode, the record's $(@($modes)[0]).") }
 if ($problems.Count -gt 0) {
     foreach ($problem in $problems) { [Console]::Error.WriteLine("RAN LIST: $problem") }
     [Console]::Error.WriteLine('RAN LIST: no list written.')
