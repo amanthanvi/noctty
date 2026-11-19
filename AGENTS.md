@@ -620,8 +620,11 @@ that govern each symbol you change, or that none does.
   run-time checks of each saving launch's command line and sandbox,
   `Assert-AccessibilitySaveLaunchQuiet`, `Get-AccessibilitySaveLaunchVerdict`,
   `Get-AccessibilityNotificationSettings` and
-  `Assert-AccessibilitySaveSandboxQuiet`, the leaf's `# pin-begin:` regions and
-  their SHA-256 pins, `$saveLeafPins`, and the toast-source inventory, who may
+  `Assert-AccessibilitySaveSandboxQuiet`, the probe's close prompt button,
+  `Get-AccessibilitySettingsCloseActionInvoke`, the leaf's `# pin-begin:`
+  regions and their SHA-256 pins, `$saveLeafPins`, the cmdlets they call,
+  `$saveRegionCmdlets`, the flow statements its finally blocks may hold,
+  `$saveFinallyFlows`, and the toast-source inventory, who may
   name the command-finish leaf and the quiet-save grammar in
   `Contracts.90-Workflows.ps1`), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines

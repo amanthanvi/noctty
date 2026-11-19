@@ -749,17 +749,29 @@ $readJobFiles = {
         if ($null -eq $text) { throw "An interactive job file is missing: $file" }
         $texts[$file] = $text
         $directory = Split-Path -Parent $file
-        foreach ($token in (& $parseToastScript $text $file -Tokens).Tokens) {
+        $parsedFile = & $parseToastScript $text $file -Tokens
+        # A literal child of `Join-Path $repoRoot` or `Join-Path $PSScriptRoot`
+        # resolves against that base alone, as PowerShell resolves it.
+        $joinBases = @{}
+        foreach ($join in $parsedFile.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and
+                    [string]::Equals($node.GetCommandName(), 'Join-Path', [StringComparison]::OrdinalIgnoreCase) }, $true)) {
+            $elements = @($join.CommandElements)
+            if ($elements.Count -ne 3 -or $elements[1] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+                $elements[2] -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+            if ([string]::Equals($elements[1].VariablePath.UserPath, 'repoRoot', [StringComparison]::OrdinalIgnoreCase)) { $joinBases[$elements[2].Extent.StartOffset] = '' }
+            elseif ([string]::Equals($elements[1].VariablePath.UserPath, 'PSScriptRoot', [StringComparison]::OrdinalIgnoreCase)) { $joinBases[$elements[2].Extent.StartOffset] = $directory }
+        }
+        foreach ($token in $parsedFile.Tokens) {
             if ($token -isnot [System.Management.Automation.Language.StringToken] -or $token.Value -notmatch '\.ps1$') { continue }
             $name = $token.Value
-            $bases = @($directory, '', 'test\windows', 'scripts')
+            $bases = if ($joinBases.ContainsKey($token.Extent.StartOffset)) { @($joinBases[$token.Extent.StartOffset]) } else { @($directory, '', 'test\windows', 'scripts') }
             $rooted = [regex]::Match($name, '^(?i)\$(?:\{(?<root>PSScriptRoot|repoRoot)\}|(?<root>PSScriptRoot|repoRoot))[\\/]')
             if ($rooted.Success) {
                 $name = $name.Substring($rooted.Length)
                 $bases = if ([string]::Equals($rooted.Groups['root'].Value, 'PSScriptRoot', [StringComparison]::OrdinalIgnoreCase)) { @($directory) } else { @('') }
             }
-            # Every base the name resolves against is read, not only the first
-            # (`Join-Path $repoRoot 'x.ps1'` and a sibling x.ps1 both are).
+            # Any other name is read against every base it resolves against,
+            # not only the first.
             $found = $false
             foreach ($base in $bases) {
                 $relative = if ($base) { Join-Path $base $name } else { $name }
@@ -984,8 +996,9 @@ if (-not $toastSiblingDiscovered.ContainsKey($toastSiblingHelper) -or
     @(& $findToastSources $toastSiblingHelper $toastSiblingDiscovered[$toastSiblingHelper]).Count -ne 1) {
     throw 'The toast-source inventory must read a script a job script names from $PSScriptRoot.'
 }
-# A name two scripts answer to, a quiet one beside the leaf and one at the
-# root that holds a source, is read in both places (CodeRabbit).
+# `Join-Path $repoRoot` names the root script even with a quiet one of that
+# name beside the leaf: the root one is read and its source found, the
+# sibling is not read (CodeRabbit; Sol's round-6 Low).
 $toastRootHelper = 'interactive-win11-extra-root-helper.ps1'
 $toastBothDiscovered = & $readJobFiles {
     param([string] $File)
@@ -995,9 +1008,9 @@ $toastBothDiscovered = & $readJobFiles {
     if ($File -ceq $nonToastLeaf) { $text += "`n. (Join-Path `$repoRoot '$toastRootHelper')" }
     $text
 }
-if (-not $toastBothDiscovered.ContainsKey($toastRootHelper) -or -not $toastBothDiscovered.ContainsKey("test\windows\$toastRootHelper") -or
+if (-not $toastBothDiscovered.ContainsKey($toastRootHelper) -or $toastBothDiscovered.ContainsKey("test\windows\$toastRootHelper") -or
     @(& $findToastSources $toastRootHelper $toastBothDiscovered[$toastRootHelper]).Count -ne 1) {
-    throw 'The toast-source inventory must read every script a name resolves to, the root one beside a sibling of that name too.'
+    throw 'The toast-source inventory must read the script Join-Path $repoRoot names, not a sibling of that name.'
 }
 # And a script it cannot find fails it.
 $toastUnfound = $null
@@ -1217,7 +1230,18 @@ $saveCommandsNamed = {
 $saveIndexOfFile = { param([string] $File) & $saveIndexOf $jobFileTexts[$File] (Split-Path -Leaf $File) }
 $saveLeafIndex = & $saveIndexOfFile $accessibilityLeaf
 $saveFunctionNames = @('Get-AccessibilityNotificationSettings', 'Get-AccessibilitySaveLaunchVerdict', 'Assert-AccessibilitySaveLaunchQuiet',
-    'Assert-AccessibilitySaveSandboxQuiet', 'Start-AccessibilityProcessWithEnvironment')
+    'Assert-AccessibilitySaveSandboxQuiet', 'Start-AccessibilityProcessWithEnvironment', 'Get-AccessibilitySettingsCloseActionInvoke')
+# The cmdlets the pinned regions call. No job script may define a function of
+# one of these names, which would run in its place (Opus L1, round 6), and a
+# region may call nothing else but a function the job scripts define;
+# `Start-Process` and `Join-Path` are called there by their module.
+$saveRegionCmdlets = [Collections.Generic.HashSet[string]]::new([string[]]@('ConvertTo-Json', 'ForEach-Object', 'Get-CimInstance', 'Get-Content',
+        'Get-Process', 'Get-WinEvent', 'Join-Path', 'Measure-Object', 'Out-Null', 'Select-Object', 'Set-Content', 'Start-Process', 'Start-Sleep',
+        'Test-Path', 'Where-Object'), [StringComparer]::OrdinalIgnoreCase)
+$saveQualifiedCmdlets = @{ 'Start-Process' = 'Microsoft.PowerShell.Management\Start-Process'; 'Join-Path' = 'Microsoft.PowerShell.Management\Join-Path' }
+# The functions the whole leaf defines, which its regions may call (the
+# controls run on the leaf with the others cut).
+$saveLeafFunctionNames = [Collections.Generic.HashSet[string]]::new([string[]]@($saveLeafIndex.Functions | ForEach-Object { & $saveBareName $_.Name }), [StringComparer]::OrdinalIgnoreCase)
 $saveRuntimeFunctions = [ordered]@{}
 foreach ($saveRuntimeName in $saveFunctionNames) {
     $saveRuntimeFound = @($saveLeafIndex.Functions | Where-Object { & $saveSame $_.Name $saveRuntimeName })
@@ -1448,6 +1472,10 @@ try {
             @{ Name = 'no XDG_CONFIG_HOME'; Files = @{}; Empty = $true; Fails = $true; NoHome = $true },
             @{ Name = 'another saved file than the environment reads'; Files = @{}; Empty = $true; Fails = $true; Elsewhere = $true },
             @{ Name = 'a save with its terminal window open'; Files = @{ 'noctty\config.ghostty' = 'template' }; Empty = $false; Fails = $false; HostOpen = $true },
+            @{ Name = 'a build folder with no portable marker'; Files = @{ 'bin\noctty.exe' = $saveAscii.GetBytes('MZ') }; Empty = $true; Fails = $false; Exe = 'bin\noctty.exe' },
+            @{ Name = 'noctty.portable beside the exe (Opus L2, round 6)'; Files = @{ 'bin\noctty.exe' = $saveAscii.GetBytes('MZ'); 'bin\noctty.portable' = $saveAscii.GetBytes("`n") }; Empty = $true; Fails = $true; Exe = 'bin\noctty.exe' },
+            @{ Name = 'portable.txt beside the exe'; Files = @{ 'bin\noctty.exe' = $saveAscii.GetBytes('MZ'); 'bin\portable.txt' = $saveAscii.GetBytes("`n") }; Empty = $true; Fails = $true; Exe = 'bin\noctty.exe' },
+            @{ Name = 'config.ghostty beside the exe'; Files = @{ 'bin\noctty.exe' = $saveAscii.GetBytes('MZ'); 'bin\config.ghostty' = $saveAscii.GetBytes("`n") }; Empty = $true; Fails = $true; Exe = 'bin\noctty.exe' },
             @{ Name = 'a save with its terminal window closed (CodeRabbit)'; Files = @{ 'noctty\config.ghostty' = 'template' }; Empty = $false; Fails = $true; HostOpen = $false }
         )) {
         $saveCaseRoot = Join-Path $saveSandboxRoot "$([Guid]::NewGuid().ToString('N'))\$saveUnicodeDirectory"
@@ -1463,6 +1491,7 @@ try {
         $saveSavedPath = if ($toastCase.ContainsKey('Elsewhere')) { Join-Path $saveSandboxRoot 'elsewhere\noctty\config.ghostty' } else { Join-Path $saveCaseRoot 'noctty\config.ghostty' }
         $saveArguments = @{ Environment = $saveEnvironment; SavedConfigPath = $saveSavedPath; When = 'in the contract'; Empty = [bool]$toastCase.Empty }
         if ($toastCase.ContainsKey('HostOpen')) { $saveArguments['HostOpen'] = $toastCase.HostOpen }
+        if ($toastCase.ContainsKey('Exe')) { $saveArguments['ExecutablePath'] = Join-Path $saveCaseRoot $toastCase.Exe }
         $toastError = $null
         $toastOutput = [Collections.Generic.List[object]]::new()
         try { Assert-AccessibilitySaveSandboxQuiet @saveArguments 6>&1 5>&1 4>&1 3>&1 2>&1 | ForEach-Object { $toastOutput.Add($_) } }
@@ -1478,12 +1507,35 @@ finally {
     Remove-Item -LiteralPath Function:\Assert-AccessibilitySaveSandboxQuiet -ErrorAction SilentlyContinue
     if ([IO.Directory]::Exists($saveSandboxRoot)) { [IO.Directory]::Delete($saveSandboxRoot, $true) }
 }
+# The launcher refuses an environment that names one variable twice, in two
+# cases (an ordinal dictionary, as a changed library could return), before it
+# sets anything or starts a process (Opus L1, round 6). The FilePath does not
+# exist, so nothing could start even past the check.
+. ([scriptblock]::Create($saveRuntimeFunctions['Start-AccessibilityProcessWithEnvironment'].Extent.Text))
+try {
+    $saveDuplicate = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    $saveDuplicate['XDG_CONFIG_HOME'] = 'A'
+    $saveDuplicate['Xdg_Config_Home'] = 'B'
+    $saveMissing = Join-Path $repoRoot 'zig-out\no-such-dir\no-such-noctty.exe'
+    $saveBefore = [System.Environment]::GetEnvironmentVariable('XDG_CONFIG_HOME', [System.EnvironmentVariableTarget]::Process)
+    $toastError = $null
+    try { $null = Start-AccessibilityProcessWithEnvironment -FilePath $saveMissing -ArgumentList @('x') -WorkingDirectory $repoRoot -EnvironmentVariables $saveDuplicate -RedirectStandardOutput $saveMissing -RedirectStandardError $saveMissing }
+    catch { $toastError = $_.Exception.Message }
+    if ($null -eq $toastError -or -not $toastError.StartsWith('The launch environment names ', [StringComparison]::Ordinal) -or
+        -not [string]::Equals([System.Environment]::GetEnvironmentVariable('XDG_CONFIG_HOME', [System.EnvironmentVariableTarget]::Process), $saveBefore, [StringComparison]::Ordinal)) {
+        throw 'Start-AccessibilityProcessWithEnvironment must refuse an environment that names one variable twice, in two cases, before it sets any.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Start-AccessibilityProcessWithEnvironment -ErrorAction SilentlyContinue
+}
+
 # (A) The pins, by SHA-256 of each region's text with LF line ends. An edit in
 # a region must update its pin here, in the same change.
 $saveLeafPins = [ordered]@{
-    'save-functions' = '16AF9A3CDCC180C93D5C742F74C4082116AC23B2508B702C8B51C36612E571B7'
-    'save-sandbox' = '53CA9237BC53DF03079BC9BFAE41EA2DEC80EABF2726D57BC5550C66C1DCB1F8'
-    'save-flow' = '2F0C83B8C1FA687D68D127F11793BEB47535E93A16FEF9EFC323AAAA629EF667'
+    'save-functions' = 'A49D1CEA75B1FF13434222F104914B220D6530E6C19D5C53F9175C79C2BBBFD7'
+    'save-sandbox' = '56CDC68B224423E2D1883BF14793EF52FC92FD43C9CE81D3DAD01DACFC26820C'
+    'save-flow' = '05DFB5066F2C3613BE18E0594D6AED3E9E5E1A578245B5FF8EE7E092ACC2B010'
     'failure-path' = '2C488B0A4E92E3C4846520BE1F40C5D6FF7BA9B83BC7F175D588723D2DF859DE'
 }
 # Each region of a text: from its begin marker's line to its end marker's line,
@@ -1658,6 +1710,9 @@ $summarizeOtherScripts = {
     $variableCmdlet = $false
     $definesSaved = $false
     $dynamicForms = $false
+    $shadowsCmdlet = $false
+    $defaultParameters = $false
+    $functionNames = [Collections.Generic.HashSet[string]]::new($saveFolded)
     foreach ($other in $Texts.GetEnumerator()) {
         $key = $other.Key + [char]0 + $other.Value
         $facts = $null
@@ -1670,15 +1725,22 @@ $summarizeOtherScripts = {
                             -not ((& $saveSame $other.Key 'scripts\interactive-win11-lib.ps1') -and (& $saveSame $_.Name 'Get-InteractiveWin11ContainmentArguments'))
                     }).Count -ne 0
                 DynamicForms = (& $saveDynamicForms $otherIndex).Count -ne 0
+                ShadowsCmdlet = @($otherIndex.Functions | Where-Object { $saveRegionCmdlets.Contains((& $saveBareName $_.Name)) }).Count -ne 0
+                DefaultParameters = (& $saveUsesOf $otherIndex 'PSDefaultParameterValues').Count -ne 0
+                FunctionNames = [string[]]@($otherIndex.Functions | ForEach-Object { & $saveBareName $_.Name })
             }
             $saveOtherFacts[$key] = $facts
         }
         if ($facts.VariableCmdlet) { $variableCmdlet = $true }
         if ($facts.DefinesSaved) { $definesSaved = $true }
         if ($facts.DynamicForms) { $dynamicForms = $true }
+        if ($facts.ShadowsCmdlet) { $shadowsCmdlet = $true }
+        if ($facts.DefaultParameters) { $defaultParameters = $true }
+        foreach ($functionName in $facts.FunctionNames) { [void]$functionNames.Add($functionName) }
     }
     [pscustomobject]@{
         VariableCmdlet = $variableCmdlet; DefinesSaved = $definesSaved; DynamicForms = $dynamicForms; Joined = (@($Texts.Values) -join "`n")
+        ShadowsCmdlet = $shadowsCmdlet; DefaultParameters = $defaultParameters; FunctionNames = $functionNames
         Names = [Collections.Generic.Dictionary[string, bool]]::new($saveFolded)
     }
 }
@@ -1765,9 +1827,9 @@ $isPlainArgument = {
     $true
 }
 $saveSandboxCalls = [ordered]@{
-    FirstLaunchCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the first launch'' -Empty'
+    FirstLaunchCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the first launch'' -Empty -ExecutablePath $exe'
     ProbeSaveCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the probe saves'' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveProbeHost))'
-    VerifyStartCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the verifier starts'''
+    VerifyStartCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the verifier starts'' -ExecutablePath $exe'
     VerifySaveCheck = 'Assert-AccessibilitySaveSandboxQuiet -Environment $settingsProbeEnvironment -SavedConfigPath $sandboxConfigPath -When ''before the verifier saves'' -HostOpen ([NocttyAccessibilityNative]::IsWindow($saveVerifyHost))'
 }
 $testQuietSettingsSaves = {
@@ -1785,7 +1847,11 @@ $testQuietSettingsSaves = {
     }
     if ((& $saveUsesOf $index 'ExecutionContext').Count -ne 0) { return $false }
     foreach ($pipeline in $index.Pipelines) { if ($pipeline.Background) { return $false } }
-    if ($Others.VariableCmdlet -or $Others.DefinesSaved -or $Others.DynamicForms) { return $false }
+    if ($Others.VariableCmdlet -or $Others.DefinesSaved -or $Others.DynamicForms -or $Others.ShadowsCmdlet -or $Others.DefaultParameters) { return $false }
+    # Opus L1, round 6: no default parameter values, no function standing in
+    # for a cmdlet the regions call.
+    if ((& $saveUsesOf $index 'PSDefaultParameterValues').Count -ne 0) { return $false }
+    foreach ($function in $index.Functions) { if ($saveRegionCmdlets.Contains((& $saveBareName $function.Name))) { return $false } }
     if ((& $saveDynamicForms $index).Count -ne 0) { return $false }
     foreach ($definedName in $saveDefinedSet) {
         $definitions = @($index.Functions | Where-Object { $saveFolded.Equals((& $saveBareName $_.Name), $definedName) })
@@ -1823,16 +1889,26 @@ $testQuietSettingsSaves = {
         $source = & $getNamedArgument $call $tie.Parameter
         if ($source -isnot [System.Management.Automation.Language.VariableExpressionAst] -or -not (& $saveSame $source.VariablePath.UserPath $tie.Source)) { return $false }
     }
-    # (1): the saves, on those probes.
+    # (1): the saves, on those probes. The probe's is the InvokePattern of the
+    # close prompt's "Save and close" button, taken once by the pinned helper
+    # into `$saveCloseInvoke` and invoked once, in save-flow.
     $saveCloses = [Collections.Generic.List[object]]::new()
-    foreach ($close in (& $saveCommandsNamed $index 'Invoke-AccessibilitySettingsCloseAction')) {
+    foreach ($close in @(@(& $saveCommandsNamed $index 'Invoke-AccessibilitySettingsCloseAction') + @(& $saveCommandsNamed $index 'Get-AccessibilitySettingsCloseActionInvoke'))) {
         $action = & $getNamedArgument $close 'ActionName'
         if (-not (& $isSingleQuoted $action)) { return $false }
         if (& $saveSame $action.Value 'Save and close') { $saveCloses.Add($close) }
     }
-    if ($saveCloses.Count -ne 1) { return $false }
+    if ($saveCloses.Count -ne 1 -or -not (& $saveSame $saveCloses[0].GetCommandName() 'Get-AccessibilitySettingsCloseActionInvoke')) { return $false }
     $closeProbe = & $getNamedArgument $saveCloses[0] 'SettingsProbe'
     if ($closeProbe -isnot [System.Management.Automation.Language.VariableExpressionAst] -or -not (& $saveSame $closeProbe.VariablePath.UserPath 'saveProbe')) { return $false }
+    $closeWrite = & $soleWrite $index 'saveCloseInvoke' $Others
+    if ($null -eq $closeWrite -or -not [object]::ReferenceEquals((& $soleElement $closeWrite.Right), $saveCloses[0]) -or
+        (& $saveUsesOf $index 'saveCloseInvoke').Count -ne 2) { return $false }
+    $closeInvokes = @($index.InvokeMembers | Where-Object {
+            $saveFolded.Equals($_.Member.Extent.Text, 'Invoke') -and $_.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $saveFolded.Equals((& $saveBareName $_.Expression.VariablePath.UserPath), 'saveCloseInvoke')
+        })
+    if ($closeInvokes.Count -ne 1 -or -not (& $saveSame $closeInvokes[0].Extent.Text '$saveCloseInvoke.Invoke()')) { return $false }
     $saveInvokes = @($index.InvokeMembers | Where-Object {
             $saveFolded.Equals($_.Member.Extent.Text, 'TryGetCurrentPattern') -and
                 $_.Expression -is [System.Management.Automation.Language.MemberExpressionAst] -and $saveFolded.Equals($_.Expression.Member.Extent.Text, 'Save')
@@ -1863,7 +1939,7 @@ $testQuietSettingsSaves = {
     $sandboxWrites = [ordered]@{}
     foreach ($pin in @(
             @{ Name = 'settingsProbeEnvironment'; Right = 'Get-InteractiveWin11Environment -Layout $settingsPersistenceLayout' },
-            @{ Name = 'sandboxConfigPath'; Right = 'Join-Path $settingsPersistenceLayout.LocalAppData ''noctty\config.ghostty''' })) {
+            @{ Name = 'sandboxConfigPath'; Right = 'Microsoft.PowerShell.Management\Join-Path $settingsPersistenceLayout.LocalAppData ''noctty\config.ghostty''' })) {
         $write = & $soleWrite $index $pin.Name $Others
         if ($null -eq $write -or -not (& $saveSame $write.Right.Extent.Text $pin.Right)) { return $false }
         $sandboxWrites[$pin.Name] = $write
@@ -1926,7 +2002,8 @@ $testQuietSettingsSaves = {
     $order['ProbeCheck'] = & $callIndex 'Assert-AccessibilitySaveLaunchQuiet' 'Process' 'saveProbeProcess'
     $order['ProbeHost'] = & $writeIndex 'saveProbeHost'
     $order['ProbeOpen'] = & $writeIndex 'saveProbe'
-    $order['ProbeSave'] = & $statementOf $saveCloses[0]
+    $order['ProbeCloseGet'] = & $writeIndex 'saveCloseInvoke'
+    $order['ProbeSave'] = & $indexOf ($closeInvokes[0].Parent.Parent)
     $order['ProbeStop'] = & $callIndex 'Stop-InteractiveWin11Process' 'Process' 'saveProbeProcess'
     $order['VerifyClass'] = & $writeIndex 'saveVerifyClass'
     $order['VerifyArguments'] = & $writeIndex 'saveVerifyArguments'
@@ -1940,11 +2017,13 @@ $testQuietSettingsSaves = {
     foreach ($before in @(
             @('FirstLaunchCheck', 'ProbeStart'), @('Flags', 'ProbeArguments'), @('Flags', 'VerifyArguments'),
             @('ProbeClass', 'ProbeArguments'), @('ProbeArguments', 'ProbeStart'), @('ProbeStart', 'ProbeCheck'), @('ProbeCheck', 'ProbeHost'), @('ProbeHost', 'ProbeOpen'),
-            @('ProbeOpen', 'ProbeSaveCheck'), @('ProbeSaveCheck', 'ProbeSave'), @('ProbeSave', 'ProbeStop'), @('ProbeStop', 'VerifyStartCheck'),
+            @('ProbeOpen', 'ProbeCloseGet'), @('ProbeCloseGet', 'ProbeSaveCheck'), @('ProbeSaveCheck', 'ProbeSave'), @('ProbeSave', 'ProbeStop'), @('ProbeStop', 'VerifyStartCheck'),
             @('VerifyStartCheck', 'VerifyStart'), @('VerifyClass', 'VerifyArguments'), @('VerifyArguments', 'VerifyStart'), @('VerifyStart', 'VerifyCheck'),
             @('VerifyCheck', 'VerifyHost'), @('VerifyHost', 'VerifyOpen'), @('VerifyOpen', 'VerifyScrollback'), @('VerifyScrollback', 'VerifySaveCheck'), @('VerifySaveCheck', 'VerifySave'))) {
         if ($order[$before[0]] -ge $order[$before[1]]) { return $false }
     }
+    # Each save is the statement right after its last check (Opus M, round 6).
+    if ($order['ProbeSave'] -ne $order['ProbeSaveCheck'] + 1 -or $order['VerifySave'] -ne $order['VerifySaveCheck'] + 1) { return $false }
     # (7): that block is the leaf's normal-mode branch, a direct statement of
     # its main try, whose catch keeps the error and whose end throws it.
     $modeIf = $saveBlock.Parent
@@ -1996,6 +2075,23 @@ $testQuietSettingsSaves = {
     foreach ($guarded in @($mainTry.CatchClauses[0], $mainTry.Finally, $messagesInit[0], $keepIf[0], $endIf[0])) {
         if ($null -eq $guarded -or -not (& $within $guarded 'failure-path')) { return $false }
     }
+    # A region calls only the cmdlets listed, `Start-Process` and `Join-Path`
+    # by their module, or a function a job script defines; the save
+    # functions press no button themselves.
+    $inRegion = { param($Node) foreach ($r in $found.Regions.Values) { if ($Node.Extent.StartOffset -ge $r.Start -and $Node.Extent.EndOffset -le $r.End) { return $true } }; $false }
+    $definedHere = [Collections.Generic.HashSet[string]]::new([string[]]@($index.Functions | ForEach-Object { & $saveBareName $_.Name }), $saveFolded)
+    foreach ($command in $index.Commands) {
+        if (-not (& $inRegion $command)) { continue }
+        $written = $command.GetCommandName()
+        if ($null -eq $written) { continue }
+        $bare = & $saveCommandName $command
+        if ($saveQualifiedCmdlets.ContainsKey($bare) -and -not (& $saveSame $written $saveQualifiedCmdlets[$bare])) { return $false }
+        if (-not $saveRegionCmdlets.Contains($bare) -and -not $definedHere.Contains($bare) -and -not $saveLeafFunctionNames.Contains($bare) -and
+            -not $Others.FunctionNames.Contains($bare)) { return $false }
+    }
+    foreach ($member in $index.InvokeMembers) {
+        if ($saveFolded.Equals($member.Member.Extent.Text, 'Invoke') -and (& $within $member 'save-functions')) { return $false }
+    }
     $true
 }
 # Every caller gets exactly one bool back, or the contract stops.
@@ -2013,6 +2109,117 @@ $saveOthers = & $summarizeOtherScripts $saveOtherTexts
 if (-not (& $runQuietCheck $accessibilityText $launchLibraryText $saveOthers)) {
     throw 'interactive-win11-accessibility.ps1 must save Settings only in its save probe and verifier processes, each started with every notification off and checked at run time before its save, in the grammar this contract states (Contracts.90-Workflows.ps1, EVIDENCE-TOAST-FOREGROUND); the grammar refuses the forms it does not list.'
 }
+# The leaf's finally blocks may not end it before its final throw (Sol M1,
+# round 6: `exit 0` after `Assert-WindowsHarnessHistoryGuard` in the outer
+# history `finally` kept all four pins and swallowed the throw). In every
+# finally block, and in every function one calls, transitively (as defined in
+# the leaf or another job script): no `exit`; no labeled `break` or
+# `continue`, and none that is not inside a loop or switch of its own script
+# block, since one in a `ForEach-Object` block unwinds past its caller. The
+# parser itself refuses a `return`, `break` or `continue` that leaves a
+# finally (ControlLeavingFinally, under PowerShell 7 and 5.1), and so does
+# this check. A finally may run a script block only inline or by a function's
+# name. The flow statements inside the finally blocks themselves are pinned
+# one by one ($saveFinallyFlows): today two loop `continue`s in cleanup loops
+# and two `return`s of `Wait-AccessibilityCondition` script blocks; the
+# outer history `finally` holds none.
+$saveFinallyFlows = @{ 'continue' = 2; 'return $compoundExact' = 1; 'return -not [NocttyAccessibilityNative]::IsWindow($settingsHwnd)' = 1 }
+$saveFlowTypes = @([System.Management.Automation.Language.ExitStatementAst], [System.Management.Automation.Language.ReturnStatementAst],
+    [System.Management.Automation.Language.BreakStatementAst], [System.Management.Automation.Language.ContinueStatementAst])
+$testFinallyFlow = {
+    param([string] $Text, [hashtable] $OtherTexts)
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { return $false }
+    $definitions = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($source in @(@($ast) + @($OtherTexts.GetEnumerator() | ForEach-Object { & $parseToastScript $_.Value $_.Key }))) {
+        foreach ($function in $source.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+            $bare = & $saveBareName $function.Name
+            $list = $null
+            if (-not $definitions.TryGetValue($bare, [ref]$list)) { $list = [Collections.Generic.List[object]]::new(); $definitions[$bare] = $list }
+            $list.Add($function)
+        }
+    }
+    $flowsIn = {
+        param($Node)
+        @($Node.FindAll({
+                    param($inner)
+                    $inner -is [System.Management.Automation.Language.ExitStatementAst] -or $inner -is [System.Management.Automation.Language.ReturnStatementAst] -or
+                        $inner -is [System.Management.Automation.Language.BreakStatementAst] -or $inner -is [System.Management.Automation.Language.ContinueStatementAst]
+                }, $true))
+    }
+    $endsEarly = {
+        param($Flow)
+        if ($Flow -is [System.Management.Automation.Language.ExitStatementAst]) { return $true }
+        if ($Flow -is [System.Management.Automation.Language.ReturnStatementAst]) { return $false }
+        if ($null -ne $Flow.Label) { return $true }
+        for ($at = $Flow.Parent; $null -ne $at; $at = $at.Parent) {
+            if ($at -is [System.Management.Automation.Language.LoopStatementAst] -or $at -is [System.Management.Automation.Language.SwitchStatementAst]) { return $false }
+            if ($at -is [System.Management.Automation.Language.ScriptBlockAst]) { return $true }
+        }
+        $true
+    }
+    $queue = [Collections.Generic.Queue[string]]::new()
+    $queued = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # In a finally block itself a script block runs only inline or by a
+    # function's name; a function it calls may run one it is given.
+    $enqueueCalls = {
+        param($Node, [switch] $Finally)
+        foreach ($command in $Node.FindAll({ param($inner) $inner -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            if ($Finally -and $command.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown -and
+                $command.CommandElements[0] -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
+                $command.CommandElements[0] -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $false }
+            $name = & $saveCommandName $command
+            if ($null -ne $name -and $definitions.ContainsKey($name) -and $queued.Add($name)) { $queue.Enqueue($name) }
+        }
+        $true
+    }
+    $seen = @{}
+    # A flow statement inside nested finally blocks counts once.
+    $counted = [Collections.Generic.HashSet[int]]::new()
+    foreach ($try in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.TryStatementAst] -and $null -ne $node.Finally }, $true)) {
+        foreach ($flow in (& $flowsIn $try.Finally)) {
+            if (& $endsEarly $flow) { return $false }
+            if ($counted.Add($flow.Extent.StartOffset)) { $seen[$flow.Extent.Text] = 1 + [int]$seen[$flow.Extent.Text] }
+        }
+        if (-not (& $enqueueCalls $try.Finally -Finally)) { return $false }
+    }
+    foreach ($flowText in $seen.Keys) {
+        if (-not $saveFinallyFlows.ContainsKey($flowText) -or $seen[$flowText] -gt $saveFinallyFlows[$flowText]) { return $false }
+    }
+    while ($queue.Count -ne 0) {
+        foreach ($function in $definitions[$queue.Dequeue()]) {
+            foreach ($flow in (& $flowsIn $function.Body)) { if (& $endsEarly $flow) { return $false } }
+            if (-not (& $enqueueCalls $function.Body)) { return $false }
+        }
+    }
+    $true
+}
+if (-not (& $testFinallyFlow $accessibilityText $saveOtherTexts)) {
+    throw 'interactive-win11-accessibility.ps1''s finally blocks, and what they call, must not end it before its final throw: no exit, no break or continue outside a loop of its own script block, and only the flow statements pinned in $saveFinallyFlows.'
+}
+$toastHistoryFinally = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n}"
+foreach ($toastControl in @(
+        @{ Name = 'exit 0 after the history guard (Sol M1, round 6)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    exit 0`n}" },
+        @{ Name = 'return after the history guard'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    return`n}" },
+        @{ Name = 'break inside a ForEach-Object block in the history finally'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    1 | ForEach-Object { break }`n}" },
+        @{ Name = 'a script block run by variable in the history finally'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    & `$historyCleanup`n}" },
+        @{ Name = 'a new loop continue in the main finally'; From = "catch {`n    `$runFailure = `$_`n}`nfinally {`n"; To = "catch {`n    `$runFailure = `$_`n}`nfinally {`n    foreach (`$unused in @()) { continue }`n" },
+        @{ Name = 'exit in a function the leaf''s finally calls'; From = "    if (-not `$Existed) {`n"; To = "    exit 0`n    if (-not `$Existed) {`n" }
+    )) {
+    $toastMutated = $accessibilityText
+    if (([regex]::Matches($toastMutated, [regex]::Escape($toastControl.From))).Count -ne 1) { throw "Finally-flow control '$($toastControl.Name)' lost its anchor." }
+    $toastMutated = $toastMutated.Replace($toastControl.From, $toastControl.To)
+    if (& $testFinallyFlow $toastMutated $saveOtherTexts) { throw "The finally-flow check accepted $($toastControl.Name)." }
+}
+$toastLibraryExit = $saveOtherTexts.Clone()
+$toastLibraryExit['scripts\interactive-win11-lib.ps1'] = $toastLibraryExit['scripts\interactive-win11-lib.ps1'].Replace('function Stop-InteractiveWin11Process {', "function Stop-InteractiveWin11Process {`n    exit 0")
+if ([string]::Equals($toastLibraryExit['scripts\interactive-win11-lib.ps1'], $saveOtherTexts['scripts\interactive-win11-lib.ps1'], [StringComparison]::Ordinal) -or
+    (& $testFinallyFlow $accessibilityText $toastLibraryExit)) {
+    throw 'The finally-flow check accepted an exit in a library function the leaf''s finally blocks call.'
+}
+
 # The leaf without what the saves never touch, for the controls below. Inside
 # the leaf's top-level block, its normal-mode block and its two diagnostic
 # branches, every character outside the pinned regions, the main try and the
@@ -2067,7 +2274,12 @@ $toastProbeCheck = "    Assert-AccessibilitySaveLaunchQuiet -Process `$saveProbe
 $toastVerifyCheck = "    Assert-AccessibilitySaveLaunchQuiet -Process `$saveVerifyProcess -Description 'settings persistence verifier'`n"
 $toastProbeOpenLine = "    `$saveProbe = Open-AccessibilitySettingsProbe -Process `$saveProbeProcess -Description 'settings save probe'`n"
 $toastPipelineExtra = "    `$settingsLaunchExtra = @('--title=review' | ForEach-Object { '--app-notifications=true' })`n"
-$toastProbeSave = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$saveProbe ``$toastEol        -ActionName 'Save and close' ``$toastEol        -Description 'settings save probe'`n"
+$toastProbeSaveOld = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$saveProbe ``$toastEol        -ActionName 'Save and close' ``$toastEol        -Description 'settings save probe'`n"
+$toastProbeSave = "    `$saveCloseInvoke.Invoke()`n"
+$toastCloseGet = "    `$saveCloseInvoke = Get-AccessibilitySettingsCloseActionInvoke ``$toastEol        -SettingsProbe `$saveProbe ``"
+$toastHelperEnd = "        throw `"`$Description action '`$ActionName' exposes no InvokePattern.`"`n    }`n    `$invoke`n}`n"
+$toastOpusWrite = "    if (`$ActionName -ceq 'Save and close') {`n        `$legacyDirectory = Microsoft.PowerShell.Management\Join-Path `$settingsPersistenceLayout.LocalAppData 'ghostty'`n        [System.IO.Directory]::CreateDirectory(`$legacyDirectory) | Out-Null`n        [System.IO.File]::WriteAllText((Microsoft.PowerShell.Management\Join-Path `$legacyDirectory 'config'), `"config-file = notify.conf``n`")`n    }`n"
+$toastRunFailureInit = "`$runFailure = `$null`n"
 $toastKeepAdd = "    `$failureMessages.Add(`"`$(`$runFailure.Exception.Message)`$failureLocation`")`n"
 $toastPreamble = "try {`n    `$deadline = [DateTime]::UtcNow.AddSeconds(`$TimeoutSeconds)`n"
 # Each control edits the fixture; `Accept` is the grammar's answer and `Pin`
@@ -2140,7 +2352,23 @@ foreach ($toastControl in @(
         @{ Name = '$ExecutionContext in the leaf'; From = $toastProbeClass; To = "    `$ExecutionContext.SessionState.PSVariable.Set('unrelated', 1)`n$toastProbeClass"; Accept = $false },
         @{ Name = 'a save action that is not literal'; From = "        -ActionName 'Save and close' ``"; To = "        -ActionName `$saveAction ``"; Accept = $false },
         @{ Name = 'a second Save invoke'; From = '    $restoreInvoke.Invoke()'; To = "    `$null = `$verifyTheme.Save.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]`$restoreInvoke)`n    `$restoreInvoke.Invoke()"; Accept = $false },
-        @{ Name = 'Save and close on another probe'; From = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$saveProbe ``"; To = "    Invoke-AccessibilitySettingsCloseAction ``$toastEol        -SettingsProbe `$ownerProbe ``"; Accept = $false },
+        @{ Name = 'Save and close on another probe'; From = $toastCloseGet; To = $toastCloseGet.Replace('-SettingsProbe $saveProbe', '-SettingsProbe $ownerProbe'); Accept = $false },
+        # The probe's save after its last check, as the next statement (Opus M, round 6).
+        @{ Name = 'a statement between the probe-save check and its save (Opus M, round 6)'; From = $toastProbeSave; To = "    Start-Sleep -Milliseconds 1`n$toastProbeSave"; Accept = $false; Pin = 'save-flow' },
+        @{ Name = 'the probe saved before its last check'; From = $toastProbeSave; To = ''; Then = @(, @($saveSandboxProbeSave, "$toastProbeSave$saveSandboxProbeSave")); Accept = $false },
+        @{ Name = 'the probe saved through the old close action'; From = $toastProbeSave; To = "    Invoke-AccessibilitySettingsCloseAction -SettingsProbe `$saveProbe -ActionName 'Save and close' -Description 'x'`n"; Accept = $false },
+        @{ Name = 'the button pressed by the helper itself'; From = $toastHelperEnd; To = $toastHelperEnd.Replace("    `$invoke`n}", "    `$invoke.Invoke()`n    `$invoke`n}"); Accept = $false; Pin = 'save-functions' },
+        @{ Name = 'Opus''s include write in the close helper (Opus M, round 6)'; From = $toastHelperEnd; To = $toastHelperEnd.Replace("    `$invoke`n}", "$toastOpusWrite    `$invoke`n}"); Accept = $true; Pin = 'save-functions' },
+        # Opus L1, round 6: what the launch runs and with which environment.
+        @{ Name = 'default parameter values for Start-Process (Opus L1, round 6)'; From = $toastRunFailureInit; To = "$toastRunFailureInit`$PSDefaultParameterValues['Start-Process:Environment'] = @{ XDG_CONFIG_HOME = 'H:\elsewhere' }`n"; Accept = $false; Pin = '' },
+        @{ Name = 'a function standing in for Start-Process (Opus L1, round 6)'; From = $toastRunFailureInit; To = "$toastRunFailureInit" + "function Start-Process { [System.Environment]::SetEnvironmentVariable('XDG_CONFIG_HOME', 'H:\elsewhere'); Microsoft.PowerShell.Management\Start-Process @args }`n"; Accept = $false; Pin = '' },
+        @{ Name = 'a function standing in for Get-Content'; From = $toastRunFailureInit; To = "$toastRunFailureInit" + "function global:Get-Content { 'scrollback-limit = 1' }`n"; Accept = $false; Pin = '' },
+        @{ Name = 'Start-Process unqualified in the launcher'; From = '        return Microsoft.PowerShell.Management\Start-Process `'; To = '        return Start-Process `'; Accept = $false; Pin = 'save-functions' },
+        @{ Name = 'Join-Path unqualified for the saved config'; From = "`$sandboxConfigPath = Microsoft.PowerShell.Management\Join-Path"; To = "`$sandboxConfigPath = Join-Path"; Accept = $false; Pin = 'save-sandbox' },
+        @{ Name = 'a region calling a command no job script defines'; From = $toastProbeSave; To = ''; Then = @(, @($saveSandboxProbeSave, "$saveSandboxProbeSave    Invoke-UnknownSaveHelper`n$toastProbeSave")); Accept = $false },
+        # Opus L2, round 6: the exe's folder before each launch.
+        @{ Name = 'the first sandbox check without the exe (Opus L2, round 6)'; From = $saveSandboxFirst; To = $saveSandboxFirst.Replace(' -ExecutablePath $exe', ''); Accept = $false; Pin = 'save-flow' },
+        @{ Name = 'the verifier-start check without the exe'; From = $saveSandboxVerifyStart; To = $saveSandboxVerifyStart.Replace(' -ExecutablePath $exe', ''); Accept = $false },
         # The sandbox checks (item (5); Opus L1, rounds 4 and 5).
         @{ Name = 'the first sandbox check removed'; From = $saveSandboxFirst; To = ''; Accept = $false },
         @{ Name = 'the first sandbox check without -Empty'; From = $saveSandboxFirst; To = $saveSandboxFirst.Replace(' -Empty', ''); Accept = $false },
@@ -2157,7 +2385,7 @@ foreach ($toastControl in @(
         @{ Name = 'the probe window written again'; From = $toastProbeOpenLine; To = "$toastProbeOpenLine    `$saveProbeHost = [IntPtr]::Zero`n"; Accept = $false },
         @{ Name = 'the first sandbox check in a block comment'; From = $saveSandboxFirst; To = "    <#`n$saveSandboxFirst    #>`n"; Accept = $false },
         @{ Name = 'the first sandbox check under if ($false)'; From = $saveSandboxFirst; To = "    if (`$false) {`n$saveSandboxFirst    }`n"; Accept = $false },
-        @{ Name = 'an include written between the first check and the flags (Opus L1 P1, round 5)'; From = $toastProbeClass; To = "    Set-Content -LiteralPath (Join-Path `$settingsPersistenceLayout.LocalAppData 'ghostty\config') -Value 'config-file = notify.conf'`n$toastProbeClass"; Accept = $true; Pin = 'save-flow' },
+        @{ Name = 'an include written between the first check and the flags (Opus L1 P1, round 5)'; From = $toastProbeClass; To = "    Set-Content -LiteralPath (Microsoft.PowerShell.Management\Join-Path `$settingsPersistenceLayout.LocalAppData 'ghostty\config') -Value 'config-file = notify.conf'`n$toastProbeClass"; Accept = $true; Pin = 'save-flow' },
         # Round 4's (Opus M, L1, L2; Sol M1, M2).
         @{ Name = 'an alias of the flags written by index (Opus M, round 4)'; From = $toastProbeClass; To = "    `$flagsAlias = `$settingsSaveNotificationArguments`n    `$flagsAlias[0] = '--app-notifications=true'`n$toastProbeClass"; Accept = $false },
         @{ Name = 'an alias of the probe arguments written by index (Opus M, round 4)'; From = $toastProbeStart; To = "    `$argsAlias = `$saveProbeArguments`n    `$argsAlias[0] = '-e'`n$toastProbeStart"; Accept = $false },
@@ -2248,7 +2476,9 @@ foreach ($toastControl in @(
         @{ Name = 'a ${function:} write in another job script (Opus L1, round 4)'; File = 'scripts\interactive-win11-window-lib.ps1'; Text = "`${function:Get-InteractiveWin11ContainmentArguments} = { return @('--linux-cgroup=always', '-e', 'cmd.exe') }" },
         @{ Name = '[scriptblock]::Create in another job script'; File = 'test\windows\interactive-win11-stateful-lib.ps1'; Text = "function Invoke-Late([string] `$Text) { . ([scriptblock]::Create(`$Text)) }" },
         @{ Name = 'the run-time check redefined in another job script (Opus L2, round 5)'; File = 'scripts\interactive-win11-window-lib.ps1'; Text = "function global:Assert-AccessibilitySaveLaunchQuiet { }" },
-        @{ Name = 'the launcher redefined in another job script'; File = 'test\windows\interactive-win11-stateful-lib.ps1'; Text = "function Start-AccessibilityProcessWithEnvironment { }" }
+        @{ Name = 'the launcher redefined in another job script'; File = 'test\windows\interactive-win11-stateful-lib.ps1'; Text = "function Start-AccessibilityProcessWithEnvironment { }" },
+        @{ Name = 'Join-Path redefined in another job script (Opus L1, round 6)'; File = 'scripts\interactive-win11-lib.ps1'; Text = "function Join-Path { 'H:\elsewhere' }" },
+        @{ Name = 'default parameter values in another job script'; File = 'scripts\interactive-win11-window-lib.ps1'; Text = "`$global:PSDefaultParameterValues['Start-Process:WorkingDirectory'] = 'H:\elsewhere'" }
     )) {
     $toastOtherTexts = $saveOtherTexts.Clone()
     $toastOtherTexts[$toastControl.File] += "`n$($toastControl.Text)"

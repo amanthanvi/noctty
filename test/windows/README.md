@@ -718,7 +718,14 @@ Three layers keep those launches quiet.
   `config-file` key in it, its lines read as noctty's `LineIterator` reads them
   (any other byte, such as the template's path in its comments, does not
   matter); before each save it also stops the leaf if the saving process's
-  terminal window has closed. Both compare ordinally, as noctty compares bytes:
+  terminal window has closed, and before each launch if the build's own
+  folder holds a portable marker (`noctty.portable`, `portable.txt` or
+  `config.ghostty`, `portable_marker_names` in `src/os/xdg.zig`), which would
+  make noctty read its config there whatever the environment says. Each save
+  is the statement right after its last check: the probe's close prompt
+  button is found first (`Get-AccessibilitySettingsCloseActionInvoke`) and
+  pressed after the check. The launcher refuses an environment that names one
+  variable twice in two cases. Both compare ordinally, as noctty compares bytes:
   PowerShell's `-eq` family ignores some characters (a soft hyphen; under
   PowerShell 7, ASCII controls), so `-ceq` read `fa`U+00AD`lse` as `false`,
   where noctty keeps the default on (the Zig test "a command line's
@@ -732,9 +739,14 @@ Three layers keep those launches quiet.
   same change; the failure names the region and its new hash. Each region must
   hold the statements it guards.
 - **Static grammar.** The same contract checks those two launches against a
-  grammar, which names what changed. It refuses every form it does not list;
-  it evaluates no PowerShell, so a name or command built at run time is the
-  run-time checks' to catch.
+  grammar, which names what changed. It refuses every form it does not list.
+
+What none of the three sees: an edit outside every region that acts on its
+own before the last check runs (an unpinned helper the flow calls first, such
+as `Wait-AccessibilityCondition`, pressing Save itself, or an asynchronous
+event handler registered elsewhere), and a name built at run time that
+replaces a checker. An include such a helper writes before the last check is
+still refused at run time.
 
 The contract runs the leaf's reading on synthetic command lines under
 PowerShell 7 and Windows PowerShell 5.1, the run-time check against a stand-in
@@ -764,11 +776,19 @@ background pipeline, and its code outside comments is printable ASCII. No job
 script uses a variable or alias cmdlet (by any module-qualified name too),
 `Import-Alias`, `Invoke-Expression`, a `function:`, `variable:` or `alias:`
 drive, a `data` section, `[scriptblock]::Create`, `SessionState`,
-`SessionStateProxy`, `$PSCmdlet`, or `&`/`.` on a name built by an expression.
+`SessionStateProxy`, `$PSCmdlet`, `$PSDefaultParameterValues`, a function named
+like a cmdlet the regions call, or `&`/`.` on a name built by an expression.
+The regions call `Start-Process` and `Join-Path` by their module, and nothing
+but the cmdlets the contract lists and functions the job scripts define. No
+`finally` block of the leaf, nor any function one calls, can end it before its
+final throw: no `exit`, and no `break` or `continue` outside a loop of its own
+script block; the flow statements inside the finally blocks are pinned one by
+one.
 Every statement of the save flow (the flags, class names and arrays, both
 launches and their run-time checks, the probes, both saves and the four
 sandbox checks) is a direct statement of the one block that holds the
-launches, in order, with `-EnvironmentVariables $settingsProbeEnvironment` on
+launches, in order, each save the statement right after its last check, with
+`-EnvironmentVariables $settingsProbeEnvironment` on
 both launches. The arguments those forms give are printable ASCII with no
 space, quote or backtick and no `--config-file`, and leave every notification
 setting off.
