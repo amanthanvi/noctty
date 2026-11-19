@@ -157,6 +157,16 @@ $soakRules = @(
         Mutation = @('if (GetProcessIdOfThread(t) != (uint)pid)', 'if (false)')
     }
     @{
+        Description = 'a resize hang on an idle minute (the first or a tenth, which run no churn) is refused before the launch (Greptile, round 2)'
+        Pattern = '(?s)if \(\$minute -ge 2 -and \$minute % 10 -ne 0 -and .*?if \(\$HangAt -eq ''resize'' -and \$HangAtMinute -gt 0 -and \(\$HangAtMinute -eq 1 -or \$HangAtMinute % 10 -eq 0\)\) \{\s*throw'
+        Mutation = @('$HangAtMinute -eq 1 -or $HangAtMinute % 10 -eq 0', '$HangAtMinute % 10 -eq 0')
+    }
+    @{
+        Description = 'a control asked for that did not take effect (no hang, no kill with exit code 3, no injection) fails the harness, since the judge never sees a control (Greptile, round 2)'
+        Pattern = '(?s)if \(\$HangAtMinute -gt 0 -and \$null -eq \$harness\.HungAtMs\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$KillAtMinute -gt 0 -and \$null -eq \$harness\.Killed\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$InjectHandleEachMinute -and \$harness\.Injected -eq 0\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$harness\.ControlMisses\.Count -gt 0\) \{\s*Log [^\r\n]*\s*return 4\s*\}.*?elseif \(\$driverExit -eq 4\) \{ \$failed \+= '
+        Mutation = @('$null -eq $harness.HungAtMs', '$false')
+    }
+    @{
         Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI", round 1''s Opus L4)'
         Pattern = '(?s)if \(\[SoakNative\]::Layout\(\) -cne \$script:SdkLayout\) \{ throw'
         Mutation = @('if ([SoakNative]::Layout() -cne $script:SdkLayout) { throw', 'if ($false) { throw')

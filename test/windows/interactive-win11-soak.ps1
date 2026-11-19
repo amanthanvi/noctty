@@ -48,7 +48,11 @@ count. -KillAtMinute 5 ends the soaked process with exit code 3 (TerminateProces
 gives) right after minute 5's sample, so the process rules must fail it. -HangAtMinute N suspends the copy's UI
 thread for -HangSeconds (120): with -HangAt resize right after minute N's first resize (the case a blocking
 resize once hid, round 1's Opus H1), with -HangAt sample 10 s before minute N's sample (its positive twin);
-the judge must fail both as HUNG. No control is written to the judge's records: a control is judged blind.
+the judge must fail both as HUNG. A resize hang needs a churn minute (the first and every tenth minute run no
+resize), so an idle one is refused before the launch. No control is written to the judge's records: a control
+is judged blind. So a control asked for that did not take effect (the hang never suspended the copy, the kill
+did not end it with exit code 3, an injection failed) fails the harness itself: the driver exits 4, and
+harness.json lists each in ControlMisses.
 
 Safety (AGENTS.md "Running noctty"). Every process starts on the private desktop, named in lpDesktop, inside
 the job; input is posted, never SendInput, and nothing takes the foreground. The copy is portable with
@@ -499,7 +503,7 @@ function Invoke-SoakDriver {
         QuitSeconds = $QuitSeconds; ResponseBoundMs = $script:ResponseBoundMs
         BuildMode = $null; Launched = $false; Injected = 0; Killed = $null; Churn = 0; Missed = 0
         LateSamples = 0; WorstLatenessMs = 0; HardErrorModes = @(); ErrorModeChanges = @(); JobLimitFlags = $null
-        QuitMs = $null; Error = $null
+        QuitMs = $null; ControlMisses = [Collections.Generic.List[string]]::new(); Error = $null
     }
     $harnessPath = Join-Path $Run 'harness.json'
     $process = [IntPtr]::Zero
@@ -802,7 +806,8 @@ function Invoke-SoakDriver {
             }
             $workMs = $clock.ElapsedMilliseconds - $workStarted
             if ($InjectHandleEachMinute -and [SoakNative]::Alive($process)) {
-                if ([SoakNative]::Inject($process)) { $harness.Injected++ } else { Log "minute $minute injection failed" }
+                if ([SoakNative]::Inject($process)) { $harness.Injected++ }
+                else { Log "minute $minute injection failed"; $harness.ControlMisses.Add("the injection at minute $minute failed") }
             }
             if ($HangAtMinute -eq $minute -and $HangAt -eq 'sample' -and [SoakNative]::Alive($process)) {
                 while ($clock.ElapsedMilliseconds -lt $due - 10000) { Start-Sleep -Milliseconds 200 }
@@ -855,6 +860,10 @@ function Invoke-SoakDriver {
                 } else { Log "kill control failed: the process has not ended with exit code 3 after 10 s" }
             }
         }
+        # A control asked for that did not take effect (driver.log says why) fails the harness, not the judge.
+        if ($HangAtMinute -gt 0 -and $null -eq $harness.HungAtMs) { $harness.ControlMisses.Add("the hang control did not suspend the copy at minute $HangAtMinute") }
+        if ($KillAtMinute -gt 0 -and $null -eq $harness.Killed) { $harness.ControlMisses.Add("the kill control did not end the copy with exit code 3 after minute $KillAtMinute") }
+        if ($InjectHandleEachMinute -and $harness.Injected -eq 0) { $harness.ControlMisses.Add('the injection control injected nothing') }
 
         # The harness's own quit, bounded; the exit code from the held handle.
         if (-not [SoakNative]::Alive($process)) {
@@ -878,6 +887,10 @@ function Invoke-SoakDriver {
         Add-Line $runTsv ("wer`t" + $(if ($suppressed) { 'suppressed' } else { 'default' }))
         Add-Line $runTsv "end`t$end"
         Log "ended: $($end -replace "`t", ' ')"
+        if ($harness.ControlMisses.Count -gt 0) {
+            Log "control not applied: $($harness.ControlMisses -join '; ')"
+            return 4
+        }
         return 0
     } catch {
         $harness.Error = $_.Exception.Message
@@ -973,6 +986,9 @@ function Invoke-SoakOuter {
     if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe') -PathType Leaf)) { throw '-Bin must hold noctty.exe.' }
     if ($KillAtMinute -gt $Minutes) { throw '-KillAtMinute is past the planned minutes.' }
     if ($HangAtMinute -gt $Minutes) { throw '-HangAtMinute is past the planned minutes.' }
+    if ($HangAt -eq 'resize' -and $HangAtMinute -gt 0 -and ($HangAtMinute -eq 1 -or $HangAtMinute % 10 -eq 0)) {
+        throw '-HangAt resize needs a churn minute: the first and every tenth minute are idle, with no resize.'
+    }
     $Run = [IO.Path]::GetFullPath($Run)
     if (Test-Path -LiteralPath $Run) { throw 'The run directory must be new.' }
     if (($Run + '\').StartsWith($Bin.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -1094,10 +1110,11 @@ function Invoke-SoakOuter {
     if ($cleanup) { $failed += "owned job cleanup: $cleanup" }
     if ($outerError) { $failed += $outerError }
     if ($driverExit -eq 3) { $failed += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
+    elseif ($driverExit -eq 4) { $failed += 'a control asked for did not take effect (see ControlMisses in harness.json)' }
     elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and harness.json)" }
     Write-Host "soak records: $Run"
     Write-Host "clipboard sequence number before $($before.Clipboard), after $($after.Clipboard)"
-    Write-Host ("judge with: python -I ci/soak_judge.py `"{0}`" --min-minutes <60 or 480> [--other-run <the other copy's run>]" -f $Run)
+    Write-Host ("judge with: python -I ci/soak_judge.py `"{0}`" --min-minutes {1} [--other-run <the other copy's run>] (90 at least; 480 at release coverage)" -f $Run, $Minutes)
     if ($failed.Count -gt 0) { throw ('soak harness: ' + ($failed -join '; ')) }
     Write-Host 'soak harness: records complete'
 }

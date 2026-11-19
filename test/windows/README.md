@@ -1038,7 +1038,10 @@ window); a shorter `--min-minutes` is refused.
 `-KillAtMinute 5` (`TerminateProcess` with exit code 3) are its first two
 controls; `-HangAtMinute N -HangAt resize|sample` (the copy's UI thread
 suspended for `-HangSeconds`, right after a resize or 10 s before a sample) are
-the other two. The judge must fail all four. A sample taken more than 5 s after
+the other two. The judge must fail all four. A resize hang needs a churn
+minute, so `-HangAt resize` on the first or a tenth minute is refused. Since a
+control never reaches the judge's records, a control that did not take effect
+fails the harness itself (`ControlMisses` in `harness.json`). A sample taken more than 5 s after
 its due time fails `LATE-SAMPLE`, and the driver never waits on the copy
 without a bound. `ci/test_soak_judge.py` holds the judge's controls
 and runs in the checks job; Contracts.98 pins the harness.
