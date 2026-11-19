@@ -1,0 +1,7 @@
+1/2 printed.test.coverage...
+OK
+loadingSKIP
+2/2 printed.test.platform...
+SKIP
+loadingOK
+1 passed; 1 skipped; 0 failed.

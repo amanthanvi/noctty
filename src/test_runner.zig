@@ -1,12 +1,15 @@
 //! The test runner of the Zig test executables (`build.zig`: `test_runner`).
 //!
 //! A copy of Zig 0.15.2's `lib/compiler/test_runner.zig` (MIT, Copyright (c)
-//! Zig contributors) with one addition: `--shard=K/N` runs only every Nth test
+//! Zig contributors) with two additions: `--shard=K/N` runs only every Nth test
 //! from the Kth (src/test_shard.zig), so `-Dtest-shards=N` can run one test
 //! executable as N processes side by side and the shards together run each
-//! test exactly once. Without `--shard` it behaves exactly like the stock
-//! runner. The stock runner runs one test at a time, so on a four-core CI
-//! runner one process left three cores idle.
+//! test exactly once; and `--results=<path>` makes terminal mode also write
+//! what it ran to a new file (`Results`), which scripts/capture-test-ran-list.ps1
+//! reads instead of the printed lines a test's own output can imitate. Without
+//! either it behaves exactly like the stock runner. The stock runner runs one
+//! test at a time, so on a four-core CI runner one process left three cores
+//! idle.
 //!
 //! Every other line is the stock file's, so a Zig upgrade re-copies the new
 //! version and reapplies the parts marked `noctty:`; the version check below
@@ -29,6 +32,77 @@ comptime {
 /// noctty: which tests this process runs (`--shard=K/N`).
 const Shard = @import("test_shard.zig").Shard;
 var shard: Shard = .{};
+
+/// noctty: the results file of `--results=<path>`, null without it.
+var results: ?Results = null;
+
+/// noctty: what terminal mode ran, as the runner itself decided it, one
+/// LF-terminated line each:
+///
+///     noctty test results v1
+///     zig <builtin.zig_version_string>
+///     mode <@tagName(builtin.mode)>
+///     shard <K>/<N>
+///     test <index> <OK|SKIP|FAIL> <leaked: 0|1> <the name's bytes, lowercase hex>
+///     end tests=<n> ok=<n> skip=<n> fail=<n> leaked=<n> errors-logged=<n>
+///
+/// A test line is written after its test's allocator is checked, and each line
+/// is flushed as it is written, so a run that stops leaves a file without its
+/// `end` line. The file must not exist yet. A process the tests start (the
+/// ConPTY probe child) gets no `--results`, so it writes nothing here.
+const Results = struct {
+    file: std.fs.File,
+
+    const Outcome = enum { ok, skip, fail };
+
+    fn create(path: []const u8) Results {
+        return .{
+            .file = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch
+                @panic("unable to create the --results file, which must not exist yet"),
+        };
+    }
+
+    fn header(r: *Results) void {
+        r.write("noctty test results v1\nzig {s}\nmode {s}\nshard {d}/{d}\n", .{
+            builtin.zig_version_string, @tagName(builtin.mode), shard.index + 1, shard.count,
+        }, null);
+    }
+
+    fn testRun(r: *Results, index: usize, name: []const u8, outcome: Outcome, leaked: bool) void {
+        const word = switch (outcome) {
+            .ok => "OK",
+            .skip => "SKIP",
+            .fail => "FAIL",
+        };
+        r.write("test {d} {s} {d} ", .{ index, word, @intFromBool(leaked) }, name);
+    }
+
+    fn end(r: *Results, tests: usize, ok: usize, skip: usize, fail: usize, leaked: usize, errors_logged: usize) void {
+        r.write("end tests={d} ok={d} skip={d} fail={d} leaked={d} errors-logged={d}\n", .{
+            tests, ok, skip, fail, leaked, errors_logged,
+        }, null);
+        r.file.close();
+        results = null;
+    }
+
+    /// Writes `format`, then `hex`'s bytes in hex and a line end if it is
+    /// given, and flushes.
+    fn write(r: *Results, comptime format: []const u8, args: anytype, hex: ?[]const u8) void {
+        var buffer: [1024]u8 = undefined;
+        var w = r.file.writerStreaming(&buffer);
+        writeLine(&w.interface, format, args, hex) catch
+            @panic("unable to write the --results file");
+    }
+
+    fn writeLine(w: *std.Io.Writer, comptime format: []const u8, args: anytype, hex: ?[]const u8) !void {
+        try w.print(format, args);
+        if (hex) |bytes| {
+            try w.printHex(bytes, .lower);
+            try w.writeByte('\n');
+        }
+        try w.flush();
+    }
+};
 
 pub const std_options: std.Options = .{
     .logFn = log,
@@ -65,6 +139,7 @@ pub fn main() void {
 
     var listen = false;
     var opt_cache_dir: ?[]const u8 = null;
+    var results_path: ?[]const u8 = null; // noctty
 
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--listen=-")) {
@@ -78,9 +153,19 @@ pub fn main() void {
             // noctty: a malformed shard must not quietly run all tests, or none.
             shard = Shard.parse(arg["--shard=".len..]) orelse
                 @panic("--shard must be K/N with 1 <= K <= N");
+        } else if (std.mem.startsWith(u8, arg, "--results=")) {
+            // noctty: see `Results`.
+            if (results_path != null) @panic("--results given twice");
+            results_path = arg["--results=".len..];
         } else {
             @panic("unrecognized command line argument");
         }
+    }
+    // noctty: created before `fba`, which holds the path, is reset. The build
+    // runner's server mode keeps its own record.
+    if (results_path) |path| {
+        if (listen) @panic("--results is for terminal mode");
+        results = Results.create(path);
     }
 
     fba.reset();
@@ -237,14 +322,18 @@ fn mainTerminal() void {
     // ignores the alignment of the slice.
     async_frame_buffer = &[_]u8{};
 
+    if (results) |*r| r.header(); // noctty
     var leaks: usize = 0;
     for (0..test_fn_list.len) |i| {
         const test_fn = builtin.test_functions[shard.testIndex(i)]; // noctty
         testing.allocator_instance = .{};
+        var outcome: Results.Outcome = .fail; // noctty: set with each count below
         defer {
-            if (testing.allocator_instance.deinit() == .leak) {
+            const leaked = testing.allocator_instance.deinit() == .leak; // noctty
+            if (leaked) {
                 leaks += 1;
             }
+            if (results) |*r| r.testRun(i + 1, test_fn.name, outcome, leaked); // noctty
         }
         testing.log_level = .warn;
 
@@ -255,11 +344,13 @@ fn mainTerminal() void {
         is_fuzz_test = false;
         if (test_fn.func()) |_| {
             ok_count += 1;
+            outcome = .ok; // noctty
             test_node.end();
             if (!have_tty) std.debug.print("OK\n", .{});
         } else |err| switch (err) {
             error.SkipZigTest => {
                 skip_count += 1;
+                outcome = .skip; // noctty
                 if (have_tty) {
                     std.debug.print("{d}/{d} {s}...SKIP\n", .{ i + 1, test_fn_list.len, test_fn.name });
                 } else {
@@ -299,6 +390,7 @@ fn mainTerminal() void {
     if (fuzz_count != 0) {
         std.debug.print("{d} fuzz tests found.\n", .{fuzz_count});
     }
+    if (results) |*r| r.end(test_fn_list.len, ok_count, skip_count, fail_count, leaks, log_err_count); // noctty
     if (leaks != 0 or log_err_count != 0 or fail_count != 0) {
         std.process.exit(1);
     }

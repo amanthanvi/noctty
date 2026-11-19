@@ -1,7 +1,7 @@
-# The exit code of each fixture executable, run directly with stderr redirected (stock test runner;
-# crossing-0.17.1 built by Zig 0.17.1, the rest by 0.15.2). <name>.names.json holds the names the executable serves
-# in server mode (Get-ZigTestNames). Rebuild one with:
-# zig test test/windows/ran-list-fixtures/<name>.zig --test-no-exec -femit-bin=<dir>/<name>.exe
+# The exit code of each fixture executable, built with the fork's runner and run directly with
+# --results=<name>.results.txt, stderr and stdout redirected. <name>.stderr.txt is its stderr (absolute
+# paths replaced). Rebuild one with:
+# zig test --test-runner src/test_runner.zig test/windows/ran-list-fixtures/<name>.zig --test-no-exec -femit-bin=<dir>/<name>.exe
 swap	0
 leak	1
 logged_error	1
@@ -9,5 +9,6 @@ names	0
 dots_output	0
 multiline	0
 glued	0
-crossing-0.15.2	0
-crossing-0.17.1	0
+printed	0
+forge	0
+bytes	0

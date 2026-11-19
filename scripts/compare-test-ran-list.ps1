@@ -6,10 +6,13 @@ one: as OK, as an approved SKIP, or as a ledgered removal.
 
 .DESCRIPTION
 Lists come from scripts/capture-test-ran-list.ps1. A test's identity is its
-suite and its fully qualified name (as the list writes it: `\`, tab, CR and LF
-escaped). Zig names an unnamed `test { ... }` block by its position in its
-container (`<container>.test_<n>`, numbered from 0 in each container, file or
-struct), so a block added above it renumbers it: the compare counts a
+suite and its fully qualified name, as the list writes it (`\`, tab, CR, LF,
+other control characters and bytes that are not UTF-8 escaped, so two names
+are one identity only when their bytes are equal). Suites are told apart
+ordinally, and a list whose suites differ only by case is refused. Zig names
+an unnamed `test { ... }` block by its position in its container
+(`<container>.test_<n>`, numbered from 0 in each container, file or struct),
+so a block added above it renumbers it: the compare counts a
 container's unnamed blocks instead (`<container>.test_#`, their number the
 multiplicity), which still fails a dropped one. Only a real unnamed block is
 counted that way: a named test called "test_0" is `<container>.test.test_0`
@@ -23,7 +26,7 @@ multiplicity any baseline gives it.
 
 Every list must exist, parse, hold rows, carry one green suite record for each
 suite its rows name (exit 0, no FAIL row, logged error, leak or panic, counts
-that match the rows), record a real build (options and compiler, not
+that match the rows), record a real build (options, mode and compiler, not
 `unknown`), and come from a clean checkout (a `dirty=true` build is refused
 unless -AllowDirty). All must agree on the build and on their environment facts
 (`# env:` lines), so a test that runs only in some environments or with some
@@ -32,11 +35,14 @@ is refused as a baseline unless -AllowFilteredBaseline is given (for a control).
 
 The compiler must match too, except across a crossing the caller declares:
 `-CompilerCrossing 0.15.2=0.17.1` lets baselines built by 0.15.2 be compared
-with a later list built by 0.17.1 (1B.5's first green build and each 1B forward
-merge's `main` parent, PLAN.md section 3.2). Across it the mode is compared by
-meaning (Debug = debug, ReleaseSafe = safe, ReleaseFast = fast, ReleaseSmall =
-small: 0.17.1 renamed the optimize modes), and every other key stays strict. The
-verdict names each crossing it used.
+with a later list built by 0.17.1: every 1B comparison that crosses compilers
+(PLAN.md section 3.2: the carried baseline at 1B.5's first green build, each 1B
+forward merge's `main` parent, and 1B's landing merge on `main`). Across it the
+mode is compared by meaning (Debug = debug, ReleaseSafe = safe, ReleaseFast =
+fast, ReleaseSmall = small: 0.17.1 renamed the optimize modes), and every other
+key stays strict, options included: take a ReleaseSafe list with
+`-Dtest-optimize=ReleaseSafe` on both compilers (0.17.1 accepts it, and builds
+mode `safe`). The verdict names each crossing it used.
 
 The later list fails the check when
   * an identity has fewer occurrences than the baselines give it (DROPPED),
@@ -45,8 +51,8 @@ The later list fails the check when
     (UNAPPROVED-SKIP), in the baseline or not: section 3.2 accepts "OK or an
     approved SKIP";
   * an approval exists for a SKIP but its conditions do not hold for this list
-    (SKIP-ENVIRONMENT), including a fact an imported log could not record
-    (`unknown`);
+    (SKIP-ENVIRONMENT); a fact or build value the list records as `unknown`
+    meets no condition, and no condition may name `unknown`;
   * it has any FAIL row.
 Tests only the later list has are counted as new; a new test that skips still
 needs its approval. A new test that never runs cannot be seen here (see
@@ -81,7 +87,7 @@ param(
     [switch] $LibraryOnly
 )
 
-$script:RanListFormat = '# noctty test ran list v3'
+$script:RanListFormat = '# noctty test ran list v4'
 
 function Resolve-RanListPath {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
@@ -114,7 +120,7 @@ function Get-RanListIdentity {
     return "$Suite`t$Name"
 }
 
-# Reads a list. A file that is missing, empty, not a v3 list, cut short,
+# Reads a list. A file that is missing, empty, not a v4 list, cut short,
 # inconsistent with its end line, or without a green suite record for each of
 # its suites has problems.
 function Read-RanList {
@@ -170,14 +176,25 @@ function Read-RanList {
     if ($null -eq $end) { $problems.Add("'$full' has no '# end:' line, so it was cut short.") }
     elseif ($end -cne "# end: rows=$($rows.Count) tests=$total") { $problems.Add("'$full' does not match its end line ($end; read rows=$($rows.Count) tests=$total).") }
     if ([string]::IsNullOrWhiteSpace($revision) -or $revision -ieq 'unknown') { $problems.Add("'$full' names no revision.") }
-    foreach ($key in 'source', 'options', 'zig') {
+    foreach ($key in 'source', 'options', 'mode', 'zig') {
         if (-not $result.Build.Contains($key) -or [string]::IsNullOrWhiteSpace($result.Build[$key]) -or $result.Build[$key] -ieq 'unknown') {
-            $problems.Add("'$full' records no real build $key; a list needs the options and the compiler that built it.")
+            $problems.Add("'$full' records no real build $key; a list needs the options, the mode and the compiler that built it.")
         }
+    }
+    # Suite labels are compared ordinally: two that differ only by case would be
+    # one suite to a case-blind reader and two to this one.
+    $labels = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($label in @(@($rows | ForEach-Object Suite) + @($suites.Keys))) { [void] $labels.Add($label) }
+    $folded = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($label in $labels) {
+        if ($folded.ContainsKey($label)) { $problems.Add("'$full' has suites $($folded[$label]) and $label, which differ only by case.") }
+        else { $folded[$label] = $label }
     }
     if ($rows.Count -eq 0) { $problems.Add("'$full' holds no tests; a baseline is never taken as empty.") }
     # One green suite record for each suite the rows name, whose counts are the rows'.
-    foreach ($name in @($rows | ForEach-Object Suite | Sort-Object -Unique)) {
+    $rowSuites = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($row in $rows) { [void] $rowSuites.Add($row.Suite) }
+    foreach ($name in $rowSuites) {
         if (-not $suites.ContainsKey($name)) { $problems.Add("'$full' has rows for suite $name but no suite record, so its run cannot be shown green."); continue }
         $s = $suites[$name]
         $mine = @($rows | Where-Object Suite -ceq $name)
@@ -189,7 +206,7 @@ function Read-RanList {
         $green = $s.Exit -ceq '0' -and $s.Fail -eq 0 -and $s.ErrorsLogged -eq 0 -and $s.Leaked -eq 0 -and $s.Panics -eq 0
         if (-not $green) { $problems.Add("'$full' suite $name is not green (exit $($s.Exit), $($s.Fail) failed, $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked, $($s.Panics) panics).") }
     }
-    foreach ($name in $suites.Keys) { if (-not @($rows | Where-Object Suite -ceq $name).Count) { $problems.Add("'$full' has a suite record for $name but no rows of it.") } }
+    foreach ($name in $suites.Keys) { if (-not $rowSuites.Contains($name)) { $problems.Add("'$full' has a suite record for $name but no rows of it.") } }
     $failed = @($rows | Where-Object Result -ceq 'FAIL')
     if ($failed.Count -gt 0) { $problems.Add("'$full' has $($failed.Count) FAIL rows, the first $($failed[0].Suite) $($failed[0].Name).") }
     $result.Rows = $rows.ToArray()
@@ -220,11 +237,13 @@ function Read-RanListLedger {
             $requires = @()
             if ($ok -and $width -eq 4 -and $fields[2] -cne '-') {
                 $requires = @($fields[2] -split ';' | ForEach-Object { $_.Trim() })
-                if (@($requires | Where-Object { $_ -notmatch '^[^=]+=.+$' }).Count -gt 0) { $ok = $false }
+                # `unknown` is what a list records for a fact it could not
+                # measure; no condition may ask for it.
+                if (@($requires | Where-Object { $_ -notmatch '^[^=]+=.+$' -or ($_ -split '=', 2)[1].Trim() -ieq 'unknown' }).Count -gt 0) { $ok = $false }
             }
             if (-not $ok) {
                 $shape = if ($width -eq 3) { '<suite><TAB><qualified name><TAB><reason>' } else { "<suite><TAB><qualified name><TAB><requires or -><TAB><reason>" }
-                $Problems.Add("$Kind file '$full' line $n is not '$shape' with a reason.")
+                $Problems.Add("$Kind file '$full' line $n is not '$shape' with a reason (and no condition on 'unknown').")
                 continue
             }
             if (-not $exact.Add("$($fields[0])`t$($fields[1])")) { $Problems.Add("$Kind lists '$($fields[0]) $($fields[1])' twice."); continue }
@@ -263,7 +282,10 @@ function Get-RanListUnmetConditions {
             $have = "$($List.Environment[$key])"
             $holds = $have -ceq $value
         }
-        if (-not $holds) { $unmet += "$key=$value (the list has '$have'$(if ($have -ceq 'unknown') { ', an imported log whose run recorded no facts' }))" }
+        # A value the list could not measure meets no condition, whatever the
+        # condition names.
+        if ($have -ieq 'unknown') { $holds = $false }
+        if (-not $holds) { $unmet += "$key=$value (the list has '$have'$(if ($have -ieq 'unknown') { ', an imported run that recorded no facts' }))" }
     }
     return , $unmet
 }
@@ -313,7 +335,7 @@ function Compare-RanList {
             $same = if ($key -ceq 'mode' -and $crossed) { (Get-RanListModeMeaning $a) -ceq (Get-RanListModeMeaning $b) } else { $a -ceq $b }
             if (-not $same) { $problems.Add("BUILD-DIFFERS $key`: '$($list.Path)' has '$($list.Build[$key])', '$($CandidateList.Path)' has '$($CandidateList.Build[$key])'.") }
         }
-        $facts = @(@($list.Environment.Keys) + @($CandidateList.Environment.Keys) | Sort-Object -Unique)
+        $facts = @(@($list.Environment.Keys) + @($CandidateList.Environment.Keys) | Sort-Object -Unique -CaseSensitive)
         foreach ($key in $facts) {
             if ("$($list.Environment[$key])" -cne "$($CandidateList.Environment[$key])") {
                 $problems.Add("ENV-DIFFERS $key`: '$($list.Path)' has '$($list.Environment[$key])', '$($CandidateList.Path)' has '$($CandidateList.Environment[$key])'.")
@@ -366,7 +388,7 @@ function Compare-RanList {
     }
     # An approval for a suite this list does not hold (the approvals file covers
     # every suite) is not stale.
-    $laterSuites = @($CandidateList.Rows | ForEach-Object Suite | Sort-Object -Unique)
+    $laterSuites = @($CandidateList.Rows | ForEach-Object Suite | Sort-Object -Unique -CaseSensitive)
     foreach ($id in $SkipEntries.Keys) {
         if (($id -split "`t", 2)[0] -cnotin $laterSuites) { continue }
         if (-not $later.ContainsKey($id) -or $later[$id].SKIP -eq 0) { $notes.Add("UNUSED-SKIP-APPROVAL $($id -replace "`t", ' ')") }
