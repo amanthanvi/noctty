@@ -412,6 +412,93 @@ reuses process numbers, found a cycle and spun at 100% CPU.
 `flagship/contracts/Contracts.97-ConptySync.ps1` drives that walk, and the dump
 reader's retry, with synthetic input.
 
+## hidden-win11-conpty-reply-path.ps1
+
+Which terminal replies reach a console program through ConPTY's input, and in
+what shape (the kitty report's shortlist #0; log entry REPLY-PATH-01 in
+`docs/agents/log/conpty.md`). On a private desktop, a portable copy of noctty
+(without `noctty.ico`, with its own AppData, clipboard reads and writes denied,
+and later tabs on `direct:<System32>\cmd.exe /D` so no cmd AutoRun runs in the
+run; the helper compile's `dev-windows.cmd` still runs it, and an fnm hook's
+junctions from it land in your own `%LOCALAPPDATA%\fnm_multishells`) runs
+`console-reply-reader.c` as
+its `-e` child in one reader state at a time, types keys so conhost has seen
+Win32 input mode records, then has noctty write each case's reply: its own
+answers to the reader's queries, and `text:` bindings with the exact bytes,
+a split as two writes. Case 7 injects the same shapes at a PSReadLine prompt
+with its history isolated. Results go to `results.json` and `results.md` in
+the run directory, each row observed against the source's prediction.
+
+```powershell
+pwsh -NoProfile -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir>
+pwsh -NoProfile -File .\hidden-win11-conpty-reply-path.ps1 -Bin ..\..\zig-out\bin -Run <new dir> `
+    -Readers a,a16,b,c,c-inbox,d,d-notiming -AllowSshFarSideUserProfileAndLocalAppData
+```
+
+The default readers are a, a16, b and c, all behind the bundled ConPTY.
+c-inbox puts reader c behind the in-box conhost. d and d-notiming run System32's
+`ssh.exe` to a one-connection `sshd.exe -d` on 127.0.0.1, run as you with keys
+made for the run and deleted after it, forwarding off on both ends;
+d-notiming adds `-o ObscureKeystrokeTiming=no`. Their far side runs through
+sshd's `DefaultShell` (`HKLM\SOFTWARE\OpenSSH`; `cmd.exe` when unset) as you,
+with your real `LOCALAPPDATA`, and a PowerShell `DefaultShell` also loads your
+own PowerShell profile. So they run only with
+`-AllowSshFarSideUserProfileAndLocalAppData`, and only with a Run path of
+letters, digits, `_`, `.`, `-` and `\`, since the far side's shell gets the
+reader command unquoted.
+
+The Run directory must be new. The harness makes it with a protected ACL (you,
+SYSTEM and Administrators, inherited by everything in it) and reads that back
+before it writes anything there. That ACL is defence in depth for Run's own
+contents. It does not guard against an account with rights on Run's parent
+folders: other local accounts are outside the harness's threat model, since it
+runs under your own account on a single-user machine. It refuses to run with
+`NOCTTY_CONPTY` already set, since it sets that itself for c-inbox.
+
+Exit 0 means every requested reader ran every step, case 7 ran with its
+controls (unless `-SkipPSReadLine`), and every positive control came back as
+predicted; other rows are observations, recorded either way, and a row whose
+step never finished reads INCOMPLETE. Exit 1 is an incomplete run, a failed
+control, a reader in the wrong state or without a clean stop, or a case 7
+without a prompt row before and after its tab switch; 2 infrastructure, in the
+driver or the outer phase (an inherited `NOCTTY_CONPTY`, or a Run whose ACL
+does not read back as yours alone); 3 a changed isolation guard (the startup ledger, the PowerShell
+history, the product AUMID's registration, the clipboard sequence number), a
+link left in the run directory, or an ssh secret that could not be deleted.
+
+Controls: `-Sabotage delimiter|reader|control` breaks one thing on purpose and
+must exit 1. `-Sabotage setup` fails the setup at the point where reader d's
+ssh keys already exist, and must exit 2 with any keys deleted (with no ssh
+reader there are none to make). `-Sabotage key` holds an ssh secret's file open
+through the cleanup, and must exit 3 with the guards compared and the failure
+recorded. `-Sabotage acl` gives Everyone a rule on the Run directory once it is
+made, and must exit 2 with nothing compiled or launched.
+
+`flagship/contracts/Contracts.98-ConptyReplyPath.ps1` holds the harness to its
+safety and measurement properties in two ways:
+
+- **Checks and mutations.** It checks each launch's desktop and job, the
+  isolation flags and guards, the bindings' bytes, the step plan, the
+  predictions, the verdicts and the exit policy. It then applies 149 mutations
+  (the council's from rounds 1 to 6, the review bots', and its own). Each must
+  be refused by the whole-file pin and by the pin of every pinned region or
+  function it changes. All but the 39 marked `PinOnly` must also be refused
+  with the pins skipped (`-SkipPins`), so each of those mutations is shown to
+  be refused by a content check too; that does not show every content check
+  is exercised. The 39 are edits only a pin can see, and they must get nothing
+  from the content checks, so the mark stays true. A mutation with `Check`
+  must be refused by that content check itself.
+- **A closed set of pins.** The whole harness and the whole reader are pinned
+  by SHA-256 with LF line ends. Any edit to either fails the contract until its
+  pin there is updated in the same change, so a reviewer sees it. The regions
+  between `# pin-begin:` and `# pin-end:` comments in the harness (the reader
+  list, the whole outer phase, case 7, the driver's results) and the functions
+  the contract lists are pinned as well, only so that a failure names the
+  block that changed. Not pinned, since other harnesses share them:
+  `console-attach-info.c` (case 7's prompt reader),
+  `scripts\windows-harness-history.ps1` (its guard decides exit 3's history
+  branch) and `scripts\dev-windows.cmd` (the helper compile, exit 2).
+
 ## interactive-win11-ime-candidate.ps1
 
 Interactive Win11 validation for IME candidate anchoring. It launches
@@ -945,3 +1032,124 @@ ghostty-vt.dll placeholder smoke: 3/3 checks passed
 A DLL that loads (libghostty-vt from `zig build -Demit-lib-vt=true` does),
 fails to load for any other reason, has an export table or carries another
 FileDescription fails the smoke.
+
+## Published portable direct updates
+
+`direct-update-acceptance.ps1` exercises the published source release's own
+updater against the candidate's GitHub tag API feed. It downloads both portable
+ZIPs into separate new directories, verifies their published SHA-256 values
+before extraction, posts the configured check key and Install notification,
+restarts the copy, and waits for confirmation and helper finalization. It
+records versions, folder inventories, a sanitized state timeline, and the final
+stub's signature, publisher pin, description, empty export/import directories,
+load failure (1114), and equality with the verified candidate ZIP.
+
+Invoke from noninteractive automation, or from a caller whose PSReadLine history
+was already set to a run-local path or `SaveNothing` before its first read.
+Typing a wrapper command in an ordinary interactive host can itself enter the
+real history before this script starts; the metadata guard cannot prevent that.
+
+```powershell
+./test/windows/direct-update-acceptance.ps1 `
+    -Run H:\scratch\direct-update-136-137-NEW `
+    -FromVersion 1.3.136 -TargetVersion 1.3.137 -Architecture x64
+```
+
+The run directory must not exist. Every harness launch names a private desktop;
+the driver inherits an explicit whitelist of standard Windows runtime/profile
+variables with separate LOCALAPPDATA, APPDATA and temporary directories, excluding
+workflow credentials and other caller-defined variables. Standard Windows profile
+identity is retained; this is application-state isolation, not a separate OS account.
+The controller must observe Default. Downloads check both system and run-volume
+space (resolving the run's existing ancestor through junctions), use GitHub CLI
+requests bounded by `TimeoutSeconds`, and verify the publisher of both noctty.exe
+and its console shim before either runs. Receipts publish by a sibling-file rename
+after serialization and preserve zero/one/many array shapes. Inventories include
+hidden files and files within hidden directories. Trailing run-path separators
+are removed while drive roots are preserved.
+The parent samples owned windows on both Default and the named private desktop,
+and checks clipboard sequence and PSReadLine history metadata. A sample cannot
+prove the placement of a window that existed entirely between samples.
+No clipboard contents are read. Local guards read the real startup-attempts.json
+to compute its hash and inspect its mtime; they do not write it. Keep failed attempts.
+
+Run 1.3.125 only on a disposable GitHub-hosted runner: that historical binary
+writes the product AUMID registration and Shell jump list even in portable mode.
+Redirecting APPDATA does not isolate those writes. OS and PowerShell process
+architectures must both match `-Architecture`; x64 emulation proves no ARM64 run.
+The historical self-signed publisher is verified cryptographically against the
+updater pin through the existing release verifier, without a trust-store import.
+
+For the 1.3.125 to 1.3.137 stub case, `-HostedMesa` explicitly opts a disposable
+hosted runner into Mesa 26.3.0 llvmpipe from `mmozeiko/build-mesa`. It is off by
+default and refused for other source/target cases. Its HTTP fetch has a separate
+`TimeoutSeconds` cancellation budget covering the response body. Both native archive hashes
+are pinned and checked before extraction. Only `opengl32.dll` is added beside
+the 1.3.125 executable; the receipt proves one extra file, its PE architecture,
+the loaded module's backing file, and preservation through the update. The
+candidate ZIP remains unchanged. This version uses its automatic check and a
+posted pair to the source-defined painted Install rectangle on the host window.
+No terminal mouse message or real input is used. This proves the updater path;
+it does not establish composed rendering or physical mouse behavior.
+
+For the v1.4.100 boundary, `-Expected Rejected` checks that a source on 1.3.136
+stays on its original executable and runs, reports the incomplete portable ZIP,
+and offers Open Release. `-Expected Removed`, from the previous stub-bearing
+1.3.x, checks that a successful update removes the stub. Opening the release
+page and checking its manual instructions is a separate browser check. Neither
+future boundary is established by the 1.3.137 acceptance run. Rejected also checks
+every original file hash and reads its journal strictly: absence and a readable
+clear transaction pass; unreadable, locked or malformed state fails. The reader
+uses `System.Text.Json` without comments or trailing commas, rejects duplicate
+or case-colliding keys recursively, and requires all 17 fields written by
+1.3.136 for a strict Rejected verdict. Empty objects and unquoted keys fail.
+
+Updater diagnostics recognize `update_github_releases` and `update_portable_apply`.
+Receipts retain the level and scope for each matching line and omit its message,
+so paths, URLs and arbitrary release text never enter the exported diagnostic.
+The published versions emit warnings only for updater errors/cleanup trouble;
+the portable apply helper has debug-only directory-sync diagnostics. A clean
+release-mode update can therefore leave this field empty. The state timeline,
+file hashes and exit codes remain the acceptance evidence.
+
+Every launch pins a direct absolute System32 cmd with `/D` and denies clipboard
+reads and writes. Local runs additionally use the local harness library's real
+startup-state fingerprint and the product AUMID's own jump-list metadata guard.
+Other applications' jump-list changes are ignored. These detect mutations;
+they do not establish the absence of reads or identical writes. The receipt
+reports that limit instead of asserting no real-directory access. Private-window
+samples are retained and must contain the driver sentinel. A hidden STATIC helper
+on Default provides a positive control of the job window oracle before noctty
+starts. Hosted runs require a sequence-number positive control in a fresh
+unnamed window station, checked to differ from WinSta0 before every clipboard
+operation. After noctty exits and its normal before/after counter comparison is
+complete, a second hosted-only helper writes fixed fixture text to WinSta0 and
+requires the parent's actual reader to observe the change. Both the script and
+native helper require a disposable GitHub-hosted runner; the helper also checks
+WinSta0 and its private desktop identity before every clipboard operation. This
+intentional control is recorded separately from the noctty run's counter pair.
+Local runs perform no clipboard write, and no clipboard contents are ever read.
+
+Successful updates must sample `swapped` followed by `confirmed`; a cleared,
+abandoned transaction fails. Rejected mode compares SHA-256 for every original
+source file and permits extra files only for explicitly named generated runtime
+artifacts; it also requires no staged transaction. Removed mode validates the
+source stub before applying and its absence afterwards. Those modes still need
+the actual v1.4.100 candidate; opening the release page stays a separate check.
+Each input receipt records the checkout commit and harness/helper hashes. Keep
+the scratch hosted branch for future native ARM64 runs, with its `windows-2025`
+and `windows-11-arm` runner labels. Add `-HostedMesa` only for the pinned
+1.3.125 to 1.3.137 case.
+
+Run `direct-update-contract.ps1` for static refusal controls and the harness's
+actual verdict functions against synthetic files and receipts. Parse-valid
+here-string, disabled-guard, forged-stub, clipboard, confirmation,
+executable-identity and sidecar mutants must fail; the flagship gate includes it.
+The hosted definition, historical/Mesa/desktop guards and Default positive are
+pinned by executable AST shape. Clipboard-helper admission masks C# strings and
+comments, refuses conditional compilation and requires exact native call counts;
+extra unguarded calls and inert copies fail. The parent's positive counters must
+also equal the helper's own before/after pair.
+Public artifacts should contain only the named JSON receipts, never the raw child logs,
+copied profiles or binaries. The hosted workflow used to gather W10 evidence is
+scratch-only and is not part of this change.

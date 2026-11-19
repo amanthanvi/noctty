@@ -3,6 +3,7 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 See also:
+- A new reporting mode (2033, and 5522 if it is built) needs its prompt-time reset beside the keyboard-mode resets: a stale mode's report reaches PSReadLine as typed text (`[?999;2n` at the prompt): item (5) of the 2026-11-18 REPLY-PATH-01 entry in conpty.md.
 - Git Bash's `ghostty.bash` (OSTYPE, OSC 7 path shapes, PWD, `D;0`) is in the 2026-10-14 PKG-17 entry in launch-and-paths.md; CRLF in the shipped scripts is in the 2026-10-11 EOL-01 entry in build-release-ci.md.
 - The 2026-09-14 "OSC 133 D in `integration.ps1`" entry's `Start-Process -WindowStyle Hidden` driver has a portable alternative (NULL std handles) in the 2026-09-15 "Triaging a scrambled TUI report" entry in conpty.md.
 - Clink's prompt marks keep `redraw=0` after a resize: with `redraw=1` noctty clears the prompt rows, and Clink's own redraw then starts a row too high and overwrites the line above. A Clink line drawn twice came from noctty's column reflow, not from the Lua: the 2026-10-25 CLINK-RESIZE-01 entry in conpty.md.

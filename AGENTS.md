@@ -16,6 +16,10 @@ reading step under [Self-Correction Log](#self-correction-log).
   - `-Dtest-shards=4` runs it as four concurrent processes with the same
     count, about a third of the time (test-harnesses.md: 2026-11-11
     TEST-SHARDS-01).
+  - `-Dtest-optimize=ReleaseSafe` builds the test executable in that mode
+    (default Debug). `-Doptimize` does not set its mode, and any value but
+    Debug breaks its compile. The summary's `compile test ghostty-test <mode>`
+    line names the mode (build-release-ci.md: 2026-11-18 TEST-OPTIMIZE-01).
   - Bare `zig build test` errors in this fork.
   - `-Dtest-filter=<token>` (one token: quote it or use a no-space
     substring, or `zig build` reads the rest as step names) runs the tests
@@ -189,7 +193,11 @@ that govern each symbol you change, or that none does.
   (`scripts/stage-conpty-redist.ps1`), what ConPTY's buffer holds after a
   resize, minimize, clear or undo and the column reflow that has to match it
   (`Screen.resize`, the replay tests in `src/terminal/resize_replay.zig`, the
-  sync harness `test/windows/interactive-win11-conpty-sync.ps1`), the
+  sync harness `test/windows/interactive-win11-conpty-sync.ps1`), which
+  terminal replies reach a console program through ConPTY's input and in what
+  shape (the reply-path harness
+  `test/windows/hidden-win11-conpty-reply-path.ps1` and its reader
+  `test/windows/console-reply-reader.c`), the
   Ctrl+C-ignore attribute hosted shells inherit
   (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under
@@ -568,7 +576,9 @@ that govern each symbol you change, or that none does.
   Sentry, the COM apartment, default-terminal handoff, the CLI and the
   `noctty.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
-  (including the `bench:*` steps' `addBenchCoreImport`) and resources, the
+  (including the `bench:*` steps' `addBenchCoreImport`, and the test
+  executable's mode, `-Dtest-optimize` through `Config.testModule`) and
+  resources, the
   Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
   `scripts/dev-windows.cmd` keeps when set and otherwise sets to
   `%LOCALAPPDATA%\zig`), the Windows target floor (`src/build/Config.zig`,

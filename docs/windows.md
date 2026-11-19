@@ -2990,12 +2990,21 @@ and the
   `ESC _ G ... ESC \`, an `OK` or an error, unless `q=1` (suppress success
   replies) or `q=2` (suppress all replies) is set. A successful delete never
   replies (`graphics_exec.zig`, `StreamHandler.apcEnd`).
-  noctty has no ConPTY-specific suppression. The 2026-10-10 audit measured the
-  bundled ConPTY handing a native console program (`[Console]::ReadKey` in
-  pwsh, and `cmd`) a lone `\` for such a reply, while the same reply arrived
-  intact through WSL's raw pty; this was not re-measured for this page. A tool
-  run directly under ConPTY that does not parse APC replies should send
-  `q=2`.
+  noctty has no ConPTY-specific suppression. Measured through the bundled
+  ConPTY with Win32 input mode on (REPLY-PATH-01 in
+  `docs/agents/log/conpty.md`): a console program that reads with
+  `ENABLE_VIRTUAL_TERMINAL_INPUT` on, as records or as bytes, gets the reply
+  whole; one that reads records with it off (PSReadLine does) gets a single
+  Alt+`\` key and nothing of the body. `[Console]::ReadKey` and `cmd` read
+  with it off by default and are expected to get the lone `\` the 2026-10-10
+  audit saw (not re-measured). Before OpenSSH for Windows 9.8.2, `ssh.exe`
+  reads a reply longer than 16 bytes in 16-record parts. That it sends each
+  part as its own channel write is inferred, not observed (no channel trace
+  was taken): with `ObscureKeystrokeTiming` off, a Windows far end lost
+  exactly the first 16 bytes of most such replies, though not all (a 28-byte
+  split reply arrived whole), and with the default timing, at most 1 of 5 in
+  a run. A tool run
+  directly under ConPTY that does not parse APC replies should send `q=2`.
 - **Sixel is passed through but not rendered.** The bundled ConPTY delivers a
   Sixel DCS payload byte-for-byte (see the
   [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog)),

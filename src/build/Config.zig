@@ -51,6 +51,9 @@ emit_lib_vt: bool = false,
 emit_terminfo: bool = false,
 emit_termcap: bool = false,
 emit_test_exe: bool = false,
+/// The test executable's optimize mode (-Dtest-optimize). Debug unless
+/// asked: -Doptimize leaves it alone.
+test_optimize: std.builtin.OptimizeMode = .Debug,
 emit_themes: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
@@ -268,6 +271,12 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         "Build and install test executables with 'build'",
     ) orelse false;
 
+    config.test_optimize = b.option(
+        std.builtin.OptimizeMode,
+        "test-optimize",
+        "Optimize mode of the Zig test executable ghostty-test (default Debug; -Doptimize does not change it)",
+    ) orelse .Debug;
+
     config.emit_unicode_table_gen = b.option(
         bool,
         "emit-unicode-table-gen",
@@ -406,6 +415,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "release_symbols", self.release_symbols);
     step.addOption(bool, "d3d11", self.d3d11);
     step.addOption(bool, "renderer_test_tools", self.renderer_test_tools);
+    step.addOption(std.builtin.OptimizeMode, "test_optimize", self.test_optimize);
     step.addOption(ApprtRuntime, "app_runtime", self.app_runtime);
     step.addOption(FontBackend, "font_backend", self.font_backend);
     step.addOption(RendererBackend, "renderer", self.renderer);
@@ -432,6 +442,20 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
             break :channel .tip;
         },
     );
+}
+
+/// The test executable's root module: `options` built in the -Dtest-optimize
+/// mode, whatever `options.optimize` says. build.zig keeps upstream's
+/// `.optimize` line in the call because upstream respells that line (`.debug`
+/// in v1.4.0); an edit there would conflict at every merge.
+pub fn testModule(
+    self: *const Config,
+    b: *std.Build,
+    options: std.Build.Module.CreateOptions,
+) *std.Build.Module {
+    var test_options = options;
+    test_options.optimize = self.test_optimize;
+    return b.createModule(test_options);
 }
 
 /// Returns the build options for the terminal module. This assumes a
@@ -521,3 +545,11 @@ pub const ReleaseChannel = enum {
     /// Stable tagged releases.
     stable,
 };
+
+test "the test executable runs in its -Dtest-optimize mode" {
+    // build_options declares its own copy of the enum, so compare the names.
+    try std.testing.expectEqualStrings(
+        @tagName(@import("build_options").test_optimize),
+        @tagName(@import("builtin").mode),
+    );
+}
