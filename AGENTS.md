@@ -193,7 +193,11 @@ that govern each symbol you change, or that none does.
   (`scripts/stage-conpty-redist.ps1`), what ConPTY's buffer holds after a
   resize, minimize, clear or undo and the column reflow that has to match it
   (`Screen.resize`, the replay tests in `src/terminal/resize_replay.zig`, the
-  sync harness `test/windows/interactive-win11-conpty-sync.ps1`), the
+  sync harness `test/windows/interactive-win11-conpty-sync.ps1`), which
+  terminal replies reach a console program through ConPTY's input and in what
+  shape (the reply-path harness
+  `test/windows/hidden-win11-conpty-reply-path.ps1` and its reader
+  `test/windows/console-reply-reader.c`), the
   Ctrl+C-ignore attribute hosted shells inherit
   (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under
