@@ -18,17 +18,23 @@ from pathlib import Path
 
 def instrument_build(data, api):
     text = data.decode("utf-8").replace("\r\n", "\n")
+    entry = "pub fn build(b: *std.Build) !void {\n"
+    if text.count(entry) != 1:
+        raise ValueError("build entry must occur exactly once")
+    text = text.replace(
+        entry,
+        entry
+        + '    const oracle_system = @import("src/differential_oracle_build.zig").systemOptionsRequested(b);\n',
+    )
     if api == "fork" or (api == "stone_flag" and "    const exe = if (" in text):
         anchor = "    // Standalone feasibility spike."
-        addition = '    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe);\n\n'
+        addition = '    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle_system);\n\n'
     elif api == "v140":
         anchor = "    // All our steps which we'll hook up later."
-        addition = '    try @import("src/differential_oracle_build.zig").addPublic(b, mod.vt);\n\n'
+        addition = '    try @import("src/differential_oracle_build.zig").addPublic(b, mod.vt, oracle_system);\n\n'
     else:
         anchor = "    const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);\n"
-        addition = (
-            '    try @import("src/differential_oracle_build.zig").add(b, exe.exe);\n'
-        )
+        addition = '    try @import("src/differential_oracle_build.zig").add(b, exe.exe, oracle_system);\n'
         if text.count(anchor) != 1:
             raise ValueError("app-build anchor must occur exactly once")
         return text.replace(anchor, anchor + addition).encode()

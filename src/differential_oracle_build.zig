@@ -3,30 +3,35 @@
 const std = @import("std");
 const Api = enum { fork, stone, stone_flag, v140, v140_fork };
 
-pub fn add(b: *std.Build, app: *std.Build.Step.Compile) !void {
-    try addInner(b, app.root_module, false);
+/// Snapshot command-line integrations before Config applies package defaults.
+pub fn systemOptionsRequested(b: *std.Build) bool {
+    if (b.graph.system_package_mode) return true;
+    const integrations = if (@hasField(@TypeOf(b.graph.*), "system_integration_options"))
+        &b.graph.system_integration_options
+    else
+        &b.graph.system_library_options;
+    for (integrations.values()) |mode| {
+        if (mode == .user_enabled or mode == .declared_enabled) return true;
+    }
+    return false;
 }
 
-pub fn addPublic(b: *std.Build, public: *std.Build.Module) !void {
-    try addInner(b, public, true);
+pub fn add(b: *std.Build, app: *std.Build.Step.Compile, system_requested: bool) !void {
+    try addInner(b, app.root_module, false, system_requested);
 }
 
-fn addInner(b: *std.Build, source: *std.Build.Module, public: bool) !void {
+pub fn addPublic(b: *std.Build, public: *std.Build.Module, system_requested: bool) !void {
+    try addInner(b, public, true, system_requested);
+}
+
+fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_requested: bool) !void {
     const step = b.step("oracle", "Build the differential terminal oracle (no capture)");
     const api = b.option(Api, "vt-api", "Terminal API shape: fork, stone, stone_flag, v140, v140_fork") orelse {
         step.dependOn(&b.addFail("oracle requires an explicit -Dvt-api").step);
         return;
     };
     const corpus = b.option(bool, "oracle-corpus", "Build the pre-side synthetic generator") orelse false;
-    const integrations = if (@hasField(@TypeOf(b.graph.*), "system_integration_options"))
-        &b.graph.system_integration_options
-    else
-        &b.graph.system_library_options;
-    var system = b.graph.system_package_mode;
-    for (integrations.values()) |mode| {
-        if (mode == .user_enabled or mode == .declared_enabled) system = true;
-    }
-    if (system) {
+    if (system_requested) {
         step.dependOn(&b.addFail("oracle: --system and every -fsys option are forbidden; system headers and libraries have no verified package pins").step);
         return;
     }
