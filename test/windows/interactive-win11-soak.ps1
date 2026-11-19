@@ -10,7 +10,8 @@ Run it as
        -ExpectedBuildMode ReleaseFast -Minutes 480 [-SandboxName soak-fast]
 then judge the run with
   python -I ci/soak_judge.py <run> --min-minutes 480 --other-run <the night's other run>
-(60 and no --other-run for Phase 0a's hour-long runs). -Bin is a portable copy's directory: the packaged
+(-Minutes 120 and --min-minutes 120 for Phase 0a's runs: 60 minutes of warm-up and 60 judged; the judge refuses
+less). -Bin is a portable copy's directory: the packaged
 layout (noctty.exe with share\ inside it, as the portable ZIP extracts) or zig-out\bin with share\ beside it.
 
 What it does. The outer half (this process, on the user's desktop) copies -Bin into <run>\copy, places the
@@ -36,7 +37,7 @@ every WER report, Application Error or Hang event and LocalDumps dump that names
 PID) after its launch into <run>\crash.
 
 Records (ci/soak_judge.py documents each): run.tsv, samples.tsv, metrics.tsv, threads.tsv, timing.tsv (when
-each minute's sample was taken, and how late) and crash\, read by the judge; harness.json (the parameters,
+each minute's probe started and ended) and crash\, read by the judge; harness.json (the parameters,
 controls and workload totals), version.txt (`+version`), noctty.log (the copy's stderr log, GHOSTTY_LOG=stderr),
 driver.log and guards.json, read by people. Nothing the driver calls waits on the copy without a bound: a
 resize is asked of the copy's own thread (SWP_ASYNCWINDOWPOS), and every message it sends has a timeout, so a
@@ -521,7 +522,7 @@ function Invoke-SoakDriver {
         $timingTsv = Join-Path $Run 'timing.tsv'
         Add-Line $metricsTsv "minute`thandles`tthreads`tprivate_bytes`tworking_set`tcommit_charge`tgdi_objects`tuser_objects`tchildren`tsurfaces`tchurn`tmissed"
         Add-Line $threadsTsv "minute`ttid`tstart`tname"
-        Add-Line $timingTsv "minute`tsampled_ms`tlate_ms`tworkload_ms"
+        Add-Line $timingTsv "minute`tprobe_start_ms`tprobe_end_ms`tworkload_ms"
         if ([SoakNative]::MemoryCountersSize -ne 96) { throw "PROCESS_MEMORY_COUNTERS_EX2 is $([SoakNative]::MemoryCountersSize) bytes, not 96." }
         if ([SoakNative]::JobLimitsSize -ne 144) { throw "JOBOBJECT_EXTENDED_LIMIT_INFORMATION is $([SoakNative]::JobLimitsSize) bytes, not 144." }
         if ([SoakNative]::Layout() -cne $script:SdkLayout) { throw "The mirrored structs do not match the SDK's x64 layout: $([SoakNative]::Layout())" }
@@ -817,17 +818,14 @@ function Invoke-SoakDriver {
                 if ($hangWindows.Count -ge 1) { Start-Hang $hangWindows[0].Hwnd } else { Log 'hang control: no window to suspend' }
             }
             while ($clock.ElapsedMilliseconds -lt $due) { Start-Sleep -Milliseconds ([Math]::Min(500, [Math]::Max(1, $due - $clock.ElapsedMilliseconds))) }
-            $sampledMs = $clock.ElapsedMilliseconds
-            $late = $sampledMs - $due
-            if ($late -gt 5000) { $harness.LateSamples++ }
-            # A hang that ended before this sample's response bound ran out is one the judge never sees.
-            if ($HangAtMinute -eq $minute -and $null -ne $harness.HungAtMs -and
-                $harness.HungAtMs + $HangSeconds * 1000 -lt $sampledMs + $script:ResponseBoundMs) {
-                $harness.ControlMisses.Add("the hang ended before minute $($minute)'s sample could see it")
-            }
-            $harness.WorstLatenessMs = [Math]::Max($harness.WorstLatenessMs, $late)
             $harness.Churn += $load.Churn; $harness.Missed += $load.Missed
+            # The probe (liveness, the copy's windows, their WM_NULL answers) is timed where it runs: its start
+            # before the liveness check, its end right after the last answer. A delay before it or inside it is
+            # lateness the judge sees (round 2's Sol High: a timestamp taken before the probe hid one).
+            $probeStart = $clock.ElapsedMilliseconds
+            $answeredNow = $null
             if (-not [SoakNative]::Alive($process)) {
+                $probeEnd = $clock.ElapsedMilliseconds
                 Add-Line $samplesTsv "$minute`t-`t-`t-"
                 Add-Line $metricsTsv ("$minute" + ("`t-" * 11))
             } else {
@@ -837,10 +835,13 @@ function Invoke-SoakDriver {
                     # A noctty window on this desktop that is not the launched process's: a restart.
                     $other = @($windows.Others)[0]
                     $answer = if ([SoakNative]::Responsive($other.Hwnd, $script:ResponseBoundMs)) { 'yes' } else { 'no' }
+                    $probeEnd = $clock.ElapsedMilliseconds
                     Add-Line $samplesTsv "$minute`t$($other.Pid)`t$([SoakNative]::CreationTimeOf($other.Pid))`t$answer"
                 } else {
                     $answered = $mine.Count -gt 0
                     foreach ($h in $mine) { if (-not [SoakNative]::Responsive($h.Hwnd, $script:ResponseBoundMs)) { $answered = $false } }
+                    $probeEnd = $clock.ElapsedMilliseconds
+                    $answeredNow = $answered
                     Add-Line $samplesTsv ("$minute`t$nocttyPid`t$start`t" + $(if ($answered) { 'yes' } else { 'no' }))
                 }
                 # The copy's error mode, each change kept with its minute (the job, not this mode, keeps a
@@ -858,7 +859,16 @@ function Invoke-SoakDriver {
                     [SoakNative]::Gui($process, 0), [SoakNative]::Gui($process, 1), $children, $surfaces, $load.Churn, $load.Missed)) -join "`t")
                 foreach ($row in $threads) { Add-Line $threadsTsv "$minute`t$row" }
             }
-            Add-Line $timingTsv "$minute`t$sampledMs`t$late`t$workMs"
+            # The judge's bounds: the probe starts within 5 s of its due time and ends within the response
+            # bound after that (ci/soak_judge.py, LATE-SAMPLE and EARLY-SAMPLE).
+            $late = $probeEnd - $due
+            if ($probeStart - $due -gt 5000 -or $late -gt 5000 + $script:ResponseBoundMs) { $harness.LateSamples++ }
+            $harness.WorstLatenessMs = [Math]::Max($harness.WorstLatenessMs, $late)
+            # The hang control's own sample must have seen the copy not answer, or the hang did not take effect.
+            if ($HangAtMinute -eq $minute -and $null -ne $harness.HungAtMs -and $answeredNow -ne $false) {
+                $harness.ControlMisses.Add("the hang's minute $minute sample did not see the copy fail to answer")
+            }
+            Add-Line $timingTsv "$minute`t$probeStart`t$probeEnd`t$workMs"
             if ($KillAtMinute -eq $minute -and [SoakNative]::Alive($process)) {
                 [SoakNative]::Terminate($process, 3)   # the kill control: the end a ReleaseSafe panic gives
                 if ([SoakNative]::WaitForSingleObject($process, 10000) -eq 0 -and [SoakNative]::ExitCode($process) -eq 3) {

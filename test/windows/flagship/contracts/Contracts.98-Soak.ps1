@@ -162,9 +162,19 @@ $soakRules = @(
         Mutation = @('$HangAtMinute -eq 1 -or $HangAtMinute % 10 -eq 0', '$HangAtMinute % 10 -eq 0')
     }
     @{
-        Description = 'a hang must outlast its minute''s sample and its response bound: a shorter -HangSeconds is refused before the launch, and a hang that ended before the sample is a control miss (CodeRabbit, round 2)'
-        Pattern = '(?s)if \(\$HangAtMinute -eq \$minute -and \$null -ne \$harness\.HungAtMs -and\s*\$harness\.HungAtMs \+ \$HangSeconds \* 1000 -lt \$sampledMs \+ \$script:ResponseBoundMs\) \{\s*\$harness\.ControlMisses\.Add\(.*?\$hangNeeds = \[int\]\$\(if \(\$HangAt -eq ''sample''\) \{ 10 \} else \{ 60 \}\) \+ \[int\]\(\$script:ResponseBoundMs / 1000\) \+ 5\s*if \(\$HangAtMinute -gt 0 -and \$HangSeconds -lt \$hangNeeds\) \{\s*throw'
+        Description = 'a hang must be seen by its minute''s own sample: a -HangSeconds too short to reach it is refused before the launch, and a sample that did not see the copy fail to answer is a control miss (CodeRabbit and Sol, round 2)'
+        Pattern = '(?s)if \(\$HangAtMinute -eq \$minute -and \$null -ne \$harness\.HungAtMs -and \$answeredNow -ne \$false\) \{\s*\$harness\.ControlMisses\.Add\(.*?\$hangNeeds = \[int\]\$\(if \(\$HangAt -eq ''sample''\) \{ 10 \} else \{ 60 \}\) \+ \[int\]\(\$script:ResponseBoundMs / 1000\) \+ 5\s*if \(\$HangAtMinute -gt 0 -and \$HangSeconds -lt \$hangNeeds\) \{\s*throw'
         Mutation = @('{ 10 } else { 60 }', '{ 1 } else { 1 }')
+    }
+    @{
+        Description = 'the hang''s sample check reads that sample''s own answer'
+        Pattern = '(?s)foreach \(\$h in \$mine\) \{ if \(-not \[SoakNative\]::Responsive\(\$h\.Hwnd, \$script:ResponseBoundMs\)\) \{ \$answered = \$false \} \}\s*\$probeEnd = \$clock\.ElapsedMilliseconds\s*\$answeredNow = \$answered\s.*?-and \$answeredNow -ne \$false\) \{'
+        Mutation = @('$answeredNow = $answered', '$answeredNow = $true')
+    }
+    @{
+        Description = 'each minute''s probe is timed where it runs: its start before the liveness check, its end after the last WM_NULL answer, both written to timing.tsv (Sol, round 2: a timestamp taken before the probe hid a 15 s delay)'
+        Pattern = '(?s)while \(\$clock\.ElapsedMilliseconds -lt \$due\) \{[^\r\n]*\}\s*\$harness\.Churn \+= \$load\.Churn; \$harness\.Missed \+= \$load\.Missed\s*\$probeStart = \$clock\.ElapsedMilliseconds\s*\$answeredNow = \$null\s*if \(-not \[SoakNative\]::Alive\(\$process\)\) \{\s*\$probeEnd = \$clock\.ElapsedMilliseconds.*?\$answer = if \(\[SoakNative\]::Responsive\(\$other\.Hwnd, \$script:ResponseBoundMs\)\) \{ ''yes'' \} else \{ ''no'' \}\s*\$probeEnd = \$clock\.ElapsedMilliseconds.*?\$answered = \$false \} \}\s*\$probeEnd = \$clock\.ElapsedMilliseconds.*?Add-Line \$timingTsv "\$minute`t\$probeStart`t\$probeEnd`t\$workMs"'
+        Mutation = @("`$probeStart = `$clock.ElapsedMilliseconds", "`$probeStart = `$due")
     }
     @{
         Description = 'a control asked for that did not take effect (no hang, no kill with exit code 3, no injection) fails the harness, since the judge never sees a control (Greptile, round 2)'

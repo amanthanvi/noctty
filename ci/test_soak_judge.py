@@ -84,12 +84,13 @@ def thread_rows(metrics, extra=None):
     return rows
 
 
-def flat_timing(samples, late=None):
-    """One timing row per sample: taken 10 ms after its due time, or `late(minute)` ms when given."""
+def flat_timing(samples, late=None, took=3):
+    """One timing row per sample: its probe started 10 ms after its due time, or `late(minute)` ms when given,
+    and ended `took` ms after it started."""
     rows = []
     for m, _, _, _ in samples:
-        ms = (late or (lambda _m: 10))(m)
-        rows.append((m, m * 60000 + ms, ms, 0 if m == 1 else 8000))
+        start = m * 60000 + (late or (lambda _m: 10))(m)
+        rows.append((m, start, start + took, 0 if m == 1 else 8000))
     return rows
 
 
@@ -123,7 +124,7 @@ def write_run(d, rows, samples, crash_dir=True, crash_files=(), metrics="flat", 
     if timing == "flat":
         timing = flat_timing(samples)
     if timing is not None:
-        put("timing.tsv", "minute\tsampled_ms\tlate_ms\tworkload_ms", timing)
+        put("timing.tsv", "minute\tprobe_start_ms\tprobe_end_ms\tworkload_ms", timing)
 
 
 class JudgeCase(unittest.TestCase):
@@ -407,18 +408,25 @@ class Records(JudgeCase):
 
     def test_a_late_sample_fails(self):
         # Round 1's Opus H1: a hung copy blocked the driver, and the sample taken after the hang read "yes".
-        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=flat_timing(SOAK_OK, lambda m: 66858 if m == 3 else 10))
-        out = self.expect(d, {"LATE-SAMPLE": 1})
-        self.assertIn("LATE-SAMPLE minute 3 sampled 66858 ms", out)
+        # The driver then reached minute 4's probe, due 60 s after minute 3's, only once minute 3's had ended.
+        late = {3: 66858, 4: 6870}
+        d = self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=flat_timing(SOAK_OK, lambda m: late.get(m, 10)))
+        out = self.expect(d, {"LATE-SAMPLE": 2})
+        self.assertIn("LATE-SAMPLE minute 3's probe started 66858 ms after its due time", out)
 
     def test_a_sample_at_the_bound_passes(self):
         self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=flat_timing(SOAK_OK, lambda m: 5000)), {})
 
-    def test_a_lateness_that_disagrees_with_its_time_is_malformed(self):
-        # CodeRabbit (round 2): a row claiming 0 ms late for a sample taken 10 s after minute 3 was due.
-        timing = [(3, 190000, 0, 8000) if r[0] == 3 else r for r in flat_timing(SOAK_OK)]
+    def test_a_probe_that_ends_before_it_starts_is_malformed(self):
+        timing = [(3, 180010, 180000, 8000) if r[0] == 3 else r for r in flat_timing(SOAK_OK)]
         out = self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=timing), {"MALFORMED": 1})
-        self.assertIn("late_ms 0 is not sampled_ms less the minute's due time (10000)", out)
+        self.assertIn("its probe ends at 180000 ms, before it starts at 180010 ms", out)
+
+    def test_timing_rows_out_of_order_are_malformed(self):
+        timing = flat_timing(SOAK_OK)
+        timing[2], timing[3] = timing[3], timing[2]
+        out = self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=timing), {"MALFORMED": 1})
+        self.assertIn("minutes and times must increase", out)
 
     def test_no_timing_file(self):
         self.expect(self.run_dir(soak_rows(("quit", 0)), SOAK_OK, timing=None), {"NO-TIMING": 1})
@@ -476,6 +484,58 @@ class Records(JudgeCase):
         self.assertEqual(rc, 1, out)
         self.assertGreaterEqual(kinds.get("MALFORMED", 0), 1, out)
         self.assertEqual(kinds.get("MISSING-METRIC"), 8, out)
+
+
+class ReviewRound2(JudgeCase):
+    """Round 2's review, judged with the repository's thresholds: the probe's own times (Sol's High), Phase 0a's
+    120 minutes (the lead's measured amendment of PLAN.md §3.5), and timing bounded both ways (Sol and Opus)."""
+
+    def phase0a(self, timing=None, minutes=120):
+        samples = ok_samples(minutes)
+        metrics = flat_metrics(samples)
+        return self.run_dir(soak_rows(("quit", 0), planned=minutes), samples, metrics=metrics,
+                            threads=thread_rows(metrics), timing=timing or flat_timing(samples))
+
+    def judge0a(self, d, kinds, minimum=120):
+        return self.expect(d, kinds, min_minutes=minimum, thresholds=DEFAULT_THRESHOLDS)
+
+    def test_a_clean_phase_0a_run_of_120_minutes_passes(self):
+        self.judge0a(self.phase0a(), {})
+
+    def test_the_repository_thresholds_refuse_a_minimum_below_120(self):
+        self.judge0a(self.phase0a(), {"MINIMUM-TOO-SHORT": 1}, minimum=119)
+
+    def test_sols_measured_delay_before_the_probe_fails(self):
+        # Sol's review-only delay, measured: 15 s of sleep after the old timestamp. The record said minute 3 was
+        # sampled at 180,004 ms (4 ms late); the probe ran at 195,021 ms, after the hang had ended. Recorded
+        # where it runs, the probe starts 15,021 ms late.
+        timing = [(3, 195021, 195024, 3) if r[0] == 3 else r for r in flat_timing(ok_samples(120))]
+        out = self.judge0a(self.phase0a(timing=timing), {"LATE-SAMPLE": 1})
+        self.assertIn("LATE-SAMPLE minute 3's probe started 15021 ms after its due time", out)
+
+    def test_the_same_delay_inside_the_probe_fails_by_its_end(self):
+        timing = [(3, 180004, 195021, 3) if r[0] == 3 else r for r in flat_timing(ok_samples(120))]
+        out = self.judge0a(self.phase0a(timing=timing), {"LATE-SAMPLE": 1})
+        self.assertIn("LATE-SAMPLE minute 3's probe ended 15021 ms after its due time, beyond 10000 ms", out)
+
+    def test_a_probe_at_both_bounds_passes(self):
+        # A probe that starts 5 s late and then waits out the full 5 s response bound on a hung window.
+        self.judge0a(self.phase0a(timing=flat_timing(ok_samples(120), lambda m: 5000, took=5000)), {})
+
+    def test_a_probe_a_millisecond_past_its_end_bound_fails(self):
+        self.judge0a(self.phase0a(timing=flat_timing(ok_samples(120), lambda m: 5000 if m == 7 else 10,
+                                                   took=5001)), {"LATE-SAMPLE": 1})
+
+    def test_a_30_second_sampler_fails_as_early(self):
+        # Opus's L4, measured: minute m sampled at m x 30 s (an 8-hour record taken in 4) passed.
+        timing = [(m, m * 30000, m * 30000 + 3, w) for m, _, _, w in flat_timing(ok_samples(120))]
+        out = self.judge0a(self.phase0a(timing=timing), {"EARLY-SAMPLE": 120})
+        self.assertIn("EARLY-SAMPLE minute 2's probe started 60000 ms before its due time", out)
+
+    def test_one_timestamp_for_every_minute_fails(self):
+        # Sol's Low, measured: sampled_ms 60000 on every row, with late_ms to match, passed a 90-minute record.
+        timing = [(m, 60000, 60003, w) for m, _, _, w in flat_timing(ok_samples(120))]
+        self.judge0a(self.phase0a(timing=timing), {"MALFORMED": 119, "EARLY-SAMPLE": 119})
 
 
 class LineEnds(JudgeCase):

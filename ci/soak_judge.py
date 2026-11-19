@@ -2,7 +2,8 @@ r"""The soak judge: PLAN.md §3.5's process rules and slope check for one soak r
 
 test/windows/interactive-win11-soak.ps1 records a run directory; this tool reads it and fails the soak on
 any rule below. Release coverage judges both copies of its night this way (the packaged ReleaseFast one and
-the ReleaseSafe one); Phase 0a's hour-long runs use it with --min-minutes 60. The role compare does not see
+the ReleaseSafe one); Phase 0a's 120-minute runs (60 of warm-up, 60 judged) use it with --min-minutes 120.
+The role compare does not see
 these rules: a copy that recorded its thread-role pairs and then panicked still passes it, so the soak's own
 rules have to catch the end.
 
@@ -13,7 +14,8 @@ metrics and thread rows the soak records, the workload they were taken under, an
 
 Usage:
   python -I ci/soak_judge.py <run-dir> --min-minutes <N> [--other-run <dir>] [--thresholds <file>]
-    --min-minutes  the run's required minimum: 480 at release coverage, 60 for 0a's hour-long runs
+    --min-minutes  the run's required minimum: 480 at release coverage, 120 for 0a's runs (the shortest the
+                   repository thresholds accept is their warm-up plus window: MINIMUM-TOO-SHORT below it)
     --other-run    the night's other copy's run directory (required from 480 minutes: NO-OTHER-RUN)
     --thresholds   the slope thresholds; default soak-thresholds.tsv beside this file
 Exit 0 on a pass, 1 on any failure, 2 on a usage error. The report is UTF-8 whatever the console's code page.
@@ -61,14 +63,17 @@ Run directory, metrics stage (new):
   threads.tsv   the header `minute tid start name`, then one row per thread of each live sample: its start
                 address as module+offset (`?` when unreadable) and its description (empty when unnamed). A
                 thread's kind is its name, else its start address.
-  timing.tsv    the header `minute sampled_ms late_ms workload_ms`, then one row per sampled minute
-                (MISSING-TIMING, DUPLICATE-TIMING): when the sample was taken (ms after the launch), how late
-                that was against its due time (minute x 60 s; a late_ms that is not sampled_ms less it is
-                MALFORMED), and how long the minute's churn ran. A sample
-                more than LATE_SAMPLE_MS late fails (LATE-SAMPLE): for that long nothing looked at the copy at
-                its due time, so a hang there would read as an answer once it ended.
+  timing.tsv    the header `minute probe_start_ms probe_end_ms workload_ms`, then one row per sampled
+                minute (MISSING-TIMING, DUPLICATE-TIMING), minutes and times strictly increasing and no probe
+                ending before it starts (MALFORMED otherwise): when the minute's probe (liveness, the windows,
+                their WM_NULL answers) started and ended, in ms of the driver's clock, on which minute m is due
+                at m x 60 000, and how long the minute's churn ran. A probe that started before its due time
+                fails (EARLY-SAMPLE: it did not look at the copy on its schedule); one that started more than
+                LATE_SAMPLE_MS after it, or ended more than LATE_SAMPLE_MS + RESPONSE_BOUND_MS after it, fails
+                (LATE-SAMPLE): for that long nothing looked at the copy at its due time, so a hang there would
+                read as an answer once it ended.
 Fails (metrics stage): NO-METRICS, NO-THREADS, NO-TIMING, MISSING-METRIC, DUPLICATE-METRIC, MISSING-TIMING,
-DUPLICATE-TIMING, MALFORMED, LATE-SAMPLE, NOT-AT-BASELINE, WORKLOAD-MISSED, NO-WORKLOAD (fewer than half the
+DUPLICATE-TIMING, MALFORMED, EARLY-SAMPLE, LATE-SAMPLE, NOT-AT-BASELINE, WORKLOAD-MISSED, NO-WORKLOAD (fewer than half the
 live minutes did any churn), BAD-THRESHOLDS, MINIMUM-TOO-SHORT (a required minimum that leaves no slope window
 after the warm-up: the call is refused, never judged without a slope), NO-SLOPE-SAMPLES (fewer live minutes
 after the warm-up than the window), SLOPE (a metric's least-squares slope over the live minutes after the
@@ -100,9 +105,10 @@ import re
 import sys
 
 Z = 3.0                 # the slope's lower bound is slope - Z x its standard error
-LATE_SAMPLE_MS = 5000   # the harness's response bound: a sample later than this saw nothing at its due time
+LATE_SAMPLE_MS = 5000   # a probe that starts later than this after its due time saw nothing at it
+RESPONSE_BOUND_MS = 5000   # the harness's WM_NULL bound: how long a probe may take once it has started
 BASELINE_SURFACES = 1
-TIMING_HEADER = ("minute", "sampled_ms", "late_ms", "workload_ms")
+TIMING_HEADER = ("minute", "probe_start_ms", "probe_end_ms", "workload_ms")
 KINDS = ("launch", "mode", "class", "exe", "planned", "wer", "end")
 METRICS = ("handles", "threads", "private_bytes", "working_set", "commit_charge", "gdi_objects", "user_objects",
            "children")
@@ -412,7 +418,7 @@ class Judge:
                               f"{metrics[m]['threads']}")
             kinds_by_minute = per_minute
 
-        # When each sample was taken: a sample late beyond the bound looked at nothing at its due time.
+        # When each minute's probe ran: one outside its bounds did not look at the copy at its due time.
         tlines = self.read(os.path.join(self.d, "timing.tsv"), "timing.tsv")
         if tlines is None:
             self.fail("NO-TIMING the run directory has no timing.tsv")
@@ -422,26 +428,37 @@ class Judge:
                 self.fail(f"MALFORMED timing.tsv header {body[0] if body else ''!r}")
                 body = []
             timed = collections.Counter()
+            previous = None   # the row before, in file order: (minute, probe_end_ms)
             for line in body[1:]:
                 p = line.split("\t")
-                if (len(p) != 4 or not is_count(p[0]) or int(p[0]) < 1 or not is_count(p[1])
-                        or not is_count(p[2].removeprefix("-")) or not is_count(p[3])):
+                if len(p) != 4 or not all(is_count(x) for x in p) or int(p[0]) < 1:
                     self.fail(f"MALFORMED timing.tsv: {line.strip()!r}")
                     continue
-                m = int(p[0])
+                m, start, end = int(p[0]), int(p[1]), int(p[2])
                 timed[m] += 1
                 if timed[m] > 1:
                     self.fail(f"DUPLICATE-TIMING minute {m} has {timed[m]} timing rows")
                     continue
-                late = int(p[1]) - m * 60000   # the driver's clock: minute m is due at m * 60000 ms
+                if end < start:
+                    self.fail(f"MALFORMED timing.tsv minute {m}: its probe ends at {end} ms, before it starts at "
+                              f"{start} ms")
+                    continue
+                if previous is not None and (m <= previous[0] or start <= previous[1]):
+                    self.fail(f"MALFORMED timing.tsv minute {m}: its probe (from {start} ms) does not follow minute "
+                              f"{previous[0]}'s, which ended at {previous[1]} ms; minutes and times must increase")
+                previous = (m, end)
+                due = m * 60000   # the driver's clock: minute m is due at m x 60 000 ms
                 if m not in self.minutes:
                     self.fail(f"MALFORMED timing.tsv minute {m} has a time and no sample")
-                elif int(p[2]) != late:
-                    self.fail(f"MALFORMED timing.tsv minute {m}: late_ms {int(p[2])} is not sampled_ms less the "
-                              f"minute's due time ({late})")
-                elif late > LATE_SAMPLE_MS:
-                    self.fail(f"LATE-SAMPLE minute {m} sampled {late} ms after its due time, beyond "
+                elif start < due:
+                    self.fail(f"EARLY-SAMPLE minute {m}'s probe started {due - start} ms before its due time")
+                elif start - due > LATE_SAMPLE_MS:
+                    self.fail(f"LATE-SAMPLE minute {m}'s probe started {start - due} ms after its due time, beyond "
                               f"{LATE_SAMPLE_MS} ms")
+                elif end - due > LATE_SAMPLE_MS + RESPONSE_BOUND_MS:
+                    self.fail(f"LATE-SAMPLE minute {m}'s probe ended {end - due} ms after its due time, beyond "
+                              f"{LATE_SAMPLE_MS + RESPONSE_BOUND_MS} ms ({LATE_SAMPLE_MS} to start, "
+                              f"{RESPONSE_BOUND_MS} to answer)")
             for m in sorted(self.minutes):
                 if timed[m] == 0:
                     self.fail(f"MISSING-TIMING minute {m}")
