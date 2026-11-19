@@ -42,8 +42,8 @@ $soakRules = @(
         Mutation = @("Where-Object { `$_.Name -notin @('noctty.ico', 'crash', 'ghostty') }", "Where-Object { `$_.Name -notin @('noctty.ico') }")
     }
     @{
-        Description = 'a flood counts only when the acknowledgement file reaches its own number, written only after its output (CodeRabbit, round 1)'
-        Pattern = '(?s)\$script:soakFloodsAsked\+\+\s*\$want = \$script:soakFloodsAsked.*?Wait-For \{ \(Get-FloodCount\) -ge \$want \} 30000.*?''@type "\{0\}" && echo flood>>"\{1\}"'''
+        Description = 'a flood counts only when the acknowledgement file reaches its own number, written only after its output, by an ASCII batch file that takes its paths from its own location (CodeRabbit, rounds 1 and 3)'
+        Pattern = '(?s)\$script:soakFloodsAsked\+\+\s*\$want = \$script:soakFloodsAsked.*?Wait-For \{ \(Get-FloodCount\) -ge \$want \} 30000.*?''@type "%~dp0flood\.txt" && echo flood>>"%~dp0flood-count\.txt"'''
         Mutation = @('(Get-FloodCount) -ge $want', '(Get-FloodCount) -gt $count')
     }
     @{

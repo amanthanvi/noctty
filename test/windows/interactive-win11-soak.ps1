@@ -1035,7 +1035,9 @@ function Invoke-SoakOuter {
     [IO.File]::WriteAllText((Join-Path $copy 'noctty.portable'), '')
     [IO.File]::WriteAllText((Join-Path $work 'flood.txt'), (New-FloodText), $script:Utf8)
     $floodCmd = Join-Path $work 'flood.cmd'
-    [IO.File]::WriteAllText($floodCmd, ('@type "{0}" && echo flood>>"{1}"' -f (Join-Path $work 'flood.txt'), (Join-Path $work 'flood-count.txt')) + "`r`n")
+    # ASCII only, its paths from its own location (%~dp0): cmd reads a batch file in the console's code page,
+    # which on a CJK host is not UTF-8, so a non-ASCII run path written into it could miss (CodeRabbit, round 3).
+    [IO.File]::WriteAllText($floodCmd, '@type "%~dp0flood.txt" && echo flood>>"%~dp0flood-count.txt"' + "`r`n")
     $floodText = '\"' + $floodCmd.Replace('\', '\\') + '\"\r'
     # The soak's config (portable mode reads <copy>\config.ghostty). Every default binding is cleared, so no
     # key the harness posts can copy, paste or open anything; F2 to F8 are the churn's. Each is bound under
