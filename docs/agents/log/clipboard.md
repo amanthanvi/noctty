@@ -3,9 +3,11 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- The 2026-10-22 RDPCLIP-1 station trap's WinSta0 no-copy rule has one hosted-only exception: test-harnesses.md 2026-11-18 DIRECT-UPDATE-720-CONTROLS permits a fixed clipboard write on a disposable GitHub runner after noctty exits and its normal counter comparison passes, behind hosted/station/desktop gates. Developer-machine writes remain forbidden.
 - 2026-04-17 `win32_surface_drop_target.zig` (inline `IDropTarget` storage): superseded by the 2026-10-11 PKG-26 entry in input.md (`DropTarget` is allocated independently and refcounted).
 
 See also:
+- The 2026-11-18 DIRECT-UPDATE-720 and DIRECT-UPDATE-720-CONTROLS entries in test-harnesses.md record the local AutoRun/clipboard failure, missing run-f receipts, denied clipboard fixture, hosted-only WinSta0 write exception, zero-without-access trap and actual-call-site pin rule.
 - Tests that drive `clipboardRequest` through a seam: #530's 2026-10-22 empty-bracketed-paste entry names `App.test_clipboard_read`; the 2026-10-22 #536 entry's seam is `App.test_clipboard_source`, which replaced it.
 - Copy as HTML's OSC 8 anchor allowlist is in the 2026-10-15 PKG-53 entry in terminal-core.md.
 - 2026-09-23 "After #264": its "previous entry" and "#261" are the 2026-09-23 "Base64 typed into Neovim after an OSC 52 paste" entry in conpty.md.

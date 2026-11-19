@@ -917,3 +917,124 @@ ghostty-vt.dll placeholder smoke: 3/3 checks passed
 A DLL that loads (libghostty-vt from `zig build -Demit-lib-vt=true` does),
 fails to load for any other reason, has an export table or carries another
 FileDescription fails the smoke.
+
+## Published portable direct updates
+
+`direct-update-acceptance.ps1` exercises the published source release's own
+updater against the candidate's GitHub tag API feed. It downloads both portable
+ZIPs into separate new directories, verifies their published SHA-256 values
+before extraction, posts the configured check key and Install notification,
+restarts the copy, and waits for confirmation and helper finalization. It
+records versions, folder inventories, a sanitized state timeline, and the final
+stub's signature, publisher pin, description, empty export/import directories,
+load failure (1114), and equality with the verified candidate ZIP.
+
+Invoke from noninteractive automation, or from a caller whose PSReadLine history
+was already set to a run-local path or `SaveNothing` before its first read.
+Typing a wrapper command in an ordinary interactive host can itself enter the
+real history before this script starts; the metadata guard cannot prevent that.
+
+```powershell
+./test/windows/direct-update-acceptance.ps1 `
+    -Run H:\scratch\direct-update-136-137-NEW `
+    -FromVersion 1.3.136 -TargetVersion 1.3.137 -Architecture x64
+```
+
+The run directory must not exist. Every harness launch names a private desktop;
+the driver inherits an explicit whitelist of standard Windows runtime/profile
+variables with separate LOCALAPPDATA, APPDATA and temporary directories, excluding
+workflow credentials and other caller-defined variables. Standard Windows profile
+identity is retained; this is application-state isolation, not a separate OS account.
+The controller must observe Default. Downloads check both system and run-volume
+space (resolving the run's existing ancestor through junctions), use GitHub CLI
+requests bounded by `TimeoutSeconds`, and verify the publisher of both noctty.exe
+and its console shim before either runs. Receipts publish by a sibling-file rename
+after serialization and preserve zero/one/many array shapes. Inventories include
+hidden files and files within hidden directories. Trailing run-path separators
+are removed while drive roots are preserved.
+The parent samples owned windows on both Default and the named private desktop,
+and checks clipboard sequence and PSReadLine history metadata. A sample cannot
+prove the placement of a window that existed entirely between samples.
+No clipboard contents are read. Local guards read the real startup-attempts.json
+to compute its hash and inspect its mtime; they do not write it. Keep failed attempts.
+
+Run 1.3.125 only on a disposable GitHub-hosted runner: that historical binary
+writes the product AUMID registration and Shell jump list even in portable mode.
+Redirecting APPDATA does not isolate those writes. OS and PowerShell process
+architectures must both match `-Architecture`; x64 emulation proves no ARM64 run.
+The historical self-signed publisher is verified cryptographically against the
+updater pin through the existing release verifier, without a trust-store import.
+
+For the 1.3.125 to 1.3.137 stub case, `-HostedMesa` explicitly opts a disposable
+hosted runner into Mesa 26.3.0 llvmpipe from `mmozeiko/build-mesa`. It is off by
+default and refused for other source/target cases. Its HTTP fetch has a separate
+`TimeoutSeconds` cancellation budget covering the response body. Both native archive hashes
+are pinned and checked before extraction. Only `opengl32.dll` is added beside
+the 1.3.125 executable; the receipt proves one extra file, its PE architecture,
+the loaded module's backing file, and preservation through the update. The
+candidate ZIP remains unchanged. This version uses its automatic check and a
+posted pair to the source-defined painted Install rectangle on the host window.
+No terminal mouse message or real input is used. This proves the updater path;
+it does not establish composed rendering or physical mouse behavior.
+
+For the v1.4.100 boundary, `-Expected Rejected` checks that a source on 1.3.136
+stays on its original executable and runs, reports the incomplete portable ZIP,
+and offers Open Release. `-Expected Removed`, from the previous stub-bearing
+1.3.x, checks that a successful update removes the stub. Opening the release
+page and checking its manual instructions is a separate browser check. Neither
+future boundary is established by the 1.3.137 acceptance run. Rejected also checks
+every original file hash and reads its journal strictly: absence and a readable
+clear transaction pass; unreadable, locked or malformed state fails. The reader
+uses `System.Text.Json` without comments or trailing commas, rejects duplicate
+or case-colliding keys recursively, and requires all 17 fields written by
+1.3.136 for a strict Rejected verdict. Empty objects and unquoted keys fail.
+
+Updater diagnostics recognize `update_github_releases` and `update_portable_apply`.
+Receipts retain the level and scope for each matching line and omit its message,
+so paths, URLs and arbitrary release text never enter the exported diagnostic.
+The published versions emit warnings only for updater errors/cleanup trouble;
+the portable apply helper has debug-only directory-sync diagnostics. A clean
+release-mode update can therefore leave this field empty. The state timeline,
+file hashes and exit codes remain the acceptance evidence.
+
+Every launch pins a direct absolute System32 cmd with `/D` and denies clipboard
+reads and writes. Local runs additionally use the local harness library's real
+startup-state fingerprint and the product AUMID's own jump-list metadata guard.
+Other applications' jump-list changes are ignored. These detect mutations;
+they do not establish the absence of reads or identical writes. The receipt
+reports that limit instead of asserting no real-directory access. Private-window
+samples are retained and must contain the driver sentinel. A hidden STATIC helper
+on Default provides a positive control of the job window oracle before noctty
+starts. Hosted runs require a sequence-number positive control in a fresh
+unnamed window station, checked to differ from WinSta0 before every clipboard
+operation. After noctty exits and its normal before/after counter comparison is
+complete, a second hosted-only helper writes fixed fixture text to WinSta0 and
+requires the parent's actual reader to observe the change. Both the script and
+native helper require a disposable GitHub-hosted runner; the helper also checks
+WinSta0 and its private desktop identity before every clipboard operation. This
+intentional control is recorded separately from the noctty run's counter pair.
+Local runs perform no clipboard write, and no clipboard contents are ever read.
+
+Successful updates must sample `swapped` followed by `confirmed`; a cleared,
+abandoned transaction fails. Rejected mode compares SHA-256 for every original
+source file and permits extra files only for explicitly named generated runtime
+artifacts; it also requires no staged transaction. Removed mode validates the
+source stub before applying and its absence afterwards. Those modes still need
+the actual v1.4.100 candidate; opening the release page stays a separate check.
+Each input receipt records the checkout commit and harness/helper hashes. Keep
+the scratch hosted branch for future native ARM64 runs, with its `windows-2025`
+and `windows-11-arm` runner labels. Add `-HostedMesa` only for the pinned
+1.3.125 to 1.3.137 case.
+
+Run `direct-update-contract.ps1` for static refusal controls and the harness's
+actual verdict functions against synthetic files and receipts. Parse-valid
+here-string, disabled-guard, forged-stub, clipboard, confirmation,
+executable-identity and sidecar mutants must fail; the flagship gate includes it.
+The hosted definition, historical/Mesa/desktop guards and Default positive are
+pinned by executable AST shape. Clipboard-helper admission masks C# strings and
+comments, refuses conditional compilation and requires exact native call counts;
+extra unguarded calls and inert copies fail. The parent's positive counters must
+also equal the helper's own before/after pair.
+Public artifacts should contain only the named JSON receipts, never the raw child logs,
+copied profiles or binaries. The hosted workflow used to gather W10 evidence is
+scratch-only and is not part of this change.
