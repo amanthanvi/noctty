@@ -897,7 +897,10 @@ and offers Open Release. `-Expected Removed`, from the previous stub-bearing
 page and checking its manual instructions is a separate browser check. Neither
 future boundary is established by the 1.3.137 acceptance run. Rejected also checks
 every original file hash and reads its journal strictly: absence and a readable
-clear transaction pass; unreadable, locked or malformed state fails.
+clear transaction pass; unreadable, locked or malformed state fails. The reader
+uses `System.Text.Json` without comments or trailing commas, rejects duplicate
+or case-colliding keys recursively, and requires all 17 fields written by
+1.3.136 for a strict Rejected verdict. Empty objects and unquoted keys fail.
 
 Updater diagnostics recognize `update_github_releases` and `update_portable_apply`.
 Receipts retain the level and scope for each matching line and omit its message,

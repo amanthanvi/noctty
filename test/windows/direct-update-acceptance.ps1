@@ -374,20 +374,57 @@ function Get-ReleaseCopy([string] $Version) {
     Save-Receipt "$Version-publisher.json" $publishers
     return $executables[0].DirectoryName
 }
+function Assert-JournalKeys([Text.Json.JsonElement] $Value) {
+    if($Value.ValueKind -eq [Text.Json.JsonValueKind]::Object){
+        # Also retain the previous refusal of case-colliding field names.
+        $names=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach($property in $Value.EnumerateObject()){
+            if(-not $names.Add($property.Name)){throw 'Duplicate journal key'}
+            Assert-JournalKeys $property.Value
+        }
+    }elseif($Value.ValueKind -eq [Text.Json.JsonValueKind]::Array){
+        foreach($child in $Value.EnumerateArray()){Assert-JournalKeys $child}
+    }
+}
+function Assert-JournalSchema([Text.Json.JsonElement] $Value) {
+    # v1.3.136 saveState writes all seventeen keys, including null values.
+    foreach($name in @('last_checked_at','last_seen_version','release_feed_url','release_url','dismissed_version','staged_version','staged_kind','staged_installer_path','staged_portable_path','staged_payload_path','staged_sha256','staged_feed_url','staged_at','apply_requested_at','portable_apply_phase','portable_backup_path','portable_confirmation_token')){
+        $property=[Text.Json.JsonElement]::new()
+        if(-not $Value.TryGetProperty($name,[ref]$property)){throw 'Required journal key absent'}
+    }
+}
+function Get-JournalField([Text.Json.JsonElement] $Value,[string] $Name) {
+    $property=[Text.Json.JsonElement]::new()
+    if(-not $Value.TryGetProperty($Name,[ref]$property)){return $null}
+    switch($property.ValueKind){
+        String {return $property.GetString()}
+        Null {return $null}
+        Number {return $property.GetInt64()}
+        default {throw 'Invalid journal field type'}
+    }
+}
 function Get-UpdateState([string] $Root,[switch] $RequireReadable) {
     $path = Join-Path $Root 'update-state.json'
+    $document=$null
     try {
-        $value = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($path)) -NoEnumerate -ErrorAction Stop
-        if($value -isnot [Management.Automation.PSCustomObject]){throw 'Journal is not a JSON object'}
+        $options=[Text.Json.JsonDocumentOptions]::new()
+        $options.AllowTrailingCommas=$false
+        $options.CommentHandling=[Text.Json.JsonCommentHandling]::Disallow
+        $document=[Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($path),$options)
+        $value=$document.RootElement
+        if($value.ValueKind -ne [Text.Json.JsonValueKind]::Object){throw 'Journal is not a JSON object'}
+        Assert-JournalKeys $value
+        if($RequireReadable){Assert-JournalSchema $value}
+        # Explicit nonsecret projection while the document is alive.
+        $version=Get-JournalField $value 'last_seen_version'
+        $observed=if([string]$version -cmatch '^1\.[34]\.[0-9]+$'){[string]$version}else{$null}
+        return @{ Phase=Get-JournalField $value 'portable_apply_phase'; StagedVersion=Get-JournalField $value 'staged_version'; StagedKind=Get-JournalField $value 'staged_kind'; LatestVersion=$observed; ApplyRequestedAt=Get-JournalField $value 'apply_requested_at'; FeedMatches=((Get-JournalField $value 'staged_feed_url') -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
     } catch [IO.FileNotFoundException] { return $null
     } catch [IO.DirectoryNotFoundException] { return $null
     } catch {
         if($RequireReadable){throw 'Rejected update journal is unreadable or malformed'}
         return $null
-    }
-    # Explicit nonsecret projection: never export confirmation tokens or arbitrary paths.
-    $observed=if([string]$value.last_seen_version -cmatch '^1\.[34]\.[0-9]+$'){[string]$value.last_seen_version}else{$null}
-    return @{ Phase=$value.portable_apply_phase; StagedVersion=$value.staged_version; StagedKind=$value.staged_kind; LatestVersion=$observed; ApplyRequestedAt=$value.apply_requested_at; FeedMatches=($value.staged_feed_url -ceq "https://api.github.com/repos/amanthanvi/noctty/releases/tags/v$TargetVersion") }
+    } finally { if($document){$document.Dispose()} }
 }
 function Wait-Check([string] $Stage,[scriptblock] $Predicate,[int] $Seconds=$TimeoutSeconds) {
     Save-Receipt 'progress.json' @{ Stage=$Stage; At=[datetime]::UtcNow.ToString('o') }

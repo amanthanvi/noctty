@@ -47,7 +47,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     $problems=[Collections.Generic.List[string]]::new()
     foreach($entry in $requirements.GetEnumerator()){if($code -cnotmatch $entry.Value){$problems.Add($entry.Key)}}
     # Fixture here-strings are later written as scripts: scan ALL original text.
-    if($Text -match '(?i)\b(?:Start-Process|Invoke-Item|Set-Clipboard|Get-Clipboard|Import-Certificate|Set-AuthenticodeSignature)\b|--clobber|gh\s+release\s+(?:create|edit|upload)|Remove-Item|\[System\.Windows\.Forms\.Clipboard\]'){ $problems.Add('ForbiddenOperation') }
+    if($Text -match '(?i)\b(?:Start-Process|Invoke-Item|Invoke-Expression|iex|Set-Clipboard|Get-Clipboard|Import-Certificate|Set-AuthenticodeSignature)\b|--clobber|gh\s+release\s+(?:create|edit|upload)|Remove-Item|\[System\.Windows\.Forms\.Clipboard\]'){ $problems.Add('ForbiddenOperation') }
     $ast=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
     function Shape($Node) {
         if($null -eq $Node){return ''}
@@ -89,7 +89,7 @@ function Get-DirectUpdateProblems([string] $Text) {
     $functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true))
     Need FunctionDefinitions (@($functions | Where-Object {-not [object]::ReferenceEquals($_.Parent,$ast.EndBlock)}).Count -eq 0 -and @($functions | Group-Object { $_.Name -replace '^(?i:global|script|local|private):','' } | Where-Object Count -GT 1).Count -eq 0)
     $traps=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.TrapStatementAst]},$true))
-    Need TrapExit ($traps.Count -eq 1 -and [object]::ReferenceEquals($traps[0].Parent,$ast.EndBlock) -and (Same $traps[0].Body.Statements[-1] 'break') -and @($traps[0].FindAll({param($n) $n -is [Management.Automation.Language.ContinueStatementAst]},$true)).Count -eq 0)
+    Need TrapExit ($traps.Count -eq 1 -and [object]::ReferenceEquals($traps[0].Parent,$ast.EndBlock) -and (Same $traps[0].Body.Statements[-1] 'break') -and @($traps[0].FindAll({param($n) $n -is [Management.Automation.Language.ContinueStatementAst] -or $n -is [Management.Automation.Language.ReturnStatementAst] -or $n -is [Management.Automation.Language.ExitStatementAst]},$true)).Count -eq 0)
     Need RejectedJournal (Direct (Function-Statements 'Assert-RejectedCopy') '$State=Get-UpdateState $Root -RequireReadable')
     $clipboardTry=@((Function-Statements 'Invoke-ClipboardPositive') | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
     Need ClipboardSupported (Direct $clipboardTry.Body.Statements "if(-not `$fact.Supported -or -not `$fact.IsolatedStation -or -not `$fact.SequenceAdvanced){throw 'Clipboard positive control failed'}")
@@ -115,11 +115,18 @@ function Get-DirectUpdateProblems([string] $Text) {
     Need EphemeralDefinition ($definitions.Count -eq 1 -and [object]::ReferenceEquals($definitions[0].Parent,$ast.EndBlock) -and (Same $definitions[0] "`$ephemeral=`$env:GITHUB_ACTIONS -ceq 'true' -and `$env:RUNNER_ENVIRONMENT -ceq 'github-hosted'"))
     # The harness has no variable-mutator cmdlets/provider or PSVariable/ref use.
     # Refuse these indirect write mechanisms rather than guessing their arguments.
-    Need EphemeralWrites ($code -inotmatch '\b(?:Set|New|Clear|Remove)-Variable\b|\b(?:sv|set|nv|clv|rv)\s+|\bPSVariable\b|variable:|\[ref\]\s*\$(?:(?:script|global|local|private):)?ephemeral\b' -and @($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandParameterAst] -and $n.ParameterName -imatch '^(?:OutVariable|PipelineVariable|ErrorVariable|WarningVariable|InformationVariable|ov|pv|ev|wv|iv)$'},$true)).Count -eq 0)
+    $references=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.ConvertExpressionAst] -and $n.Type.TypeName.FullName -ieq 'ref' -and @($n.Child.FindAll({param($v) $v -is [Management.Automation.Language.VariableExpressionAst] -and $v.VariablePath.UserPath -imatch '(^|:)ephemeral$'},$true)).Count -gt 0},$true))
+    Need EphemeralWrites ($references.Count -eq 0 -and $code -inotmatch '\b(?:Get|Set|New|Clear|Remove)-Variable\b|\b(?:gv|sv|set|nv|clv|rv)\s+|\bPSVariable\b|variable:' -and @($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandParameterAst] -and $n.ParameterName -imatch '^(?:OutVariable|PipelineVariable|ErrorVariable|WarningVariable|InformationVariable|ov|pv|ev|wv|iv)$'},$true)).Count -eq 0)
+    function OutputBindingName([string] $Name){ -not [string]::IsNullOrEmpty($Name) -and ('OutVariable'.StartsWith($Name,[StringComparison]::OrdinalIgnoreCase) -or $Name -ieq 'ov') }
+    $bindings=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandParameterAst] -and (OutputBindingName $n.ParameterName)},$true))
+    $splatBindings=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.HashtableAst] -and @($n.KeyValuePairs | Where-Object {$_.Item1 -is [Management.Automation.Language.StringConstantExpressionAst] -and (OutputBindingName $_.Item1.Value)}).Count -gt 0},$true))
+    Need OutputVariableBinding ($bindings.Count -eq 0 -and $splatBindings.Count -eq 0)
     Need LegacyStatement (Direct $ast.EndBlock.Statements "if ([version]`$FromVersion -lt [version]'1.3.136' -and -not `$ephemeral) { throw 'Historical portable identity requires an ephemeral hosted runner' }")
     Need MesaStatement (Direct $ast.EndBlock.Statements "if(`$HostedMesa -and (-not `$ephemeral -or `$FromVersion -cne '1.3.125' -or `$TargetVersion -cne '1.3.137' -or `$Expected -cne 'Stub')){throw 'Mesa fixture requires hosted 1.3.125 to 1.3.137 stub acceptance'}")
     Need NativeStatement (Direct (Function-Statements 'Assert-NativeArchitecture') "if (`$native -cne `$Architecture -or `$processArchitecture -cne `$Architecture) { throw 'Native OS and process architecture must match the requested test; emulation is not evidence' }")
     $controller=Find-If $ast.EndBlock.Statements '-not $Driver'
+    Need ControllerExit (Same $controller.Clauses[0].Item2.Statements[-1] 'exit 0')
+    Need DriverExit ((Same $ast.EndBlock.Statements[-2] 'if(-not $result.Passed){exit 1}') -and (Same $ast.EndBlock.Statements[-1] 'exit 0'))
     Need RunPathCall (Direct $controller.Clauses[0].Item2.Statements '$Run=Get-RunPath $Run')
     Need ParentDesktop (Direct $controller.Clauses[0].Item2.Statements "if([HiddenWin]::CurrentDesktopName() -cne 'Default'){throw 'Controller must observe the Default desktop'}")
     Need RunVolume (Direct $controller.Clauses[0].Item2.Statements "if(`$runFree -le 20GB){throw 'Run volume has 20 GB or less free'}")
@@ -242,7 +249,7 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
     $tokens=$null; $errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseInput($Text,[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'Behavioural fixture must parse'}
-    $names=@('Get-RunPath','New-DriverEnvironment','Test-WorkflowCredentialsAbsent','Get-UpdaterLogFact','Save-Receipt','Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Get-UpdateState','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
+    $names=@('Get-RunPath','New-DriverEnvironment','Test-WorkflowCredentialsAbsent','Get-UpdaterLogFact','Save-Receipt','Get-Sha','Get-Listing','Get-Stub','Assert-NativeArchitecture','Assert-NewRun','Assert-DriverProfile','Assert-NoDefaultWindows','Assert-ClipboardSequence','Add-UpdateSample','Test-FinalizedUpdate','Assert-InstalledStub','Get-SourceSnapshot','Assert-JournalKeys','Assert-JournalSchema','Get-JournalField','Get-UpdateState','Assert-RejectedCopy','Assert-SourceStub','Get-NocttyJumpList','Assert-LocalState','Write-IsolationReceipt','Assert-HostedClipboardControl')
     $definitions=foreach($name in $names){
         $found=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
         if($found.Count -ne 1){throw "Verdict definition is absent or ambiguous: $name"}
@@ -352,17 +359,58 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         Refuses MissingSidecar {Assert-RejectedCopy $before $missing}
         Refuses ChangedSidecar {Assert-RejectedCopy $before $changed}
         $journal=Join-Path $good 'update-state.json'
-        [IO.File]::WriteAllText($journal,'{"portable_apply_phase":"pending","staged_version":"1.4.100"}')
+        $clearJournal=[ordered]@{
+            last_checked_at=0; last_seen_version=$null; release_feed_url=$null; release_url=$null; dismissed_version=$null
+            staged_version=$null; staged_kind=$null; staged_installer_path=$null; staged_portable_path=$null; staged_payload_path=$null; staged_sha256=$null; staged_feed_url=$null
+            staged_at=0; apply_requested_at=0; portable_apply_phase=$null; portable_backup_path=$null; portable_confirmation_token=$null
+        }
+        $clearJson=ConvertTo-Json -InputObject $clearJournal -Compress
+        $pendingJson=$clearJson.Replace('"portable_apply_phase":null','"portable_apply_phase":"pending"').Replace('"staged_version":null','"staged_version":"1.4.100"')
+        [IO.File]::WriteAllText($journal,$pendingJson)
         Refuses RejectedStage {Assert-RejectedCopy $before $good}
         $locked=[IO.File]::Open($journal,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
         try{Refuses RejectedLocked {Assert-RejectedCopy $before $good}}finally{$locked.Dispose()}
-        [IO.File]::WriteAllText($journal,'{ malformed')
-        Refuses RejectedMalformed {Assert-RejectedCopy $before $good}
-        foreach($invalid in @('null','[]','[{}]','"scalar"')){
-            [IO.File]::WriteAllText($journal,$invalid)
-            Refuses RejectedNotObject {Assert-RejectedCopy $before $good}
+        $writer=[IO.File]::Open($journal,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
+        try{Refuses RejectedWriterOpen {Assert-RejectedCopy $before $good}}finally{$writer.Dispose()}
+        $originalAcl=Get-Acl -LiteralPath $journal
+        $deniedAcl=Get-Acl -LiteralPath $journal
+        $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+        $deniedAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,[Security.AccessControl.FileSystemRights]::ReadData,[Security.AccessControl.AccessControlType]::Deny))
+        try{
+            Set-Acl -LiteralPath $journal -AclObject $deniedAcl
+            Refuses DeniedReadPositive {[IO.File]::ReadAllText($journal) | Out-Null}
+            Refuses RejectedDeniedRead {Assert-RejectedCopy $before $good}
+        }finally{Set-Acl -LiteralPath $journal -AclObject $originalAcl}
+        $badJournals=[ordered]@{
+            Malformed='{ malformed'; Truncated='{"portable_apply_phase":"pending"'; TrailingGarbage=($pendingJson+'garbage'); Empty=''; Whitespace=" `t`n"
+            Null='null'; EmptyArray='[]'; ObjectArray='[{}]'; Scalar='"scalar"'; Number='42'; Boolean='true'; PendingArray=('['+$pendingJson+']')
+            CaseDuplicate=($clearJson.TrimEnd('}')+',"Portable_apply_phase":null}')
+            TrailingComma=($clearJson.TrimEnd('}')+',}')
+            UnquotedKey=$clearJson.Replace('"portable_apply_phase":','portable_apply_phase:')
+            Comment=('/* invalid JSON */'+$clearJson)
+            DuplicateLaterNull=($pendingJson.TrimEnd('}')+',"portable_apply_phase":null,"staged_version":null}')
+            EmptyObject='{}'
+            NestedDuplicate=($clearJson.TrimEnd('}')+',"extra":{"same":1,"same":2}}')
+            NestedArrayDuplicate=($clearJson.TrimEnd('}')+',"extra":[{"same":1,"same":2}]}')
         }
-        [IO.File]::WriteAllText($journal,'{"portable_apply_phase":null,"staged_version":null}')
+        foreach($bad in $badJournals.GetEnumerator()){
+            [IO.File]::WriteAllText($journal,$bad.Value)
+            Refuses ('Rejected'+$bad.Key) {Assert-RejectedCopy $before $good}
+        }
+        foreach($encoding in @([Text.UTF8Encoding]::new($true),[Text.UnicodeEncoding]::new($false,$true),[Text.UnicodeEncoding]::new($false,$false))){
+            [IO.File]::WriteAllText($journal,$pendingJson,$encoding)
+            Refuses RejectedEncodedPending {Assert-RejectedCopy $before $good}
+        }
+        [IO.File]::WriteAllText($journal,$clearJson.Replace('"portable_apply_phase":null','"portable_apply_phase":""'))
+        Refuses RejectedEmptyPhase {Assert-RejectedCopy $before $good}
+        foreach($missingKey in @($clearJournal.Keys)){
+            $partial=[ordered]@{}; foreach($key in $clearJournal.Keys){if($key -cne $missingKey){$partial[$key]=$clearJournal[$key]}}
+            [IO.File]::WriteAllText($journal,(ConvertTo-Json -InputObject $partial -Compress))
+            Refuses RejectedMissingKey {Assert-RejectedCopy $before $good}
+        }
+        [IO.File]::Delete($journal); $null=New-Item -ItemType Directory -Path $journal
+        try{Refuses RejectedDirectory {Assert-RejectedCopy $before $good}}finally{[IO.Directory]::Delete($journal)}
+        [IO.File]::WriteAllText($journal,$clearJson)
         try{Assert-RejectedCopy $before $good}catch{$failures.Add('RejectedClearPositive')}
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
@@ -418,6 +466,8 @@ $controls=[ordered]@{
     ClipboardSupported=@('if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw','if($false){throw')
 }
 $sites=[ordered]@{
+    ControllerExit=@("    exit 0`n}","}")
+    DriverExit=@('if(-not $result.Passed){exit 1}','if(-not $result.Passed){exit 0}')
     TrapExit=@("    break`n}","    continue`n}")
     RejectedJournal=@('$State=Get-UpdateState $Root -RequireReadable','$State=Get-UpdateState $Root')
     ResolvedRunVolume=@('$runFree=[DirectUpdateUi]::AvailableRunSpace($Run)','$runFree=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($Run)).AvailableFreeSpace')
@@ -482,6 +532,18 @@ foreach($control in $inert.GetEnumerator()){
 $shapeControls=[ordered]@{}
 $ephemeralLine=@($source -split "`r?`n" | Where-Object {$_ -like '$ephemeral=*'})
 $shapeControls.EphemeralReassignment=@($ephemeralLine[0],($ephemeralLine[0]+"`n`$ephemeral=`$true"),'EphemeralDefinition')
+foreach($item in @(
+    @('OutVariableAbbreviation','Write-Output $true -OutV ephemeral | Out-Null','OutputVariableBinding'),
+    @('OutVariableSplat','$o=@{OutVariable=''ephemeral''}; Write-Output $true @o | Out-Null','OutputVariableBinding'),
+    @('GetVariableValue','(Get-Variable ephemeral).Value=$true','EphemeralWrites'),
+    @('Reference','$r=[ref]$ephemeral; $r.Value=$true','EphemeralWrites'),
+    @('BracedReference','$r=[ref]${ephemeral}; $r.Value=$true','EphemeralWrites'),
+    @('InvokeExpression','Invoke-Expression ''$ephemeral=$true''','ForbiddenOperation'),
+    @('InvokeExpressionAlias','iex ''Write-Output fixture''','ForbiddenOperation')
+)){$shapeControls[$item[0]]=@($ephemeralLine[0],($ephemeralLine[0]+"`n"+$item[1]),$item[2])}
+foreach($exit in @('return','exit 0')){
+    $shapeControls[('Trap'+$exit.Replace(' ',''))]=@("    break`n}",("    "+$exit+"`n    break`n}"),'TrapExit')
+}
 foreach($write in ([ordered]@{
     Typed='[bool] $ephemeral=$true'; Multiple='$unused,$ephemeral=0,$true'; Foreach='foreach($ephemeral in @($true)){}'; Increment='$ephemeral++'
     SetVariable='Set-Variable ephemeral $true'; NewVariable='New-Variable ephemeral $true'; ClearVariable='Clear-Variable ephemeral'; RemoveVariable='Remove-Variable ephemeral'
@@ -518,6 +580,10 @@ $baseline=Join-Path $fixtures 'baseline'; $null=New-Item -ItemType Directory -Pa
 $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
+    JournalDuplicateKeys=@('        Assert-JournalKeys $value','')
+    JournalSchema=@('if($RequireReadable){Assert-JournalSchema $value}','')
+    JournalTrailingComma=@('$options.AllowTrailingCommas=$false','$options.AllowTrailingCommas=$true')
+    JournalComments=@('$options.CommentHandling=[Text.Json.JsonCommentHandling]::Disallow','$options.CommentHandling=[Text.Json.JsonCommentHandling]::Skip')
     JournalFailOpen=@("if(`$RequireReadable){throw 'Rejected update journal is unreadable or malformed'}",'')
     JournalNotStrict=@('$State=Get-UpdateState $Root -RequireReadable','$State=Get-UpdateState $Root')
     CredentialAlwaysAbsent=@("if([string]::Equals([string]`$key,`$name,[StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrEmpty([string]`$Environment[`$key])){return `$false}",'')
