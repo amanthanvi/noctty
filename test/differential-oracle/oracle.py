@@ -911,7 +911,7 @@ def compare(
     profile_declarations=None,
     shipped_declarations=None,
 ):
-    if expected_corpus is not None and not re.fullmatch(
+    if not isinstance(expected_corpus, str) or not re.fullmatch(
         "[0-9a-f]{64}", expected_corpus
     ):
         raise ValueError("--expected-corpus must be a nonempty SHA-256 hash")
@@ -922,6 +922,10 @@ def compare(
         if root is not None
     ]
     validate_harness_declarations(declarations, used)
+    if sets[0].manifest["revision"] == sets[1].manifest["revision"]:
+        raise ValueError(
+            "pre and post captures must have distinct production revisions"
+        )
     for index, capture in enumerate(sets):
         manifest = capture.manifest
         for other_capture in sets[:index]:
@@ -1201,7 +1205,7 @@ def controls(args):
                         }
                     )
         identity = {
-            "revision": "0" * 40,
+            "revision": str(side) * 40,
             "dirty": False,
             "vt_api": "v140_fork",
             "terminal_source": "app",
@@ -1211,11 +1215,11 @@ def controls(args):
             root / "manifest.json",
             {
                 "schema": 3,
-                "revision": "0" * 40,
+                "revision": str(side) * 40,
                 "exe_sha256": str(side + 1) * 64,
                 "provenance": {
-                    "production_revision": "0" * 40,
-                    "instrumented_revision": "0" * 40,
+                    "production_revision": str(side) * 40,
+                    "instrumented_revision": str(side) * 40,
                 },
                 "build_identity": identity,
                 "profile": profile,
@@ -1228,7 +1232,31 @@ def controls(args):
         )
         shutil.copytree(root, root.parent / "run-2")
         complete_capture(root.parent)
-    result = compare(*roots)
+    pin = read_json(roots[0] / "manifest.json")["corpus_sha256"]
+
+    def comp(*paths, **options):
+        options.setdefault("expected_corpus", pin)
+        return compare(*paths, **options)
+
+    def mirror_pre():
+        # Equal bytes/profile, but an independently identified production build.
+        twin = args.out / "pre-twin"
+        shutil.copytree(roots[0].parent, twin, dirs_exist_ok=True)
+        for run in ("run-1", "run-2"):
+            path = twin / run / "manifest.json"
+            value = read_json(path)
+            value["revision"] = "e" * 40
+            value["exe_sha256"] = "e" * 64
+            value["build_identity"]["revision"] = "e" * 40
+            value["provenance"].update(
+                production_revision="e" * 40, instrumented_revision="e" * 40
+            )
+            path.write_text(json.dumps(value), encoding="utf-8")
+        (twin / "completion.json").unlink()
+        complete_capture(twin)
+        return twin / "run-1"
+
+    result = comp(*roots)
     check(
         result["counts"]
         == {
@@ -1262,15 +1290,15 @@ def controls(args):
         dict(row, reason="synthetic control", ledger="control ledger row")
         for row in result["differences"]
     ]
-    check(compare(*roots, triage=triage)["untriaged"] == 0)
-    check(compare(roots[0], roots[0])["untriaged"] == 0)
-    check(compare(roots[0], roots[1])["counts"] == {"no change": 8, "different": 12})
+    check(comp(*roots, triage=triage)["untriaged"] == 0)
+    check(comp(roots[0], mirror_pre())["untriaged"] == 0)
+    check(comp(roots[0], roots[1])["counts"] == {"no change": 8, "different": 12})
     checks = [
         "five equality partitions",
         "every item has its expected class label",
         "complete three-way listing",
         "hash-bound triage",
-        "pair identical",
+        "pair identical bytes under distinct revisions",
         "pair differences",
     ]
 
@@ -1284,42 +1312,48 @@ def controls(args):
         else:
             raise AssertionError(label + " accepted")
 
+    rejects("missing required corpus pin", lambda: compare(*roots), "--expected-corpus")
+    rejects(
+        "same production revision in pre and post slots",
+        lambda: comp(roots[0], roots[0]),
+        "distinct production revisions",
+    )
     target = roots[1] / "0-80x24.plain"
     target.write_bytes(b"corrupt")
-    rejects("corrupt dump", lambda: compare(*roots))
+    rejects("corrupt dump", lambda: comp(*roots))
     target.write_bytes(b"a")
     target.unlink()
-    rejects("missing dump", lambda: compare(*roots))
+    rejects("missing dump", lambda: comp(*roots))
     target.write_bytes(b"a")
     manifest_path = roots[1] / "manifest.json"
     original = manifest_path.read_bytes()
     manifest = read_json(manifest_path)
     manifest["items"].pop()
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    rejects("missing manifest item", lambda: compare(*roots))
+    rejects("missing manifest item", lambda: comp(*roots))
     manifest_path.write_bytes(original)
     manifest = read_json(manifest_path)
     manifest["items"] = [item for item in manifest["items"] if item["input"] != "4"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    rejects("entire input missing", lambda: compare(*roots))
+    rejects("entire input missing", lambda: comp(*roots))
     manifest_path.write_bytes(original)
     manifest = read_json(manifest_path)
     manifest["items"].append(manifest["items"][0])
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    rejects("duplicate manifest item", lambda: compare(*roots))
+    rejects("duplicate manifest item", lambda: comp(*roots))
     manifest_path.write_bytes(original)
     manifest = read_json(manifest_path)
     manifest["corpus_sha256"] = "different"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    rejects("different corpus", lambda: compare(*roots))
+    rejects("different corpus", lambda: comp(*roots))
     manifest_path.write_bytes(original)
     rejects(
         "missing ledger",
-        lambda: compare(*roots, triage=[dict(row, ledger="") for row in triage]),
+        lambda: comp(*roots, triage=[dict(row, ledger="") for row in triage]),
     )
     rejects(
         "stale triage",
-        lambda: compare(*roots, triage=[dict(row, sha256=[]) for row in triage]),
+        lambda: comp(*roots, triage=[dict(row, sha256=[]) for row in triage]),
     )
     check(unescape(r"a\e[1m\r\n\t\\\xff") == b"a\x1b[1m\r\n\t\\\xff")
     ops, conpty, initial = replay(
@@ -1331,6 +1365,11 @@ def controls(args):
         and ops == [send(b"ab"), {"resize": [8, 3]}, send(b"L1\r\nL2\r\n")]
     )
     checks.append("replay bytes and resize schedule")
+    rejects(
+        "pty requires exactly one separator space",
+        lambda: replay(b"size 4 2\npty  conpty\nsend A\n"),
+        "bad replay pty directive",
+    )
     for newline in ("\n", "\r\n"):
         payload = "A\u2028#B\u0085C\vD\fE".encode()
         script = ("size 4 2" + newline).encode() + b"send " + payload + newline.encode()
@@ -1345,14 +1384,14 @@ def controls(args):
     completion = roots[1].parent / "completion.json"
     saved = completion.read_bytes()
     completion.unlink()
-    rejects("missing completion (failed second run)", lambda: compare(*roots))
+    rejects("missing completion (failed second run)", lambda: comp(*roots))
     completion.write_text("{}", encoding="utf-8")
-    rejects("invalid completion", lambda: compare(*roots))
+    rejects("invalid completion", lambda: comp(*roots))
     completion.write_bytes(saved)
     record = read_json(completion)
     record["corpus_sha256"] = "0" * 64
     completion.write_text(json.dumps(record), encoding="utf-8")
-    rejects("mismatched completion", lambda: compare(*roots))
+    rejects("mismatched completion", lambda: comp(*roots))
     completion.write_bytes(saved)
     twin = roots[1].parent / "run-2/0-80x24.plain"
     twin.write_bytes(b"changed")
@@ -1369,14 +1408,14 @@ def controls(args):
     )
     rejects(
         "nondeterministic second run",
-        lambda: compare(*roots),
+        lambda: comp(*roots),
         "no longer deterministic",
     )
     twin.write_bytes(b"a")
     sibling_manifest.write_text(
         json.dumps(json.loads(original), separators=(",", ":")), encoding="utf-8"
     )
-    rejects("sibling manifest bytes changed (run-1 selected)", lambda: compare(*roots))
+    rejects("sibling manifest bytes changed (run-1 selected)", lambda: comp(*roots))
     rejects(
         "sibling manifest bytes changed (run-2 selected)",
         lambda: load_set(sibling_manifest.parent),
@@ -1386,21 +1425,21 @@ def controls(args):
         lambda: complete_capture(roots[1].parent),
     )
     sibling_manifest.write_bytes(original)
-    rejects("malformed triage object", lambda: compare(*roots, triage={"a": 1}))
+    rejects("malformed triage object", lambda: comp(*roots, triage={"a": 1}))
     rejects(
         "malformed triage reason",
-        lambda: compare(*roots, triage=[dict(triage[0], reason=1)]),
+        lambda: comp(*roots, triage=[dict(triage[0], reason=1)]),
     )
-    pair = compare(roots[0], roots[1])
+    pair = comp(roots[0], roots[1])
     pair_triage = [dict(r, reason="control") for r in pair["differences"]]
     rejects(
         "pair triage requires ledger",
-        lambda: compare(roots[0], roots[1], triage=pair_triage),
+        lambda: comp(roots[0], roots[1], triage=pair_triage),
     )
-    rejects("operator corpus pin", lambda: compare(*roots, expected_corpus="0" * 64))
+    rejects("operator corpus pin", lambda: comp(*roots, expected_corpus="0" * 64))
     rejects(
         "empty corpus pin",
-        lambda: compare(*roots, expected_corpus=""),
+        lambda: comp(*roots, expected_corpus=""),
         "--expected-corpus",
     )
 
@@ -1417,7 +1456,6 @@ def controls(args):
         complete_capture(roots[1].parent)
 
     change_manifests(lambda m: m["profile"].update(optimize="different"))
-    rejects("different complete build profiles", lambda: compare(*roots))
     declaration = [
         {
             "side": "branch",
@@ -1427,7 +1465,12 @@ def controls(args):
             "new": {"present": True, "value": "different"},
         }
     ]
-    declared = compare(
+    rejects(
+        "different complete build profiles",
+        lambda: comp(*roots, shipped_declarations=declaration),
+        "--declare-profile-differences",
+    )
+    declared = comp(
         *roots, profile_declarations=declaration, shipped_declarations=declaration
     )
     check(
@@ -1448,7 +1491,7 @@ def controls(args):
     )
     rejects(
         "wrong profile option declaration",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=[
@@ -1458,7 +1501,7 @@ def controls(args):
     )
     rejects(
         "empty profile reason",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=[dict(declaration[0], reason=" ")],
@@ -1466,7 +1509,7 @@ def controls(args):
     )
     rejects(
         "duplicate profile declaration",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=declaration * 2,
@@ -1474,7 +1517,7 @@ def controls(args):
     )
     rejects(
         "wrong profile side",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=[dict(declaration[0], side="upstream")],
@@ -1482,7 +1525,7 @@ def controls(args):
     )
     rejects(
         "malformed profile declaration",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations={"option": "optimize"},
@@ -1490,11 +1533,11 @@ def controls(args):
     )
     rejects(
         "unused profile declaration",
-        lambda: compare(roots[0], roots[0], profile_declarations=declaration),
+        lambda: comp(roots[0], mirror_pre(), profile_declarations=declaration),
     )
     rejects(
         "stale declared new value",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=[
@@ -1504,7 +1547,7 @@ def controls(args):
     )
     rejects(
         "stale declared old value",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=[
@@ -1514,7 +1557,7 @@ def controls(args):
     )
     rejects(
         "missing declared values",
-        lambda: compare(
+        lambda: comp(
             *roots,
             shipped_declarations=declaration,
             profile_declarations=[
@@ -1525,16 +1568,16 @@ def controls(args):
     change_manifests(
         lambda m: m["harness_sources"].update({"src/control.zig": "2" * 64})
     )
-    rejects("changed harness", lambda: compare(*roots))
+    rejects("changed harness", lambda: comp(*roots))
     captured = digest(
         json.dumps(
             read_json(roots[1] / "manifest.json")["harness_sources"], sort_keys=True
         ).encode()
     )
     current = digest(json.dumps(harness_sources(), sort_keys=True).encode())
-    check(compare(*roots, declarations=[f"{captured}:{current}"])["untriaged"] == 16)
+    check(comp(*roots, declarations=[f"{captured}:{current}"])["untriaged"] == 16)
     check(
-        compare(*roots, declarations=[f"{captured}:{current}"])["harness_declarations"]
+        comp(*roots, declarations=[f"{captured}:{current}"])["harness_declarations"]
         == [f"{captured}:{current}"]
     )
     checks.append("explicit harness change declaration")
@@ -1543,13 +1586,13 @@ def controls(args):
     completion.write_bytes(saved)
     rejects(
         "unused harness declaration",
-        lambda: compare(*roots, declarations=["a" * 64 + ":" + "b" * 64]),
+        lambda: comp(*roots, declarations=["a" * 64 + ":" + "b" * 64]),
     )
     rejects(
         "malformed harness declaration",
-        lambda: compare(*roots, declarations=["deadbeef:cafe"]),
+        lambda: comp(*roots, declarations=["deadbeef:cafe"]),
     )
-    check(compare(*roots)["sides"]["branch"]["revision"] == "0" * 40)
+    check(comp(*roots)["sides"]["branch"]["revision"] == "1" * 40)
     checks.append("comparison records revisions, executable and both manifest hashes")
 
     change_manifests(
@@ -1558,13 +1601,16 @@ def controls(args):
             m["provenance"].update(production_revision="4" * 40),
         )
     )
-    check(compare(*roots)["counts"] == result["counts"])
+    check(comp(*roots)["counts"] == result["counts"])
     pin = read_json(roots[1] / "manifest.json")["corpus_sha256"]
-    check(compare(roots[1], roots[1], expected_corpus=pin)["untriaged"] == 0)
+    check(
+        comp(roots[1], roots[0], expected_corpus=pin)["counts"]
+        == {"no change": 8, "different": 12}
+    )
     checks.append("successor production revision accepted in pinned pre slot")
     rejects(
         "successor pre with different corpus pin",
-        lambda: compare(roots[1], roots[1], expected_corpus="f" * 64),
+        lambda: comp(roots[1], roots[0], expected_corpus="f" * 64),
         "operator pin",
     )
     checks.append("branch revision may differ from frozen corpus source")
@@ -1572,13 +1618,13 @@ def controls(args):
         (roots[1].parent / run / "manifest.json").write_bytes(original)
     completion.write_bytes(saved)
     pin = read_json(roots[0] / "manifest.json")["corpus_sha256"]
-    pinned = compare(*roots, expected_corpus=pin)
+    pinned = comp(*roots, expected_corpus=pin)
     check(
         pinned["corpus_sha256"] == pin
         and pinned["expected_corpus"] == pin
-        and result["expected_corpus"] is None
+        and result["expected_corpus"] == pin
     )
-    checks.append("report records corpus identity and optional operator pin")
+    checks.append("report records corpus identity and required operator pin")
 
     def duplicate_exe_revision(m):
         m["exe_sha256"] = "1" * 64
@@ -1586,7 +1632,7 @@ def controls(args):
         m["provenance"]["production_revision"] = "3" * 40
 
     change_manifests(duplicate_exe_revision)
-    rejects("same executable hash under different revisions", lambda: compare(*roots))
+    rejects("same executable hash under different revisions", lambda: comp(*roots))
     change_manifests(lambda m: None)
     for run in ("run-1", "run-2"):
         (roots[1].parent / run / "manifest.json").write_bytes(original)
@@ -1620,7 +1666,7 @@ def controls(args):
         )
     pre_completion_path.unlink()
     complete_capture(roots[0].parent)
-    rejects("two equal non-shipped fork profiles", lambda: compare(roots[0], roots[0]))
+    rejects("two equal non-shipped fork profiles", lambda: comp(roots[0], mirror_pre()))
     shipping = [
         {
             "side": side,
@@ -1629,7 +1675,7 @@ def controls(args):
         }
         for side in ("pre", "branch")
     ]
-    accepted = compare(roots[0], roots[0], shipped_declarations=shipping)
+    accepted = comp(roots[0], mirror_pre(), shipped_declarations=shipping)
     check(
         accepted["untriaged"] == 0
         and accepted["shipped_profile_declarations"]
@@ -1638,11 +1684,11 @@ def controls(args):
     checks.append("explicit value-bound shipped mismatches accepted and recorded")
     rejects(
         "missing one fork shipped declaration",
-        lambda: compare(roots[0], roots[0], shipped_declarations=shipping[:1]),
+        lambda: comp(roots[0], mirror_pre(), shipped_declarations=shipping[:1]),
     )
     rejects(
         "wrong shipped mismatch value",
-        lambda: compare(
+        lambda: comp(
             roots[0],
             roots[0],
             shipped_declarations=[
@@ -1655,7 +1701,7 @@ def controls(args):
     pre_completion_path.write_bytes(pre_completion)
     rejects(
         "unused shipped mismatch declaration",
-        lambda: compare(roots[0], roots[0], shipped_declarations=shipping),
+        lambda: comp(roots[0], mirror_pre(), shipped_declarations=shipping),
     )
     public_pre = json.loads(pre_manifest)
     public_pre["build_identity"].update(vt_api="v140", terminal_source="public-lib-vt")
@@ -1673,7 +1719,7 @@ def controls(args):
     complete_capture(roots[0].parent)
     rejects(
         "public module cannot implicitly claim fork slots",
-        lambda: compare(roots[0], roots[0]),
+        lambda: comp(roots[0], mirror_pre()),
     )
     public_shipping = [
         {"side": side, **d, "reason": "Explicit public-as-fork sentinel role control"}
@@ -1681,7 +1727,7 @@ def controls(args):
         for d in public_pre["shipped_profile"]["differences"]
     ]
     check(
-        compare(roots[0], roots[0], shipped_declarations=public_shipping)["untriaged"]
+        comp(roots[0], mirror_pre(), shipped_declarations=public_shipping)["untriaged"]
         == 0
     )
     checks.append(
@@ -1694,7 +1740,7 @@ def controls(args):
         manifest = json.loads(original)
         del manifest[field]
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        rejects("missing provenance " + field, lambda: compare(*roots))
+        rejects("missing provenance " + field, lambda: comp(*roots))
         manifest_path.write_bytes(original)
     native = native_corpus("0" * 40)
     native_root = args.out / "native-fixture/run-1"
@@ -1851,7 +1897,9 @@ def main():
         help="value-bound reasons for non-shipped fork options, including pre",
     )
     command.add_argument(
-        "--expected-corpus", help="required corpus SHA-256 for a real gate"
+        "--expected-corpus",
+        required=True,
+        help="required corpus SHA-256 for every comparison",
     )
     command.add_argument("--report", type=Path, required=True)
     command = commands.add_parser(

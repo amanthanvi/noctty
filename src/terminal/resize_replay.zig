@@ -200,7 +200,7 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
         const t = if (term) |*v| v else return scriptError(name, line_no, "size must come first");
 
         if (std.mem.eql(u8, cmd, "pty")) {
-            if (!std.mem.eql(u8, rest, "conpty")) return scriptError(name, line_no, "unknown pty");
+            if (!std.mem.eql(u8, line, "pty conpty")) return scriptError(name, line_no, "expected pty conpty with one space");
             // What the Windows backend sets (termio Exec.initTerminal).
             t.flags.resize_pull_scrollback = false;
         } else if (std.mem.eql(u8, cmd, "send")) {
@@ -332,6 +332,11 @@ fn parseInt(name: []const u8, line_no: usize, word: ?[]const u8) !u16 {
 fn scriptError(name: []const u8, line_no: usize, message: []const u8) error{BadReplayScript} {
     std.debug.print("{s}:{d}: {s}\n", .{ name, line_no, message });
     return error.BadReplayScript;
+}
+
+test "resize replay: pty requires exactly one separator space" {
+    try run(std.testing.allocator, "pty-single-space", "size 4 2\npty conpty\nsend A\n", .quiet);
+    try std.testing.expectError(error.BadReplayScript, run(std.testing.allocator, "pty-double-space", "size 4 2\npty  conpty\nsend A\n", .quiet));
 }
 
 /// Decode the escapes a `send` line may use into `buf`, which must be at

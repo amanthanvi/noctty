@@ -18,6 +18,18 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool) !void {
         return;
     };
     const corpus = b.option(bool, "oracle-corpus", "Build the pre-side synthetic generator") orelse false;
+    const integrations = if (@hasField(@TypeOf(b.graph.*), "system_integration_options"))
+        &b.graph.system_integration_options
+    else
+        &b.graph.system_library_options;
+    var system = b.graph.system_package_mode;
+    for (integrations.values()) |mode| {
+        if (mode == .user_enabled or mode == .declared_enabled) system = true;
+    }
+    if (system) {
+        step.dependOn(&b.addFail("oracle: --system and every -fsys option are forbidden; system headers and libraries have no verified package pins").step);
+        return;
+    }
     const compiler = std.mem.trim(u8, b.run(&.{ b.graph.zig_exe, "version" }), " \r\n");
     const modern = (try std.SemanticVersion.parse(compiler)).minor >= 17;
     if (modern and (api == .fork or api == .stone or api == .stone_flag or corpus)) {

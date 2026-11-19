@@ -152,8 +152,10 @@ wrong tree or dirty build is invalid evidence. Compare also refuses one exe
 hash attributed to different production or instrumented revisions.
 Identity generation verifies the paths and pinned hashes of the packages the
 **build graph actually resolved**, on both compilers. This includes
-`ZIG_LOCAL_PKG_DIR`, `--pkg-dir`, `--system` and global-cache locations; overrides
-are supported by verifying their actual contents. It computes Zig's SHA-256
+`ZIG_LOCAL_PKG_DIR`, `--pkg-dir` and global-cache locations; package-directory
+overrides are supported by verifying their actual contents. Oracle builds refuse
+`--system` and every `-fsys=PACKAGE` selection: system headers/libraries have no
+verified package pins, even when the other packages remain vendored. It computes Zig's SHA-256
 package tree hash read-only, without `zig fetch` copies, archives or temporary
 package directories. Hashes are checked against build-graph pins, not directory
 names. Extra files or unsupported reparse points fail closed. Unhashed local
@@ -187,24 +189,26 @@ sources. To declare an intentional instrument change explicitly, pass
 `--declare-harness-change OLD:CURRENT` to compare/native-controls; each value is
 the SHA-256 of `json.dumps(harness_sources, sort_keys=True).encode()`.
 Declarations do not bypass profile, corpus, provenance, determinism or dump checks.
-Use `--expected-corpus SHA256` on compare to pin the real baseline corpus. Keep large dumps and their frozen corpus outside the
+Every comparison requires `--expected-corpus SHA256` to pin the baseline corpus. Keep large dumps and their frozen corpus outside the
 repository.
 
 Compare pins corpus **content**, independently of its origin revision. A pre
 capture from a later authenticated revision (including the 1A tip for a 1B
 comparison) is accepted when it used the same pinned corpus. `source_revision`
 records where the inputs originated; it does not restrict which revision can
-occupy the pre slot. Every supplied `--expected-corpus` must be a nonempty
-64-digit SHA-256 and must match the admitted corpus bytes. Compare records
-`corpus_sha256` and `expected_corpus` (null if unpinned) in the report. Report
+occupy the pre slot. Pre and post must have distinct production revisions; the
+branch's own capture cannot serve as its pre baseline, even with a different exe
+or instrumented commit. The required `--expected-corpus` must be a nonempty
+64-digit SHA-256 and match the admitted corpus bytes. Compare records
+`corpus_sha256` and `expected_corpus` in the report. Report
 manifest/completion hashes describe the exact bytes used during admission,
 including when a run is reached through a junction alias.
 
 ## Compare and triage
 
 ```text
-python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 --report PAIR.json
-python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 UPSTREAM/run-1 --report TRIAGE.json
+python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 --expected-corpus CORPUS_SHA256 --report PAIR.json
+python test/differential-oracle/oracle.py compare PRE/run-1 BRANCH/run-1 UPSTREAM/run-1 --expected-corpus CORPUS_SHA256 --report TRIAGE.json
 ```
 
 An intentional profile difference requires `--declare-profile-differences
@@ -253,7 +257,7 @@ same value-bound schema for **every** mismatch on each affected `pre`, `branch`
 or `upstream` app side: `old` is the shipped expectation and `new` the measured
 value. This declaration is separate from cross-profile differences. The `pre` and `branch` slots require shipped settings even if the executable
 uses the public module. Put a genuine public-library endpoint in the third
-`upstream` slot (for a pair diagnostic use pre/pre/upstream), or explicitly
+`upstream` slot (the pre/post pair must still use distinct production revisions), or explicitly
 declare its shipped mismatches as well. Public metadata cannot silently exempt
 a fork slot. The upstream public profile still records that it differs from
 the shipped app; only that upstream role is exempt from enforcement.
@@ -329,3 +333,8 @@ The binary protocol is intentionally internal. Reuse the saved corpus and
 the same harness sources across comparisons. Do not regenerate synthetic data
 on a compared tree, normalize dump bytes, excuse missing inputs, or interpret
 source/build evidence as runtime acceptance of noctty or ConPTY.
+
+Replay `pty conpty` uses exactly one ASCII separator space in both readers;
+`pty  conpty` is invalid. Staging preflights write access to every destination
+and its existing directory, including the tracked `build.zig`, before copying
+any overlay bytes. A read-only target leaves the source copy unchanged.

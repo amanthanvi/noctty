@@ -52,6 +52,43 @@ def sources(root):
     )
 
 
+def require_writable(target):
+    if target.exists():
+        # Acquire write access without changing bytes, length or timestamps.
+        with target.open("r+b"):
+            pass
+    parent = target.parent
+    while not parent.exists():
+        parent = parent.parent
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel.CreateFileW
+        create.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create.restype = wintypes.HANDLE
+        close = kernel.CloseHandle
+        close.argtypes = [wintypes.HANDLE]
+        close.restype = wintypes.BOOL
+        # FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY; open the directory, no writes.
+        handle = create(str(parent), 0x0002 | 0x0004, 7, None, 3, 0x02000000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not close(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+    elif not os.access(parent, os.W_OK | os.X_OK):
+        raise PermissionError("oracle instrumentation destination is not writable")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo", type=Path)
@@ -93,6 +130,8 @@ def main():
                 )
             if parent == repo:
                 break
+    for target in [*targets, repo / "build.zig"]:
+        require_writable(target)
     contents = [
         (repo / path.relative_to(source), path.read_bytes()) for path in overlay
     ]
