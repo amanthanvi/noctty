@@ -12,11 +12,6 @@ name: Windows GUI Probe
 # to, a pull request's checks. It measures and gates nothing.
 on:
   workflow_dispatch: {}
-  # TEMPORARY (lead decision on #738): GitHub dispatches a workflow only once it is on
-  # the default branch, so this branch-only trigger runs the probe once; the next
-  # commit removes it and the merged workflow is dispatch-only.
-  push:
-    branches: [test/gui-hosted-probe]
 
 permissions:
   contents: read
