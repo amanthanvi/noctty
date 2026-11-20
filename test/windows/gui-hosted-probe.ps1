@@ -15,9 +15,11 @@ checked against its receipt in -MeasureRepo; Q0 runs it. -TestToolsBin (required
 `-Drenderer-test-tools=true` build of the same source, which P3, P4 and P5 run on both desktops: one build and one
 fixture. Every run takes a build prepared outside it (nothing here builds, or runs dev-windows.cmd or `cmd /c`) and
 uses #727's launch policy: a portable copy without noctty.ico, its own LOCALAPPDATA and APPDATA, every shell the
-absolute `direct:<System32>\cmd.exe /D` (no AutoRun), the clipboard read and write denied, `copy-on-select=false`,
-`--window-save-state=never`, `--renderer=d3d11-warp` (a hosted runner has only GDI's OpenGL 1.1) and a seeded
-background, #1f6f8b. Each run records that policy as named fields read back from its own arguments, never their text.
+absolute `direct:<System32>\cmd.exe /D` (no AutoRun), the clipboard read and write denied, `copy-on-select = false`,
+`window-save-state = never`, `renderer = d3d11-warp` (a hosted runner has only GDI's OpenGL 1.1) and a seeded
+background, #1f6f8b, all set in the copy's portable config.ghostty; the command line carries only the launch helper's
+isolation. Each run records that policy as named fields, and reads its shell's real command line by PID to record,
+never the text, that it is System32's cmd.exe with /D ahead of any payload.
 The P3 fixture's shell is the same cmd with `/D /K type <seed file>`: 20 lines of 64 printable characters (1320
 bytes), or, for a withheld-seed control, an empty file. No image, no custom shader, one pane.
 
@@ -648,49 +650,106 @@ function Get-SessionFacts([string] $Private) {
 
 # ---- launching the copy
 
-# The copy's command line, and the launch policy it carries as named fields read back from the arguments themselves.
+# The copy's launch: its command line, which carries only the launch helper's isolation (containment,
+# --single-instance=false, its own class), and its portable config.ghostty, which carries the shell and every
+# setting. A shell set on the command line would travel as one argument with a space in it, which a caller that
+# splits arguments can cut before /D, so cmd's AutoRun would run (design review r6); the config file cannot be split.
 # #727's policy: the one shell the absolute System32 cmd with /D (no AutoRun), no -e, the clipboard read and write
-# denied, copy-on-select off. A P3 fixture's shell prints the seed file (`/K type <seed>`) on the fixture's grid.
-function Get-CopyCommandLine([string] $Exe, [string] $SeedPath) {
+# denied, copy-on-select off. A P3 fixture's shell prints the seed file (`/K type <seed>`) on the fixture's grid. The
+# policy is read back from the settings and arguments themselves as named fields, never their text.
+function Get-CopyLaunch([string] $Exe, [string] $SeedPath) {
     $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'gui-probe'
     $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     $shell = "direct:$cmdPath /D"
-    $fixture = @()
     if ($SeedPath) {
         if ($SeedPath -notmatch '\A[^\s"]+\z') { throw 'The seed path must hold no whitespace or quote.' }
         $shell += " /K type $SeedPath"
-        $fixture = @('--window-width=100', '--window-height=30')
     }
-    $arguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
-        "--command=$shell", '--window-save-state=never', '--clipboard-read=deny', '--clipboard-write=deny',
-        '--copy-on-select=false', '--renderer=d3d11-warp', ('--background=#{0:x6}' -f $script:SeedBackground)) + $fixture
-    $commands = @($arguments | Where-Object { $_.StartsWith('--command=', [StringComparison]::Ordinal) })
-    if ($commands.Count -ne 1) { throw 'The copy needs exactly one --command.' }
-    $setting = {
+    $settings = [ordered]@{
+        'command' = $shell
+        'auto-update' = 'off'
+        'window-save-state' = 'never'
+        'clipboard-read' = 'deny'
+        'clipboard-write' = 'deny'
+        'copy-on-select' = 'false'
+        'renderer' = 'd3d11-warp'
+        'background' = ('#{0:x6}' -f $script:SeedBackground)
+    }
+    if ($SeedPath) { $settings['window-width'] = '100'; $settings['window-height'] = '30' }
+    $arguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand)
+    foreach ($argument in $arguments) {
+        if ($argument -match '[\s"]' -or $argument.StartsWith('--command=', [StringComparison]::Ordinal) -or $argument -ceq '-e') { throw 'The command line may carry only the launch helper''s isolation.' }
+    }
+    $flag = {
         param([string] $Key)
         $hits = @($arguments | Where-Object { $_.StartsWith("--$Key=", [StringComparison]::Ordinal) })
         if ($hits.Count -eq 1) { return $hits[0].Substring($Key.Length + 3) }
         return "set $($hits.Count) times"
     }
-    $command = $commands[0].Substring('--command='.Length)
-    $tokens = @($(if ($command.StartsWith('direct:', [StringComparison]::Ordinal)) { $command.Substring('direct:'.Length) -split ' ' } else { @() }))
+    $tokens = @($(if ($shell.StartsWith('direct:', [StringComparison]::Ordinal)) { $shell.Substring('direct:'.Length) -split ' ' } else { @() }))
     $stimulus = 'none'
     if ($tokens.Count -gt 2) { $stimulus = $(if ($tokens.Count -eq 5 -and $tokens[2] -ceq '/K' -and $tokens[3] -ceq 'type') { 'type-seed-file' } else { 'other' }) }
     $policy = [ordered]@{
+        shellSetIn = 'config-file'
         shellKind = $(if ($tokens.Count -ge 1 -and [string]::Equals($tokens[0], $cmdPath, [StringComparison]::OrdinalIgnoreCase)) { 'direct-system32-cmd' } else { 'other' })
         shellAutoRunOff = ($tokens.Count -ge 2 -and $tokens[1] -ceq '/D')
         shellStimulus = $stimulus
-        initialCommands = @($arguments | Where-Object { $_ -ceq '-e' -or $_.StartsWith('--initial-command=', [StringComparison]::Ordinal) }).Count
-        clipboardRead = & $setting 'clipboard-read'
-        clipboardWrite = & $setting 'clipboard-write'
-        copyOnSelect = & $setting 'copy-on-select'
-        windowSaveState = & $setting 'window-save-state'
-        renderer = & $setting 'renderer'
-        singleInstance = & $setting 'single-instance'
-        jobObjectKillOnClose = & $setting 'windows-job-object-kill-on-close'
+        initialCommands = 0
+        clipboardRead = $settings['clipboard-read']
+        clipboardWrite = $settings['clipboard-write']
+        copyOnSelect = $settings['copy-on-select']
+        windowSaveState = $settings['window-save-state']
+        renderer = $settings['renderer']
+        singleInstance = & $flag 'single-instance'
+        jobObjectKillOnClose = & $flag 'windows-job-object-kill-on-close'
     }
-    $line = ('"{0}" ' -f $Exe) + (@($arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
-    return [pscustomobject]@{ Line = $line; Policy = $policy }
+    $line = ('"{0}" ' -f $Exe) + ($arguments -join ' ')
+    $config = @($settings.Keys | ForEach-Object { '{0} = {1}' -f $_, $settings[$_] })
+    return [pscustomobject]@{ Line = $line; Config = $config; Policy = $policy }
+}
+
+# True when `ProcessId` descends from `Ancestor` in the toolhelp rows `All` (keyed by PID), within 16 hops.
+function Test-ProbeDescendant($All, [int] $ProcessId, [int] $Ancestor) {
+    $hop = $All[$ProcessId]
+    for ($depth = 0; $null -ne $hop -and $depth -lt 16; $depth++) {
+        if ($hop.Parent -eq $Ancestor) { return $true }
+        if ($hop.Parent -eq $hop.Pid) { return $false }
+        $hop = $All[$hop.Parent]
+    }
+    return $false
+}
+
+# The copy's shell as Windows started it, found by PID (the one cmd.exe below the copy). Its command line is read and
+# tested here and never kept: the facts say only whether it is System32's cmd.exe and whether /D is its first
+# argument, ahead of any payload (the fixture's `/K type <seed>`; Q0's shell has none).
+function Get-ShellLaunchFacts([int] $CopyPid, [bool] $Fixture) {
+    $facts = [ordered]@{ shells = 0; read = $false; systemCmd = $false; autoRunOffFirst = $false; payloadAfterD = $false }
+    $deadline = [datetime]::UtcNow.AddSeconds(15)
+    do {
+        $all = @{}
+        foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
+        $shells = @($all.Values | Where-Object { $_.Image -ieq 'cmd.exe' -and (Test-ProbeDescendant $all $_.Pid $CopyPid) })
+        if ($shells.Count -ge 1) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([datetime]::UtcNow -lt $deadline)
+    $facts.shells = $shells.Count
+    if ($shells.Count -ne 1) { return $facts }
+    $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($shells[0].Pid)" -ErrorAction SilentlyContinue
+    $commandLine = $(if ($process) { [string]$process.CommandLine } else { '' })
+    if (-not $commandLine) { return $facts }
+    $facts.read = $true
+    $parsed = [regex]::Match($commandLine, '\A\s*(?:"(?<exe>[^"]+)"|(?<exe>\S+))(?<rest>.*)\z')
+    if ($parsed.Success) {
+        $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        $exe = $parsed.Groups['exe'].Value
+        $facts.systemCmd = [IO.Path]::IsPathRooted($exe) -and [string]::Equals([IO.Path]::GetFullPath($exe), $cmdPath, [StringComparison]::OrdinalIgnoreCase)
+        $rest = $parsed.Groups['rest'].Value.Trim()
+        # cmd reads its switches without regard to case, so these matches ignore it too.
+        $facts.autoRunOffFirst = $rest -match '\A/D(\s|\z)'
+        $facts.payloadAfterD = $(if ($Fixture) { $rest -match '\A/D\s+/K\s+type\s+\S' } else { $rest -match '\A/D\z' })
+    }
+    $commandLine = $null
+    return $facts
 }
 
 # Writes the P3 fixture's seed file: the seed, or (withheld) nothing, so the shell prints only its prompt.
@@ -740,7 +799,9 @@ function Start-ProbeCopy([string] $Exe, [string] $Desktop, [string] $LogPath, [I
         $env:NOCTTY_RENDER_TRACE_LIVE = '1'
         $env:NOCTTY_RENDERER_CAPTURE_PATH = $(if ($CapturePath) { $CapturePath } else { $null })
         $env:NOCTTY_RENDERER_STATUS_PATH = $(if ($CapturePath) { [IO.Path]::ChangeExtension($CapturePath, '.status.json') } else { $null })
-        $launch = Get-CopyCommandLine $Exe $SeedPath
+        $launch = Get-CopyLaunch $Exe $SeedPath
+        # Portable mode reads <copy>\config.ghostty; written fresh for each start.
+        [IO.File]::WriteAllLines((Join-Path (Split-Path -Parent $Exe) 'config.ghostty'), [string[]]$launch.Config, [Text.UTF8Encoding]::new($false))
         $script:LastLaunchPolicy = $launch.Policy
         # What the gate checked, beside the arguments' policy.
         $script:LastLaunchPolicy.build = $build
@@ -1020,6 +1081,7 @@ function Invoke-ProbeDriver {
             $result.launchPolicy = $script:LastLaunchPolicy
             $hostWindow = Wait-ProbeHost $pi.pid 45
             $result.copyReady = $hostWindow -ne [IntPtr]::Zero
+            $result.shell = Get-ShellLaunchFacts $pi.pid $false
             # The ConPTY host and the shell start with the first pane; give them a moment.
             $deadline = [datetime]::UtcNow.AddSeconds(20)
             do {
@@ -1060,6 +1122,7 @@ function Invoke-ProbeDriver {
             $result.launchPolicy = $script:LastLaunchPolicy
             $hostWindow = Wait-ProbeHost $pi.pid 45
             $result.copyReady = $hostWindow -ne [IntPtr]::Zero
+            $result.shell = Get-ShellLaunchFacts $pi.pid $true
             if ($result.copyReady) {
                 $surface = @([HiddenLocal]::Surfaces($hostWindow))[0]
                 $result.readback = Invoke-ProbeReadback $surface $capture
@@ -1217,6 +1280,7 @@ function Invoke-DefaultCopy([string] $TestToolsStageBin, [string] $Name, [bool] 
         $env:LOCALAPPDATA = $savedLocal; $env:APPDATA = $savedRoaming
         $hostWindow = Wait-ProbeHost $pi.pid 45
         $run.copyReady = $hostWindow -ne [IntPtr]::Zero
+        $run.shell = Get-ShellLaunchFacts $pi.pid $true
         if ($run.copyReady) {
             $surface = @([HiddenLocal]::Surfaces($hostWindow))[0]
             $run.snapshot = $(if ($Withheld) { Wait-ProbePresented $surface $trace 1 5 } else { Wait-ProbePresented $surface $trace $script:SeedBytes 0 })
@@ -1357,6 +1421,9 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
         withheldLastSwapOutputBytes = $withheldRun.snapshot.lastSwapOutputBytes; withheldSwaps = $withheldRun.snapshot.swapBuffers
         privateReadbackSeeded = $privateReadback.seeded; privateSwapsAfterReadback = $privateAfter.swapBuffers
         privateWithheldReadbackSeeded = $privateWithheldRun.driver.readback.seeded
+        # Every arm's shell, read by PID: System32's cmd.exe with /D ahead of the `/K type` payload.
+        shellPolicyHeld = (@($interactive.shell, $withheldRun.shell, $privateRun.driver.shell, $privateWithheldRun.driver.shell) |
+            Where-Object { -not ($null -ne $_ -and [bool]$_.systemCmd -and [bool]$_.autoRunOffFirst -and [bool]$_.payloadAfterD) }).Count -eq 0
         verdict = Get-Verdict `
             ((Test-WarpOnlyLog $defaultLog) -and $interactive.copyReady -and $interactive.snapshot.swapBuffers -ge 1 -and $interactive.snapshot.lastSwapOutputBytes -ge $script:SeedBytes) `
             ((Test-WarpOnlyLog $withheldRun.log) -and $withheldRun.snapshot.swapBuffers -ge 1 -and $withheldRun.snapshot.lastSwapOutputBytes -lt $script:SeedBytes -and
@@ -1401,11 +1468,15 @@ Assert-InteractiveWin11MeasureBuild -RepoRoot $MeasureRepo -ExePath (Join-Path $
 
 [void](New-Item -ItemType Directory -Path $Work)
 $script:RunRoot = $Work
-# A copy's source: a build's bin without noctty.ico (and without its symbols), with share\ beside it.
+# A copy's source, staged the way #727's soak stages its copy, by plain copies from the build's own prefix bin (no
+# harness-library helper): everything but noctty.ico (a portable copy with its icon beside it creates the user's
+# AppUserModelId registration when that key is missing) and the portable crash trees, with share\ beside it.
 function New-ProbeStage([string] $Source, [string] $Name) {
     $bin = Join-Path $Work "$Name\bin"
     [void](New-Item -ItemType Directory -Path $bin)
-    Get-ChildItem -LiteralPath $Source -File | Where-Object { $_.Name -ne 'noctty.ico' -and $_.Extension -ne '.pdb' } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $bin }
+    Get-ChildItem -LiteralPath $Source -Force | Where-Object { $_.Name -notin @('noctty.ico', 'crash', 'ghostty') } |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $bin $_.Name) -Recurse }
+    if (Test-Path -LiteralPath (Join-Path $bin 'noctty.ico')) { throw 'The stage must not carry noctty.ico.' }
     $share = Join-Path (Split-Path -Parent $Source) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path $Work "$Name\share") -Recurse }
     return $bin
@@ -1449,6 +1520,8 @@ try {
         copyProcesses = $copyProcesses.Count
         copyProcessesOffPrivate = $onDefault
         copyWindowsOffPrivate = $windowsOnDefault
+        # The shell Windows started, read by PID: System32's cmd.exe with /D first (so no AutoRun) and nothing after.
+        shellPolicyHeld = ($null -ne $driverRecord -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst -and [bool]$driverRecord.shell.payloadAfterD)
         verdict = Get-Verdict `
             ($null -ne $driverRecord -and $driverRecord.copyReady -and $copyProcesses.Count -ge 2 -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0) `
             ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `

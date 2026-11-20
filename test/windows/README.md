@@ -1077,11 +1077,17 @@ Every copy uses #727's launch policy:
 - a portable copy without `noctty.ico`, with its own `LOCALAPPDATA` and
   `APPDATA`;
 - every shell `direct:<System32>\cmd.exe /D`;
-- the clipboard read and write denied, and `copy-on-select=false`;
-- `--renderer=d3d11-warp` and a seeded background (#1f6f8b).
+- the clipboard read and write denied, and `copy-on-select = false`;
+- `renderer = d3d11-warp` and a seeded background (#1f6f8b).
 
-Each run records that policy as named fields read back from its own
-arguments. Nothing in a run builds or runs `dev-windows.cmd` or `cmd /c`.
+These settings, the shell among them, go in the copy's portable
+`config.ghostty`. The command line carries only the launch helper's isolation:
+a shell passed there would travel as one argument with a space in it, which a
+caller that splits arguments can cut before `/D`. Each run records the policy
+as named fields. It also reads its shell's real command line by PID, and
+records, never the text, that the shell is System32's `cmd.exe` with `/D`
+ahead of any payload. Staging copies the build the way #727's soak does.
+Nothing in a run builds or runs `dev-windows.cmd` or `cmd /c`.
 
 **The launcher's gate.** `Get-ProbeLaunchRefusal` runs before every noctty
 start, in measurement mode (`NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, which the
