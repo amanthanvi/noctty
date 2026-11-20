@@ -2122,7 +2122,7 @@ test "semantic prompt: bash keeps redraw=last after a program reads an Enter" {
 
     // Narrowing clears only the last line, the one bash redraws, so all
     // three renderings of the upper prompt line survive.
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, screen, "u@h ~"));
@@ -2149,7 +2149,7 @@ test "semantic prompt: bash keeps redraw=last after a program reads two Enters a
     s.nextSlice("git ch\r\ncheckout  cherry\r\n" ++ bash_ps1 ++ "git ch");
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, screen, "u@h ~"));
@@ -2207,7 +2207,7 @@ test "semantic prompt: oh-my-posh keeps the PowerShell prompt after Read-Host re
     s.nextSlice("\r\n" ++ ps ++ "\x1b]133;D;0\x07\x1b]133;A\x07p2> \x1b[K\x1b]133;B\x07");
     try testing.expect(t.flags.shell_redraws_prompt == .false);
 
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expect(std.mem.indexOf(u8, screen, "p2>") != null);
@@ -2288,7 +2288,7 @@ test "semantic prompt: a shell started by a pasted line in cmd has its prompt cl
     s.nextSlice("\x1b]133;A\x07nu> \x1b]133;B\x07");
     try testing.expect(t.flags.shell_redraws_prompt == .true);
 
-    try t.resize(testing.allocator, 12, 6);
+    try t.resize(testing.allocator, .{ .cols = 12, .rows = 6 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expect(std.mem.indexOf(u8, screen, "nu>") == null);
@@ -2432,7 +2432,7 @@ test "semantic prompt: a line read by a PowerShell command that then starts cmd 
     try testing.expect(!t.screens.active.semantic_command.prompt_presubmitted);
     try testing.expect(t.flags.shell_redraws_prompt == .false);
 
-    try t.resize(testing.allocator, 20, 10);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 10 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, screen, "C:\\>"));
@@ -2480,7 +2480,7 @@ test "semantic prompt: bash keeps redraw=last after the command that started it 
     s.nextSlice("git ch\r\ncheckout  cherry\r\n" ++ bash_ps1 ++ "git ch");
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, screen, "u@h ~"));
