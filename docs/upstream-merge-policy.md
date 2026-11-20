@@ -129,11 +129,14 @@ not an adaptation to record.
   `appendIfWrapped` (upstream `0d015b2fc`), PageList.zig's own hunks above,
   and `src/inspector/widgets/pagelist.zig:79`, which no build compiles, so
   a wrong side there gets no compile check. One fork read has no conflict
-  to point at it: `appendPage`'s read of the previous node for
-  `Meta.before` (`prev.page()`) merges cleanly, and it too takes upstream's
-  form, a `pagePreservingState(self.alloc)` read, at the merge. Left as it
-  is, it restores a compressed neighbour, and upstream's test "compressed
-  history match spanning page boundary remains compressed" fails.
+  to point at it, because upstream has no counterpart: the fork's
+  `appendPage` adds `Meta.before`, read from the previous node through
+  `prev.page()`, while upstream's builds `Meta` from the node alone. That
+  fork adaptation merges cleanly, so at the merge it keeps `Meta.before`
+  but must read the previous node with `pagePreservingState(self.alloc)`,
+  so that a compressed neighbour stays compressed. Left as it is, it
+  restores one, and upstream's test "compressed history match spanning
+  page boundary remains compressed" fails.
 
 Until that merge lands on `main`, `main`'s node is still resident-only:
 `Data = struct { resident: Page }`, the four accessors `page()`, `rows()`,
