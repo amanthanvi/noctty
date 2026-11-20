@@ -498,7 +498,7 @@ public static class GuiProbeNative {
             return GetProcessTimes(h, out c, out e, out k, out u) && c == creation && WaitForSingleObject(h, 0) == 258;
         } finally { CloseHandle(h); }
     }
-    public sealed class JoinedProcess { public int Pid; public long Creation; public int Parent; public string Image; public string StartupDesktop; public IntPtr Handle; public bool Unpinned; }
+    public sealed class JoinedProcess { public int Pid; public long Creation; public int Parent; public string Image; public string StartupDesktop; public IntPtr Handle; public bool Unpinned; public bool OpenFailed; public long Taken; }
     // Every process that joins `job`, reported on a completion port (JOB_OBJECT_MSG_NEW_PROCESS) and read the moment it
     // is reported, before a short-lived one can exit: its handle pinned (so its PID cannot be reused while the watch
     // lives), its creation time, its parent (from the process itself), its image's file name and its startup desktop
@@ -506,9 +506,17 @@ public static class GuiProbeNative {
     // reported (CodeRabbit r4647868824): a member of `job` (IsProcessInJob on the opened handle) created no later than
     // the message was taken. Anything else is `Unpinned`, never read, so the job's member stays unobserved and the arm
     // inconclusive (notSeenInJob). Delivery itself is best effort: Windows does not guarantee the message, and a child
-    // can exit before it is opened. Dispose stops the reader and closes the pins and the port.
+    // can exit before it is opened (`OpenFailed`, counted as unopenedJoins; the member then stays unobserved too).
+    // So the reader opens first: it takes every waiting message and opens its process at once, and reads one pinned
+    // process only when no message waits; and it runs above normal priority. On hosted run 44827416079 the forwarded
+    // noctty.exe of `+version` exited before the old one-at-a-time reader opened it; on one CPU with a busy main
+    // thread, that reader failed to open 52 to 61 of 62 short-lived joiners. Dispose stops the reader and closes the
+    // pins and the port.
     public sealed class JobWatch : IDisposable {
         readonly IntPtr port; readonly IntPtr job; readonly Thread reader; volatile bool stopping;
+        // An exception on the reader ends the reading, never the process: what it had not read stays unobserved
+        // (notSeenInJob), and the fault is recorded.
+        public volatile bool Faulted;
         readonly List<JoinedProcess> joined = new List<JoinedProcess>();
         public JobWatch(IntPtr job) {
             this.job = job;
@@ -519,31 +527,44 @@ public static class GuiProbeNative {
                 int error = Marshal.GetLastWin32Error(); CloseHandle(port);
                 throw new Exception("Associating the job's completion port failed: " + error);
             }
-            reader = new Thread(Loop); reader.IsBackground = true; reader.Start();
+            reader = new Thread(Loop); reader.IsBackground = true; reader.Priority = ThreadPriority.Highest; reader.Start();
         }
         void Loop() {
-            while (!stopping) {
+            try { Run(); } catch (Exception) { Faulted = true; }
+        }
+        void Run() {
+            var opened = new List<JoinedProcess>();
+            while (!stopping || opened.Count > 0) {
                 uint message; UIntPtr key; IntPtr overlapped;
-                if (!GetQueuedCompletionStatus(port, out message, out key, out overlapped, 50)) continue;
-                if (message != 6) continue; // JOB_OBJECT_MSG_NEW_PROCESS: overlapped carries the PID
-                long taken; GetSystemTimePreciseAsFileTime(out taken);
-                var row = new JoinedProcess { Pid = (int)overlapped.ToInt64() };
-                IntPtr h = OpenProcess(0x1000 | 0x0400 | 0x0010 | 0x00100000, false, row.Pid); // QUERY_LIMITED | QUERY | VM_READ | SYNCHRONIZE
-                if (h != IntPtr.Zero) {
-                    long c, e, k, u; bool member;
-                    bool timed = GetProcessTimes(h, out c, out e, out k, out u);
-                    if (!IsProcessInJob(h, job, out member) || !member || !timed || c > taken) {
-                        row.Unpinned = true; CloseHandle(h);
-                    } else {
-                        row.Creation = c;
-                        int parent; if (ParentOf(h, out parent)) row.Parent = parent;
-                        row.Image = ImageLeafOf(h);
-                        row.StartupDesktop = DesktopInfoOf(h);
-                        row.Handle = h;
-                    }
+                // Open first: while a message waits, take it and open its process; read one only once none waits.
+                if (!stopping && GetQueuedCompletionStatus(port, out message, out key, out overlapped, opened.Count > 0 ? 0u : 50u)) {
+                    if (message != 6) continue; // JOB_OBJECT_MSG_NEW_PROCESS: overlapped carries the PID
+                    long taken; GetSystemTimePreciseAsFileTime(out taken);
+                    var row = new JoinedProcess { Pid = (int)overlapped.ToInt64(), Taken = taken };
+                    row.Handle = OpenProcess(0x1000 | 0x0400 | 0x0010 | 0x00100000, false, row.Pid); // QUERY_LIMITED | QUERY | VM_READ | SYNCHRONIZE
+                    if (row.Handle == IntPtr.Zero) row.OpenFailed = true;
+                    opened.Add(row);
+                    continue;
                 }
-                lock (joined) joined.Add(row);
+                if (opened.Count == 0) continue;
+                // One read at a time, so a message that arrives during it waits for one read at most.
+                var next = opened[0]; opened.RemoveAt(0);
+                ReadOpened(next); lock (joined) joined.Add(next);
             }
+        }
+        // The pin's checks on the handle opened for the message, then the reads.
+        void ReadOpened(JoinedProcess row) {
+            IntPtr h = row.Handle;
+            if (h == IntPtr.Zero) return;
+            long c, e, k, u; bool member;
+            bool timed = GetProcessTimes(h, out c, out e, out k, out u);
+            if (!IsProcessInJob(h, job, out member) || !member || !timed || c > row.Taken) {
+                row.Unpinned = true; CloseHandle(h); row.Handle = IntPtr.Zero; return;
+            }
+            row.Creation = c;
+            int parent; if (ParentOf(h, out parent)) row.Parent = parent;
+            row.Image = ImageLeafOf(h);
+            row.StartupDesktop = DesktopInfoOf(h);
         }
         public JoinedProcess[] Snapshot() { lock (joined) return joined.ToArray(); }
         public void Dispose() {
@@ -2108,6 +2129,9 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 $facts.jobProcessesStarted = $(if ($null -ne $after) { $after[0] } else { $null })
                 $facts.joinedReported = @($watch.Snapshot()).Count
                 $facts.unpinnedJoins = @($watch.Snapshot() | Where-Object { $_.Unpinned }).Count
+                # Reported, but gone before it could be opened: the member stays unobserved, which notSeenInJob gates.
+                $facts.unopenedJoins = @($watch.Snapshot() | Where-Object { $_.OpenFailed }).Count
+                $facts.watchFaulted = $watch.Faulted
                 # sampledAlive false: gone before any poll, so only the watch's read at its creation (its startup
                 # desktop) stands for it; its threads were never read.
                 $facts.processes = @($seen.Values | ForEach-Object { [ordered]@{ image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = [bool]$_.leftJob
