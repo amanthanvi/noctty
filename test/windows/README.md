@@ -1201,7 +1201,13 @@ Each arm:
   - a member of the job's process list read at that same moment that is not
     a census row with the same PID and creation time, so an exit and a join
     cannot balance out (a GUI arm; the list is recorded as
-    `jobMembersAtBoundary`, and a record without it is inconclusive).
+    `jobMembersAtBoundary`, and a record without it is inconclusive). The
+    list is read inside a bracket: the job's accounting before and after it
+    must show the same total (nothing joined; the total only grows, and the
+    job permits no breakaway) and the same active count, equal to the list's
+    length (nothing left). An unstable bracket is retried up to 5 times and
+    recorded (`boundaryBracket`); a stable one proves no member exited inside
+    it, so every member must match by PID and creation time.
 - Each walk also checks, on a handle held open, whether the owner of a
   window off the private desktop that is outside the census belongs to the
   arm's job (the CLI's watched job, or the GUI driver's own). A member's

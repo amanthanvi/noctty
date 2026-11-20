@@ -518,6 +518,10 @@ public static class GuiProbeNative {
         // (notSeenInJob), and the fault is recorded.
         public volatile bool Faulted;
         readonly List<JoinedProcess> joined = new List<JoinedProcess>();
+        // Opened, not yet read: a field, so Dispose can close what a fault or a stop leaves here.
+        readonly List<JoinedProcess> opened = new List<JoinedProcess>();
+        // Whether Dispose saw the reader stop within its wait (council r4, Sol L1).
+        public bool Stopped;
         public JobWatch(IntPtr job) {
             this.job = job;
             port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
@@ -533,7 +537,6 @@ public static class GuiProbeNative {
             try { Run(); } catch (Exception) { Faulted = true; }
         }
         void Run() {
-            var opened = new List<JoinedProcess>();
             while (!stopping || opened.Count > 0) {
                 uint message; UIntPtr key; IntPtr overlapped;
                 // Open first: while a message waits, take it and open its process; read one only once none waits.
@@ -547,9 +550,11 @@ public static class GuiProbeNative {
                     continue;
                 }
                 if (opened.Count == 0) continue;
-                // One read at a time, so a message that arrives during it waits for one read at most.
-                var next = opened[0]; opened.RemoveAt(0);
-                ReadOpened(next); lock (joined) joined.Add(next);
+                // One read at a time, so a message that arrives during it waits for one read at most. The row leaves the
+                // queue only once read, so a fault in the read leaves its handle for Dispose to close.
+                var next = opened[0];
+                ReadOpened(next);
+                opened.RemoveAt(0); lock (joined) joined.Add(next);
             }
         }
         // The pin's checks on the handle opened for the message, then the reads.
@@ -568,8 +573,10 @@ public static class GuiProbeNative {
         }
         public JoinedProcess[] Snapshot() { lock (joined) return joined.ToArray(); }
         public void Dispose() {
-            stopping = true; reader.Join(2000);
+            stopping = true; Stopped = reader.Join(2000);
             lock (joined) foreach (var r in joined) if (r.Handle != IntPtr.Zero) CloseHandle(r.Handle);
+            // The queue is the reader's own: touched only once it has stopped (else the process's exit closes them).
+            if (Stopped) foreach (var r in opened) if (r.Handle != IntPtr.Zero) CloseHandle(r.Handle);
             CloseHandle(port);
         }
     }
@@ -1936,10 +1943,27 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
             $arm.desktopReadersOpen = Test-ProbeDesktopReadersOpen $readers
             $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName $Bin
         } finally { Close-ProbeDesktopReaders $readers }
-        $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
-        # The job's member set at the same boundary (council r3, Sol M): each member must be a census row with the same
-        # PID and creation time, so an exit and a join between the census and this read cannot balance out.
-        $members = [GuiProbeNative]::JobMembers([IntPtr]::Zero)
+        # The boundary, as one bracketed read (council r4, Sol M; council r3's member set): the job's accounting, its
+        # member list (each member's creation time read on a handle opened right after the list), the accounting again.
+        # TotalProcesses only grows and our jobs permit no breakaway (PROBE-JOB-BREAKAWAY-01), so an unchanged total
+        # proves nothing joined inside the window, and an unchanged active count equal to the list's length then proves
+        # nothing left it: the list is the job's member set throughout. An unstable bracket is retried, up to 5 reads; the
+        # last one is recorded either way, and the judge checks the rule on it.
+        $bracket = $null; $accounting = $null; $members = $null
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            $before = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+            $members = [GuiProbeNative]::JobMembers([IntPtr]::Zero)
+            $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+            $stable = $null -ne $before -and $null -ne $members -and $null -ne $accounting -and $before[0] -eq $accounting[0] -and
+                $before[1] -eq $accounting[1] -and $accounting[1] -eq @($members).Count
+            $bracket = [ordered]@{
+                attempts = $attempt
+                before = $(if ($null -eq $before) { $null } else { [ordered]@{ totalProcesses = $before[0]; activeProcesses = $before[1] } })
+                after = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1] } })
+            }
+            if ($stable) { break }
+        }
+        $arm.boundaryBracket = $bracket
         $arm.jobMembersAtBoundary = $(if ($null -eq $members) { $null } else { @($members | ForEach-Object { [ordered]@{ pid = $_.Pid; creation = $_.Creation } }) })
         $arm.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
         $arm.sampledProcesses = @($processes).Count
@@ -2141,7 +2165,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 $facts.notSeenInJob = $(if ($null -ne $facts.jobProcessesStarted) { $facts.jobProcessesStarted - @($seen.Values | Where-Object { $_.inJob }).Count } else { $null })
             } finally {
                 # The pins and the port go first, then the job (by its own handle: it holds only this invocation's tree).
-                if ($null -ne $watch) { $watch.Dispose() }
+                if ($null -ne $watch) { $watch.Dispose(); $facts.watchStopped = $watch.Stopped }
                 try { [void][HiddenLocal]::StopOwnedJob($watchJob) } catch { $facts.watchJobCloseFailed = $true }
             }
             $invocations.Add($facts)
@@ -2353,12 +2377,23 @@ function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin)
 # run (unresolved 0; with no unverified candidate at all, there is none), and, for a GUI arm, no more live processes
 # in the job than in-job rows (the job's active count read right after the sample). A process that joined and exited
 # before the sample (cmd's chcp) is outside the claim and stays a recorded count (jobProcessesNotSampled).
-# The count alone balances an exit against a join (council r3, Sol M), so the job's member set read at the same
-# boundary is compared too: every member must be a census row with the same PID and creation time (one whose
-# creation could not be read, as it had exited, at least by PID). A record without that set is inconclusive.
+# The count alone balances an exit against a join (council r3, Sol M), so the job's member set at the boundary is
+# compared too, and the boundary is one bracketed read (council r4, Sol M): accounting before and after the member list
+# with the same TotalProcesses (nothing joined inside it) and the same active count, equal to the list's length (nothing
+# left it). Every member must then be a census row with the same PID and creation time: a stable bracket proves no member
+# exited inside it, so a member whose creation could not be read is no exit, and it is inconclusive. A record without
+# the bracket or the list is inconclusive.
+function Test-ProbeBoundaryBracket($Driver) {
+    $bracket = $Driver.boundaryBracket
+    if ($null -eq $bracket -or $null -eq $bracket.before -or $null -eq $bracket.after -or $null -eq $Driver.jobMembersAtBoundary) { return $false }
+    $count = @($Driver.jobMembersAtBoundary).Count
+    return [long]$bracket.before.totalProcesses -eq [long]$bracket.after.totalProcesses -and
+        [long]$bracket.before.activeProcesses -eq [long]$bracket.after.activeProcesses -and [long]$bracket.after.activeProcesses -eq $count
+}
 function Test-ProbeMembersCensused($Driver) {
     $members = $Driver.jobMembersAtBoundary
     if ($null -eq $members -or @($members).Count -lt 1) { return $false }
+    if (-not (Test-ProbeBoundaryBracket $Driver)) { return $false }
     $identities = [System.Collections.Generic.HashSet[string]]::new()
     $pids = [System.Collections.Generic.HashSet[long]]::new()
     foreach ($row in @($Driver.processes)) {
@@ -2367,9 +2402,8 @@ function Test-ProbeMembersCensused($Driver) {
         if ($null -ne $row.creation) { [void]$identities.Add("$([long]$row.pid):$([long]$row.creation)") }
     }
     foreach ($member in @($members)) {
-        if ($null -eq $member.pid) { return $false }
-        if ([long]$member.creation -ne 0) { if (-not $identities.Contains("$([long]$member.pid):$([long]$member.creation)")) { return $false } }
-        elseif (-not $pids.Contains([long]$member.pid)) { return $false }
+        if ($null -eq $member.pid -or $null -eq $member.creation -or [long]$member.creation -eq 0) { return $false }
+        if (-not $identities.Contains("$([long]$member.pid):$([long]$member.creation)")) { return $false }
     }
     return $true
 }
