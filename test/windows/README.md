@@ -1122,16 +1122,27 @@ ConPTY host"):
   `+list-windows --class=<fresh class> --format=json --timeout=1000`. The
   single-instance pipe is named only from `--class`, so the CLI arm reaches
   no other noctty, and it runs locally too. Its tree is sampled at every poll
-  until the root exits, and so are its windows: the same two-desktop
+  until the tree is done, and so are its windows: the same two-desktop
   inventory, with its sentinel and Default > 0 control, over the tree's
-  processes. `noctty.com` is a console program, so a console window it got on
-  Default is exactly the leak Q0 exists to catch. Each invocation runs in a
-  job of the driver's own, watched on a completion port: each process that
-  joins it (the forwarded `noctty.exe`, its console host) is read the moment
-  the job reports it, with its handle pinned. A process that exits between
-  polls still has its startup desktop read; its row is `sampledAlive: false`,
-  as its threads were never read. Every process the job counted must have
-  been read (`notSeenInJob` 0), or the arm is inconclusive.
+  processes. A job member outside the census after a walk (it joined during
+  the poll, and the walk kept only the census's windows) leaves that
+  inventory incomplete. The probe starts `noctty.com` with
+  `CREATE_NO_WINDOW`, so this arm does not test whether a console window
+  would reach Default. Each invocation runs in a job of the driver's own,
+  watched on a completion port, and each process that joins it (the forwarded
+  `noctty.exe`, its console host) is read when the job reports it. That read
+  is best effort. Windows does not guarantee `JOB_OBJECT_MSG_NEW_PROCESS`, a
+  child can exit before it is opened, and a PID is recorded only when the
+  process opened is a member of the job created no later than the message was
+  taken (else it is `unpinned` and left unread). A process that exits between
+  polls but was read at its report keeps its startup desktop, which is then
+  its only evidence: its row is `sampledAlive: false`, as its threads were
+  never read. The arm is inconclusive unless:
+  - every process the job counted was read (`notSeenInJob` 0);
+  - every startup desktop was read;
+  - each tree drained in time and the poll after the drain ran
+    (`treeDoneInTime`);
+  - each watched job closed (no `watchJobCloseFailed`).
 
 Each arm:
 
@@ -1167,7 +1178,14 @@ Each arm:
   it resolved. A thread with no USER desktop is kept apart from an unreadable
   one, and an unreadable one leaves Q0 inconclusive. The growth of the job's
   `TotalProcesses` since the copy started is recorded beside the sample, so a
-  descendant that exited before it (cmd's `chcp`) is counted.
+  descendant that joined and exited before it (cmd's `chcp`) is counted. It is
+  outside the claim and does not fail Q0.
+- An incomplete census also leaves Q0 inconclusive:
+  - a descendant candidate the walk could not verify, unless it is gone, its
+    PID now names another process, or it predates the ancestor it names
+    (`unresolvedDescendantLinks` must be 0);
+  - more live processes in the job, by its active count right after the
+    sample, than in-job rows (a GUI arm).
 - Positive control: a child started without a desktop name reports the private
   desktop.
 - Negative control: a thread moved to a second desktop with `SetThreadDesktop`
@@ -1176,12 +1194,16 @@ Each arm:
   Desktop names compare case-insensitively, and a startup desktop the reader
   names neither way is recorded by its leaf.
 - The enumeration classifier's own control runs in the bundled arm's driver:
-  a fresh empty desktop comes back unavailable, a walk through a handle that
+  a fresh empty desktop, walked through the handle that created it, comes
+  back with the empty walk's own signature (FALSE with no error), a walk
+  through a handle that
   is not a desktop (an event of the driver's) comes back unavailable with a
   Win32 error, and the desktop holding the sentinel lists it. Anything else
   leaves Q0 inconclusive. A desktop handle without some access right is no
-  such failure: `EnumDesktopWindows` checks none (test-harnesses.md
-  2026-11-20 PROBE-ENUM-ACCESS-01).
+  such failure: on the Windows builds measured, `EnumDesktopWindows` walked
+  every narrowed desktop handle tried, though Microsoft documents
+  `DESKTOP_READOBJECTS` as required (test-harnesses.md 2026-11-20
+  PROBE-ENUM-ACCESS-01).
 - The CLI arm polls until its root has exited and its watched job holds no
   live process, then once more for what joined after the last snapshot.
 - Q0 passes only when all three arms and every control pass. Its claim is
@@ -1232,8 +1254,9 @@ pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix
     -MeasureRepo <repo> -Work <new dir> -Out <record.json> -Part Q0
 ```
 
-`-Part` takes `Q0`, `Local` or `All`. With `Local` or `All`, add
-`-TestToolsBin <test-tools prefix>\bin`. `-Work` must lie outside
+`-Part` takes `Q0`, `Local` or `All`. `All` needs
+`-TestToolsBin <test-tools prefix>\bin`; with `Local` it only feeds the gate's
+control, which must refuse it. `-Work` must lie outside
 `-MeasureRepo`, or in a folder git ignores there: copies staged in the
 checkout would dirty it, and the driver's admission refuses a dirty one. The
 probe checks this before it creates anything.
@@ -1258,10 +1281,12 @@ probe checks this before it creates anything.
   (`guardUnreadable`) and gates no verdict: the guard protects the user's
   clipboard, and the runner's clipboard is not theirs.
 - The record holds only values and HRESULTs. `Write-ProbeRecord` writes any
-  other string, and any other type, as `rejected-value`, so no screen image,
-  path, environment value, window title or command line enters it. The
-  record is still written: it counts the replacements (`rejectedValues`) and
-  lists where they were (`rejectedAt`). A driver record with any replacement
+  other string, and any other type, as `rejected-value`, and leaves out an
+  entry under any other key. No screen image, path, environment value,
+  window title or command line enters it. The record is still written: it
+  counts the replacements (`rejectedValues`) and lists where they were
+  (`rejectedAt`, a left-out key as `#key<n>`, which no allowed key can
+  match). A driver record with any replacement
   leaves the verdicts that read it inconclusive.
 - Readbacks stay in `-Work`, and only their counts reach the record.
 
