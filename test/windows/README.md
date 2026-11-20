@@ -1012,8 +1012,10 @@ pane, and samples it through the handle it
 holds from `CreateProcess`: PID and creation time, whether the window answers
 `WM_NULL` within 5 s, handles, threads (start address and name), private bytes,
 working set, commit charge, GDI and USER objects, and the panes' other
-processes. After the last minute it closes the window and takes the exit code
-from `GetExitCodeProcess`, then copies the copy's crash files and any WER report
+processes. After the last minute it posts `WM_CLOSE` to each window the copy
+still owns and takes the exit code from `GetExitCodeProcess`; it records a
+clean quit only when a post took and the exit followed it. It then copies the
+copy's crash files and any WER report
 or Application Error event naming its path into `crash\`.
 
 ```powershell
@@ -1027,7 +1029,9 @@ Release coverage runs 480 minutes; Phase 0a's runs are 120 (`-Minutes 120`,
 `--min-minutes 120`).
 
 `ci/soak_judge.py` fails a run by the process rules (a gone, changed or hung
-process, an early or non-zero end, a crash file, WER not suppressed, incomplete
+process, an early or non-zero end, an exit no quit request of the harness
+reached (`UNASKED-EXIT`: an `end unasked` row, which fails even at exit code
+0), a crash file, WER not suppressed, incomplete
 or duplicated records, a short plan, a class not of the helper's shape or
 shared with the other copy) and by the slope check: "no upward slope after
 warm-up", a metric failing when its least-squares slope over the minutes after

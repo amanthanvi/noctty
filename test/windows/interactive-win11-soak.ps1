@@ -1036,7 +1036,7 @@ function Invoke-SoakOuter {
     # The hang has to outlast its minute's sample and that sample's response bound, plus 5 s of margin. Its lead,
     # from the hang to the sample: 10 s with `sample`; with `resize`, the churn's bounded waits on the hung copy
     # after the minute's first resize. Measured on ReleaseFast (r5-hang-resize, council round 3): 70.5 s from the
-    # hang to its probe (six 5 s skips, the 30 s baseline wait, then Restore-Baseline's 10 s and 5 s), plus up to
+    # hang to its probe (five 5 s skips, the 30 s baseline wait, then Restore-Baseline's 10 s and 5 s), plus up to
     # 5 s more on a minute that floods the base pane (minute % 5 = 2): 76 s, taken as 90 for margin.
     $hangLead = if ($HangAt -eq 'sample') { 10 } else { 90 }
     $hangNeeds = $hangLead + [int]($script:ResponseBoundMs / 1000) + 5
