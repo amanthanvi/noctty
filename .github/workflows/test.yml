@@ -116,13 +116,9 @@ jobs:
         shell: pwsh
         run: ./test/windows/ci-scripts.ps1
 
-      # The soak judge (PLAN.md §3.5) is Python. CI tools run on a pinned
-      # interpreter, each in isolated mode (-I), as PLAN.md §6.5 requires.
-      - name: Setup Python for the soak judge
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.13'
-
+      # The soak judge (PLAN.md §3.5) is Python. It runs on the job's one
+      # pinned interpreter (the Setup Python step above), in isolated mode
+      # (-I), as PLAN.md §6.5 requires of CI tools.
       - name: Soak judge tests
         shell: pwsh
         run: python -I ci/test_soak_judge.py

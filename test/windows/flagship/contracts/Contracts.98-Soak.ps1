@@ -392,19 +392,27 @@ foreach ($case in @(@{ Type = $native; Async = $true }, @{ Type = ($blockingName
 }
 
 # CI runs the judge's controls on a pinned interpreter, unconditionally (PLAN.md §6.5: setup-python at a
-# commit SHA, Python 3.13, each tool with -I).
+# commit SHA, Python 3.13, each tool with -I). The interpreter is the checks job's one Python setup, the step the
+# migration lints share (Contracts.90 pins its text); a second setup-python in the job would give the tools two
+# interpreters (PR #727, rebased over #721).
 $soakChecks = Get-YamlJobText -Content (Get-Content -LiteralPath $soakWorkflow -Raw) -Name 'checks' -Source $soakWorkflow
-$setupStep = Get-YamlStepBlock -Content $soakChecks -Name 'Setup Python for the soak judge' -Source $soakWorkflow
+$setupStep = Get-YamlStepBlock -Content $soakChecks -Name 'Setup Python' -Source $soakWorkflow
 $testStep = Get-YamlStepBlock -Content $soakChecks -Name 'Soak judge tests' -Source $soakWorkflow
 if ($setupStep -notmatch '(?m)^        uses: actions/setup-python@[0-9a-f]{40} # v\S+\s*$' -or
-    $setupStep -notmatch "(?m)^          python-version: '3\.13'\s*$") {
+    $setupStep -notmatch '(?m)^          python-version: [''"]3\.13[''"]\s*$') {
     throw 'The soak judge''s interpreter must be actions/setup-python pinned to a commit SHA with Python 3.13.'
+}
+if ([regex]::Matches($soakChecks, '(?m)^\s+uses: actions/setup-python@').Count -ne 1) {
+    throw 'The checks job must set up Python once, so the soak judge and the lints share one pinned interpreter.'
 }
 if ($testStep -notmatch '(?m)^        run: python -I ci/test_soak_judge\.py\s*$') { throw 'CI must run the soak judge''s tests with python -I.' }
 foreach ($step in @($setupStep, $testStep)) {
     if ($step -match '(?m)^        [''"]?(?:if|continue-on-error)[''"]?[ \t]*:') { throw 'The soak judge steps must be unconditional and fail closed.' }
 }
-if ($soakChecks.IndexOf('- name: Setup Python for the soak judge') -gt $soakChecks.IndexOf('- name: Soak judge tests')) {
+if ($soakChecks.IndexOf('- name: Setup Python' + "`n") -lt 0 -and $soakChecks.IndexOf('- name: Setup Python' + "`r`n") -lt 0) {
+    throw 'The checks job has no step named exactly Setup Python.'
+}
+if ($soakChecks.IndexOf($setupStep) -gt $soakChecks.IndexOf($testStep)) {
     throw 'The soak judge''s interpreter must be set up before its tests run.'
 }
 Write-Host "Soak contracts: $($soakRules.Count) rules, $soakMutations/$soakMutations mutations rejected"
