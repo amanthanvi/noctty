@@ -5755,77 +5755,104 @@ pub fn mouseButtonCallback(
     }
 
     if (button == .left and action == .release) {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        // The renderer state mutex is held across the whole release
+        // (upstream 33f155880). A link under the pointer is only resolved
+        // and copied under it (`linkAtLocked`) and opened after the unlock
+        // (`processLinks`): the mutex is not recursive, and the opener must
+        // not run under it (PKG-23).
+        const link: ?OpenLink = released: {
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
 
-        // The selection gesture tracks whether a press became a drag by
-        // comparing the release cell to the original press cell. Resolve the
-        // release position and pin before notifying the gesture so later
-        // release handling can query that state.
-        const release_pos: ?apprt.CursorPos = self.rt_surface.getCursorPos() catch |err| pos: {
-            log.warn("error reading cursor position for mouse release err={}", .{err});
-            break :pos null;
+            // The selection gesture tracks whether a press became a drag by
+            // comparing the release cell to the original press cell. Resolve the
+            // release position and pin before notifying the gesture so later
+            // release handling can query that state.
+            const release_pos: ?apprt.CursorPos = self.rt_surface.getCursorPos() catch |err| pos: {
+                log.warn("error reading cursor position for mouse release err={}", .{err});
+                break :pos null;
+            };
+
+            // If we can't map the release position to a cell, pass null so the
+            // gesture can conservatively treat the release as having moved away
+            // from the pressed cell.
+            const release_pin: ?terminal.Pin = if (release_pos) |pos| pin: {
+                const release_vp = self.posToViewport(pos.x, pos.y);
+                break :pin self.io.terminal.screens.active.pages.pin(.{ .viewport = .{
+                    .x = release_vp.x,
+                    .y = release_vp.y,
+                } });
+            } else null;
+            self.mouse.selection_gesture.release(
+                self.renderer_state.terminal,
+                .{ .pin = release_pin },
+            );
+
+            // Stop selection scrolling when releasing the left mouse button
+            // but only when selection scrolling is active.
+            if (self.selection_scroll_active) {
+                self.queueIo(
+                    .{ .selection_scroll = false },
+                    .locked,
+                );
+            }
+
+            // The selection clipboard is only updated for left-click drag when
+            // the left button is released. This is to avoid the clipboard
+            // being updated on every mouse move which would be noisy.
+            if (self.config.copy_on_select != .false) {
+                const prev_ = self.io.terminal.screens.active.selection;
+                if (prev_) |prev| {
+                    try self.setSelectionAndCopy(terminal.Selection.init(
+                        prev.start(),
+                        prev.end(),
+                        prev.rectangle,
+                    ));
+                }
+            }
+
+            // Handle link clicking. We want to do this before we do mouse
+            // reporting or any other mouse handling because a successfully
+            // clicked link will swallow the event.
+            if (self.mouse.over_link and !self.mouse.selection_gesture.left_click_dragged) {
+                // We are holding the renderer lock, but this should just be
+                // a cached value.
+                const pos = release_pos orelse try self.rt_surface.getCursorPos();
+                if (self.linkAtLocked(pos)) |found| {
+                    if (found) |copied| break :released copied;
+                } else |err| {
+                    log.warn("error processing links err={}", .{err});
+                }
+            }
+
+            // Handle prompt clicking. If we released our mouse on a prompt
+            // and we support some kind of click events, then we need to
+            // move to it.
+            if (self.maybePromptClick()) |handled| {
+                if (handled) return true;
+            } else |err| {
+                log.warn("error processing prompt click err={}", .{err});
+            }
+            break :released null;
         };
 
-        // If we can't map the release position to a cell, pass null so the
-        // gesture can conservatively treat the release as having moved away
-        // from the pressed cell.
-        const release_pin: ?terminal.Pin = if (release_pos) |pos| pin: {
-            const release_vp = self.posToViewport(pos.x, pos.y);
-            break :pin self.io.terminal.screens.active.pages.pin(.{ .viewport = .{
-                .x = release_vp.x,
-                .y = release_vp.y,
-            } });
-        } else null;
-        self.mouse.selection_gesture.release(
-            self.renderer_state.terminal,
-            .{ .pin = release_pin },
-        );
-
-        // Stop selection scrolling when releasing the left mouse button
-        // but only when selection scrolling is active.
-        if (self.selection_scroll_active) {
-            self.queueIo(
-                .{ .selection_scroll = false },
-                .locked,
-            );
-        }
-
-        // The selection clipboard is only updated for left-click drag when
-        // the left button is released. This is to avoid the clipboard
-        // being updated on every mouse move which would be noisy.
-        if (self.config.copy_on_select != .false) {
-            const prev_ = self.io.terminal.screens.active.selection;
-            if (prev_) |prev| {
-                try self.setSelectionAndCopy(terminal.Selection.init(
-                    prev.start(),
-                    prev.end(),
-                    prev.rectangle,
-                ));
-            }
-        }
-
-        // Handle link clicking. We want to do this before we do mouse
-        // reporting or any other mouse handling because a successfully
-        // clicked link will swallow the event.
-        if (self.mouse.over_link and !self.mouse.selection_gesture.left_click_dragged) {
-            // We are holding the renderer lock, but this should just be
-            // a cached value.
-            const pos = release_pos orelse try self.rt_surface.getCursorPos();
-            if (self.processLinks(pos)) |processed| {
-                if (processed) return true;
+        if (link) |copied| {
+            defer copied.deinit(self.alloc);
+            if (self.processLinks(copied)) |_| {
+                return true;
             } else |err| {
                 log.warn("error processing links err={}", .{err});
             }
-        }
 
-        // Handle prompt clicking. If we released our mouse on a prompt
-        // and we support some kind of click events, then we need to
-        // move to it.
-        if (self.maybePromptClick()) |handled| {
-            if (handled) return true;
-        } else |err| {
-            log.warn("error processing prompt click err={}", .{err});
+            // A link that did not open leaves the release to a prompt click,
+            // as it did when the link was opened under the release's lock.
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
+            if (self.maybePromptClick()) |handled| {
+                if (handled) return true;
+            } else |err| {
+                log.warn("error processing prompt click err={}", .{err});
+            }
         }
     }
 
@@ -6110,6 +6137,7 @@ pub fn mouseButtonCallback(
 
 /// Requires the renderer state mutex is held.
 fn maybePromptClick(self: *Surface) !bool {
+    assertHeld(self.renderer_state.mutex);
     const t: *terminal.Terminal = self.renderer_state.terminal;
     const screen: *terminal.Screen = t.screens.active;
 
@@ -6290,6 +6318,228 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     // An unreported click at the prompt moves the cursor.
     surface.mouse.selection_gesture.left_click_count = 1;
     try testing.expect(try surface.maybePromptClick());
+}
+
+/// A Surface for the mouse tests below, zeroed but for what a click or a
+/// drag reads: the terminal (40x6 cells of 10x20 px) and its renderer state
+/// mutex, a default derived config with its links, the cursor position the
+/// Win32 surface caches, an apprt that only `setSelection`'s
+/// `selection_changed` reaches (Win32 ignores it), and `readonly`, so a
+/// prompt click's arrow keys are dropped instead of queued for an IO
+/// thread. Nothing may reach the clipboard: a test that selects text keeps
+/// copy-on-select off.
+const TestMouseSurface = struct {
+    alloc: Allocator,
+    mutex: std.Thread.Mutex,
+    config: configpkg.Config,
+    derived: DerivedConfig,
+    rt_app: *apprt.runtime.App,
+    rt_surface: *apprt.runtime.Surface,
+    surface: *Surface,
+
+    fn create(
+        alloc: Allocator,
+        copy_on_select: configpkg.CopyOnSelect,
+        vt: []const u8,
+    ) !*TestMouseSurface {
+        if (comptime !@hasField(apprt.runtime.Surface, "cursor_pos")) return error.SkipZigTest;
+
+        const self = try alloc.create(TestMouseSurface);
+        errdefer alloc.destroy(self);
+        self.alloc = alloc;
+        self.mutex = .{};
+        self.config = try configpkg.Config.default(alloc);
+        errdefer self.config.deinit();
+        self.derived = try DerivedConfig.init(alloc, &self.config);
+        errdefer self.derived.deinit();
+        self.rt_app = try alloc.create(apprt.runtime.App);
+        errdefer alloc.destroy(self.rt_app);
+        @memset(std.mem.asBytes(self.rt_app), 0);
+        self.rt_surface = try alloc.create(apprt.runtime.Surface);
+        errdefer alloc.destroy(self.rt_surface);
+        @memset(std.mem.asBytes(self.rt_surface), 0);
+        self.surface = try alloc.create(Surface);
+        errdefer alloc.destroy(self.surface);
+        @memset(std.mem.asBytes(self.surface), 0);
+
+        const surface = self.surface;
+        surface.alloc = alloc;
+        surface.rt_app = self.rt_app;
+        surface.rt_surface = self.rt_surface;
+        surface.renderer_state.mutex = &self.mutex;
+        surface.config = self.derived;
+        surface.config.copy_on_select = copy_on_select;
+        surface.config.link_osc8 = true;
+        surface.config.cursor_click_to_move = true;
+        surface.readonly = true;
+        surface.size = .{
+            .screen = .{ .width = 400, .height = 120 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        };
+        surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 6 });
+        errdefer surface.io.terminal.deinit(alloc);
+        surface.renderer_state.terminal = &surface.io.terminal;
+        var stream = surface.io.terminal.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(vt);
+        return self;
+    }
+
+    fn destroy(self: *TestMouseSurface) void {
+        const alloc = self.alloc;
+        self.surface.io.terminal.deinit(alloc);
+        alloc.destroy(self.surface);
+        alloc.destroy(self.rt_surface);
+        alloc.destroy(self.rt_app);
+        self.derived.deinit();
+        self.config.deinit();
+        alloc.destroy(self);
+    }
+
+    /// Puts the pointer over the middle of cell (`x`, `y`) and returns
+    /// where it is.
+    fn at(self: *TestMouseSurface, x: u16, y: u16) apprt.CursorPos {
+        self.rt_surface.cursor_pos = .{
+            .x = @as(f32, @floatFromInt(x)) * 10 + 5,
+            .y = @as(f32, @floatFromInt(y)) * 20 + 10,
+        };
+        return self.rt_surface.cursor_pos;
+    }
+
+    /// Presses and releases the left button over cell (`x`, `y`) on a
+    /// worker thread and waits 5 s for it. A click that does not finish
+    /// panics, naming the test, and does not return: an error would run
+    /// the test's cleanup, which would free the mutex the stuck worker
+    /// waits on.
+    fn click(self: *TestMouseSurface, comptime name: []const u8, x: u16, y: u16) !bool {
+        _ = self.at(x, y);
+        var job: Click = .{ .surface = self.surface };
+        const thread = try std.Thread.spawn(.{}, Click.run, .{&job});
+        job.done.timedWait(5 * std.time.ns_per_s) catch @panic(name ++ ": deadlock");
+        thread.join();
+        return job.result;
+    }
+
+    const Click = struct {
+        surface: *Surface,
+        done: std.Thread.ResetEvent = .{},
+        result: anyerror!bool = false,
+
+        fn run(job: *Click) void {
+            defer job.done.set();
+            const surface = job.surface;
+            if (surface.mouseButtonCallback(.press, .left, surface.mouse.mods)) |_| {} else |err| {
+                job.result = err;
+                return;
+            }
+            job.result = surface.mouseButtonCallback(.release, .left, surface.mouse.mods);
+        }
+    };
+};
+
+/// Stands in for the apprt's opener in the left release tests: it records
+/// what it was asked to open, and whether its caller held the renderer
+/// state mutex.
+const TestLinkOpener = struct {
+    var count: usize = 0;
+    var held: bool = false;
+    var kind: apprt.action.OpenUrl.Kind = .unknown;
+    var url_buf: [64]u8 = undefined;
+    var url_len: usize = 0;
+
+    fn install() void {
+        count = 0;
+        held = false;
+        url_len = 0;
+        test_open_url = &open;
+    }
+
+    fn uninstall() void {
+        test_open_url = null;
+    }
+
+    fn open(surface: *Surface, action: apprt.action.OpenUrl) anyerror!void {
+        // The mutex is not recursive, so its holder cannot take it again;
+        // nothing else takes it while a test click runs.
+        const mutex = surface.renderer_state.mutex;
+        if (mutex.tryLock()) mutex.unlock() else held = true;
+        count += 1;
+        kind = action.kind;
+        url_len = @min(action.url.len, url_buf.len);
+        @memcpy(url_buf[0..url_len], action.url[0..url_len]);
+    }
+
+    fn url() []const u8 {
+        return url_buf[0..url_len];
+    }
+};
+
+/// A left release over an OSC 8 link and over link text: the release holds
+/// the renderer state mutex (upstream 33f155880), the link is copied under
+/// it and opened after it.
+fn testLeftReleaseOverLink(comptime name: []const u8, copy_on_select: configpkg.CopyOnSelect) !void {
+    const testing = std.testing;
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        copy_on_select,
+        "\x1b]8;;https://example.com/osc8\x1b\\click here\x1b]8;;\x1b\\\r\n" ++
+            "see https://example.com/text",
+    );
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    TestLinkOpener.install();
+    defer TestLinkOpener.uninstall();
+
+    // An OSC 8 URI is page memory: it opens from a copy.
+    surface.mouse.over_link = true;
+    try testing.expect(try fixture.click(name, 2, 0));
+    try testing.expectEqual(1, TestLinkOpener.count);
+    try testing.expect(!TestLinkOpener.held);
+    try testing.expectEqual(apprt.action.OpenUrl.Kind.osc8, TestLinkOpener.kind);
+    try testing.expectEqualStrings("https://example.com/osc8", TestLinkOpener.url());
+
+    // Link text takes the mutex again to read the pwd before it opens.
+    surface.mouse.over_link = true;
+    try testing.expect(try fixture.click(name, 8, 1));
+    try testing.expectEqual(2, TestLinkOpener.count);
+    try testing.expect(!TestLinkOpener.held);
+    try testing.expectEqual(apprt.action.OpenUrl.Kind.unknown, TestLinkOpener.kind);
+    try testing.expectEqualStrings("https://example.com/text", TestLinkOpener.url());
+}
+
+/// A left release at the prompt moves the cursor under the release's own
+/// hold of the renderer state mutex, and opens nothing.
+fn testLeftReleaseAtPrompt(comptime name: []const u8, copy_on_select: configpkg.CopyOnSelect) !void {
+    const testing = std.testing;
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        copy_on_select,
+        "\x1b]133;A;cl=line\x07> \x1b]133;B\x07hello",
+    );
+    defer fixture.destroy();
+    TestLinkOpener.install();
+    defer TestLinkOpener.uninstall();
+
+    try testing.expect(try fixture.click(name, 4, 0));
+    try testing.expectEqual(0, TestLinkOpener.count);
+}
+
+test "Surface: a left release over a link opens it after the renderer lock" {
+    try testLeftReleaseOverLink("Surface: a left release over a link opens it after the renderer lock", .false);
+}
+
+test "Surface: a left release over a link with copy-on-select opens it after the renderer lock" {
+    try testLeftReleaseOverLink("Surface: a left release over a link with copy-on-select opens it after the renderer lock", .true);
+}
+
+test "Surface: a left release at a prompt is a prompt click under the renderer lock" {
+    try testLeftReleaseAtPrompt("Surface: a left release at a prompt is a prompt click under the renderer lock", .false);
+}
+
+test "Surface: a left release at a prompt with copy-on-select is a prompt click under the renderer lock" {
+    try testLeftReleaseAtPrompt("Surface: a left release at a prompt with copy-on-select is a prompt click under the renderer lock", .true);
 }
 
 const Link = struct {
@@ -6506,46 +6756,78 @@ fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
     return final;
 }
 
-/// Attempt to invoke the action of any link that is under the
-/// given position.
-///
-/// Takes the renderer state mutex itself, so the caller must not hold it.
-/// The link is resolved and copied out of the terminal under the mutex,
-/// because the IO thread prunes and reuses the pages it lives in. It is
-/// opened after the mutex is released, because the Win32 opener runs
-/// ShellExecuteW, which can pump messages.
-fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
-    const action: input.Link.Action, const target: [:0]const u8 = target: {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
-        const link = try self.linkAtPos(pos) orelse return false;
-        const url: [:0]const u8 = switch (link.action) {
-            .open => try self.io.terminal.screens.active.selectionString(self.alloc, .{
-                .sel = link.selection,
-                .trim = false,
-            }),
-
-            // The URI is a slice of page memory, so it must be copied.
-            ._open_osc8 => try self.alloc.dupeZ(u8, self.osc8URI(link.selection.start()) orelse {
-                log.warn("failed to get URI for OSC8 hyperlink", .{});
-                return false;
-            }),
-        };
-        break :target .{ link.action, url };
-    };
-    defer self.alloc.free(target);
-
-    switch (action) {
-        .open => try self.openLinkText(target),
-        ._open_osc8 => try self.openUrl(.{ .kind = .osc8, .url = target }),
-    }
-    return true;
+/// Asserts in a Debug build that the calling thread holds `mutex`, the
+/// check behind a "requires the renderer state mutex held" precondition.
+/// `std.Thread.Mutex` has no owner query, but its Debug implementation
+/// records the thread that locked it, which this reads; other builds check
+/// nothing. A renderer state mutex that tracks its own owner replaces this
+/// with its own `assertHeld()`.
+fn assertHeld(mutex: *const std.Thread.Mutex) void {
+    if (comptime !@hasField(@TypeOf(mutex.impl), "locking_thread")) return;
+    assert(mutex.impl.locking_thread.load(.unordered) == std.Thread.getCurrentId());
 }
+
+/// A link's target, copied out of the terminal by `linkAtLocked` for
+/// `processLinks` to open once the renderer state mutex is released.
+const OpenLink = struct {
+    action: input.Link.Action,
+    target: [:0]const u8,
+
+    fn deinit(self: OpenLink, alloc: Allocator) void {
+        alloc.free(self.target);
+    }
+};
+
+/// Resolve the link under the given position, if any, and copy its target
+/// out of the terminal: the IO thread prunes and reuses the pages it lives
+/// in, and an OSC 8 URI is a slice of page memory.
+///
+/// Requires the renderer state mutex held.
+fn linkAtLocked(self: *Surface, pos: apprt.CursorPos) !?OpenLink {
+    assertHeld(self.renderer_state.mutex);
+    const link = try self.linkAtPos(pos) orelse return null;
+    const target: [:0]const u8 = switch (link.action) {
+        .open => try self.io.terminal.screens.active.selectionString(self.alloc, .{
+            .sel = link.selection,
+            .trim = false,
+        }),
+
+        // The URI is a slice of page memory, so it must be copied.
+        ._open_osc8 => try self.alloc.dupeZ(u8, self.osc8URI(link.selection.start()) orelse {
+            log.warn("failed to get URI for OSC8 hyperlink", .{});
+            return null;
+        }),
+    };
+    return .{ .action = link.action, .target = target };
+}
+
+/// Invoke the action of a link that `linkAtLocked` copied.
+///
+/// Takes no lock itself, and must be called without the renderer state
+/// mutex held: link text takes the mutex to read the pwd
+/// (`openLinkText`), and the opener must never run under it. On Win32 the
+/// opener (`App.openLink`) checks the target, may ask in the confirm
+/// overlay, and leaves the open itself to the message loop
+/// (`App.deferShellRequest`), because ShellExecuteW pumps messages.
+fn processLinks(self: *Surface, link: OpenLink) !void {
+    switch (link.action) {
+        .open => try self.openLinkText(link.target),
+        ._open_osc8 => try self.openUrl(.{ .kind = .osc8, .url = link.target }),
+    }
+}
+
+/// A test's stand-in for the apprt's opener: when set, `openUrl` hands it
+/// the action and opens nothing.
+var test_open_url: ?*const fn (*Surface, apprt.action.OpenUrl) anyerror!void = null;
 
 fn openUrl(
     self: *Surface,
     action: apprt.action.OpenUrl,
 ) !void {
+    if (comptime builtin.is_test) {
+        if (test_open_url) |open| return open(self, action);
+    }
+
     // If the apprt handles it then we're done.
     if (try self.rt_app.performAction(
         .{ .surface = self },
