@@ -1306,11 +1306,22 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
             // row with our blank cell, preserving the background color.
             self.clearCells(page, row, page.getCells(row));
         }
+
+        // The row becomes the new blank cursor row after the rotation
+        // below and must not retain metadata (wrap state, semantic
+        // prompt) from the discarded content (upstream b31fbc846, after
+        // the stepping stone; the fork's port, 547bd5f72, reset the row in
+        // PageList.eraseRowBounded, the path this fast path replaced).
+        row.reset();
     }
 
     // Rotate the region rows so the now-blank top row moves to the
     // bottom (the cursor row) and everything else shifts up by one.
-    // Rotating the region changes which logical row its coordinates identify.
+    // Rotating the region changes which logical row its coordinates
+    // identify, so the fork's row generation (which Win32 UIA reads for
+    // held range geometry) moves too, before the mutation, as
+    // PageList.eraseRowBounded does on the cross-page path.
+    self.pages.row_generation +%= 1;
     self.pages.invalidateNodeLayout(pin.node);
     fastmem.rotateOnce(Row, rows);
 
