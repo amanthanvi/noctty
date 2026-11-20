@@ -357,8 +357,12 @@ function Compare-RanList {
         $facts = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($k in @($list.Environment.Keys) + @($CandidateList.Environment.Keys)) { [void] $facts.Add($k) }
         foreach ($key in $facts) {
-            if (-not (Test-RanListSame $list.Environment[$key] $CandidateList.Environment[$key])) {
-                $problems.Add("ENV-DIFFERS $key`: '$($list.Path)' has '$($list.Environment[$key])', '$($CandidateList.Path)' has '$($CandidateList.Environment[$key])'.")
+            # A key only one list holds differs, even when the other's value is
+            # empty: both read as '' through a [string] parameter.
+            if ($list.Environment.Contains($key) -ne $CandidateList.Environment.Contains($key) -or -not (Test-RanListSame $list.Environment[$key] $CandidateList.Environment[$key])) {
+                $a = if ($list.Environment.Contains($key)) { "'$($list.Environment[$key])'" } else { 'no such fact' }
+                $b = if ($CandidateList.Environment.Contains($key)) { "'$($CandidateList.Environment[$key])'" } else { 'no such fact' }
+                $problems.Add("ENV-DIFFERS $key`: '$($list.Path)' has $a, '$($CandidateList.Path)' has $b.")
             }
         }
     }

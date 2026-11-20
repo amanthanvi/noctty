@@ -556,6 +556,11 @@ try {
         [System.IO.File]::WriteAllText($ranCrossedKey, ([System.IO.File]::ReadAllText($ranCase.Path) -creplace 'mode=Debug', 'mode=debug' -creplace 'zig=0\.15\.2', 'zig=0.17.1'), [System.Text.UTF8Encoding]::new($false))
         Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranCrossedKey -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1').Problems -join ' ') -like $ranCase.Expect) "Across the crossing a list with $($ranCase.Name) differs in its environment."
     }
+    # A key only one list holds differs even when the other side's value is empty, which
+    # reads as '' just as a missing key does (CodeRabbit on #731). The same list passes.
+    $ranEmptyKey = Join-Path $ranTemp 'empty-key.tsv'
+    [System.IO.File]::WriteAllText($ranEmptyKey, ($ranText -creplace '(# env: cwd-on-temp-drive=true\n)', "`$1# env: CWD-ON-TEMP-DRIVE=`n"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((((Get-RanVerdict -Baselines @($ranEmptyKey) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*ENV-DIFFERS CWD-ON-TEMP-DRIVE*has '''', *has no such fact*') -and (((Get-RanVerdict -Baselines @($ranBase) -Later $ranEmptyKey -SkipFiles @($ranSkips)).Problems -join ' ') -like '*ENV-DIFFERS CWD-ON-TEMP-DRIVE*has no such fact*') -and (Get-RanVerdict -Baselines @($ranEmptyKey) -Later $ranEmptyKey -SkipFiles @($ranSkips)).Problems.Count -eq 0) 'A fact with an empty value differs from no such fact, either way round, and a list that holds it in both passes.'
     # An approval may also name the build: one for 1A's ReleaseSafe list does not cover the Debug list.
     $ranBuildSkips = New-RanLedger 'build-skips.tsv' @("ghostty-test`ta.test.font`tbuild:mode=ReleaseSafe`tskips in ReleaseSafe only")
     $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranBase -SkipFiles @($ranBuildSkips)
@@ -853,6 +858,12 @@ try {
     # this run's value: a map that folded case would keep the second value and pass.
     $ranHereFact = [regex]::Match([System.IO.File]::ReadAllText($out), '(?m)^# env: cwd-on-temp-drive=([a-z]+)$').Groups[1].Value
     $ranFlipFact = $(if ($ranHereFact -ceq 'true') { 'false' } else { 'true' })
+    # A baseline with an extra key whose value is empty: a missing key and an empty value
+    # both read as '', so only membership tells them apart (CodeRabbit on #731).
+    $ranEmptyOf = Join-Path $ranTemp 'empty-of.tsv'
+    [System.IO.File]::WriteAllText($ranEmptyOf, ([System.IO.File]::ReadAllText($out) -creplace '(# env: cwd-on-temp-drive=[a-z]+\n)', "`$1# env: CWD-ON-TEMP-DRIVE=`n"), [System.Text.UTF8Encoding]::new($false))
+    $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'empty-of-run.tsv') -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranEmptyOf)
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like "*environment fact CWD-ON-TEMP-DRIVE is missing here and '' in the baseline*") "-EnvironmentOf stops on a baseline key whose value is empty and this run lacks ($(Join-RanOutput $output))."
     $ranShadowOf = Join-Path $ranTemp 'shadow-of.tsv'
     [System.IO.File]::WriteAllText($ranShadowOf, ([System.IO.File]::ReadAllText($out) -creplace '# env: cwd-on-temp-drive=[a-z]+\n', "# env: cwd-on-temp-drive=$ranFlipFact`n# env: CWD-ON-TEMP-DRIVE=$ranHereFact`n"), [System.Text.UTF8Encoding]::new($false))
     $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'shadow-of-run.tsv') -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranShadowOf)

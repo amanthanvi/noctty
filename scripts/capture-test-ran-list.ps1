@@ -601,9 +601,15 @@ function Assert-RanListEnvironmentOf {
     # character is a key of its own, missing from the other side.
     $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($k in @($Facts.Keys) + @($baseFacts.Keys)) { [void] $keys.Add($k) }
-    $differ = @($keys | Where-Object { -not [string]::Equals("$($Facts[$_])", "$($baseFacts[$_])", [StringComparison]::Ordinal) })
+    # A key only one side holds differs, even when the other side's value is
+    # empty: a missing key and an empty value both read as ''.
+    $differ = @($keys | Where-Object { $Facts.Contains($_) -ne $baseFacts.Contains($_) -or -not [string]::Equals("$($Facts[$_])", "$($baseFacts[$_])", [StringComparison]::Ordinal) })
     if ($differ.Count -gt 0) {
-        foreach ($key in $differ) { [Console]::Error.WriteLine("RAN LIST: environment fact $key is '$($Facts[$key])' here and '$($baseFacts[$key])' in the baseline.") }
+        foreach ($key in $differ) {
+            $here = if ($Facts.Contains($key)) { "'$($Facts[$key])'" } else { 'missing' }
+            $there = if ($baseFacts.Contains($key)) { "'$($baseFacts[$key])'" } else { 'missing' }
+            [Console]::Error.WriteLine("RAN LIST: environment fact $key is $here here and $there in the baseline.")
+        }
         [Console]::Error.WriteLine('RAN LIST: this run would not be like for like with its baseline; nothing was built or run.')
         exit 1
     }
