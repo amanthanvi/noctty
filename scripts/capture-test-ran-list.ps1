@@ -485,7 +485,10 @@ function Get-RanListEnvironment {
         }
     }
     $unregistered = [Collections.Generic.List[object]]::new()
-    foreach ($file in (Get-RanListUnregisteredFontFiles -RegisteredPaths $paths.ToArray() -Directories @($systemFonts, $userFonts))) {
+    # Only the directories this environment has: without LOCALAPPDATA (or WINDIR)
+    # one is $null, which a Mandatory [string[]] parameter refuses to bind.
+    $fontDirs = @(@($systemFonts, $userFonts) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($file in (Get-RanListUnregisteredFontFiles -RegisteredPaths $paths.ToArray() -Directories $fontDirs)) {
         $unregistered.Add((Get-RanListFontFamilies -Path $file))
     }
     $fonts = Get-RanListFontFacts -RegisteredNames $names.ToArray() -UnregisteredFamilies $unregistered.ToArray()

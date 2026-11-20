@@ -914,6 +914,15 @@ try {
     $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -Checkout $ranRepo -BuildOptions none -OutFile (Join-Path $ranTemp 'dirty-build.tsv') 2>&1
     Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*has tracked changes*' -and -not (Test-Path -LiteralPath $ranStubRan)) "Build mode refuses a dirty checkout before it builds ($($output -join ' | '))."
     Assert-True (@($ranHere.Keys) -contains 'temp-makes-8dot3-names' -and @($ranHere.Keys) -contains 'font:Noto Serif Tibetan' -and $ranHere['env:NOCTTY_RUN_LOCAL_PATH_SWEEP'] -cin @('unset', '1', 'other')) 'The capture records the facts the environment-dependent tests read.'
+    # Without LOCALAPPDATA there is no per-user font directory, and the probe still
+    # records every fact (Greptile on #731).
+    $ranSavedLocalAppData = $env:LOCALAPPDATA
+    try {
+        $env:LOCALAPPDATA = $null
+        $ranNoUser = Get-RanListEnvironment -Directory $ranTemp
+    }
+    finally { $env:LOCALAPPDATA = $ranSavedLocalAppData }
+    Assert-True ($ranNoUser.Count -eq (Get-RanListFactKeys).Count -and @('Arial Unicode MS', 'Noto Sans Chakma', 'Noto Serif Tibetan' | Where-Object { $ranNoUser["font:$_"] -cin @('present', 'absent', 'unknown') }).Count -eq 3) 'The environment probe runs without LOCALAPPDATA.'
 
     # Paths resolve against PowerShell's location, not .NET's current directory:
     # old holds a list that would pass, new one that drops a test, with the
