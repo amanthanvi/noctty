@@ -419,9 +419,15 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         $withUrl=$clearJson.Replace('"release_url":null','"release_url":"fixture"')
         $offset=$withUrl.IndexOf('fixture',[StringComparison]::Ordinal)
         if($offset -lt 0){throw 'Invalid UTF-8 fixture anchor absent'}
-        $invalidUtf8=[Text.Encoding]::UTF8.GetBytes($withUrl); $invalidUtf8[$offset]=0xff
+        $validUtf8=[Text.Encoding]::UTF8.GetBytes($withUrl)
+        [byte[]]$utf8Bom=0xef,0xbb,0xbf
+        [IO.File]::WriteAllBytes($journal,[byte[]]($utf8Bom+$validUtf8))
+        try{Assert-RejectedCopy $before $good}catch{$failures.Add('RejectedUtf8BomPositive')}
+        $invalidUtf8=[byte[]]$validUtf8.Clone(); $invalidUtf8[$offset]=0xff
         [IO.File]::WriteAllBytes($journal,$invalidUtf8)
         Refuses RejectedInvalidUtf8 {Assert-RejectedCopy $before $good}
+        [IO.File]::WriteAllBytes($journal,[byte[]]($utf8Bom+$invalidUtf8))
+        Refuses RejectedInvalidUtf8Bom {Assert-RejectedCopy $before $good}
         [IO.File]::WriteAllText($journal,$clearJson)
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
@@ -593,6 +599,7 @@ $issues=@(Invoke-DirectUpdateVerdicts $source $baseline)
 if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
     JournalUtf8Replacement=@('[Text.UTF8Encoding]::new($false,$true)','[Text.UTF8Encoding]::new($false,$false)')
+    JournalUtf8BomFallback=@('[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path))','[IO.File]::ReadAllText($path,[Text.UTF8Encoding]::new($false,$true))')
     JournalDuplicateKeys=@('        Assert-JournalKeys $value','')
     JournalSchema=@('if($RequireReadable){Assert-JournalSchema $value}','')
     JournalTrailingComma=@('$options.AllowTrailingCommas=$false','$options.AllowTrailingCommas=$true')
