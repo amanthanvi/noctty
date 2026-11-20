@@ -400,7 +400,8 @@ Assert-True (@(Get-RanListFactKeys) -notcontains 'store-alias') 'No fact is reco
 # whose names are not all read makes an absent font `unknown`, which no approval meets.
 $ranJet = Join-Path $repoRoot 'src\font\res\JetBrainsMonoNoNF-Regular.ttf'
 $ranJetNames = Get-RanListFontNames -Path $ranJet
-Assert-True ($ranJetNames.Complete -and $ranJetNames.Names -contains 'JetBrains Mono' -and (Get-RanListFontNames -Path (Join-Path $repoRoot 'src\font\res\CodeNewRoman-Regular.otf')).Names -contains 'Code New Roman') 'A TrueType and a CFF OpenType font read their family names, whole.'
+$ranCffNames = Get-RanListFontNames -Path (Join-Path $repoRoot 'src\font\res\MonaspaceNeon-Regular.otf')
+Assert-True ($ranJetNames.Complete -and $ranJetNames.Names -contains 'JetBrains Mono' -and $ranCffNames.Complete -and $ranCffNames.Names -contains 'Monaspace Neon') 'A TrueType and a CFF (OTTO) OpenType font read their family names, whole.'
 foreach ($ranCase in @(
         @{ Name = 'no font file'; Fonts = @(); Expect = 'absent|absent|absent' }
         @{ Name = 'a font of another family'; Fonts = @(@{ Names = @('Marlett'); Complete = $true }); Expect = 'absent|absent|absent' }
@@ -522,18 +523,19 @@ try {
     [System.IO.File]::WriteAllBytes($ranCut, [byte[]] $ranTtf[0..199])
     $ranTtcNames = Get-RanListFontNames -Path $ranTtcPath
     Assert-True ($ranTtcNames.Complete -and $ranTtcNames.Names -contains 'JetBrains Mono' -and -not (Get-RanListFontNames -Path $ranJunk).Complete -and -not (Get-RanListFontNames -Path $ranCut).Complete) 'A collection reads its faces'' names; a file that is no font, or is cut short, is not wholly read.'
-    # A copy of the TrueType font whose `name` table is one of format $Format holding
-    # $Names (name ID, string or raw bytes, and optionally platform and encoding,
-    # Windows Unicode by default), appended to the file and followed by $Pad zero
-    # bytes; its directory entry gives the table's length plus $LengthDelta, its
-    # header the record count plus $CountDelta, and a format 1 table a language-tag
-    # count of $LangTags with no tags stored.
+    # A copy of $Source (the TrueType font by default) whose `name` table is one of
+    # format $Format holding $Names (name ID, string or raw bytes, and optionally
+    # platform and encoding, Windows Unicode by default), appended to the file and
+    # followed by $Pad zero bytes; its directory entry gives the table's length plus
+    # $LengthDelta and its header the record count plus $CountDelta. A format 1
+    # table stores a language tag for each of $Tags, its offset moved by
+    # $TagOffsetDelta, or with $LangTags only that count and no tags.
     function New-RanNamedFont {
-        param([string] $Name, [object[]] $Names, [int] $LengthDelta = 0, [int] $CountDelta = 0, [int] $Pad = 0, [int] $Format = 0, [int] $LangTags = 0)
+        param([string] $Name, [object[]] $Names, [int] $LengthDelta = 0, [int] $CountDelta = 0, [int] $Pad = 0, [int] $Format = 0, [int] $LangTags = -1, [string[]] $Tags = @(), [int] $TagOffsetDelta = 0, [byte[]] $Source = $ranTtf)
         $table = [Collections.Generic.List[byte]]::new()
         $strings = [Collections.Generic.List[byte]]::new()
         $u16 = { param($list, [int] $v) $list.Add([byte](($v -shr 8) -band 0xFF)); $list.Add([byte]($v -band 0xFF)) }
-        $tagBytes = if ($Format -eq 1) { 2 } else { 0 }
+        $tagBytes = if ($Format -eq 1) { 2 + 4 * $(if ($LangTags -ge 0) { 0 } else { $Tags.Count }) } else { 0 }
         & $u16 $table $Format; & $u16 $table ($Names.Count + $CountDelta); & $u16 $table (6 + 12 * $Names.Count + $tagBytes)
         foreach ($n in $Names) {
             $platform = if ($n.Count -gt 2) { [int] $n[2] } else { 3 }
@@ -542,14 +544,24 @@ try {
             & $u16 $table $platform; & $u16 $table $encoding; & $u16 $table 0x409; & $u16 $table $n[0]; & $u16 $table $s.Length; & $u16 $table $strings.Count
             $strings.AddRange([byte[]] $s)
         }
-        if ($Format -eq 1) { & $u16 $table $LangTags }
+        if ($Format -eq 1) {
+            if ($LangTags -ge 0) { & $u16 $table $LangTags }
+            else {
+                & $u16 $table $Tags.Count
+                foreach ($tag in $Tags) {
+                    $s = [System.Text.Encoding]::BigEndianUnicode.GetBytes($tag)
+                    & $u16 $table $s.Length; & $u16 $table ($strings.Count + $TagOffsetDelta)
+                    $strings.AddRange($s)
+                }
+            }
+        }
         $table.AddRange($strings)
-        $at = $ranTtf.Length + ((4 - $ranTtf.Length % 4) % 4)
+        $at = $Source.Length + ((4 - $Source.Length % 4) % 4)
         $font = [byte[]]::new($at + $table.Count + $Pad)
-        [Array]::Copy($ranTtf, $font, $ranTtf.Length)
+        [Array]::Copy($Source, $font, $Source.Length)
         $table.CopyTo($font, $at)
         $length = $table.Count + $LengthDelta
-        for ($i = 0; $i -lt (([int]$ranTtf[4] -shl 8) -bor $ranTtf[5]); $i++) {
+        for ($i = 0; $i -lt (([int]$Source[4] -shl 8) -bor $Source[5]); $i++) {
             $record = 12 + 16 * $i
             if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($font, $record, 4), 'name', [StringComparison]::Ordinal)) {
                 for ($k = 0; $k -lt 4; $k++) {
@@ -619,6 +631,21 @@ try {
     $ranFormat2Path = Join-Path $ranTemp 'format-2.ttf'
     [System.IO.File]::WriteAllBytes($ranFormat2Path, $ranFormat2)
     $ranChakmaNames = $ranChakmaCases[1].Names
+    $ranOtherNames = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
+    # MonaspaceNeon-Regular.otf is the vendored CFF (`OTTO`) font; CodeNewRoman-Regular.otf is TrueType inside.
+    $ranCff = Join-Path $repoRoot 'src\font\res\MonaspaceNeon-Regular.otf'
+    # A copy of a font with one table's tag renamed, so it has no table of that tag.
+    function Rename-RanTable {
+        param([string] $Path, [string] $From, [string] $To, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        for ($i = 0; $i -lt (([int]$bytes[4] -shl 8) -bor $bytes[5]); $i++) {
+            $record = 12 + 16 * $i
+            if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, $record, 4), $From, [StringComparison]::Ordinal)) { [System.Text.Encoding]::ASCII.GetBytes($To).CopyTo($bytes, $record) }
+        }
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
     foreach ($ranCase in @(
             @{ Name = 'a name table whose declared length is 6'; Path = $ranShortPath; Expect = 'unknown' }
             @{ Name = 'a string one byte past the name table'; Path = (New-RanNamedFont 'string-past.ttf' $ranChakmaNames -LengthDelta (-1)); Expect = 'unknown' }
@@ -628,7 +655,14 @@ try {
             @{ Name = 'the same name table at its own length'; Path = (New-RanNamedFont 'table-whole.ttf' $ranChakmaNames); Expect = 'present' }
             @{ Name = 'a name table of format 2 (Sol''s case)'; Path = $ranFormat2Path; Expect = 'unknown' }
             @{ Name = 'its family in a name table of format 2'; Path = (New-RanNamedFont 'format-2-named.ttf' $ranChakmaNames -Format 2); Expect = 'unknown' }
-            @{ Name = 'language tags past a format 1 table'; Path = (New-RanNamedFont 'tags-past.ttf' $ranChakmaNames -Format 1 -LangTags 1000); Expect = 'unknown' }
+            @{ Name = 'language tags past a format 1 table'; Path = (New-RanNamedFont 'tags-past.ttf' $ranOtherNames -Format 1 -LangTags 1000); Expect = 'unknown' }
+            @{ Name = 'its family beside language tags past the table'; Path = (New-RanNamedFont 'tags-past-named.ttf' $ranChakmaNames -Format 1 -LangTags 1000); Expect = 'present' }
+            @{ Name = 'a language tag whose string lies past the table (CodeRabbit)'; Path = (New-RanNamedFont 'tag-string-past.ttf' $ranOtherNames -Format 1 -Tags @('en') -TagOffsetDelta 2); Expect = 'unknown' }
+            @{ Name = 'a language tag inside the table and no name of it'; Path = (New-RanNamedFont 'tag-whole.ttf' $ranOtherNames -Format 1 -Tags @('en')); Expect = 'absent' }
+            @{ Name = 'no name table'; Path = (Rename-RanTable $ranJet 'name' 'xame' 'no-name.ttf'); Expect = 'unknown' }
+            @{ Name = 'a CFF font without a head table (CodeRabbit)'; Path = (Rename-RanTable $ranCff 'head' 'xead' 'cff-no-head.otf'); Expect = 'unknown' }
+            @{ Name = 'its family in a CFF font without a head table'; Path = (New-RanNamedFont 'cff-no-head-named.otf' $ranChakmaNames -Source ([System.IO.File]::ReadAllBytes((Rename-RanTable $ranCff 'head' 'xead' 'cff-no-head-source.otf')))); Expect = 'present' }
+            @{ Name = 'a CFF font with its head table and no name of it'; Path = $ranCff; Expect = 'absent' }
             @{ Name = 'a family record in an encoding the probe does not decode'; Path = (New-RanNamedFont 'big5.ttf' @(, @(1, 'Noto Sans Chakma', 3, 4))); Expect = 'unknown' }
             @{ Name = 'a family record on the custom platform'; Path = (New-RanNamedFont 'custom.ttf' @(, @(1, 'Noto Sans Chakma', 4, 0))); Expect = 'unknown' }
             @{ Name = 'a family record whose bytes are no UTF-16'; Path = (New-RanNamedFont 'surrogate.ttf' @(, @(1, [byte[]] @(0xD8, 0x00)))); Expect = 'unknown' }

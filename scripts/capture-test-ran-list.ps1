@@ -403,16 +403,20 @@ function Get-RanListNameDecoder {
 }
 
 # Adds one face's names to $Names (see Get-RanListFontNames). Returns whether
-# every part of them could be read and decoded; throws past the end of the file.
+# every part of them could be read and decoded, and whether they are the names
+# FreeType takes the face's family from; throws past the end of the file.
 function Add-RanListFaceNames {
     param([byte[]] $Bytes, [long] $Face, [Collections.Generic.HashSet[string]] $Names)
     $tables = Read-RanListBigEndian $Bytes ($Face + 4) 2
     $name = $null
     $tableLength = 0
+    $hasHead = $false
     for ($i = 0; $i -lt $tables; $i++) {
         $record = $Face + 12 + 16 * $i
         if ($record + 16 -gt $Bytes.Length) { return $false }
-        if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($Bytes, [int]$record, 4), 'name', [StringComparison]::Ordinal)) {
+        $tag = [System.Text.Encoding]::ASCII.GetString($Bytes, [int]$record, 4)
+        if ([string]::Equals($tag, 'head', [StringComparison]::Ordinal)) { $hasHead = $true }
+        if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) {
             $name = Read-RanListBigEndian $Bytes ($record + 8) 4
             $tableLength = Read-RanListBigEndian $Bytes ($record + 12) 4
         }
@@ -425,12 +429,23 @@ function Add-RanListFaceNames {
     $storage = Read-RanListBigEndian $Bytes ($name + 4) 2
     $recordsEnd = 6 + 12 * $entries
     if ($recordsEnd -gt $tableLength -or $storage -gt $tableLength) { return $false }
-    if ($format -eq 1) {
-        if ($recordsEnd + 2 -gt $tableLength) { return $false }
-        $tags = Read-RanListBigEndian $Bytes ($name + $recordsEnd) 2
-        if ($recordsEnd + 2 + 4 * $tags -gt $tableLength) { return $false }
-    }
     $complete = $true
+    # A CFF font (`OTTO`) without a `head` table takes its family from its CFF
+    # data, not this table (FreeType's cff_face_init loads no sfnt names for it).
+    if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($Bytes, [int]$Face, 4), 'OTTO', [StringComparison]::Ordinal) -and -not $hasHead) { $complete = $false }
+    if ($format -eq 1) {
+        # The language tags and every string they point at must lie inside the table.
+        $tags = if ($recordsEnd + 2 -le $tableLength) { Read-RanListBigEndian $Bytes ($name + $recordsEnd) 2 } else { $null }
+        if ($null -eq $tags -or $recordsEnd + 2 + 4 * $tags -gt $tableLength) { $complete = $false }
+        else {
+            for ($j = 0; $j -lt $tags; $j++) {
+                $tagRecord = $name + $recordsEnd + 2 + 4 * $j
+                $tagLength = Read-RanListBigEndian $Bytes $tagRecord 2
+                $tagOffset = Read-RanListBigEndian $Bytes ($tagRecord + 2) 2
+                if ($storage + $tagOffset + $tagLength -gt $tableLength) { $complete = $false }
+            }
+        }
+    }
     # Each ID's distinct strings: most languages and platforms repeat one name.
     $byId = [Collections.Generic.Dictionary[int, Collections.Generic.HashSet[string]]]::new()
     foreach ($id in 1, 2, 4, 16, 17, 21, 22) { $byId[$id] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
@@ -470,7 +485,11 @@ function Add-RanListFaceNames {
 # an OpenType font, a `name` table of a format other than 0 or 1, one whose
 # records, language tags or strings pass its declared length or that runs past
 # the end of the file, or a record of those IDs in an encoding the probe does
-# not decode or with bytes its encoding refuses. Names holds what could be read.
+# not decode or with bytes its encoding refuses; and a face whose family
+# FreeType takes from elsewhere: one with no `name` table, or a CFF font
+# (`OTTO`) without a `head` table, whose family comes from its CFF data (as
+# does a bare CFF file's, which reads as no OpenType font). Names holds what
+# could be read.
 function Get-RanListFontNames {
     param([Parameter(Mandatory)] [string] $Path)
     $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
