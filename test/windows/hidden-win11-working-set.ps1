@@ -67,7 +67,9 @@ private_bytes = PrivateUsage (what Windows calls the process's commit charge), w
 peak_working_set = PeakWorkingSetSize, private_plus_shared_commit = PrivateUsage + SharedCommitUsage. The handle,
 GDI and USER counts are null when their query failed, never 0.
 
-Records in -Run: workingset.json (the parameters, the copy's build mode and SHA-256, the receipt's head, the
+Records in -Run: workingset.json (the parameters, the copy's build mode, the SHA-256 of its app, CLI and config and of
+the admitted receipt, the receipt's head, the ConPTY pair's SHA-256 beside the build's, the transport its log names,
+the scrollback limit it was launched with, each session checkpoint's times and line count, the
 workload's SHA-256, the grid, the window's client size and DPI, the stages with every sample, the workload's counts,
 the exit), version.txt (`+version`), noctty.log (the copy's stderr), driver.log, and guards.json (the outer half's
 guards). The outer half declares a run complete only after it checked workingset.json (Get-WorkingSetRecordProblems).
@@ -78,7 +80,13 @@ private desktop and a kill-on-close job, and starts this script as the driver on
 with LOCALAPPDATA, APPDATA, TEMP and TMP redirected into the run (never for Git Bash or another msys program: nothing
 here starts one). The driver re-proves that isolation before it starts anything: it runs in a job, on its own
 desktop (neither Default nor the input desktop), with those four variables inside the run, and the build and the
-copy check out against the receipt again. Every process names the private desktop in STARTUPINFO. Input is posted,
+copy check out against the receipt again. Every process the harness creates directly names the private desktop in
+STARTUPINFO, and the native launches refuse any other: a child only on the driver's own desktop, the driver never on
+the caller's, Default or the input desktop. The driver's re-admission runs git through the measure library, which
+names no desktop; per CreateProcess such a child inherits its parent's desktop, the driver's private one (read, not
+measured). The staged config must be byte for byte the harness's own for the run, NOCTTY_CONPTY must be unset, the
+copy's conpty.dll and OpenConsole.exe must match the build's, and a run on any transport but the bundled ConPTY
+fails. Input is posted,
 never SendInput, and nothing takes the foreground. The copy runs with the launch helper's isolation (its own class,
 --single-instance=false), the clipboard denied on the command line and in the config, every default binding
 cleared, and no binding that copies. The outer half compares the real startup-attempts.json's, the real
@@ -128,6 +136,16 @@ $script:PruneSeconds = 7
 $script:SettleSamples = 10
 $script:SampleMs = 500
 $script:SettleCapMs = 90000
+# What the product gives a full payload, for the payload checks (Sol, round 2). Not workload inputs, so not in
+# WorkloadSha256: the session capture's budget and storage overhead (win32_session_state.zig
+# max_total_scrollback_bytes, scrollback_snapshot_storage_overhead), the line cap the config sets
+# (window-save-state-scrollback), and the UIA document's history budget (win32_uia/text.zig
+# accessible_history_target_cells, accessible_history_max_rows).
+$script:SessionBudgetBytes = 524288
+$script:SessionOverheadBytes = 96
+$script:SessionLineCap = 10000
+$script:UiaHistoryCells = 40000
+$script:UiaHistoryMaxRows = 500
 # psapi.h PROCESS_MEMORY_COUNTERS_EX2, processthreadsapi.h STARTUPINFOW, winnt.h JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
 # tlhelp32.h PROCESSENTRY32W, and consoleapi2.h CONSOLE_SCREEN_BUFFER_INFO with wincontypes.h COORD and SMALL_RECT, on
 # x64 (AGENTS.md "Win32 FFI"). None of those headers changes the packing (no pshpack), so x64's natural alignment
@@ -259,6 +277,10 @@ public static class WorkingSetNative {
     // flag: a creator at normal priority gives its child normal priority), its desktop named in STARTUPINFO.
     public static ProcessInfo LaunchDriver(string app, string command, string cwd, string desktop, IntPtr job) {
         if (string.IsNullOrEmpty(desktop)) throw new Exception("A launch must name its desktop");
+        // Onto a private desktop: never the caller's own, Default or the input desktop (Opus, round 2).
+        string input = InputDesktopName();
+        if (input == null || string.Equals(desktop, "WinSta0\\" + CurrentDesktopName(), StringComparison.OrdinalIgnoreCase) || string.Equals(desktop, "WinSta0\\Default", StringComparison.OrdinalIgnoreCase) || string.Equals(desktop, "WinSta0\\" + input, StringComparison.OrdinalIgnoreCase))
+            throw new Exception("The driver must start on a private desktop, not the caller's, Default or the input desktop");
         var si = new Startup { cb = Marshal.SizeOf<Startup>(), desktop = desktop, flags = 1, show = 0 }; ProcessInfo pi;
         if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, false, 0x08000004, IntPtr.Zero, cwd, ref si, out pi))
             throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
@@ -273,6 +295,13 @@ public static class WorkingSetNative {
     // GUI window shows on its desktop.
     public static ProcessInfo Spawn(string app, string command, string cwd, string desktop, string logPath, bool noWindow) {
         if (string.IsNullOrEmpty(desktop)) throw new Exception("A launch must name its desktop");
+        // Only onto the caller's own desktop, and never Default or the input desktop (Opus, round 2): the driver has
+        // re-proved it runs on its private desktop, so no caller can route a child to the user's.
+        string own = "WinSta0\\" + CurrentDesktopName();
+        if (!string.Equals(desktop, own, StringComparison.OrdinalIgnoreCase)) throw new Exception("A child must start on the caller's own desktop");
+        string input = InputDesktopName();
+        if (input == null || string.Equals(desktop, "WinSta0\\Default", StringComparison.OrdinalIgnoreCase) || string.Equals(desktop, "WinSta0\\" + input, StringComparison.OrdinalIgnoreCase))
+            throw new Exception("A child must not start on Default or the input desktop");
         var sa = new SecurityAttributes { length = Marshal.SizeOf<SecurityAttributes>(), inherit = 1 };
         IntPtr log = CreateFileW(logPath, 0x40000000, 3, ref sa, 2, 0x80, IntPtr.Zero);
         if (log == new IntPtr(-1)) throw new Exception("Creating the log file failed: " + Marshal.GetLastWin32Error());
@@ -428,12 +457,13 @@ function Get-WorkingSetMeasureBuild([string] $Repo) {
     $Repo = (Resolve-Path -LiteralPath $Repo).Path
     $exe = Get-InteractiveWin11MeasureExePath -RepoRoot $Repo
     Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
-    $receipt = Get-Content -LiteralPath (Get-InteractiveWin11MeasureLayout $Repo).Receipt -Raw | ConvertFrom-Json
+    $receiptPath = (Get-InteractiveWin11MeasureLayout $Repo).Receipt
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
     if ((Get-Sha256 $exe) -cne [string]$receipt.ExeSHA256 -or (Get-Sha256 $cli) -cne [string]$receipt.CliSHA256) {
         throw 'The measurement build does not match its receipt.'
     }
-    return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize }
+    return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize; ReceiptSha256 = Get-Sha256 $receiptPath }
 }
 
 # Whether a copy's noctty.exe and noctty.com are the admitted build's bytes.
@@ -454,6 +484,61 @@ function Assert-WorkingSetRunPlacement([string] $Run, [string] $Repo) {
     $relative = if ($Run.Length -gt $Repo.Length) { $Run.Substring($Repo.Length + 1) } else { '.' }
     & git -C $Repo check-ignore -q --no-index -- $relative 2>$null
     if ($LASTEXITCODE -ne 0) { throw '-Run is inside -MeasureRepo and git does not ignore it; choose a -Run outside the checkout or in a directory git ignores.' }
+}
+
+# The copy's config for a run, exactly: what the outer half writes and what the driver requires byte for byte before
+# its first launch, so an initial-command or a second command, in any spelling, cannot change the first pane's shell
+# (Sol, round 2). The run's directory appears in working-directory and, escaped, in the flood binding.
+function New-WorkingSetConfigText([string] $Workload, [string] $Run) {
+    $work = Join-Path $Run 'work'
+    $floodCmd = Join-Path $work 'flood.cmd'
+    $floodText = '\"' + $floodCmd.Replace('\', '\\') + '\"\r'
+    $bindings = [ordered]@{ f2 = 'new_tab'; f5 = "text:$floodText"; f6 = 'close_surface'; f7 = 'close_tab' }
+    $chords = @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')
+    $saveScrollback = if ($Workload -eq 'session-capture') { $script:SessionLineCap } else { 0 }
+    $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    $lines = @(
+        "command = direct:$cmdPath /D"
+        'auto-update = off'
+        'confirm-close-surface = false'
+        'desktop-notifications = false'
+        'clipboard-read = deny'
+        'clipboard-write = deny'
+        'copy-on-select = false'
+        "window-width = $($script:Cols)"
+        "window-height = $($script:Rows)"
+        "window-save-state-scrollback = $saveScrollback"
+        "working-directory = $work"
+        'keybind = clear'
+        foreach ($key in $bindings.Keys) { foreach ($chord in $chords) { "keybind = $chord$key=$($bindings[$key])" } }
+    )
+    return ($lines -join "`n") + "`n"
+}
+
+# Whether a staged config is byte for byte New-WorkingSetConfigText's for this run.
+function Test-WorkingSetConfigBytes([string] $Path, [string] $Workload, [string] $Run) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $staged = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path))
+    $expected = [Convert]::ToBase64String($script:Utf8.GetBytes((New-WorkingSetConfigText $Workload $Run)))
+    return [string]::Equals($staged, $expected, [StringComparison]::Ordinal)
+}
+
+# A file another process may still hold open for writing (the copy's log), read whole; empty when absent.
+function Read-SharedText([string] $Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try { return [IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }
+}
+
+# The payload the product gives a full checkpoint and a full walk on the expected grid (Sol, round 2): a session
+# snapshot pre-limited by its budget to (budget - overhead) / (columns + 1) lines, at most the line cap (3,717 at 140
+# columns; the formatter's retry halves it, which must not count), and a UIA document of the history rows plus the
+# viewport, which a walk by line counts with one line more at its end (329 at 140 x 43, in every run measured).
+function Get-ExpectedSessionLines {
+    return [int][Math]::Min($script:SessionLineCap, [Math]::Floor(($script:SessionBudgetBytes - $script:SessionOverheadBytes) / ($script:Cols + 1)))
+}
+function Get-ExpectedUiaLines {
+    return [int]([Math]::Min([Math]::Floor($script:UiaHistoryCells / $script:Cols), $script:UiaHistoryMaxRows) + $script:GridRows + 1)
 }
 
 # One block of output, deterministic: 25,000 lines of 82 or 91 bytes, every seventh in an SGR colour.
@@ -552,12 +637,23 @@ function Get-WorkingSetRecordProblems($Record) {
         $pairs = @($Record.SessionSnapshots)
         if ($pairs.Count -ne $Record.SessionSaves) { $problems.Add("session snapshot times $($pairs.Count) for $($Record.SessionSaves) snapshots") }
         $last = [uint64]0
+        $expectedLines = Get-ExpectedSessionLines
         foreach ($pair in $pairs) {
             if ([uint64]$pair.snapshot_at_unix_ms -le [uint64]$pair.close_at_unix_ms -or [uint64]$pair.snapshot_at_unix_ms -le $last) { $problems.Add('a session snapshot not after its close and the one before'); break }
+            if ([int]$pair.lines -ne $expectedLines -or [int]$pair.fixture_lines -lt $expectedLines - 10) { $problems.Add("a session snapshot of $($pair.lines) lines ($($pair.fixture_lines) the fixture's), not $expectedLines"); break }
             $last = [uint64]$pair.snapshot_at_unix_ms
         }
     }
-    if ($Record.Workload -eq 'uia-walk' -and ($null -eq $Record.Uia -or -not $Record.Uia.walk_complete)) { $problems.Add('UIA walk incomplete') }
+    if ($Record.Workload -eq 'uia-walk') {
+        $expectedLines = Get-ExpectedUiaLines
+        if ($null -eq $Record.Uia -or -not $Record.Uia.walk_complete -or -not $Record.Uia.walk_ended -or -not $Record.Uia.holds_last_line -or [int]$Record.Uia.walked_lines -ne $expectedLines) {
+            $problems.Add("UIA walk incomplete: $($Record.Uia.walked_lines) lines of $expectedLines")
+        }
+    }
+    if ($Record.Transport -cne 'bundled') { $problems.Add("transport $($Record.Transport)") }
+    if (-not $Record.ConptyDllSHA256 -or $Record.ConptyDllSHA256 -cne $Record.PrefixConptyDllSHA256 -or -not $Record.OpenConsoleSHA256 -or $Record.OpenConsoleSHA256 -cne $Record.PrefixOpenConsoleSHA256) {
+        $problems.Add('the ConPTY pair is not the build''s')
+    }
     $want = @(Get-WorkloadStages $Record.Workload $Record.BlocksPlanned)
     $got = @($Record.Stages | ForEach-Object { $_.name })
     if (($want -join ',') -cne ($got -join ',')) { $problems.Add("stages $($got -join ',') not $($want -join ',')") }
@@ -596,6 +692,8 @@ function Invoke-WorkingSetDriver {
         WorkloadSha256 = $null; BlockSha256 = $null; FloodSha256 = $null; ClientWidth = $null; ClientHeight = $null; Dpi = $null
         Cycles = 0; CyclesMissed = 0; SessionSaves = 0; SessionFileBytes = $null; SessionLines = $null; Uia = $null
         SessionSnapshots = [Collections.Generic.List[object]]::new()
+        LaunchScrollbackLimit = $null; ConfigSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; Transport = $null
+        ConptyDllSHA256 = $null; PrefixConptyDllSHA256 = $null; OpenConsoleSHA256 = $null; PrefixOpenConsoleSHA256 = $null
         EffectiveDirs = $null; Stages = [Collections.Generic.List[object]]::new(); QuitPosts = 0; Exit = $null; Error = $null
     }
     $recordPath = Join-Path $Run 'workingset.json'
@@ -625,6 +723,8 @@ function Invoke-WorkingSetDriver {
             $effective[$name] = [IO.Path]::GetFullPath($value)
         }
         $record.EffectiveDirs = $effective
+        # The bundled ConPTY only (Sol, round 2): an inherited NOCTTY_CONPTY would move the copy to another host.
+        if ($null -ne [Environment]::GetEnvironmentVariable('NOCTTY_CONPTY')) { throw 'NOCTTY_CONPTY is set; the copy would not run on the bundled ConPTY.' }
         # What it launches is the staged copy: the run's own copy directory, the portable marker, no noctty.ico, the
         # harness's config, and the measurement build's bytes.
         if (-not [string]::Equals([IO.Path]::GetFullPath($Bin).TrimEnd('\'), (Join-Path $runPrefix 'copy'), [StringComparison]::OrdinalIgnoreCase)) { throw 'The copy is not the run''s own copy directory.' }
@@ -633,9 +733,23 @@ function Invoke-WorkingSetDriver {
         foreach ($wanted in @('keybind = clear', 'clipboard-read = deny', 'clipboard-write = deny', 'copy-on-select = false', 'auto-update = off')) {
             if ($config -notcontains $wanted) { throw "The copy's config is not the harness's (no '$wanted')." }
         }
+        # Byte for byte the harness's own config for this run (New-WorkingSetConfigText), before the first launch: an
+        # initial-command or a second command, in any spelling, would change the first pane's shell (Sol, round 2).
+        if (-not (Test-WorkingSetConfigBytes (Join-Path $Bin 'config.ghostty') $Workload $Run)) { throw "The copy's config is not byte for byte the harness's for this run." }
+        $record.ConfigSHA256 = Get-Sha256 (Join-Path $Bin 'config.ghostty')
         $build = Get-WorkingSetMeasureBuild $MeasureRepo
         if (-not (Test-WorkingSetCopy $Bin $build)) { throw "The copy's noctty.exe or noctty.com is not the measurement build's." }
         $record.MeasureHead = $build.Head
+        $record.CliSHA256 = Get-Sha256 (Join-Path $Bin 'noctty.com')
+        $record.ReceiptSHA256 = $build.ReceiptSha256
+        # The ConPTY pair the copy loads is the measurement build's, byte for byte (Sol, round 2).
+        foreach ($file in @(@('conpty.dll', 'ConptyDllSHA256'), @('OpenConsole.exe', 'OpenConsoleSHA256'))) {
+            $staged = Join-Path $Bin $file[0]; $built = Join-Path $build.Bin $file[0]
+            if (-not (Test-Path -LiteralPath $staged -PathType Leaf) -or -not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "The copy or the build has no $($file[0])." }
+            $record[$file[1]] = Get-Sha256 $staged
+            $record['Prefix' + $file[1]] = Get-Sha256 $built
+            if ($record[$file[1]] -cne $record['Prefix' + $file[1]]) { throw "The copy's $($file[0]) is not the measurement build's." }
+        }
         $desktopPath = "WinSta0\$DesktopName"
         $exe = Join-Path $Bin 'noctty.exe'
         $work = Join-Path $Run 'work'
@@ -656,8 +770,6 @@ function Invoke-WorkingSetDriver {
 
         $saveState = if ($Workload -eq 'session-capture') { 'always' } else { 'never' }
         $record.ScrollbackLimitBytes = if ($Workload -eq 'scrollback-max') { $ScrollbackMaxBytes } else { 10000000 }
-        $record.BlocksPlanned = Get-WorkloadBlocks $Workload $ScrollbackMaxBytes
-        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.ScrollbackLimitBytes $record.BlocksPlanned $record.BlockSha256 $record.FloodSha256 (Join-Path $Bin 'config.ghostty') $Run
         # The shell is the config's `command` (System32's cmd.exe run directly with /D, so no cmd AutoRun runs);
         # the command line carries none.
         $configCommands = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')) | Where-Object { $_ -like 'command =*' })
@@ -667,6 +779,14 @@ function Invoke-WorkingSetDriver {
         $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
             "--window-save-state=$saveState", '--clipboard-read=deny', '--clipboard-write=deny',
             "--scrollback-limit=$($record.ScrollbackLimitBytes)")
+        # The limit the copy is launched with is what the record and the hash say (Opus, round 2): read back from the
+        # launch arguments themselves, and refused unless it is the workload's.
+        $limitArguments = @($launchArguments | Where-Object { $_ -like '--scrollback-limit=*' })
+        if ($limitArguments.Count -ne 1) { throw 'The launch must carry one --scrollback-limit.' }
+        $record.LaunchScrollbackLimit = [long]$limitArguments[0].Substring(19)
+        if ($record.LaunchScrollbackLimit -ne $record.ScrollbackLimitBytes) { throw "The copy's --scrollback-limit is $($record.LaunchScrollbackLimit), not the workload's $($record.ScrollbackLimitBytes)." }
+        $record.BlocksPlanned = Get-WorkloadBlocks $Workload $record.LaunchScrollbackLimit
+        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.LaunchScrollbackLimit $record.BlocksPlanned $record.BlockSha256 $record.FloodSha256 (Join-Path $Bin 'config.ghostty') $Run
         $class = @($launchArguments | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
         if ($class.Count -ne 1) { throw 'The launch helper gave no single --class.' }
         if (@($launchArguments | Where-Object { $_ -like '--command=*' -or $_ -eq '-e' }).Count -ne 0) { throw 'The command line must not set the shell.' }
@@ -842,12 +962,13 @@ function Invoke-WorkingSetDriver {
                     if ($range.Move([System.Windows.Automation.Text.TextUnit]::Line, 1) -eq 0) { $ended = $true; break }
                 }
                 # Complete only when the walk reached the end, the document holds the last block's last line, and
-                # the walk covered at least the history rows UIA exposes at this width.
+                # the walk counted the whole bottom-of-scrollback document: the history rows, the viewport and the
+                # one line more a walk counts (Get-ExpectedUiaLines, 329 at 140 x 43; Sol, round 2).
                 $lastLine = 'ws line {0:D6} the quick brown fox' -f ($script:BlockLines - 1)
-                $historyRows = [Math]::Min([Math]::Floor(40000 / $script:Cols), 500)
+                $expectedLines = Get-ExpectedUiaLines
                 $holdsFixture = $whole.Contains($lastLine)
                 $record.Uia = [ordered]@{ document_chars = $whole.Length; document_ms = $wholeMs; walked_lines = $lines; walked_chars = $chars; walk_ms = $uiaWatch.ElapsedMilliseconds - $wholeMs
-                    walk_ended = $ended; holds_last_line = $holdsFixture; walk_complete = ($ended -and $holdsFixture -and $lines -ge $historyRows) }
+                    walk_ended = $ended; holds_last_line = $holdsFixture; expected_lines = $expectedLines; walk_complete = ($ended -and $holdsFixture -and $lines -eq $expectedLines) }
                 Log "uia: document $($whole.Length) chars in $wholeMs ms; walked $lines lines, ended $ended, holds the last line $holdsFixture"
                 $whole = $null; $document = $null; $range = $null; $pattern = $null; $element = $null
                 Add-Stage 'after'
@@ -871,20 +992,24 @@ function Invoke-WorkingSetDriver {
                     return [pscustomobject]@{ At = [uint64]$snapshot.captured_at_unix_ms; Lines = @($snapshot.lines).Count; Fixture = $fixture }
                 }
                 $previous = [uint64]0
+                $expectedLines = Get-ExpectedSessionLines
+                $script:wsLastSeen = $null
                 for ($i = 0; $i -lt $script:SessionCheckpoints; $i++) {
                     # The close's checkpoint (1 s after the last persist_session) is the write this counts: a snapshot of
-                    # the base pane alone, taken after this close and after the last one counted, that holds the
-                    # fixture's lines. A display-change or deferred structural save from before the close does not
-                    # count (CodeRabbit on #739); each counted pair is recorded for the outer half's check.
+                    # the base pane alone, taken after this close and after the last one counted, of exactly the lines
+                    # its budget gives (Get-ExpectedSessionLines, 3,717 at 140 columns; a halved slice from the
+                    # formatter's retry does not count, Sol, round 2), all but the pane's last few rows the fixture's.
+                    # A display-change or deferred structural save from before the close does not count (CodeRabbit on
+                    # #739); each counted checkpoint's times and line counts are recorded for the outer half's check.
                     if (-not (Invoke-TabCycle)) { continue }
                     $closeAt = [uint64]$script:wsCloseAt
                     $script:wsSnapshot = $null
-                    $seen = Wait-For { $s = Read-BaseSnapshot; if ($null -ne $s -and $s.At -gt $previous -and $s.At -gt $closeAt -and $s.Fixture -ge 1000 -and $s.Lines -le 10000) { $script:wsSnapshot = $s; return $true }; return $false } 15000
+                    $seen = Wait-For { $s = Read-BaseSnapshot; if ($null -ne $s) { $script:wsLastSeen = $s.Lines }; if ($null -ne $s -and $s.At -gt $previous -and $s.At -gt $closeAt -and $s.Lines -eq $expectedLines -and $s.Fixture -ge $expectedLines - 10) { $script:wsSnapshot = $s; return $true }; return $false } 15000
                     if ($seen) {
                         $record.SessionSaves++; $previous = $script:wsSnapshot.At; $record.SessionLines = $script:wsSnapshot.Lines
-                        $record.SessionSnapshots.Add([pscustomobject]@{ close_at_unix_ms = $closeAt; snapshot_at_unix_ms = $script:wsSnapshot.At })
+                        $record.SessionSnapshots.Add([pscustomobject]@{ close_at_unix_ms = $closeAt; snapshot_at_unix_ms = $script:wsSnapshot.At; lines = $script:wsSnapshot.Lines; fixture_lines = $script:wsSnapshot.Fixture })
                     }
-                    else { Log "checkpoint $($i + 1): no new base-pane snapshot with the fixture within 15 s" }
+                    else { Log "checkpoint $($i + 1): no new base-pane snapshot of $expectedLines lines with the fixture within 15 s (last seen: $($script:wsLastSeen) lines)" }
                 }
                 $record.SessionFileBytes = if (Test-Path -LiteralPath $sessionFile) { (Get-Item -LiteralPath $sessionFile).Length } else { $null }
                 Wait-Pruned
@@ -897,6 +1022,10 @@ function Invoke-WorkingSetDriver {
         if ([WorkingSetNative]::WaitForSingleObject($process, 60000) -eq 0) { $record.Exit = [WorkingSetNative]::ExitCode($process) }
         else { [WorkingSetNative]::Terminate($process, 1); $record.Exit = 'stuck'; Log 'the copy did not end within 60 s of the quit' }
         Log "quit: $($record.QuitPosts) posts, exit $($record.Exit)"
+        # The transport the copy ran on, from its own log (src/pty.zig's startup marker): the bundled ConPTY from the
+        # copy's own conpty.dll, never the in-box conhost (Sol, round 2).
+        $nocttyLog = Read-SharedText (Join-Path $Run 'noctty.log')
+        $record.Transport = if ($nocttyLog.Contains('using the in-box conhost')) { 'inbox' } elseif ($nocttyLog.IndexOf('using bundled ConPTY: ' + (Join-Path $Bin 'conpty.dll'), [StringComparison]::OrdinalIgnoreCase) -ge 0) { 'bundled' } else { 'unknown' }
         if ($script:wsUnsettled.Count -gt 0) { $record.Error = "UNSETTLED $($script:wsUnsettled -join ',')" }
         ConvertTo-RecordArrays
         $problems = @(Get-WorkingSetRecordProblems ([pscustomobject]$record))
@@ -919,6 +1048,8 @@ function Invoke-WorkingSetOuter {
     # Only the receipt-bound measurement build, before anything is created or started.
     $build = Get-WorkingSetMeasureBuild $MeasureRepo
     $source = $build.Bin
+    # The bundled ConPTY only (Sol, round 2), before anything is created: the copy inherits this environment.
+    if ($null -ne [Environment]::GetEnvironmentVariable('NOCTTY_CONPTY')) { throw 'NOCTTY_CONPTY is set in this environment; the copy would not run on the bundled ConPTY. Clear it first.' }
     # A relative -Run is taken from PowerShell's location, not the process's directory.
     $Run = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location -PSProvider FileSystem).ProviderPath, $Run))
     # One run at a time on this session: copies run together differ by tens of MiB (SOAK-01 trap 6).
@@ -955,26 +1086,7 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
     [IO.File]::WriteAllText((Join-Path $work 'block.txt'), (New-BlockText), $script:Utf8)
     $floodCmd = Join-Path $work 'flood.cmd'
     [IO.File]::WriteAllText($floodCmd, (New-FloodCmdText))
-    $floodText = '\"' + $floodCmd.Replace('\', '\\') + '\"\r'
-    $bindings = [ordered]@{ f2 = 'new_tab'; f5 = "text:$floodText"; f6 = 'close_surface'; f7 = 'close_tab' }
-    $chords = @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')
-    $saveScrollback = if ($Workload -eq 'session-capture') { 10000 } else { 0 }
-    $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
-    @(
-        "command = direct:$cmdPath /D"
-        'auto-update = off'
-        'confirm-close-surface = false'
-        'desktop-notifications = false'
-        'clipboard-read = deny'
-        'clipboard-write = deny'
-        'copy-on-select = false'
-        "window-width = $($script:Cols)"
-        "window-height = $($script:Rows)"
-        "window-save-state-scrollback = $saveScrollback"
-        "working-directory = $work"
-        'keybind = clear'
-        foreach ($key in $bindings.Keys) { foreach ($chord in $chords) { "keybind = $chord$key=$($bindings[$key])" } }
-    ) | Set-Content -LiteralPath (Join-Path $copy 'config.ghostty') -Encoding utf8NoBOM
+    [IO.File]::WriteAllText((Join-Path $copy 'config.ghostty'), (New-WorkingSetConfigText $Workload $Run), $script:Utf8)
 
     $realLocal = [Environment]::GetFolderPath('LocalApplicationData')
     $realDirs = @($realLocal, [Environment]::GetFolderPath('ApplicationData'), [IO.Path]::GetTempPath()) | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
@@ -1041,6 +1153,14 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
     $recordPath = Join-Path $Run 'workingset.json'
     $record = if (Test-Path -LiteralPath $recordPath) { Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } else { $null }
     $failed += @(Get-WorkingSetRecordProblems $record | ForEach-Object { "record: $_" })
+    # The record is the run this half asked for: its workload, the limit the copy was launched with, and the blocks
+    # that limit plans (Opus, round 2).
+    if ($null -ne $record) {
+        $wantLimit = if ($Workload -eq 'scrollback-max') { $ScrollbackMaxBytes } else { 10000000 }
+        if ($record.Workload -cne $Workload) { $failed += "record: workload $($record.Workload), not $Workload" }
+        if ($record.ScrollbackLimitBytes -ne $wantLimit -or $record.LaunchScrollbackLimit -ne $wantLimit) { $failed += "record: scrollback limit $($record.LaunchScrollbackLimit), not $wantLimit" }
+        if ($record.BlocksPlanned -ne (Get-WorkloadBlocks $Workload $wantLimit)) { $failed += "record: $($record.BlocksPlanned) blocks planned, not $(Get-WorkloadBlocks $Workload $wantLimit)" }
+    }
     # Where the driver ran the copy from: each directory inside the run, none of them a real one.
     if ($null -ne $record -and $null -ne $record.EffectiveDirs) {
         foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {

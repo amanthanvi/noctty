@@ -190,7 +190,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the config clears every default binding, binds nothing that copies or pastes, and denies OSC 52 and updates'
-        Pattern = '(?s)\$bindings = \[ordered\]@\{(?:(?!copy|paste)[^}])*\}.*?''auto-update = off''.*?''clipboard-read = deny''.*?''clipboard-write = deny''.*?''copy-on-select = false''.*?''keybind = clear''\s*foreach \(\$key in \$bindings\.Keys\) \{ foreach \(\$chord in \$chords\) \{ "keybind = \$chord\$key=\$\(\$bindings\[\$key\]\)" \} \}\s*\) \| Set-Content'
+        Pattern = '(?s)\$bindings = \[ordered\]@\{(?:(?!copy|paste)[^}])*\}.*?''auto-update = off''.*?''clipboard-read = deny''.*?''clipboard-write = deny''.*?''copy-on-select = false''.*?''keybind = clear''\s*foreach \(\$key in \$bindings\.Keys\) \{ foreach \(\$chord in \$chords\) \{ "keybind = \$chord\$key=\$\(\$bindings\[\$key\]\)" \} \}\s*\)\s+return \(\$lines -join "`n"\) \+ "`n"'
         Mutation = @("f7 = 'close_tab' }", "f7 = 'close_tab'; f9 = 'copy_to_clipboard' }")
     }
     @{
@@ -256,7 +256,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'a session checkpoint counts only with a new base-pane snapshot holding the fixture, read from the copy''s own session file (council round 1)'
-        Pattern = '(?s)\$sessionFile = Join-Path \$Bin ''session-state\.json''.*?if \(\$null -ne \$s -and \$s\.At -gt \$previous -and \$s\.At -gt \$closeAt -and \$s\.Fixture -ge 1000 -and \$s\.Lines -le 10000\) \{'
+        Pattern = '(?s)\$sessionFile = Join-Path \$Bin ''session-state\.json''.*?if \(\$null -ne \$s -and \$s\.At -gt \$previous -and \$s\.At -gt \$closeAt -and \$s\.Lines -eq \$expectedLines -and \$s\.Fixture -ge \$expectedLines - 10\) \{'
         Mutation = @('$s.At -gt $previous -and ', '')
     }
     @{
@@ -285,9 +285,9 @@ $workingSetRules = @(
         Mutation = @('Assert-WorkingSetRunPlacement $Run $build.Repo', '$null')
     }
     @{
-        Description = 'the UIA walk is complete only when it ended, the document holds the last block''s last line, and it covered the history rows (council round 1)'
-        Pattern = '(?s)walk_complete = \(\$ended -and \$holdsFixture -and \$lines -ge \$historyRows\)'
-        Mutation = @('$ended -and $holdsFixture -and $lines -ge $historyRows', '$ended')
+        Description = 'the UIA walk is complete only when it ended, the document holds the last block''s last line, and it counted the whole document (council round 1; Sol, round 2)'
+        Pattern = '(?s)\$expectedLines = Get-ExpectedUiaLines.*?walk_complete = \(\$ended -and \$holdsFixture -and \$lines -eq \$expectedLines\)'
+        Mutation = @('$ended -and $holdsFixture -and $lines -eq $expectedLines', '$ended')
     }
     @{
         Description = 'the UIA client takes the pane from this copy''s own window handle'
@@ -296,8 +296,99 @@ $workingSetRules = @(
     }
     @{
         Description = 'each run records the workload''s hash over the workload, its limit, its blocks, the block, the flood batch file and the config'
-        Pattern = '(?s)\$record\.BlocksPlanned = Get-WorkloadBlocks \$Workload \$ScrollbackMaxBytes\s+\$record\.WorkloadSha256 = Get-WorkloadSha256 \$Workload \$record\.ScrollbackLimitBytes \$record\.BlocksPlanned \$record\.BlockSha256 \$record\.FloodSha256 \(Join-Path \$Bin ''config\.ghostty''\) \$Run'
+        Pattern = '(?s)\$record\.BlocksPlanned = Get-WorkloadBlocks \$Workload \$record\.LaunchScrollbackLimit\s+\$record\.WorkloadSha256 = Get-WorkloadSha256 \$Workload \$record\.LaunchScrollbackLimit \$record\.BlocksPlanned \$record\.BlockSha256 \$record\.FloodSha256 \(Join-Path \$Bin ''config\.ghostty''\) \$Run'
         Mutation = @('$record.BlockSha256 $record.FloodSha256', '$record.BlockSha256 ''0''')
+    }
+    # --- round 2 (Sol M1-M3, Opus's Medium and Lows)
+    @{
+        Description = 'the product''s payload constants the checks derive from (win32_session_state.zig, win32_uia/text.zig, the config''s line cap)'
+        Pattern = '(?s)\$script:SessionBudgetBytes = 524288\s+\$script:SessionOverheadBytes = 96\s+\$script:SessionLineCap = 10000\s+\$script:UiaHistoryCells = 40000\s+\$script:UiaHistoryMaxRows = 500\s'
+        Mutation = @('$script:SessionOverheadBytes = 96', '$script:SessionOverheadBytes = 0')
+    }
+    @{
+        Description = 'a session checkpoint counts only a snapshot of exactly the lines its budget gives, so a halved slice from the formatter''s retry does not (Sol, round 2)'
+        Pattern = '(?s)\$expectedLines = Get-ExpectedSessionLines.*?\$s\.Lines -eq \$expectedLines -and \$s\.Fixture -ge \$expectedLines - 10\) \{.*?lines = \$script:wsSnapshot\.Lines; fixture_lines = \$script:wsSnapshot\.Fixture \}'
+        Mutation = @('$s.Lines -eq $expectedLines -and ', '$s.Lines -le 10000 -and ')
+    }
+    @{
+        Description = 'the driver refuses a staged config that is not byte for byte the generator''s for the run, before its first launch (Sol, round 2)'
+        Pattern = '(?s)if \(-not \(Test-WorkingSetConfigBytes \(Join-Path \$Bin ''config\.ghostty''\) \$Workload \$Run\)\) \{ throw [^\r\n]+\}.*?\$check = \[WorkingSetNative\]::Spawn\('
+        Mutation = @('if (-not (Test-WorkingSetConfigBytes', 'if ($false -and -not (Test-WorkingSetConfigBytes')
+    }
+    @{
+        Description = 'the outer half writes exactly the generator''s config'
+        Pattern = '\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''config\.ghostty''\), \(New-WorkingSetConfigText \$Workload \$Run\), \$script:Utf8\)'
+        Mutation = @('(New-WorkingSetConfigText $Workload $Run), $script:Utf8)', '((New-WorkingSetConfigText $Workload $Run) + "initial-command = x"), $script:Utf8)')
+    }
+    @{
+        Description = 'the outer half refuses an inherited NOCTTY_CONPTY before it creates anything (Sol, round 2)'
+        Pattern = '(?s)\$source = \$build\.Bin\s+if \(\$null -ne \[Environment\]::GetEnvironmentVariable\(''NOCTTY_CONPTY''\)\) \{ throw ''NOCTTY_CONPTY is set in this environment[^\r\n]+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$Run\)'
+        Mutation = @("if (`$null -ne [Environment]::GetEnvironmentVariable('NOCTTY_CONPTY')) { throw 'NOCTTY_CONPTY is set in this environment", "if (`$false) { throw 'NOCTTY_CONPTY is set in this environment")
+    }
+    @{
+        Description = 'the driver refuses NOCTTY_CONPTY before its first launch'
+        Pattern = '(?s)if \(\$null -ne \[Environment\]::GetEnvironmentVariable\(''NOCTTY_CONPTY''\)\) \{ throw ''NOCTTY_CONPTY is set; the copy would not run on the bundled ConPTY\.'' \}.*?\$check = \[WorkingSetNative\]::Spawn\('
+        Mutation = @("if (`$null -ne [Environment]::GetEnvironmentVariable('NOCTTY_CONPTY')) { throw 'NOCTTY_CONPTY is set; the copy", "if (`$false) { throw 'NOCTTY_CONPTY is set; the copy")
+    }
+    @{
+        Description = 'the copy''s conpty.dll and OpenConsole.exe must be the build''s, byte for byte, before the first launch, and both digests are recorded'
+        Pattern = '(?s)foreach \(\$file in @\(@\(''conpty\.dll'', ''ConptyDllSHA256''\), @\(''OpenConsole\.exe'', ''OpenConsoleSHA256''\)\)\) \{.*?\$record\[''Prefix'' \+ \$file\[1\]\] = Get-Sha256 \$built\s+if \(\$record\[\$file\[1\]\] -cne \$record\[''Prefix'' \+ \$file\[1\]\]\) \{ throw .*?\$check = \[WorkingSetNative\]::Spawn\('
+        Mutation = @("if (`$record[`$file[1]] -cne `$record['Prefix' + `$file[1]]) { throw", "if (`$false) { throw")
+    }
+    @{
+        Description = 'the record keeps the transport the copy''s own log names: bundled from the copy''s conpty.dll, or the in-box conhost'
+        Pattern = '(?s)\$nocttyLog = Read-SharedText \(Join-Path \$Run ''noctty\.log''\)\s+\$record\.Transport = if \(\$nocttyLog\.Contains\(''using the in-box conhost''\)\) \{ ''inbox'' \} elseif \(\$nocttyLog\.IndexOf\(''using bundled ConPTY: '' \+ \(Join-Path \$Bin ''conpty\.dll''\), \[StringComparison\]::OrdinalIgnoreCase\) -ge 0\) \{ ''bundled'' \} else \{ ''unknown'' \}'
+        Mutation = @("if (`$nocttyLog.Contains('using the in-box conhost')) { 'inbox' } elseif", "if (`$false) { 'inbox' } elseif")
+    }
+    @{
+        Description = 'the record keeps the CLI''s and the admitted receipt''s digests (Sol, round 2)'
+        Pattern = '(?s)ReceiptSha256 = Get-Sha256 \$receiptPath \}.*?\$record\.CliSHA256 = Get-Sha256 \(Join-Path \$Bin ''noctty\.com''\)\s+\$record\.ReceiptSHA256 = \$build\.ReceiptSha256'
+        Mutation = @('$record.ReceiptSHA256 = $build.ReceiptSha256', '$record.ReceiptSHA256 = $null')
+    }
+    @{
+        Description = 'every driver launch names the driver''s own private desktop (Opus, round 2: m03, Default for $desktopPath)'
+        Pattern = '\$desktopPath = "WinSta0\\\$DesktopName"'
+        Mutation = @('$desktopPath = "WinSta0\$DesktopName"', '$desktopPath = ''WinSta0\Default''')
+    }
+    @{
+        Description = 'the +version check and the copy are each launched on $desktopPath (Opus, round 2: m01, Default in the copy''s own launch)'
+        Pattern = '(?s)\[WorkingSetNative\]::Spawn\(\$exe, \(''"\{0\}" \+version'' -f \$exe\), \$work, \$desktopPath, .*?\[WorkingSetNative\]::Spawn\(\$exe, \$commandLine, \$work, \$desktopPath, '
+        Mutation = @('[WorkingSetNative]::Spawn($exe, $commandLine, $work, $desktopPath,', '[WorkingSetNative]::Spawn($exe, $commandLine, $work, ''WinSta0\Default'',')
+    }
+    @{
+        Description = 'the native Spawn refuses any desktop but the caller''s own, read through GetThreadDesktop and UOI_NAME (Opus, round 2)'
+        Pattern = '(?s)public static ProcessInfo Spawn\(.*?string own = "WinSta0\\\\" \+ CurrentDesktopName\(\);\s+if \(!string\.Equals\(desktop, own, StringComparison\.OrdinalIgnoreCase\)\) throw new Exception\("A child must start on the caller''s own desktop"\);.*?CreateProcessW\('
+        Mutation = @('if (!string.Equals(desktop, own, StringComparison.OrdinalIgnoreCase)) throw new Exception("A child must start on the caller''s own desktop");', '')
+    }
+    @{
+        Description = 'the native LaunchDriver refuses the caller''s own desktop, Default and the input desktop'
+        Pattern = '(?s)public static ProcessInfo LaunchDriver\(.*?if \(input == null \|\| string\.Equals\(desktop, "WinSta0\\\\" \+ CurrentDesktopName\(\), StringComparison\.OrdinalIgnoreCase\) \|\| string\.Equals\(desktop, "WinSta0\\\\Default", StringComparison\.OrdinalIgnoreCase\) \|\| string\.Equals\(desktop, "WinSta0\\\\" \+ input, StringComparison\.OrdinalIgnoreCase\)\)\s+throw new Exception\("The driver must start on a private desktop[^"]*"\);.*?CreateProcessW\('
+        Mutation = @('string.Equals(desktop, "WinSta0\\" + CurrentDesktopName(), StringComparison.OrdinalIgnoreCase) || ', '')
+    }
+    @{
+        Description = 'the copy''s --scrollback-limit is read back from its launch arguments and must be the workload''s (Opus, round 2: m06, 10,000,000 under 1 GiB)'
+        Pattern = '(?s)"--scrollback-limit=\$\(\$record\.ScrollbackLimitBytes\)"\).*?\$limitArguments = @\(\$launchArguments \| Where-Object \{ \$_ -like ''--scrollback-limit=\*'' \}\).*?\$record\.LaunchScrollbackLimit = \[long\]\$limitArguments\[0\]\.Substring\(19\)\s+if \(\$record\.LaunchScrollbackLimit -ne \$record\.ScrollbackLimitBytes\) \{ throw'
+        Mutation = @('"--scrollback-limit=$($record.ScrollbackLimitBytes)")', '"--scrollback-limit=10000000")')
+    }
+    @{
+        Description = 'the outer half refuses a record whose workload, launch limit or planned blocks are not the ones it asked for'
+        Pattern = '(?s)if \(\$record\.Workload -cne \$Workload\) \{ \$failed \+= [^\r\n]+\}\s+if \(\$record\.ScrollbackLimitBytes -ne \$wantLimit -or \$record\.LaunchScrollbackLimit -ne \$wantLimit\) \{ \$failed \+= [^\r\n]+\}\s+if \(\$record\.BlocksPlanned -ne \(Get-WorkloadBlocks \$Workload \$wantLimit\)\) \{ \$failed \+= '
+        Mutation = @('if ($record.Workload -cne $Workload) { $failed += "record: workload $($record.Workload), not $Workload" }', '')
+    }
+    @{
+        Description = 'the driver is given the outer half''s own workload (Opus, round 2: m07)'
+        Pattern = '\$build\.Repo, \$copy, \$Run, \$Workload, \$ExpectedBuildMode, '
+        Mutation = @('$Run, $Workload, $ExpectedBuildMode,', '$Run, ''fixed'', $ExpectedBuildMode,')
+    }
+    @{
+        Description = 'nor [Diagnostics.Process]::Start, which names no desktop (Opus, round 2: m13)'
+        Pattern = '(?s)\A(?!.*Process\]::Start\()'
+        Mutation = @("[IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), '')", "[IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), ''); [Diagnostics.Process]::Start(`$exe)")
+    }
+    @{
+        Description = 'the driver''s noctty.ico refusal itself, not the text of its message (Opus, round 2: m05)'
+        Pattern = '-or \(Test-Path -LiteralPath \(Join-Path \$Bin ''noctty\.ico''\)\)\) \{ throw ''The copy is not a portable copy without noctty\.ico\.'' \}'
+        Mutation = @(" -or (Test-Path -LiteralPath (Join-Path `$Bin 'noctty.ico'))", '')
     }
     # --- the native layer
     @{
@@ -354,7 +445,7 @@ function Get-WorkingSetFunction([string] $Name) {
     if ($found.Count -ne 1) { throw "The working-set harness must define $Name once." }
     return $found[0].Extent.Text
 }
-$constantNames = @('BlockLines', 'RowPageBytes', 'Cols', 'Rows', 'GridRows', 'FixedCycles', 'ChurnCycles', 'SessionCheckpoints', 'PruneSeconds', 'SettleSamples', 'SampleMs', 'SettleCapMs')
+$constantNames = @('BlockLines', 'RowPageBytes', 'Cols', 'Rows', 'GridRows', 'FixedCycles', 'ChurnCycles', 'SessionCheckpoints', 'PruneSeconds', 'SettleSamples', 'SampleMs', 'SettleCapMs', 'SessionBudgetBytes', 'SessionOverheadBytes', 'SessionLineCap', 'UiaHistoryCells', 'UiaHistoryMaxRows')
 $constantLines = foreach ($name in $constantNames) {
     $line = [regex]::Match($workingSetText, "(?m)^\`$script:$name = \d+[ \t]*$").Value.Trim()
     if (-not $line) { throw "The working-set harness has no `$script:$name = <number> line." }
@@ -416,6 +507,11 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
     . ([scriptblock]::Create($blocksText))
     . ([scriptblock]::Create($stagesText))
     . ([scriptblock]::Create($problemsText))
+    . ([scriptblock]::Create((Get-WorkingSetFunction 'Get-ExpectedSessionLines')))
+    . ([scriptblock]::Create((Get-WorkingSetFunction 'Get-ExpectedUiaLines')))
+    # The formulas give what every run measured: 3,717 session lines at 140 columns and a 329-line walk at 140 x 43.
+    if ((Get-ExpectedSessionLines) -ne 3717) { throw "Get-ExpectedSessionLines gives $(Get-ExpectedSessionLines), not the 3,717 measured." }
+    if ((Get-ExpectedUiaLines) -ne 329) { throw "Get-ExpectedUiaLines gives $(Get-ExpectedUiaLines), not the 329 measured." }
     function New-WorkingSetRecord([string] $Name) {
         $limit = if ($Name -eq 'scrollback-max') { 1073741824 } else { 10000000 }
         $blocks = Get-WorkloadBlocks $Name $limit
@@ -425,8 +521,9 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
             Schema = 2; Workload = $Name; Error = $null; Exit = 0; QuitPosts = 1; GridCols = 140; GridRows = 43
             ScrollbackLimitBytes = $limit; Blocks = $blocks; BlocksPlanned = $blocks; Cycles = $cycles; CyclesMissed = 0
             SessionSaves = $(if ($Name -eq 'session-capture') { 10 } else { 0 })
-            SessionSnapshots = @(if ($Name -eq 'session-capture') { foreach ($k in 1..10) { [pscustomobject]@{ close_at_unix_ms = [uint64](1000 * $k); snapshot_at_unix_ms = [uint64](1000 * $k + 900) } } })
-            Uia = $(if ($Name -eq 'uia-walk') { [pscustomobject]@{ walk_complete = $true } } else { $null })
+            SessionSnapshots = @(if ($Name -eq 'session-capture') { foreach ($k in 1..10) { [pscustomobject]@{ close_at_unix_ms = [uint64](1000 * $k); snapshot_at_unix_ms = [uint64](1000 * $k + 900); lines = 3717; fixture_lines = 3715 } } })
+            Uia = $(if ($Name -eq 'uia-walk') { [pscustomobject]@{ walk_complete = $true; walk_ended = $true; holds_last_line = $true; walked_lines = 329 } } else { $null })
+            Transport = 'bundled'; ConptyDllSHA256 = 'aa'; PrefixConptyDllSHA256 = 'aa'; OpenConsoleSHA256 = 'bb'; PrefixOpenConsoleSHA256 = 'bb'
             Stages = $stages
         }
     }
@@ -449,6 +546,13 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
         @{ Name = 'a session snapshot from before its close'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[4].snapshot_at_unix_ms = $r.SessionSnapshots[4].close_at_unix_ms - 10 } }
         @{ Name = 'a session snapshot no newer than the one before'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[4].snapshot_at_unix_ms = $r.SessionSnapshots[3].snapshot_at_unix_ms } }
         @{ Name = 'a counted snapshot without its times'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots = @($r.SessionSnapshots | Select-Object -First 9) } }
+        @{ Name = 'a halved session capture, 1,858 lines (Sol, round 2: the formatter''s retry)'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[6].lines = 1858; $r.SessionSnapshots[6].fixture_lines = 1856 } }
+        @{ Name = 'a UIA document of the history rows alone, 285 lines (Sol, round 2)'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walked_lines = 285 } }
+        @{ Name = 'a UIA walk that never ended'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walk_ended = $false } }
+        @{ Name = 'the in-box conhost'; Workload = 'fixed'; Change = { param($r) $r.Transport = 'inbox' } }
+        @{ Name = 'a transport the log did not name'; Workload = 'tab-churn'; Change = { param($r) $r.Transport = $null } }
+        @{ Name = 'a conpty.dll not the build''s'; Workload = 'scrollback-default'; Change = { param($r) $r.ConptyDllSHA256 = 'ab' } }
+        @{ Name = 'no OpenConsole.exe digest'; Workload = 'fixed'; Change = { param($r) $r.OpenConsoleSHA256 = $null; $r.PrefixOpenConsoleSHA256 = $null } }
         @{ Name = 'an incomplete UIA walk'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walk_complete = $false } }
         @{ Name = 'an older schema'; Workload = 'fixed'; Change = { param($r) $r.Schema = 1 } }
     )
@@ -631,6 +735,59 @@ try {
     }
     if (-not $controlAccepted) { throw 'The run-placement control refused the run anyway, so the case shows nothing.' }
 } finally { [IO.Directory]::Delete($placementDir, $true) }
+
+# The staged config, byte for byte (Sol, round 2): the generator's own output passes; with an initial-command, a second
+# command in the no-space spelling, or its keybind = clear dropped, it fails. The control, a check that compares
+# nothing, must accept the initial-command one.
+$configDir = Join-Path ([IO.Path]::GetTempPath()) ('ws-config-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+[void][IO.Directory]::CreateDirectory($configDir)
+try {
+    $configRun = Join-Path $configDir 'run-1'
+    $generatorText = Get-WorkingSetFunction 'New-WorkingSetConfigText'
+    $configCheckText = Get-WorkingSetFunction 'Test-WorkingSetConfigBytes'
+    $configCases = & {
+        . ([scriptblock]::Create($generatorText))
+        . ([scriptblock]::Create($configCheckText))
+        $generated = New-WorkingSetConfigText 'session-capture' $configRun
+        $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        $cases = [ordered]@{
+            exact = $generated
+            initialCommand = $generated + "initial-command = direct:$cmdPath /D /C exit`n"
+            secondCommand = $generated + "command=direct:$cmdPath /D /K echo`n"
+            noClear = $generated.Replace("keybind = clear`n", '')
+        }
+        $verdicts = [ordered]@{}
+        foreach ($name in $cases.Keys) {
+            $path = Join-Path $configDir "$name.ghostty"
+            [IO.File]::WriteAllText($path, $cases[$name], $script:Utf8)
+            $verdicts[$name] = Test-WorkingSetConfigBytes $path 'session-capture' $configRun
+        }
+        $verdicts.otherRun = Test-WorkingSetConfigBytes (Join-Path $configDir 'exact.ghostty') 'session-capture' (Join-Path $configDir 'run-2')
+        $verdicts
+    }
+    if (-not $configCases.exact) { throw 'The generator''s own config failed its byte check.' }
+    foreach ($name in 'initialCommand', 'secondCommand', 'noClear', 'otherRun') { if ($configCases[$name]) { throw "The config byte check accepted a staged config with $name." } }
+    $configControl = $configCheckText.Replace('return [string]::Equals($staged, $expected, [StringComparison]::Ordinal)', 'return $true')
+    if ([string]::Equals($configControl, $configCheckText, [StringComparison]::Ordinal)) { throw 'The config control changed nothing.' }
+    $configControlAccepted = & {
+        . ([scriptblock]::Create($generatorText))
+        . ([scriptblock]::Create($configControl))
+        Test-WorkingSetConfigBytes (Join-Path $configDir 'initialCommand.ghostty') 'session-capture' $configRun
+    }
+    if (-not $configControlAccepted) { throw 'The config control refused the initial-command config anyway, so the case shows nothing.' }
+} finally { [IO.Directory]::Delete($configDir, $true) }
+
+# What the payload checks and the transport check read from the product: the session budget and overhead, the UIA
+# history budget, and the two startup markers in src/pty.zig.
+$sessionStateZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\apprt\win32_session_state.zig') -Raw
+$uiaTextZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\apprt\win32_uia\text.zig') -Raw
+$ptyZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\pty.zig') -Raw
+if (-not $sessionStateZig.Contains('pub const max_total_scrollback_bytes: usize = 512 * 1024;') -or $script:SessionBudgetBytes -ne 512 * 1024) { throw 'The session budget is not the product''s max_total_scrollback_bytes.' }
+if (-not $sessionStateZig.Contains("pub const scrollback_snapshot_storage_overhead: usize = $($script:SessionOverheadBytes);")) { throw 'The session overhead is not the product''s scrollback_snapshot_storage_overhead.' }
+if (-not $uiaTextZig.Contains("pub const accessible_history_max_rows: usize = $($script:UiaHistoryMaxRows);")) { throw 'The UIA row cap is not the product''s accessible_history_max_rows.' }
+if (-not $uiaTextZig.Contains('pub const accessible_history_target_cells: usize = 40_000;') -or $script:UiaHistoryCells -ne 40000) { throw 'The UIA cell budget is not the product''s accessible_history_target_cells.' }
+if (-not $ptyZig.Contains('log.info("using bundled ConPTY: {s}"') -or -not $ptyZig.Contains('"using the in-box conhost')) { throw 'The transport markers are not the ones src/pty.zig logs.' }
+
 } finally {
     foreach ($name in $savedScriptVars.Keys) {
         if ($savedScriptVars[$name].Existed) { Set-Variable -Scope Script -Name $name -Value $savedScriptVars[$name].Value }
@@ -665,4 +822,35 @@ foreach ($control in $layoutControls) {
     if (($controlClass -as [type])::Layout() -ceq $layoutWanted) { throw "The layout check accepted $($control.Name)." }
 }
 
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain) and run-placement (unignored, ignored, outside) cases; native layout $layoutActual"
+# The launch desktop at run time (Opus, round 2): the compiled native layer refuses a child on any desktop but the
+# caller's own and on Default or the input desktop, and the driver on the caller's own desktop, Default or the input
+# desktop. Every call names an executable that does not exist, so a missing refusal fails with CreateProcess and
+# still starts nothing. Where this process has no readable desktop (a service session), the case is skipped.
+$desktopProbe = $contractClass -as [type]
+$ownDesktop = $null
+try { $ownDesktop = $desktopProbe::CurrentDesktopName() } catch { $ownDesktop = $null }
+if ($null -ne $ownDesktop) {
+    $launchDir = Join-Path ([IO.Path]::GetTempPath()) ('ws-launch-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($launchDir)
+    try {
+        $missingExe = Join-Path $launchDir 'missing.exe'
+        $launchLog = Join-Path $launchDir 'launch.log'
+        function Get-LaunchRefusal([scriptblock] $Call) { try { & $Call; return 'launched' } catch { return $_.Exception.Message } }
+        $foreign = 'WinSta0\ws-contract-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $got = Get-LaunchRefusal { $desktopProbe::Spawn($missingExe, '"x"', $launchDir, $foreign, $launchLog, $true) }
+        if (-not $got.Contains("A child must start on the caller's own desktop")) { throw "Spawn did not refuse another desktop (got: $got)." }
+        $got = Get-LaunchRefusal { $desktopProbe::Spawn($missingExe, '"x"', $launchDir, 'WinSta0\Default', $launchLog, $true) }
+        if (-not ($got.Contains("A child must start on the caller's own desktop") -or $got.Contains('A child must not start on Default or the input desktop'))) { throw "Spawn did not refuse Default (got: $got)." }
+        $got = Get-LaunchRefusal { $desktopProbe::LaunchDriver($missingExe, '"x"', $launchDir, 'WinSta0\Default', [IntPtr]::Zero) }
+        if (-not $got.Contains('The driver must start on a private desktop')) { throw "LaunchDriver did not refuse Default (got: $got)." }
+        $got = Get-LaunchRefusal { $desktopProbe::LaunchDriver($missingExe, '"x"', $launchDir, "WinSta0\$ownDesktop", [IntPtr]::Zero) }
+        if (-not $got.Contains('The driver must start on a private desktop')) { throw "LaunchDriver did not refuse the caller's own desktop (got: $got)." }
+        # The control: a private desktop's name passes the check and reaches CreateProcess, which fails on the
+        # missing executable (when the input desktop cannot be read, LaunchDriver refuses that too).
+        $got = Get-LaunchRefusal { $desktopProbe::LaunchDriver($missingExe, '"x"', $launchDir, $foreign, [IntPtr]::Zero) }
+        $wantControl = if ($null -eq $desktopProbe::InputDesktopName()) { 'The driver must start on a private desktop' } else { 'CreateProcess failed' }
+        if (-not $got.Contains($wantControl)) { throw "LaunchDriver's desktop check refused a private desktop, or launched (got: $got)." }
+    } finally { [IO.Directory]::Delete($launchDir, $true) }
+    $desktopCase = 'launch-desktop (Spawn: foreign, Default; LaunchDriver: Default, own; control: private)'
+} else { $desktopCase = 'launch-desktop skipped (no readable desktop)' }
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run) and $desktopCase cases; native layout $layoutActual"

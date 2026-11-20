@@ -1344,7 +1344,19 @@ run at a time (a session-wide mutex refuses a second). The driver re-proves
 its isolation before it starts anything (a job; its own desktop, neither
 `Default` nor the input desktop; `LOCALAPPDATA`, `APPDATA`, `TEMP` and `TMP`
 inside the run; the staged copy, its marker, no `noctty.ico`, the harness's
-config and the receipt's bytes). The copy starts through
+config and the receipt's bytes). Every process the harness creates directly
+names the private desktop, and the native launches refuse any other: a child
+only on the driver's own desktop, the driver never on the caller's, `Default`
+or the input desktop. The driver's re-admission runs git through the measure
+library, which names no desktop; per `CreateProcess` such a child inherits its
+parent's desktop, the driver's private one (read, not measured). The staged
+config must be byte for byte the harness's own for the run
+(`New-WorkingSetConfigText`), so an `initial-command` or a second `command`
+cannot change the first pane's shell. `NOCTTY_CONPTY` must be unset (both
+halves refuse it), the copy's `conpty.dll` and `OpenConsole.exe` must match
+the build's, and the record keeps the transport the copy's own log names
+(`using bundled ConPTY: <copy>\conpty.dll`); a run on any other transport
+fails. The copy starts through
 `Get-InteractiveWin11LaunchArguments` (its own class) after its build mode is
 checked through `+version`, with its config's
 `command = direct:<System32>\cmd.exe /D`, the clipboard denied, no
@@ -1391,7 +1403,10 @@ through its end:
   history rows plus the viewport (285 + 43 rows here), and the window slides
   only with a scrolled viewport (`snapshotDocumentWindow`), which this
   workload never scrolls. The walk counts only when the document holds the
-  last block's last line and the walk covered the history rows. Its `after`
+  last block's last line and the walk counted the whole document: the history
+  rows, the viewport and the one line more a walk counts, 329 lines at
+  140 x 43 (`Get-ExpectedUiaLines`); a 285-line document, the history rows
+  alone, fails. Its `after`
   stage is sampled with the UIA client still connected: about 20 more handles
   than `start` in every Phase 0a run (595-599 against 575-579).
 - `session-capture`: `scrollback-default`'s output with
@@ -1401,7 +1416,10 @@ through its end:
   base pane with the fixture's lines, its `captured_at_unix_ms` later than
   both the close (timed right before the close key) and the last snapshot
   counted, so a display-change or deferred save from before the close does
-  not count; the record keeps each pair of times. The
+  not count, and only a snapshot of exactly the lines its budget gives
+  (`Get-ExpectedSessionLines`, 3,717 at 140 columns), so a halved slice from
+  the formatter's retry (1,858 lines) does not count either; the record keeps
+  each checkpoint's times and line counts. The
   512 KiB snapshot budget pre-limits a capture to (budget - 96 bytes of
   snapshot overhead) / (columns + 1) lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
   reached at this width. This is the only workload that saves session state,
@@ -1427,7 +1445,9 @@ comparison. Only completed runs count (the outer half checks each
 `workingset.json` with `Get-WorkingSetRecordProblems` before it says
 "complete") with the same `WorkloadSha256` (the workload, its scrollback limit
 and planned blocks, the constants, the output block, the flood batch file and
-the config) and grid. One copy at a time, 9 Phase 0a copies' settled `start`
+the config) and grid, and both arms on the same transport and bundle: the
+bundled ConPTY, with the same `conpty.dll` and `OpenConsole.exe` digests in
+their records. One copy at a time, 9 Phase 0a copies' settled `start`
 levels had IQRs of 0.1-1.6 MiB and their `after` levels up to 2.7 MiB (7.5 MiB
 at the 1 GiB limit), with one unexplained low run, while copies run together
 differed by tens of MiB (test-harnesses.md, the 2026-11-20 WORKING-SET-01
