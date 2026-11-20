@@ -2358,7 +2358,14 @@ const TestStream = struct {
 
     /// `self` holds pointers into itself, so it must not move after this.
     fn init(self: *TestStream, alloc: Allocator, options: Options) !void {
-        self.term = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+        // The fork's cursor defaults (block, blinking) used to be the
+        // handler's fields; upstream c594031d5 moved them into Terminal,
+        // whose `default_cursor_blink` defaults to false.
+        self.term = try terminal.Terminal.init(alloc, .{
+            .cols = 80,
+            .rows = 24,
+            .default_cursor_blink = true,
+        });
         errdefer self.term.deinit(alloc);
         self.termio_mailbox = try termio.Mailbox.initSPSC(alloc);
         errdefer self.termio_mailbox.deinit(alloc);

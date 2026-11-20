@@ -2296,6 +2296,15 @@ pub fn index(self: *Terminal) !void {
             return;
         }
 
+        // Without scrollback a top-anchored region discards its top row in
+        // place, so the last-command tracker must drop a command anchored
+        // there, as Screen.cursorDownScroll does on the fork's old path
+        // (terminal-core.md KITTY2 part 2, rule (4)): otherwise PageList's
+        // pin update retargets it to the next row's content.
+        if (screen.no_scrollback and self.scrolling_region.top == 0) {
+            screen.semantic_command.invalidateActiveTopRow(&screen.pages);
+        }
+
         // Kitty image placements may need adjusting around the scroll;
         // handled out of line like the scrollback path above.
         if (comptime build_options.kitty_graphics) {
@@ -12343,6 +12352,48 @@ test "Terminal: scrollUp's Kitty op and scroll branch agree on a partial region"
     // scrollback.
     t.setTopAndBottomMargin(0, 0);
     try testing.expect(t.scrollUpShiftsWindow());
+}
+
+test "Terminal: index without scrollback drops a completed command whose prompt scrolls off" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 3, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+
+    // A command completed on rows 0 and 1.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    s.cursorAbsolute(0, 1);
+    try s.testWriteString("out");
+    try s.semanticPromptEndCommand();
+
+    // A second command, submitted and still running, on the bottom row.
+    s.cursorAbsolute(0, 2);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("two");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+
+    // Linefeeds at the bottom scroll the first command off the top through
+    // the in-place region scroll: it is gone, not retargeted to the row
+    // that took its place.
+    try t.index();
+    try t.index();
+    try testing.expect((try s.lastCommandString(alloc)) == null);
 }
 
 test "Terminal: alt screen scroll up recycled row has default metadata" {
