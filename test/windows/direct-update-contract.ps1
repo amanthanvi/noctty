@@ -141,12 +141,17 @@ function Get-DirectUpdateProblems([string] $Text) {
     $exitRead=@($controllerTryStatements | Where-Object {Same $_ 'if(-not [HiddenWin]::GetExitCodeProcess($launch.process,[ref]$code)){throw ''Driver exit read failed''}'})
     $exitReadIndex=-1
     if($exitRead.Count -eq 1){$exitReadIndex=[Array]::IndexOf($controllerTryStatements,$exitRead[0])}
+    $controllerWait=if($exitReadIndex -ge 2){$controllerTryStatements[$exitReadIndex-2]}
+    # A signaled wait must leave the loop and reach the driver's status read.
+    Need ControllerWaitBreak ($controllerWait -is [Management.Automation.Language.DoWhileStatementAst] -and
+        (Same $controllerWait.Condition '$true') -and
+        (Direct $controllerWait.Body.Statements 'if([HiddenWin]::WaitForSingleObject($launch.process,250) -eq 0) { break }'))
     $exitWrites=@($controller.FindAll({param($node)
         $node -is [Management.Automation.Language.AssignmentStatementAst] -and
         @($node.Left.FindAll({param($target) $target -is [Management.Automation.Language.VariableExpressionAst] -and $target.VariablePath.UserPath -imatch '(^|:)exitCode$'},$true)).Count -gt 0
     },$true))
     Need ControllerExitSource ($exitReadIndex -ge 2 -and $exitReadIndex+1 -lt $controllerTryStatements.Count -and
-        $controllerTryStatements[$exitReadIndex-2] -is [Management.Automation.Language.DoWhileStatementAst] -and
+        $controllerWait -is [Management.Automation.Language.DoWhileStatementAst] -and
         (Same $controllerTryStatements[$exitReadIndex-1] '[uint32]$code=1') -and
         $exitWrites.Count -eq 2 -and (Same $exitWrites[0] '$exitCode=1') -and (Same $exitWrites[1] '$exitCode=$code') -and
         [object]::ReferenceEquals($exitWrites[1],$controllerTryStatements[$exitReadIndex+1]))
@@ -511,6 +516,7 @@ $controls=[ordered]@{
     ClipboardSupported=@('if(-not $fact.Supported -or -not $fact.IsolatedStation -or -not $fact.SequenceAdvanced){throw','if($false){throw')
 }
 $sites=[ordered]@{
+    ControllerWaitBreak=@('if([HiddenWin]::WaitForSingleObject($launch.process,250) -eq 0) { break }','if([HiddenWin]::WaitForSingleObject($launch.process,250) -eq 0) { return }')
     ControllerFailure=@('if($exitCode -ne 0){throw ''Acceptance driver failed; read sanitized result.json''}','')
     ControllerExit=@("    exit 0`n}","}")
     DriverExit=@('if(-not $result.Passed){exit 1}','if(-not $result.Passed){exit 0}')
