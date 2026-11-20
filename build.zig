@@ -7,7 +7,7 @@ const requireZig = @import("src/build/zig.zig").requireZig;
 const app_zon_version = @import("build.zig.zon").version;
 
 /// Libghostty version. We use a separate version from the app.
-const lib_version = "0.1.0";
+const lib_version = "0.1.0-dev";
 
 /// Minimum required zig version.
 const minimum_zig_version = @import("build.zig.zon").minimum_zig_version;
@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) !void {
     const config = try BuildConfig.init(
         b,
         file_version orelse app_zon_version,
+        lib_version,
     );
 
     // lld-link defaults to /OPT:NOREF,NOICF when it writes a PDB (/DEBUG), so a

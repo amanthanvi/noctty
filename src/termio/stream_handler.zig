@@ -48,12 +48,6 @@ pub const StreamHandler = struct {
     /// a repaint should happen.
     renderer_wakeup: *xev.Async,
 
-    /// The default cursor state. This is used with CSI q. This is
-    /// set to true when we're currently in the default cursor state.
-    default_cursor: bool = true,
-    default_cursor_style: terminal.CursorStyle,
-    default_cursor_blink: ?bool,
-
     /// The response to use for ENQ requests. The memory is owned by
     /// whoever owns StreamHandler.
     enquiry_response: []const u8,
@@ -132,13 +126,8 @@ pub const StreamHandler = struct {
         self.osc_color_report_format = config.osc_color_report_format;
         self.clipboard_write = config.clipboard_write;
         self.enquiry_response = config.enquiry_response;
-        self.default_cursor_style = config.cursor_style;
-        self.default_cursor_blink = config.cursor_blink;
-
-        // If our cursor is the default, then we update it immediately.
-        if (self.default_cursor) self.setCursorStyle(.default) catch |err| {
-            log.warn("failed to set default cursor style: {}", .{err});
-        };
+        self.terminal.setDefaultCursorStyle(config.cursor_style);
+        self.terminal.setDefaultCursorBlink(config.cursor_blink);
 
         // The config could have changed any of our colors, but the mode
         // 2031 report is sent by Termio.changeConfig. This runs on the io
@@ -243,6 +232,10 @@ pub const StreamHandler = struct {
                     }
                 }
             },
+            .print_slice => {
+                @branchHint(.likely);
+                try self.printSlice(value.cps);
+            },
             .print_repeat => try self.printRepeat(value),
             .bell => self.bell(),
             .backspace => self.terminal.backspace(),
@@ -283,7 +276,7 @@ pub const StreamHandler = struct {
             .cursor_row => self.terminal.setCursorRow(value.value),
             .cursor_col_relative => self.terminal.cursorColRelative(value.value),
             .cursor_row_relative => self.terminal.cursorRowRelative(value.value),
-            .cursor_style => try self.setCursorStyle(value),
+            .cursor_style => self.terminal.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => {
@@ -319,7 +312,7 @@ pub const StreamHandler = struct {
             },
             .soft_reset => {
                 self.terminal.softReset();
-                try self.setCursorStyle(.default);
+                self.terminal.setCursorStyle(.default);
             },
             .set_mode => try self.setMode(value.mode, true),
             .reset_mode => try self.setMode(value.mode, false),
@@ -418,6 +411,7 @@ pub const StreamHandler = struct {
             .apc_start => self.apc.start(),
             .apc_end => try self.apcEnd(value.terminated),
             .apc_put => self.apc.feed(self.alloc, value),
+            .apc_put_slice => self.apc.feedSlice(self.alloc, value.bytes),
 
             // Unimplemented
             .title_push,
@@ -626,6 +620,23 @@ pub const StreamHandler = struct {
                     }
                 }
             },
+
+            .glyph => |*glyph_req| {
+                const resp = self.terminal.glyphProtocol(self.alloc, glyph_req);
+                switch (glyph_req.*) {
+                    .register, .clear => try self.queueRender(),
+                    .support, .query => {},
+                }
+
+                if (resp) |r| {
+                    var buf: [terminal.apc.glyph.Response.max_wire_bytes]u8 = undefined;
+                    var writer: std.Io.Writer = .fixed(&buf);
+                    try r.formatWire(&writer);
+                    const final = writer.buffered();
+                    log.debug("glyph protocol response: {x}", .{final});
+                    self.messageWriter(try termio.Message.writeReq(self.alloc, final));
+                }
+            },
         }
     }
 
@@ -667,6 +678,26 @@ pub const StreamHandler = struct {
     inline fn capturesSemanticOutput(self: *const StreamHandler) bool {
         return self.terminal.status_display == .main and
             self.terminal.screens.active_key == .primary;
+    }
+
+    /// A run of printable codepoints. Upstream's batched print runs unless
+    /// the run goes to an active spoken-output capture, which records each
+    /// committed codepoint as the `.print` arm does.
+    inline fn printSlice(self: *StreamHandler, cps: []const u32) !void {
+        if (!self.capturesSemanticOutput() or !self.semantic_output.active) {
+            try self.terminal.printSlice(cps);
+            return;
+        }
+
+        for (cps) |cp| {
+            self.terminal.print(@intCast(cp)) catch |err| {
+                self.semantic_output.omitRemainder();
+                return err;
+            };
+            if (self.terminal.committedPrintCodepoint()) |committed| {
+                self.semantic_output.recordPrint(committed);
+            }
+        }
     }
 
     inline fn printRepeat(self: *StreamHandler, count_req: usize) !void {
@@ -778,7 +809,7 @@ pub const StreamHandler = struct {
         // their shell config when they render prompts to ensure the
         // cursor is exactly as they request.
         if (mode == .cursor_blinking and
-            self.default_cursor_blink != null)
+            self.terminal.cursor.default_blink != null)
         {
             return;
         }
@@ -838,8 +869,10 @@ pub const StreamHandler = struct {
                 const grid_size = self.size.grid();
                 self.terminal.resize(
                     self.alloc,
-                    grid_size.columns,
-                    grid_size.rows,
+                    .{
+                        .cols = grid_size.columns,
+                        .rows = grid_size.rows,
+                    },
                 ) catch |err| {
                     log.err("error updating terminal size: {}", .{err});
                 };
@@ -1001,55 +1034,6 @@ pub const StreamHandler = struct {
             },
 
             .color_scheme => self.messageWriter(.{ .color_scheme_report = .{ .force = true } }),
-        }
-    }
-
-    pub fn setCursorStyle(
-        self: *StreamHandler,
-        style: terminal.CursorStyleReq,
-    ) !void {
-        // Assume we're setting to a non-default.
-        self.default_cursor = false;
-
-        switch (style) {
-            .default => {
-                self.default_cursor = true;
-                self.terminal.screens.active.cursor.cursor_style = self.default_cursor_style;
-                self.terminal.modes.set(
-                    .cursor_blinking,
-                    self.default_cursor_blink orelse true,
-                );
-            },
-
-            .blinking_block => {
-                self.terminal.screens.active.cursor.cursor_style = .block;
-                self.terminal.modes.set(.cursor_blinking, true);
-            },
-
-            .steady_block => {
-                self.terminal.screens.active.cursor.cursor_style = .block;
-                self.terminal.modes.set(.cursor_blinking, false);
-            },
-
-            .blinking_underline => {
-                self.terminal.screens.active.cursor.cursor_style = .underline;
-                self.terminal.modes.set(.cursor_blinking, true);
-            },
-
-            .steady_underline => {
-                self.terminal.screens.active.cursor.cursor_style = .underline;
-                self.terminal.modes.set(.cursor_blinking, false);
-            },
-
-            .blinking_bar => {
-                self.terminal.screens.active.cursor.cursor_style = .bar;
-                self.terminal.modes.set(.cursor_blinking, true);
-            },
-
-            .steady_bar => {
-                self.terminal.screens.active.cursor.cursor_style = .bar;
-                self.terminal.modes.set(.cursor_blinking, false);
-            },
         }
     }
 
@@ -1820,8 +1804,6 @@ test "semantic output capture follows real stream handler parser" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .none,
         .clipboard_write = .allow,
@@ -2054,8 +2036,6 @@ test "issue149 config change queues no color scheme report, even into a full mai
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
@@ -2128,8 +2108,6 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
@@ -2312,8 +2290,6 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .none,
         .clipboard_write = .allow,
@@ -2408,8 +2384,6 @@ const TestStream = struct {
             .renderer_state = &self.renderer_state,
             .renderer_mailbox = undefined,
             .renderer_wakeup = undefined,
-            .default_cursor_style = .block,
-            .default_cursor_blink = true,
             .enquiry_response = options.enquiry_response,
             .osc_color_report_format = options.osc_color_report_format,
             .clipboard_write = .allow,

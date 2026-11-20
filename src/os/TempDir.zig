@@ -6,8 +6,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 const Dir = std.fs.Dir;
-const allocTmpDir = @import("file.zig").allocTmpDir;
-const freeTmpDir = @import("file.zig").freeTmpDir;
+const file = @import("file.zig");
 
 const log = std.log.scoped(.tempdir);
 
@@ -19,30 +18,28 @@ parent: Dir,
 
 /// Name buffer that name points into. Generally do not use. To get the
 /// name call the name() function.
-name_buf: [TMP_PATH_LEN:0]u8,
+name_buf: [file.random_basename_len:0]u8,
 
 /// Create the temporary directory.
 pub fn init() !TempDir {
     // Note: the tmp_path_buf sentinel is important because it ensures
-    // we actually always have TMP_PATH_LEN+1 bytes of available space. We
-    // need that so we can set the sentinel in the case we use all the
-    // possible length.
-    var tmp_path_buf: [TMP_PATH_LEN:0]u8 = undefined;
-    var rand_buf: [RANDOM_BYTES]u8 = undefined;
+    // we actually always have random_basename_len+1 bytes of available
+    // space. We need that so we can set the sentinel in the case we use
+    // all the possible length.
+    var tmp_path_buf: [file.random_basename_len:0]u8 = undefined;
 
     // The parent is always a handle of our own, so `close` can close it.
     var dir = dir: {
         const cwd = std.fs.cwd();
-        const tmp_dir = try allocTmpDir(std.heap.page_allocator);
-        defer freeTmpDir(std.heap.page_allocator, tmp_dir);
+        const tmp_dir = try file.allocTmpDir(std.heap.page_allocator);
+        defer file.freeTmpDir(std.heap.page_allocator, tmp_dir);
         break :dir try cwd.openDir(tmp_dir, .{});
     };
     errdefer dir.close();
 
     // We now loop forever until we can find a directory that we can create.
     while (true) {
-        std.crypto.random.bytes(rand_buf[0..]);
-        const tmp_path = b64_encoder.encode(&tmp_path_buf, &rand_buf);
+        const tmp_path = try file.randomBasename(&tmp_path_buf);
         tmp_path_buf[tmp_path.len] = 0;
 
         dir.makeDir(tmp_path) catch |err| switch (err) {
@@ -83,15 +80,6 @@ pub fn close(self: *TempDir, mode: CloseMode) void {
     }
     self.parent.close();
 }
-
-// The amount of random bytes to get to determine our filename.
-const RANDOM_BYTES = 16;
-const TMP_PATH_LEN = b64_encoder.calcSize(RANDOM_BYTES);
-
-// Base64 encoder, replacing the standard `+/` with `-_` so that it can
-// be used in a file name on any filesystem.
-const b64_encoder = std.base64.Base64Encoder.init(b64_alphabet, null);
-const b64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".*;
 
 test {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;

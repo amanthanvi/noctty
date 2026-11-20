@@ -34,6 +34,7 @@ wasm_shared: bool = true,
 /// Ghostty exe properties
 exe_entrypoint: ExeEntrypoint = .ghostty,
 version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
+lib_version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 
 /// Binary properties
 pie: bool = false,
@@ -65,7 +66,7 @@ is_dep: bool = false,
 /// Environmental properties
 env: std.process.EnvMap,
 
-pub fn init(b: *std.Build, appVersion: []const u8) !Config {
+pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Config {
     // Setup our standard Zig target and optimize options, i.e.
     // `-Doptimize` and `-Dtarget`.
     const optimize = b.standardOptimizeOption(.{});
@@ -213,6 +214,20 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
             .build = if (is_dep) null else "windows",
         };
     };
+
+    // libghostty-vt properties
+
+    const lib_version_string = b.option(
+        []const u8,
+        "lib-version-string",
+        "A specific version string to use for the build of libghostty-vt. " ++
+            "If not specified, git will be used. This must be a semantic version.",
+    );
+
+    config.lib_version = if (lib_version_string) |v|
+        try std.SemanticVersion.parse(v)
+    else
+        try std.SemanticVersion.parse(libVersion);
 
     //---------------------------------------------------------------
     // Binary Properties
@@ -426,12 +441,19 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // Our version. We also add the string version so we don't need
     // to do any allocations at runtime. This has to be long enough to
     // accommodate realistic large branch names for dev versions.
-    var buf: [1024]u8 = undefined;
+    var app_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "app_version", self.version);
     step.addOption([:0]const u8, "app_version_string", try std.fmt.bufPrintZ(
-        &buf,
+        &app_version_buf,
         "{f}",
         .{self.version},
+    ));
+    var lib_version_buf: [1024]u8 = undefined;
+    step.addOption(std.SemanticVersion, "lib_version", self.lib_version);
+    step.addOption([:0]const u8, "lib_version_string", try std.fmt.bufPrintZ(
+        &lib_version_buf,
+        "{f}",
+        .{self.lib_version},
     ));
     step.addOption(
         ReleaseChannel,
@@ -460,13 +482,16 @@ pub fn testModule(
 
 /// Returns the build options for the terminal module. This assumes a
 /// Ghostty executable being built. Callers should modify this as needed.
-pub fn terminalOptions(self: *const Config) TerminalBuildOptions {
+pub fn terminalOptions(self: *const Config, artifact: TerminalBuildOptions.Artifact) TerminalBuildOptions {
     return .{
-        .artifact = .ghostty,
+        .artifact = artifact,
         .simd = self.simd,
         .oniguruma = true,
         .c_abi = false,
-        .version = self.version,
+        .version = switch (artifact) {
+            .ghostty => self.version,
+            .lib => self.lib_version,
+        },
         .slow_runtime_safety = switch (self.optimize) {
             .Debug => true,
             .ReleaseSafe,

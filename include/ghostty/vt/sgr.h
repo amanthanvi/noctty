@@ -19,8 +19,11 @@
  * The parser processes SGR parameters from CSI sequences (e.g., `ESC[1;31m`)
  * and returns individual text attributes like bold, italic, colors, etc.
  * It supports both semicolon (`;`) and colon (`:`) separators, possibly mixed,
- * and handles various color formats including 8-color, 16-color, 256-color,
- * X11 named colors, and RGB in multiple formats.
+ * and handles SGR color attributes including 8-color, 16-color, 256-color,
+ * direct RGB, underline color, and reset forms. Color values are returned
+ * using the shared @ref color types; applications that need to parse Ghostty
+ * config/theme color strings, generate palettes, inspect X11 color names, or
+ * calculate luminance and contrast should use the @ref color APIs directly.
  *
  * ## Basic Usage
  *
@@ -48,16 +51,6 @@ extern "C" {
 #endif
 
 /**
- * Opaque handle to an SGR parser instance.
- *
- * This handle represents an SGR (Select Graphic Rendition) parser that can
- * be used to parse SGR sequences and extract individual text attributes.
- *
- * @ingroup sgr
- */
-typedef struct GhosttySgrParserImpl* GhosttySgrParser;
-
-/**
  * SGR attribute tags.
  *
  * These values identify the type of an SGR attribute in a tagged union.
@@ -65,7 +58,7 @@ typedef struct GhosttySgrParserImpl* GhosttySgrParser;
  *
  * @ingroup sgr
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_SGR_ATTR_UNSET = 0,
   GHOSTTY_SGR_ATTR_UNKNOWN = 1,
   GHOSTTY_SGR_ATTR_BOLD = 2,
@@ -97,6 +90,7 @@ typedef enum {
   GHOSTTY_SGR_ATTR_BRIGHT_FG_8 = 28,
   GHOSTTY_SGR_ATTR_BG_256 = 29,
   GHOSTTY_SGR_ATTR_FG_256 = 30,
+  GHOSTTY_SGR_ATTR_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySgrAttributeTag;
 
 /**
@@ -104,13 +98,14 @@ typedef enum {
  *
  * @ingroup sgr
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_SGR_UNDERLINE_NONE = 0,
   GHOSTTY_SGR_UNDERLINE_SINGLE = 1,
   GHOSTTY_SGR_UNDERLINE_DOUBLE = 2,
   GHOSTTY_SGR_UNDERLINE_CURLY = 3,
   GHOSTTY_SGR_UNDERLINE_DOTTED = 4,
   GHOSTTY_SGR_UNDERLINE_DASHED = 5,
+  GHOSTTY_SGR_UNDERLINE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySgrUnderline;
 
 /**

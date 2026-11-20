@@ -35,11 +35,12 @@ extern "C" {
 /**
  * Build optimization mode.
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_OPTIMIZE_DEBUG = 0,
   GHOSTTY_OPTIMIZE_RELEASE_SAFE = 1,
   GHOSTTY_OPTIMIZE_RELEASE_SMALL = 2,
   GHOSTTY_OPTIMIZE_RELEASE_FAST = 3,
+  GHOSTTY_OPTIMIZE_MODE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyOptimizeMode;
 
 /**
@@ -47,7 +48,7 @@ typedef enum {
  *
  * Each variant documents the expected output pointer type.
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   /** Invalid data type. Never results in any data extraction. */
   GHOSTTY_BUILD_INFO_INVALID = 0,
 
@@ -108,12 +109,21 @@ typedef enum {
   GHOSTTY_BUILD_INFO_VERSION_PATCH = 8,
 
   /**
+   * The pre metadata string (e.g. "alpha", "beta", "dev"). Has zero length if
+   * no pre metadata is present.
+   *
+   * Output type: GhosttyString *
+   */
+  GHOSTTY_BUILD_INFO_VERSION_PRE = 9,
+
+  /**
    * The build metadata string (e.g. commit hash). Has zero length if
    * no build metadata is present.
    *
    * Output type: GhosttyString *
    */
-  GHOSTTY_BUILD_INFO_VERSION_BUILD = 9,
+  GHOSTTY_BUILD_INFO_VERSION_BUILD = 10,
+  GHOSTTY_BUILD_INFO_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyBuildInfo;
 
 /**

@@ -663,6 +663,8 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
             .rows = grid_size.rows,
             .max_scrollback = opts.full_config.@"scrollback-limit",
             .default_modes = default_modes,
+            .default_cursor_style = opts.config.cursor_style,
+            .default_cursor_blink = opts.config.cursor_blink,
             .colors = .{
                 .background = .init(opts.config.background.toTerminalRGB()),
                 .foreground = .init(opts.config.foreground.toTerminalRGB()),
@@ -673,23 +675,11 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
                 },
                 .palette = .init(opts.config.palette),
             },
+            .kitty_image_storage_limit = opts.config.image_storage_limit,
+            .kitty_image_loading_limits = .all,
         };
     });
     errdefer term.deinit(alloc);
-
-    // Set the image size limits
-    var it = term.screens.all.iterator();
-    while (it.next()) |entry| {
-        const screen: *terminalpkg.Screen = entry.value.*;
-        try screen.kitty_images.setLimit(
-            alloc,
-            screen,
-            opts.config.image_storage_limit,
-        );
-    }
-
-    // Set our default cursor style
-    term.screens.active.cursor.cursor_style = opts.config.cursor_style;
 
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
@@ -714,8 +704,6 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .osc_color_report_format = opts.config.osc_color_report_format,
         .clipboard_write = opts.config.clipboard_write,
         .enquiry_response = opts.config.enquiry_response,
-        .default_cursor_style = opts.config.cursor_style,
-        .default_cursor_blink = opts.config.cursor_blink,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
@@ -912,16 +900,9 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
         log.warn("error sending color scheme report err={}", .{err});
     };
 
-    // Set the image size limits
-    var it = self.terminal.screens.all.iterator();
-    while (it.next()) |entry| {
-        const screen: *terminalpkg.Screen = entry.value.*;
-        try screen.kitty_images.setLimit(
-            self.alloc,
-            screen,
-            config.image_storage_limit,
-        );
-    }
+    // Set the image limits
+    try self.terminal.setKittyGraphicsSizeLimit(self.alloc, config.image_storage_limit);
+    self.terminal.setKittyGraphicsLoadingLimits(.all);
 }
 
 /// Replace the live derived config. Split out so the ordering contract with
@@ -966,17 +947,15 @@ pub fn resize(
         // Update the size of our terminal state
         try self.terminal.resize(
             self.alloc,
-            grid_size.columns,
-            grid_size.rows,
+            .{
+                .cols = grid_size.columns,
+                .rows = grid_size.rows,
+                .cell_size_px = .{
+                    .width = self.size.cell.width,
+                    .height = self.size.cell.height,
+                },
+            },
         );
-
-        // Update our pixel sizes
-        self.terminal.width_px = grid_size.columns * self.size.cell.width;
-        self.terminal.height_px = grid_size.rows * self.size.cell.height;
-
-        // Disable synchronized output mode so that we show changes
-        // immediately for a resize. This is allowed by the spec.
-        self.terminal.modes.set(.synchronized_output, false);
 
         // If we have size reporting enabled we need to send a report.
         if (self.terminal.modes.get(.in_band_size_reports)) {
@@ -1011,15 +990,19 @@ pub fn resizeBeforeThreadStart(
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
 
+        // Upstream's resize also sets the pixel size from the cell size and
+        // resets synchronized output, as this did by hand before.
         try self.terminal.resize(
             self.alloc,
-            grid_size.columns,
-            grid_size.rows,
+            .{
+                .cols = grid_size.columns,
+                .rows = grid_size.rows,
+                .cell_size_px = .{
+                    .width = self.size.cell.width,
+                    .height = self.size.cell.height,
+                },
+            },
         );
-
-        self.terminal.width_px = grid_size.columns * self.size.cell.width;
-        self.terminal.height_px = grid_size.rows * self.size.cell.height;
-        self.terminal.modes.set(.synchronized_output, false);
     }
 
     self.renderer_state.noteWakeSource(.mailbox);
@@ -1724,8 +1707,6 @@ test "issue149 config change writes exactly one color scheme report" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,

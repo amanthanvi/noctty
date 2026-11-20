@@ -1554,8 +1554,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 //     std.log.err("[updateFrame critical time] start={}\tduration={} us", .{ start_micro, end.since(start) / std.time.ns_per_us });
                 // }
 
-                state.mutex.lock();
-                defer state.mutex.unlock();
+                // Lock while signaling demand so the IO parse thread
+                // can't starve us. See renderer.State.lockDemand.
+                state.lockDemand();
+                defer state.unlockDemand();
 
                 const cursor_blinking = state.terminal.modes.get(.cursor_blinking);
 
@@ -1595,8 +1597,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const pre_update_rows = self.terminal_state.rows;
                 const pre_update_cols = self.terminal_state.cols;
 
-                // Update our terminal state
-                try self.terminal_state.update(self.alloc, state.terminal);
+                // Begin the update of our terminal state. Work that
+                // doesn't require terminal access (e.g. style
+                // denormalization) is deferred to the endUpdate call
+                // outside of this critical section, keeping our lock
+                // hold time as short as possible.
+                try self.terminal_state.beginUpdate(
+                    self.alloc,
+                    state.terminal,
+                );
                 state.drawn_undirtied = .init(state.terminal);
 
                 // Cached search pins target row geometry. If the grid
@@ -1693,6 +1702,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .output_progress = state.outputProgress(),
                 };
             };
+
+            // Outside the critical area, complete the update we began
+            // within it. This must be done before anything reads the
+            // render state (e.g. rebuildCells).
+            self.terminal_state.endUpdate();
 
             // Outside the critical area we can update our links to contain
             // our regex results.

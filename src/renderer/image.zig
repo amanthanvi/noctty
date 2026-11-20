@@ -257,9 +257,9 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                     return;
                 };
 
-                // For transmit time we always just use the current time
-                // and overwrite the overlay.
-                const transmit_time = try std.time.Instant.now();
+                // Overlays are always considered new content, so we take a
+                // fresh generation stamp to force replacing any existing one.
+                const generation = terminal.kitty.graphics.nextGeneration();
 
                 // Ensure we have space for our overlay placement. Do this before
                 // we upload our image so we don't have to deal with cleaning
@@ -272,7 +272,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 try self.prepImage(
                     alloc,
                     .overlay,
-                    transmit_time,
+                    generation,
                     pending,
                 );
                 errdefer comptime unreachable;
@@ -491,7 +491,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
 
                 // Calculate the dimensions of our image, taking in to
                 // account the rows / columns specified by the placement.
-                const dest_size = p.calculatedSize(image.*, t);
+                const dest_size = p.pixelSize(image.*, t);
                 const cell_offset = p.cellOffset(t);
 
                 const source = p.sourceRect(image.*);
@@ -581,14 +581,14 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 self: *State,
                 alloc: Allocator,
                 id: Id,
-                transmit_time: std.time.Instant,
+                generation: u64,
                 pending: Image.Pending,
             ) PrepImageError!void {
-                // If this image exists and its transmit time is the same we assume
-                // it is the identical image so we don't need to send it to the GPU.
+                // If this image exists and its generation is the same it is the
+                // identical image so we don't need to send it to the GPU.
                 const gop = try self.images.getOrPut(alloc, id);
                 if (gop.found_existing and
-                    gop.value_ptr.transmit_time.order(transmit_time) == .eq)
+                    gop.value_ptr.generation == generation)
                 {
                     return;
                 }
@@ -626,7 +626,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 if (!gop.found_existing) {
                     gop.value_ptr.* = .{
                         .image = new_image,
-                        .transmit_time = undefined,
+                        .generation = 0,
                     };
                 } else {
                     gop.value_ptr.image.markForReplace(
@@ -642,7 +642,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                     log.warn("error preparing image for upload err={}", .{err});
                     return error.ImageConversionError;
                 };
-                gop.value_ptr.transmit_time = transmit_time;
+                gop.value_ptr.generation = generation;
             }
 
             /// Prepare the provided Kitty image for upload to the GPU by copying its
@@ -655,7 +655,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 try self.prepImage(
                     alloc,
                     .{ .kitty = image.id },
-                    image.transmit_time,
+                    image.generation,
                     .{
                         .width = image.width,
                         .height = image.height,
@@ -744,7 +744,13 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
         /// The map used for storing images.
         pub const ImageMap = std.AutoHashMapUnmanaged(Id, struct {
             image: Image,
-            transmit_time: std.time.Instant,
+
+            /// The generation of the terminal image this was created from
+            /// (see terminal.kitty.graphics.Image.generation). Used to detect
+            /// staleness: a differing generation for the same ID means the
+            /// contents changed and the texture must be replaced. Zero is
+            /// never a valid stored generation so it marks "not yet uploaded".
+            generation: u64,
         });
 
         /// The state for a single image that is to be rendered.
@@ -986,14 +992,14 @@ test "image cleanup preserves live pending data without a graphics device" {
     const alloc = std.testing.allocator;
     var state: Images.State = .empty;
     defer state.deinit(alloc);
-    const time = try std.time.Instant.now();
+    const generation = terminal.kitty.graphics.nextGeneration();
     var pixel = [_]u8{ 255, 0, 0, 255 };
     const pending: Images.Image.Pending = .{ .width = 1, .height = 1, .pixel_format = .rgba, .data = &pixel };
-    try state.prepImage(alloc, .{ .kitty = 1 }, time, pending);
+    try state.prepImage(alloc, .{ .kitty = 1 }, generation, pending);
     const live = state.images.get(.{ .kitty = 1 }).?.image.pending.data;
     for (2..66) |id| {
         const key: Images.Id = .{ .kitty = @intCast(id) };
-        try state.prepImage(alloc, key, time, pending);
+        try state.prepImage(alloc, key, generation, pending);
         state.images.getPtr(key).?.image.markForUnload();
         state.cleanup(alloc);
         try std.testing.expectEqual(@as(u32, 1), state.images.count());
@@ -1006,7 +1012,7 @@ test "image cleanup preserves live pending data without a graphics device" {
             .texture = .{ .released = &released },
             .pending = .{ .width = 1, .height = 1, .pixel_format = .rgba, .data = (try alloc.dupe(u8, &pixel)).ptr },
         } },
-        .transmit_time = time,
+        .generation = generation,
     });
     state.cleanup(alloc);
     state.cleanup(alloc);
@@ -1053,7 +1059,6 @@ test "kitty placement whose rows were pruned is not drawn" {
         .height = 1,
         .format = .rgba,
         .data = try alloc.dupe(u8, &.{ 255, 0, 0, 255 }),
-        .transmit_time = try std.time.Instant.now(),
     });
     const pin = try screen.pages.trackPin(screen.pages.pin(.{ .active = .{} }).?);
     try screen.kitty_images.addPlacement(alloc, screen, 1, 1, .{
@@ -1106,7 +1111,6 @@ test "kitty renderer uses the intersected source rectangle" {
         .height = 3,
         .format = .rgb,
         .data = pixels,
-        .transmit_time = try std.time.Instant.now(),
     });
     const pin = try screen.pages.trackPin(screen.cursor.page_pin.*);
     try screen.kitty_images.addPlacement(alloc, screen, 1, 1, .{

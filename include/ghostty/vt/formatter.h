@@ -33,22 +33,6 @@ extern "C" {
  */
 
 /**
- * Output format.
- *
- * @ingroup formatter
- */
-typedef enum {
-  /** Plain text (no escape sequences). */
-  GHOSTTY_FORMATTER_FORMAT_PLAIN,
-
-  /** VT sequences preserving colors, styles, URLs, etc. */
-  GHOSTTY_FORMATTER_FORMAT_VT,
-
-  /** HTML with inline styles. */
-  GHOSTTY_FORMATTER_FORMAT_HTML,
-} GhosttyFormatterFormat;
-
-/**
  * Extra screen state to include in styled output.
  *
  * @ingroup formatter
@@ -106,13 +90,6 @@ typedef struct {
   /** Screen-level extras. */
   GhosttyFormatterScreenExtra screen;
 } GhosttyFormatterTerminalExtra;
-
-/**
- * Opaque handle to a formatter instance.
- *
- * @ingroup formatter
- */
-typedef struct GhosttyFormatterImpl* GhosttyFormatter;
 
 /**
  * Options for creating a terminal formatter.

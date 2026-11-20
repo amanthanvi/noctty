@@ -6,6 +6,7 @@ const opentype = @import("opentype.zig");
 const options = @import("main.zig").options;
 const Collection = @import("main.zig").Collection;
 const DeferredFace = @import("main.zig").DeferredFace;
+const Library = @import("main.zig").Library;
 pub const Descriptor = @import("descriptor.zig").Descriptor;
 const Variation = @import("variation.zig").Variation;
 const fontconfig = if (options.backend.hasFontconfig()) @import("fontconfig") else struct {};
@@ -163,7 +164,8 @@ fn descriptorToCoreTextDescriptor(desc: Descriptor) !CoreTextFontDescriptor {
 pub const Fontconfig = if (options.backend.hasFontconfig()) struct {
     fc_config: *fontconfig.Config,
 
-    pub fn init() Fontconfig {
+    pub fn init(lib: Library) Fontconfig {
+        _ = lib;
         // safe to call multiple times and concurrently
         _ = fontconfig.init();
         return .{ .fc_config = fontconfig.initLoadConfigAndFonts() };
@@ -260,7 +262,8 @@ pub const Fontconfig = if (options.backend.hasFontconfig()) struct {
 pub const Windows = @import("discovery_windows.zig").Windows;
 
 pub const CoreText = if (options.backend.hasCoretext()) struct {
-    pub fn init() CoreText {
+    pub fn init(lib: Library) CoreText {
+        _ = lib;
         // Required for the "interface" but does nothing for CoreText.
         return .{};
     }
@@ -817,7 +820,8 @@ pub const CoreText = if (options.backend.hasCoretext()) struct {
         }
     };
 
-    pub fn init() CoreText {
+    pub fn init(lib: Library) CoreText {
+        _ = lib;
         return .{};
     }
 
@@ -871,7 +875,10 @@ test "fontconfig" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var fc = Fontconfig.init();
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var fc = Fontconfig.init(lib);
     defer fc.deinit();
     var it = try fc.discover(alloc, .{ .family = "monospace", .size = 12 });
     defer it.deinit();
@@ -883,7 +890,10 @@ test "fontconfig codepoint" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var fc = Fontconfig.init();
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var fc = Fontconfig.init(lib);
     defer fc.deinit();
     var it = try fc.discover(alloc, .{ .codepoint = 'A', .size = 12 });
     defer it.deinit();
