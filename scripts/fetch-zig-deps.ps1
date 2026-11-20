@@ -39,7 +39,7 @@ $deps = @(
     @{ Url = "https://deps.files.ghostty.org/zf-3c52637b7e937c5ae61fd679717da3e276765b23.tar.gz"; File = "zf-3c52637b7e937c5ae61fd679717da3e276765b23.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/JetBrainsMono-2.304.tar.gz"; File = "JetBrainsMono-2.304.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz"; File = "NerdFontsSymbolsOnly-3.4.0.tar.gz" },
-    @{ Url = "https://deps.files.ghostty.org/ghostty-themes-release-20260323-152405-a2c7b60.tgz"; File = "ghostty-themes-release-20260323-152405-a2c7b60.tgz" },
+    @{ Url = "https://deps.files.ghostty.org/ghostty-themes-release-20260713-155359-c3968b3.tgz"; File = "ghostty-themes-release-20260713-155359-c3968b3.tgz" },
     @{ Url = "https://deps.files.ghostty.org/breakpad-b99f444ba5f6b98cac261cbb391d8766b34a5918.tar.gz"; File = "breakpad-b99f444ba5f6b98cac261cbb391d8766b34a5918.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/DearBindings_v0.17_ImGui_v1.92.5-docking.tar.gz"; File = "DearBindings_v0.17_ImGui_v1.92.5-docking.tar.gz" },
     @{ Url = "https://github.com/ocornut/imgui/archive/refs/tags/v1.92.5-docking.tar.gz"; File = "imgui-v1.92.5-docking.tar.gz" },
@@ -54,7 +54,6 @@ $deps = @(
     @{ Url = "https://deps.files.ghostty.org/oniguruma-1220c15e72eadd0d9085a8af134904d9a0f5dfcbed5f606ad60edc60ebeccd9706bb.tar.gz"; File = "oniguruma-1220c15e72eadd0d9085a8af134904d9a0f5dfcbed5f606ad60edc60ebeccd9706bb.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/sentry-1220446be831adcca918167647c06c7b825849fa3fba5f22da394667974537a9c77e.tar.gz"; File = "sentry-1220446be831adcca918167647c06c7b825849fa3fba5f22da394667974537a9c77e.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/spirv_cross-1220fb3b5586e8be67bc3feb34cbe749cf42a60d628d2953632c2f8141302748c8da.tar.gz"; File = "spirv_cross-1220fb3b5586e8be67bc3feb34cbe749cf42a60d628d2953632c2f8141302748c8da.tar.gz" },
-    @{ Url = "https://deps.files.ghostty.org/utfcpp-1220d4d18426ca72fc2b7e56ce47273149815501d0d2395c2a98c726b31ba931e641.tar.gz"; File = "utfcpp-1220d4d18426ca72fc2b7e56ce47273149815501d0d2395c2a98c726b31ba931e641.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz"; File = "wuffs-122037b39d577ec2db3fd7b2130e7b69ef6cc1807d68607a7c232c958315d381b5cd.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/pixels-12207ff340169c7d40c570b4b6a97db614fe47e0d83b5801a932dcd44917424c8806.tar.gz"; File = "pixels-12207ff340169c7d40c570b4b6a97db614fe47e0d83b5801a932dcd44917424c8806.tar.gz" },
     @{ Url = "https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz"; File = "zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz" }
