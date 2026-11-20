@@ -17,6 +17,13 @@ developer shell with an explicitly addressed compiler for Zig 0.17.1. Keep build
 roots and their Zig global caches on the same drive. Use task-owned scratch
 copies and caches; never build in a retained read-only plan tree.
 
+An oracle invocation selects only the `oracle` step. Its argument allowlist is
+`-Dvt-api=`, `-Doracle-corpus=`, `-Doracle-scrollback=`, `-Dsimd=`, `-Doptimize=`,
+`-Dcpu=`, `-Dcustom-shaders=` (where defined), `--prefix` (or `-p`), and
+`--summary`. Set `ZIG_GLOBAL_CACHE_DIR` for a scratch cache on the source drive.
+The always-run guard checks the original Windows Zig driver invocation on both
+compilers, including options consumed before the build script runs.
+
 From the repository root:
 
 ```text
@@ -152,15 +159,16 @@ wrong tree or dirty build is invalid evidence. Compare also refuses one exe
 hash attributed to different production or instrumented revisions.
 Identity generation verifies the paths and pinned hashes of the packages the
 **build graph actually resolved**, on both compilers. This includes
-`ZIG_LOCAL_PKG_DIR`, `--pkg-dir` and global-cache locations; package-directory
-overrides are supported by verifying their actual contents. Oracle builds refuse
-`--system` and every `-fsys=PACKAGE` selection: system headers/libraries have no
-verified package pins, even when the other packages remain vendored. It computes Zig's SHA-256
+`ZIG_LOCAL_PKG_DIR` and global-cache locations. Oracle builds refuse options
+outside the allowlist, including `--pkg-dir`, `--search-prefix`, `--sysroot`,
+`--libc`, `--system`, and `-fsys=PACKAGE`. They compute Zig's SHA-256
 package tree hash read-only, without `zig fetch` copies, archives or temporary
 package directories. Hashes are checked against build-graph pins, not directory
 names. Extra files or unsupported reparse points fail closed. Unhashed local
 package wrappers must be inside the authenticated source tree. Git ignores
 cached dependencies; their edits must not masquerade as a clean build.
+Git index flags `assume-unchanged` and `skip-worktree` can hide edits from the
+cleanliness checks, a deliberate modification outside the oracle's threat model.
 
 The request and response have checked versioned headers, counts, lengths,
 ordered record indices and exact EOF. For each input/initial size, both plain
@@ -334,7 +342,7 @@ the same harness sources across comparisons. Do not regenerate synthetic data
 on a compared tree, normalize dump bytes, excuse missing inputs, or interpret
 source/build evidence as runtime acceptance of noctty or ConPTY.
 
-Replay `pty conpty` uses exactly one ASCII separator space in both readers;
-`pty  conpty` is invalid. Staging preflights write access to every destination
+Replay `pty conpty` uses one ASCII separator space and, when present, must be
+the first directive after `size` in both readers. Staging preflights write access to every destination
 and its existing directory, including the tracked `build.zig`, before copying
 any overlay bytes. A read-only target leaves the source copy unchanged.

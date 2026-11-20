@@ -4,37 +4,44 @@ const std = @import("std");
 const Api = enum { fork, stone, stone_flag, v140, v140_fork };
 
 /// Snapshot command-line integrations before Config applies package defaults.
-pub fn systemOptionsRequested(b: *std.Build) bool {
-    if (b.graph.system_package_mode) return true;
+pub fn systemOptionsRequested(b: *std.Build) ?[]const u8 {
+    if (b.graph.system_package_mode) return "--system";
     const integrations = if (@hasField(@TypeOf(b.graph.*), "system_integration_options"))
         &b.graph.system_integration_options
     else
         &b.graph.system_library_options;
     for (integrations.values()) |mode| {
-        if (mode == .user_enabled or mode == .declared_enabled) return true;
+        if (mode == .user_enabled or mode == .declared_enabled) return "-fsys";
     }
-    return false;
+    return null;
 }
 
-pub fn add(b: *std.Build, app: *std.Build.Step.Compile, system_requested: bool) !void {
+pub fn add(b: *std.Build, app: *std.Build.Step.Compile, system_requested: ?[]const u8) !void {
     try addInner(b, app.root_module, false, system_requested);
 }
 
-pub fn addPublic(b: *std.Build, public: *std.Build.Module, system_requested: bool) !void {
+pub fn addPublic(b: *std.Build, public: *std.Build.Module, system_requested: ?[]const u8) !void {
     try addInner(b, public, true, system_requested);
 }
 
-fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_requested: bool) !void {
+fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_requested: ?[]const u8) !void {
     const step = b.step("oracle", "Build the differential terminal oracle (no capture)");
     const api = b.option(Api, "vt-api", "Terminal API shape: fork, stone, stone_flag, v140, v140_fork") orelse {
         step.dependOn(&b.addFail("oracle requires an explicit -Dvt-api").step);
         return;
     };
     const corpus = b.option(bool, "oracle-corpus", "Build the pre-side synthetic generator") orelse false;
-    if (system_requested) {
-        step.dependOn(&b.addFail("oracle: --system and every -fsys option are forbidden; system headers and libraries have no verified package pins").step);
+    if (system_requested) |option| {
+        step.dependOn(&b.addFail(b.fmt("oracle build arguments: disallowed option: {s}", .{option})).step);
         return;
     }
+    // Maker consumes some arguments before configuration and may reuse a
+    // cached graph. Check its actual invocation on every oracle build.
+    const arguments = b.addSystemCommand(&.{ "python", "-I" });
+    arguments.addFileArg(b.path("test/differential-oracle/build_args.py"));
+    arguments.addArg(b.graph.zig_exe);
+    arguments.setCwd(b.path("."));
+    arguments.has_side_effects = true;
     const compiler = std.mem.trim(u8, b.run(&.{ b.graph.zig_exe, "version" }), " \r\n");
     const modern = (try std.SemanticVersion.parse(compiler)).minor >= 17;
     if (modern and (api == .fork or api == .stone or api == .stone_flag or corpus)) {
@@ -99,6 +106,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     identity.setCwd(b.path("."));
     // HEAD and cleanliness are not file inputs in the build cache.
     identity.has_side_effects = true;
+    identity.step.dependOn(&arguments.step);
     identity.addArgs(&.{ b.graph.zig_exe, compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
     var dependencies = b.graph.dependency_cache.iterator();
     while (dependencies.next()) |entry| {
@@ -136,6 +144,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     metadata.addOption([]const u8, "optimize", if (std.mem.eql(u8, optimize, "fast")) "ReleaseFast" else if (std.mem.eql(u8, optimize, "safe")) "ReleaseSafe" else if (std.mem.eql(u8, optimize, "small")) "ReleaseSmall" else if (std.mem.eql(u8, optimize, "debug")) "Debug" else optimize);
     mod.addOptions("oracle_build", metadata);
     const exe = b.addExecutable(.{ .name = "differential-oracle", .root_module = mod, .use_llvm = true });
+    exe.step.dependOn(&arguments.step);
     step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     if (corpus) {
         const generator = b.addExecutable(.{
@@ -147,6 +156,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
             }),
             .use_llvm = true,
         });
+        generator.step.dependOn(&arguments.step);
         step.dependOn(&b.addInstallArtifact(generator, .{}).step);
     }
 }

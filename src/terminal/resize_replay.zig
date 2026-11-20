@@ -6,7 +6,7 @@
 //!
 //!   # comment
 //!   size <cols> <rows>      create the terminal (first command)
-//!   pty conpty              the bytes come from Windows ConPTY (see below)
+//!   pty conpty              optional, immediately after size (see below)
 //!   send <text>             feed bytes; escapes \e \r \n \t \\ \xHH (use
 //!                           \x20 for a leading space)
 //!   seq <pre> <a> <b> [suf] feed "<pre><n><suf>\r\n" for n = a..b, with the
@@ -180,6 +180,7 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
 
     var lines = std.mem.splitScalar(u8, script, '\n');
     var line_no: usize = 0;
+    var pty_allowed = false;
     while (lines.next()) |raw| {
         line_no += 1;
         const line = std.mem.trim(u8, raw, " \r");
@@ -195,11 +196,13 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
             try noMoreWords(name, line_no, &words);
             term = try Terminal.init(alloc, .{ .cols = cols, .rows = rows });
             stream = term.?.vtStream();
+            pty_allowed = true;
             continue;
         }
         const t = if (term) |*v| v else return scriptError(name, line_no, "size must come first");
 
         if (std.mem.eql(u8, cmd, "pty")) {
+            if (!pty_allowed) return scriptError(name, line_no, "pty must immediately follow size");
             if (!std.mem.eql(u8, line, "pty conpty")) return scriptError(name, line_no, "expected pty conpty with one space");
             // What the Windows backend sets (termio Exec.initTerminal).
             t.flags.resize_pull_scrollback = false;
@@ -270,6 +273,7 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
             );
             check.record(ok);
         } else return scriptError(name, line_no, "unknown command");
+        pty_allowed = false;
     }
 
     if (failed > 0) return error.ReplayMismatch;
@@ -337,6 +341,10 @@ fn scriptError(name: []const u8, line_no: usize, message: []const u8) error{BadR
 test "resize replay: pty requires exactly one separator space" {
     try run(std.testing.allocator, "pty-single-space", "size 4 2\npty conpty\nsend A\n", .quiet);
     try std.testing.expectError(error.BadReplayScript, run(std.testing.allocator, "pty-double-space", "size 4 2\npty  conpty\nsend A\n", .quiet));
+}
+
+test "resize replay: pty must immediately follow size" {
+    try std.testing.expectError(error.BadReplayScript, run(std.testing.allocator, "pty-after-send", "size 4 2\nsend A\npty conpty\n", .quiet));
 }
 
 /// Decode the escapes a `send` line may use into `buf`, which must be at

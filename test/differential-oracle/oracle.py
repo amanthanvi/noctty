@@ -121,6 +121,7 @@ def replay(data):
     initial = None
     conpty = False
     expecting = False
+    pty_allowed = False
     for raw in data.decode("utf-8").split("\n"):
         line = raw.strip(" \r")
         if not line or line.startswith("#"):
@@ -140,7 +141,9 @@ def replay(data):
                 raise ValueError("bad replay initial size")
             initial = [int(x) for x in words]
         elif cmd == "pty":
-            if rest != "conpty" or operations:
+            if not pty_allowed:
+                raise ValueError("replay pty must immediately follow size")
+            if rest != "conpty":
                 raise ValueError("bad replay pty directive")
             conpty = True
         elif cmd == "send":
@@ -172,6 +175,7 @@ def replay(data):
                 raise ValueError("bad replay cursor")
         else:
             raise ValueError("unknown replay command")
+        pty_allowed = cmd == "size"
     if initial is None or expecting:
         raise ValueError("unfinished replay")
     return operations, conpty, initial
@@ -1370,6 +1374,11 @@ def controls(args):
         lambda: replay(b"size 4 2\npty  conpty\nsend A\n"),
         "bad replay pty directive",
     )
+    rejects(
+        "pty must immediately follow size",
+        lambda: replay(b"size 4 2\nsend A\npty conpty\n"),
+        "pty must immediately follow size",
+    )
     for newline in ("\n", "\r\n"):
         payload = "A\u2028#B\u0085C\vD\fE".encode()
         script = ("size 4 2" + newline).encode() + b"send " + payload + newline.encode()
@@ -1690,11 +1699,12 @@ def controls(args):
         "wrong shipped mismatch value",
         lambda: comp(
             roots[0],
-            roots[0],
+            mirror_pre(),
             shipped_declarations=[
                 dict(row, old={"present": True, "value": False}) for row in shipping
             ],
         ),
+        "values are stale",
     )
     for run in ("run-1", "run-2"):
         (roots[0].parent / run / "manifest.json").write_bytes(pre_manifest)
