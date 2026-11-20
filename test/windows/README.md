@@ -831,9 +831,14 @@ Three layers keep those launches quiet.
 What none of the three sees: an edit outside every region that acts on its
 own before the last check runs (an unpinned helper the flow calls first, such
 as `Wait-AccessibilityCondition`, pressing Save itself, or an asynchronous
-event handler registered elsewhere), and a name built at run time that
-replaces a checker. An include such a helper writes before the last check is
-still refused at run time.
+event handler registered elsewhere), or after a save's `Invoke()` returns,
+while noctty is still saving and reloading (UI Automation's `Invoke` does not
+wait for the click, and the wait after it is unpinned); a function whose name
+itself carries the module qualifier (`function
+Microsoft.PowerShell.Management\Start-Process`, which PowerShell then runs for
+that qualified call); and a name built at run time that replaces a checker. An
+include such a helper writes before the last check is still refused at run
+time.
 
 The contract runs the leaf's reading on synthetic command lines under
 PowerShell 7 and Windows PowerShell 5.1, the run-time check against a stand-in
@@ -864,13 +869,14 @@ script uses a variable or alias cmdlet (by any module-qualified name too),
 `Import-Alias`, `Invoke-Expression`, a `function:`, `variable:` or `alias:`
 drive, a `data` section, `[scriptblock]::Create`, `SessionState`,
 `SessionStateProxy`, `$PSCmdlet`, `$PSDefaultParameterValues`, a function named
-like a cmdlet the regions call, or `&`/`.` on a name built by an expression.
+like a cmdlet the regions call (by its bare name), or `&`/`.` on a name built
+by an expression.
 The regions call `Start-Process` and `Join-Path` by their module, and nothing
 but the cmdlets the contract lists and functions the job scripts define. No
 `finally` block of the leaf, nor any function one calls, can end it before its
-final throw: no `exit`, and no `break` or `continue` outside a loop of its own
-script block; the flow statements inside the finally blocks are pinned one by
-one.
+final throw: no `exit`, `[Environment]::Exit(...)` or `$Host.SetShouldExit(...)`,
+and no `break` or `continue` outside a loop of its own script block; the flow
+statements inside the finally blocks are pinned one by one.
 Every statement of the save flow (the flags, class names and arrays, both
 launches and their run-time checks, the probes, both saves and the four
 sandbox checks) is a direct statement of the one block that holds the

@@ -607,7 +607,12 @@ foreach ($toastControl in @(
 # `$arguments = @(...)`, the only plain assignment of `$arguments`, comes first,
 # then `if ($DeferCommandFinish) { $arguments += '-DeferCommandFinish' }`, then,
 # as the very next statement, so nothing can write `$arguments` between them,
-# the one `powershell.exe` call, which splats `@arguments`.
+# the one `powershell.exe` call, which splats `@arguments`. The switch is only
+# read, as the composite's is: the name appears as its declaration and as that
+# if's whole condition and nowhere else, no string names it but the one
+# literal `-DeferCommandFinish` token the append adds, and the wrapper uses
+# neither `$PSBoundParameters` nor a variable cmdlet (Sol M, round 7: a
+# `$DeferCommandFinish = $false` before the append passed).
 $testWrapperForwarding = {
     param([string] $Text)
     $ast = & $parseToastScript $Text 'Invoke-InteractiveWin11.ps1'
@@ -623,6 +628,23 @@ $testWrapperForwarding = {
                 $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
                 [string]::Equals($node.Left.VariablePath.UserPath, 'arguments', [StringComparison]::OrdinalIgnoreCase) }, $true))
     if ($appends.Count -ne 1 -or $calls.Count -ne 1 -or $builds.Count -ne 1 -or $calls[0].Parent -isnot [System.Management.Automation.Language.PipelineAst]) { return $false }
+    $switchUses = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.VariablePath.UserPath -match '^(?i)((global|local|script|private|variable|using):)?DeferCommandFinish$' }, $true))
+    if ($switchUses.Count -ne 2) { return $false }
+    foreach ($use in $switchUses) {
+        if ($use.Parent -is [System.Management.Automation.Language.ParameterAst]) { continue }
+        if (-not (& $same $use.VariablePath.UserPath 'DeferCommandFinish') -or $use.Parent -isnot [System.Management.Automation.Language.CommandExpressionAst] -or
+            -not [object]::ReferenceEquals($use.Parent.Parent, $appends[0].Clauses[0].Item1)) { return $false }
+    }
+    $switchNames = @($ast.FindAll({ param($node) ($node -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                    $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) -and
+                $node.Value.IndexOf('DeferCommandFinish', [StringComparison]::OrdinalIgnoreCase) -ge 0 }, $true))
+    if ($switchNames.Count -ne 1 -or -not (& $same $switchNames[0].Value '-DeferCommandFinish') -or
+        $switchNames[0].Extent.StartOffset -lt $appends[0].Extent.StartOffset -or $switchNames[0].Extent.EndOffset -gt $appends[0].Extent.EndOffset) { return $false }
+    if (@($ast.FindAll({ param($node) ($node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $node.VariablePath.UserPath -match '^(?i)((global|local|script|private|variable):)?PSBoundParameters$') -or
+                    ($node -is [System.Management.Automation.Language.CommandAst] -and $null -ne $node.GetCommandName() -and
+                        $node.GetCommandName().Substring($node.GetCommandName().LastIndexOf([char]'\') + 1) -in @('Set-Variable', 'New-Variable', 'Clear-Variable', 'Remove-Variable', 'sv', 'set', 'nv', 'clv', 'rv')) }, $true)).Count -ne 0) { return $false }
     $splats = @($calls[0].CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and $_.Splatted })
     if ($splats.Count -ne 1 -or -not (& $same $splats[0].VariablePath.UserPath 'arguments')) { return $false }
     $statements = @($appends[0].Parent.Statements)
@@ -644,7 +666,13 @@ foreach ($toastControl in @(
         @{ Name = 'a typed write that drops the switch before the call (CodeRabbit)'; From = $wrapperCall; To = "    [string[]] `$arguments = `$arguments | Where-Object { `$_ -ne '-DeferCommandFinish' }`n$wrapperCall" },
         @{ Name = 'the call splatting another array'; From = $wrapperCall; To = "    & powershell.exe @otherArguments *> `$rawTranscriptPath`n" },
         @{ Name = 'the append to another array'; From = $wrapperAppend; To = "    if (`$DeferCommandFinish) { `$otherArguments += '-DeferCommandFinish' }`n" },
-        @{ Name = 'the switch undeclared'; From = '    [switch] $DeferCommandFinish'; To = '    [string] $DeferCommandFinish' }
+        @{ Name = 'the switch undeclared'; From = '    [switch] $DeferCommandFinish'; To = '    [string] $DeferCommandFinish' },
+        @{ Name = 'the switch cleared before the append (Sol M, round 7)'; From = $wrapperAppend; To = "    `$DeferCommandFinish = `$false`n$wrapperAppend" },
+        @{ Name = 'the switch cleared in script scope'; From = $wrapperAppend; To = "    [bool]`$script:DeferCommandFinish = `$false`n$wrapperAppend" },
+        @{ Name = 'the switch cleared by Set-Variable on a built name'; From = $wrapperAppend; To = "    Microsoft.PowerShell.Utility\Set-Variable -Name ('Defer' + 'CommandFinish') -Value `$false`n$wrapperAppend" },
+        @{ Name = 'the switch read through PSBoundParameters'; From = $wrapperAppend; To = "    `$null = `$PSBoundParameters.Remove('Rebuild')`n$wrapperAppend" },
+        @{ Name = 'the switch passed on another way'; From = $wrapperAppend; To = "$wrapperAppend    Write-Host `$DeferCommandFinish`n" },
+        @{ Name = 'the token appended twice'; From = $wrapperAppend; To = "$wrapperAppend    `$extraToken = '-DeferCommandFinish'`n" }
     )) {
     $wrapperMutated = $flagshipInteractiveText
     foreach ($wrapperEdit in @(, @($toastControl.From, $toastControl.To)) + @(if ($toastControl.ContainsKey('Then')) { $toastControl.Then })) {
@@ -753,13 +781,17 @@ $readJobFiles = {
         # A literal child of `Join-Path $repoRoot` or `Join-Path $PSScriptRoot`
         # resolves against that base alone, as PowerShell resolves it.
         $joinBases = @{}
-        foreach ($join in $parsedFile.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and
-                    [string]::Equals($node.GetCommandName(), 'Join-Path', [StringComparison]::OrdinalIgnoreCase) }, $true)) {
+        foreach ($join in $parsedFile.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $null -ne $node.GetCommandName() -and
+                    [string]::Equals($node.GetCommandName().Substring($node.GetCommandName().LastIndexOf([char]'\') + 1), 'Join-Path', [StringComparison]::OrdinalIgnoreCase) }, $true)) {
+            # `Join-Path $base 'x.ps1'`, by its module or not, or with -Path and -ChildPath.
             $elements = @($join.CommandElements)
-            if ($elements.Count -ne 3 -or $elements[1] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
-                $elements[2] -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
-            if ([string]::Equals($elements[1].VariablePath.UserPath, 'repoRoot', [StringComparison]::OrdinalIgnoreCase)) { $joinBases[$elements[2].Extent.StartOffset] = '' }
-            elseif ([string]::Equals($elements[1].VariablePath.UserPath, 'PSScriptRoot', [StringComparison]::OrdinalIgnoreCase)) { $joinBases[$elements[2].Extent.StartOffset] = $directory }
+            $joinBase = & $getNamedArgument $join 'Path'
+            $joinChild = & $getNamedArgument $join 'ChildPath'
+            if ($null -eq $joinBase -and $null -eq $joinChild -and $elements.Count -eq 3) { $joinBase = $elements[1]; $joinChild = $elements[2] }
+            if ($joinBase -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+                $joinChild -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+            if ([string]::Equals($joinBase.VariablePath.UserPath, 'repoRoot', [StringComparison]::OrdinalIgnoreCase)) { $joinBases[$joinChild.Extent.StartOffset] = '' }
+            elseif ([string]::Equals($joinBase.VariablePath.UserPath, 'PSScriptRoot', [StringComparison]::OrdinalIgnoreCase)) { $joinBases[$joinChild.Extent.StartOffset] = $directory }
         }
         foreach ($token in $parsedFile.Tokens) {
             if ($token -isnot [System.Management.Automation.Language.StringToken] -or $token.Value -notmatch '\.ps1$') { continue }
@@ -1000,17 +1032,21 @@ if (-not $toastSiblingDiscovered.ContainsKey($toastSiblingHelper) -or
 # name beside the leaf: the root one is read and its source found, the
 # sibling is not read (CodeRabbit; Sol's round-6 Low).
 $toastRootHelper = 'interactive-win11-extra-root-helper.ps1'
-$toastBothDiscovered = & $readJobFiles {
-    param([string] $File)
-    if ($File -ceq $toastRootHelper) { return "`$null = '--notify-on-command-finish=always'" }
-    if ($File -ceq "test\windows\$toastRootHelper") { return "`$null = 'quiet'" }
-    $text = & $readRepositoryFile $File
-    if ($File -ceq $nonToastLeaf) { $text += "`n. (Join-Path `$repoRoot '$toastRootHelper')" }
-    $text
-}
-if (-not $toastBothDiscovered.ContainsKey($toastRootHelper) -or $toastBothDiscovered.ContainsKey("test\windows\$toastRootHelper") -or
-    @(& $findToastSources $toastRootHelper $toastBothDiscovered[$toastRootHelper]).Count -ne 1) {
-    throw 'The toast-source inventory must read the script Join-Path $repoRoot names, not a sibling of that name.'
+# The same by its module and with -Path and -ChildPath (Sol Low, round 7).
+foreach ($toastJoin in @("Join-Path `$repoRoot '$toastRootHelper'", "Microsoft.PowerShell.Management\Join-Path `$repoRoot '$toastRootHelper'",
+        "Join-Path -Path `$repoRoot -ChildPath '$toastRootHelper'")) {
+    $toastBothDiscovered = & $readJobFiles {
+        param([string] $File)
+        if ($File -ceq $toastRootHelper) { return "`$null = '--notify-on-command-finish=always'" }
+        if ($File -ceq "test\windows\$toastRootHelper") { return "`$null = 'quiet'" }
+        $text = & $readRepositoryFile $File
+        if ($File -ceq $nonToastLeaf) { $text += "`n. ($toastJoin)" }
+        $text
+    }
+    if (-not $toastBothDiscovered.ContainsKey($toastRootHelper) -or $toastBothDiscovered.ContainsKey("test\windows\$toastRootHelper") -or
+        @(& $findToastSources $toastRootHelper $toastBothDiscovered[$toastRootHelper]).Count -ne 1) {
+        throw "The toast-source inventory must read the script $toastJoin names, not a sibling of that name."
+    }
 }
 # And a script it cannot find fails it.
 $toastUnfound = $null
@@ -1054,10 +1090,14 @@ if ($null -eq $toastUnfound -or -not $toastUnfound.Contains('which the toast-sou
 # (C) The static grammar names what changed. It refuses every form it does not
 #     list; it evaluates no PowerShell, so a name built at run time is the
 #     run-time checks' to catch. Its rules, (1) to (7):
-# (1) Saves. Exactly one `Invoke-AccessibilitySettingsCloseAction` with
-#     `-ActionName 'Save and close'`, on `-SettingsProbe $saveProbe`, exactly
-#     one `.Save.TryGetCurrentPattern(`, on `$verifyScrollback.Save`, and
-#     exactly one `$restoreInvoke.Invoke()`.
+# (1) Saves. Exactly one close-prompt action named 'Save and close', every
+#     action name single-quoted: a `Get-AccessibilitySettingsCloseActionInvoke`
+#     on `-SettingsProbe $saveProbe`, written once to `$saveCloseInvoke`, read
+#     once, and pressed as `$saveCloseInvoke.Invoke()`, the statement right
+#     after the 'before the probe saves' check; exactly one
+#     `.Save.TryGetCurrentPattern(`, on `$verifyScrollback.Save`, and exactly
+#     one `$restoreInvoke.Invoke()`, the statement right after the 'before the
+#     verifier saves' check.
 # (2) Probes and processes. `$saveProbe = Open-AccessibilitySettingsProbe
 #     -Process $saveProbeProcess ...`, `$saveVerifyProbe = ... -Process
 #     $saveVerifyProcess ...`, `$verifyScrollback = Get-AccessibilityScrollbackProbe
@@ -2118,7 +2158,8 @@ if (-not (& $runQuietCheck $accessibilityText $launchLibraryText $saveOthers)) {
 # block, since one in a `ForEach-Object` block unwinds past its caller. The
 # parser itself refuses a `return`, `break` or `continue` that leaves a
 # finally (ControlLeavingFinally, under PowerShell 7 and 5.1), and so does
-# this check. A finally may run a script block only inline or by a function's
+# this check. `[Environment]::Exit(...)` and `$Host.SetShouldExit(...)` count as
+# an `exit` (Opus L1, round 7). A finally may run a script block only inline or by a function's
 # name. The flow statements inside the finally blocks themselves are pinned
 # one by one ($saveFinallyFlows): today two loop `continue`s in cleanup loops
 # and two `return`s of `Wait-AccessibilityCondition` script blocks; the
@@ -2141,17 +2182,29 @@ $testFinallyFlow = {
             $list.Add($function)
         }
     }
+    # `[Environment]::Exit(...)` ends the process and `$Host.SetShouldExit(...)`
+    # the host, as `exit` does (Opus L1, round 7).
+    $isHostExit = {
+        param($Node)
+        if ($Node -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst]) { return $false }
+        $member = $Node.Member.Extent.Text
+        if ([string]::Equals($member, 'SetShouldExit', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        $Node.Static -and [string]::Equals($member, 'Exit', [StringComparison]::OrdinalIgnoreCase) -and
+            $Node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+            $Node.Expression.TypeName.FullName -match '^(?i)(System\.)?Environment$'
+    }
     $flowsIn = {
         param($Node)
         @($Node.FindAll({
                     param($inner)
                     $inner -is [System.Management.Automation.Language.ExitStatementAst] -or $inner -is [System.Management.Automation.Language.ReturnStatementAst] -or
-                        $inner -is [System.Management.Automation.Language.BreakStatementAst] -or $inner -is [System.Management.Automation.Language.ContinueStatementAst]
+                        $inner -is [System.Management.Automation.Language.BreakStatementAst] -or $inner -is [System.Management.Automation.Language.ContinueStatementAst] -or
+                        (& $isHostExit $inner)
                 }, $true))
     }
     $endsEarly = {
         param($Flow)
-        if ($Flow -is [System.Management.Automation.Language.ExitStatementAst]) { return $true }
+        if ($Flow -is [System.Management.Automation.Language.ExitStatementAst] -or (& $isHostExit $Flow)) { return $true }
         if ($Flow -is [System.Management.Automation.Language.ReturnStatementAst]) { return $false }
         if ($null -ne $Flow.Label) { return $true }
         for ($at = $Flow.Parent; $null -ne $at; $at = $at.Parent) {
@@ -2206,7 +2259,10 @@ foreach ($toastControl in @(
         @{ Name = 'break inside a ForEach-Object block in the history finally'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    1 | ForEach-Object { break }`n}" },
         @{ Name = 'a script block run by variable in the history finally'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    & `$historyCleanup`n}" },
         @{ Name = 'a new loop continue in the main finally'; From = "catch {`n    `$runFailure = `$_`n}`nfinally {`n"; To = "catch {`n    `$runFailure = `$_`n}`nfinally {`n    foreach (`$unused in @()) { continue }`n" },
-        @{ Name = 'exit in a function the leaf''s finally calls'; From = "    if (-not `$Existed) {`n"; To = "    exit 0`n    if (-not `$Existed) {`n" }
+        @{ Name = 'exit in a function the leaf''s finally calls'; From = "    if (-not `$Existed) {`n"; To = "    exit 0`n    if (-not `$Existed) {`n" },
+        @{ Name = '[Environment]::Exit after the history guard (Opus L1, round 7)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    [Environment]::Exit(0)`n}" },
+        @{ Name = '$Host.SetShouldExit after the history guard (Opus L1, round 7)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    `$Host.SetShouldExit(0)`n}" },
+        @{ Name = '[System.Environment]::Exit in a function the main finally calls (Opus L1, round 7)'; From = "function Stop-AccessibilityEditEventCapture {`n"; To = "function Stop-AccessibilityEditEventCapture {`n    if (`$null -ne `$runFailure) { [System.Environment]::Exit(0) }`n" }
     )) {
     $toastMutated = $accessibilityText
     if (([regex]::Matches($toastMutated, [regex]::Escape($toastControl.From))).Count -ne 1) { throw "Finally-flow control '$($toastControl.Name)' lost its anchor." }
