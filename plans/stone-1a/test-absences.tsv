@@ -1,0 +1,19 @@
+# 1A ledgered test absences (PLAN.md r46a §3.2 "ledgered absence", decision 32): tests of the stepping stone 74d0c72fd's
+# floor, or upstream tests the merge brings, that stone-1a does not run on Windows. Each names its reason and the
+# lead decision or ledger row it rests on. state: absent (the test text is not in the branch) or not-compiled (the
+# text is present but no Windows test build compiles the file; to be confirmed by 1A.6's ran list).
+test	upstream_commit	state	reason	decision	ledger
+src/termio/Exec.zig :: execCommand windows: bare cmd.exe resolves via COMSPEC	8c5b8ac3c	absent	tests upstream ef7ecbd3e's Windows shell launch, which the fork refuses: fork-owned Windows launch semantics (#151's cmd.exe /C trampoline, ExecCommand.windows_cmd_shell)	LEAD Qg07-1 2026-11-20	src/termio/Exec.zig clean:execCommand-windows-shell
+src/termio/Exec.zig :: execCommand windows: bare non-cmd shell is passed through	8c5b8ac3c	absent	tests the refused ef7ecbd3e launch (as above): the fork runs every shell-form command through cmd.exe /C	LEAD Qg07-1 2026-11-20	src/termio/Exec.zig clean:execCommand-windows-shell
+src/termio/Exec.zig :: execCommand windows: shell with args is split on whitespace	8c5b8ac3c	absent	pins the whitespace split #151 fixed (a quoted path with a space is split): refused, fork-owned Windows launch semantics	LEAD Qg07-1 2026-11-20	src/termio/Exec.zig clean:execCommand-windows-shell
+src/termio/Exec.zig :: execCommand windows: direct command is passed through unchanged	8c5b8ac3c	absent	duplicates the fork's own test "execCommand windows-direct-command-line keeps argv", which stays: fork-owned Windows launch semantics	LEAD Qg07-1 2026-11-20	src/termio/Exec.zig clean:execCommand-windows-shell
+src/font/DeferredFace.zig :: coretext	12c9482d4	absent	CoreText does not exist on Windows; the fork deleted the test with PKG-66 (1ba1d5e43); on Windows font.DeferredFace is DeferredFace_windows.zig (decision 12)	LEAD Qg08-1 2026-11-20	src/font/DeferredFace.zig 4/4
+src/font/DeferredFace.zig :: fontconfig	b11ed06fc	not-compiled	the text stays; on Windows font.DeferredFace is DeferredFace_windows.zig (decision 12), so no Windows build compiles DeferredFace.zig's tests; fontconfig does not exist on Windows	LEAD Qg08-1 2026-11-20	src/font/DeferredFace.zig 4/4
+src/font/discovery.zig :: windows	5aef2541b	absent	tests upstream's Windows directory scanner (61fce4d0a, fe2a90978), removed under the fork's Windows font backend (decision 12, §2.3); the fork's discovery_windows.zig tests cover Windows discovery	LEAD Qg08-1 2026-11-20	src/font/discovery.zig clean:upstream-windows-scanner
+src/font/discovery.zig :: coretext	(base)	absent	CoreText does not exist on Windows (decision 12); the fork's discovery.zig keeps no CoreText tests	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
+src/font/discovery.zig :: coretext codepoint	(base)	absent	as above	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
+src/font/discovery.zig :: coretext sorting	34f08a450	absent	as above	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
+src/font/discovery.zig :: fontconfig	(base)	not-compiled	the text stays; no Windows build compiles discovery.zig's fontconfig arm (decision 12); fontconfig does not exist on Windows	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
+src/font/discovery.zig :: fontconfig codepoint	(base)	not-compiled	as above	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
+src/font/discovery.zig :: descriptor hash	(base)	not-compiled	the text stays; whether a Windows test build compiles it is per g08's reading (font/main.zig routes Windows discovery to discovery_windows.zig), not yet measured: 1A.6's ran list settles it	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
+src/font/discovery.zig :: descriptor hash family names	(base)	not-compiled	as above	LEAD Qg08-1 2026-11-20	src/font/discovery.zig
