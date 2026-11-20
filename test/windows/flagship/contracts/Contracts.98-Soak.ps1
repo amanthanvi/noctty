@@ -99,7 +99,7 @@ $soakRules = @(
     @{
         Description = 'the exit code comes only from GetExitCodeProcess on the held handle: no Process object, no PID lookup'
         Pattern = '(?s)\A(?!.*(?:\.ExitCode\b|Get-Process\b|GetProcessById|WaitForExit|\.HasExited))'
-        Mutation = @('$end = "early`t$([SoakNative]::ExitCode($process))"', '$end = "early`t$((Get-Process -Id $nocttyPid).ExitCode)"')
+        Mutation = @('-ExitCode { [SoakNative]::ExitCode($process) }', '-ExitCode { (Get-Process -Id $nocttyPid).ExitCode }')
     }
     @{
         Description = 'nothing in the harness uses real input, the foreground, the clipboard, Start-Process or a recursive delete'
@@ -163,8 +163,8 @@ $soakRules = @(
     }
     @{
         Description = 'a hang must be seen by its minute''s own sample: a -HangSeconds too short to reach it is refused before the launch, and a sample that did not see the copy fail to answer is a control miss (CodeRabbit and Sol, round 2)'
-        Pattern = '(?s)if \(\$HangAtMinute -eq \$minute -and \$null -ne \$harness\.HungAtMs -and \$answeredNow -ne \$false\) \{\s*\$harness\.ControlMisses\.Add\(.*?\$hangNeeds = \[int\]\$\(if \(\$HangAt -eq ''sample''\) \{ 10 \} else \{ 60 \}\) \+ \[int\]\(\$script:ResponseBoundMs / 1000\) \+ 5\s*if \(\$HangAtMinute -gt 0 -and \$HangSeconds -lt \$hangNeeds\) \{\s*throw'
-        Mutation = @('{ 10 } else { 60 }', '{ 1 } else { 1 }')
+        Pattern = '(?s)if \(\$HangAtMinute -eq \$minute -and \$null -ne \$harness\.HungAtMs -and \$answeredNow -ne \$false\) \{\s*\$harness\.ControlMisses\.Add\(.*?\$hangLead = if \(\$HangAt -eq ''sample''\) \{ 10 \} else \{ 90 \}\s*\$hangNeeds = \$hangLead \+ \[int\]\(\$script:ResponseBoundMs / 1000\) \+ 5\s*if \(\$HangAtMinute -gt 0 -and \$HangSeconds -lt \$hangNeeds\) \{\s*throw'
+        Mutation = @('$HangSeconds -lt $hangNeeds', '$HangSeconds -lt 1')
     }
     @{
         Description = 'the hang''s sample check reads that sample''s own answer'
@@ -180,6 +180,11 @@ $soakRules = @(
         Description = 'a control asked for that did not take effect (no hang, no kill with exit code 3, no injection) fails the harness, since the judge never sees a control (Greptile, round 2)'
         Pattern = '(?s)if \(\$HangAtMinute -gt 0 -and \$null -eq \$harness\.HungAtMs\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$KillAtMinute -gt 0 -and \$null -eq \$harness\.Killed\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$InjectHandleEachMinute -and \$harness\.Injected -eq 0\) \{ \$harness\.ControlMisses\.Add\(.*?if \(\$harness\.ControlMisses\.Count -gt 0\) \{\s*Log [^\r\n]*\s*return 4\s*\}.*?elseif \(\$driverExit -eq 4\) \{ \$failed \+= '
         Mutation = @('$null -eq $harness.HungAtMs', '$false')
+    }
+    @{
+        Description = 'the driver ends through Invoke-SoakQuit, and a WM_CLOSE goes only to a window the soaked process still owns, so a post that took means the copy was there to be asked (council round 3, Sol)'
+        Pattern = '(?s)public static bool PostClose\(IntPtr h, int pid\) \{\s*int owner; GetWindowThreadProcessId\(h, out owner\);\s*return owner == pid && PostMessageW\(h, 0x10, IntPtr\.Zero, IntPtr\.Zero\);.*?\$quit = Invoke-SoakQuit -Alive \{ \[SoakNative\]::Alive\(\$process\) \}.*?-Post \{ param\(\$Window\) \[SoakNative\]::PostClose\(\$Window, \$nocttyPid\) \}.*?\$end = \$quit\.End'
+        Mutation = @('return owner == pid && PostMessageW', 'return PostMessageW')
     }
     @{
         Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI", round 1''s Opus L4)'
@@ -244,6 +249,57 @@ if (-not (Test-SoakMinimumNamed $soakRawText $soakJudgeRaw $soakMinimum)) {
 if (Test-SoakMinimumNamed ($soakRawText.Replace("($soakMinimum at least;", '(90 at least;')) $soakJudgeRaw $soakMinimum) {
     throw 'The soak minimum check accepted a stale printed hint.'
 }
+
+# The hang minimum before the launch covers the measured worst case (council round 3, Opus L2): on ReleaseFast a
+# resize hang's probe came 70.5 s after the hang began (r5-hang-resize), up to 5 s more on a minute that floods the
+# base pane, and the probe's own WM_NULL waits 5 s; a sample hang starts 10 s before the probe. The lines are taken
+# from the harness and evaluated; the control, the old 60 s lead, fails the same check.
+$hangLines = [regex]::Match($soakText, '(?m)^\s*\$hangLead = .*\r?\n\s*\$hangNeeds = .*$').Value
+if (-not $hangLines) { throw 'The soak harness has no $hangLead and $hangNeeds lines.' }
+function Get-SoakHangNeeds([string] $Lines, [string] $Mode) {
+    $script:ResponseBoundMs = 5000
+    $HangAt = $Mode
+    . ([scriptblock]::Create($Lines))
+    return $hangNeeds
+}
+function Test-SoakHangMinimum([string] $Lines) {
+    return (Get-SoakHangNeeds $Lines 'resize') -ge [Math]::Ceiling(70.5 + 5 + 5) -and (Get-SoakHangNeeds $Lines 'sample') -ge 10 + 5 + 5
+}
+if (-not (Test-SoakHangMinimum $hangLines)) { throw "The resize hang's minimum is below the measured 70.5 s to its probe, plus the base pane's flood and the probe's bound." }
+if (Test-SoakHangMinimum ($hangLines.Replace('{ 90 }', '{ 60 }'))) { throw 'The hang minimum check accepted the old 60 s resize lead.' }
+
+# The quit's end row (council round 3, Sol: a copy that left on its own between the last liveness check and the
+# posts read as a clean quit). The harness's Invoke-SoakQuit, taken from its AST, runs with test doubles: `quit`
+# only when a post took and the exit followed; no window, or a post that failed, then an exit is `unasked`.
+$soakAst = [Management.Automation.Language.Parser]::ParseFile($soakScript, [ref]$null, [ref]$null)
+$quitAst = @($soakAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-SoakQuit' }, $false))
+if ($quitAst.Count -ne 1) { throw 'The soak harness must define Invoke-SoakQuit once.' }
+$quitCases = @(
+    @{ Name = 'no window to post to, then the handle signals with 0'; Alive = $true; Windows = @(); Posts = @(); Waits = $true; Want = "unasked`t0" }
+    @{ Name = 'the window vanished, the post failed, then the handle signals with 0'; Alive = $true; Windows = @(7); Posts = @($false); Waits = $true; Want = "unasked`t0" }
+    @{ Name = 'a post took, then the copy ended with 0'; Alive = $true; Windows = @(7); Posts = @($true); Waits = $true; Want = "quit`t0" }
+    @{ Name = 'one of two posts took'; Alive = $true; Windows = @(7, 8); Posts = @($false, $true); Waits = $true; Want = "quit`t0" }
+    @{ Name = 'the copy had ended before the quit'; Alive = $false; Windows = @(7); Posts = @($true); Waits = $true; Want = "early`t0" }
+    @{ Name = 'a post took and the bound ran out'; Alive = $true; Windows = @(7); Posts = @($true); Waits = $false; Want = "stuck`t-" }
+)
+& {
+    . ([scriptblock]::Create($quitAst[0].Extent.Text))
+    foreach ($case in $quitCases) {
+        $script:quitPostIndex = 0; $script:quitStopped = $false
+        $result = Invoke-SoakQuit -Alive { $case.Alive } -Windows { $case.Windows } `
+            -Post { param($Window) $taken = $case.Posts[$script:quitPostIndex]; $script:quitPostIndex++; $taken } `
+            -Wait { $case.Waits } -ExitCode { 0 } -Stop { $script:quitStopped = $true }
+        if ($result.End -cne $case.Want) { throw "Invoke-SoakQuit gave '$($result.End -replace "`t", ' ')' for $($case.Name); want '$($case.Want -replace "`t", ' ')'." }
+        if (($case.Want -like 'stuck*') -ne $script:quitStopped) { throw "Invoke-SoakQuit's stop ran wrongly for $($case.Name)." }
+    }
+}
+$quitControl = $quitAst[0].Extent.Text.Replace("if (`$quitPosts -gt 0) { 'quit' } else { 'unasked' }", "'quit'")
+if ($quitControl -ceq $quitAst[0].Extent.Text) { throw 'The quit control changed nothing.' }
+$controlCaught = & {
+    . ([scriptblock]::Create($quitControl))
+    (Invoke-SoakQuit -Alive { $true } -Windows { @() } -Post { $false } -Wait { $true } -ExitCode { 0 } -Stop { }).End -cne "unasked`t0"
+}
+if (-not $controlCaught) { throw 'The quit test doubles did not catch a quit recorded with no post.' }
 
 # The class the launch helper composes for a soak sandbox has the shape the judge accepts, and two sandbox
 # names give two classes. The helper's functions are taken from the library and run in a child scope.

@@ -17,7 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 JUDGE = os.path.join(HERE, "soak_judge.py")
 DEFAULT_THRESHOLDS = os.path.join(HERE, "soak-thresholds.tsv")
 
-PID, START = "720", "134070000000000720"
+# The FILETIME is built at run time: main's lint (ci/test_lints.py, fixture_commit_pins) reads any 7-40 character
+# all-hex string literal in a ci/test_*.py as a commit pin that must be on main, and 18 decimal digits are hex.
+PID, START = "720", str(134070000000000720)
 SOAK_CLASS = "noctty-interactive-zig017-0123456789ab-soak-fast"
 OTHER_CLASS = "noctty-interactive-zig017-0123456789ab-soak-safe"
 METRICS_HEADER = ("minute\thandles\tthreads\tprivate_bytes\tworking_set\tcommit_charge\tgdi_objects\tuser_objects"
@@ -178,7 +180,7 @@ class PrototypeControls(JudgeCase):
                     {"PROCESS-GONE": 3, "EARLY-EXIT": 1, "EXIT-CODE": 1})
 
     def test_096_restarted_under_a_new_pid(self):
-        samples = SOAK_OK[:5] + [(6, "721", "134070000000000721", "yes")] + SOAK_OK[6:]
+        samples = SOAK_OK[:5] + [(6, "721", str(134070000000000721), "yes")] + SOAK_OK[6:]
         self.expect(self.run_dir(soak_rows(("quit", 0)), samples), {"PROCESS-CHANGED": 1})
 
     def test_097_a_hung_window(self):
@@ -536,6 +538,34 @@ class ReviewRound2(JudgeCase):
         # Sol's Low, measured: sampled_ms 60000 on every row, with late_ms to match, passed a 90-minute record.
         timing = [(m, 60000, 60003, w) for m, _, _, w in flat_timing(ok_samples(120))]
         self.judge0a(self.phase0a(timing=timing), {"MALFORMED": 119, "EARLY-SAMPLE": 119})
+
+
+class ReviewRound3(JudgeCase):
+    """Round 3's review: an exit no quit request of the harness reached (Sol's Medium, measured with a test double:
+    no window to post to, or a post that failed, then the handle signalled with 0) is a failure, judged on a complete
+    120-minute record with the repository's thresholds."""
+
+    def phase0a(self, end):
+        samples = ok_samples(120)
+        metrics = flat_metrics(samples)
+        return self.run_dir(soak_rows(end, planned=120), samples, metrics=metrics, threads=thread_rows(metrics),
+                            timing=flat_timing(samples))
+
+    def judge0a(self, d, kinds):
+        return self.expect(d, kinds, min_minutes=120, thresholds=DEFAULT_THRESHOLDS)
+
+    def test_a_quit_the_harness_asked_for_passes(self):
+        self.judge0a(self.phase0a(("quit", 0)), {})
+
+    def test_an_exit_no_quit_request_reached_fails(self):
+        out = self.judge0a(self.phase0a(("unasked", 0)), {"UNASKED-EXIT": 1})
+        self.assertIn("UNASKED-EXIT the process ended with no WM_CLOSE of the harness reaching one of its windows", out)
+
+    def test_an_unasked_exit_with_a_code_fails_on_both(self):
+        self.judge0a(self.phase0a(("unasked", 1)), {"UNASKED-EXIT": 1, "EXIT-CODE": 1})
+
+    def test_an_unasked_end_without_a_code_is_malformed(self):
+        self.judge0a(self.phase0a(("unasked", "-")), {"MALFORMED": 1})
 
 
 class LineEnds(JudgeCase):

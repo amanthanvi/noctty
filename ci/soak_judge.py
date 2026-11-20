@@ -36,6 +36,9 @@ Run directory, process rules (as the prototype):
                                                       own mode can change during a run; the job's limit holds)
                 end <TAB> quit|early <TAB> <code>     ended after the harness's quit or before it, with the code
                                                       GetExitCodeProcess gave on the held handle
+                end <TAB> unasked <TAB> <code>        ended during the quit's wait with no WM_CLOSE of the
+                                                      harness reaching one of its windows (UNASKED-EXIT): nothing
+                                                      shows the exit followed the quit
                 end <TAB> stuck <TAB> -               still running when the quit's bound ran out
   samples.tsv   <minute> <TAB> <pid>|- <TAB> <start>|- <TAB> yes|no|-
                                                       one sample a minute, minutes 1..N, each once, N at least the
@@ -84,7 +87,7 @@ the minimum fails PLAN-TOO-SHORT rather than the slope check.
 
 Fails (process rules): NO-MINIMUM, PLAN-TOO-SHORT, NO-OTHER-RUN, BAD-CLASS, SHARED-CLASS, MALFORMED,
 DUPLICATE-ROW, MISSING-ROW, NO-SAMPLES, DUPLICATE-MINUTE, MISSING-MINUTE, SHORT-RUN, PROCESS-GONE,
-PROCESS-CHANGED, HUNG, EARLY-EXIT, QUIT-TIMEOUT, EXIT-CODE, NO-CRASH-DIR, CRASH-REPORT, WER-NOT-SUPPRESSED.
+PROCESS-CHANGED, HUNG, EARLY-EXIT, UNASKED-EXIT, QUIT-TIMEOUT, EXIT-CODE, NO-CRASH-DIR, CRASH-REPORT, WER-NOT-SUPPRESSED.
 A ReleaseSafe panic exits with code 3 and writes no minidump (Zig's default panic handler; only ReleaseFast
 traps into the minidump filter), so EARLY-EXIT and EXIT-CODE are what catch it.
 
@@ -226,7 +229,7 @@ class Judge:
         if self.planned is not None and self.min_minutes is not None and self.planned < self.min_minutes:
             self.fail(f"PLAN-TOO-SHORT {self.planned} planned minutes, below the run's required {self.min_minutes}")
         wer = self.parsed("wer", lambda p: len(p) == 2 and p[1] in ("suppressed", "default"), lambda p: p[1])
-        end = self.parsed("end", lambda p: len(p) == 3 and ((p[1] in ("quit", "early")
+        end = self.parsed("end", lambda p: len(p) == 3 and ((p[1] in ("quit", "early", "unasked")
                                                               and is_count(p[2].removeprefix("-")))
                                                              or (p[1] == "stuck" and p[2] == "-")),
                           lambda p: (p[1], None if p[1] == "stuck" else int(p[2])))
@@ -272,6 +275,8 @@ class Judge:
                 self.fail(f"HUNG minute {m}: the window did not answer WM_NULL")
         if end and end[0] == "early":
             self.fail("EARLY-EXIT the process ended before the harness's quit")
+        if end and end[0] == "unasked":
+            self.fail("UNASKED-EXIT the process ended with no WM_CLOSE of the harness reaching one of its windows")
         if end and end[0] == "stuck":
             self.fail("QUIT-TIMEOUT the process was still running when the quit's bound ran out")
         elif end and end[1] != 0:

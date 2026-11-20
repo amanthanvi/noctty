@@ -51,7 +51,7 @@ thread for -HangSeconds (120): with -HangAt resize right after minute N's first 
 resize once hid, round 1's Opus H1), with -HangAt sample 10 s before minute N's sample (its positive twin);
 the judge must fail both as HUNG. A resize hang needs a churn minute (the first and every tenth minute run no
 resize), so an idle one is refused before the launch, and a hang must outlast its minute's sample (-HangSeconds
-at least 20 with sample, 70 with resize). No control is written to the judge's records: a control
+at least 20 with sample, 100 with resize). No control is written to the judge's records: a control
 is judged blind. So a control asked for that did not take effect (the hang never suspended the copy or ended
 before its minute's sample, the kill
 did not end it with exit code 3, an injection failed) fails the harness itself: the driver exits 4, and
@@ -417,7 +417,11 @@ public static class SoakNative {
     public static bool Responsive(IntPtr h, uint ms) {
         IntPtr result; return SendMessageTimeoutW(h, 0, IntPtr.Zero, IntPtr.Zero, 2, ms, out result) != IntPtr.Zero; // WM_NULL, SMTO_ABORTIFHUNG
     }
-    public static bool PostClose(IntPtr h) { return PostMessageW(h, 0x10, IntPtr.Zero, IntPtr.Zero); }
+    // WM_CLOSE to a window the soaked process still owns; false when it is gone or another process's.
+    public static bool PostClose(IntPtr h, int pid) {
+        int owner; GetWindowThreadProcessId(h, out owner);
+        return owner == pid && PostMessageW(h, 0x10, IntPtr.Zero, IntPtr.Zero);
+    }
     // A key as a posted WM_KEYDOWN/WM_KEYUP pair, after clearing the keyboard state the window's thread
     // reads (attaching resets it, AttachThreadInput's documentation; test-harnesses.md, 2026-11-08 trap 7).
     public static void Key(IntPtr h, int vk) {
@@ -496,6 +500,30 @@ function New-FloodText {
 # ---------------------------------------------------------------------------------------------------------
 # The driver: on the private desktop, inside the job, with the environment redirected.
 # ---------------------------------------------------------------------------------------------------------
+# The harness's quit and the end row it gives (PLAN.md §3.5: the copy must end after the harness's own quit). It
+# posts WM_CLOSE to each of the copy's windows, then waits for the held handle within the bound:
+#   early   the copy had already ended at the quit;
+#   quit    it ended within the bound after at least one post reached a window it still owned;
+#   unasked it ended within the bound with no post that took (no window of its own, or every post failed), so
+#           nothing shows the exit followed the quit: the judge fails it (council round 3, Sol: a copy that left
+#           on its own between the last liveness check and the posts read as a clean quit);
+#   stuck   it was still running when the bound ran out ($Stop then ends it).
+# The native calls come in as script blocks, so Contracts.98 runs this with test doubles.
+function Invoke-SoakQuit {
+    param([scriptblock] $Alive, [scriptblock] $Windows, [scriptblock] $Post, [scriptblock] $Wait,
+        [scriptblock] $ExitCode, [scriptblock] $Stop)
+    if (-not (& $Alive)) { return [pscustomobject]@{ End = "early`t$(& $ExitCode)"; Posts = 0; QuitMs = $null } }
+    $quitWatch = [Diagnostics.Stopwatch]::StartNew()
+    $quitPosts = 0
+    foreach ($quitWindow in @(& $Windows)) { if (& $Post $quitWindow) { $quitPosts++ } }
+    if (& $Wait) {
+        $kind = if ($quitPosts -gt 0) { 'quit' } else { 'unasked' }
+        return [pscustomobject]@{ End = "$kind`t$(& $ExitCode)"; Posts = $quitPosts; QuitMs = $quitWatch.ElapsedMilliseconds }
+    }
+    & $Stop
+    return [pscustomobject]@{ End = "stuck`t-"; Posts = $quitPosts; QuitMs = $null }
+}
+
 function Invoke-SoakDriver {
     $driverLog = Join-Path $Run 'driver.log'
     function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
@@ -506,7 +534,7 @@ function Invoke-SoakDriver {
         QuitSeconds = $QuitSeconds; ResponseBoundMs = $script:ResponseBoundMs
         BuildMode = $null; Launched = $false; Injected = 0; Killed = $null; Churn = 0; Missed = 0
         LateSamples = 0; WorstLatenessMs = 0; HardErrorModes = @(); ErrorModeChanges = @(); JobLimitFlags = $null
-        QuitMs = $null; ControlMisses = [Collections.Generic.List[string]]::new(); Error = $null
+        QuitMs = $null; QuitPosts = $null; ControlMisses = [Collections.Generic.List[string]]::new(); Error = $null
     }
     $harnessPath = Join-Path $Run 'harness.json'
     $process = [IntPtr]::Zero
@@ -882,22 +910,21 @@ function Invoke-SoakDriver {
         if ($KillAtMinute -gt 0 -and $null -eq $harness.Killed) { $harness.ControlMisses.Add("the kill control did not end the copy with exit code 3 after minute $KillAtMinute") }
         if ($InjectHandleEachMinute -and $harness.Injected -eq 0) { $harness.ControlMisses.Add('the injection control injected nothing') }
 
-        # The harness's own quit, bounded; the exit code from the held handle.
-        if (-not [SoakNative]::Alive($process)) {
-            $end = "early`t$([SoakNative]::ExitCode($process))"
-        } else {
-            $harness.HardErrorModes += [SoakNative]::HardErrorMode($process)
-            $quitClock = [Diagnostics.Stopwatch]::StartNew()
-            foreach ($h in @((Get-Mine).Mine)) { [void][SoakNative]::PostClose($h.Hwnd) }
-            if ([SoakNative]::WaitForSingleObject($process, [uint32]($QuitSeconds * 1000)) -eq 0) {
-                $harness.QuitMs = $quitClock.ElapsedMilliseconds
-                $end = "quit`t$([SoakNative]::ExitCode($process))"
-            } else {
-                $end = "stuck`t-"   # it missed the quit's bound, whatever happens next
+        # The harness's own quit, bounded; the exit code from the held handle (Invoke-SoakQuit decides the row).
+        if ([SoakNative]::Alive($process)) { $harness.HardErrorModes += [SoakNative]::HardErrorMode($process) }
+        $quit = Invoke-SoakQuit -Alive { [SoakNative]::Alive($process) } `
+            -Windows { @((Get-Mine).Mine | ForEach-Object { $_.Hwnd }) } `
+            -Post { param($Window) [SoakNative]::PostClose($Window, $nocttyPid) } `
+            -Wait { [SoakNative]::WaitForSingleObject($process, [uint32]($QuitSeconds * 1000)) -eq 0 } `
+            -ExitCode { [SoakNative]::ExitCode($process) } `
+            -Stop {
                 try { [SoakNative]::Terminate($process, 1) } catch { Log "stuck copy: $($_.Exception.Message)" }
                 [void][SoakNative]::WaitForSingleObject($process, 10000)
             }
-        }
+        $end = $quit.End
+        $harness.QuitMs = $quit.QuitMs
+        $harness.QuitPosts = $quit.Posts
+        if ($end.StartsWith("unasked`t")) { Log 'the copy ended with no WM_CLOSE of the harness reaching one of its windows' }
         # Suppressed: the job kills a process on an unhandled exception, and the copy started with
         # SEM_NOGPFAULTERRORBOX (inherited from this driver).
         $suppressed = $jobDies -and $harness.HardErrorModes.Count -gt 0 -and ($harness.HardErrorModes[0] -band 2) -ne 0
@@ -1006,9 +1033,13 @@ function Invoke-SoakOuter {
     if ($HangAt -eq 'resize' -and $HangAtMinute -gt 0 -and ($HangAtMinute -eq 1 -or $HangAtMinute % 10 -eq 0)) {
         throw '-HangAt resize needs a churn minute: the first and every tenth minute are idle, with no resize.'
     }
-    # The hang has to outlast its minute's sample and that sample's response bound: it starts 10 s before the
-    # sample (`sample`), or after the minute's first resize, at most 60 s before it (`resize`).
-    $hangNeeds = [int]$(if ($HangAt -eq 'sample') { 10 } else { 60 }) + [int]($script:ResponseBoundMs / 1000) + 5
+    # The hang has to outlast its minute's sample and that sample's response bound, plus 5 s of margin. Its lead,
+    # from the hang to the sample: 10 s with `sample`; with `resize`, the churn's bounded waits on the hung copy
+    # after the minute's first resize. Measured on ReleaseFast (r5-hang-resize, council round 3): 70.5 s from the
+    # hang to its probe (six 5 s skips, the 30 s baseline wait, then Restore-Baseline's 10 s and 5 s), plus up to
+    # 5 s more on a minute that floods the base pane (minute % 5 = 2): 76 s, taken as 90 for margin.
+    $hangLead = if ($HangAt -eq 'sample') { 10 } else { 90 }
+    $hangNeeds = $hangLead + [int]($script:ResponseBoundMs / 1000) + 5
     if ($HangAtMinute -gt 0 -and $HangSeconds -lt $hangNeeds) {
         throw "-HangSeconds must be at least $hangNeeds with -HangAt ${HangAt}: a shorter hang ends before its minute's sample sees it."
     }

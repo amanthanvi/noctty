@@ -1046,7 +1046,7 @@ suspended for `-HangSeconds`, right after a resize or 10 s before a sample) are
 the other two. The judge must fail all four. A resize hang needs a churn
 minute, so `-HangAt resize` on the first or a tenth minute is refused, and a
 hang must outlast its minute's sample (`-HangSeconds` at least 20 with `sample`,
-70 with `resize`). Since a control never reaches the judge's records, a control
+100 with `resize`). Since a control never reaches the judge's records, a control
 that did not take effect fails the harness itself (`ControlMisses` in
 `harness.json`); a hang counts only when its minute's own sample saw the copy
 fail to answer. Each minute's probe (liveness, the windows, their `WM_NULL`
