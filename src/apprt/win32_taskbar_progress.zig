@@ -3,6 +3,7 @@ const windows = std.os.windows;
 const progress_report = @import("../progress_report.zig");
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
+const gui_probe_trace = @import("../os/gui_probe_trace.zig");
 
 const HRESULT = windows.HRESULT;
 const GUID = windows.GUID;
@@ -145,6 +146,7 @@ pub const TaskbarProgress = struct {
         errdefer _ = taskbar.release();
 
         const init_hr = taskbar.hrInit();
+        gui_probe_trace.noteHrInit(init_hr);
         if (init_hr < 0) return error.InitializationFailed;
 
         return .{ .taskbar = taskbar };

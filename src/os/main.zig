@@ -69,6 +69,7 @@ pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
 pub const macos = if (builtin.os.tag.isDarwin()) @import("macos.zig") else struct {};
 pub const monotonic = @import("monotonic.zig");
+pub const gui_probe_trace = @import("gui_probe_trace.zig");
 pub const shell = @import("shell.zig");
 pub const uri = @import("uri.zig");
 
@@ -289,6 +290,7 @@ test {
     _ = file;
     _ = i18n;
     _ = monotonic;
+    _ = gui_probe_trace;
     _ = path;
     _ = uri;
     _ = shell;
