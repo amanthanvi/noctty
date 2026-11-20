@@ -32,6 +32,9 @@ def check_arguments(args):
         name, equals, value = arg.partition("=")
         if name in BUILD_OPTIONS and equals and value:
             continue
+        # The installed Zig shim can supply a job limit before launching Zig.
+        if re.fullmatch(r"-j[1-9][0-9]*", arg):
+            continue
         if (
             arg in VALUE_OPTIONS
             and (value := next(rest, ""))

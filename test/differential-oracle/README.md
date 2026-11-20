@@ -19,8 +19,8 @@ copies and caches; never build in a retained read-only plan tree.
 
 An oracle invocation selects only the `oracle` step. Its argument allowlist is
 `-Dvt-api=`, `-Doracle-corpus=`, `-Doracle-scrollback=`, `-Dsimd=`, `-Doptimize=`,
-`-Dcpu=`, `-Dcustom-shaders=` (where defined), `--prefix` (or `-p`), and
-`--summary`. Set `ZIG_GLOBAL_CACHE_DIR` for a scratch cache on the source drive.
+`-Dcpu=`, `-Dcustom-shaders=` (where defined), `--prefix` (or `-p`), `--summary`,
+and `-jN` for a positive job limit. Set `ZIG_GLOBAL_CACHE_DIR` for a scratch cache on the source drive.
 The always-run guard checks the original Windows Zig driver invocation on both
 compilers, including options consumed before the build script runs.
 
