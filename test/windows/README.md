@@ -1332,25 +1332,42 @@ probe checks this before it creates anything.
 
 ## hidden-win11-working-set.ps1
 
-`PLAN.md` §3.5's working-set workloads: one portable copy of a measurement
-build on a private desktop runs one fixed workload, and the harness samples
-its private bytes, working set, commit charge, peak working set, handles,
-panes and GDI and USER objects through the handle it holds from
-`CreateProcess`, at each stage once the last 10 samples, 500 ms apart, hold
-private bytes within 0.5% and working set within 1%; a stage that has not
-settled after 90 s fails the run. Each run is a fresh copy, private desktop,
-job and `LOCALAPPDATA`, one run at a time (a session-wide mutex refuses a
-second), from an unused build output (a `-Bin` holding a portable copy's
-state is refused). The copy starts through
+`PLAN.md` §3.5's working-set workloads: one portable copy of the
+receipt-bound measurement build on a private desktop runs one fixed workload,
+and the harness samples it through the handle it holds from `CreateProcess`.
+It launches only the measurement generation of `-MeasureRepo`
+(`Invoke-InteractiveWin11MeasureBuild`): `Assert-InteractiveWin11MeasureBuild`
+admits it and the copied `noctty.exe` and `noctty.com` must match the
+receipt's hashes, so a plain `zig-out` build is refused before anything
+starts. Each run is a fresh copy, private desktop, job and `LOCALAPPDATA`, one
+run at a time (a session-wide mutex refuses a second). The driver re-proves
+its isolation before it starts anything (a job; its own desktop, neither
+`Default` nor the input desktop; `LOCALAPPDATA`, `APPDATA`, `TEMP` and `TMP`
+inside the run; the staged copy, its marker, no `noctty.ico`, the harness's
+config and the receipt's bytes). The copy starts through
 `Get-InteractiveWin11LaunchArguments` (its own class) after its build mode is
-checked through `+version`, with `direct:<System32>\cmd.exe /D`, the clipboard
-denied, no `noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process
-on an unhandled exception, the driver and the copy at normal priority. The
-workloads, at 140 x 45 cells, in blocks of 25,000 lines:
+checked through `+version`, with its config's
+`command = direct:<System32>\cmd.exe /D`, the clipboard denied, no
+`noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process on an
+unhandled exception, the driver and the copy at normal priority. The grid is
+read from the base pane's pseudoconsole before `start` and must be 140 x 45.
+
+Each sample holds `private_bytes` (`PrivateUsage`, what Windows calls the
+process's commit charge), `working_set`, `peak_working_set`,
+`private_plus_shared_commit` (`PrivateUsage + SharedCommitUsage`), the pane
+count and whether it is the base pane alone, and the handle, GDI and USER
+counts (null when their query failed). A stage settles once the last 10
+samples, 500 ms apart, hold private bytes within 0.5% and working set within
+1% of their mean (range over mean); its value is its last sample. A stage
+that has not settled after 90 s, or that is not at the base pane alone, fails
+the run. The workloads, at 140 x 45 cells, in blocks of 25,000 lines; a block
+counts once the batch file acknowledged it and the copy's window title shows
+`ws-block-<n>`, which the batch file sets after the block, so the pane parsed
+through its end:
 
 - `fixed`: one block, then 20 cycles of a new tab and its close; `after` 7 s
   later (undo-timeout prunes closed panes after 5 s) and once the copy is back
-  to one pane.
+  to its base pane alone.
 - `scrollback-default`: 4 blocks at the default `scrollback-limit`
   (10,000,000 bytes), about ten times what it retains at this width.
 - `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` holds at 1,120
@@ -1367,34 +1384,45 @@ workloads, at 140 x 45 cells, in blocks of 25,000 lines:
   `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
   history rows plus the viewport (285 + 45 rows here), and the window slides
   only with a scrolled viewport (`snapshotDocumentWindow`), which this
-  workload never scrolls.
+  workload never scrolls. The walk counts only when the document holds the
+  last block's last line and the walk covered the history rows. Its `after`
+  stage is sampled with the UIA client still connected: about 20 more handles
+  than `start` in every Phase 0a run (595-599 against 575-579).
 - `session-capture`: `scrollback-default`'s output with
   `window-save-state = always` and `window-save-state-scrollback = 10000`,
-  then 10 checkpoints, each a new tab and its close and then a session file
-  write. The 512 KiB snapshot budget pre-limits a capture to
-  budget / (columns + 1) lines, about 3,700 at 140 columns, so the 10,000-line
-  cap is not reached at this width. This is the only workload that saves
-  session state, an exception to AGENTS.md's `--window-save-state=never`: the
-  file stays in the portable copy, and the real `session-state.json` is
-  guarded.
+  then 10 checkpoints, each a new tab and its close; a checkpoint counts only
+  when the copy's own `session-state.json` then holds a new snapshot of the
+  base pane (a later `captured_at_unix_ms`) with the fixture's lines. The
+  512 KiB snapshot budget pre-limits a capture to budget / (columns + 1)
+  lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
+  reached at this width. This is the only workload that saves session state,
+  an exception to AGENTS.md's `--window-save-state=never`: the file stays in
+  the portable copy, and the real `session-state.json` is guarded.
 - `tab-churn`: 50 cycles of a new tab and its close.
 
 ```powershell
 pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
-    -Bin <measurement prefix>\bin -Run <new dir> -Workload fixed
+    -MeasureRepo <checkout with a measurement build> -Run <new dir> -Workload fixed
 ```
 
-Compare the median of each workload's `after` stage over sequential runs with
-the same `WorkloadSha256` (the workload, its scrollback limit and planned
-blocks, the constants, the output block and the config),
-one copy at a time on a quiet machine: so run, 9 copies' settled `start`
+A later phase compares its working set with Phase 0a's by running the 0a
+measurement build and the new one interleaved, under the same harness
+version, one copy at a time on a quiet machine, and comparing each workload's
+median `after`; the stored 0a numbers are the reference level, not the
+comparison. Only completed runs count (the outer half checks each
+`workingset.json` with `Get-WorkingSetRecordProblems` before it says
+"complete") with the same `WorkloadSha256` (the workload, its scrollback limit
+and planned blocks, the constants, the output block, the flood batch file and
+the config) and grid. One copy at a time, 9 Phase 0a copies' settled `start`
 levels had IQRs of 0.1-1.6 MiB and their `after` levels up to 2.7 MiB (7.5 MiB
 at the 1 GiB limit), with one unexplained low run, while copies run together
 differed by tens of MiB (test-harnesses.md, the 2026-11-20 WORKING-SET-01
-entry and trap 6 of the 2026-11-18 SOAK-01 entry). The outer half checks the
-real `startup-attempts.json`, `session-state.json`, the product jump list and
-the PowerShell history by metadata and records the clipboard sequence number
-before and after. Contracts.98-WorkingSet pins the harness and its workload.
+entry and trap 6 of the 2026-11-18 SOAK-01 entry). The real startup ledger,
+the product jump list and the clipboard sequence number go through the shared
+state guard (`scripts/interactive-win11-state-guard.ps1`), the PowerShell
+history through `scripts/windows-harness-history.ps1`, and the real
+`session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
+harness, its workload and its run-time checks.
 
 ## Style
 
