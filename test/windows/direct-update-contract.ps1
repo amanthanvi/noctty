@@ -142,10 +142,12 @@ function Get-DirectUpdateProblems([string] $Text) {
     $exitReadIndex=-1
     if($exitRead.Count -eq 1){$exitReadIndex=[Array]::IndexOf($controllerTryStatements,$exitRead[0])}
     $controllerWait=if($exitReadIndex -ge 2){$controllerTryStatements[$exitReadIndex-2]}
-    # A signaled wait must leave the loop and reach the driver's status read.
+    # The controller must read the signaled driver's status or fail at the deadline.
     Need ControllerWaitBreak ($controllerWait -is [Management.Automation.Language.DoWhileStatementAst] -and
         (Same $controllerWait.Condition '$true') -and
-        (Direct $controllerWait.Body.Statements 'if([HiddenWin]::WaitForSingleObject($launch.process,250) -eq 0) { break }'))
+        (Direct $controllerWait.Body.Statements 'if([HiddenWin]::WaitForSingleObject($launch.process,250) -eq 0) { break }') -and
+        (Direct $controllerWait.Body.Statements 'if([datetime]::UtcNow -ge $deadline) { throw ''Private driver timed out'' }') -and
+        @($controllerWait.Body.FindAll({param($n) $n -is [Management.Automation.Language.ReturnStatementAst] -or $n -is [Management.Automation.Language.ExitStatementAst]},$true)).Count -eq 0)
     $exitWrites=@($controller.FindAll({param($node)
         $node -is [Management.Automation.Language.AssignmentStatementAst] -and
         @($node.Left.FindAll({param($target) $target -is [Management.Automation.Language.VariableExpressionAst] -and $target.VariablePath.UserPath -imatch '(^|:)exitCode$'},$true)).Count -gt 0
@@ -590,6 +592,10 @@ $shapeControls.ControllerGuardCommented=@($controllerGuard,('# '+$controllerGuar
 $shapeControls.ControllerGuardWarning=@($controllerGuard,$controllerGuard.Replace('throw ','Write-Warning '),'ControllerFailure')
 $shapeControls.ControllerAmbientExitCode=@('$exitCode=$code','$exitCode=$LASTEXITCODE','ControllerExitSource')
 $shapeControls.ControllerConstantExitCode=@('$exitCode=$code','$exitCode = 0','ControllerExitSource')
+$shapeControls.ControllerDeadlineReturn=@('throw ''Private driver timed out''','return','ControllerWaitBreak')
+$shapeControls.ControllerReceiptReturn=@('throw ''Private driver receipt mismatch''','return','ControllerWaitBreak')
+$waitBreak=$sites.ControllerWaitBreak[0]
+$shapeControls.ControllerLoopReturn=@($waitBreak,('return'+"`n            "+$waitBreak),'ControllerWaitBreak')
 $ephemeralLine=@($source -split "`r?`n" | Where-Object {$_ -like '$ephemeral=*'})
 $shapeControls.EphemeralReassignment=@($ephemeralLine[0],($ephemeralLine[0]+"`n`$ephemeral=`$true"),'EphemeralDefinition')
 foreach($item in @(

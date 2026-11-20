@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 See also:
 - Beyond the control characters of the 2026-11-18 PWSH-CEQ-ICU entry below: `-in`, `-cin` and `-contains` compare the same way, and U+00AD (a soft hyphen) and U+200C, U+200D, U+2060 and U+FEFF are ignored under Windows PowerShell 5.1 too, so 5.1 is no safer for bytes; the accessibility leaf's run-time reading of a saving launch's command line, which `-ceq` misread that way, compares ordinally and refuses any character outside printable ASCII: the 2026-11-18 EVIDENCE-TOAST-FOREGROUND entry in test-harnesses.md.
+- The 2026-11-18 DIRECT-UPDATE-720-CONTROLS entry in test-harnesses.md records the journal reader traps from `ReadAllText` BOM detection and culture-sensitive `StartsWith([string][char]0xfeff)`.
 - PowerShell traps filed where they were found: a one-element array from `if`/`switch` unrolls to a scalar (item 6 of the 2026-10-17 "The manual Chocolatey Publish workflow" entry in build-release-ci.md); `@($a + 1, $b)` parses as `$a + (1, $b)` (the 2026-10-16 "The real-input check of #285" entry in window-frame.md, harness traps).
 - A struct argument or a `const` copy of an aggregate can alias a list element: the 2026-10-19 `closeWindow` aliasing entry in tabs-panes.md.
 - Mirroring a WinRT vtable (check every method order against `winrt/*.h`; `get_History` is on `IToastNotificationManagerStatics2`): trap (1) of the 2026-10-23 NOTIFY-2 entry in app-lifecycle.md.
