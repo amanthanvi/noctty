@@ -1,0 +1,5 @@
+1/2 logged_error.test.logs an error...[default] (err): fixture error line
+OK
+2/2 logged_error.test.fine...OK
+All 2 tests passed.
+1 errors were logged.

@@ -410,7 +410,10 @@ function Get-UpdateState([string] $Root,[switch] $RequireReadable) {
         $options=[Text.Json.JsonDocumentOptions]::new()
         $options.AllowTrailingCommas=$false
         $options.CommentHandling=[Text.Json.JsonCommentHandling]::Disallow
-        $document=[Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($path),$options)
+        # Decode the bytes directly so BOM detection cannot replace the strict decoder.
+        $journal=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path))
+        if($journal.StartsWith([string][char]0xfeff,[StringComparison]::Ordinal)){$journal=$journal.Substring(1)}
+        $document=[Text.Json.JsonDocument]::Parse($journal,$options)
         $value=$document.RootElement
         if($value.ValueKind -ne [Text.Json.JsonValueKind]::Object){throw 'Journal is not a JSON object'}
         Assert-JournalKeys $value

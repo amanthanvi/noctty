@@ -1,0 +1,5 @@
+1/3 bytes.test.coverage■...OK
+2/3 bytes.test.coverage ...OK
+3/3 bytes.test.carriage
+return...OK
+All 3 tests passed.

@@ -664,7 +664,11 @@ that govern each symbol you change, or that none does.
   probe's `HISTFILE`, a failing test's error name (the installed test
   executable), the skip budget (`scripts/check-test-skips.ps1`,
   `test/windows/test-skip-budget.json`) and the nightly per-test log it reads
-  (`scripts/ci-test-timing.ps1`), and a test count or result that
+  (`scripts/ci-test-timing.ps1`), the list of the tests that ran and its
+  compare (`scripts/capture-test-ran-list.ps1`,
+  `scripts/compare-test-ran-list.ps1`, the approved skips
+  `test/windows/ran-list-approved-skips.tsv` and the parser fixtures
+  `test/windows/ran-list-fixtures/`), and a test count or result that
   contradicts the code.
 - [tooling.md](docs/agents/log/tooling.md): declaring `extern` functions or
   structs, casting Win32 handles and `LPARAM`/`LRESULT` (`@intCast`,

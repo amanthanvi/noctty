@@ -1,0 +1,5 @@
+1/2 swap.test.coverage...OK
+SKIP
+2/2 swap.test.platform...SKIP
+OK
+1 passed; 1 skipped; 0 failed.

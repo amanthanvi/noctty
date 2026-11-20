@@ -1,0 +1,7 @@
+noctty test results v1
+zig 0.15.2
+mode Debug
+shard 1/1
+test 1 SKIP 0 666f7267652e746573742e6669727374
+test 2 OK 0 666f7267652e746573742e7365636f6e64
+end tests=2 ok=1 skip=1 fail=0 leaked=0 errors-logged=0

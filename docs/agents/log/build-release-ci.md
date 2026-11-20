@@ -23,6 +23,7 @@ See also:
 - The Test workflow's nightly checks the `windows-2025` skip budget against the per-test log of its timing run, and uploads that log (`zig-test-results-<run id>`): the 2026-11-12 SKIP-BUDGET-2025 entry in test-harnesses.md.
 - Preparing the desktop for the release evidence run (step 4 of PACKAGING.md's release runbook: Do Not Disturb, shell flyouts closed, every other window minimized, hands off), and `Show-StatefulHost` taking the foreground back from another application: the 2026-11-10 EVIDENCE-FOREGROUND-01 entry in test-harnesses.md.
 - The evidence job's step order (the command-finish leaf, its one real toast, last; the composite's `-DeferCommandFinish`), why the suite's own toasts no longer need Do Not Disturb, and why step 4 still asks for it: the 2026-11-18 EVIDENCE-TOAST-FOREGROUND entry in test-harnesses.md.
+- The test executable reads the updater's version fixture through a path relative to its build root (`windows_version_fixture.exe_path`, the fixture of the 2026-10-10 version-resource entry below), so it has to run from the checkout that built it: trap (1) of the 2026-11-18 RAN-LIST-01 entry in test-harnesses.md.
 
 <!-- prettier-ignore-end -->
 
