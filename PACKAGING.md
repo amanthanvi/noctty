@@ -386,9 +386,11 @@ step. Inspect that run and publication state before choosing recovery.
 `DraftRelease` (including a partial or cancelled upload) cannot be promoted.
 Discovery reads all release-list pages and the selected release ID because
 GitHub's tag endpoint hides drafts. `AmbiguousReleaseTag` refuses duplicate
-pending tags for inspection. A selected ID returning a successful response
-without a release object is retried and refused as `ReleaseLookupIncomplete`
-if the response stays unusable. After a create request, release discovery allows
+pending tags for inspection. If the selected ID returns HTTP 200 with a
+non-object JSON value such as `[]`, the read is retried within a three-read
+limit. Exhausting that limit gives `ReleaseLookupIncomplete`. A JSON object
+with a missing or mismatched ID or tag, such as `{}`, immediately gives
+`ReleaseIdentityMismatch`. After a create request, release discovery allows
 up to three reads for a list miss or an ID read returning 404. The build
 continues only if the returned draft carries this attempt's marker in its
 notes and passes the candidate checks. `ReleaseDraftOwnershipUnconfirmed`

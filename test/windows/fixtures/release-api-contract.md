@@ -15,7 +15,7 @@ response and mutation.
   implement separate published-tag and draft lookups. Our production lookup
   lists all pages, refuses duplicate pending tags and reads the selected ID.
   Fixture B models tag 404, ID success, pagination, duplicate drafts and absence.
-  A listed ID returning HTTP 200 with `[]` is retried three times at most.
+  A listed ID returning HTTP 200 with `[]` gets up to three reads in total.
   A recovered object still blocks preflight create, and exhaustion refuses
   without creating or uploading anything.
   Every build case rejects use of the tag endpoint; these include the corrected
@@ -86,8 +86,9 @@ query is claimed.
 
 Post-write controls model lost create/flip responses, a different writer's
 matching draft, missing or late ID visibility, wrong draft identity, delayed
-publication flags, tag 404 visibility, stale/missing
-latest, and true HTTP 503 framing with retry/exhaustion twins. Mutations are
+publication flags, tag 404 visibility, stale/missing latest, and true HTTP 503
+framing with retry/exhaustion twins. The tag-ref preflight and prerelease latest
+controls also refuse HTTP 200 with `[]` after three reads in total. Mutations are
 issued once, then reconciliation uses reads only. Backoff is bounded to three
 logical observations, with at most three transport attempts per observation.
 Actual GitHub write propagation times remain unmeasured under this task's grant.

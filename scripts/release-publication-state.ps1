@@ -51,7 +51,7 @@ function Assert-RemoteReleaseTag {
     param([string] $Repository, [string] $Tag, [string] $CandidateSha, [switch] $AllowMissing, [switch] $WaitForExistence)
     $attempts = if ($WaitForExistence) { 3 } else { 1 }
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
-        $ref = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/git/ref/tags/$Tag") -AllowNotFound:($AllowMissing -or $WaitForExistence)
+        $ref = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/git/ref/tags/$Tag") -AllowNotFound:($AllowMissing -or $WaitForExistence) -RequireReleaseObject
         if ($null -ne $ref) { break }
         if ($AllowMissing) { return }
         if ($attempt -lt $attempts) { Start-Sleep -Seconds $attempt }
@@ -112,7 +112,7 @@ function Confirm-ReleasePublication {
     [void](Assert-ReleaseManifest @ManifestInputs -Release $state)
     Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -WaitForExistence
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $latest = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/latest") -AllowNotFound
+        $latest = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/latest") -AllowNotFound -RequireReleaseObject
         $isLatest = [string]::Equals([string]$latest.id, $ReleaseId, [StringComparison]::Ordinal)
         if ($isLatest -ne $Prerelease) { return $state }
         if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
