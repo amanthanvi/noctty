@@ -1125,10 +1125,15 @@ ConPTY host"):
   until the root exits, and so are its windows: the same two-desktop
   inventory, with its sentinel and Default > 0 control, over the tree's
   processes. `noctty.com` is a console program, so a console window it got on
-  Default is exactly the leak Q0 exists to catch.
+  Default is exactly the leak Q0 exists to catch. Each invocation runs in a
+  job of the driver's own, watched on a completion port: each process that
+  joins it (the forwarded `noctty.exe`, its console host) is read the moment
+  the job reports it, with its handle pinned. A process that exits between
+  polls still has its startup desktop read; its row is `sampledAlive: false`,
+  as its threads were never read. Every process the job counted must have
+  been read (`notSeenInJob` 0), or the arm is inconclusive.
 
 Each arm:
-
 
 - A driver created by name on a private desktop (`Invoke-LocalHiddenDriver`)
   starts the copy.
@@ -1141,8 +1146,9 @@ Each arm:
   is counted, never stopped.
 - The bundled arm must see the copy's own `OpenConsole.exe`; a fall back to
   System32's `conhost.exe` fails it. The in-box arm must see `conhost.exe`.
-- It reads each process's startup desktop (PEB `DesktopInfo`) and its
-  threads' desktops while holding read-only handles to Default and the
+- It reads each process's startup desktop (PEB `DesktopInfo`, taken as an
+  offset into the parameter block until the child's loader normalizes it) and
+  its threads' desktops while holding read-only handles to Default and the
   private desktop. `GetThreadDesktop` names another process's thread desktop
   only while the caller holds a handle to that desktop (test-harnesses.md
   2026-11-20 PROBE-THREAD-DESKTOP-01).
@@ -1152,19 +1158,23 @@ Each arm:
   - a hidden sentinel window of the driver must appear on the private
     desktop;
   - Default must show at least one window.
-- It then stops each process by exact PID.
+- It then stops each process by exact PID, and counts what still runs: the
+  same PID and creation time, not exited. A held handle keeps an exited
+  process's creation time readable, so creation alone is no proof of life.
 - Its claim is "every process and window alive at the sample". It holds only
   when the sample has the app, the ConPTY host (the copy's own
   `OpenConsole.exe`, or `conhost`) and the shell, and every desktop read in
   it resolved. A thread with no USER desktop is kept apart from an unreadable
-  one, and an unreadable one leaves Q0 inconclusive. The job's own
-  `TotalProcesses` is recorded beside the sample, so a descendant that exited
-  before it (cmd's `chcp`) is counted.
+  one, and an unreadable one leaves Q0 inconclusive. The growth of the job's
+  `TotalProcesses` since the copy started is recorded beside the sample, so a
+  descendant that exited before it (cmd's `chcp`) is counted.
 - Positive control: a child started without a desktop name reports the private
   desktop.
 - Negative control: a thread moved to a second desktop with `SetThreadDesktop`
   starts a child that reports Default. While the child waits, Q0's own reader
   must name Default for both its startup desktop and its thread desktops.
+  Desktop names compare case-insensitively, and a startup desktop the reader
+  names neither way is recorded by its leaf.
 - The enumeration classifier's own control runs in the bundled arm's driver:
   a fresh empty desktop comes back unavailable, a handle without
   `DESKTOP_ENUMERATE` comes back unavailable with a nonzero error, and the

@@ -225,6 +225,11 @@ public static class GuiProbeNative {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
     [DllImport("user32.dll", SetLastError=true)] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
     [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent, IntPtr child);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr existing, UIntPtr key, uint threads);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetQueuedCompletionStatus(IntPtr port, out uint bytes, out UIntPtr key, out IntPtr overlapped, uint ms);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int type, ref JobPort info, uint size);
+    // JOBOBJECT_ASSOCIATE_COMPLETION_PORT: x64 size 16.
+    [StructLayout(LayoutKind.Sequential)] struct JobPort { public IntPtr key; public IntPtr port; }
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
@@ -282,7 +287,8 @@ public static class GuiProbeNative {
             " ProcessBasic=" + Marshal.SizeOf<ProcessBasic>() + " ProcessEntry=" + Marshal.SizeOf<ProcessEntry>() +
             " parentPid@" + Marshal.OffsetOf<ProcessEntry>("parentPid") + " ThreadEntry=" + Marshal.SizeOf<ThreadEntry>() +
             " Input=" + Marshal.SizeOf<Input>() + " WndClassEx=" + Marshal.SizeOf<WndClassEx>() + " Msg=" + Marshal.SizeOf<Msg>() +
-            " GuiThreadInfo=" + Marshal.SizeOf<GuiThreadInfo>() + " focus@" + Marshal.OffsetOf<GuiThreadInfo>("focus");
+            " GuiThreadInfo=" + Marshal.SizeOf<GuiThreadInfo>() + " focus@" + Marshal.OffsetOf<GuiThreadInfo>("focus") +
+            " JobPort=" + Marshal.SizeOf<JobPort>();
     }
 
     // Starts `command` on `desktop` (null: none named, so the child takes this process's), suspended until it is in
@@ -424,19 +430,87 @@ public static class GuiProbeNative {
     public static string StartupDesktop(int pid) {
         IntPtr h = OpenProcess(0x0400 | 0x0010, false, pid); // PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
         if (h == IntPtr.Zero) return null;
+        try { return DesktopInfoOf(h); } finally { CloseHandle(h); }
+    }
+    // The PEB's RTL_USER_PROCESS_PARAMETERS.DesktopInfo through a handle with QUERY_INFORMATION and VM_READ. Until the
+    // child's loader normalizes them (Flags bit RTL_USER_PROC_PARAMS_NORMALIZED, at +0x08), the parameters' string
+    // buffers are offsets from the block, so a just-created process is read that way.
+    static string DesktopInfoOf(IntPtr h) {
+        ProcessBasic basic; int returned;
+        if (NtQueryInformationProcess(h, 0, out basic, Marshal.SizeOf<ProcessBasic>(), out returned) != 0) return null;
+        byte[] pointer = Read(h, basic.peb + 0x20, 8);
+        if (pointer == null) return null;
+        long parameters = BitConverter.ToInt64(pointer, 0);
+        if (parameters == 0) return null;
+        byte[] header = Read(h, new IntPtr(parameters), 12);
+        if (header == null) return null;
+        bool normalized = (BitConverter.ToUInt32(header, 8) & 1) != 0;
+        byte[] text = Read(h, new IntPtr(parameters + 0xC0), 16);
+        if (text == null) return null;
+        int length = BitConverter.ToUInt16(text, 0);
+        if (length == 0) return "";
+        if (length > 1024) return null;
+        long buffer = BitConverter.ToInt64(text, 8);
+        if (!normalized) buffer += parameters;
+        byte[] chars = Read(h, new IntPtr(buffer), length);
+        return chars == null ? null : Encoding.Unicode.GetString(chars);
+    }
+    static string ImageLeafOf(IntPtr h) {
+        var s = new StringBuilder(32768); uint size = (uint)s.Capacity;
+        return QueryFullProcessImageNameW(h, 0, s, ref size) ? System.IO.Path.GetFileName(s.ToString()) : null;
+    }
+    // Whether `pid` is still the process created at `creation` and has not exited (a held handle keeps an exited
+    // process's creation time readable, so creation alone is no proof of life).
+    public static bool AliveExact(int pid, long creation) {
+        IntPtr h = OpenProcess(0x1000 | 0x00100000, false, pid);
+        if (h == IntPtr.Zero) return false;
         try {
-            ProcessBasic basic; int returned;
-            if (NtQueryInformationProcess(h, 0, out basic, Marshal.SizeOf<ProcessBasic>(), out returned) != 0) return null;
-            byte[] pointer = Read(h, basic.peb + 0x20, 8);
-            if (pointer == null) return null;
-            byte[] text = Read(h, new IntPtr(BitConverter.ToInt64(pointer, 0)) + 0xC0, 16);
-            if (text == null) return null;
-            int length = BitConverter.ToUInt16(text, 0);
-            if (length == 0) return "";
-            if (length > 1024) return null;
-            byte[] chars = Read(h, new IntPtr(BitConverter.ToInt64(text, 8)), length);
-            return chars == null ? null : Encoding.Unicode.GetString(chars);
+            long c, e, k, u;
+            return GetProcessTimes(h, out c, out e, out k, out u) && c == creation && WaitForSingleObject(h, 0) == 258;
         } finally { CloseHandle(h); }
+    }
+    public sealed class JoinedProcess { public int Pid; public long Creation; public int Parent; public string Image; public string StartupDesktop; public IntPtr Handle; }
+    // Every process that joins `job`, reported on a completion port (JOB_OBJECT_MSG_NEW_PROCESS) and read the moment it
+    // is reported, before a short-lived one can exit: its handle pinned (so its PID cannot be reused while the watch
+    // lives), its creation time, its parent (from the process itself), its image's file name and its startup desktop
+    // (PEB). Dispose stops the reader and closes the pins and the port.
+    public sealed class JobWatch : IDisposable {
+        readonly IntPtr port; readonly Thread reader; volatile bool stopping;
+        readonly List<JoinedProcess> joined = new List<JoinedProcess>();
+        public JobWatch(IntPtr job) {
+            port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+            if (port == IntPtr.Zero) throw new Exception("CreateIoCompletionPort failed: " + Marshal.GetLastWin32Error());
+            var info = new JobPort { key = job, port = port };
+            if (!SetInformationJobObject(job, 7, ref info, (uint)Marshal.SizeOf<JobPort>())) { // JobObjectAssociateCompletionPortInformation
+                int error = Marshal.GetLastWin32Error(); CloseHandle(port);
+                throw new Exception("Associating the job's completion port failed: " + error);
+            }
+            reader = new Thread(Loop); reader.IsBackground = true; reader.Start();
+        }
+        void Loop() {
+            while (!stopping) {
+                uint message; UIntPtr key; IntPtr overlapped;
+                if (!GetQueuedCompletionStatus(port, out message, out key, out overlapped, 50)) continue;
+                if (message != 6) continue; // JOB_OBJECT_MSG_NEW_PROCESS: overlapped carries the PID
+                var row = new JoinedProcess { Pid = (int)overlapped.ToInt64() };
+                IntPtr h = OpenProcess(0x1000 | 0x0400 | 0x0010 | 0x00100000, false, row.Pid); // QUERY_LIMITED | QUERY | VM_READ | SYNCHRONIZE
+                if (h != IntPtr.Zero) {
+                    long c, e, k, u;
+                    if (GetProcessTimes(h, out c, out e, out k, out u)) row.Creation = c;
+                    int parent; if (ParentOf(h, out parent)) row.Parent = parent;
+                    row.Image = ImageLeafOf(h);
+                    row.StartupDesktop = DesktopInfoOf(h);
+                    row.Handle = h;
+                }
+                lock (joined) joined.Add(row);
+            }
+        }
+        public JoinedProcess[] Snapshot() { lock (joined) return joined.ToArray(); }
+        public void Dispose() {
+            stopping = true; reader.Join(2000);
+            lock (joined) foreach (var r in joined) if (r.Handle != IntPtr.Zero) CloseHandle(r.Handle);
+            CloseHandle(port);
+        }
     }
 
     static string Name(IntPtr h) {
@@ -806,7 +880,7 @@ $script:SeedBytes = [long](@($script:SeedLines | ForEach-Object { $_.Length + 2 
 # withheld one.
 $script:SeedInkFloor = 0.02
 
-$script:SdkLayout = 'Startup=104 StartupEx=112 ProcessBasic=48 ProcessEntry=568 parentPid@32 ThreadEntry=28 Input=40 WndClassEx=80 Msg=48 GuiThreadInfo=72 focus@16'
+$script:SdkLayout = 'Startup=104 StartupEx=112 ProcessBasic=48 ProcessEntry=568 parentPid@32 ThreadEntry=28 Input=40 WndClassEx=80 Msg=48 GuiThreadInfo=72 focus@16 JobPort=16'
 function Assert-ProbeLayout {
     if (-not [string]::Equals([GuiProbeNative]::Layout(), $script:SdkLayout, [StringComparison]::Ordinal)) { throw "The probe's mirrored structs are not the SDK's x64 layout: $([GuiProbeNative]::Layout())" }
 }
@@ -821,8 +895,9 @@ function Get-DesktopKind([AllowNull()] [string] $Name, [string] $Private) {
     if ($null -eq $Name) { return 'unreadable' }
     $leaf = ($Name -split '\\')[-1]
     if ($leaf -eq '') { return 'none' }
-    if ($Private -and [string]::Equals($leaf, $Private, [StringComparison]::Ordinal)) { return 'private' }
-    if ([string]::Equals($leaf, 'Default', [StringComparison]::Ordinal)) { return 'Default' }
+    # Desktop names are case-insensitive: an inherited name keeps whatever casing its parent's string had.
+    if ($Private -and [string]::Equals($leaf, $Private, [StringComparison]::OrdinalIgnoreCase)) { return 'private' }
+    if ([string]::Equals($leaf, 'Default', [StringComparison]::OrdinalIgnoreCase)) { return 'Default' }
     return 'other'
 }
 
@@ -1578,6 +1653,9 @@ function Invoke-EnumerationControl {
 # utf8-console `chcp`, a control's child) is counted, never hidden.
 function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnvironment) {
     $arm = [ordered]@{}
+    # The job's count before the copy starts, so the unsampled count is the copy tree's own (the driver's admission
+    # ran git in this job before).
+    $accountingBefore = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
     $pi = Start-ProbeCopy -Exe $Exe -Desktop "WinSta0\$DesktopName" -LogPath (Join-Path $Run "$LogName.log") -Job ([IntPtr]::Zero) -TracePath (Join-Path $Run "render-$LogName.json") -ExtraEnvironment $ExtraEnvironment
     try {
         $arm.launchPolicy = $script:LastLaunchPolicy
@@ -1599,10 +1677,11 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
         } finally { Close-ProbeDesktopReaders $readers }
         $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
         $arm.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
-        $inJobSampled = @($processes | Where-Object { $_.inJob }).Count
         $arm.sampledProcesses = @($processes).Count
         $arm.unverifiedDescendantLinks = $script:SampleUnverifiedLinks
-        $arm.jobProcessesNotSampled = $(if ($null -eq $accounting) { $null } else { $accounting[0] - $inJobSampled })
+        # Processes that joined the job since the copy started, against the copy's sampled processes in it.
+        $copyInJob = @($processes | Where-Object { $_.inJob -and $_.role -in @('noctty', 'noctty-descendant') }).Count
+        $arm.jobProcessesNotSampled = $(if ($null -eq $accounting -or $null -eq $accountingBefore) { $null } else { ($accounting[0] - $accountingBefore[0]) - $copyInJob })
         # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
         # enumeration must list.
         $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
@@ -1618,8 +1697,8 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
         $arm.inventoryComplete = $windows.complete
         $arm.log = Read-ProbeLog (Join-Path $Run "$LogName.log")
         $arm.stopped = Stop-ProbeProcesses $processes ([IntPtr]::Zero)
-        # The copy's processes still alive after the stop: the same PID with the same creation time.
-        $arm.leftAfterStop = @($processes | Where-Object { $_.role -in @('noctty', 'noctty-descendant') -and [GuiProbeNative]::CreationTime($_.pid) -eq $_.creation }).Count
+        # The copy's processes still running after the stop: the same process, not exited (AliveExact).
+        $arm.leftAfterStop = @($processes | Where-Object { $_.role -in @('noctty', 'noctty-descendant') -and [GuiProbeNative]::AliveExact($_.pid, $_.creation) }).Count
     } finally { [void][GuiProbeNative]::CloseHandle($pi.process) }
     return $arm
 }
@@ -1654,79 +1733,111 @@ function Invoke-Q0CliArm([string] $CopyBin) {
         $arm.desktopReadersOpen = Test-ProbeDesktopReadersOpen $readers
         foreach ($shape in $shapes.Keys) {
             $facts = [ordered]@{ shape = $shape }
-            $before = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
             $savedTemp = @($env:TEMP, $env:TMP)
             if (-not (Test-ProbeHosted)) {
                 $cliTemp = Join-Path $Run 'cli-temp'
                 [void][IO.Directory]::CreateDirectory($cliTemp)
                 $env:TEMP = $cliTemp; $env:TMP = $cliTemp
             }
-            try { $pi = [GuiProbeNative]::Start($cli, ('"{0}" {1}' -f $cli, ($shapes[$shape] -join ' ')), $CopyBin, "WinSta0\$DesktopName", (Join-Path $Run "cli-$shape.log"), [IntPtr]::Zero, $true) }
-            finally { $env:TEMP = $savedTemp[0]; $env:TMP = $savedTemp[1] }
-            [void][GuiProbeNative]::CloseHandle($pi.thread)
-            $rootCreation = [GuiProbeNative]::CreationTime($pi.pid)
-            $seen = [System.Collections.Generic.Dictionary[int, object]]::new()
-            # The CLI tree's windows, inventoried on both desktops at every poll: noctty.com is a console program, so a
-            # console window it gets on Default is exactly the leak Q0 exists to catch.
-            $windowsSeen = [System.Collections.Generic.Dictionary[string, object]]::new()
-            $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0
-            $deadline = [datetime]::UtcNow.AddSeconds(30)
-            do {
-                $all = @{}
-                foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
-                $descendants = Get-ProbeDescendants $pi.pid
-                $unverifiedLinks = [Math]::Max($unverifiedLinks, [int]$script:LastUnverifiedLinks)
-                $jobPids = @([GuiProbeNative]::JobPids([IntPtr]::Zero))
-                foreach ($id in @(@($pi.pid) + @($descendants.Keys))) {
-                    $creation = $(if ($id -eq $pi.pid) { $rootCreation } else { $descendants[$id] })
-                    if ([GuiProbeNative]::CreationTime($id) -ne $creation) { continue }
-                    $reading = Get-ProcessDesktopReading $id $DesktopName
-                    if (-not $seen.ContainsKey($id)) {
-                        $image = $(if ($all[$id]) { $all[$id].Image } else { $null })
-                        $role = $(if ($id -eq $pi.pid) { 'cli' } elseif ($image -ieq 'noctty.exe') { 'cli-forwarded' } else { 'cli-descendant' })
-                        $seen[$id] = [ordered]@{ pid = $id; creation = $creation; image = $image; role = $role; inJob = $jobPids -contains $id
-                            startupDesktop = $reading.startupDesktop; threadDesktops = @($reading.threadDesktops); threadsUnreadable = $reading.threadsUnreadable }
-                    } else {
-                        # Later reads add the thread desktops a thread connects to after its first one.
-                        $row = $seen[$id]
-                        $row.threadDesktops = @(@($row.threadDesktops) + @($reading.threadDesktops) | Sort-Object -Unique)
-                        $row.threadsUnreadable = [Math]::Max([int]$row.threadsUnreadable, [int]$reading.threadsUnreadable)
-                        if ($row.startupDesktop -in @('unreadable', 'none') -and $reading.startupDesktop -notin @('unreadable', 'none')) { $row.startupDesktop = $reading.startupDesktop }
-                        if (-not ($jobPids -contains $id)) { $row.inJob = $false }
+            # A job of the driver's own per invocation, watched on a completion port: every process that joins it (the
+            # root, the forwarded noctty.exe, its console host) is read the moment it is created, before a short-lived
+            # one exits. A process that never joins (a breakaway) is found by the verified-descendant walk below.
+            $watchJob = [HiddenLocal]::CreateOwnedJob()
+            $watch = $null
+            try {
+                $watch = [GuiProbeNative+JobWatch]::new($watchJob)
+                try { $pi = [GuiProbeNative]::Start($cli, ('"{0}" {1}' -f $cli, ($shapes[$shape] -join ' ')), $CopyBin, "WinSta0\$DesktopName", (Join-Path $Run "cli-$shape.log"), $watchJob, $true) }
+                finally { $env:TEMP = $savedTemp[0]; $env:TMP = $savedTemp[1] }
+                [void][GuiProbeNative]::CloseHandle($pi.thread)
+                $rootCreation = [GuiProbeNative]::CreationTime($pi.pid)
+                $seen = [System.Collections.Generic.Dictionary[int, object]]::new()
+                $earlyReads = [System.Collections.Generic.Dictionary[int, object]]::new()
+                # The CLI tree's windows, inventoried on both desktops at every poll: noctty.com is a console program, so a
+                # console window it gets on Default is exactly the leak Q0 exists to catch.
+                $windowsSeen = [System.Collections.Generic.Dictionary[string, object]]::new()
+                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0
+                $deadline = [datetime]::UtcNow.AddSeconds(30)
+                do {
+                    $all = @{}
+                    foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
+                    $descendants = Get-ProbeDescendants $pi.pid
+                    $unverifiedLinks = [Math]::Max($unverifiedLinks, [int]$script:LastUnverifiedLinks)
+                    # The watched job's members, each read at its creation; their creation times come from that read.
+                    foreach ($joined in $watch.Snapshot()) {
+                        if ($joined.Creation -ne 0 -and -not $earlyReads.ContainsKey($joined.Pid)) { $earlyReads[$joined.Pid] = $joined }
+                        if ($joined.Pid -ne $pi.pid -and $joined.Creation -ne 0 -and -not $descendants.ContainsKey($joined.Pid)) { $descendants[$joined.Pid] = $joined.Creation }
                     }
+                    $jobPids = @(@([GuiProbeNative]::JobPids($watchJob)) + @($earlyReads.Keys))
+                    foreach ($id in @(@($pi.pid) + @($descendants.Keys))) {
+                        $creation = $(if ($id -eq $pi.pid) { $rootCreation } else { $descendants[$id] })
+                        $alive = [GuiProbeNative]::AliveExact($id, $creation)
+                        if (-not $alive -and $seen.ContainsKey($id)) { continue }
+                        $reading = $(if ($alive) { Get-ProcessDesktopReading $id $DesktopName } else { $null })
+                        if (-not $seen.ContainsKey($id)) {
+                            $early = $(if ($earlyReads.ContainsKey($id)) { $earlyReads[$id] } else { $null })
+                            # A process gone before any poll read it keeps the watch's read at its creation.
+                            if ($null -eq $reading) {
+                                if ($null -eq $early) { continue }
+                                $reading = [ordered]@{ startupDesktop = Get-DesktopKind $early.StartupDesktop $DesktopName; threadDesktops = @(); threadsUnreadable = 0 }
+                            } elseif ($null -ne $early -and $reading.startupDesktop -in @('unreadable', 'none')) {
+                                $reading.startupDesktop = Get-DesktopKind $early.StartupDesktop $DesktopName
+                            }
+                            $image = $(if ($all[$id]) { $all[$id].Image } elseif ($null -ne $early) { $early.Image } else { $null })
+                            $role = $(if ($id -eq $pi.pid) { 'cli' } elseif ($image -ieq 'noctty.exe') { 'cli-forwarded' } else { 'cli-descendant' })
+                            $seen[$id] = [ordered]@{ pid = $id; creation = $creation; image = $image; role = $role; inJob = $jobPids -contains $id
+                                startupDesktop = $reading.startupDesktop; threadDesktops = @($reading.threadDesktops); threadsUnreadable = $reading.threadsUnreadable
+                                sampledAlive = $alive }
+                        } elseif ($null -ne $reading) {
+                            # Later reads add the thread desktops a thread connects to after its first one.
+                            $row = $seen[$id]
+                            $row.sampledAlive = $true
+                            $row.threadDesktops = @(@($row.threadDesktops) + @($reading.threadDesktops) | Sort-Object -Unique)
+                            $row.threadsUnreadable = [Math]::Max([int]$row.threadsUnreadable, [int]$reading.threadsUnreadable)
+                            if ($row.startupDesktop -in @('unreadable', 'none') -and $reading.startupDesktop -notin @('unreadable', 'none')) { $row.startupDesktop = $reading.startupDesktop }
+                            if (-not ($jobPids -contains $id)) { $row.inJob = $false }
+                        }
+                    }
+                    $polls++
+                    $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd
+                    if (-not [bool]$inventory.complete) { $inventoryEveryPoll = $false }
+                    foreach ($window in @($inventory.windows)) { $windowsSeen["$($window.desktop)|$($window.class)|$($window.ownerRole)"] = $window }
+                    if ([GuiProbeNative]::WaitForSingleObject($pi.process, 20) -eq 0) { break }
+                } while ([datetime]::UtcNow -lt $deadline)
+                $facts.polls = $polls
+                $facts.inventoryCompleteEveryPoll = $inventoryEveryPoll -and $polls -gt 0
+                $facts.windows = @($windowsSeen.Values)
+                $facts.windowsOffPrivate = @($windowsSeen.Values | Where-Object { $_.desktop -ne 'private' }).Count
+                $facts.unverifiedDescendantLinks = $unverifiedLinks
+                $facts.rootExited = [GuiProbeNative]::WaitForSingleObject($pi.process, 0) -eq 0
+                $facts.exitCode = $(if ($facts.rootExited) { [long][GuiProbeNative]::ExitCode($pi.process) } else { $null })
+                # Anything of the tree still alive is stopped by its exact PID and creation time: in the job through the
+                # job's own check, a process that left it (leftJob) as the root's verified descendant.
+                $stops = [ordered]@{}
+                foreach ($row in @($seen.Values)) {
+                    $row.leftJob = -not $row.inJob
+                    if (-not [GuiProbeNative]::AliveExact($row.pid, $row.creation)) { continue }
+                    $outcome = $(if ($row.leftJob) { [GuiProbeNative]::StopExactDescendant($row.pid, $row.creation) } else { [GuiProbeNative]::StopExact($row.pid, $row.creation, $watchJob) })
+                    $stops[$outcome] = 1 + [int]$stops[$outcome]
                 }
-                $polls++
-                $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd
-                if (-not [bool]$inventory.complete) { $inventoryEveryPoll = $false }
-                foreach ($window in @($inventory.windows)) { $windowsSeen["$($window.desktop)|$($window.class)|$($window.ownerRole)"] = $window }
-                if ([GuiProbeNative]::WaitForSingleObject($pi.process, 20) -eq 0) { break }
-            } while ([datetime]::UtcNow -lt $deadline)
-            $facts.polls = $polls
-            $facts.inventoryCompleteEveryPoll = $inventoryEveryPoll -and $polls -gt 0
-            $facts.windows = @($windowsSeen.Values)
-            $facts.windowsOffPrivate = @($windowsSeen.Values | Where-Object { $_.desktop -ne 'private' }).Count
-            $facts.unverifiedDescendantLinks = $unverifiedLinks
-            $facts.rootExited = [GuiProbeNative]::WaitForSingleObject($pi.process, 0) -eq 0
-            $facts.exitCode = $(if ($facts.rootExited) { [long][GuiProbeNative]::ExitCode($pi.process) } else { $null })
-            # Anything of the tree still alive is stopped by its exact PID and creation time: in the job through the
-            # job's own check, a process that left it (leftJob) as the root's verified descendant.
-            $stops = [ordered]@{}
-            foreach ($row in @($seen.Values)) {
-                if ([GuiProbeNative]::CreationTime($row.pid) -ne $row.creation) { continue }
-                $row.leftJob = -not $row.inJob
-                $outcome = $(if ($row.leftJob) { [GuiProbeNative]::StopExactDescendant($row.pid, $row.creation) } else { [GuiProbeNative]::StopExact($row.pid, $row.creation, [IntPtr]::Zero) })
-                $stops[$outcome] = 1 + [int]$stops[$outcome]
+                $facts.stopped = $stops
+                $facts.leftAfterStop = @($seen.Values | Where-Object { [GuiProbeNative]::AliveExact($_.pid, $_.creation) }).Count
+                [void][GuiProbeNative]::CloseHandle($pi.process)
+                $after = [GuiProbeNative]::JobAccounting($watchJob)
+                # Every process the watched job ever held, against the ones this arm saw in it.
+                $facts.jobProcessesStarted = $(if ($null -ne $after) { $after[0] } else { $null })
+                $facts.joinedReported = @($watch.Snapshot()).Count
+                # sampledAlive false: gone before any poll, so only the watch's read at its creation (its startup
+                # desktop) stands for it; its threads were never read.
+                $facts.processes = @($seen.Values | ForEach-Object { [ordered]@{ image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = [bool]$_.leftJob
+                    startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops; threadsUnreadable = $_.threadsUnreadable; sampledAlive = [bool]$_.sampledAlive } })
+                $facts.leftJob = @($seen.Values | Where-Object { $_.leftJob }).Count
+                $facts.forwardedSeen = @($seen.Values | Where-Object { $_.role -eq 'cli-forwarded' }).Count -ge 1
+                $facts.notSeenInJob = $(if ($null -ne $facts.jobProcessesStarted) { $facts.jobProcessesStarted - @($seen.Values | Where-Object { $_.inJob }).Count } else { $null })
+            } finally {
+                # The pins and the port go first, then the job (by its own handle: it holds only this invocation's tree).
+                if ($null -ne $watch) { $watch.Dispose() }
+                try { [void][HiddenLocal]::StopOwnedJob($watchJob) } catch { $facts.watchJobCloseFailed = $true }
             }
-            $facts.stopped = $stops
-            $facts.leftAfterStop = @($seen.Values | Where-Object { [GuiProbeNative]::CreationTime($_.pid) -eq $_.creation }).Count
-            [void][GuiProbeNative]::CloseHandle($pi.process)
-            $after = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
-            $facts.jobProcessesStarted = $(if ($null -ne $before -and $null -ne $after) { $after[0] - $before[0] } else { $null })
-            $facts.processes = @($seen.Values | ForEach-Object { [ordered]@{ image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = [bool]$_.leftJob
-                startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops; threadsUnreadable = $_.threadsUnreadable } })
-            $facts.leftJob = @($seen.Values | Where-Object { $_.leftJob }).Count
-            $facts.forwardedSeen = @($seen.Values | Where-Object { $_.role -eq 'cli-forwarded' }).Count -ge 1
-            $facts.notSeenInJob = $(if ($null -ne $facts.jobProcessesStarted) { $facts.jobProcessesStarted - @($seen.Values | Where-Object { $_.inJob }).Count } else { $null })
             $invocations.Add($facts)
         }
     } finally { [GuiProbeNative]::Close($sentinel); Close-ProbeDesktopReaders $readers }
@@ -1839,7 +1950,14 @@ function Invoke-NegativeControl {
         $readers = Open-ProbeDesktopReaders @('Default', $name)
         try {
             $readersOpen = Test-ProbeDesktopReadersOpen $readers
-            if ([GuiProbeNative]::WaitForSingleObject($child.process, 0) -ne 0) { $reading = Get-ProcessDesktopReading $child.pid $name }
+            if ([GuiProbeNative]::WaitForSingleObject($child.process, 0) -ne 0) {
+                $reading = Get-ProcessDesktopReading $child.pid $name
+                # A startup desktop the kinds do not name is recorded by its leaf, when the leaf is plain enough.
+                if ($reading.startupDesktop -eq 'other') {
+                    $leaf = @(([string][GuiProbeNative]::StartupDesktop($child.pid)) -split '\\')[-1]
+                    $reading.startupDesktopLeaf = $(if ($leaf -match '\A[A-Za-z0-9._-]{1,64}\z') { $leaf } else { 'unrecordable' })
+                }
+            }
         } finally { Close-ProbeDesktopReaders $readers }
         [IO.File]::WriteAllText($release, '')
         $exited = [GuiProbeNative]::WaitForSingleObject($child.process, 60000) -eq 0
@@ -1960,9 +2078,10 @@ function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
     }
 }
 
-# Q0's CLI arm, from its driver's record: inconclusive without both invocations' forwarded noctty.exe seen and every
-# desktop read resolved; pass only with every process of both trees (leftJob ones included) on the private desktop,
-# each root exited, nothing left after the stop and the guards held.
+# Q0's CLI arm, from its driver's record: inconclusive without both invocations' forwarded noctty.exe seen, every
+# process that joined a watched job read (notSeenInJob 0) and every desktop read resolved; pass only with every process
+# of both trees (leftJob ones included) on the private desktop, each root exited, nothing left after the stop and the
+# guards held.
 function Get-Q0CliArmVerdict($ArmRun) {
     $d = $ArmRun.driver
     $invocations = @($(if ($d) { $d.invocations }))
@@ -1970,19 +2089,21 @@ function Get-Q0CliArmVerdict($ArmRun) {
     $readsResolved = $all.Count -gt 0 -and @($all | Where-Object { $_.threadsUnreadable -gt 0 -or $_.startupDesktop -in @('unreadable', 'none') }).Count -eq 0
     $offPrivate = @($all | Where-Object { $_.startupDesktop -ne 'private' -or @($_.threadDesktops | Where-Object { $_ -ne 'private' }).Count -gt 0 }).Count
     $forwarded = $invocations.Count -eq 2 -and @($invocations | Where-Object { -not [bool]$_.forwardedSeen }).Count -eq 0
+    $everyJoinedRead = $invocations.Count -gt 0 -and @($invocations | Where-Object { $_.notSeenInJob -ne 0 }).Count -eq 0
     $rootsExited = $invocations.Count -gt 0 -and @($invocations | Where-Object { -not [bool]$_.rootExited }).Count -eq 0
     $nothingLeft = @($invocations | Where-Object { $_.leftAfterStop -ne 0 }).Count -eq 0
     $inventories = $invocations.Count -gt 0 -and @($invocations | Where-Object { -not [bool]$_.inventoryCompleteEveryPoll }).Count -eq 0
     $windowsOff = [int](@($invocations | ForEach-Object { [int]$_.windowsOffPrivate }) | Measure-Object -Sum).Sum
     $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and $forwarded -and $readsResolved -and
-        $inventories -and (Test-ProbeGuardsReadable $ArmRun)
+        $everyJoinedRead -and $inventories -and (Test-ProbeGuardsReadable $ArmRun)
     $positive = $offPrivate -eq 0 -and $windowsOff -eq 0 -and $rootsExited -and $nothingLeft -and (Test-ProbeGuardsHeld $ArmRun)
     return [ordered]@{
         invocations = $invocations.Count; processesSeen = $all.Count; processesOffPrivate = $offPrivate
         leftJob = @($all | Where-Object { $_.leftJob }).Count; forwardedSeen = $forwarded; desktopReadsResolved = $readsResolved
         windowInventoriesComplete = $inventories; windowsOffPrivate = $windowsOff
         exitCodes = @($invocations | ForEach-Object { $_.exitCode })
-        notSeenInJob = @($invocations | ForEach-Object { $_.notSeenInJob })
+        notSeenInJob = @($invocations | ForEach-Object { $_.notSeenInJob }); everyJoinedRead = $everyJoinedRead
+        readAtCreationOnly = @($all | Where-Object { -not [bool]$_.sampledAlive }).Count
         verdict = $(if (-not $records) { 'inconclusive' } elseif ($positive) { 'pass' } else { 'fail' })
     }
 }
