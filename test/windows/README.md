@@ -1061,6 +1061,274 @@ fails `EARLY-SAMPLE`; times that do not increase are `MALFORMED`. The driver
 never waits on the copy without a bound. `ci/test_soak_judge.py` holds the judge's controls
 and runs in the checks job; Contracts.98 pins the harness.
 
+## gui-hosted-probe.ps1
+
+A record-only diagnostic: it measures, and nothing gates on it. It shows where
+noctty's processes and windows land, and what a GitHub-hosted runner's own
+interactive desktop allows a GUI test. It runs from
+`.github/workflows/gui-probe.yml`, which only `workflow_dispatch` starts, on
+two builds of the same source, both prepared before the run. Q0 runs the
+measurement build (`Invoke-InteractiveWin11MeasureBuild`). On a hosted runner,
+P3 to P5 run a `-Drenderer-test-tools=true` build (`-TestToolsBin`) on both
+desktops: one build and one fixture.
+
+Every copy uses #727's launch policy:
+
+- a portable copy without `noctty.ico`, with its own `LOCALAPPDATA` and
+  `APPDATA`;
+- every shell `direct:<System32>\cmd.exe /D`;
+- the clipboard read and write denied, and `copy-on-select = false`;
+- `renderer = d3d11-warp` and a seeded background (#1f6f8b).
+
+These settings, the shell among them, go in the copy's portable
+`config.ghostty`. The command line carries only the launch helper's isolation:
+a shell passed there would travel as one argument with a space in it, which a
+caller that splits arguments can cut before `/D`. Each run records the policy
+as named fields. It also reads its shell's real command line by PID, and
+records, never the text, that the shell is System32's `cmd.exe` with `/D`
+ahead of any payload. Staging copies the build the way #727's soak does,
+and refuses the run unless both the app (`noctty.exe`) and the CLI
+(`noctty.com`) match the build: the measurement receipt's `ExeSHA256` and
+`CliSHA256`, or the test-tools prefix's own files.
+Nothing in a run builds or runs `dev-windows.cmd` or `cmd /c`.
+
+**The launcher's gate.** `Get-ProbeLaunchRefusal` runs before every noctty
+start, in measurement mode (`NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, which the
+probe sets for itself and its drivers). It allows only a portable copy (`noctty.portable` beside it, no
+`noctty.ico`, the profile folders under `-Work`) of two builds:
+
+- the receipt-bound measurement build;
+- on a hosted runner only, the test-tools build.
+
+A stock build shares the product AUMID and can rewrite the installed app's
+per-user registration (app-lifecycle.md 2026-10-16), so locally only the
+measurement build starts. The gate's control runs first and starts nothing.
+It must refuse each of these for its own reason:
+
+- a copy without the marker;
+- a copy with the icon;
+- another binary;
+- the test-tools build off a hosted runner;
+- an unredirected `LOCALAPPDATA`;
+- measurement mode unset;
+- a missing or mismatched `noctty.com` beside the app.
+
+**Q0**, run locally and hosted, in three arms (design §9: "the CLI, either
+ConPTY host"):
+
+- the copy with its bundled ConPTY host (`OpenConsole.exe`);
+- the same with the in-box host (`NOCTTY_CONPTY=inbox`, `conhost.exe`);
+- the copy's CLI as PR 1's leaves run it: `noctty.com +version`, and
+  `+list-windows --class=<fresh class> --format=json --timeout=1000`. The
+  single-instance pipe is named only from `--class`, so the CLI arm reaches
+  no other noctty, and it runs locally too. Its tree is sampled at every poll
+  until the tree is done, and so are its windows: the same two-desktop
+  inventory, with its sentinel and Default > 0 control, over the tree's
+  processes. The walk keeps only the census's windows, so after it the job's
+  members are read again: a member outside the census (it joined during the
+  poll) that owns a window the walk dropped, on any desktop but the private
+  one, is recorded as a job window there (`late-joiner`), and the arm cannot
+  pass. A late joiner with no such window is only counted
+  (`lateJoinersAfterWalk`); the GUI arms do the same. The probe starts
+  `noctty.com` with
+  `CREATE_NO_WINDOW`, so this arm does not test whether a console window
+  would reach Default. Each invocation runs in a job of the driver's own,
+  watched on a completion port, and each process that joins it (the forwarded
+  `noctty.exe`, its console host) is read when the job reports it. The reader
+  opens first: while a message waits it opens that process at once, and it
+  reads one opened process only when none waits, on a thread above normal
+  priority (test-harnesses.md 2026-11-20 PROBE-JOB-WATCH-OPEN-FIRST-01). That
+  read is best effort. Windows does not guarantee `JOB_OBJECT_MSG_NEW_PROCESS`,
+  a child can exit before it is opened (counted as `unopenedJoins`), and a PID
+  is recorded only when the process opened is a member of the job created no
+  later than the message was taken (else it is `unpinned` and left unread). A
+  fault on the reader ends the reading, not the driver (`watchFaulted`). These
+  counts are recorded only; what gates is `notSeenInJob`. A process that exits between
+  polls but was read at its report keeps its startup desktop, which is then
+  its only evidence: its row is `sampledAlive: false`, as its threads were
+  never read. The arm is inconclusive unless:
+  - every process the job counted was read (`notSeenInJob` 0);
+  - every startup desktop was read;
+  - each tree drained in time and the poll after the drain ran
+    (`treeDoneInTime`);
+  - each watched job closed (no `watchJobCloseFailed`).
+
+Each arm:
+
+- A driver created by name on a private desktop (`Invoke-LocalHiddenDriver`)
+  starts the copy.
+- It records the desktop of every process in the job, plus every descendant
+  of the launched root whose link was verified on pinned handles. Each
+  candidate is opened first, and its parent is read from the process itself,
+  its creation time from the same handle, with every ancestor's handle held.
+  A descendant outside the job is `leftJob`: it is judged like the rest and
+  stopped by its exact PID and creation time. A link that cannot be verified
+  is counted, never stopped.
+- The bundled arm must see the copy's own `OpenConsole.exe`; a fall back to
+  System32's `conhost.exe` fails it. The in-box arm must see `conhost.exe`.
+- It reads each process's startup desktop (PEB `DesktopInfo`, taken as an
+  offset into the parameter block until the child's loader normalizes it) and
+  its threads' desktops while holding read-only handles to Default and the
+  private desktop. A startup desktop that could not be read is recorded as
+  `none`, the same as an empty name (PowerShell binds a null to `[string]` as
+  an empty string); every gate treats `none` and `unreadable` alike, as
+  unresolved. `GetThreadDesktop` names another process's thread desktop
+  only while the caller holds a handle to that desktop (test-harnesses.md
+  2026-11-20 PROBE-THREAD-DESKTOP-01).
+- It records every top-level window found on the private desktop and on
+  Default. Both inventories must be complete:
+  - every `FALSE` from `EnumDesktopWindows` counts as unavailable;
+  - a hidden sentinel window of the driver must appear on the private
+    desktop;
+  - Default must show at least one window.
+- It then stops each process by exact PID, and counts what still runs: the
+  same PID and creation time, not exited. A held handle keeps an exited
+  process's creation time readable, so creation alone is no proof of life.
+- Its claim is "every process and window alive at the sample". It holds only
+  when the sample has the app, the ConPTY host (the copy's own
+  `OpenConsole.exe`, or `conhost`) and the shell, and every desktop read in
+  it resolved. A thread with no USER desktop is kept apart from an unreadable
+  one, and an unreadable one leaves Q0 inconclusive. The growth of the job's
+  `TotalProcesses` since the copy started is recorded beside the sample, so a
+  descendant that joined and exited before it (cmd's `chcp`) is counted. It is
+  outside the claim and does not fail Q0.
+- An incomplete census also leaves Q0 inconclusive:
+  - a descendant candidate the walk could not verify, unless it is gone, its
+    PID now names another process, or it predates the ancestor it names
+    (`unresolvedDescendantLinks` must be 0). Unresolved is not the only way
+    the walk can miss a live process: when an intermediate's PID is reused by
+    a newer child of the same ancestor, the intermediate's live child reads
+    as older. The arm's job still holds such a grandchild, since it permits no
+    breakaway (test-harnesses.md 2026-11-20 PROBE-JOB-BREAKAWAY-01), so the
+    GUI census counts it and the CLI watch reads it or leaves the arm
+    inconclusive. The walk is a cross-check;
+  - a running child of a gone or reused candidate that is not in the arm's
+    job (the walk does not pass through such a PID; it counts as unresolved);
+  - more live processes in the job, by its active count right after the
+    sample, than in-job rows (a GUI arm);
+  - a member of the job's process list read at that same moment that is not
+    a census row with the same PID and creation time, so an exit and a join
+    cannot balance out (a GUI arm; the list is recorded as
+    `jobMembersAtBoundary`, and a record without it is inconclusive). The
+    list is read inside a bracket: the job's accounting before and after it
+    must show the same total (nothing joined; the total only grows, and the
+    job permits no breakaway) and the same active count, equal to the list's
+    length (nothing left). An unstable bracket is retried up to 5 times and
+    recorded (`boundaryBracket`); a stable one proves no member exited inside
+    it, so every member must match by PID and creation time.
+- Each walk also checks, on a handle held open, whether the owner of a
+  window off the private desktop that is outside the census belongs to the
+  arm's job (the CLI's watched job, or the GUI driver's own). A member's
+  window counts as a job window there, so the arm cannot pass. An owner that
+  cannot be opened is counted (`windowOwnersUnreadable`, beside
+  `windowOwnersTotal`, the owners checked). An owner that exits
+  between the walk and its open, taking its windows with it, is outside this
+  check.
+- Positive control: a child started without a desktop name reports the private
+  desktop.
+- Negative control: a thread moved to a second desktop with `SetThreadDesktop`
+  starts a child that reports Default. While the child waits, Q0's own reader
+  must name Default for both its startup desktop and its thread desktops.
+  Desktop names compare case-insensitively, and a startup desktop the reader
+  names neither way is recorded by its leaf.
+- The enumeration classifier's own control runs in the bundled arm's driver:
+  a fresh empty desktop, walked through the handle that created it, comes
+  back with the empty walk's own signature (FALSE with no error), a walk
+  through a handle that
+  is not a desktop (an event of the driver's) comes back unavailable with a
+  Win32 error, and the desktop holding the sentinel lists it. Anything else
+  leaves Q0 inconclusive. A desktop handle without some access right is no
+  such failure: on the Windows builds measured, `EnumDesktopWindows` walked
+  every narrowed desktop handle tried, though Microsoft documents
+  `DESKTOP_READOBJECTS` as required (test-harnesses.md 2026-11-20
+  PROBE-ENUM-ACCESS-01).
+- The CLI arm polls until its root has exited and its watched job holds no
+  live process, then once more for what joined after the last snapshot.
+- Q0 passes only when all three arms and every control pass. Its claim is
+  "every process and window alive at a sample".
+
+**D3**, run hosted only (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` checked).
+On the runner's own Default desktop, each item has a control:
+
+- **P1:** `SendInput` text reaches the script's own window, once that
+  window's EDIT has the focus and it is in no menu loop. The foreground is
+  unlocked by a zero-motion mouse input, not an Alt tap, which opens the menu
+  loop and swallows the next key. Control: another window in front takes the
+  input, and the probe's text is unchanged. Then the noctty arm: the
+  measurement copy, foreground, is typed `echo <nonce>>"<file>"` and Enter,
+  and the file must hold the nonce. Control: the same with a probe window in
+  front, whose EDIT takes the line while no file appears. P1 passes only with
+  both arms, and every stimulus counts only when `SendInput` inserted every
+  event.
+- **P2:** a #FF00FF window is read back one pixel at a time. Controls: the
+  window covered, and the window minimised.
+- **P3:** the fixture's shell prints a seed of known size: 20 lines of 64
+  characters, 1320 bytes (`/K type <seed file>`).
+  - In every arm, the backend is shown by the existing
+    `initialized driver=WARP` line, the `renderer_windows` scope's one line
+    (the WARP notice), and no logged backend switch.
+  - On Default, a fresh render-trace snapshot (`NOCTTY_RENDER_TRACE_LIVE`,
+    WM_APP + 8) shows a swap whose `last_swap_process_output_bytes` is at
+    least the seed's bytes.
+  - Control: the same run with the seed withheld stays below that.
+  - Control: on a private desktop, a fresh `WM_PRINTCLIENT` readback of the
+    pane (the test tools' `renderer.capture`) is the seeded frame, and a
+    snapshot taken after it counts no swap.
+  - Control: a private withheld-seed readback misses the seed text's pixel
+    floor.
+  - A failed readback, a missing snapshot, or a snapshot that lacks a counter
+    is "inconclusive". The withheld readback counts only as the fixture's own
+    background with a measured ink fraction below the floor.
+- **P4:** `ITaskbarList3::HrInit`'s HRESULT on both desktops.
+- **P5:** the toast setting and history count for the build's identities.
+  The after-exit samples are taken only after a normal exit: `WM_CLOSE`
+  posted, the process ended inside the wait, and exit code 0.
+
+P4 reads the copy's own record. `NOCTTY_GUI_PROBE_TRACE=1`
+(`src/os/gui_probe_trace.zig`) turns it on, and it needs `GHOSTTY_LOG=stderr`.
+
+```powershell
+pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix>\bin `
+    -MeasureRepo <repo> -Work <new dir> -Out <record.json> -Part Q0
+```
+
+`-Part` takes `Q0`, `Local` or `All`. `All` needs
+`-TestToolsBin <test-tools prefix>\bin`; with `Local` it only feeds the gate's
+control, which must refuse it. `-Work` must lie outside
+`-MeasureRepo`, or in a folder git ignores there: copies staged in the
+checkout would dirty it, and the driver's admission refuses a dirty one. The
+probe checks this before it creates anything.
+
+- `-Part Local` runs the gate's control, Q0, and the private-desktop facts of
+  P4 and P5 on the measurement build. Given `-TestToolsBin`, it only feeds the
+  gate's control, which must refuse it.
+- `-Part All` refuses to start off a hosted runner, and needs
+  `-TestToolsBin`.
+- Locally, the run also:
+  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`);
+  - reads only the measurement identity's toast facts;
+  - gives each noctty child a `TEMP` and `TMP` under its run directory;
+  - deletes the copies it made under `-Work` once the record is written
+    (`-KeepCopies` keeps them);
+  - exits 3 after a tripped guard and 2 after a failed stage. The record
+    names the guard (`guardTripped`) and its state (`guardTrippedState`,
+    `tripped` or `unreadable`).
+- On a hosted runner the probe is record-only and exits 0.
+- A clipboard sequence sample of 0 cannot be read. Locally it stops the run,
+  as a tripped guard does. On a hosted runner it is recorded
+  (`guardUnreadable`) and gates no verdict: the guard protects the user's
+  clipboard, and the runner's clipboard is not theirs.
+- The record holds only values and HRESULTs. `Write-ProbeRecord` writes any
+  other string, and any other type, as `rejected-value`, and leaves out an
+  entry under any other key. No screen image, path, window title or command
+  line enters it, nor any environment value but the hosted runner's image
+  name and version, each kept only in its known shape (else `unknown`). The record is still written: it
+  counts the replacements (`rejectedValues`) and lists where they were
+  (`rejectedAt`, a left-out key as `#key<n>`, which no allowed key can
+  match). A driver record with any replacement
+  leaves the verdicts that read it inconclusive.
+- Readbacks stay in `-Work`, and only their counts reach the record.
+
 ## Style
 
 - Define reusable helpers as `function Verb-Noun { ... }` with a `param(...)`
