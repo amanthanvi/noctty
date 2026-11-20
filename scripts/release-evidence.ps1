@@ -9,8 +9,8 @@ function Invoke-ReleaseGhJson {
             $code = [int]$status.Groups[1].Value
             if ($code -eq 404 -and $AllowNotFound) {
                 if (-not $invalidReleaseResponse) { $global:LASTEXITCODE = 0; return $null }
-                # Once a selected ID sent a malformed success, keep trying to
-                # read its object. A later 404 does not establish absence.
+                # After a malformed success from an object endpoint, a later
+                # 404 does not establish absence.
             } elseif ($readExit -eq 0 -and $code -eq 200) {
                 $blank = [array]::IndexOf($lines, '')
                 if ($blank -lt 0) { throw 'Release GitHub read refused (HTTP 200); publication state is unknown.' }
@@ -31,7 +31,7 @@ function Invoke-ReleaseGhJson {
         if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
     }
     if ($invalidReleaseResponse) {
-        throw 'ReleaseLookupIncomplete: the selected release ID did not return an object after 3 reads.'
+        throw 'ReleaseLookupIncomplete: the GitHub endpoint did not return a JSON object after 3 reads.'
     }
     throw 'Release GitHub read failed after 3 attempts; publication state is unknown.'
 }

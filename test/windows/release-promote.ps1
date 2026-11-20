@@ -205,6 +205,10 @@ function Invoke-FixtureGh {
             return (@{object=@{type='commit';sha=$remoteSha}}|ConvertTo-Json -Depth 5)
         }
         if ($endpoint -like '*/git/ref/tags/*') {
+            if ($global:NocttyReleaseFixtureB.Case -eq 'build-tag-empty') {
+                [void](Get-FixtureReadCount tag)
+                return '[]'
+            }
             if ($global:NocttyReleaseFixtureB.Case -eq 'build-create-identity' -and $global:NocttyReleaseFixtureB.BuildCreated) { $global:LASTEXITCODE=1;return '{}' }
             if ($global:NocttyReleaseFixtureB.Calls.Contains('publish') -and $global:NocttyReleaseFixtureB.Case -in @('build-tag-lag','build-tag-exhausted','build-tag-503')) {
                 $count=Get-FixtureReadCount tag
@@ -237,6 +241,10 @@ function Invoke-FixtureGh {
         }
         if ($endpoint -match '/releases/latest$') {
             $case=$global:NocttyReleaseFixtureB.Case
+            if ($case -eq 'build-latest-empty') {
+                [void](Get-FixtureReadCount latest)
+                return '[]'
+            }
             if ($case -in @('build-stable-latest-lag','build-stable-latest-exhausted','build-stable-latest-404','build-stable-latest-503','promote-latest-lag','promote-latest-exhausted')) {
                 $count=Get-FixtureReadCount latest
                 if ($case -like '*exhausted' -or $count -le 2) {
@@ -517,7 +525,7 @@ try {
         $global:NocttyReleaseFixtureB.Release=$record.release | ConvertTo-Json -Depth 8 | ConvertFrom-Json
         $global:NocttyReleaseFixtureB.Release | Add-Member -NotePropertyName id -NotePropertyValue 136 -Force
     }
-    foreach ($case in @('build', 'build-stable', 'build-retry', 'build-lost-response', 'build-exhausted', 'build-drift', 'build-existing', 'build-draft', 'build-upload-starter','build-absent-tag','build-tag-mismatch','build-annotated','build-annotated-mismatch','build-edit-lost','build-edit-refused','build-read-retry','build-read-exhausted','build-publish-flags','build-create-lost','build-create-delay','build-create-refused','build-create-identity','build-create-other-writer','build-create-id-lag','build-create-id-exhausted','build-preflight-id-404','build-preflight-id-empty','build-preflight-id-empty-lag','build-tag-lag','build-tag-exhausted','build-tag-503','build-stable-latest-lag','build-stable-latest-exhausted','build-stable-latest-404','build-stable-latest-503','build-publish-lag','build-after-publish-drift','build-create-existing-tag-target')) {
+    foreach ($case in @('build', 'build-stable', 'build-retry', 'build-lost-response', 'build-exhausted', 'build-drift', 'build-existing', 'build-draft', 'build-upload-starter','build-absent-tag','build-tag-mismatch','build-annotated','build-annotated-mismatch','build-edit-lost','build-edit-refused','build-read-retry','build-read-exhausted','build-publish-flags','build-create-lost','build-create-delay','build-create-refused','build-create-identity','build-create-other-writer','build-create-id-lag','build-create-id-exhausted','build-preflight-id-404','build-preflight-id-empty','build-preflight-id-empty-lag','build-tag-lag','build-tag-exhausted','build-tag-503','build-tag-empty','build-latest-empty','build-stable-latest-lag','build-stable-latest-exhausted','build-stable-latest-404','build-stable-latest-503','build-publish-lag','build-after-publish-drift','build-create-existing-tag-target')) {
         if ($CaseFilter -and $case -cnotin $CaseFilter) { continue }
         $activeCase = $case
         $global:NocttyReleaseFixtureB.Case = $case
@@ -561,6 +569,19 @@ try {
                 @($calls | Where-Object { $_ -eq 'id-release-read' }).Count -ne $expectedReads -or
                 @($calls | Where-Object { $_ -eq 'create' }).Count -ne [int]($case -ne 'build-preflight-id-404')) {
                 throw "Create discovery refusal failed for ${case}: $message"
+            }
+        } elseif ($case -in @('build-tag-empty','build-latest-empty')) {
+            $key = if ($case -eq 'build-tag-empty') { 'tag' } else { 'latest' }
+            $calls = $global:NocttyReleaseFixtureB.Calls
+            if ($message -notmatch '^ReleaseLookupIncomplete:' -or $global:NocttyReleaseFixtureB.Reads[$key] -ne 3) {
+                throw "Empty $key response did not refuse after three reads: $message"
+            }
+            if ($key -eq 'tag' -and @($calls | Where-Object { $_ -in @('create','publish') -or $_ -like 'upload:*' }).Count) {
+                throw 'Build mutated after an empty tag-ref response.'
+            }
+            if ($key -eq 'latest' -and (@($calls | Where-Object { $_ -eq 'publish' }).Count -ne 1 -or
+                $global:NocttyReleaseFixtureB.Release.draft -or -not $global:NocttyReleaseFixtureB.Release.prerelease)) {
+                throw 'An empty latest response did not preserve the published prerelease.'
             }
         } elseif ($case -in @('build-tag-exhausted','build-stable-latest-exhausted')) {
             $expected=if($case -eq 'build-tag-exhausted'){'ReleaseTagUnconfirmed'}else{'ReleaseLatestUnconfirmed'}
