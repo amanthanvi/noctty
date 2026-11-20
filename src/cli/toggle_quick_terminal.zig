@@ -47,6 +47,9 @@ pub fn run(alloc: Allocator) !u8 {
         .detect,
         .toggle_quick_terminal,
         {},
+        // noctty's performIpc takes a response timeout; this is the
+        // default `+new-window --timeout` uses.
+        10_000,
     ) catch |err| switch (err) {
         error.IPCFailed => {
             return 1;

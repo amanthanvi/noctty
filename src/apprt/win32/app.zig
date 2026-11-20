@@ -5120,6 +5120,14 @@ pub const App = struct {
                 try self.showChildExited(target, value);
                 return true;
             },
+
+            // Upstream c4e1ab888's selection notification (adaptation C3,
+            // PLAN.md §6.5): Win32 reads the selection itself and has no
+            // listener until Phase 3 adds UIA selection events, so it is
+            // explicitly ignored. Surface.setSelection sends it with the
+            // renderer state mutex held: an arm here must neither take that
+            // mutex nor pump messages.
+            .selection_changed => return false,
         }
     }
 
@@ -5157,6 +5165,12 @@ pub const App = struct {
                 if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
             },
+
+            // Upstream's +toggle-quick-terminal (apprt/ipc.zig at 74d0c72fd).
+            // Forwarding it to the running instance is adaptation C2 (PLAN.md
+            // §6.5, step 1A.5: an IPC server arm that calls the existing Win32
+            // action); until then the CLI reports it as unsupported here.
+            .toggle_quick_terminal => return false,
         }
     }
 

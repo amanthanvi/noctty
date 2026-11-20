@@ -1834,7 +1834,7 @@ test "a glyph constrained below a pixel renders as an empty glyph" {
     const cases = [_]struct {
         font: [:0]const u8,
         format: font.Atlas.Format,
-        constraint: font.face.RenderOptions.Constraint,
+        constraint: font.Glyph.RenderOptions.Constraint,
     }{
         // Spleen's 8x16 bitmap 'A' fit into the cell: 0.4x0.8 px, 0 px wide
         // once rounded.
