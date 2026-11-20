@@ -7,6 +7,7 @@ Corrected in other files:
 - 2026-10-15 SMALL-04 A, item (2): its "the plain prompt for the front terminal still says 'A process is still running' in the same read-only case (left)" no longer holds; the terminal in front says its program has exited too. See the 2026-11-03 CONFIRM-EXITED-FRONT entry in chrome-overlays.md.
 
 See also:
+- A UIA client's "whole document" is the accessible window, `accessibleHistoryRows` (min(40,000 cells / columns, 500) history rows) plus the viewport, which `snapshotDocumentWindow` slides only with a scrolled viewport: 329 lines at 140 columns over a full 10,000,000-byte scrollback, measured: trap (1) of the 2026-11-20 WORKING-SET-01 entry in test-harnesses.md.
 - When the docked search's results chip raises its live region (only while the bar is open: a close announces nothing, and the reopen writes the chip before the layout shows it): trap (a) of the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
 - `PageList.page_serial_min` (read by UIA `RowNumbering` and the snapshot provenance) moves only on `PageList.reset`; prunes and a split of the first page (`PageList.split` renews its source's serial) change `first_page_serial`, and rows shifted in place otherwise keep their page serial: the 2026-10-30 "Page serials are generations" entry in terminal-core.md.
 - Settings rows' static UIA HelpText, derived from typed descriptors: the 2026-10-18 "Settings native form rows" entry (#458) in settings.md.

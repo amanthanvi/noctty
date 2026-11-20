@@ -1334,34 +1334,46 @@ probe checks this before it creates anything.
 
 `PLAN.md` §3.5's working-set workloads: one portable copy of a measurement
 build on a private desktop runs one fixed workload, and the harness samples
-its private bytes, working set, commit charge, peak working set, handles and
-GDI and USER objects through the handle it holds from `CreateProcess`, at each
-stage once private bytes hold within 0.5% and working set within 1% for 5 s
-(or after 90 s, recorded as not settled). Each run is a fresh copy, private
-desktop, job and `LOCALAPPDATA`; the copy starts through
+its private bytes, working set, commit charge, peak working set, handles,
+panes and GDI and USER objects through the handle it holds from
+`CreateProcess`, at each stage once the last 10 samples, 500 ms apart, hold
+private bytes within 0.5% and working set within 1%; a stage that has not
+settled after 90 s fails the run. Each run is a fresh copy, private desktop,
+job and `LOCALAPPDATA`, one run at a time (a session-wide mutex refuses a
+second), from an unused build output (a `-Bin` holding a portable copy's
+state is refused). The copy starts through
 `Get-InteractiveWin11LaunchArguments` (its own class) after its build mode is
 checked through `+version`, with `direct:<System32>\cmd.exe /D`, the clipboard
 denied, no `noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process
-on an unhandled exception, and the driver at normal priority. The workloads,
-at 140 x 45 cells, in blocks of 25,000 lines:
+on an unhandled exception, the driver and the copy at normal priority. The
+workloads, at 140 x 45 cells, in blocks of 25,000 lines:
 
 - `fixed`: one block, then 20 cycles of a new tab and its close; `after` 7 s
-  later (undo-timeout prunes closed panes after 5 s).
+  later (undo-timeout prunes closed panes after 5 s) and once the copy is back
+  to one pane.
 - `scrollback-default`: 4 blocks at the default `scrollback-limit`
   (10,000,000 bytes), about ten times what it retains at this width.
-- `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` (default 1 GiB;
-  noctty itself has no maximum) holds at this width, with that limit.
+- `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` holds at 1,120
+  bytes a row (about twice the limit, measured), with that limit. noctty has
+  no maximum; Settings' up-down stops at 2,147,483,647, which caps the
+  parameter; the default, and Phase 0a's baseline, is 1 GiB.
 - `uia-walk`: `scrollback-default`'s output, then a UIA client reads the
   pane's whole `DocumentRange` and walks it line by line to its end, the pane
-  found from the copy's own window handle. The document is the accessible
-  window, not the whole scrollback: `accessibleHistoryRows` in
-  `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
-  history rows plus the viewport, 285 + 45 rows at 140 columns (329 lines
-  walked, measured).
+  found from the copy's own window handle, the viewport at the bottom. The
+  document is the accessible window, not the whole scrollback:
+  `accessibleHistoryRows` in `src/apprt/win32_uia/text.zig` exposes
+  min(40,000 cells / columns, 500) history rows plus the viewport, 285 + 45
+  rows at 140 columns (329 lines walked, measured). The window slides with a
+  scrolled viewport (`snapshotDocumentWindow`); this workload does not scroll.
 - `session-capture`: `scrollback-default`'s output with
   `window-save-state = always` and `window-save-state-scrollback = 10000`,
-  then 10 checkpoints, each a new tab and its close and the session file's
-  next write; the session file stays in the portable copy.
+  then 10 checkpoints, each a new tab and its close and then a session file
+  write. The 512 KiB snapshot budget pre-limits a capture to
+  budget / (columns + 1) lines, about 3,700 at 140 columns, so the 10,000-line
+  cap is not reached at this width. This is the only workload that saves
+  session state, an exception to AGENTS.md's `--window-save-state=never`: the
+  file stays in the portable copy, and the real `session-state.json` is
+  guarded.
 - `tab-churn`: 50 cycles of a new tab and its close.
 
 ```powershell
@@ -1369,14 +1381,16 @@ pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
     -Bin <measurement prefix>\bin -Run <new dir> -Workload fixed
 ```
 
-Compare the median of each workload's `after` stage over sequential runs, one
-copy at a time on a quiet machine: so run, 9 copies' settled levels had IQRs of
-0.1-1.6 MiB, while copies run together differed by tens of MiB
-(test-harnesses.md, the 2026-11-20 WORKING-SET-01 entry and trap 6 of the
-2026-11-18 SOAK-01 entry). The outer half
-checks the real `startup-attempts.json`, the product jump list and the
-PowerShell history by metadata and records the clipboard sequence number
-before and after. Contracts.98-WorkingSet pins the harness.
+Compare the median of each workload's `after` stage over sequential runs with
+the same `WorkloadSha256` (the constants, the output block and the config),
+one copy at a time on a quiet machine: so run, 9 copies' settled `start`
+levels had IQRs of 0.1-1.6 MiB and their `after` levels up to 2.7 MiB (7.5 MiB
+at the 1 GiB limit), with one unexplained low run, while copies run together
+differed by tens of MiB (test-harnesses.md, the 2026-11-20 WORKING-SET-01
+entry and trap 6 of the 2026-11-18 SOAK-01 entry). The outer half checks the
+real `startup-attempts.json`, `session-state.json`, the product jump list and
+the PowerShell history by metadata and records the clipboard sequence number
+before and after. Contracts.98-WorkingSet pins the harness and its workload.
 
 ## Style
 
