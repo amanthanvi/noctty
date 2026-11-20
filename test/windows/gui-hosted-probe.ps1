@@ -1184,22 +1184,24 @@ function Get-ProcessDesktopReading([int] $ProcessId, [string] $Private) {
 }
 
 # Every Toolhelp descendant of `RootPid` in `All` (rows by PID), as PID -> creation time. A child links to its parent
-# only when it was created no earlier than the parent, so a reused PID cannot join the tree.
+# only when it was created no earlier than the parent, so a reused PID cannot join the tree. PID-keyed maps are
+# Dictionary[int, ...], never [ordered]@{}: an int index on an OrderedDictionary is positional (tooling.md
+# 2026-11-20 PS-ORDERED-INT-INDEX-01).
 function Get-ProbeDescendants($All, [int] $RootPid) {
-    $found = [ordered]@{}
+    $found = [System.Collections.Generic.Dictionary[int, long]]::new()
     $rootCreation = [GuiProbeNative]::CreationTime($RootPid)
-    if ($rootCreation -eq 0) { return $found }
+    if ($rootCreation -eq 0) { return , $found }
     $queue = [Collections.Generic.Queue[object]]::new()
     $queue.Enqueue(@($RootPid, $rootCreation))
     while ($queue.Count -gt 0 -and $found.Count -lt 256) {
         $parent = $queue.Dequeue()
         foreach ($row in @($All.Values | Where-Object { $_.Parent -eq $parent[0] -and $_.Pid -ne $parent[0] })) {
-            if ($found.Contains($row.Pid)) { continue }
+            if ($found.ContainsKey($row.Pid)) { continue }
             $creation = [GuiProbeNative]::CreationTime($row.Pid)
             if ($creation -ne 0 -and $creation -ge $parent[1]) { $found[$row.Pid] = $creation; $queue.Enqueue(@($row.Pid, $creation)) }
         }
     }
-    return $found
+    return , $found
 }
 
 # Q0's sample: the job's PIDs plus every Toolhelp descendant of the copy (by PID and creation time). A descendant
@@ -1224,12 +1226,12 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [s
                 $hop = $all[$hop.Parent]
             }
         }
-        if ($descendants.Contains($id) -and $role -eq 'other') { $role = 'noctty-descendant' }
+        if ($descendants.ContainsKey($id) -and $role -eq 'other') { $role = 'noctty-descendant' }
         $inJob = $jobPids -contains $id
         $reading = Get-ProcessDesktopReading $id $Private
         $rows.Add([ordered]@{
             pid = $id
-            creation = $(if ($descendants.Contains($id)) { $descendants[$id] } else { [GuiProbeNative]::CreationTime($id) })
+            creation = $(if ($descendants.ContainsKey($id)) { $descendants[$id] } else { [GuiProbeNative]::CreationTime($id) })
             image = $(if ($entry) { $entry.Image } else { $null })
             role = $role
             inJob = $inJob
@@ -1566,7 +1568,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
             finally { $env:TEMP = $savedTemp[0]; $env:TMP = $savedTemp[1] }
             [void][GuiProbeNative]::CloseHandle($pi.thread)
             $rootCreation = [GuiProbeNative]::CreationTime($pi.pid)
-            $seen = [ordered]@{}
+            $seen = [System.Collections.Generic.Dictionary[int, object]]::new()
             $deadline = [datetime]::UtcNow.AddSeconds(30)
             do {
                 $all = @{}
@@ -1577,7 +1579,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                     $creation = $(if ($id -eq $pi.pid) { $rootCreation } else { $descendants[$id] })
                     if ([GuiProbeNative]::CreationTime($id) -ne $creation) { continue }
                     $reading = Get-ProcessDesktopReading $id $DesktopName
-                    if (-not $seen.Contains($id)) {
+                    if (-not $seen.ContainsKey($id)) {
                         $image = $(if ($all[$id]) { $all[$id].Image } else { $null })
                         $role = $(if ($id -eq $pi.pid) { 'cli' } elseif ($image -ieq 'noctty.exe') { 'cli-forwarded' } else { 'cli-descendant' })
                         $seen[$id] = [ordered]@{ pid = $id; creation = $creation; image = $image; role = $role; inJob = $jobPids -contains $id
