@@ -201,8 +201,13 @@ $workingSetRules = @(
     # --- the workload and its proofs
     @{
         Description = 'the workload''s constants are the ones Phase 0a measured (a change is a new workload, and changes WorkloadSha256)'
-        Pattern = '(?s)\$script:BlockLines = 25000\s+\$script:RowPageBytes = 1120\s+\$script:Cols = 140\s+\$script:Rows = 45\s+\$script:FixedCycles = 20\s+\$script:ChurnCycles = 50\s+\$script:SessionCheckpoints = 10\s+\$script:PruneSeconds = 7\s+\$script:SettleSamples = 10\s+\$script:SampleMs = 500\s+\$script:SettleCapMs = 90000\s'
+        Pattern = '(?s)\$script:BlockLines = 25000\s+\$script:RowPageBytes = 1120\s+\$script:Cols = 140\s+\$script:Rows = 45\s+\$script:GridRows = 43\s+\$script:FixedCycles = 20\s+\$script:ChurnCycles = 50\s+\$script:SessionCheckpoints = 10\s+\$script:PruneSeconds = 7\s+\$script:SettleSamples = 10\s+\$script:SampleMs = 500\s+\$script:SettleCapMs = 90000\s'
         Mutation = @('$script:FixedCycles = 20', '$script:FixedCycles = 19')
+    }
+    @{
+        Description = 'a run expects the grid the config gave on the measurement machine, 43 rows (measured on the 0a build and the PR head), not the configured 45'
+        Pattern = '(?m)^\$script:GridRows = 43[ \t]*$'
+        Mutation = @('$script:GridRows = 43', '$script:GridRows = 45')
     }
     @{
         Description = 'every workload uses those constants: the cycle counts, the prune wait and the checkpoints'
@@ -236,8 +241,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'the grid is read from the base pane''s pseudoconsole before start, and a grid other than the constants fails the run'
-        Pattern = '(?s)\$probe = \[WorkingSetNative\]::Spawn\(\$pwsh, \(''"\{0\}" -NoProfile -NonInteractive -File "\{1\}" -Run "\{2\}" -GridProbePid \{3\}'' -f \$pwsh, \$PSCommandPath, \$Run, \$shells\[0\]\), \$Run, \$desktopPath,.*?if \(\$record\.GridCols -ne \$script:Cols -or \$record\.GridRows -ne \$script:Rows\) \{ throw [^\r\n]+\}\s+Add-Stage ''start'''
-        Mutation = @('if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:Rows) { throw', 'if ($false) { throw')
+        Pattern = '(?s)\$probe = \[WorkingSetNative\]::Spawn\(\$pwsh, \(''"\{0\}" -NoProfile -NonInteractive -File "\{1\}" -Run "\{2\}" -GridProbePid \{3\}'' -f \$pwsh, \$PSCommandPath, \$Run, \$shells\[0\]\), \$Run, \$desktopPath,.*?if \(\$record\.GridCols -ne \$script:Cols -or \$record\.GridRows -ne \$script:GridRows\) \{ throw [^\r\n]+\}\s+Add-Stage ''start'''
+        Mutation = @('if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:GridRows) { throw', 'if ($false) { throw')
     }
     @{
         Description = 'a block counts only when the acknowledgement file reaches its own number and the window title shows the pane parsed through its end'
@@ -324,7 +329,7 @@ function Get-WorkingSetFunction([string] $Name) {
     if ($found.Count -ne 1) { throw "The working-set harness must define $Name once." }
     return $found[0].Extent.Text
 }
-$constantNames = @('BlockLines', 'RowPageBytes', 'Cols', 'Rows', 'FixedCycles', 'ChurnCycles', 'SessionCheckpoints', 'PruneSeconds', 'SettleSamples', 'SampleMs', 'SettleCapMs')
+$constantNames = @('BlockLines', 'RowPageBytes', 'Cols', 'Rows', 'GridRows', 'FixedCycles', 'ChurnCycles', 'SessionCheckpoints', 'PruneSeconds', 'SettleSamples', 'SampleMs', 'SettleCapMs')
 $constantLines = foreach ($name in $constantNames) {
     $line = [regex]::Match($workingSetText, "(?m)^\`$script:$name = \d+[ \t]*$").Value.Trim()
     if (-not $line) { throw "The working-set harness has no `$script:$name = <number> line." }
@@ -392,7 +397,7 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
         $cycles = switch ($Name) { 'fixed' { 20 } 'tab-churn' { 50 } 'session-capture' { 10 } default { 0 } }
         $stages = @(Get-WorkloadStages $Name $blocks | ForEach-Object { [pscustomobject]@{ name = $_; settled = -not $_.StartsWith('block-'); base_pane_only = $true } })
         return [pscustomobject]@{
-            Schema = 2; Workload = $Name; Error = $null; Exit = 0; QuitPosts = 1; GridCols = 140; GridRows = 45
+            Schema = 2; Workload = $Name; Error = $null; Exit = 0; QuitPosts = 1; GridCols = 140; GridRows = 43
             ScrollbackLimitBytes = $limit; Blocks = $blocks; BlocksPlanned = $blocks; Cycles = $cycles; CyclesMissed = 0
             SessionSaves = $(if ($Name -eq 'session-capture') { 10 } else { 0 })
             Uia = $(if ($Name -eq 'uia-walk') { [pscustomobject]@{ walk_complete = $true } } else { $null })
@@ -408,6 +413,7 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
         @{ Name = 'an unsettled after stage'; Workload = 'fixed'; Change = { param($r) $r.Stages[-1].settled = $false } }
         @{ Name = 'a stage off the base pane'; Workload = 'tab-churn'; Change = { param($r) $r.Stages[-1].base_pane_only = $false } }
         @{ Name = 'the wrong grid'; Workload = 'uia-walk'; Change = { param($r) $r.GridRows = 30 } }
+        @{ Name = 'the configured 45 rows'; Workload = 'fixed'; Change = { param($r) $r.GridRows = 45 } }
         @{ Name = 'no close that took'; Workload = 'fixed'; Change = { param($r) $r.QuitPosts = 0 } }
         @{ Name = 'a non-zero exit'; Workload = 'fixed'; Change = { param($r) $r.Exit = 1 } }
         @{ Name = 'a missed block'; Workload = 'scrollback-max'; Change = { param($r) $r.Blocks = 47 } }
@@ -450,6 +456,8 @@ try {
         if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configC 'C:\run-a')) { throw 'The workload hash ignored a config line.' }
         $script:FixedCycles++
         try { if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored a constant.' } } finally { $script:FixedCycles-- }
+        $script:GridRows++
+        try { if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the expected grid.' } } finally { $script:GridRows-- }
     }
     # The control: a hash that takes out the plain directory but not its escaped form in the flood binding (the form
     # a real config holds) must fail the run-directory case.

@@ -1350,7 +1350,13 @@ checked through `+version`, with its config's
 `command = direct:<System32>\cmd.exe /D`, the clipboard denied, no
 `noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process on an
 unhandled exception, the driver and the copy at normal priority. The grid is
-read from the base pane's pseudoconsole before `start` and must be 140 x 45.
+read from the base pane's pseudoconsole before `start` and must be 140 x 43:
+on the measurement machine (144 DPI) the config's `window-width = 140` and
+`window-height = 45` give 43 rows, measured on the 0a build and on this
+harness's, so the harness pins that grid (`$script:GridRows`), not the
+configured 45. The flagship configured-size leaf
+(`interactive-win11-configured-size.ps1`) likewise accepts a configured size
+with a tolerance (its 140 x 45 needs at least 120 x 35).
 
 Each sample holds `private_bytes` (`PrivateUsage`, what Windows calls the
 process's commit charge), `working_set`, `peak_working_set`,
@@ -1360,7 +1366,7 @@ counts (null when their query failed). A stage settles once the last 10
 samples, 500 ms apart, hold private bytes within 0.5% and working set within
 1% of their mean (range over mean); its value is its last sample. A stage
 that has not settled after 90 s, or that is not at the base pane alone, fails
-the run. The workloads, at 140 x 45 cells, in blocks of 25,000 lines; a block
+the run. The workloads, on the 140 x 43 grid, in blocks of 25,000 lines; a block
 counts once the batch file acknowledged it and the copy's window title shows
 `ws-block-<n>`, which the batch file sets after the block, so the pane parsed
 through its end:
@@ -1382,7 +1388,7 @@ through its end:
   the bottom of the scrollback, 329 lines at 140 columns (measured), not a
   scrolling walk of the whole scrollback: `accessibleHistoryRows` in
   `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
-  history rows plus the viewport (285 + 45 rows here), and the window slides
+  history rows plus the viewport (285 + 43 rows here), and the window slides
   only with a scrolled viewport (`snapshotDocumentWindow`), which this
   workload never scrolls. The walk counts only when the document holds the
   last block's last line and the walk covered the history rows. Its `after`

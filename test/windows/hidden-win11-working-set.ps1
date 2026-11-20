@@ -22,8 +22,9 @@ unchanged, every required stage present and settled), and only runs whose Worklo
 effective scrollback limit and planned blocks, the constants below, the output block, the flood batch file and the
 config with the run's directory taken out) and recorded grid match.
 
-The workloads, every one at 140 x 45 cells (checked before `start` through the pane's pseudoconsole), the shell
-System32's cmd.exe started directly with /D (the copy's config `command`):
+The workloads, every one on a 140 x 43 grid (read before `start` through the pane's pseudoconsole: the config's
+window-width = 140 and window-height = 45 give 43 rows on the measurement machine at 144 DPI, measured on the 0a build
+and on this harness's), the shell System32's cmd.exe started directly with /D (the copy's config `command`):
   fixed               one block of output (25,000 lines), then 20 cycles of a new tab and its close; `after` 7 s
                       later (undo-timeout prunes closed panes after 5 s) and once the copy is back to its one base
                       pane (waited for, at most 30 s; the run fails otherwise), once memory settles.
@@ -110,11 +111,15 @@ $script:Utf8 = [Text.UTF8Encoding]::new($false)
 $script:ResponseBoundMs = 5000
 # The workload's constants. A change to any of them, to New-BlockText, to the flood batch file or to the config
 # changes WorkloadSha256, and runs with different WorkloadSha256 are not comparable. One block of output: lines of 82
-# or 91 bytes, every seventh in an SGR colour; a 140-column row of page holds one.
+# or 91 bytes, every seventh in an SGR colour; a 140-column row of page holds one. Cols and Rows are the config's
+# window-width and window-height. GridRows is the grid's row count a run must show before `start`: what that config
+# gave on the measurement machine (144 DPI), on the 0a build and on this harness's, not the configured 45 (measured
+# 2026-11-20; the flagship configured-size leaf likewise accepts a configured size with a tolerance).
 $script:BlockLines = 25000
 $script:RowPageBytes = 1120
 $script:Cols = 140
 $script:Rows = 45
+$script:GridRows = 43
 $script:FixedCycles = 20
 $script:ChurnCycles = 50
 $script:SessionCheckpoints = 10
@@ -492,10 +497,10 @@ function Get-WorkloadStages([string] $Name, [int] $BlocksPlanned) {
 function Get-WorkloadSha256([string] $Name, [long] $ScrollbackLimitBytes, [int] $BlocksPlanned, [string] $BlockSha256, [string] $FloodSha256, [string] $ConfigPath, [string] $RunRoot) {
     $root = $RunRoot.TrimEnd('\')
     $config = ([IO.File]::ReadAllLines($ConfigPath) -join "`n").Replace($root.Replace('\', '\\'), '<run>').Replace($root, '<run>')
-    $constants = 'workload={11} scrollback={12} blocks={13} cols={0} rows={1} block={2} rowpage={3} fixed={4} churn={5} checkpoints={6} prune={7} settle={8}x{9}ms cap={10} rule=0.005/0.01' -f `
+    $constants = 'workload={11} scrollback={12} blocks={13} cols={0} rows={1} grid={0}x{14} block={2} rowpage={3} fixed={4} churn={5} checkpoints={6} prune={7} settle={8}x{9}ms cap={10} rule=0.005/0.01' -f `
         $script:Cols, $script:Rows, $script:BlockLines, $script:RowPageBytes, $script:FixedCycles, $script:ChurnCycles,
         $script:SessionCheckpoints, $script:PruneSeconds, $script:SettleSamples, $script:SampleMs, $script:SettleCapMs,
-        $Name, $ScrollbackLimitBytes, $BlocksPlanned
+        $Name, $ScrollbackLimitBytes, $BlocksPlanned, $script:GridRows
     $sha = [Security.Cryptography.SHA256]::Create()
     try { return [BitConverter]::ToString($sha.ComputeHash($script:Utf8.GetBytes("$constants`n$BlockSha256`n$FloodSha256`n$config"))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
@@ -525,7 +530,7 @@ function Get-WorkingSetRecordProblems($Record) {
     if ($Record.Error) { $problems.Add("error: $($Record.Error)") }
     if ($Record.Exit -ne 0) { $problems.Add("exit $($Record.Exit)") }
     if ($Record.QuitPosts -lt 1) { $problems.Add('no close post took') }
-    if ($Record.GridCols -ne $script:Cols -or $Record.GridRows -ne $script:Rows) { $problems.Add("grid $($Record.GridCols)x$($Record.GridRows)") }
+    if ($Record.GridCols -ne $script:Cols -or $Record.GridRows -ne $script:GridRows) { $problems.Add("grid $($Record.GridCols)x$($Record.GridRows)") }
     if ($Record.Blocks -ne $Record.BlocksPlanned -or $Record.BlocksPlanned -ne (Get-WorkloadBlocks $Record.Workload $Record.ScrollbackLimitBytes)) { $problems.Add("blocks $($Record.Blocks) of $($Record.BlocksPlanned)") }
     $wantCycles = switch ($Record.Workload) { 'fixed' { $script:FixedCycles } 'tab-churn' { $script:ChurnCycles } 'session-capture' { $script:SessionCheckpoints } default { 0 } }
     if ($Record.Cycles -ne $wantCycles -or $Record.CyclesMissed -ne 0) { $problems.Add("cycles $($Record.Cycles) of $wantCycles, $($Record.CyclesMissed) missed") }
@@ -715,7 +720,7 @@ function Invoke-WorkingSetDriver {
         $grid = [regex]::Match([IO.File]::ReadAllText($gridFile), '\A(\d+),(\d+)\z')
         if (-not $grid.Success) { throw "The grid probe read no grid ($([IO.File]::ReadAllText($gridFile)))." }
         $record.GridCols = [int]$grid.Groups[1].Value; $record.GridRows = [int]$grid.Groups[2].Value
-        if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:Rows) { throw "The grid is $($record.GridCols)x$($record.GridRows), not $($script:Cols)x$($script:Rows)." }
+        if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:GridRows) { throw "The grid is $($record.GridCols)x$($record.GridRows), not $($script:Cols)x$($script:GridRows)." }
         Add-Stage 'start'
 
         $floodCount = Join-Path $work 'flood-count.txt'
