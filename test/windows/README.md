@@ -1157,9 +1157,11 @@ P4 reads the copy's own record. `NOCTTY_GUI_PROBE_TRACE=1`
 
 ```powershell
 pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix>\bin `
-    -MeasureRepo <repo> -Work <new dir> -Out <record.json> -Part Q0|Local|All `
-    [-TestToolsBin <test-tools prefix>\bin]
+    -MeasureRepo <repo> -Work <new dir> -Out <record.json> -Part Q0
 ```
+
+`-Part` takes `Q0`, `Local` or `All`. With `Local` or `All`, add
+`-TestToolsBin <test-tools prefix>\bin`.
 
 - `-Part Local` runs the gate's control, Q0, and the private-desktop facts of
   P4 and P5 on the measurement build. Given `-TestToolsBin`, it only feeds the
