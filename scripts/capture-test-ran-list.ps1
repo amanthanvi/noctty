@@ -148,6 +148,9 @@ $script:RanListResultsFormat = 'noctty test results v1'
 $script:RanListFonts = @('Arial Unicode MS', 'Noto Sans Chakma', 'Noto Serif Tibetan')
 # Get-RanListNameDecoder's decoders, made on first use.
 $script:RanListNameDecoders = $null
+# The sfnt version tags FreeType's TrueType driver opens (tt_face_init):
+# 00010000, 00020000, `true`, A5 `kbd` and A5 `lst`.
+$script:RanListTrueTypeTags = @(0x00010000L, 0x00020000L, 0x74727565L, 0xA56B6264L, 0xA56C7374L)
 $script:RanListProbeVariables = @(
     'NOCTTY_CONPTY_KEY_INPUT_PROBE',
     'NOCTTY_CONPTY_TRANSPORT_PROBE',
@@ -477,10 +480,12 @@ function Add-RanListNameTable {
 # past the end of the file.
 function Add-RanListFaceNames {
     param([byte[]] $Bytes, [long] $Face, [Collections.Generic.HashSet[string]] $Names)
+    $version = Read-RanListBigEndian $Bytes $Face 4
     $tables = Read-RanListBigEndian $Bytes ($Face + 4) 2
     $nameTables = [Collections.Generic.List[object]]::new()
     $heads = 0
     $headsUsable = $true
+    $headsWhole = $true
     for ($i = 0; $i -lt $tables; $i++) {
         $record = $Face + 12 + 16 * $i
         if ($record + 16 -gt $Bytes.Length) { return $false }
@@ -489,14 +494,27 @@ function Add-RanListFaceNames {
         $tableLength = Read-RanListBigEndian $Bytes ($record + 12) 4
         # FreeType treats a table of no length, or one past the end of the file, as missing.
         $usable = $tableLength -gt 0 -and $tableOffset + $tableLength -le $Bytes.Length
-        if ([string]::Equals($tag, 'head', [StringComparison]::Ordinal)) { $heads++; if (-not $usable) { $headsUsable = $false } }
+        if ([string]::Equals($tag, 'head', [StringComparison]::Ordinal)) {
+            $heads++
+            if (-not $usable) { $headsUsable = $false }
+            # check_table_dir refuses a TrueType face whose `head` is under 0x36 bytes.
+            if ($tableLength -lt 0x36 -or $tableOffset + $tableLength -gt $Bytes.Length) { $headsWhole = $false }
+        }
         if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) { $nameTables.Add(@($tableOffset, $tableLength)) }
     }
     if ($nameTables.Count -eq 0) { return $false }
     $complete = $true
-    # A CFF font (`OTTO`) without a usable `head` table takes its family from its
-    # CFF data, not a `name` table (FreeType's cff_face_init loads no sfnt names).
-    if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($Bytes, [int]$Face, 4), 'OTTO', [StringComparison]::Ordinal) -and ($heads -eq 0 -or -not $headsUsable)) { $complete = $false }
+    # Only a face FreeType reads as a plain sfnt is wholly read: a CFF font
+    # (`OTTO`) with a usable `head` table, since without one cff_face_init loads
+    # no sfnt names and takes the family from the CFF data; or a TrueType face
+    # (00010000, 00020000, `true`, or the Apple tags A5 `kbd` and A5 `lst`, as
+    # tt_face_init takes them) with a `head` of at least 0x36 bytes inside the
+    # file. Any other face (`typ1`, which FreeType opens as Type 1 or CID from its
+    # own table; a WOFF file, which FreeType decompresses first; a Mac resource
+    # fork; an unknown tag) takes its family from data the probe does not read.
+    if ($version -eq 0x4F54544FL) { if ($heads -eq 0 -or -not $headsUsable) { $complete = $false } }
+    elseif ($script:RanListTrueTypeTags -contains $version) { if ($heads -eq 0 -or -not $headsWhole) { $complete = $false } }
+    else { $complete = $false }
     foreach ($table in $nameTables) {
         $read = try { Add-RanListNameTable -Bytes $Bytes -Name $table[0] -TableLength $table[1] -Names $Names } catch { $false }
         if (-not $read) { $complete = $false }
@@ -520,7 +538,8 @@ function Add-RanListFaceNames {
 # FreeType takes from elsewhere: one with no `name` table, or a CFF font
 # (`OTTO`) without a usable `head` table (none, one of no length, or one past
 # the end of the file), whose family comes from its CFF data (as does a bare
-# CFF file's, which reads as no OpenType font). Where FreeType reads a name
+# CFF file's, which reads as no OpenType font); and any face FreeType does not
+# read as a plain sfnt (see Add-RanListFaceNames). Where FreeType reads a name
 # otherwise than its label says, the probe reads it both ways: an ISO record
 # also as UTF-16BE, and every name also cut at its first NUL, before joins;
 # and it reads every `name` table a face's directory lists. Names holds what
@@ -601,12 +620,20 @@ function Get-RanListFontFacts {
 # The font directories discovery scans (systemFontsDir and userFontsDir in
 # src/font/discovery_windows.zig): %WINDIR%\Fonts, else %SystemRoot%\Fonts, else
 # C:\Windows\Fonts; and %LOCALAPPDATA%\Microsoft\Windows\Fonts when LOCALAPPDATA
-# is set. The system directory comes first.
+# is set, joined as discovery joins them ("{s}\\Fonts"). The system directory
+# comes first. A variable set to an empty value is set, as
+# std.process.getEnvVarOwned returns it, so its directory is `\Fonts` or
+# `\Microsoft\Windows\Fonts` on the current drive; only $null means unset.
 function Get-RanListFontDirectories {
-    $base = if ($env:WINDIR) { $env:WINDIR } elseif ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    param(
+        $WinDir = [Environment]::GetEnvironmentVariable('WINDIR'),
+        $SystemRoot = [Environment]::GetEnvironmentVariable('SystemRoot'),
+        $LocalAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+    )
+    $base = if ($null -ne $WinDir) { $WinDir } elseif ($null -ne $SystemRoot) { $SystemRoot } else { 'C:\Windows' }
     $dirs = [Collections.Generic.List[string]]::new()
-    $dirs.Add([System.IO.Path]::Join($base, 'Fonts'))
-    if ($env:LOCALAPPDATA) { $dirs.Add([System.IO.Path]::Join($env:LOCALAPPDATA, 'Microsoft\Windows\Fonts')) }
+    $dirs.Add("$base\Fonts")
+    if ($null -ne $LocalAppData) { $dirs.Add("$LocalAppData\Microsoft\Windows\Fonts") }
     return , $dirs.ToArray()
 }
 

@@ -675,6 +675,17 @@ try {
         [System.IO.File]::WriteAllBytes($out, $bytes)
         return $out
     }
+    # A copy of a font with its first four bytes, the sfnt version tag, set to $Tag
+    # (four ASCII characters, or bytes).
+    function Set-RanFontTag {
+        param([string] $Path, [object] $Tag, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $tagBytes = if ($Tag -is [string]) { [System.Text.Encoding]::ASCII.GetBytes($Tag) } else { [byte[]] $Tag }
+        $tagBytes.CopyTo($bytes, 0)
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
     # A copy of a font with one table's directory entry given another offset or length.
     function Set-RanTableEntry {
         param([string] $Path, [string] $Tag, [long] $Offset = -1, [long] $Length = -1, [string] $Name)
@@ -714,6 +725,18 @@ try {
             @{ Name = 'two name tables, its family in the second'; Path = (New-RanNamedFont 'dup-second.ttf' $ranChakmaNames -Duplicate second); Expect = 'present' }
             @{ Name = 'two name tables, neither naming it'; Path = (New-RanNamedFont 'dup-other.ttf' $ranOtherNames -Duplicate first); Expect = 'absent' }
             @{ Name = 'two name tables, the second past the end of the file'; Path = (New-RanNamedFont 'dup-past.ttf' $ranOtherNames -Duplicate first -DuplicateOutOfFile); Expect = 'unknown' }
+            @{ Name = 'a typ1-tagged face (council round 4 on #731, Sol M)'; Path = (Set-RanFontTag $ranJet 'typ1' 'typ1.ttf'); Expect = 'unknown' }
+            @{ Name = 'a WOFF signature, named .ttf (Opus L1)'; Path = (Set-RanFontTag $ranJet 'wOFF' 'woff.ttf'); Expect = 'unknown' }
+            @{ Name = 'a WOFF2 signature, named .ttf'; Path = (Set-RanFontTag $ranJet 'wOF2' 'woff2.ttf'); Expect = 'unknown' }
+            @{ Name = 'an unknown sfnt tag'; Path = (Set-RanFontTag $ranJet 'abcd' 'unknown-tag.ttf'); Expect = 'unknown' }
+            @{ Name = 'its family in a typ1-tagged face'; Path = (New-RanNamedFont 'typ1-named.ttf' $ranChakmaNames -Source ([System.IO.File]::ReadAllBytes((Set-RanFontTag $ranJet 'typ1' 'typ1-source.ttf')))); Expect = 'present' }
+            @{ Name = 'a TrueType face whose head is under 0x36 bytes'; Path = (Set-RanTableEntry $ranJet 'head' -Length 0x35 -Name 'head-short.ttf'); Expect = 'unknown' }
+            @{ Name = 'a TrueType face whose head lies past the end of the file'; Path = (Set-RanTableEntry $ranJet 'head' -Offset 0x7FFFFF00 -Name 'head-past.ttf'); Expect = 'unknown' }
+            @{ Name = 'a TrueType face without a head table'; Path = (Rename-RanTable $ranJet 'head' 'xead' 'no-head.ttf'); Expect = 'unknown' }
+            @{ Name = 'the TrueType tag true and no name of it'; Path = (Set-RanFontTag $ranJet 'true' 'tag-true.ttf'); Expect = 'absent' }
+            @{ Name = 'the TrueType tag 00020000 and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0, 2, 0, 0)) 'tag-00020000.ttf'); Expect = 'absent' }
+            @{ Name = 'the Apple tag A5 kbd and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6B, 0x62, 0x64)) 'tag-a5kbd.ttf'); Expect = 'absent' }
+            @{ Name = 'the Apple tag A5 lst and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6C, 0x73, 0x74)) 'tag-a5lst.ttf'); Expect = 'absent' }
             @{ Name = 'a family record in an encoding the probe does not decode'; Path = (New-RanNamedFont 'big5.ttf' @(, @(1, 'Noto Sans Chakma', 3, 4))); Expect = 'unknown' }
             @{ Name = 'a family record on the custom platform'; Path = (New-RanNamedFont 'custom.ttf' @(, @(1, 'Noto Sans Chakma', 4, 0))); Expect = 'unknown' }
             @{ Name = 'a family record whose bytes are no UTF-16'; Path = (New-RanNamedFont 'surrogate.ttf' @(, @(1, [byte[]] @(0xD8, 0x00)))); Expect = 'unknown' }
@@ -1202,6 +1225,27 @@ try {
         $env:SystemRoot = $ranSavedSystemRoot
     }
     Assert-True ($ranDirsWin.Count -eq 2 -and $ranDirsWin[1] -ceq $ranUserDir) "The per-user font directory follows the system one ($($ranDirsWin -join '; '))."
+    # A variable set to an empty value is set: discovery's getEnvVarOwned returns it, so
+    # its directories are \Fonts and \Microsoft\Windows\Fonts (council round 4 on #731,
+    # Opus L2). In this process through the parameters, and end to end in a child pwsh
+    # started with both variables set to '' (a .NET ProcessStartInfo keeps an empty
+    # value in the child's environment block).
+    $ranEmptyDirs = (Get-RanListFontDirectories -WinDir '' -SystemRoot 'X:\root' -LocalAppData '') -join '|'
+    $ranEmptyRoot = (Get-RanListFontDirectories -WinDir $null -SystemRoot '' -LocalAppData $null) -join '|'
+    Assert-True ($ranEmptyDirs -ceq '\Fonts|\Microsoft\Windows\Fonts' -and $ranEmptyRoot -ceq '\Fonts') "An empty WINDIR, SystemRoot or LOCALAPPDATA names discovery's directories ($ranEmptyDirs; $ranEmptyRoot)."
+    $ranDirsChild = Join-Path $ranTemp 'dirs-child.ps1'
+    [System.IO.File]::WriteAllText($ranDirsChild, "param([string] `$Capture)`n. `$Capture -LibraryOnly`n(Get-RanListFontDirectories) -join '|'`n", [System.Text.UTF8Encoding]::new($false))
+    $ranPsi = [System.Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    foreach ($a in '-NoProfile', '-NonInteractive', '-File', $ranDirsChild, '-Capture', $ranCapture) { $ranPsi.ArgumentList.Add($a) }
+    $ranPsi.Environment['WINDIR'] = ''
+    $ranPsi.Environment['LOCALAPPDATA'] = ''
+    $ranPsi.UseShellExecute = $false
+    $ranPsi.RedirectStandardOutput = $true
+    $ranPsi.CreateNoWindow = $true
+    $ranChild = [System.Diagnostics.Process]::Start($ranPsi)
+    $ranChildDirs = $ranChild.StandardOutput.ReadToEnd().Trim()
+    $ranChild.WaitForExit()
+    Assert-True ($ranChild.ExitCode -eq 0 -and $ranChildDirs -ceq '\Fonts|\Microsoft\Windows\Fonts') "A child with WINDIR and LOCALAPPDATA set to '' scans discovery's directories ($ranChildDirs)."
     Assert-True ($ranDirsNone[0] -ceq 'C:\Windows\Fonts' -and $ranDirsRoot[0] -ceq (Join-Path $ranTemp 'root\Fonts') -and $ranDirsWin[0] -ceq (Join-Path $ranWinDir 'Fonts')) "The system font directory is WINDIR's, else SystemRoot's, else C:\Windows's ($($ranDirsNone[0]); $($ranDirsRoot[0]); $($ranDirsWin[0]))."
     Assert-True ($ranNoWindows.Count -eq (Get-RanListFactKeys).Count -and $ranWws['font:Noto Sans Chakma'] -ceq 'present') "The probe runs without WINDIR and SystemRoot, and reads a font named by its WWS family alone ($($ranWws['font:Noto Sans Chakma']))."
     $ranChakmaTest = 'font.shaper.harfbuzz.test.shape Chakma vowel sign with ligature (vowel sign renders first)'
@@ -1284,6 +1328,10 @@ try {
     $ranOtherFont = New-RanNamedFont 'registered-other.ttf' @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
     $ranPair = New-RanCollection 'registered-pair.ttc' @($ranOtherFont, $ranWwsFont)
     Assert-True ((Get-RanListFontNames -Path $ranPair).Names -contains 'Noto Sans Chakma' -and (Get-RanListFontNames -Path $ranPair).Complete) 'A two-face collection reads its second face.'
+    # A collection is wholly read only if every face is a plain sfnt (council round 4 on #731).
+    $ranMixed = Get-RanListFontNames -Path (New-RanCollection 'mixed.ttc' @($ranOtherFont, (Set-RanFontTag $ranOtherFont 'typ1' 'typ1-other.ttf')))
+    Assert-True (-not $ranMixed.Complete -and $ranMixed.Names -contains 'Chakma UI') "A collection with a typ1-tagged face is not wholly read, and its names still count ($($ranMixed.Complete))."
+
     foreach ($ranCase in @(
             @{ Name = 'none'; Values = [ordered]@{}; Files = @{}; Expect = 'absent'; What = 'no font of the family anywhere (the control)' }
             @{ Name = 'default'; Values = [ordered]@{ '' = '<root>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font outside the font directories that the default value, whose name is empty, names' }
