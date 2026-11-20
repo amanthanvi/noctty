@@ -661,6 +661,11 @@ try {
     [System.IO.File]::WriteAllBytes($ranFormat2Path, $ranFormat2)
     $ranChakmaNames = $ranChakmaCases[1].Names
     $ranOtherNames = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
+    # A resource font in an MZ executable: FreeType's winfnt driver, not an sfnt.
+    $ranFnt = Join-Path $ranTemp 'fnt.ttf'
+    $ranFntBytes = [byte[]]::new(256)
+    $ranFntBytes[0] = 0x4D; $ranFntBytes[1] = 0x5A
+    [System.IO.File]::WriteAllBytes($ranFnt, $ranFntBytes)
     # MonaspaceNeon-Regular.otf is the vendored CFF (`OTTO`) font; CodeNewRoman-Regular.otf is TrueType inside.
     $ranCff = Join-Path $repoRoot 'src\font\res\MonaspaceNeon-Regular.otf'
     # A copy of a font with one table's tag renamed, so it has no table of that tag.
@@ -671,6 +676,15 @@ try {
             $record = 12 + 16 * $i
             if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, $record, 4), $From, [StringComparison]::Ordinal)) { [System.Text.Encoding]::ASCII.GetBytes($To).CopyTo($bytes, $record) }
         }
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
+    # A copy of a file with the bytes at each offset of $At set (offset = byte list).
+    function Set-RanBytes {
+        param([string] $Path, [hashtable] $At, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        foreach ($e in $At.GetEnumerator()) { ([byte[]] $e.Value).CopyTo($bytes, [int] $e.Key) }
         $out = Join-Path $ranTemp $Name
         [System.IO.File]::WriteAllBytes($out, $bytes)
         return $out
@@ -737,6 +751,9 @@ try {
             @{ Name = 'the TrueType tag 00020000 and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0, 2, 0, 0)) 'tag-00020000.ttf'); Expect = 'absent' }
             @{ Name = 'the Apple tag A5 kbd and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6B, 0x62, 0x64)) 'tag-a5kbd.ttf'); Expect = 'absent' }
             @{ Name = 'the Apple tag A5 lst and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6C, 0x73, 0x74)) 'tag-a5lst.ttf'); Expect = 'absent' }
+            @{ Name = 'a TrueType face whose first 128 bytes pass the MacBinary header test (council round 5 on #731, Opus L1)'; Path = (Set-RanBytes $ranJet @{ 63 = @(0); 82 = @(0, 0) } 'macbinary-shape.ttf'); Expect = 'unknown' }
+            @{ Name = 'a TrueType face whose first 16 bytes pass the resource-fork header test'; Path = (Set-RanBytes (New-RanNamedFont 'rfork-base.ttf' $ranOtherNames -Pad 1200000) @{ 6 = @(0, 0, 0, 0, 0, 0x10); 12 = @(0, 0, 0, 0x10) } 'rfork-shape.ttf'); Expect = 'unknown' }
+            @{ Name = 'a Windows FNT (MZ) file named .ttf (council round 5 on #731, Sol)'; Path = $ranFnt; Expect = 'unknown' }
             @{ Name = 'a family record in an encoding the probe does not decode'; Path = (New-RanNamedFont 'big5.ttf' @(, @(1, 'Noto Sans Chakma', 3, 4))); Expect = 'unknown' }
             @{ Name = 'a family record on the custom platform'; Path = (New-RanNamedFont 'custom.ttf' @(, @(1, 'Noto Sans Chakma', 4, 0))); Expect = 'unknown' }
             @{ Name = 'a family record whose bytes are no UTF-16'; Path = (New-RanNamedFont 'surrogate.ttf' @(, @(1, [byte[]] @(0xD8, 0x00)))); Expect = 'unknown' }
@@ -1291,7 +1308,7 @@ try {
         return $path
     }
     function Invoke-RanRegisteredProbe {
-        param([string] $Case, [System.Collections.IDictionary] $Values, [System.Collections.IDictionary] $UserValues, [hashtable] $Files)
+        param([string] $Case, [System.Collections.IDictionary] $Values, [System.Collections.IDictionary] $UserValues, [hashtable] $Files, [string] $WinDirValue = '<root>\windir', [string] $From = '')
         $root = Join-Path $ranTemp "registered-$Case"
         $winFonts = New-Item -ItemType Directory -Path (Join-Path $root 'windir\Fonts')
         $userFonts = New-Item -ItemType Directory -Path (Join-Path $root 'local\Microsoft\Windows\Fonts')
@@ -1299,14 +1316,18 @@ try {
         foreach ($f in $Files.GetEnumerator()) { Copy-Item -LiteralPath $f.Value -Destination (Join-Path $root $f.Key) }
         $savedWinDir = $env:WINDIR
         $savedLocalAppData = $env:LOCALAPPDATA
+        $savedDirectory = [Environment]::CurrentDirectory
+        # `<rel>` is the root without its drive: a path rooted on no drive.
+        $rel = $root.Substring(2)
+        if ($From) { Push-Location -LiteralPath $From; [Environment]::CurrentDirectory = $From }
         try {
-            $env:WINDIR = Join-Path $root 'windir'
+            $env:WINDIR = $WinDirValue -replace '<rel>', $rel -replace '<root>', $root
             $env:LOCALAPPDATA = Join-Path $root 'local'
             # One set of values per key: HKLM's from $Values, HKCU's from $UserValues.
             $machine = [ordered]@{}
-            foreach ($v in $Values.GetEnumerator()) { $machine[$v.Key] = $v.Value -replace '<root>', $root }
+            foreach ($v in $Values.GetEnumerator()) { $machine[$v.Key] = $v.Value -replace '<rel>', $rel -replace '<root>', $root }
             $user = [ordered]@{}
-            foreach ($v in $UserValues.GetEnumerator()) { $user[$v.Key] = $v.Value -replace '<root>', $root }
+            foreach ($v in $UserValues.GetEnumerator()) { $user[$v.Key] = $v.Value -replace '<rel>', $rel -replace '<root>', $root }
             return & {
                 function Get-Item {
                     [CmdletBinding()] param([string] $LiteralPath)
@@ -1322,7 +1343,19 @@ try {
         finally {
             $env:WINDIR = $savedWinDir
             $env:LOCALAPPDATA = $savedLocalAppData
+            if ($From) { Pop-Location; [Environment]::CurrentDirectory = $savedDirectory }
         }
+    }
+    # Discovery resolves a path rooted on no drive against the test's working directory,
+    # so the probe must too, wherever the capture starts. Another drive: a ready fixed
+    # drive other than the test's, else a subst drive over a scratch directory, removed
+    # when the run ends.
+    $ranOtherDrive = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed -and -not [string]::Equals($_.Name.Substring(0, 1), $ranTemp.Substring(0, 1), [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.RootDirectory.FullName })[0]
+    if ($null -eq $ranOtherDrive) {
+        $ranSubstLetter = @('R', 'S', 'T', 'U', 'V', 'W', 'Y' | Where-Object { -not (Test-Path -LiteralPath "$($_):\") })[0]
+        $ranSubstTarget = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'subst-root')
+        $null = & subst.exe "$($ranSubstLetter):" $ranSubstTarget.FullName
+        $ranOtherDrive = "$($ranSubstLetter):\"
     }
     $ranWwsFont = New-RanNamedFont 'registered-wws.ttf' $ranChakmaCases[1].Names
     $ranOtherFont = New-RanNamedFont 'registered-other.ttf' @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
@@ -1341,9 +1374,17 @@ try {
             @{ Name = 'missing'; Values = [ordered]@{ 'Noto Sans Chakma (TrueType)' = '<root>\elsewhere\gone.ttf' }; Files = @{}; Expect = 'absent'; What = 'a value naming a file that does not exist' }
             @{ Name = 'user-key'; UserValues = [ordered]@{ 'Chakma (TrueType)' = '<root>\elsewhere\chakma.ttf' }; Values = [ordered]@{}; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font outside the font directories that only the per-user Fonts key names (Opus X3)' }
             @{ Name = 'spaces'; Values = [ordered]@{ 'Chakma (TrueType)' = " `t<root>\elsewhere\chakma.ttf`t " }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data has spaces and a tab around it (Opus X2)' }
-            @{ Name = 'nul'; Values = [ordered]@{ 'Chakma (TrueType)' = "<root>\elsewhere\chakma.ttf$([char]0)junk" }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data holds a NUL and more after the path (Opus L5)' })) {
+            @{ Name = 'nul'; Values = [ordered]@{ 'Chakma (TrueType)' = "<root>\elsewhere\chakma.ttf$([char]0)junk" }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data holds a NUL and more after the path (Opus L5)' }
+            @{ Name = 'slash'; Values = [ordered]@{ 'Chakma UI (TrueType)' = '<root>/elsewhere/other.ttf' }; Files = @{ 'elsewhere\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding a / whose font names another family (council round 5 on #731, Opus L1)' }
+            @{ Name = 'drive-dirs-here'; WinDirValue = '<rel>\windir'; From = $ranTemp; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from the test''s drive' }
+            @{ Name = 'drive-dirs-away'; WinDirValue = '<rel>\windir'; From = $ranOtherDrive; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from another drive (council round 5 on #731, Sol M and Opus L2)' }
+            @{ Name = 'drive-value-here'; From = $ranTemp; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from the test''s drive' }
+            @{ Name = 'drive-value-away'; From = $ranOtherDrive; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from another drive' })) {
         $ranUserValues = if ($ranCase.UserValues) { $ranCase.UserValues } else { [ordered]@{} }
-        $ranGot = Invoke-RanRegisteredProbe -Case $ranCase.Name -Values $ranCase.Values -UserValues $ranUserValues -Files $ranCase.Files
+        $ranProbeArgs = @{ Case = $ranCase.Name; Values = $ranCase.Values; UserValues = $ranUserValues; Files = $ranCase.Files }
+        if ($ranCase.WinDirValue) { $ranProbeArgs.WinDirValue = $ranCase.WinDirValue }
+        if ($ranCase.From) { $ranProbeArgs.From = $ranCase.From }
+        $ranGot = Invoke-RanRegisteredProbe @ranProbeArgs
         $ranFact = if ($ranGot -is [System.Collections.IDictionary]) { $ranGot['font:Noto Sans Chakma'] } else { "error: $ranGot" }
         Assert-True ($ranGot -is [System.Collections.IDictionary] -and $ranGot.Count -eq (Get-RanListFactKeys).Count -and $ranFact -ceq $ranCase.Expect) "The probe reads $($ranCase.Expect) for Noto Sans Chakma with $($ranCase.What) (got $ranFact)."
     }
@@ -1377,6 +1418,7 @@ try {
 finally {
     Set-Location -LiteralPath $ranSavedLocation
     [Environment]::CurrentDirectory = $ranSavedDirectory
+    if ($ranSubstLetter) { $null = & subst.exe "$($ranSubstLetter):" /d }
     Remove-Item -LiteralPath $ranTemp -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -473,6 +473,30 @@ function Add-RanListNameTable {
     return $complete
 }
 
+# Whether a file's opening bytes pass the header tests FreeType's Mac loader
+# applies when its TrueType driver refuses a face (load_mac_face in ftobjs.c):
+# IsMacBinary's on the first 128 bytes, or FT_Raccess_Get_HeaderInfo's on a
+# resource-fork header at the start. Such a file can be named from a font in
+# its fork, which the probe does not read, so it is not wholly read. Only the
+# headers are tested; the forks are not parsed.
+function Test-RanListMacContainer {
+    param([byte[]] $Bytes)
+    if ($Bytes.Length -ge 128) {
+        $h = $Bytes
+        $nameLength = [int] $h[1]
+        if ($h[0] -eq 0 -and $h[74] -eq 0 -and $h[82] -eq 0 -and $nameLength -ge 1 -and $nameLength -le 33 -and $h[63] -eq 0 -and $h[2 + $nameLength] -eq 0 -and $h[0x53] -le 0x7F) { return $true }
+    }
+    if ($Bytes.Length -ge 16 -and $Bytes[0] -lt 0x80 -and $Bytes[4] -lt 0x80 -and $Bytes[8] -lt 0x80 -and $Bytes[12] -lt 0x80) {
+        $dataAt = Read-RanListBigEndian $Bytes 0 4
+        $mapAt = Read-RanListBigEndian $Bytes 4 4
+        $dataLength = Read-RanListBigEndian $Bytes 8 4
+        $mapLength = Read-RanListBigEndian $Bytes 12 4
+        $apart = if ($dataAt -lt $mapAt) { $dataAt -le $mapAt - $dataLength } else { $mapAt -le $dataAt - $mapLength }
+        if ($mapAt -ne 0 -and $apart -and $dataAt + $dataLength -le $Bytes.Length -and $mapAt + $mapLength -le $Bytes.Length) { return $true }
+    }
+    return $false
+}
+
 # Adds one face's names to $Names (see Get-RanListFontNames): those of every
 # directory entry tagged `name`, since FreeType keeps the first and a later one
 # could be any. Returns whether every part of them could be read and decoded,
@@ -497,7 +521,9 @@ function Add-RanListFaceNames {
         if ([string]::Equals($tag, 'head', [StringComparison]::Ordinal)) {
             $heads++
             if (-not $usable) { $headsUsable = $false }
-            # check_table_dir refuses a TrueType face whose `head` is under 0x36 bytes.
+            # check_table_dir refuses a TrueType face whose `head` (or `bhed`) is
+            # under 0x36 bytes; a short `bhed` is the Mac loader's way in, which
+            # Test-RanListMacContainer covers by the file's shape.
             if ($tableLength -lt 0x36 -or $tableOffset + $tableLength -gt $Bytes.Length) { $headsWhole = $false }
         }
         if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) { $nameTables.Add(@($tableOffset, $tableLength)) }
@@ -538,8 +564,9 @@ function Add-RanListFaceNames {
 # FreeType takes from elsewhere: one with no `name` table, or a CFF font
 # (`OTTO`) without a usable `head` table (none, one of no length, or one past
 # the end of the file), whose family comes from its CFF data (as does a bare
-# CFF file's, which reads as no OpenType font); and any face FreeType does not
-# read as a plain sfnt (see Add-RanListFaceNames). Where FreeType reads a name
+# CFF file's, which reads as no OpenType font); any face FreeType does not
+# read as a plain sfnt (see Add-RanListFaceNames); and a file shaped like a Mac
+# container (see Test-RanListMacContainer). Where FreeType reads a name
 # otherwise than its label says, the probe reads it both ways: an ISO record
 # also as UTF-16BE, and every name also cut at its first NUL, before joins;
 # and it reads every `name` table a face's directory lists. Names holds what
@@ -550,6 +577,7 @@ function Get-RanListFontNames {
     $complete = $true
     try {
         $bytes = [System.IO.File]::ReadAllBytes($Path)
+        if (Test-RanListMacContainer -Bytes $bytes) { $complete = $false }
         $faces = @([long] 0)
         if ($bytes.Length -ge 12 -and [string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, 0, 4), 'ttcf', [StringComparison]::Ordinal)) {
             $count = Read-RanListBigEndian $bytes 8 4
@@ -653,13 +681,18 @@ function Get-RanListEnvironment {
     }
     catch { $facts['temp-makes-8dot3-names'] = 'unknown' }
     finally { if (Test-Path -LiteralPath $probe) { [System.IO.File]::Delete($probe) } }
-    $fontDirs = Get-RanListFontDirectories
+    # Discovery opens its paths in the test process, whose working directory is
+    # $Directory, so a path rooted on no drive (`\Fonts`) or relative resolves
+    # there, not against PowerShell's location or this process's directory.
+    $base = [System.IO.Path]::GetFullPath($Directory)
+    $fontDirs = @(foreach ($d in (Get-RanListFontDirectories)) { [System.IO.Path]::GetFullPath($d, $base) })
     $systemFonts = $fontDirs[0]
     # The file each Fonts value names, as collectRegistryFontPaths resolves it:
     # the value's data (expanded, trimmed of spaces and tabs), a path, or a name
     # in the system font directory. Value names are not read; discovery does not
     # read them.
     $paths = [Collections.Generic.List[string]]::new()
+    $fonts = [Collections.Generic.List[object]]::new()
     foreach ($key in 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts', 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') {
         $item = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
         if ($null -eq $item) { continue }
@@ -674,11 +707,15 @@ function Get-RanListEnvironment {
             foreach ($raw in $tried) {
                 $file = $raw.Trim(' ', "`t")
                 if ($file.Length -eq 0) { continue }
-                $paths.Add($(if ([System.IO.Path]::IsPathRooted($file)) { $file } else { [System.IO.Path]::Join($systemFonts, $file) }))
+                # Through a path holding `/`, FreeType's resource-fork guessers can
+                # open a sibling file the probe does not read (`resource.frk/` and
+                # others in ftrfork.c), so such a value leaves the facts unknown.
+                if ($file.Contains('/')) { $fonts.Add([pscustomobject]@{ Names = [string[]] @(); Complete = $false }) }
+                $joined = if ([System.IO.Path]::IsPathRooted($file)) { $file } else { [System.IO.Path]::Join($systemFonts, $file) }
+                try { $paths.Add([System.IO.Path]::GetFullPath($joined, $base)) } catch { }
             }
         }
     }
-    $fonts = [Collections.Generic.List[object]]::new()
     foreach ($file in (Get-RanListFontFiles -Directories $fontDirs -RegistryPaths $paths.ToArray())) {
         $fonts.Add((Get-RanListFontNames -Path $file))
     }
