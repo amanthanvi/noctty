@@ -803,8 +803,15 @@ try {
     $ranElsewhere = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'elsewhere')
     foreach ($n in 'h.otf', 'i.fon') { [System.IO.File]::WriteAllBytes((Join-Path $ranElsewhere $n), [byte[]] @(0)) }
     $ranRegistryPaths = @((Join-Path $ranFontDir 'A.TTF'), (Join-Path $ranElsewhere 'h.otf'), (Join-Path $ranElsewhere 'i.fon'), (Join-Path $ranElsewhere 'missing.ttf'), '', (Join-Path $ranFontDir 'f.ttf'))
-    $ranFound = try { (@(foreach ($p in (Get-RanListFontFiles -Directories @($ranFontDir.FullName, (Join-Path $ranTemp 'no-such-dir')) -RegistryPaths $ranRegistryPaths)) { Split-Path -Leaf $p }) | Sort-Object) -join '|' } catch { $_.Exception.Message }
-    Assert-True ($ranFound -ceq 'a.ttf|b.TTF|c.otc|g.ttf|h.otf') "The font scan takes the files discovery takes, each once: $ranFound"
+    $ranFound = try { $leaves = [string[]] @(foreach ($p in (Get-RanListFontFiles -Directories @($ranFontDir.FullName, (Join-Path $ranTemp 'no-such-dir')) -RegistryPaths $ranRegistryPaths)) { Split-Path -Leaf $p }); [Array]::Sort($leaves, [StringComparer]::Ordinal); $leaves -join '|' } catch { $_.Exception.Message }
+    # A.TTF, the registry's spelling of the directory's a.ttf, is a path of its own.
+    Assert-True ($ranFound -ceq 'A.TTF|a.ttf|b.TTF|c.otc|g.ttf|h.otf') "The font scan takes the files discovery takes, each spelling once: $ranFound"
+    # Deduplicated ordinally: a case-sensitive directory holds both spellings as two
+    # files, which discovery opens both (council round 7 on #731, Sol M). On this
+    # directory they are one file read twice; the same spelling twice is read once.
+    $ranSpellings = try { Get-RanListFontFiles -Directories @() -RegistryPaths @((Join-Path $ranElsewhere 'h.otf'), (Join-Path $ranElsewhere 'H.OTF'), (Join-Path $ranElsewhere 'h.otf')) } catch { @($_.Exception.Message) }
+    Assert-True ($ranSpellings.Count -eq 2 -and [string]::Equals([System.IO.Path]::GetFileName($ranSpellings[1]), 'H.OTF', [StringComparison]::Ordinal)) "Two spellings of a font path are two paths, and one spelling is one ($($ranSpellings -join ' | '))."
+
 
     $ranBaseTests = @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
     $ranBase = New-RanListFile 'base.tsv' $ranBaseTests
@@ -1376,7 +1383,19 @@ try {
     # drive letter that does not exist, so it touches nothing (council round 6 on #731,
     # Opus L3 and Sol): WINDIR, LOCALAPPDATA and two Fonts values rooted on no drive or
     # bare resolve onto the test directory's drive, and the path rule fires.
-    $ranNoDrive = @('Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z' | Where-Object { -not (Test-Path -LiteralPath "$($_):\") })[0]
+    # The first letter, A to Z, that names no drive (none listed and no root), or
+    # none (council round 7 on #731, Sol L).
+    function Select-RanFreeDriveLetter {
+        param([AllowEmptyCollection()] [string[]] $Taken)
+        $letters = @(65..90 | ForEach-Object { [string][char]$_ })
+        return @($letters | Where-Object { $Taken -notcontains $_ })[0]
+    }
+    $ranAllButC = @(65..90 | ForEach-Object { [string][char]$_ } | Where-Object { $_ -cne 'C' })
+    Assert-True ([string]::Equals((Select-RanFreeDriveLetter -Taken $ranAllButC), 'C', [StringComparison]::Ordinal) -and $null -eq (Select-RanFreeDriveLetter -Taken @(65..90 | ForEach-Object { [string][char]$_ }))) 'The pure check takes any free letter, A to Z, and none when all are taken.'
+    $ranTakenLetters = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() }) + @(65..90 | ForEach-Object { [string][char]$_ } | Where-Object { Test-Path -LiteralPath "$($_):\" })
+    $ranNoDrive = Select-RanFreeDriveLetter -Taken $ranTakenLetters
+    if ($null -eq $ranNoDrive) { Write-Host 'NOT RUN: the pure font-path resolution check, since every drive letter A to Z is taken.' }
+    else {
     $ranPure = & {
         $values = [ordered]@{ 'Rooted (TrueType)' = '\x\elsewhere\f.ttf'; 'Bare (TrueType)' = 'f.ttf' }
         function Get-Item {
@@ -1402,6 +1421,7 @@ try {
     $ranPureDirs = $ranPure.Directories -join '|'
     $ranPurePaths = @($ranPure.RegistryPaths) -join '|'
     Assert-True ($ranPureDirs -ceq "$($ranNoDrive):\x\win\Fonts|$($ranNoDrive):\x\local\Microsoft\Windows\Fonts" -and $ranPurePaths -ceq "$($ranNoDrive):\x\elsewhere\f.ttf|$($ranNoDrive):\x\win\Fonts\f.ttf" -and $ranPure.Unsafe) "Font paths resolve against the test's directory, on a drive that does not exist ($ranPureDirs; $ranPurePaths; $($ranPure.Unsafe))."
+    }
     # The real run from another drive, where a second ready fixed drive exists.
     $ranOtherDrive = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed -and -not [string]::Equals($_.Name.Substring(0, 1), $ranTemp.Substring(0, 1), [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.RootDirectory.FullName })[0]
     $ranWwsFont = New-RanNamedFont 'registered-wws.ttf' $ranChakmaCases[1].Names
@@ -1430,6 +1450,13 @@ try {
             @{ Name = 'ascii-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\oth$([char]0xE9)r.ttf" }; Files = @{ "elsewhere\oth$([char]0xE9)r.ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding a non-ASCII character (council round 6 on #731, Sol M)' }
             @{ Name = 'ascii-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\oth$([char]0xE9)r.ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds a non-ASCII character' }
             @{ Name = 'ascii-dir'; WinDirValue = "<root>\w$([char]0xEF)ndir"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding a non-ASCII character' }
+            @{ Name = 'kelvin-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\other$([char]0x212A).ttf" }; Files = @{ "elsewhere\other$([char]0x212A).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding U+212A, which -match misses (council round 7 on #731, Opus L1)' }
+            @{ Name = 'dotted-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\other$([char]0x0130).ttf" }; Files = @{ "elsewhere\other$([char]0x0130).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding U+0130' }
+            @{ Name = 'kelvin-dir'; WinDirValue = "<root>\win$([char]0x212A)"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding U+212A, which only the path rule sees' }
+            @{ Name = 'dotted-dir'; WinDirValue = "<root>\win$([char]0x0130)"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding U+0130, which only the path rule sees' }
+            @{ Name = 'kelvin-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\other$([char]0x212A).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds U+212A' }
+            @{ Name = 'dotted-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\other$([char]0x0130).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds U+0130' }
+            @{ Name = 'drive-relative'; Values = [ordered]@{ 'Chakma UI (TrueType)' = 'Q:other.ttf' }; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value like Q:other.ttf, which Zig joins to the system directory and .NET reads as Q:\other.ttf (council round 7 on #731, Opus L2)' }
             @{ Name = 'drive-dirs-here'; WinDirValue = '<rel>\windir'; From = $ranTemp; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from the test''s drive (present wins over the path rule)' }
             @{ Name = 'drive-dirs-away'; Away = $true; WinDirValue = '<rel>\windir'; From = $ranOtherDrive; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from another drive (council round 5 on #731, Sol M and Opus L2)' }
             @{ Name = 'drive-value-here'; From = $ranTemp; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from the test''s drive' }

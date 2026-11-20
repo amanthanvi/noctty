@@ -596,7 +596,7 @@ function Get-RanListFontNames {
 }
 
 # The font files discovery reads (scanAll in src/font/discovery_windows.zig),
-# each once, compared without case: every file with a .ttf, .otf, .ttc or .otc
+# each once, compared ordinally: every file with a .ttf, .otf, .ttc or .otc
 # extension directly in each directory, hidden ones included
 # (collectDirFontPaths), and every such file a registry path names
 # (collectRegistryFontPaths), inside those directories or not. A path that
@@ -604,7 +604,10 @@ function Get-RanListFontNames {
 function Get-RanListFontFiles {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Directories, [Parameter(Mandatory)] [AllowEmptyCollection()] [AllowEmptyString()] [string[]] $RegistryPaths)
     $supported = @('.ttf', '.otf', '.ttc', '.otc')
-    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # Ordinal: on a case-sensitive directory two spellings are two files, and
+    # discovery opens both (council round 7 on #731, Sol M); reading one file
+    # twice is harmless.
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $files = [Collections.Generic.List[string]]::new()
     foreach ($dir in $Directories) {
         if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
@@ -675,10 +678,15 @@ function Get-RanListFontDirectories {
 # prefix before the whole path and so reach a file relative to the test's
 # working directory; or one holding a non-ASCII character, since FreeType opens
 # the UTF-8 bytes discovery passes with CreateFileA, which under an ANSI code
-# page can open a differently spelled file.
+# page can open a differently spelled file. Also one holding a `:` after its
+# drive: a value like `Q:foo.ttf`, which Zig joins to the system directory as
+# `<dir>\Q:foo.ttf` (a stream of a file named `Q`) while .NET reads it as
+# `Q:\foo.ttf` (council round 7 on #731, Opus L2).
 function Test-RanListUnsafeFontPath {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
-    return $Path.Contains('/') -or $Path -cnotmatch '\A[A-Za-z]:' -or $Path -match '[^\x00-\x7F]'
+    # -cmatch: with case folded, [^\x00-\x7F] does not match U+212A or U+0130,
+    # whose case partners are ASCII (council round 7 on #731, Opus L1).
+    return $Path.Contains('/') -or $Path -cnotmatch '\A[A-Za-z]:' -or $Path.IndexOf(':', 2) -ge 0 -or $Path -cmatch '[^\x00-\x7F]'
 }
 
 # Whether discovery's resolveRegistryFontPath takes a value as it is: Zig's
@@ -762,7 +770,7 @@ function Get-RanListEnvironment {
     foreach ($file in (Get-RanListFontFiles -Directories $sources.Directories -RegistryPaths $sources.RegistryPaths)) {
         # A directory entry's name is part of the path discovery forms; the
         # registry's names were tested in Get-RanListFontSources.
-        if ([System.IO.Path]::GetFileName($file) -match '[^\x00-\x7F]') { $unsafe = $true }
+        if ([System.IO.Path]::GetFileName($file) -cmatch '[^\x00-\x7F]') { $unsafe = $true }
         $fonts.Add((Get-RanListFontNames -Path $file))
     }
     # A path the rule refuses can lead FreeType to a file the probe does not read.
