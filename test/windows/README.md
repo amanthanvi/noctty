@@ -1134,11 +1134,16 @@ ConPTY host"):
   `CREATE_NO_WINDOW`, so this arm does not test whether a console window
   would reach Default. Each invocation runs in a job of the driver's own,
   watched on a completion port, and each process that joins it (the forwarded
-  `noctty.exe`, its console host) is read when the job reports it. That read
-  is best effort. Windows does not guarantee `JOB_OBJECT_MSG_NEW_PROCESS`, a
-  child can exit before it is opened, and a PID is recorded only when the
-  process opened is a member of the job created no later than the message was
-  taken (else it is `unpinned` and left unread). A process that exits between
+  `noctty.exe`, its console host) is read when the job reports it. The reader
+  opens first: while a message waits it opens that process at once, and it
+  reads one opened process only when none waits, on a thread above normal
+  priority (test-harnesses.md 2026-11-20 PROBE-JOB-WATCH-OPEN-FIRST-01). That
+  read is best effort. Windows does not guarantee `JOB_OBJECT_MSG_NEW_PROCESS`,
+  a child can exit before it is opened (counted as `unopenedJoins`), and a PID
+  is recorded only when the process opened is a member of the job created no
+  later than the message was taken (else it is `unpinned` and left unread). A
+  fault on the reader ends the reading, not the driver (`watchFaulted`). These
+  counts are recorded only; what gates is `notSeenInJob`. A process that exits between
   polls but was read at its report keeps its startup desktop, which is then
   its only evidence: its row is `sampledAlive: false`, as its threads were
   never read. The arm is inconclusive unless:
@@ -1164,7 +1169,10 @@ Each arm:
 - It reads each process's startup desktop (PEB `DesktopInfo`, taken as an
   offset into the parameter block until the child's loader normalizes it) and
   its threads' desktops while holding read-only handles to Default and the
-  private desktop. `GetThreadDesktop` names another process's thread desktop
+  private desktop. A startup desktop that could not be read is recorded as
+  `none`, the same as an empty name (PowerShell binds a null to `[string]` as
+  an empty string); every gate treats `none` and `unreadable` alike, as
+  unresolved. `GetThreadDesktop` names another process's thread desktop
   only while the caller holds a handle to that desktop (test-harnesses.md
   2026-11-20 PROBE-THREAD-DESKTOP-01).
 - It records every top-level window found on the private desktop and on
