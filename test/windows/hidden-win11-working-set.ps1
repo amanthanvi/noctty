@@ -1,25 +1,32 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-PLAN.md §3.5's working-set workloads: one portable noctty copy on a private desktop runs one fixed workload, and
-its private bytes, working set and commit charge are sampled at each stage.
+PLAN.md §3.5's working-set workloads: one portable copy of the receipt-bound measurement build on a private desktop
+runs one fixed workload, and its private bytes and working set are sampled at each stage.
 
 .DESCRIPTION
 Run it as
-  pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 -Bin <measurement build's bin> -Run <new directory>
-       -Workload <fixed|scrollback-default|scrollback-max|uia-walk|session-capture|tab-churn>
+  pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 -MeasureRepo <repo with a measurement build>
+       -Run <new directory> -Workload <fixed|scrollback-default|scrollback-max|uia-walk|session-capture|tab-churn>
        [-ExpectedBuildMode ReleaseFast] [-ScrollbackMaxBytes 1073741824]
-once per run; each run is a fresh copy, a fresh private desktop and a fresh LOCALAPPDATA, and only one run at a time
-(a session-wide mutex refuses a second). -Bin must be an unused build output: one that holds a portable copy's state
-(session-state.json, startup-attempts.json, noctty.portable, config.ghostty, shell-integration\) is refused. Compare
-the medians of the `after` stage over repeated sequential runs (PLAN.md §3.5: the working set after the fixed workload
-within +10% of Phase 0a's), and only between runs whose WorkloadSha256 (the workload, its scrollback limit and planned
-blocks, the constants below, the output block and the config with the run's directory taken out) is the same.
+once per run. -MeasureRepo is a checkout whose measurement generation Invoke-InteractiveWin11MeasureBuild built
+(scripts/interactive-win11-measure-lib.ps1): the harness launches only that build, after
+Assert-InteractiveWin11MeasureBuild and after the copied noctty.exe and noctty.com match the receipt's hashes; any
+other binary, a plain zig-out build included, is refused before anything starts. Each run is a fresh copy, a fresh
+private desktop and a fresh LOCALAPPDATA, one run at a time (a session-wide mutex refuses a second).
 
-The workloads, every one at 140 x 45 cells, the shell System32's cmd.exe started directly with /D:
+Comparing runs. A later phase compares its working set with Phase 0a's by running the 0a measurement build and the
+new one interleaved, under the same harness version, and comparing the medians of each workload's `after` stage; the
+stored 0a numbers are the reference level, not the comparison. Only completed runs count (driver exit 0, every guard
+unchanged, every required stage present and settled), and only runs whose WorkloadSha256 (the workload, its
+effective scrollback limit and planned blocks, the constants below, the output block, the flood batch file and the
+config with the run's directory taken out) and recorded grid match.
+
+The workloads, every one at 140 x 45 cells (checked before `start` through the pane's pseudoconsole), the shell
+System32's cmd.exe started directly with /D (the copy's config `command`):
   fixed               one block of output (25,000 lines), then 20 cycles of a new tab and its close; `after` 7 s
-                      later (undo-timeout prunes closed panes after 5 s) and once the copy is back to its one pane
-                      (waited for, at most 30 s; the run fails otherwise), once memory settles.
+                      later (undo-timeout prunes closed panes after 5 s) and once the copy is back to its one base
+                      pane (waited for, at most 30 s; the run fails otherwise), once memory settles.
   scrollback-default  4 blocks (100,000 lines) at the default scrollback-limit (10,000,000 bytes), about ten times
                       what that limit retains at this width, so the scrollback is full and recycling; a sample after
                       each block.
@@ -33,58 +40,77 @@ The workloads, every one at 140 x 45 cells, the shell System32's cmd.exe started
                       only what UIA exposes at the bottom of the scrollback (win32_uia/text.zig
                       `accessibleHistoryRows`: min(40,000 cells / columns, 500) history rows plus the viewport, 329
                       lines here), not a scrolling walk of the whole scrollback: the window slides only with a
-                      scrolled viewport (`snapshotDocumentWindow`), which this workload never scrolls. The client finds the pane from
-                      this copy's own window handle only.
+                      scrolled viewport (`snapshotDocumentWindow`), which this workload never scrolls. The walk is
+                      complete only when the document holds the last block's last line and the walk covered at least
+                      the history rows. The client finds the pane from this copy's own window handle only.
   session-capture     scrollback-default's output with window-save-state = always and
                       window-save-state-scrollback = 10000 (the session line cap), then 10 checkpoints, each a new tab
-                      and its close, then a session file write after the close (win32/session.zig: the capture runs
-                      TerminalFormatter over up to the line cap, pre-limited by the 512 KiB snapshot budget to
-                      budget / (columns + 1) lines, about 3,700 at 140 columns). The only workload that saves
-                      session state, an exception to AGENTS.md's --window-save-state=never: the file stays in the
-                      portable copy, and the real session-state.json is guarded like startup-attempts.json.
+                      and its close, then a session write after the close that holds a new snapshot of the base pane
+                      (a later captured_at_unix_ms, with the fixture's lines), read from the copy's own
+                      session-state.json (win32/session.zig: the capture runs TerminalFormatter over up to the line
+                      cap, pre-limited by the 512 KiB snapshot budget to budget / (columns + 1) lines, 3,717 at 140
+                      columns). The only workload that saves session state, an exception to AGENTS.md's
+                      --window-save-state=never: the file stays in the portable copy, and the real
+                      session-state.json is guarded like startup-attempts.json.
   tab-churn           50 cycles of a new tab and its close, no output.
-Every workload samples `start` (after the first pane shows and memory settles) and `after` (its end, settled); a
-stage that does not settle within 90 s fails the run. Settled: the last 10 samples, 500 ms apart, have private bytes
-within 0.5% and working set within 1% of their mean.
+A block counts once the batch file acknowledged it (flood-count.txt holds its number) and the pane parsed through
+its end: the batch file sets the console title to `ws-block-<n>` after the block, and the copy's window title must
+show it. Every workload samples `start` (after the first pane shows and memory settles) and `after` (its end,
+settled); a stage that does not settle within 90 s fails the run, as does a settled stage whose panes are not
+exactly the base pane. Settled: the last 10 samples, 500 ms apart, have private bytes within 0.5% and working set
+within 1% of their mean (range over mean); the stage's value is its last sample.
 
-Records in -Run: workingset.json (the parameters, the copy's build mode and SHA-256, the workload's SHA-256, the
-window's client size and DPI, the stages with every sample, the workload's counts, the exit), version.txt (`+version`), noctty.log (the copy's stderr), driver.log, and
-guards.json (the outer half's guards).
+The memory fields, all from the held noctty process handle (K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX2):
+private_bytes = PrivateUsage (what Windows calls the process's commit charge), working_set = WorkingSetSize,
+peak_working_set = PeakWorkingSetSize, private_plus_shared_commit = PrivateUsage + SharedCommitUsage. The handle,
+GDI and USER counts are null when their query failed, never 0.
+
+Records in -Run: workingset.json (the parameters, the copy's build mode and SHA-256, the receipt's head, the
+workload's SHA-256, the grid, the window's client size and DPI, the stages with every sample, the workload's counts,
+the exit), version.txt (`+version`), noctty.log (the copy's stderr), driver.log, and guards.json (the outer half's
+guards). The outer half declares a run complete only after it checked workingset.json (Get-WorkingSetRecordProblems).
 
 Safety (AGENTS.md "Running noctty"; the soak's rules, test/windows/interactive-win11-soak.ps1). The outer half copies
--Bin without noctty.ico, places `noctty.portable` beside the exe, writes the config, creates a private desktop and a
-kill-on-close job, and starts this script as the driver on that desktop at normal priority, with LOCALAPPDATA,
-APPDATA, TEMP and TMP redirected into the run (never for Git Bash or another msys program: nothing here starts one).
-Every process names the private desktop in STARTUPINFO. Input is posted, never SendInput, and nothing takes the
-foreground. The copy runs with the launch helper's isolation (its own class, --single-instance=false),
-`--command=direct:<System32>\cmd.exe /D`, the clipboard denied on the command line and in the config, every default
-binding cleared, and no binding that copies. The outer half compares the real startup-attempts.json's and the
-product jump list's and the real session-state.json's size and time (never their content) and the PSReadLine
-history's metadata before and after, and records the clipboard sequence number before and after. Session state stays in the portable copy. Logs name kinds and
-sizes, never a command line or an environment value.
+the measurement build without noctty.ico, places `noctty.portable` beside the exe, writes the config, creates a
+private desktop and a kill-on-close job, and starts this script as the driver on that desktop at normal priority,
+with LOCALAPPDATA, APPDATA, TEMP and TMP redirected into the run (never for Git Bash or another msys program: nothing
+here starts one). The driver re-proves that isolation before it starts anything: it runs in a job, on its own
+desktop (neither Default nor the input desktop), with those four variables inside the run, and the build and the
+copy check out against the receipt again. Every process names the private desktop in STARTUPINFO. Input is posted,
+never SendInput, and nothing takes the foreground. The copy runs with the launch helper's isolation (its own class,
+--single-instance=false), the clipboard denied on the command line and in the config, every default binding
+cleared, and no binding that copies. The outer half compares the real startup-attempts.json's, the real
+session-state.json's and the product jump list's size and time (never their content) and the PSReadLine history's
+metadata before and after, and records the clipboard sequence number before and after. Logs name kinds and sizes,
+never a command line or an environment value.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)] [string] $Bin,
+    [string] $MeasureRepo,
     [Parameter(Mandatory)] [string] $Run,
-    [Parameter(Mandatory)] [ValidateSet('fixed', 'scrollback-default', 'scrollback-max', 'uia-walk', 'session-capture', 'tab-churn')] [string] $Workload,
+    [ValidateSet('fixed', 'scrollback-default', 'scrollback-max', 'uia-walk', 'session-capture', 'tab-churn')] [string] $Workload,
     [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')] [string] $ExpectedBuildMode = 'ReleaseFast',
     [ValidateRange(10000000, 2147483647)] [long] $ScrollbackMaxBytes = 1073741824,
     [ValidatePattern('^[a-z0-9][a-z0-9.-]{0,23}$')] [string] $SandboxName,
     [switch] $Driver,
-    [string] $DesktopName
+    [string] $Bin,
+    [string] $DesktopName,
+    # Internal: the grid probe, a child of the driver that attaches to a pane's pseudoconsole.
+    [int] $GridProbePid = 0
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
+# The real startup ledger, the product jump list and the clipboard sequence: the shared state guard, which holds
+# their paths and names (the job's and the validate run's guard too).
+. (Join-Path $repoRoot 'scripts\interactive-win11-state-guard.ps1')
 $script:Utf8 = [Text.UTF8Encoding]::new($false)
-$script:ProductJumpList = 'c2214d6ebc43ff3f.customDestinations-ms'
 $script:ResponseBoundMs = 5000
-# The workload's constants. A change to any of them, to New-BlockText or to the config changes WorkloadSha256, and
-# runs with different WorkloadSha256 are not comparable. One block of output: lines of 82 or 91 bytes, every seventh
-# in an SGR colour; a 140-column row of page holds one.
+# The workload's constants. A change to any of them, to New-BlockText, to the flood batch file or to the config
+# changes WorkloadSha256, and runs with different WorkloadSha256 are not comparable. One block of output: lines of 82
+# or 91 bytes, every seventh in an SGR colour; a 140-column row of page holds one.
 $script:BlockLines = 25000
 $script:RowPageBytes = 1120
 $script:Cols = 140
@@ -136,6 +162,7 @@ public static class WorkingSetNative {
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool K32GetProcessMemoryInfo(IntPtr h, ref MemoryCounters counters, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
     [DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);
     [DllImport("kernel32.dll")] public static extern uint GetErrorMode();
     // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (winnt.h): 144 bytes on x64, pinned by Layout().
@@ -163,20 +190,25 @@ public static class WorkingSetNative {
         }
         return job;
     }
+    // Whether this process runs inside a job (any job).
+    public static bool InJob() { bool r; return IsProcessInJob(new IntPtr(-1), IntPtr.Zero, out r) && r; }
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow cb, IntPtr p);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumWindow cb, IntPtr p);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out int pid);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll", SetLastError=true)] static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
-    [DllImport("user32.dll")] static extern uint GetGuiResources(IntPtr process, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] static extern uint GetGuiResources(IntPtr process, uint flags);
     [DllImport("user32.dll", SetLastError=true)] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll", SetLastError=true)] static extern bool SetKeyboardState(byte[] state);
     [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetThreadDesktop(uint tid);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr h);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformationW(IntPtr h, int index, StringBuilder name, int length, out int needed);
 
     public static string Layout() {
@@ -191,15 +223,27 @@ public static class WorkingSetNative {
             "attributes@" + Marshal.OffsetOf<StartupEx>("attributes"), "JobLimits=" + Marshal.SizeOf<JobLimits>(),
             "limitFlags@" + Marshal.OffsetOf<BasicLimits>("flags") });
     }
+    static string NameOf(IntPtr desktop) {
+        var name = new StringBuilder(256); int needed;
+        if (!GetUserObjectInformationW(desktop, 2, name, 512, out needed)) return null;
+        return name.ToString();
+    }
     public static string CurrentDesktopName() {
         if (GetDesktopWindow() == IntPtr.Zero) throw new Exception("Current desktop connection failed");
-        var name = new StringBuilder(256); int needed;
-        if (!GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), 2, name, 512, out needed)) throw new Exception("Desktop name query failed");
-        return name.ToString();
+        var name = NameOf(GetThreadDesktop(GetCurrentThreadId()));
+        if (name == null) throw new Exception("Desktop name query failed");
+        return name;
+    }
+    // The input desktop's name, or null when it cannot be opened or read.
+    public static string InputDesktopName() {
+        IntPtr h = OpenInputDesktop(0, false, 0x0001); // DESKTOP_READOBJECTS
+        if (h == IntPtr.Zero) return null;
+        try { return NameOf(h); } finally { CloseDesktop(h); }
     }
     // The driver: suspended, assigned to the job before it runs, no console window, normal priority (no priority
     // flag: a creator at normal priority gives its child normal priority), its desktop named in STARTUPINFO.
     public static ProcessInfo LaunchDriver(string app, string command, string cwd, string desktop, IntPtr job) {
+        if (string.IsNullOrEmpty(desktop)) throw new Exception("A launch must name its desktop");
         var si = new Startup { cb = Marshal.SizeOf<Startup>(), desktop = desktop, flags = 1, show = 0 }; ProcessInfo pi;
         if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, false, 0x08000004, IntPtr.Zero, cwd, ref si, out pi))
             throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
@@ -210,8 +254,10 @@ public static class WorkingSetNative {
         return pi;
     }
     // A child of the driver on `desktop`, its standard output and error in `logPath` (the only handle it inherits),
-    // at normal priority (0x20). No STARTF_USESHOWWINDOW, so a GUI window shows on its desktop.
-    public static ProcessInfo Spawn(string app, string command, string cwd, string desktop, string logPath) {
+    // at normal priority (0x20), with no console window (0x08000000) when `noWindow`. No STARTF_USESHOWWINDOW, so a
+    // GUI window shows on its desktop.
+    public static ProcessInfo Spawn(string app, string command, string cwd, string desktop, string logPath, bool noWindow) {
+        if (string.IsNullOrEmpty(desktop)) throw new Exception("A launch must name its desktop");
         var sa = new SecurityAttributes { length = Marshal.SizeOf<SecurityAttributes>(), inherit = 1 };
         IntPtr log = CreateFileW(logPath, 0x40000000, 3, ref sa, 2, 0x80, IntPtr.Zero);
         if (log == new IntPtr(-1)) throw new Exception("Creating the log file failed: " + Marshal.GetLastWin32Error());
@@ -232,7 +278,7 @@ public static class WorkingSetNative {
             si.info.output = log; si.info.error = log;
             si.attributes = list;
             ProcessInfo pi;
-            if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true, 0x00080000 | 0x20, IntPtr.Zero, cwd, ref si, out pi))
+            if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true, 0x00080000 | 0x20 | (noWindow ? 0x08000000u : 0u), IntPtr.Zero, cwd, ref si, out pi))
                 throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
             return pi;
         } finally {
@@ -247,13 +293,20 @@ public static class WorkingSetNative {
         return code;
     }
     public static void Terminate(IntPtr process, uint code) { TerminateProcess(process, code); }
-    // { private bytes, working set, commit charge, peak working set, handles, GDI objects, USER objects }
+    // { private bytes (PrivateUsage), working set, private plus shared commit, peak working set, handles, GDI objects,
+    // USER objects }. A count whose query failed is -1 (published as unavailable), never 0.
     public static long[] Sample(IntPtr process) {
         var c = new MemoryCounters(); c.cb = (uint)Marshal.SizeOf<MemoryCounters>();
         if (!K32GetProcessMemoryInfo(process, ref c, c.cb)) throw new Exception("GetProcessMemoryInfo failed: " + Marshal.GetLastWin32Error());
-        uint handles; GetProcessHandleCount(process, out handles);
+        uint handles; long handleCount = GetProcessHandleCount(process, out handles) ? (long)handles : -1;
         return new long[] { (long)c.privateUsage.ToUInt64(), (long)c.workingSet.ToUInt64(), (long)(c.privateUsage.ToUInt64() + c.sharedCommit),
-            (long)c.peakWorkingSet.ToUInt64(), handles, GetGuiResources(process, 0), GetGuiResources(process, 1) };
+            (long)c.peakWorkingSet.ToUInt64(), handleCount, Gui(process, 0), Gui(process, 1) };
+    }
+    // GetGuiResources returns 0 both for none and for a failure; a failure sets the last error.
+    static long Gui(IntPtr process, uint kind) {
+        Marshal.SetLastPInvokeError(0);
+        uint v = GetGuiResources(process, kind);
+        return v == 0 && Marshal.GetLastPInvokeError() != 0 ? -1 : (long)v;
     }
     static string Class(IntPtr h) { var s = new StringBuilder(128); GetClassNameW(h, s, 128); return s.ToString(); }
     // This copy's host windows (owner pid `pid`).
@@ -269,6 +322,8 @@ public static class WorkingSetNative {
         return list.ToArray();
     }
     public static int Owner(IntPtr h) { int pid; GetWindowThreadProcessId(h, out pid); return pid; }
+    // A window's caption text (internal text, read without sending a message to its thread).
+    public static string Title(IntPtr h) { var s = new StringBuilder(512); GetWindowTextW(h, s, 512); return s.ToString(); }
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int left, top, right, bottom; }
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out Rect r);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
@@ -292,6 +347,49 @@ public static class WorkingSetNative {
         if (!PostMessageW(h, 0x100, new IntPtr(vk), new IntPtr(1))) throw new Exception("Key-down post failed");
         if (!PostMessageW(h, 0x101, new IntPtr(vk), new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
     }
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct ProcessEntry {
+        public uint size, usage, processId; public IntPtr heapId; public uint moduleId, threads, parentProcessId;
+        public int basePriority; public uint flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string exeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+    // The PIDs of `parent`'s children whose executable is `exe` (case-insensitive).
+    public static int[] Children(int parent, string exe) {
+        var list = new List<int>();
+        IntPtr snap = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+        if (snap == new IntPtr(-1)) throw new Exception("CreateToolhelp32Snapshot failed: " + Marshal.GetLastWin32Error());
+        try {
+            var e = new ProcessEntry { size = (uint)Marshal.SizeOf<ProcessEntry>() };
+            for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e)) {
+                if ((int)e.parentProcessId == parent && string.Equals(e.exeFile, exe, StringComparison.OrdinalIgnoreCase)) list.Add((int)e.processId);
+                e.size = (uint)Marshal.SizeOf<ProcessEntry>();
+            }
+        } finally { CloseHandle(snap); }
+        return list.ToArray();
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct Coord { public short x, y; }
+    [StructLayout(LayoutKind.Sequential)] struct SmallRect { public short left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct ScreenBufferInfo { public Coord size, cursor; public ushort attributes; public SmallRect window; public Coord maxWindow; }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetConsoleScreenBufferInfo(IntPtr output, out ScreenBufferInfo info);
+    // The grid of `pid`'s console (a pane's shell, whose console is the pane's pseudoconsole): "columns,rows" from its
+    // screen buffer's window, or an error word. Detaches this process from its own console first.
+    public static string ConsoleGrid(uint pid) {
+        FreeConsole();
+        if (!AttachConsole(pid)) return "attach-failed-" + Marshal.GetLastWin32Error();
+        IntPtr output = CreateFileW("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (output == new IntPtr(-1)) return "conout-failed-" + Marshal.GetLastWin32Error();
+        try {
+            ScreenBufferInfo info;
+            if (!GetConsoleScreenBufferInfo(output, out info)) return "info-failed-" + Marshal.GetLastWin32Error();
+            return (info.window.right - info.window.left + 1) + "," + (info.window.bottom - info.window.top + 1);
+        } finally { CloseHandle(output); FreeConsole(); }
+    }
 }
 '@
 }
@@ -304,7 +402,35 @@ function Get-Metadata([string] $Path) {
     return '{0}:{1}' -f $item.Length, $item.LastWriteTimeUtc.Ticks
 }
 
-# One block of output, deterministic: 25,000 lines of 80 to 90 bytes, every seventh in an SGR colour.
+function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
+# The receipt-bound measurement build of -MeasureRepo, admitted the way Assert-InteractiveWin11MeasureBuild admits it
+# (its generation, receipt, source patch and executable), with the prefix's noctty.exe and noctty.com matching the
+# receipt's hashes. Throws for anything else: a repository with only a plain zig-out build has no generation, so it
+# is refused before anything starts.
+function Get-WorkingSetMeasureBuild([string] $Repo) {
+    if ([string]::IsNullOrWhiteSpace($Repo)) { throw 'Pass -MeasureRepo: only a receipt-bound measurement build is launched.' }
+    $Repo = (Resolve-Path -LiteralPath $Repo).Path
+    $exe = Get-InteractiveWin11MeasureExePath -RepoRoot $Repo
+    Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
+    $receipt = Get-Content -LiteralPath (Get-InteractiveWin11MeasureLayout $Repo).Receipt -Raw | ConvertFrom-Json
+    $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
+    if ((Get-Sha256 $exe) -cne [string]$receipt.ExeSHA256 -or (Get-Sha256 $cli) -cne [string]$receipt.CliSHA256) {
+        throw 'The measurement build does not match its receipt.'
+    }
+    return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize }
+}
+
+# Whether a copy's noctty.exe and noctty.com are the admitted build's bytes.
+function Test-WorkingSetCopy([string] $Copy, $Build) {
+    foreach ($pair in @(@('noctty.exe', $Build.ExeSha256), @('noctty.com', $Build.CliSha256))) {
+        $path = Join-Path $Copy $pair[0]
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Sha256 $path) -cne $pair[1]) { return $false }
+    }
+    return $true
+}
+
+# One block of output, deterministic: 25,000 lines of 82 or 91 bytes, every seventh in an SGR colour.
 function New-BlockText {
     $builder = [Text.StringBuilder]::new(2400000)
     $esc = [char]27
@@ -313,6 +439,18 @@ function New-BlockText {
         if ($i % 7 -eq 0) { [void]$builder.Append("$esc[3$(1 + $i % 6)m$text$esc[0m`r`n") } else { [void]$builder.Append("$text`r`n") }
     }
     return $builder.ToString()
+}
+
+# The flood batch file: the block, then the console title `ws-block-<n>` (n read from next-block.txt, which the
+# driver writes before each block; `set /p` reads it without a child cmd), then the acknowledgement line. ASCII only,
+# its paths from its own location (%~dp0), as the soak's; one statement a line, so %n% expands after `set /p` ran.
+function New-FloodCmdText {
+    return (@(
+            '@type "%~dp0block.txt" || exit /b 1'
+            '@set /p n=<"%~dp0next-block.txt"'
+            '@title ws-block-%n%'
+            '@echo block>>"%~dp0flood-count.txt"'
+        ) -join "`r`n") + "`r`n"
 }
 
 # How many blocks a workload writes (each acknowledged before the next).
@@ -327,10 +465,22 @@ function Get-WorkloadBlocks([string] $Name, [long] $MaxBytes) {
     }
 }
 
+# The stages a completed run of a workload holds, in order (the per-block samples of the scrollback cases included).
+function Get-WorkloadStages([string] $Name, [int] $BlocksPlanned) {
+    switch ($Name) {
+        'fixed' { return @('start', 'after') }
+        'tab-churn' { return @('start', 'after') }
+        'uia-walk' { return @('start', 'filled', 'after') }
+        'session-capture' { return @('start', 'filled', 'after') }
+        'scrollback-default' { return @('start') + @(1..$BlocksPlanned | ForEach-Object { "block-$_" }) + @('after') }
+        'scrollback-max' { return @('start') + @(1..$BlocksPlanned | Where-Object { $_ % 8 -eq 0 -or $_ -eq $BlocksPlanned } | ForEach-Object { "block-$_" }) + @('after') }
+    }
+}
+
 # The workload's identity: SHA-256 over the workload, its scrollback limit and its planned blocks, the constants,
-# the block's SHA-256 and the config with the run's own directory (in working-directory and, escaped, in the flood
-# binding) written as <run>. Runs compare only when it matches.
-function Get-WorkloadSha256([string] $Name, [long] $ScrollbackLimitBytes, [int] $BlocksPlanned, [string] $BlockSha256, [string] $ConfigPath, [string] $RunRoot) {
+# the block's and the flood batch file's SHA-256 and the config with the run's own directory (in working-directory
+# and, escaped, in the flood binding) written as <run>. Runs compare only when it matches.
+function Get-WorkloadSha256([string] $Name, [long] $ScrollbackLimitBytes, [int] $BlocksPlanned, [string] $BlockSha256, [string] $FloodSha256, [string] $ConfigPath, [string] $RunRoot) {
     $root = $RunRoot.TrimEnd('\')
     $config = ([IO.File]::ReadAllLines($ConfigPath) -join "`n").Replace($root.Replace('\', '\\'), '<run>').Replace($root, '<run>')
     $constants = 'workload={11} scrollback={12} blocks={13} cols={0} rows={1} block={2} rowpage={3} fixed={4} churn={5} checkpoints={6} prune={7} settle={8}x{9}ms cap={10} rule=0.005/0.01' -f `
@@ -338,7 +488,7 @@ function Get-WorkloadSha256([string] $Name, [long] $ScrollbackLimitBytes, [int] 
         $script:SessionCheckpoints, $script:PruneSeconds, $script:SettleSamples, $script:SampleMs, $script:SettleCapMs,
         $Name, $ScrollbackLimitBytes, $BlocksPlanned
     $sha = [Security.Cryptography.SHA256]::Create()
-    try { return [BitConverter]::ToString($sha.ComputeHash($script:Utf8.GetBytes("$constants`n$BlockSha256`n$config"))).Replace('-', '').ToLowerInvariant() }
+    try { return [BitConverter]::ToString($sha.ComputeHash($script:Utf8.GetBytes("$constants`n$BlockSha256`n$FloodSha256`n$config"))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
 }
 
@@ -357,6 +507,38 @@ function Test-Settled([object[]] $Samples) {
     return $true
 }
 
+# What keeps a run's record from counting, as a list (empty: the run counts). The outer half runs it on
+# workingset.json before it declares the run complete. Pure, so the contract can run it.
+function Get-WorkingSetRecordProblems($Record) {
+    $problems = [Collections.Generic.List[string]]::new()
+    if ($null -eq $Record) { return @('no record') }
+    if ($Record.Schema -ne 2) { $problems.Add("schema $($Record.Schema)") }
+    if ($Record.Error) { $problems.Add("error: $($Record.Error)") }
+    if ($Record.Exit -ne 0) { $problems.Add("exit $($Record.Exit)") }
+    if ($Record.QuitPosts -lt 1) { $problems.Add('no close post took') }
+    if ($Record.GridCols -ne $script:Cols -or $Record.GridRows -ne $script:Rows) { $problems.Add("grid $($Record.GridCols)x$($Record.GridRows)") }
+    if ($Record.Blocks -ne $Record.BlocksPlanned -or $Record.BlocksPlanned -ne (Get-WorkloadBlocks $Record.Workload $Record.ScrollbackLimitBytes)) { $problems.Add("blocks $($Record.Blocks) of $($Record.BlocksPlanned)") }
+    $wantCycles = switch ($Record.Workload) { 'fixed' { $script:FixedCycles } 'tab-churn' { $script:ChurnCycles } 'session-capture' { $script:SessionCheckpoints } default { 0 } }
+    if ($Record.Cycles -ne $wantCycles -or $Record.CyclesMissed -ne 0) { $problems.Add("cycles $($Record.Cycles) of $wantCycles, $($Record.CyclesMissed) missed") }
+    if ($Record.Workload -eq 'session-capture' -and $Record.SessionSaves -ne $script:SessionCheckpoints) { $problems.Add("session snapshots $($Record.SessionSaves)") }
+    if ($Record.Workload -eq 'uia-walk' -and ($null -eq $Record.Uia -or -not $Record.Uia.walk_complete)) { $problems.Add('UIA walk incomplete') }
+    $want = @(Get-WorkloadStages $Record.Workload $Record.BlocksPlanned)
+    $got = @($Record.Stages | ForEach-Object { $_.name })
+    if (($want -join ',') -cne ($got -join ',')) { $problems.Add("stages $($got -join ',') not $($want -join ',')") }
+    foreach ($stage in @($Record.Stages | Where-Object { $_.name -notlike 'block-*' })) {
+        if (-not $stage.settled) { $problems.Add("stage $($stage.name) not settled") }
+        if (-not $stage.base_pane_only) { $problems.Add("stage $($stage.name) not at the base pane alone") }
+    }
+    return $problems.ToArray()
+}
+
+# The grid probe: a child of the driver, on its desktop, that attaches to a pane's shell's console (the pane's
+# pseudoconsole) and writes "columns,rows" to -Run's grid.txt.
+if ($GridProbePid -gt 0) {
+    [IO.File]::WriteAllText((Join-Path $Run 'grid.txt'), [WorkingSetNative]::ConsoleGrid([uint32]$GridProbePid))
+    exit 0
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # The driver: on the private desktop, inside the job, with the environment redirected.
 # ---------------------------------------------------------------------------------------------------------
@@ -364,12 +546,13 @@ function Invoke-WorkingSetDriver {
     $driverLog = Join-Path $Run 'driver.log'
     function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
     $record = [ordered]@{
-        Schema = 1; Workload = $Workload; ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null
+        Schema = 2; Workload = $Workload; ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
         ScrollbackLimitBytes = $null; Blocks = 0; BlocksPlanned = 0; BlockLines = $script:BlockLines
-        Cols = $script:Cols; Rows = $script:Rows; Class = $null; ExeSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
-        WorkloadSha256 = $null; BlockSha256 = $null; ClientWidth = $null; ClientHeight = $null; Dpi = $null
-        Cycles = 0; CyclesMissed = 0; SessionSaves = 0; SessionFileBytes = $null; Uia = $null; Stages = [Collections.Generic.List[object]]::new()
-        Exit = $null; Error = $null
+        Cols = $script:Cols; Rows = $script:Rows; GridCols = $null; GridRows = $null
+        Class = $null; ExeSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
+        WorkloadSha256 = $null; BlockSha256 = $null; FloodSha256 = $null; ClientWidth = $null; ClientHeight = $null; Dpi = $null
+        Cycles = 0; CyclesMissed = 0; SessionSaves = 0; SessionFileBytes = $null; SessionLines = $null; Uia = $null
+        EffectiveDirs = $null; Stages = [Collections.Generic.List[object]]::new(); QuitPosts = 0; Exit = $null; Error = $null
     }
     $recordPath = Join-Path $Run 'workingset.json'
     $process = [IntPtr]::Zero
@@ -377,16 +560,47 @@ function Invoke-WorkingSetDriver {
         # Normal priority for the measurement (the outer half creates this process without a priority flag).
         [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'Normal'
         $record.DriverPriority = [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
-        if ([WorkingSetNative]::CurrentDesktopName() -cne $DesktopName) { throw 'The driver is not on its private desktop.' }
         if ([WorkingSetNative]::Layout() -cne $script:SdkLayout) { throw "The mirrored structs do not match the SDK's x64 layout: $([WorkingSetNative]::Layout())" }
+        # The driver's own admission, before it starts anything: it takes nothing on trust from its caller. It must
+        # run in a job, on its own desktop (neither Default nor the input desktop), with LOCALAPPDATA, APPDATA, TEMP
+        # and TMP inside the run, and the build and the copy must check out against the receipt again.
+        $own = [WorkingSetNative]::CurrentDesktopName()
+        $inputDesktop = [WorkingSetNative]::InputDesktopName()
+        if ($own -cne $DesktopName -or -not $own.StartsWith('noctty-ws-', [StringComparison]::Ordinal)) { throw 'The driver is not on its private desktop.' }
+        if ([string]::Equals($own, 'Default', [StringComparison]::OrdinalIgnoreCase)) { throw 'The driver is on Default.' }
+        if ($null -eq $inputDesktop) { throw 'The input desktop is unreadable.' }
+        if ([string]::Equals($own, $inputDesktop, [StringComparison]::OrdinalIgnoreCase)) { throw 'The driver is on the input desktop.' }
+        if (-not [WorkingSetNative]::InJob()) { throw 'The driver is in no job.' }
+        $runPrefix = [IO.Path]::GetFullPath($Run).TrimEnd('\') + '\'
+        $effective = [ordered]@{}
+        foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {
+            $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+            if ([string]::IsNullOrWhiteSpace($value) -or -not ([IO.Path]::GetFullPath($value).TrimEnd('\') + '\').StartsWith($runPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "$name is not inside the run."
+            }
+            $effective[$name] = [IO.Path]::GetFullPath($value)
+        }
+        $record.EffectiveDirs = $effective
+        # What it launches is the staged copy: the run's own copy directory, the portable marker, no noctty.ico, the
+        # harness's config, and the measurement build's bytes.
+        if (-not [string]::Equals([IO.Path]::GetFullPath($Bin).TrimEnd('\'), (Join-Path $runPrefix 'copy'), [StringComparison]::OrdinalIgnoreCase)) { throw 'The copy is not the run''s own copy directory.' }
+        if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable') -PathType Leaf) -or (Test-Path -LiteralPath (Join-Path $Bin 'noctty.ico'))) { throw 'The copy is not a portable copy without noctty.ico.' }
+        $config = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')))
+        foreach ($wanted in @('keybind = clear', 'clipboard-read = deny', 'clipboard-write = deny', 'copy-on-select = false', 'auto-update = off')) {
+            if ($config -notcontains $wanted) { throw "The copy's config is not the harness's (no '$wanted')." }
+        }
+        $build = Get-WorkingSetMeasureBuild $MeasureRepo
+        if (-not (Test-WorkingSetCopy $Bin $build)) { throw "The copy's noctty.exe or noctty.com is not the measurement build's." }
+        $record.MeasureHead = $build.Head
         $desktopPath = "WinSta0\$DesktopName"
         $exe = Join-Path $Bin 'noctty.exe'
         $work = Join-Path $Run 'work'
-        $record.ExeSHA256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-        $record.BlockSha256 = (Get-FileHash -LiteralPath (Join-Path $work 'block.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
+        $record.ExeSHA256 = Get-Sha256 $exe
+        $record.BlockSha256 = Get-Sha256 (Join-Path $work 'block.txt')
+        $record.FloodSha256 = Get-Sha256 (Join-Path $work 'flood.cmd')
 
         $versionPath = Join-Path $Run 'version.txt'
-        $check = [WorkingSetNative]::Spawn($exe, ('"{0}" +version' -f $exe), $work, $desktopPath, $versionPath)
+        $check = [WorkingSetNative]::Spawn($exe, ('"{0}" +version' -f $exe), $work, $desktopPath, $versionPath, $false)
         try {
             if ([WorkingSetNative]::WaitForSingleObject($check.process, 60000) -ne 0) { [WorkingSetNative]::Terminate($check.process, 1); throw '+version did not finish in 60 s.' }
             $versionExit = [WorkingSetNative]::ExitCode($check.process)
@@ -394,24 +608,30 @@ function Invoke-WorkingSetDriver {
         $modeMatch = [regex]::Match([IO.File]::ReadAllText($versionPath), '(?m)^\s*-\s*build mode\s*:\s*(?:[A-Za-z_.]*\.)?(Debug|ReleaseSafe|ReleaseFast|ReleaseSmall)\s*$')
         if ($versionExit -ne 0 -or -not $modeMatch.Success) { throw "noctty +version exited $versionExit with no build mode line." }
         $record.BuildMode = $modeMatch.Groups[1].Value
-        if ($record.BuildMode -cne $ExpectedBuildMode) { $record.Error = 'BUILD-MODE'; Log "build mode $($record.BuildMode); not launched"; return 3 }
+        if ($record.BuildMode -cne $ExpectedBuildMode -or $build.Optimize -cne $ExpectedBuildMode) { $record.Error = 'BUILD-MODE'; Log "build mode $($record.BuildMode); not launched"; return 3 }
 
         $saveState = if ($Workload -eq 'session-capture') { 'always' } else { 'never' }
         $record.ScrollbackLimitBytes = if ($Workload -eq 'scrollback-max') { $ScrollbackMaxBytes } else { 10000000 }
-        $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $SandboxName
+        $record.BlocksPlanned = Get-WorkloadBlocks $Workload $ScrollbackMaxBytes
+        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.ScrollbackLimitBytes $record.BlocksPlanned $record.BlockSha256 $record.FloodSha256 (Join-Path $Bin 'config.ghostty') $Run
+        # The shell is the config's `command` (System32's cmd.exe run directly with /D, so no cmd AutoRun runs);
+        # the command line carries none.
+        $configCommands = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')) | Where-Object { $_ -like 'command =*' })
         $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        if ($configCommands.Count -ne 1 -or $configCommands[0] -cne "command = direct:$cmdPath /D") { throw "The copy's config must set exactly one command, System32's cmd.exe with /D." }
+        $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $SandboxName
         $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
-            "--command=direct:$cmdPath /D", "--window-save-state=$saveState", '--clipboard-read=deny', '--clipboard-write=deny',
+            "--window-save-state=$saveState", '--clipboard-read=deny', '--clipboard-write=deny',
             "--scrollback-limit=$($record.ScrollbackLimitBytes)")
         $class = @($launchArguments | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
         if ($class.Count -ne 1) { throw 'The launch helper gave no single --class.' }
-        if (@($launchArguments | Where-Object { $_ -like '--command=*' }).Count -ne 1) { throw 'The copy needs exactly one --command.' }
+        if (@($launchArguments | Where-Object { $_ -like '--command=*' -or $_ -eq '-e' }).Count -ne 0) { throw 'The command line must not set the shell.' }
         foreach ($argument in $launchArguments) { if ($argument -match '"' -or $argument.EndsWith('\')) { throw 'A launch argument cannot be quoted.' } }
         $record.Class = $class[0]
         $commandLine = ('"{0}" ' -f $exe) + (@($launchArguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
         [void][WorkingSetNative]::SetErrorMode([WorkingSetNative]::GetErrorMode() -bor 2)   # SEM_NOGPFAULTERRORBOX, inherited
         $env:GHOSTTY_LOG = 'stderr'
-        $pi = [WorkingSetNative]::Spawn($exe, $commandLine, $work, $desktopPath, (Join-Path $Run 'noctty.log'))
+        $pi = [WorkingSetNative]::Spawn($exe, $commandLine, $work, $desktopPath, (Join-Path $Run 'noctty.log'), $false)
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $process = $pi.process
         [void][WorkingSetNative]::CloseHandle($pi.thread)
@@ -433,10 +653,15 @@ function Invoke-WorkingSetDriver {
         }
         function Read-Sample {
             $v = [WorkingSetNative]::Sample($process)
-            return [pscustomobject][ordered]@{ ms = $clock.ElapsedMilliseconds; surfaces = @(Get-AllSurfaces $false).Count; private_bytes = $v[0]; working_set = $v[1]; commit_charge = $v[2]; peak_working_set = $v[3]; handles = $v[4]; gdi_objects = $v[5]; user_objects = $v[6] }
+            $panes = @(Get-AllSurfaces $false)
+            return [pscustomobject][ordered]@{
+                ms = $clock.ElapsedMilliseconds; surfaces = $panes.Count; base_pane_only = ($panes.Count -eq 1 -and $panes[0] -eq $script:wsBase)
+                private_bytes = $v[0]; working_set = $v[1]; private_plus_shared_commit = $v[2]; peak_working_set = $v[3]
+                handles = $(if ($v[4] -lt 0) { $null } else { $v[4] }); gdi_objects = $(if ($v[5] -lt 0) { $null } else { $v[5] }); user_objects = $(if ($v[6] -lt 0) { $null } else { $v[6] })
+            }
         }
         # A stage: samples every $script:SampleMs until settled (Test-Settled) or $script:SettleCapMs; the stage's value
-        # is its last sample, and a stage that never settled fails the run.
+        # is its last sample. A stage that never settled, or whose last sample is not the base pane alone, fails the run.
         function Add-Stage([string] $Name) {
             $samples = [Collections.Generic.List[object]]::new()
             $started = $clock.ElapsedMilliseconds
@@ -449,18 +674,39 @@ function Invoke-WorkingSetDriver {
             $settled = Test-Settled $samples.ToArray()
             if (-not $settled) { $script:wsUnsettled += @($Name) }
             $last = $samples[$samples.Count - 1]
-            $record.Stages.Add([ordered]@{ name = $Name; settled = $settled; settle_ms = $clock.ElapsedMilliseconds - $started; value = $last; samples = $samples.ToArray() })
-            Log ("stage {0}: private {1:N0} ws {2:N0} commit {3:N0} settled {4}" -f $Name, $last.private_bytes, $last.working_set, $last.commit_charge, $settled)
+            $record.Stages.Add([ordered]@{ name = $Name; settled = $settled; base_pane_only = $last.base_pane_only; settle_ms = $clock.ElapsedMilliseconds - $started; value = $last; samples = $samples.ToArray() })
+            Log ("stage {0}: private {1:N0} ws {2:N0} settled {3} base pane only {4}" -f $Name, $last.private_bytes, $last.working_set, $settled, $last.base_pane_only)
         }
 
         if (-not (Wait-For { @(Get-AllSurfaces $true).Count -ge 1 } 90000)) { throw 'The first pane never showed.' }
         $hosts = @(Get-Hosts)
         if ($hosts.Count -ne 1) { throw "Expected one window, found $($hosts.Count)." }
         $hostWindow = $hosts[0]
-        $base = @(Get-AllSurfaces $true)[0]
+        $firstPanes = @(Get-AllSurfaces $false)
+        if ($firstPanes.Count -ne 1) { throw "Expected one pane at the start, found $($firstPanes.Count)." }
+        $base = $firstPanes[0]
+        $script:wsBase = $base
         $script:wsUnsettled = @()
         $client = [WorkingSetNative]::ClientAndDpi($base)
         $record.ClientWidth = $client[0]; $record.ClientHeight = $client[1]; $record.Dpi = $client[2]
+
+        # The grid, before `start`: the base pane's shell's console is the pane's pseudoconsole, whose window is the
+        # terminal's grid. A probe child attaches to it (the driver keeps its own console).
+        $shells = @()
+        [void](Wait-For { $script:wsShells = @([WorkingSetNative]::Children($nocttyPid, 'cmd.exe')); $script:wsShells.Count -eq 1 } 30000)
+        $shells = @($script:wsShells)
+        if ($shells.Count -ne 1) { throw "Expected one shell under the copy, found $($shells.Count)." }
+        $pwsh = (Get-Command pwsh.exe).Source
+        $gridFile = Join-Path $Run 'grid.txt'
+        $probe = [WorkingSetNative]::Spawn($pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -Run "{2}" -GridProbePid {3}' -f $pwsh, $PSCommandPath, $Run, $shells[0]), $Run, $desktopPath, (Join-Path $Run 'grid-probe.log'), $true)
+        try {
+            if ([WorkingSetNative]::WaitForSingleObject($probe.process, 60000) -ne 0) { [WorkingSetNative]::Terminate($probe.process, 1); throw 'The grid probe did not finish in 60 s.' }
+            if ([WorkingSetNative]::ExitCode($probe.process) -ne 0) { throw 'The grid probe failed.' }
+        } finally { [void][WorkingSetNative]::CloseHandle($probe.thread); [void][WorkingSetNative]::CloseHandle($probe.process) }
+        $grid = [regex]::Match([IO.File]::ReadAllText($gridFile), '\A(\d+),(\d+)\z')
+        if (-not $grid.Success) { throw "The grid probe read no grid ($([IO.File]::ReadAllText($gridFile)))." }
+        $record.GridCols = [int]$grid.Groups[1].Value; $record.GridRows = [int]$grid.Groups[2].Value
+        if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:Rows) { throw "The grid is $($record.GridCols)x$($record.GridRows), not $($script:Cols)x$($script:Rows)." }
         Add-Stage 'start'
 
         $floodCount = Join-Path $work 'flood-count.txt'
@@ -472,12 +718,15 @@ function Invoke-WorkingSetDriver {
             } catch [IO.IOException] { return -1 }
             return @($text -split "`n" | Where-Object { $_.Trim() }).Count
         }
-        # One block into the base pane: F5 types `"<work>\flood.cmd"` and Enter; the batch file appends a line to
-        # flood-count.txt only after its `type` finished, so block k counts once the file holds k lines.
+        # One block into the base pane: F5 types `"<work>\flood.cmd"` and Enter. Block k counts once the batch file
+        # acknowledged it (flood-count.txt holds k lines, written after its `type` and its title) and the copy's window
+        # title shows `ws-block-k`, which the pane parsed after the block's last byte.
         function Invoke-Block([int] $Index) {
             if (-not [WorkingSetNative]::Responsive($hostWindow, $script:ResponseBoundMs)) { throw "The copy does not answer before block $Index." }
+            [IO.File]::WriteAllText((Join-Path $work 'next-block.txt'), "$Index`r`n")
             [WorkingSetNative]::Key($base, $nocttyPid, 0x74)
             if (-not (Wait-For { (Get-FloodCount) -ge $Index } 600000)) { throw "Block $Index was not acknowledged within 600 s." }
+            if (-not (Wait-For { [WorkingSetNative]::Title($hostWindow).Contains("ws-block-$Index") } 60000)) { throw "The pane did not reach the end of block $Index within 60 s." }
             $record.Blocks = $Index
         }
         # One cycle: F2 (new_tab) from the base pane, the new pane shown, F7 (close_tab) on it, the pane gone.
@@ -486,32 +735,31 @@ function Invoke-WorkingSetDriver {
             [WorkingSetNative]::Key($base, $nocttyPid, 0x71)
             $script:wsNew = [IntPtr]::Zero
             $opened = Wait-For { $now = @(Get-AllSurfaces $true | Where-Object { $before -notcontains $_ }); if ($now.Count -ge 1) { $script:wsNew = $now[0]; return $true }; return $false } 15000
-            if (-not $opened) { $record.CyclesMissed++; Log 'cycle: no new pane within 15 s'; return }
+            if (-not $opened) { $record.CyclesMissed++; Log 'cycle: no new pane within 15 s'; return $false }
             $new = $script:wsNew
             [void](Wait-For { [WorkingSetNative]::Responsive($hostWindow, 1000) } 5000)
             [WorkingSetNative]::Key($new, $nocttyPid, 0x76)
-            if (Wait-For { -not ([WorkingSetNative]::IsWindow($new) -and [WorkingSetNative]::IsWindowVisible($new)) } 15000) { $record.Cycles++ }
-            else { $record.CyclesMissed++; Log 'cycle: the new pane still shown after 15 s' }
+            if (Wait-For { -not ([WorkingSetNative]::IsWindow($new) -and [WorkingSetNative]::IsWindowVisible($new)) } 15000) { $record.Cycles++; return $true }
+            $record.CyclesMissed++; Log 'cycle: the new pane still shown after 15 s'
+            return $false
         }
 
-        # After the last close: undo-timeout (5 s) prunes the closed panes; wait for the copy to be back to its one
-        # pane before the stage, at most 30 s more (test-harnesses.md, SOAK-01 trap 2).
+        # After the last close: undo-timeout (5 s) prunes the closed panes; wait for the copy to be back to its base
+        # pane alone before the stage, at most 30 s more (test-harnesses.md, SOAK-01 trap 2).
         function Wait-Pruned {
             Start-Sleep -Seconds $script:PruneSeconds
-            if (-not (Wait-For { @(Get-AllSurfaces $false).Count -eq 1 } 30000)) { throw "$(@(Get-AllSurfaces $false).Count) panes left 30 s after the prune." }
+            if (-not (Wait-For { $panes = @(Get-AllSurfaces $false); $panes.Count -eq 1 -and $panes[0] -eq $base } 30000)) { throw "$(@(Get-AllSurfaces $false).Count) panes left 30 s after the prune, or the base pane is gone." }
         }
 
-        $record.BlocksPlanned = Get-WorkloadBlocks $Workload $ScrollbackMaxBytes
-        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.ScrollbackLimitBytes $record.BlocksPlanned $record.BlockSha256 (Join-Path $Bin 'config.ghostty') $Run
         switch ($Workload) {
             'fixed' {
                 Invoke-Block 1
-                for ($i = 0; $i -lt $script:FixedCycles; $i++) { Invoke-TabCycle }
+                for ($i = 0; $i -lt $script:FixedCycles; $i++) { [void](Invoke-TabCycle) }
                 Wait-Pruned
                 Add-Stage 'after'
             }
             'tab-churn' {
-                for ($i = 0; $i -lt $script:ChurnCycles; $i++) { Invoke-TabCycle }
+                for ($i = 0; $i -lt $script:ChurnCycles; $i++) { [void](Invoke-TabCycle) }
                 Wait-Pruned
                 Add-Stage 'after'
             }
@@ -521,7 +769,7 @@ function Invoke-WorkingSetDriver {
                     if ($Workload -eq 'scrollback-default' -or $k % 8 -eq 0 -or $k -eq $record.BlocksPlanned) {
                         $sample = Read-Sample
                         Log ("block {0}: private {1:N0} ws {2:N0}" -f $k, $sample.private_bytes, $sample.working_set)
-                        $record.Stages.Add([ordered]@{ name = "block-$k"; settled = $false; settle_ms = 0; value = $sample; samples = @($sample) })
+                        $record.Stages.Add([ordered]@{ name = "block-$k"; settled = $false; base_pane_only = $sample.base_pane_only; settle_ms = 0; value = $sample; samples = @($sample) })
                     }
                 }
                 Add-Stage 'after'
@@ -541,47 +789,65 @@ function Invoke-WorkingSetDriver {
                 $range = $document.Clone()
                 [void]$range.MoveEndpointByRange([System.Windows.Automation.Text.TextPatternRangeEndpoint]::End, $range, [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start)
                 $range.ExpandToEnclosingUnit([System.Windows.Automation.Text.TextUnit]::Line)
-                $lines = 0; $chars = 0L; $complete = $false
+                $lines = 0; $chars = 0L; $ended = $false
                 while ($uiaWatch.ElapsedMilliseconds -lt 900000) {
                     $chars += $range.GetText(-1).Length
                     $lines++
-                    if ($range.Move([System.Windows.Automation.Text.TextUnit]::Line, 1) -eq 0) { $complete = $true; break }
+                    if ($range.Move([System.Windows.Automation.Text.TextUnit]::Line, 1) -eq 0) { $ended = $true; break }
                 }
-                $record.Uia = [ordered]@{ document_chars = $whole.Length; document_ms = $wholeMs; walked_lines = $lines; walked_chars = $chars; walk_ms = $uiaWatch.ElapsedMilliseconds - $wholeMs; walk_complete = $complete }
-                Log "uia: document $($whole.Length) chars in $wholeMs ms; walked $lines lines, complete $complete"
+                # Complete only when the walk reached the end, the document holds the last block's last line, and
+                # the walk covered at least the history rows UIA exposes at this width.
+                $lastLine = 'ws line {0:D6} the quick brown fox' -f ($script:BlockLines - 1)
+                $historyRows = [Math]::Min([Math]::Floor(40000 / $script:Cols), 500)
+                $holdsFixture = $whole.Contains($lastLine)
+                $record.Uia = [ordered]@{ document_chars = $whole.Length; document_ms = $wholeMs; walked_lines = $lines; walked_chars = $chars; walk_ms = $uiaWatch.ElapsedMilliseconds - $wholeMs
+                    walk_ended = $ended; holds_last_line = $holdsFixture; walk_complete = ($ended -and $holdsFixture -and $lines -ge $historyRows) }
+                Log "uia: document $($whole.Length) chars in $wholeMs ms; walked $lines lines, ended $ended, holds the last line $holdsFixture"
                 $whole = $null; $document = $null; $range = $null; $pattern = $null; $element = $null
                 Add-Stage 'after'
             }
             'session-capture' {
                 for ($k = 1; $k -le $record.BlocksPlanned; $k++) { Invoke-Block $k }
                 Add-Stage 'filled'
-                $roots = @((Split-Path -Parent $Bin), $env:LOCALAPPDATA, $env:APPDATA)
-                function Get-SessionFiles { return @($roots | ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter 'session-state.json' -ErrorAction SilentlyContinue }) }
-                for ($i = 0; $i -lt $script:SessionCheckpoints; $i++) {
-                    # The close's checkpoint (1 s after the last persist_session) is the write this counts: the state
-                    # is taken after the close, so the open's own write cannot stand in for it.
-                    Invoke-TabCycle
-                    $was = @(Get-SessionFiles | ForEach-Object { '{0}:{1}' -f $_.FullName, $_.LastWriteTimeUtc.Ticks }) -join '|'
-                    if (Wait-For { (@(Get-SessionFiles | ForEach-Object { '{0}:{1}' -f $_.FullName, $_.LastWriteTimeUtc.Ticks }) -join '|') -cne $was } 15000) { $record.SessionSaves++ }
-                    else { Log "checkpoint $($i + 1): no session write within 15 s" }
+                # Only the copy's own session file (portable mode: beside its exe).
+                $sessionFile = Join-Path $Bin 'session-state.json'
+                # The base pane's snapshot in the session file: its time and its fixture lines, or $null when the
+                # file is absent, mid-write or holds no single tab with one snapshot.
+                function Read-BaseSnapshot {
+                    if (-not (Test-Path -LiteralPath $sessionFile -PathType Leaf)) { return $null }
+                    try { $state = [IO.File]::ReadAllText($sessionFile) | ConvertFrom-Json -Depth 64 } catch { return $null }
+                    $tabs = @($state.windows | ForEach-Object { $_.tabs })
+                    if ($tabs.Count -ne 1) { return $null }
+                    $panes = @($tabs[0].layout.nodes | Where-Object { $_.PSObject.Properties['pane'] } | ForEach-Object { $_.pane })
+                    if ($panes.Count -ne 1 -or $null -eq $panes[0].PSObject.Properties['scrollback'] -or $null -eq $panes[0].scrollback) { return $null }
+                    $snapshot = $panes[0].scrollback
+                    $fixture = @($snapshot.lines | Where-Object { $_ -match '\Aws line \d{6} the quick brown fox' }).Count
+                    return [pscustomobject]@{ At = [uint64]$snapshot.captured_at_unix_ms; Lines = @($snapshot.lines).Count; Fixture = $fixture }
                 }
-                $files = @(Get-SessionFiles)
-                $record.SessionFileBytes = if ($files.Count -ge 1) { $files[0].Length } else { $null }
+                $previous = [uint64]0
+                for ($i = 0; $i -lt $script:SessionCheckpoints; $i++) {
+                    # The close's checkpoint (1 s after the last persist_session) is the write this counts: a snapshot of
+                    # the base pane alone, taken after the last one counted, that holds the fixture's lines.
+                    if (-not (Invoke-TabCycle)) { continue }
+                    $script:wsSnapshot = $null
+                    $seen = Wait-For { $s = Read-BaseSnapshot; if ($null -ne $s -and $s.At -gt $previous -and $s.Fixture -ge 1000 -and $s.Lines -le 10000) { $script:wsSnapshot = $s; return $true }; return $false } 15000
+                    if ($seen) { $record.SessionSaves++; $previous = $script:wsSnapshot.At; $record.SessionLines = $script:wsSnapshot.Lines }
+                    else { Log "checkpoint $($i + 1): no new base-pane snapshot with the fixture within 15 s" }
+                }
+                $record.SessionFileBytes = if (Test-Path -LiteralPath $sessionFile) { (Get-Item -LiteralPath $sessionFile).Length } else { $null }
                 Wait-Pruned
                 Add-Stage 'after'
             }
         }
 
-        $quitPosts = 0
-        foreach ($h in Get-Hosts) { if ([WorkingSetNative]::PostClose($h, $nocttyPid)) { $quitPosts++ } }
+        foreach ($h in Get-Hosts) { if ([WorkingSetNative]::PostClose($h, $nocttyPid)) { $record.QuitPosts++ } }
+        if ($record.QuitPosts -lt 1) { Log 'quit: no close post took' }
         if ([WorkingSetNative]::WaitForSingleObject($process, 60000) -eq 0) { $record.Exit = [WorkingSetNative]::ExitCode($process) }
         else { [WorkingSetNative]::Terminate($process, 1); $record.Exit = 'stuck'; Log 'the copy did not end within 60 s of the quit' }
-        Log "quit: $quitPosts posts, exit $($record.Exit)"
-        if ($record.CyclesMissed -gt 0) { $record.Error = "CYCLES-MISSED $($record.CyclesMissed)" }
+        Log "quit: $($record.QuitPosts) posts, exit $($record.Exit)"
         if ($script:wsUnsettled.Count -gt 0) { $record.Error = "UNSETTLED $($script:wsUnsettled -join ',')" }
-        if ($Workload -eq 'session-capture' -and $record.SessionSaves -ne $script:SessionCheckpoints) { $record.Error = "SESSION-SAVES $($record.SessionSaves)" }
-        if ($Workload -eq 'uia-walk' -and -not $record.Uia.walk_complete) { $record.Error = 'UIA-WALK-INCOMPLETE' }
-        if ($record.Exit -ne 0) { $record.Error = "EXIT $($record.Exit)" }
+        $problems = @(Get-WorkingSetRecordProblems ([pscustomobject]$record))
+        if ($problems.Count -gt 0 -and -not $record.Error) { $record.Error = $problems -join '; ' }
         return $(if ($record.Error) { 1 } else { 0 })
     } catch {
         $record.Error = $_.Exception.Message
@@ -595,40 +861,52 @@ function Invoke-WorkingSetDriver {
 }
 
 function Invoke-WorkingSetOuter {
-    $Bin = (Resolve-Path -LiteralPath $Bin).Path
-    if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe') -PathType Leaf)) { throw '-Bin must hold noctty.exe.' }
-    # A used portable copy carries its state beside the exe (os/xdg.zig: the portable root): its session would be
-    # restored and its startup ledger read, so only an unused build output is accepted.
-    $used = @('session-state.json', 'startup-attempts.json', 'noctty.portable', 'config.ghostty', 'shell-integration' | Where-Object { Test-Path -LiteralPath (Join-Path $Bin $_) })
-    if ($used.Count -gt 0) { throw "-Bin holds a portable copy's state ($($used -join ', ')); pass an unused build output." }
+    if (-not $Workload) { throw 'Pass -Workload.' }
+    # Only the receipt-bound measurement build, before anything is created or started.
+    $build = Get-WorkingSetMeasureBuild $MeasureRepo
+    $source = $build.Bin
+    # A relative -Run is taken from PowerShell's location, not the process's directory.
+    $Run = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location -PSProvider FileSystem).ProviderPath, $Run))
     # One run at a time on this session: copies run together differ by tens of MiB (SOAK-01 trap 6).
-    $script:wsMutex = [Threading.Mutex]::new($false, 'Local\noctty-hidden-win11-working-set')
-    if (-not $script:wsMutex.WaitOne(0)) { throw 'Another working-set run is active in this session.' }
-    $Run = [IO.Path]::GetFullPath($Run)
+    $mutex = [Threading.Mutex]::new($false, 'Local\noctty-hidden-win11-working-set')
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'Another working-set run is active in this session.' }
+        Invoke-WorkingSetOuterRun $build $source $Run
+    } finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
     if (Test-Path -LiteralPath $Run) { throw 'The run directory must be new.' }
-    if (($Run + '\').StartsWith($Bin.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The run directory cannot be inside -Bin.' }
+    if (($Run + '\').StartsWith($source.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The run directory cannot be inside the build.' }
     if (-not $SandboxName) { $SandboxName = 'ws-' + [guid]::NewGuid().ToString('N').Substring(0, 8) }
     $copy = Join-Path $Run 'copy'
     $work = Join-Path $Run 'work'
     [void](New-Item -ItemType Directory -Path $Run)
     foreach ($name in @('localappdata', 'appdata', 'temp', 'work')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
     [void](New-Item -ItemType Directory -Path $copy)
-    Get-ChildItem -LiteralPath $Bin -Force | Where-Object { $_.Name -notin @('noctty.ico', 'crash', 'ghostty') } |
+    Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('noctty.ico', 'crash', 'ghostty') } |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $copy $_.Name) -Recurse }
-    if (-not (Test-Path -LiteralPath (Join-Path $copy 'share')) -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Bin) 'share'))) {
-        Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $Bin) 'share') -Destination (Join-Path $copy 'share') -Recurse
+    if (-not (Test-Path -LiteralPath (Join-Path $copy 'share')) -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $source) 'share'))) {
+        Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $source) 'share') -Destination (Join-Path $copy 'share') -Recurse
     }
     if (Test-Path -LiteralPath (Join-Path $copy 'noctty.ico')) { throw 'The copy must not carry noctty.ico beside its exe.' }
+    if (-not (Test-WorkingSetCopy $copy $build)) { throw "The copied noctty.exe or noctty.com does not match the receipt." }
     [IO.File]::WriteAllText((Join-Path $copy 'noctty.portable'), '')
     [IO.File]::WriteAllText((Join-Path $work 'block.txt'), (New-BlockText), $script:Utf8)
     $floodCmd = Join-Path $work 'flood.cmd'
-    # ASCII only, its paths from its own location (%~dp0), as the soak's.
-    [IO.File]::WriteAllText($floodCmd, '@type "%~dp0block.txt" && echo block>>"%~dp0flood-count.txt"' + "`r`n")
+    [IO.File]::WriteAllText($floodCmd, (New-FloodCmdText))
     $floodText = '\"' + $floodCmd.Replace('\', '\\') + '\"\r'
     $bindings = [ordered]@{ f2 = 'new_tab'; f5 = "text:$floodText"; f6 = 'close_surface'; f7 = 'close_tab' }
     $chords = @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')
     $saveScrollback = if ($Workload -eq 'session-capture') { 10000 } else { 0 }
+    $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
     @(
+        "command = direct:$cmdPath /D"
         'auto-update = off'
         'confirm-close-surface = false'
         'desktop-notifications = false'
@@ -644,11 +922,11 @@ function Invoke-WorkingSetOuter {
     ) | Set-Content -LiteralPath (Join-Path $copy 'config.ghostty') -Encoding utf8NoBOM
 
     $realLocal = [Environment]::GetFolderPath('LocalApplicationData')
-    $realRoaming = [Environment]::GetFolderPath('ApplicationData')
-    $startupPath = Join-Path $realLocal 'noctty\startup-attempts.json'
+    $realDirs = @($realLocal, [Environment]::GetFolderPath('ApplicationData'), [IO.Path]::GetTempPath()) | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+    # The real session file (session-capture saves session state): guarded here, beside the shared guard.
     $sessionPath = Join-Path $realLocal 'noctty\session-state.json'
-    $jumpPath = Join-Path $realRoaming "Microsoft\Windows\Recent\CustomDestinations\$($script:ProductJumpList)"
-    $before = [ordered]@{ Startup = Get-Metadata $startupPath; Session = Get-Metadata $sessionPath; JumpList = Get-Metadata $jumpPath; Clipboard = [HiddenLocal]::GetClipboardSequenceNumber() }
+    $sessionBefore = Get-Metadata $sessionPath
+    $stateGuard = Start-InteractiveWin11StateGuard -Harness 'hidden-win11-working-set' -ReceiptDirectory $Run
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'hidden-win11-working-set.ps1'
 
     $desktopName = 'noctty-ws-' + [guid]::NewGuid().ToString('N')
@@ -656,14 +934,14 @@ function Invoke-WorkingSetOuter {
     if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $saved = @{}
     foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
-    $pi = $null; $job = [IntPtr]::Zero; $driverExit = $null; $cleanup = $null; $outerError = $null; $owned = $null
+    $pi = $null; $job = [IntPtr]::Zero; $driverExit = $null; $cleanup = $null; $outerError = $null; $ownedProcesses = $null
     try {
         $job = [WorkingSetNative]::CreateRunJob()
         $env:LOCALAPPDATA = Join-Path $Run 'localappdata'; $env:APPDATA = Join-Path $Run 'appdata'
         $env:TEMP = Join-Path $Run 'temp'; $env:TMP = $env:TEMP
         $pwsh = (Get-Command pwsh.exe).Source
-        $line = '"{0}" -NoProfile -NonInteractive -File "{1}" -Driver -Bin "{2}" -Run "{3}" -Workload {4} -ExpectedBuildMode {5} -ScrollbackMaxBytes {6} -SandboxName {7} -DesktopName {8}' -f `
-            $pwsh, $PSCommandPath, $copy, $Run, $Workload, $ExpectedBuildMode, $ScrollbackMaxBytes, $SandboxName, $desktopName
+        $line = '"{0}" -NoProfile -NonInteractive -File "{1}" -Driver -MeasureRepo "{2}" -Bin "{3}" -Run "{4}" -Workload {5} -ExpectedBuildMode {6} -ScrollbackMaxBytes {7} -SandboxName {8} -DesktopName {9}' -f `
+            $pwsh, $PSCommandPath, $build.Repo, $copy, $Run, $Workload, $ExpectedBuildMode, $ScrollbackMaxBytes, $SandboxName, $desktopName
         $pi = [WorkingSetNative]::LaunchDriver($pwsh, $line, $Run, "WinSta0\$desktopName", $job)
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
         Write-Host "working-set driver PID=$($pi.pid); workload $Workload; evidence=$Run"
@@ -671,37 +949,53 @@ function Invoke-WorkingSetOuter {
         while ([HiddenLocal]::WaitForSingleObject($pi.process, 1000) -eq 258) {
             if ([DateTime]::UtcNow -ge $deadline) { throw 'The driver ran past 45 minutes; the owned job was closed.' }
         }
-        [uint32]$code = 0; [void][HiddenLocal]::GetExitCodeProcess($pi.process, [ref]$code); $driverExit = $code
+        [uint32]$code = 0
+        if (-not [HiddenLocal]::GetExitCodeProcess($pi.process, [ref]$code)) { throw 'The driver exit code could not be read.' }
+        $driverExit = $code
     } catch {
         $outerError = $_.Exception.Message
     } finally {
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
-        if ($job -ne [IntPtr]::Zero) { try { $owned = [HiddenLocal]::StopOwnedJob($job) } catch { $cleanup = $_.Exception.Message } }
+        if ($job -ne [IntPtr]::Zero) { try { $ownedProcesses = [HiddenLocal]::StopOwnedJob($job) } catch { $cleanup = $_.Exception.Message } }
         if ($pi) { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
         [void][HiddenLocal]::CloseDesktop($desktop)
     }
-    $after = [ordered]@{ Startup = Get-Metadata $startupPath; Session = Get-Metadata $sessionPath; JumpList = Get-Metadata $jumpPath; Clipboard = [HiddenLocal]::GetClipboardSequenceNumber() }
+    $sessionAfter = Get-Metadata $sessionPath
+    $stateFailure = $null
+    try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $stateFailure = $_.Exception.Message }
     $historyFailure = $null
     try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure = $_.Exception.Message }
     $guards = [ordered]@{
-        StartupUnchanged = $before.Startup -ceq $after.Startup
-        SessionUnchanged = $before.Session -ceq $after.Session
-        JumpListUnchanged = $before.JumpList -ceq $after.JumpList
+        StateGuardPassed = $null -eq $stateFailure
+        SessionUnchanged = $sessionBefore -ceq $sessionAfter
         HistoryUnchanged = $null -eq $historyFailure
-        ClipboardSequenceBefore = $before.Clipboard; ClipboardSequenceAfter = $after.Clipboard
-        OwnedJobProcesses = $owned; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
+        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
+        OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
     }
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
     $failed = @()
-    if (-not $guards.StartupUnchanged) { $failed += 'the real startup-attempts.json changed' }
+    if ($stateFailure) { $failed += $stateFailure }
     if (-not $guards.SessionUnchanged) { $failed += 'the real session-state.json changed' }
-    if (-not $guards.JumpListUnchanged) { $failed += 'the product jump list changed' }
     if ($historyFailure) { $failed += $historyFailure }
     if ($cleanup) { $failed += "owned job cleanup: $cleanup" }
     if ($outerError) { $failed += $outerError }
     if ($driverExit -eq 3) { $failed += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
     elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and workingset.json)" }
-    Write-Host "clipboard sequence number before $($before.Clipboard), after $($after.Clipboard)"
+    # The artifact itself, before the run counts: every required stage present and settled at the base pane alone,
+    # the counts, the grid, a close that took and a clean exit.
+    $recordPath = Join-Path $Run 'workingset.json'
+    $record = if (Test-Path -LiteralPath $recordPath) { Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } else { $null }
+    $failed += @(Get-WorkingSetRecordProblems $record | ForEach-Object { "record: $_" })
+    # Where the driver ran the copy from: each directory inside the run, none of them a real one.
+    if ($null -ne $record -and $null -ne $record.EffectiveDirs) {
+        foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {
+            $dir = [string]$record.EffectiveDirs.$name
+            if (-not $dir -or -not ($dir.TrimEnd('\') + '\').StartsWith($Run.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or ($realDirs -contains $dir.TrimEnd('\'))) {
+                $failed += "record: the copy's $name was not the run's own"
+            }
+        }
+    } elseif ($null -ne $record) { $failed += 'record: no effective directories' }
+    Write-Host "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)"
     if ($failed.Count -gt 0) { throw ('working-set harness: ' + ($failed -join '; ')) }
     Write-Host "working-set harness: $Workload complete: $Run"
 }
