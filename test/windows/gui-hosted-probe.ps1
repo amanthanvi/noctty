@@ -30,8 +30,9 @@ with its bundled ConPTY host (OpenConsole.exe), the same with the in-box host (N
 the copy's CLI run the way PR 1's leaves run it (`noctty.com +version`, and `+list-windows --class=<fresh class>
 --format=json --timeout=1000`). Invoke-LocalHiddenDriver (hidden-win11-local-lib.ps1, the #727 soak's model) creates
 a private desktop and runs this script again as the driver on it, by name, in a kill-on-close job. The sample is the
-job's PIDs plus every Toolhelp descendant of the launched root (PID and creation time): one that left the job
-(noctty.com's action job lets its children break away) is `leftJob`, judged like the rest and stopped by its exact PID
+job's PIDs plus every Toolhelp descendant of the launched root (PID and creation time). The job permits no breakaway,
+so no descendant can leave it (PROBE-JOB-BREAKAWAY-01) and the job's own list is the record; the descendant walk is a
+cross-check, and a descendant it finds outside the job is `leftJob`, judged like the rest and stopped by its exact PID
 and creation time. Every desktop read holds read-only handles to Default and the private desktop, because
 GetThreadDesktop names another process's thread desktop only while the caller holds a handle to it (test-harnesses.md
 2026-11-20 PROBE-THREAD-DESKTOP-01). A descendant counts only through a link verified on pinned handles (the candidate
@@ -426,6 +427,28 @@ public static class GuiProbeNative {
         } finally { Marshal.FreeHGlobal(buffer); }
     }
 
+    public sealed class Member { public int Pid; public long Creation; }
+    // The job's members at one moment (JobObjectBasicProcessIdList; Zero: this process's own job), each with its
+    // creation time read on a handle opened right after the list (0 when it cannot be opened: it has exited). Null when
+    // the list cannot be read. Our jobs permit no breakaway (PROBE-JOB-BREAKAWAY-01), so the list is every live
+    // descendant in the job.
+    public static Member[] JobMembers(IntPtr job) {
+        int[] pids;
+        try { pids = JobPids(job); } catch (Exception) { return null; }
+        var members = new List<Member>();
+        foreach (var pid in pids) {
+            var member = new Member { Pid = pid };
+            IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h != IntPtr.Zero) {
+                long c, e, k, u;
+                if (GetProcessTimes(h, out c, out e, out k, out u)) member.Creation = c;
+                CloseHandle(h);
+            }
+            members.Add(member);
+        }
+        return members.ToArray();
+    }
+
     static byte[] Read(IntPtr h, IntPtr address, int length) {
         var buffer = new byte[length]; IntPtr read;
         return ReadProcessMemory(h, address, buffer, new IntPtr(length), out read) && read.ToInt64() == length ? buffer : null;
@@ -572,8 +595,8 @@ public static class GuiProbeNative {
     public static IntPtr OpenDesktopReader(string name) { return OpenDesktopW(name, 0, false, 0x0001); }
     public static void CloseDesktopReader(IntPtr h) { if (h != IntPtr.Zero) CloseDesktop(h); }
     // Ends `pid` only if it is still the process created at `creation`, with no job check: for a descendant the
-    // caller linked to its root by PID and creation time that has left the job (noctty.com's action job lets its
-    // children break away). "terminated", "gone", "reused" or "stillRunning".
+    // caller linked to its root by PID and creation time and found outside the job (our jobs permit no breakaway,
+    // PROBE-JOB-BREAKAWAY-01, so this is the cross-check's path). "terminated", "gone", "reused" or "stillRunning".
     public static string StopExactDescendant(int pid, long creation) {
         IntPtr h = OpenProcess(0x0001 | 0x1000 | 0x00100000, false, pid);
         if (h == IntPtr.Zero) return "gone";
@@ -601,8 +624,12 @@ public static class GuiProbeNative {
     // could not be verified: they are never returned, so never stopped. Each is also classified (council r2, Sol M1):
     // `gone` (it no longer runs: OpenProcess says no such process, or the opened process has exited), `reused` (the
     // PID now names a process whose parent is another, so the candidate itself has exited), `older` (created before
-    // the ancestor it names, so not its child), or `unresolved`: a candidate that may still run and whose link could
-    // not be read. Only an unresolved one can hide a live process.
+    // the ancestor it names: not its child, unless that ancestor's PID was itself reused since the snapshot), or
+    // `unresolved`: a candidate that may still run and whose link could not be read. Unresolved is not the only way
+    // to miss a live process: when an intermediate's PID is reused by a newer child of the same ancestor, that
+    // intermediate's live child reads `older` (council r3, Opus L1). The arm's job still holds such a grandchild, since
+    // it permits no breakaway (PROBE-JOB-BREAKAWAY-01): the GUI census counts it through the job's list, and the CLI
+    // watch reads it or leaves the arm inconclusive (notSeenInJob). The walk is a cross-check, not the record.
     // `pruned` lists the gone and reused candidates' PIDs: the walk does not pass through them (their PID may name
     // another process now), so their snapshot children are for the caller to account for (Get-ProbeOrphansUnaccounted).
     public static Descendant[] VerifiedDescendants(int root, out int unverified) {
@@ -1575,7 +1602,7 @@ function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSenti
     $owned = Get-ProbeJobOwnedWindows $dropped { param($OwnerPid) [GuiProbeNative]::OwnerInJob($OwnerPid, $Job) }
     foreach ($window in @($owned.windows)) { $rows.Add($window) }
     return [ordered]@{ windows = $rows; counts = $counts; totals = $totals; privateSentinelSeen = $sentinelSeen; complete = $complete; dropped = $dropped
-        ownersUnreadable = $owned.ownersUnreadable }
+        ownersUnreadable = $owned.ownersUnreadable; ownersTotal = $owned.ownersTotal }
 }
 
 # The windows a walk dropped (owner outside the census) on a desktop other than the private one whose owner is a member
@@ -1591,7 +1618,7 @@ function Get-ProbeJobOwnedWindows($Dropped, [scriptblock] $InJob) {
             $windows.Add([ordered]@{ desktop = $window.desktop; class = $window.class; ownerImage = $null; ownerRole = 'job-member'; visible = $window.visible })
         }
     }
-    return [ordered]@{ windows = $windows.ToArray(); ownersUnreadable = @($verdicts.Values | Where-Object { $_ -eq -1 }).Count }
+    return [ordered]@{ windows = $windows.ToArray(); ownersUnreadable = @($verdicts.Values | Where-Object { $_ -eq -1 }).Count; ownersTotal = $verdicts.Count }
 }
 
 # After a walk (CodeRabbit r4647868866, in the stricter form the lead chose in council r2): the walk kept only the
@@ -1889,6 +1916,10 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
             $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName $Bin
         } finally { Close-ProbeDesktopReaders $readers }
         $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+        # The job's member set at the same boundary (council r3, Sol M): each member must be a census row with the same
+        # PID and creation time, so an exit and a join between the census and this read cannot balance out.
+        $members = [GuiProbeNative]::JobMembers([IntPtr]::Zero)
+        $arm.jobMembersAtBoundary = $(if ($null -eq $members) { $null } else { @($members | ForEach-Object { [ordered]@{ pid = $_.Pid; creation = $_.Creation } }) })
         $arm.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
         $arm.sampledProcesses = @($processes).Count
         $arm.unverifiedDescendantLinks = $script:SampleUnverifiedLinks
@@ -1901,10 +1932,11 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
         $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
         try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd ([IntPtr]::Zero) } finally { [GuiProbeNative]::Close($sentinel) }
         $arm.windowOwnersUnreadable = $windows.ownersUnreadable
+        $arm.windowOwnersTotal = $windows.ownersTotal
         $arm.windowTotals = $windows.totals
         $arm.privateSentinelSeen = $windows.privateSentinelSeen
         $arm.processes = @($processes | ForEach-Object { [ordered]@{
-            image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = $_.leftJob; startupDesktop = $_.startupDesktop
+            pid = $_.pid; creation = $_.creation; image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = $_.leftJob; startupDesktop = $_.startupDesktop
             threadDesktops = $_.threadDesktops; threadsWithoutDesktop = $_.threadsWithoutDesktop; noDesktopErrors = $_.noDesktopErrors
             threadsUnreadable = $_.threadsUnreadable; imageInCopyFolder = $_.imageInCopyFolder; imageInSystemFolder = $_.imageInSystemFolder } })
         $arm.windows = $windows.windows
@@ -1926,9 +1958,10 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
 # it through cmd, and `+list-windows --class=<class> --format=json --timeout=1000` as cli-automation does, against a
 # fresh class no instance owns. The single-instance pipe is named only from --class (ipc_server.zig), so that client
 # can reach no other noctty's pipe, and `+version` uses none. noctty.com forwards to the copy's noctty.exe with the
-# parent's lpDesktop and, for a waiting action, nests a job whose children may break away; so each invocation's sample
-# is its root plus every Toolhelp descendant (PID and creation time), polled until the root exits, desktop readers for
-# Default and this desktop held. The job's accounting before and after counts what the polls missed.
+# parent's lpDesktop and, for a waiting action, nests a job of its own inside the watched one; nothing leaves the
+# watched job, which permits no breakaway (PROBE-JOB-BREAKAWAY-01). Each invocation's sample is every process that
+# joined it plus every Toolhelp descendant of the root (PID and creation time), polled until the tree is done, desktop
+# readers for Default and this desktop held. The job's accounting counts what the polls missed.
 function Invoke-Q0CliArm([string] $CopyBin) {
     $arm = [ordered]@{}
     $exe = Join-Path $CopyBin 'noctty.exe'
@@ -1960,7 +1993,8 @@ function Invoke-Q0CliArm([string] $CopyBin) {
             }
             # A job of the driver's own per invocation, watched on a completion port: every process that joins it (the
             # root, the forwarded noctty.exe, its console host) is read the moment it is created, before a short-lived
-            # one exits. A process that never joins (a breakaway) is found by the verified-descendant walk below.
+            # one exits. Nothing can break away from it (PROBE-JOB-BREAKAWAY-01); the verified-descendant walk below is a
+            # cross-check.
             $watchJob = [HiddenLocal]::CreateOwnedJob()
             $watch = $null
             try {
@@ -1971,10 +2005,10 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 $rootCreation = [GuiProbeNative]::CreationTime($pi.pid)
                 $seen = [System.Collections.Generic.Dictionary[int, object]]::new()
                 $earlyReads = [System.Collections.Generic.Dictionary[int, object]]::new()
-                # The CLI tree's windows, inventoried on both desktops at every poll: noctty.com is a console program, so a
-                # console window it gets on Default is exactly the leak Q0 exists to catch.
+                # The CLI tree's windows, inventoried on both desktops at every poll. noctty.com is started with
+                # CREATE_NO_WINDOW, so this arm does not test a console window on Default; any other window counts.
                 $windowsSeen = [System.Collections.Generic.Dictionary[string, object]]::new()
-                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0; $unresolvedLinks = 0; $finalPoll = $false; $finalPollRan = $false; $lateJoiners = 0; $ownersUnreadable = 0
+                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0; $unresolvedLinks = 0; $finalPoll = $false; $finalPollRan = $false; $lateJoiners = 0; $ownersUnreadable = 0; $ownersTotal = 0
                 $deadline = [datetime]::UtcNow.AddSeconds(30)
                 do {
                     $all = @{}
@@ -2021,6 +2055,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                     $polls++
                     $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd $watchJob
                     $ownersUnreadable = [Math]::Max($ownersUnreadable, [int]$inventory.ownersUnreadable)
+                    $ownersTotal = [Math]::Max($ownersTotal, [int]$inventory.ownersTotal)
                     if (-not [bool]$inventory.complete) { $inventoryEveryPoll = $false }
                     # A late joiner's window the walk dropped, off the private desktop, is kept as a job window there.
                     $members = @(@([GuiProbeNative]::JobPids($watchJob)) + @($watch.Snapshot() | Where-Object { -not $_.Unpinned -and $_.Creation -ne 0 } | ForEach-Object { $_.Pid }))
@@ -2048,6 +2083,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 $facts.inventoryCompleteEveryPoll = $inventoryEveryPoll -and $polls -gt 0
                 $facts.lateJoinersAfterWalk = $lateJoiners
                 $facts.windowOwnersUnreadable = $ownersUnreadable
+                $facts.windowOwnersTotal = $ownersTotal
                 $facts.windows = @($windowsSeen.Values)
                 $facts.windowsOffPrivate = @($windowsSeen.Values | Where-Object { $_.desktop -ne 'private' }).Count
                 $facts.unverifiedDescendantLinks = $unverifiedLinks
@@ -2055,7 +2091,8 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 $facts.rootExited = [GuiProbeNative]::WaitForSingleObject($pi.process, 0) -eq 0
                 $facts.exitCode = $(if ($facts.rootExited) { [long][GuiProbeNative]::ExitCode($pi.process) } else { $null })
                 # Anything of the tree still alive is stopped by its exact PID and creation time: in the job through the
-                # job's own check, a process that left it (leftJob) as the root's verified descendant.
+                # job's own check, and a process found outside it (leftJob; the cross-check's path) as the root's verified
+                # descendant.
                 $stops = [ordered]@{}
                 foreach ($row in @($seen.Values)) {
                     $row.leftJob = -not $row.inJob
@@ -2292,6 +2329,26 @@ function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin)
 # run (unresolved 0; with no unverified candidate at all, there is none), and, for a GUI arm, no more live processes
 # in the job than in-job rows (the job's active count read right after the sample). A process that joined and exited
 # before the sample (cmd's chcp) is outside the claim and stays a recorded count (jobProcessesNotSampled).
+# The count alone balances an exit against a join (council r3, Sol M), so the job's member set read at the same
+# boundary is compared too: every member must be a census row with the same PID and creation time (one whose
+# creation could not be read, as it had exited, at least by PID). A record without that set is inconclusive.
+function Test-ProbeMembersCensused($Driver) {
+    $members = $Driver.jobMembersAtBoundary
+    if ($null -eq $members -or @($members).Count -lt 1) { return $false }
+    $identities = [System.Collections.Generic.HashSet[string]]::new()
+    $pids = [System.Collections.Generic.HashSet[long]]::new()
+    foreach ($row in @($Driver.processes)) {
+        if ($null -eq $row.pid) { continue }
+        [void]$pids.Add([long]$row.pid)
+        if ($null -ne $row.creation) { [void]$identities.Add("$([long]$row.pid):$([long]$row.creation)") }
+    }
+    foreach ($member in @($members)) {
+        if ($null -eq $member.pid) { return $false }
+        if ([long]$member.creation -ne 0) { if (-not $identities.Contains("$([long]$member.pid):$([long]$member.creation)")) { return $false } }
+        elseif (-not $pids.Contains([long]$member.pid)) { return $false }
+    }
+    return $true
+}
 function Get-ProbeUnresolvedLinks($Facts) {
     if ($null -ne $Facts.unresolvedDescendantLinks) { return [int]$Facts.unresolvedDescendantLinks }
     if ($null -ne $Facts.unverifiedDescendantLinks -and [int]$Facts.unverifiedDescendantLinks -eq 0) { return 0 }
@@ -2300,7 +2357,7 @@ function Get-ProbeUnresolvedLinks($Facts) {
 function Test-ProbeCensusComplete($Driver) {
     $inJobRows = @(@($Driver.processes) | Where-Object { $_.inJob }).Count
     $active = $(if ($Driver.jobAccounting) { $Driver.jobAccounting.activeProcesses } else { $null })
-    return (Get-ProbeUnresolvedLinks $Driver) -eq 0 -and $null -ne $active -and [int]$active -le $inJobRows
+    return (Get-ProbeUnresolvedLinks $Driver) -eq 0 -and $null -ne $active -and [int]$active -le $inJobRows -and (Test-ProbeMembersCensused $Driver)
 }
 
 # A GUI arm of Q0 (the bundled or the in-box ConPTY host), from its driver's record: inconclusive without its records

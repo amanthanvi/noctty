@@ -1187,16 +1187,27 @@ Each arm:
 - An incomplete census also leaves Q0 inconclusive:
   - a descendant candidate the walk could not verify, unless it is gone, its
     PID now names another process, or it predates the ancestor it names
-    (`unresolvedDescendantLinks` must be 0);
+    (`unresolvedDescendantLinks` must be 0). Unresolved is not the only way
+    the walk can miss a live process: when an intermediate's PID is reused by
+    a newer child of the same ancestor, the intermediate's live child reads
+    as older. The arm's job still holds such a grandchild, since it permits no
+    breakaway (test-harnesses.md 2026-11-20 PROBE-JOB-BREAKAWAY-01), so the
+    GUI census counts it and the CLI watch reads it or leaves the arm
+    inconclusive. The walk is a cross-check;
   - a running child of a gone or reused candidate that is not in the arm's
     job (the walk does not pass through such a PID; it counts as unresolved);
   - more live processes in the job, by its active count right after the
-    sample, than in-job rows (a GUI arm).
+    sample, than in-job rows (a GUI arm);
+  - a member of the job's process list read at that same moment that is not
+    a census row with the same PID and creation time, so an exit and a join
+    cannot balance out (a GUI arm; the list is recorded as
+    `jobMembersAtBoundary`, and a record without it is inconclusive).
 - Each walk also checks, on a handle held open, whether the owner of a
   window off the private desktop that is outside the census belongs to the
   arm's job (the CLI's watched job, or the GUI driver's own). A member's
   window counts as a job window there, so the arm cannot pass. An owner that
-  cannot be opened is counted (`windowOwnersUnreadable`). An owner that exits
+  cannot be opened is counted (`windowOwnersUnreadable`, beside
+  `windowOwnersTotal`, the owners checked). An owner that exits
   between the walk and its open, taking its windows with it, is outside this
   check.
 - Positive control: a child started without a desktop name reports the private
@@ -1295,8 +1306,9 @@ probe checks this before it creates anything.
   clipboard, and the runner's clipboard is not theirs.
 - The record holds only values and HRESULTs. `Write-ProbeRecord` writes any
   other string, and any other type, as `rejected-value`, and leaves out an
-  entry under any other key. No screen image, path, environment value,
-  window title or command line enters it. The record is still written: it
+  entry under any other key. No screen image, path, window title or command
+  line enters it, nor any environment value but the hosted runner's image
+  name and version, each kept only in its known shape (else `unknown`). The record is still written: it
   counts the replacements (`rejectedValues`) and lists where they were
   (`rejectedAt`, a left-out key as `#key<n>`, which no allowed key can
   match). A driver record with any replacement
