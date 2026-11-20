@@ -1393,8 +1393,8 @@ through its end:
   then 10 checkpoints, each a new tab and its close; a checkpoint counts only
   when the copy's own `session-state.json` then holds a new snapshot of the
   base pane (a later `captured_at_unix_ms`) with the fixture's lines. The
-  512 KiB snapshot budget pre-limits a capture to budget / (columns + 1)
-  lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
+  512 KiB snapshot budget pre-limits a capture to (budget - 96 bytes of
+  snapshot overhead) / (columns + 1) lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
   reached at this width. This is the only workload that saves session state,
   an exception to AGENTS.md's `--window-save-state=never`: the file stays in
   the portable copy, and the real `session-state.json` is guarded.

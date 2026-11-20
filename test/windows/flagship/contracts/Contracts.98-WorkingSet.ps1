@@ -461,19 +461,107 @@ try {
     }
     if (-not $controlCaught) { throw 'The run-directory case did not catch a hash that keeps the escaped directory.' }
 
-    # Build admission: a repository whose only build is a plain zig-out\bin (no measurement generation, no receipt)
-    # is refused by the harness's own admission function (council round 1, Sol H1).
-    $plainRepo = Join-Path $hashDir 'plain-repo'
-    [void][IO.Directory]::CreateDirectory((Join-Path $plainRepo 'zig-out\bin'))
-    foreach ($file in 'noctty.exe', 'noctty.com') { [IO.File]::WriteAllBytes((Join-Path $plainRepo "zig-out\bin\$file"), [byte[]](0x4d, 0x5a)) }
+    # Build admission, through the harness's own Get-WorkingSetMeasureBuild and the real measure library, with only
+    # its git boundary replaced (as test/windows/interactive-win11-measure-contract.ps1 does), so HEAD resolves and each
+    # case reaches the admission check (council round 1, Sol H1; CodeRabbit on #739):
+    #   - a fixture generation with a matching receipt is admitted, and its receipt's head and hashes come back;
+    #   - the same generation with its prefix noctty.exe changed is refused by the receipt check, by name;
+    #   - a checkout whose only build is a plain zig-out\bin has no generation, and is refused for that, by name.
     $admissionText = Get-WorkingSetFunction 'Get-WorkingSetMeasureBuild'
-    $refused = & {
+    & {
         . (Join-Path $repoRoot 'scripts\interactive-win11-measure-lib.ps1')
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
         function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
         . ([scriptblock]::Create($admissionText))
-        try { [void](Get-WorkingSetMeasureBuild $plainRepo); $false } catch { $true }
+        $wsFixtureHead = '1234567890123456789012345678901234567890'
+        $wsFixtureOriginal = [Text.Encoding]::UTF8.GetBytes(("const std = @import(`"std`");`n" +
+                "const aumid_wide = std.unicode.utf8ToUtf16LeStringLiteral(`"io.github.amanthanvi.noctty`");`n" +
+                "pub const aumid_utf8 = `"io.github.amanthanvi.noctty`";`n" +
+                "pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {`n    _ = alloc;`n    _ = portable;`n}`n"))
+        $wsFixtureNotifier = [Text.Encoding]::UTF8.GetBytes('const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");' + "`n" + 'win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16)' + "`n")
+        $archiveStream = [IO.MemoryStream]::new()
+        $zip = [IO.Compression.ZipArchive]::new($archiveStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+        foreach ($name in 'src/apprt/win32_aumid.zig', 'src/apprt/win32/app.zig') {
+            $entryStream = $zip.CreateEntry($name).Open()
+            $content = if ($name -eq 'src/apprt/win32/app.zig') { $wsFixtureNotifier } else { $wsFixtureOriginal }
+            try { $entryStream.Write($content, 0, $content.Length) } finally { $entryStream.Dispose() }
+        }
+        $zip.Dispose()
+        $wsFixtureArchive = $archiveStream.ToArray()
+        $archiveStream.Dispose()
+        # The git boundary: this fixture's HEAD, a clean checkout, its two identity sources and its archive.
+        function Invoke-InteractiveWin11MeasureGit {
+            param([string] $RepoRoot, [string[]] $Arguments)
+            switch ($Arguments[0]) {
+                'rev-parse' { return ,[Text.Encoding]::UTF8.GetBytes($wsFixtureHead) }
+                'status' { return ,[byte[]]@() }
+                'show' { if ($Arguments[1].EndsWith(':src/apprt/win32/app.zig')) { return ,$wsFixtureNotifier }; return ,$wsFixtureOriginal }
+                'archive' { return ,$wsFixtureArchive }
+                default { throw 'Unexpected fixture git operation.' }
+            }
+        }
+        function New-WorkingSetFixtureCheckout([string] $Root) {
+            [void][IO.Directory]::CreateDirectory((Join-Path $Root 'src\apprt\win32'))
+            [IO.File]::WriteAllBytes((Join-Path $Root 'src\apprt\win32_aumid.zig'), $wsFixtureOriginal)
+            [IO.File]::WriteAllBytes((Join-Path $Root 'src\apprt\win32\app.zig'), $wsFixtureNotifier)
+        }
+        # A generation the way Invoke-InteractiveWin11MeasureBuild leaves one, with synthetic app and CLI bytes.
+        $measureRepo = Join-Path $hashDir 'measure-repo'
+        New-WorkingSetFixtureCheckout $measureRepo
+        $layout = Get-InteractiveWin11MeasureLayout $measureRepo -Head $wsFixtureHead
+        [void][IO.Directory]::CreateDirectory($layout.Root)
+        [IO.File]::WriteAllBytes($layout.Archive, $wsFixtureArchive)
+        [IO.Compression.ZipFile]::ExtractToDirectory($layout.Archive, $layout.Source)
+        $patched = Get-InteractiveWin11MeasurePatchedBytes $wsFixtureOriginal
+        [IO.File]::WriteAllBytes((Join-Path $layout.Source 'src\apprt\win32_aumid.zig'), $patched)
+        $sourceReceipt = [ordered]@{
+            Schema = 2; Head = $wsFixtureHead; Patch = 'aumid-isolate-product-toast-v2'; NotifierAumid = 'io.github.amanthanvi.noctty'
+            ArchiveSHA256 = Get-InteractiveWin11MeasureHash $wsFixtureArchive
+            OriginalAumidSHA256 = Get-InteractiveWin11MeasureHash $wsFixtureOriginal; PatchedAumidSHA256 = Get-InteractiveWin11MeasureHash $patched
+            OriginalNotifierSHA256 = Get-InteractiveWin11MeasureHash $wsFixtureNotifier; MeasuredNotifierSHA256 = Get-InteractiveWin11MeasureHash $wsFixtureNotifier
+        }
+        [IO.File]::WriteAllText($layout.SourceReceipt, ($sourceReceipt | ConvertTo-Json))
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $layout.Exe))
+        [IO.File]::WriteAllText($layout.Exe, 'synthetic measurement app')
+        [IO.File]::WriteAllText($layout.Cli, 'synthetic measurement CLI')
+        $receipt = [ordered]@{
+            Schema = 3; State = 'complete'; Head = $wsFixtureHead; RepoRoot = $layout.Repo
+            BuildArguments = (Get-InteractiveWin11MeasureBuildArguments 'ReleaseFast') -join ' '
+            Aumid = 'io.github.amanthanvi.noctty.measure'; Patch = $sourceReceipt.Patch; NotifierAumid = $sourceReceipt.NotifierAumid
+            ArchiveSHA256 = $sourceReceipt.ArchiveSHA256; OriginalAumidSHA256 = $sourceReceipt.OriginalAumidSHA256
+            PatchedAumidSHA256 = $sourceReceipt.PatchedAumidSHA256; OriginalNotifierSHA256 = $sourceReceipt.OriginalNotifierSHA256
+            MeasuredNotifierSHA256 = $sourceReceipt.MeasuredNotifierSHA256
+            SourceReceiptSHA256 = Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($layout.SourceReceipt))
+            Optimize = 'ReleaseFast'; ExePath = $layout.Exe; ExeSHA256 = Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($layout.Exe))
+            CliPath = $layout.Cli; CliSHA256 = Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($layout.Cli))
+        }
+        [IO.File]::WriteAllText($layout.Receipt, ($receipt | ConvertTo-Json))
+
+        $admitted = Get-WorkingSetMeasureBuild $measureRepo
+        if ($admitted.Head -cne $wsFixtureHead -or $admitted.ExeSha256 -cne $receipt.ExeSHA256 -or $admitted.CliSha256 -cne $receipt.CliSHA256 -or
+            $admitted.Optimize -cne 'ReleaseFast' -or -not [string]::Equals($admitted.Bin, (Split-Path -Parent $layout.Exe), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The harness did not admit a measurement generation with a matching receipt, or returned another build.'
+        }
+
+        [IO.File]::WriteAllText($layout.Exe, 'another app')
+        $tampered = $null
+        try { [void](Get-WorkingSetMeasureBuild $measureRepo) } catch { $tampered = $_.Exception.Message }
+        if ($tampered -cne 'Measurement build receipt does not match HEAD, source patch, or executable.') {
+            throw "A changed measurement app was not refused by the receipt check (got: $tampered)."
+        }
+
+        $plainRepo = Join-Path $hashDir 'plain-repo'
+        New-WorkingSetFixtureCheckout $plainRepo
+        [void][IO.Directory]::CreateDirectory((Join-Path $plainRepo 'zig-out\bin'))
+        foreach ($file in 'noctty.exe', 'noctty.com') { [IO.File]::WriteAllBytes((Join-Path $plainRepo "zig-out\bin\$file"), [byte[]](0x4d, 0x5a)) }
+        $plain = $null
+        try { [void](Get-WorkingSetMeasureBuild $plainRepo) } catch { $plain = $_.Exception.Message }
+        $plainGeneration = (Get-InteractiveWin11MeasureLayout $plainRepo -Head $wsFixtureHead).Root
+        if ($null -eq $plain -or -not $plain.Contains($plainGeneration)) {
+            throw "A checkout with only a plain zig-out build was not refused for its missing measurement generation (got: $plain)."
+        }
     }
-    if (-not $refused) { throw 'The harness admitted a repository whose only build is a plain zig-out build.' }
 } finally { [IO.Directory]::Delete($hashDir, $true) }
 } finally {
     foreach ($name in $savedScriptVars.Keys) {
@@ -509,4 +597,4 @@ foreach ($control in $layoutControls) {
     if (($controlClass -as [type])::Layout() -ceq $layoutWanted) { throw "The layout check accepted $($control.Name)." }
 }
 
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash and admission cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash and admission (admitted, tampered, plain) cases; native layout $layoutActual"

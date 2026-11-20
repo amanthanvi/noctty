@@ -48,7 +48,7 @@ System32's cmd.exe started directly with /D (the copy's config `command`):
                       and its close, then a session write after the close that holds a new snapshot of the base pane
                       (a later captured_at_unix_ms, with the fixture's lines), read from the copy's own
                       session-state.json (win32/session.zig: the capture runs TerminalFormatter over up to the line
-                      cap, pre-limited by the 512 KiB snapshot budget to budget / (columns + 1) lines, 3,717 at 140
+                      cap, pre-limited by the 512 KiB snapshot budget to (budget - 96 bytes of overhead) / (columns + 1) lines, 3,717 at 140
                       columns). The only workload that saves session state, an exception to AGENTS.md's
                       --window-save-state=never: the file stays in the portable copy, and the real
                       session-state.json is guarded like startup-attempts.json.
