@@ -1139,7 +1139,7 @@ function Invoke-SoakOuter {
     elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and harness.json)" }
     Write-Host "soak records: $Run"
     Write-Host "clipboard sequence number before $($before.Clipboard), after $($after.Clipboard)"
-    Write-Host ("judge with: python -I ci/soak_judge.py `"{0}`" --min-minutes {1} [--other-run <the other copy's run>] (90 at least; 480 at release coverage)" -f $Run, $Minutes)
+    Write-Host ("judge with: python -I ci/soak_judge.py `"{0}`" --min-minutes {1} [--other-run <the other copy's run>] (120 at least; 480 at release coverage)" -f $Run, $Minutes)
     if ($failed.Count -gt 0) { throw ('soak harness: ' + ($failed -join '; ')) }
     Write-Host 'soak harness: records complete'
 }

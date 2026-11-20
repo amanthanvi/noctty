@@ -226,6 +226,25 @@ if ($soakText -notmatch '(?s)\$start = \[SoakNative\]::CreationTime\(\$process\)
     throw 'The soak harness must take the launch row and each sample from the held handle.'
 }
 
+# The shortest run the judge accepts is the repository thresholds' warm-up plus window; the minimum the harness
+# prints after a run, its usage and the judge's usage all give that number (CodeRabbit, round 3: the printed hint
+# still said 90 after the window moved to 60). The control: a stale hint fails the same check.
+$soakThresholdRows = @(Get-Content -LiteralPath (Join-Path $repoRoot 'ci\soak-thresholds.tsv') | Where-Object { $_ -match '^(warmup|window)\t\d+\s*$' })
+if ($soakThresholdRows.Count -ne 2) { throw 'ci/soak-thresholds.tsv needs one warmup and one window row.' }
+$soakMinimum = ($soakThresholdRows | ForEach-Object { [int](($_ -split "`t")[1]) } | Measure-Object -Sum).Sum
+function Test-SoakMinimumNamed([string] $Harness, [string] $Judge, [int] $Minimum) {
+    return $Harness.Contains("($Minimum at least; 480 at release coverage)") -and
+        $Harness.Contains("--min-minutes $Minimum for Phase 0a's runs") -and $Judge.Contains("use it with --min-minutes $Minimum.")
+}
+$soakRawText = Get-Content -LiteralPath $soakScript -Raw
+$soakJudgeRaw = Get-Content -LiteralPath $soakJudge -Raw
+if (-not (Test-SoakMinimumNamed $soakRawText $soakJudgeRaw $soakMinimum)) {
+    throw "The soak harness's printed minimum, its usage and the judge's usage must each give $soakMinimum (warm-up plus window)."
+}
+if (Test-SoakMinimumNamed ($soakRawText.Replace("($soakMinimum at least;", '(90 at least;')) $soakJudgeRaw $soakMinimum) {
+    throw 'The soak minimum check accepted a stale printed hint.'
+}
+
 # The class the launch helper composes for a soak sandbox has the shape the judge accepts, and two sandbox
 # names give two classes. The helper's functions are taken from the library and run in a child scope.
 $judgeText = Get-Content -LiteralPath $soakJudge -Raw
