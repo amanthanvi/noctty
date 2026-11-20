@@ -1352,7 +1352,14 @@ library, which names no desktop; per `CreateProcess` such a child inherits its
 parent's desktop, the driver's private one (read, not measured). The staged
 config must be byte for byte the harness's own for the run
 (`New-WorkingSetConfigText`), so an `initial-command` or a second `command`
-cannot change the first pane's shell. `NOCTTY_CONPTY` must be unset (both
+cannot change the first pane's shell, and only it loads: the copy is launched
+with `--config-default-files=false` and `--config-file=<copy>\config.ghostty`
+(read back from its launch arguments and recorded), and a staged copy holding
+a legacy `ghostty\config` or `winghostty\config.ghostty` is refused. The run's
+path appears in the config only as
+`working-directory`: F5 types `.\flood.cmd`, relative to the pane's working
+directory, so a `%USERNAME%`, `^` or `&` in the path never reaches cmd's
+parser. `NOCTTY_CONPTY` must be unset (both
 halves refuse it), the copy's `conpty.dll` and `OpenConsole.exe` must match
 the build's, and the record keeps the transport the copy's own log names
 (`using bundled ConPTY: <copy>\conpty.dll`); a run on any other transport
@@ -1378,7 +1385,9 @@ counts (null when their query failed). A stage settles once the last 10
 samples, 500 ms apart, hold private bytes within 0.5% and working set within
 1% of their mean (range over mean); its value is its last sample. A stage
 that has not settled after 90 s, or that is not at the base pane alone, fails
-the run. The workloads, on the 140 x 43 grid, in blocks of 25,000 lines; a block
+the run. The scrollback workloads' `block-<n>` entries are the exception, by
+design: one immediate sample each, right after its block, not settled and
+exempt from both checks (the comparison uses the settled `after`). The workloads, on the 140 x 43 grid, in blocks of 25,000 lines; a block
 counts once the batch file acknowledged it and the copy's window title shows
 `ws-block-<n>`, which the batch file sets after the block, so the pane parsed
 through its end:

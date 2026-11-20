@@ -19,9 +19,10 @@ private desktop and a fresh LOCALAPPDATA, one run at a time (a session-wide mute
 Comparing runs. A later phase compares its working set with Phase 0a's by running the 0a measurement build and the
 new one interleaved, under the same harness version, and comparing the medians of each workload's `after` stage; the
 stored 0a numbers are the reference level, not the comparison. Only completed runs count (driver exit 0, every guard
-unchanged, every required stage present and settled), and only runs whose WorkloadSha256 (the workload, its
-effective scrollback limit and planned blocks, the constants below, the output block, the flood batch file and the
-config with the run's directory taken out) and recorded grid match.
+unchanged, every required stage present, and every stage settled but the scrollback workloads' block-<n> samples),
+and only runs whose WorkloadSha256 (the workload, its effective scrollback limit and planned blocks, the constants
+below, the output block, the flood batch file and the config with the run's directory taken out), recorded grid,
+transport (the bundled ConPTY) and both ConPTY bundle digests (conpty.dll and OpenConsole.exe) match.
 
 The workloads, every one on a 140 x 43 grid (read before `start` through the pane's pseudoconsole: the config's
 window-width = 140 and window-height = 45 give 43 rows on the measurement machine at 144 DPI, measured on the 0a build
@@ -43,12 +44,14 @@ and on this harness's), the shell System32's cmd.exe started directly with /D (t
                       `accessibleHistoryRows`: min(40,000 cells / columns, 500) history rows plus the viewport, 329
                       lines here), not a scrolling walk of the whole scrollback: the window slides only with a
                       scrolled viewport (`snapshotDocumentWindow`), which this workload never scrolls. The walk is
-                      complete only when the document holds the last block's last line and the walk covered at least
-                      the history rows. The client finds the pane from this copy's own window handle only.
+                      complete only when it ended, the document holds the last block's last line, and the walk
+                      counted the whole document: 329 lines on this grid (the history rows, the viewport and the one
+                      line more a walk counts). The client finds the pane from this copy's own window handle only.
   session-capture     scrollback-default's output with window-save-state = always and
                       window-save-state-scrollback = 10000 (the session line cap), then 10 checkpoints, each a new tab
                       and its close, then a session write after the close that holds a new snapshot of the base pane
-                      (a later captured_at_unix_ms, with the fixture's lines), read from the copy's own
+                      (a captured_at_unix_ms later than its close and the last one counted, of exactly the lines its
+                      budget gives, 3,717 at 140 columns: a halved slice does not count), read from the copy's own
                       session-state.json (win32/session.zig: the capture runs TerminalFormatter over up to the line
                       cap, pre-limited by the 512 KiB snapshot budget to (budget - 96 bytes of overhead) / (columns + 1) lines, 3,717 at 140
                       columns). The only workload that saves session state, an exception to AGENTS.md's
@@ -60,7 +63,9 @@ its end: the batch file sets the console title to `ws-block-<n>` after the block
 show it. Every workload samples `start` (after the first pane shows and memory settles) and `after` (its end,
 settled); a stage that does not settle within 90 s fails the run, as does a settled stage whose panes are not
 exactly the base pane. Settled: the last 10 samples, 500 ms apart, have private bytes within 0.5% and working set
-within 1% of their mean (range over mean); the stage's value is its last sample.
+within 1% of their mean (range over mean); the stage's value is its last sample. The scrollback workloads'
+block-<n> entries are the exception, by design: one immediate sample each, right after its block, not settled and
+exempt from the settle and base-pane checks (the comparison uses the settled `after`).
 
 The memory fields, all from the held noctty process handle (K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX2):
 private_bytes = PrivateUsage (what Windows calls the process's commit charge), working_set = WorkingSetSize,
@@ -84,7 +89,9 @@ copy check out against the receipt again. Every process the harness creates dire
 STARTUPINFO, and the native launches refuse any other: a child only on the driver's own desktop, the driver never on
 the caller's, Default or the input desktop. The driver's re-admission runs git through the measure library, which
 names no desktop; per CreateProcess such a child inherits its parent's desktop, the driver's private one (read, not
-measured). The staged config must be byte for byte the harness's own for the run, NOCTTY_CONPTY must be unset, the
+measured). The staged config must be byte for byte the harness's own for the run, and only it loads: the copy is
+launched with --config-default-files=false and --config-file=<copy>\config.ghostty, and a staged copy holding a
+legacy config (ghostty\config, winghostty\config.ghostty) is refused. NOCTTY_CONPTY must be unset, the
 copy's conpty.dll and OpenConsole.exe must match the build's, and a run on any transport but the bundled ConPTY
 fails. Input is posted,
 never SendInput, and nothing takes the foreground. The copy runs with the launch helper's isolation (its own class,
@@ -447,6 +454,10 @@ function Get-Metadata([string] $Path) {
 }
 
 function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Get-BytesSha256([byte[]] $Bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
 
 # The receipt-bound measurement build of -MeasureRepo, admitted the way Assert-InteractiveWin11MeasureBuild admits it
 # (its generation, receipt, source patch and executable), with the prefix's noctty.exe and noctty.com matching the
@@ -457,13 +468,14 @@ function Get-WorkingSetMeasureBuild([string] $Repo) {
     $Repo = (Resolve-Path -LiteralPath $Repo).Path
     $exe = Get-InteractiveWin11MeasureExePath -RepoRoot $Repo
     Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
-    $receiptPath = (Get-InteractiveWin11MeasureLayout $Repo).Receipt
-    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    # One read of the receipt: its fields and its digest come from the same bytes (CodeRabbit on #739).
+    $receiptBytes = [IO.File]::ReadAllBytes((Get-InteractiveWin11MeasureLayout $Repo).Receipt)
+    $receipt = [Text.Encoding]::UTF8.GetString($receiptBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
     $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
     if ((Get-Sha256 $exe) -cne [string]$receipt.ExeSHA256 -or (Get-Sha256 $cli) -cne [string]$receipt.CliSHA256) {
         throw 'The measurement build does not match its receipt.'
     }
-    return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize; ReceiptSha256 = Get-Sha256 $receiptPath }
+    return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize; ReceiptSha256 = Get-BytesSha256 $receiptBytes }
 }
 
 # Whether a copy's noctty.exe and noctty.com are the admitted build's bytes.
@@ -488,11 +500,12 @@ function Assert-WorkingSetRunPlacement([string] $Run, [string] $Repo) {
 
 # The copy's config for a run, exactly: what the outer half writes and what the driver requires byte for byte before
 # its first launch, so an initial-command or a second command, in any spelling, cannot change the first pane's shell
-# (Sol, round 2). The run's directory appears in working-directory and, escaped, in the flood binding.
+# (Sol, round 2). The run's directory appears only in working-directory, a value noctty passes to CreateProcess
+# (it expands only a leading ~/): F5 types `.\flood.cmd`, relative to the pane's working directory, so the run's path
+# never reaches cmd's parser, where a %USERNAME%, ^ or & in it would be expanded or reinterpreted (CodeRabbit on #739).
 function New-WorkingSetConfigText([string] $Workload, [string] $Run) {
     $work = Join-Path $Run 'work'
-    $floodCmd = Join-Path $work 'flood.cmd'
-    $floodText = '\"' + $floodCmd.Replace('\', '\\') + '\"\r'
+    $floodText = '.\\flood.cmd\r'
     $bindings = [ordered]@{ f2 = 'new_tab'; f5 = "text:$floodText"; f6 = 'close_surface'; f7 = 'close_tab' }
     $chords = @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')
     $saveScrollback = if ($Workload -eq 'session-capture') { $script:SessionLineCap } else { 0 }
@@ -513,6 +526,14 @@ function New-WorkingSetConfigText([string] $Workload, [string] $Run) {
         foreach ($key in $bindings.Keys) { foreach ($chord in $chords) { "keybind = $chord$key=$($bindings[$key])" } }
     )
     return ($lines -join "`n") + "`n"
+}
+
+# The default config files portable mode would also read under a copy (src/config/file_load.zig: the legacy
+# ghostty/config and the pre-rename winghostty/config.ghostty, rooted at the portable root by src/os/xdg.zig
+# portablePath). The copy loads only its generated file anyway (--config-default-files=false); a staged copy holding
+# either is refused as well (Sol, round 3).
+function Get-WorkingSetStrayConfigs([string] $Copy) {
+    return @(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path $Copy $_) })
 }
 
 # Whether a staged config is byte for byte New-WorkingSetConfigText's for this run.
@@ -651,6 +672,7 @@ function Get-WorkingSetRecordProblems($Record) {
         }
     }
     if ($Record.Transport -cne 'bundled') { $problems.Add("transport $($Record.Transport)") }
+    if ($Record.LaunchConfigDefaultFiles -ne $false -or -not $Record.LaunchConfigFile) { $problems.Add('the copy was not launched with only the generated config') }
     if (-not $Record.ConptyDllSHA256 -or $Record.ConptyDllSHA256 -cne $Record.PrefixConptyDllSHA256 -or -not $Record.OpenConsoleSHA256 -or $Record.OpenConsoleSHA256 -cne $Record.PrefixOpenConsoleSHA256) {
         $problems.Add('the ConPTY pair is not the build''s')
     }
@@ -692,7 +714,7 @@ function Invoke-WorkingSetDriver {
         WorkloadSha256 = $null; BlockSha256 = $null; FloodSha256 = $null; ClientWidth = $null; ClientHeight = $null; Dpi = $null
         Cycles = 0; CyclesMissed = 0; SessionSaves = 0; SessionFileBytes = $null; SessionLines = $null; Uia = $null
         SessionSnapshots = [Collections.Generic.List[object]]::new()
-        LaunchScrollbackLimit = $null; ConfigSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; Transport = $null
+        LaunchScrollbackLimit = $null; LaunchConfigDefaultFiles = $null; LaunchConfigFile = $null; ConfigSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; Transport = $null
         ConptyDllSHA256 = $null; PrefixConptyDllSHA256 = $null; OpenConsoleSHA256 = $null; PrefixOpenConsoleSHA256 = $null
         EffectiveDirs = $null; Stages = [Collections.Generic.List[object]]::new(); QuitPosts = 0; Exit = $null; Error = $null
     }
@@ -737,6 +759,7 @@ function Invoke-WorkingSetDriver {
         # initial-command or a second command, in any spelling, would change the first pane's shell (Sol, round 2).
         if (-not (Test-WorkingSetConfigBytes (Join-Path $Bin 'config.ghostty') $Workload $Run)) { throw "The copy's config is not byte for byte the harness's for this run." }
         $record.ConfigSHA256 = Get-Sha256 (Join-Path $Bin 'config.ghostty')
+        $stray = @(Get-WorkingSetStrayConfigs $Bin); if ($stray.Count -gt 0) { throw "The copy holds another config file ($($stray -join ', ')), which the app's default search would read." }
         $build = Get-WorkingSetMeasureBuild $MeasureRepo
         if (-not (Test-WorkingSetCopy $Bin $build)) { throw "The copy's noctty.exe or noctty.com is not the measurement build's." }
         $record.MeasureHead = $build.Head
@@ -772,12 +795,13 @@ function Invoke-WorkingSetDriver {
         $record.ScrollbackLimitBytes = if ($Workload -eq 'scrollback-max') { $ScrollbackMaxBytes } else { 10000000 }
         # The shell is the config's `command` (System32's cmd.exe run directly with /D, so no cmd AutoRun runs);
         # the command line carries none.
-        $configCommands = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')) | Where-Object { $_ -like 'command =*' })
+        $configCommands = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')) | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
         $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
-        if ($configCommands.Count -ne 1 -or $configCommands[0] -cne "command = direct:$cmdPath /D") { throw "The copy's config must set exactly one command, System32's cmd.exe with /D." }
+        if ($configCommands.Count -ne 1 -or $configCommands[0] -cne "command = direct:$cmdPath /D") { throw "The copy's config must set exactly one command, System32's cmd.exe with /D, and no initial-command." }
         $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $SandboxName
         $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
             "--window-save-state=$saveState", '--clipboard-read=deny', '--clipboard-write=deny',
+            '--config-default-files=false', "--config-file=$(Join-Path $Bin 'config.ghostty')",
             "--scrollback-limit=$($record.ScrollbackLimitBytes)")
         # The limit the copy is launched with is what the record and the hash say (Opus, round 2): read back from the
         # launch arguments themselves, and refused unless it is the workload's.
@@ -785,6 +809,15 @@ function Invoke-WorkingSetDriver {
         if ($limitArguments.Count -ne 1) { throw 'The launch must carry one --scrollback-limit.' }
         $record.LaunchScrollbackLimit = [long]$limitArguments[0].Substring(19)
         if ($record.LaunchScrollbackLimit -ne $record.ScrollbackLimitBytes) { throw "The copy's --scrollback-limit is $($record.LaunchScrollbackLimit), not the workload's $($record.ScrollbackLimitBytes)." }
+        # Only the generated config loads (Sol, round 3): --config-default-files=false drops every default file (the
+        # legacy ghostty/config among them) and --config-file names the generated one, both read back from the launch
+        # arguments themselves and recorded.
+        $defaultFilesArguments = @($launchArguments | Where-Object { $_ -like '--config-default-files*' })
+        $configFileArguments = @($launchArguments | Where-Object { $_ -like '--config-file*' })
+        if ($defaultFilesArguments.Count -ne 1 -or $defaultFilesArguments[0] -cne '--config-default-files=false') { throw 'The launch must carry --config-default-files=false once.' }
+        if ($configFileArguments.Count -ne 1 -or $configFileArguments[0] -cne "--config-file=$(Join-Path $Bin 'config.ghostty')") { throw 'The launch must name the generated config once, with --config-file.' }
+        $record.LaunchConfigDefaultFiles = $false
+        $record.LaunchConfigFile = $configFileArguments[0].Substring(14)
         $record.BlocksPlanned = Get-WorkloadBlocks $Workload $record.LaunchScrollbackLimit
         $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.LaunchScrollbackLimit $record.BlocksPlanned $record.BlockSha256 $record.FloodSha256 (Join-Path $Bin 'config.ghostty') $Run
         $class = @($launchArguments | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
@@ -882,7 +915,7 @@ function Invoke-WorkingSetDriver {
             } catch [IO.IOException] { return -1 }
             return @($text -split "`n" | Where-Object { $_.Trim() }).Count
         }
-        # One block into the base pane: F5 types `"<work>\flood.cmd"` and Enter. Block k counts once the batch file
+        # One block into the base pane: F5 types `.\flood.cmd` (the pane's working directory is <work>) and Enter. Block k counts once the batch file
         # acknowledged it (flood-count.txt holds k lines, written after its `type` and its title) and the copy's window
         # title shows `ws-block-k`, which the pane parsed after the block's last byte.
         function Invoke-Block([int] $Index) {
@@ -1160,6 +1193,7 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
         if ($record.Workload -cne $Workload) { $failed += "record: workload $($record.Workload), not $Workload" }
         if ($record.ScrollbackLimitBytes -ne $wantLimit -or $record.LaunchScrollbackLimit -ne $wantLimit) { $failed += "record: scrollback limit $($record.LaunchScrollbackLimit), not $wantLimit" }
         if ($record.BlocksPlanned -ne (Get-WorkloadBlocks $Workload $wantLimit)) { $failed += "record: $($record.BlocksPlanned) blocks planned, not $(Get-WorkloadBlocks $Workload $wantLimit)" }
+        if ($record.LaunchConfigFile -ne (Join-Path $copy 'config.ghostty')) { $failed += "record: the copy's config file was not its own generated one" }
     }
     # Where the driver ran the copy from: each directory inside the run, none of them a real one.
     if ($null -ne $record -and $null -ne $record.EffectiveDirs) {

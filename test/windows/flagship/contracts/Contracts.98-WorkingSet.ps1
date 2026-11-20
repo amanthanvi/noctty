@@ -342,7 +342,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the record keeps the CLI''s and the admitted receipt''s digests (Sol, round 2)'
-        Pattern = '(?s)ReceiptSha256 = Get-Sha256 \$receiptPath \}.*?\$record\.CliSHA256 = Get-Sha256 \(Join-Path \$Bin ''noctty\.com''\)\s+\$record\.ReceiptSHA256 = \$build\.ReceiptSha256'
+        Pattern = '(?s)ReceiptSha256 = Get-BytesSha256 \$receiptBytes \}.*?\$record\.CliSHA256 = Get-Sha256 \(Join-Path \$Bin ''noctty\.com''\)\s+\$record\.ReceiptSHA256 = \$build\.ReceiptSha256'
         Mutation = @('$record.ReceiptSHA256 = $build.ReceiptSha256', '$record.ReceiptSHA256 = $null')
     }
     @{
@@ -389,6 +389,31 @@ $workingSetRules = @(
         Description = 'the driver''s noctty.ico refusal itself, not the text of its message (Opus, round 2: m05)'
         Pattern = '-or \(Test-Path -LiteralPath \(Join-Path \$Bin ''noctty\.ico''\)\)\) \{ throw ''The copy is not a portable copy without noctty\.ico\.'' \}'
         Mutation = @(" -or (Test-Path -LiteralPath (Join-Path `$Bin 'noctty.ico'))", '')
+    }
+    @{
+        Description = 'the receipt is read once: its fields and its digest come from the same bytes (CodeRabbit on #739)'
+        Pattern = '(?s)\$receiptBytes = \[IO\.File\]::ReadAllBytes\(\(Get-InteractiveWin11MeasureLayout \$Repo\)\.Receipt\)\s+\$receipt = \[Text\.Encoding\]::UTF8\.GetString\(\$receiptBytes\)[^\r\n]*\| ConvertFrom-Json.*?ReceiptSha256 = Get-BytesSha256 \$receiptBytes \}'
+        Mutation = @('ReceiptSha256 = Get-BytesSha256 $receiptBytes }', 'ReceiptSha256 = Get-Sha256 (Get-InteractiveWin11MeasureLayout $Repo).Receipt }')
+    }
+    @{
+        Description = 'F5 types a relative .\flood.cmd, never the run''s path, so cmd never parses the path (CodeRabbit on #739)'
+        Pattern = '\$floodText = ''\.\\\\flood\.cmd\\r'''
+        Mutation = @("`$floodText = '.\\flood.cmd\r'", "`$floodText = '\`"' + (Join-Path `$work 'flood.cmd').Replace('\', '\\') + '\`"\r'")
+    }
+    @{
+        Description = 'the copy is launched with --config-default-files=false and --config-file naming the generated config, both read back from its launch arguments (Sol, round 3)'
+        Pattern = '(?s)''--config-default-files=false'', "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)",.*?if \(\$defaultFilesArguments\.Count -ne 1 -or \$defaultFilesArguments\[0\] -cne ''--config-default-files=false''\) \{ throw .*?if \(\$configFileArguments\.Count -ne 1 -or \$configFileArguments\[0\] -cne "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)"\) \{ throw .*?\$record\.LaunchConfigFile = \$configFileArguments\[0\]\.Substring\(14\)'
+        Mutation = @("'--config-default-files=false', `"--config-file=", "`"--config-file=")
+    }
+    @{
+        Description = 'the driver refuses a staged copy holding a legacy config file the default search would read, before its first launch (Sol, round 3)'
+        Pattern = '(?s)\$stray = @\(Get-WorkingSetStrayConfigs \$Bin\); if \(\$stray\.Count -gt 0\) \{ throw .*?\$check = \[WorkingSetNative\]::Spawn\('
+        Mutation = @('if ($stray.Count -gt 0) { throw', 'if ($false) { throw')
+    }
+    @{
+        Description = 'the driver reads every command line of the config in any spelling, initial-command included'
+        Pattern = '\$configCommands = @\(\[IO\.File\]::ReadAllLines\(\(Join-Path \$Bin ''config\.ghostty''\)\) \| Where-Object \{ \$_ -match ''\^\\s\*\(initial-\)\?command\\s\*='' \}\)'
+        Mutation = @("`$_ -match '^\s*(initial-)?command\s*='", "`$_ -like 'command =*'")
     }
     # --- the native layer
     @{
@@ -523,6 +548,7 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
             SessionSaves = $(if ($Name -eq 'session-capture') { 10 } else { 0 })
             SessionSnapshots = @(if ($Name -eq 'session-capture') { foreach ($k in 1..10) { [pscustomobject]@{ close_at_unix_ms = [uint64](1000 * $k); snapshot_at_unix_ms = [uint64](1000 * $k + 900); lines = 3717; fixture_lines = 3715 } } })
             Uia = $(if ($Name -eq 'uia-walk') { [pscustomobject]@{ walk_complete = $true; walk_ended = $true; holds_last_line = $true; walked_lines = 329 } } else { $null })
+            LaunchConfigDefaultFiles = $false; LaunchConfigFile = 'C:\run\copy\config.ghostty'
             Transport = 'bundled'; ConptyDllSHA256 = 'aa'; PrefixConptyDllSHA256 = 'aa'; OpenConsoleSHA256 = 'bb'; PrefixOpenConsoleSHA256 = 'bb'
             Stages = $stages
         }
@@ -550,6 +576,8 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
         @{ Name = 'a UIA document of the history rows alone, 285 lines (Sol, round 2)'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walked_lines = 285 } }
         @{ Name = 'a UIA walk that never ended'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walk_ended = $false } }
         @{ Name = 'the in-box conhost'; Workload = 'fixed'; Change = { param($r) $r.Transport = 'inbox' } }
+        @{ Name = 'default config files left on (Sol, round 3)'; Workload = 'uia-walk'; Change = { param($r) $r.LaunchConfigDefaultFiles = $true } }
+        @{ Name = 'no generated config named'; Workload = 'fixed'; Change = { param($r) $r.LaunchConfigFile = $null } }
         @{ Name = 'a transport the log did not name'; Workload = 'tab-churn'; Change = { param($r) $r.Transport = $null } }
         @{ Name = 'a conpty.dll not the build''s'; Workload = 'scrollback-default'; Change = { param($r) $r.ConptyDllSHA256 = 'ab' } }
         @{ Name = 'no OpenConsole.exe digest'; Workload = 'fixed'; Change = { param($r) $r.OpenConsoleSHA256 = $null; $r.PrefixOpenConsoleSHA256 = $null } }
@@ -615,6 +643,7 @@ try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
         . ([scriptblock]::Create($admissionText))
+        . ([scriptblock]::Create((Get-WorkingSetFunction 'Get-BytesSha256')))
         $wsFixtureHead = '1234567890123456789012345678901234567890'
         $wsFixtureOriginal = [Text.Encoding]::UTF8.GetBytes(("const std = @import(`"std`");`n" +
                 "const aumid_wide = std.unicode.utf8ToUtf16LeStringLiteral(`"io.github.amanthanvi.noctty`");`n" +
@@ -681,7 +710,7 @@ try {
 
         $admitted = Get-WorkingSetMeasureBuild $measureRepo
         if ($admitted.Head -cne $wsFixtureHead -or $admitted.ExeSha256 -cne $receipt.ExeSHA256 -or $admitted.CliSha256 -cne $receipt.CliSHA256 -or
-            $admitted.Optimize -cne 'ReleaseFast' -or -not [string]::Equals($admitted.Bin, (Split-Path -Parent $layout.Exe), [StringComparison]::OrdinalIgnoreCase)) {
+            $admitted.Optimize -cne 'ReleaseFast' -or $admitted.ReceiptSha256 -cne (Get-Sha256 $layout.Receipt) -or -not [string]::Equals($admitted.Bin, (Split-Path -Parent $layout.Exe), [StringComparison]::OrdinalIgnoreCase)) {
             throw 'The harness did not admit a measurement generation with a matching receipt, or returned another build.'
         }
 
@@ -775,6 +804,66 @@ try {
         Test-WorkingSetConfigBytes (Join-Path $configDir 'initialCommand.ghostty') 'session-capture' $configRun
     }
     if (-not $configControlAccepted) { throw 'The config control refused the initial-command config anyway, so the case shows nothing.' }
+
+    # A run path cmd would expand or reinterpret (%USERNAME%, &, ^) is handled literally (CodeRabbit on #739): it
+    # appears only as the working-directory value, and no keybind (F5's typed text among them) carries any of it. The
+    # control, the earlier binding that typed the quoted path, must fail.
+    function Test-WorkingSetRunPathLiteral([string] $Generator, [string] $Run) {
+        $text = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText 'fixed' $Run }
+        $lines = @($text -split "`n" | Where-Object { $_ })
+        $carrying = @($lines | Where-Object { $_.Contains('%USERNAME%') -or $_.Contains('a&b^c') })
+        return $carrying.Count -eq 1 -and $carrying[0] -ceq "working-directory = $(Join-Path $Run 'work')"
+    }
+    $metaRun = Join-Path $configDir 'a&b^c\%USERNAME%\run-1'
+    if (-not (Test-WorkingSetRunPathLiteral $generatorText $metaRun)) { throw 'A run path with %USERNAME%, & and ^ reached a command line in the config.' }
+    $pathControl = $generatorText.Replace("`$floodText = '.\\flood.cmd\r'", "`$floodText = '\`"' + (Join-Path `$work 'flood.cmd').Replace('\', '\\') + '\`"\r'")
+    if ([string]::Equals($pathControl, $generatorText, [StringComparison]::Ordinal)) { throw 'The run-path control changed nothing.' }
+    if (Test-WorkingSetRunPathLiteral $pathControl $metaRun) { throw 'The run-path case accepted the binding that types the path.' }
+
+    # The generator's first-pane command, pinned here independently of the generator (Sol, round 3): its config sets
+    # exactly one command, System32's cmd.exe run directly with /D, and no initial-command, in any spelling. The
+    # control, a generator that adds an initial-command, must fail.
+    function Test-WorkingSetGeneratedCommand([string] $Generator) {
+        $text = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText 'session-capture' $configRun }
+        $commands = @($text -split "`n" | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
+        $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        return $commands.Count -eq 1 -and $commands[0] -ceq "command = direct:$cmdPath /D"
+    }
+    if (-not (Test-WorkingSetGeneratedCommand $generatorText)) { throw 'The generated config does not set exactly System32''s cmd.exe with /D, or it sets an initial-command.' }
+    $commandControl = $generatorText.Replace("        'keybind = clear'`n", "        'initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit'`n        'keybind = clear'`n")
+    if ([string]::Equals($commandControl, $generatorText, [StringComparison]::Ordinal)) { throw 'The generated-command control changed nothing.' }
+    if (Test-WorkingSetGeneratedCommand $commandControl) { throw 'The generated-command check accepted a generator that adds an initial-command.' }
+
+    # Sol's round-3 case: an untouched config.ghostty beside a legacy ghostty/config that sets an initial-command must
+    # not pass; nor a pre-rename winghostty/config.ghostty; a copy with only its generated config does. The control, a
+    # check that finds nothing, must accept the legacy case.
+    $strayText = Get-WorkingSetFunction 'Get-WorkingSetStrayConfigs'
+    $strayCopy = Join-Path $configDir 'copy'
+    [void][IO.Directory]::CreateDirectory((Join-Path $strayCopy 'ghostty'))
+    [IO.File]::Copy((Join-Path $configDir 'exact.ghostty'), (Join-Path $strayCopy 'config.ghostty'))
+    $strayCases = & {
+        . ([scriptblock]::Create($strayText))
+        $found = [ordered]@{ clean = @(Get-WorkingSetStrayConfigs $strayCopy) }
+        [IO.File]::WriteAllText((Join-Path $strayCopy 'ghostty\config'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
+        $found.legacy = @(Get-WorkingSetStrayConfigs $strayCopy)
+        [IO.File]::Delete((Join-Path $strayCopy 'ghostty\config'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $strayCopy 'winghostty'))
+        [IO.File]::WriteAllText((Join-Path $strayCopy 'winghostty\config.ghostty'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
+        $found.renamed = @(Get-WorkingSetStrayConfigs $strayCopy)
+        [IO.File]::Delete((Join-Path $strayCopy 'winghostty\config.ghostty'))
+        [IO.File]::WriteAllText((Join-Path $strayCopy 'ghostty\config'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
+        $found
+    }
+    if ($strayCases.clean.Count -ne 0) { throw 'A copy with only its generated config was refused for a stray config.' }
+    if (@($strayCases.legacy) -cne 'ghostty\config') { throw 'A legacy ghostty/config beside an untouched config.ghostty was not refused.' }
+    if (@($strayCases.renamed) -cne 'winghostty\config.ghostty') { throw 'A pre-rename winghostty/config.ghostty was not refused.' }
+    $strayControl = $strayText.Replace("return @(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path `$Copy `$_) })", 'return @()')
+    if ([string]::Equals($strayControl, $strayText, [StringComparison]::Ordinal)) { throw 'The stray-config control changed nothing.' }
+    $strayControlFound = & { . ([scriptblock]::Create($strayControl)); @(Get-WorkingSetStrayConfigs $strayCopy) }
+    if ($strayControlFound.Count -ne 0) { throw 'The stray-config control found the legacy file anyway, so the case shows nothing.' }
+    # The list is the product's: file_load.zig's legacy paths, rooted at the portable root.
+    $fileLoadZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\config\file_load.zig') -Raw
+    if (-not $fileLoadZig.Contains('.subdir = "ghostty/config"') -or -not $fileLoadZig.Contains('.subdir = "winghostty/config.ghostty"')) { throw 'The stray-config list is not file_load.zig''s legacy paths.' }
 } finally { [IO.Directory]::Delete($configDir, $true) }
 
 # What the payload checks and the transport check read from the product: the session budget and overhead, the UIA
@@ -853,4 +942,4 @@ if ($null -ne $ownDesktop) {
     } finally { [IO.Directory]::Delete($launchDir, $true) }
     $desktopCase = 'launch-desktop (Spawn: foreign, Default; LaunchDriver: Default, own; control: private)'
 } else { $desktopCase = 'launch-desktop skipped (no readable desktop)' }
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run) and $desktopCase cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command (and its control), stray-config (Sol's legacy ghostty/config, winghostty, clean) and $desktopCase cases; native layout $layoutActual"
