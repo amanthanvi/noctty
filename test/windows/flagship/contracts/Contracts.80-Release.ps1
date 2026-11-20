@@ -1448,7 +1448,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '124745e2768c1ce7af20288b86723b60135cc5a9959589f605a927d8850afc37'
+            '3c976387b3412be90583c1d84d681cd9c7948f9a89d326203e3ab8ed94698cb5'
         CriticalStatement = '$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing'
     }
     [pscustomobject] @{
@@ -1463,7 +1463,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            '309807de0e1c7ddf93dfd215a62f3d933a8dd4e23d300c08a8d2ebc9cf94b4fe'
+            '3986606c7db89b03c935a15d5791564a0777d2afd4854345a82ba291c5b7f9cb'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
