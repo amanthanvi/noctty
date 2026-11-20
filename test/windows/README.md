@@ -1130,8 +1130,11 @@ It must refuse each of these for its own reason:
 **D3**, run hosted only (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` checked).
 On the runner's own Default desktop, each item has a control:
 
-- **P1:** `SendInput` text reaches the script's own window. Control: the same
-  input with another window in front leaves the text unchanged.
+- **P1:** `SendInput` text reaches the script's own window, once that
+  window's EDIT has the focus and it is in no menu loop. The foreground is
+  unlocked by a zero-motion mouse input, not an Alt tap, which opens the menu
+  loop and swallows the next key. Control: another window in front takes the
+  input, and the probe's text is unchanged.
 - **P2:** a #FF00FF window is read back one pixel at a time. Controls: the
   window covered, and the window minimised.
 - **P3:** the fixture's shell prints a seed of known size: 20 lines of 64

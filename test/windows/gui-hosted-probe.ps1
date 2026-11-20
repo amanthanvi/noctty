@@ -35,9 +35,11 @@ SetThreadDesktop, starts a child without naming a desktop; the child reports Def
 
 D3 (GitHub-hosted only: GITHUB_ACTIONS is "true" and RUNNER_ENVIRONMENT "github-hosted"). On the runner's own
 Default desktop:
-  P1  a probe window takes the foreground; SendInput's KEYEVENTF_UNICODE input of BMP, surrogate and control units
-      must arrive exactly (SendInput's count and GetLastError recorded). Control: with another window in front,
-      the probe's text is unchanged. Nothing is injected unless this thread is on the input desktop.
+  P1  a probe window takes the foreground (unlocked by a zero-motion mouse input, not an Alt tap, which would open
+      a menu loop); with its EDIT focused and no menu loop, SendInput's KEYEVENTF_UNICODE input of BMP, surrogate
+      and control units must arrive exactly (SendInput's count and GetLastError recorded). Control: another window
+      in front, its own EDIT focused, takes `zz`, and the probe's text is unchanged. Nothing is injected unless
+      this thread is on the input desktop.
   P2  a window filled with #FF00FF is read back from the screen, one pixel at a time on a grid. Controls: covered
       by another window, and minimised: the same points are not that colour.
   P3  the test-tools copy with renderer = d3d11-warp, for the whole run of every arm: the `d3d11` scope's
@@ -490,6 +492,12 @@ public static class GuiProbeNative {
     }
     public static void Close(ProbeWindow win) { if (win == null) return; PostMessageW(win.Hwnd, 0x10, IntPtr.Zero, IntPtr.Zero); win.Thread.Join(5000); }
     public static void Minimise(ProbeWindow win) { ShowWindow(win.Hwnd, 6); } // SW_MINIMIZE
+    // Whether the window's thread is in a menu loop (GUI_INMENUMODE, GUI_SYSTEMMENUMODE or GUI_POPUPMENUMODE), where a
+    // key goes to the menu, not the focus.
+    public static bool MenuMode(ProbeWindow win) {
+        var info = new GuiThreadInfo { size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        return win != null && GetGUIThreadInfo(win.ThreadId, ref info) && (info.flags & 0x1C) != 0;
+    }
     // Whether the keyboard focus of the window's own thread is its EDIT (GetGUIThreadInfo's hwndFocus).
     public static bool FocusOnEdit(ProbeWindow win) {
         var info = new GuiThreadInfo { size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
@@ -516,11 +524,14 @@ public static class GuiProbeNative {
         input.u.key.vk = vk; input.u.key.scan = scan; input.u.key.flags = flags;
         return input;
     }
-    // An Alt tap through SendInput, so this process sent the last input and may set the foreground, then the
-    // foreground itself; true when GetForegroundWindow confirms it.
-    public static bool Foreground(IntPtr hwnd, out uint altSent, out bool setResult) {
-        var tap = new Input[] { Key(0x12, 0, 0), Key(0x12, 0, 0x2) };
-        altSent = SendInput(2, tap, Marshal.SizeOf<Input>());
+    // A zero-motion mouse input through SendInput, so this process sent the last input and may set the foreground,
+    // then the foreground itself; true when GetForegroundWindow confirms it. Not an Alt tap: a lone Alt press and
+    // release puts a window with a system menu in menu mode, which eats the next key (hosted run 44794955668 lost
+    // P1's first unit and the cover's input that way).
+    public static bool Foreground(IntPtr hwnd, out uint unlockSent, out bool setResult) {
+        var nudge = new Input[] { new Input { type = 0 } };
+        nudge[0].u.mouse.flags = 0x0001; // MOUSEEVENTF_MOVE, dx = dy = 0
+        unlockSent = SendInput(1, nudge, Marshal.SizeOf<Input>());
         setResult = SetForegroundWindow(hwnd);
         if (GetForegroundWindow() != hwnd) {
             int owner; uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out owner);
@@ -1412,12 +1423,13 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
         $probe = $null; $cover = $null
         try {
             $probe = [GuiProbeNative]::Open('NocttyGuiProbeInput', 0xFFFFFF, 80, 80, 420, 240, $true)
-            $altSent = [uint32]0; $setResult = $false
-            $p1.foreground = [GuiProbeNative]::Foreground($probe.Hwnd, [ref]$altSent, [ref]$setResult)
-            $p1.altTapSent = $altSent; $p1.setForegroundResult = $setResult
+            $unlockSent = [uint32]0; $setResult = $false
+            $p1.foreground = [GuiProbeNative]::Foreground($probe.Hwnd, [ref]$unlockSent, [ref]$setResult)
+            $p1.unlockInputSent = $unlockSent; $p1.setForegroundResult = $setResult
             # The keyboard focus must be the probe's EDIT before anything is sent (Greptile).
             $p1.focusOnEdit = [GuiProbeNative]::FocusOnEdit($probe)
-            if ($p1.foreground -and $p1.focusOnEdit) {
+            $p1.menuModeBeforeSend = [GuiProbeNative]::MenuMode($probe)
+            if ($p1.foreground -and $p1.focusOnEdit -and -not $p1.menuModeBeforeSend) {
                 $win32Error = 0
                 $p1.sent = [GuiProbeNative]::SendUnicode($text, [ref]$win32Error); $p1.lastError = $win32Error; $p1.injected = $true
                 $null = Wait-Until { [string]::Equals([GuiProbeNative]::Text($probe), $text, [StringComparison]::Ordinal) } 5
@@ -1426,12 +1438,15 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
                 $p1.receivedUnits = @($(if ($null -ne $received) { $received.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ } }))
                 # Control: a second window in front; the probe's text must not change.
                 $cover = [GuiProbeNative]::Open('NocttyGuiProbeCover', 0xFFFFFF, 120, 120, 420, 240, $true)
-                $p1.coverForeground = [GuiProbeNative]::Foreground($cover.Hwnd, [ref]$altSent, [ref]$setResult)
+                $p1.coverForeground = [GuiProbeNative]::Foreground($cover.Hwnd, [ref]$unlockSent, [ref]$setResult)
                 $p1.coverFocusOnEdit = [GuiProbeNative]::FocusOnEdit($cover)
+                $p1.coverMenuModeBeforeSend = [GuiProbeNative]::MenuMode($cover)
                 $p1.coverSent = [GuiProbeNative]::SendUnicode('zz', [ref]$win32Error)
                 Start-Sleep -Milliseconds 800
                 $p1.probeUnchangedWithCoverInFront = [string]::Equals([GuiProbeNative]::Text($probe), $received, [StringComparison]::Ordinal)
-                $p1.coverReceived = [string]::Equals([GuiProbeNative]::Text($cover), 'zz', [StringComparison]::Ordinal)
+                $coverText = [GuiProbeNative]::Text($cover)
+                $p1.coverReceived = [string]::Equals($coverText, 'zz', [StringComparison]::Ordinal)
+                $p1.coverReceivedUnits = @($(if ($null -ne $coverText) { $coverText.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ } }))
             }
         } catch {
             $p1.failed = $true
@@ -1439,7 +1454,7 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
         } finally { [GuiProbeNative]::Close($cover); [GuiProbeNative]::Close($probe) }
     }
     # The control counts only when the cover itself took the stimulus: in front, its EDIT focused, and `zz` in it.
-    $p1.verdict = Get-Verdict ([bool]$p1.receivedExactly) ([bool]$p1.coverForeground -and [bool]$p1.coverFocusOnEdit -and [bool]$p1.coverReceived -and [bool]$p1.probeUnchangedWithCoverInFront) ([bool]$p1.injected)
+    $p1.verdict = Get-Verdict ([bool]$p1.receivedExactly) ([bool]$p1.coverForeground -and [bool]$p1.coverFocusOnEdit -and -not [bool]$p1.coverMenuModeBeforeSend -and [bool]$p1.coverReceived -and [bool]$p1.probeUnchangedWithCoverInFront) ([bool]$p1.injected)
     $d3.p1 = $p1
 
     # P2, the screen read back, one pixel at a time on a 5 x 5 grid of the window's client area.
@@ -1462,8 +1477,8 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     try {
         # COLORREF is 0x00BBGGRR: #FF00FF.
         $color = [GuiProbeNative]::Open('NocttyGuiProbeColor', 0xFF00FF, 160, 160, 400, 300, $false)
-        $altSent = [uint32]0; $setResult = $false
-        $p2.foreground = [GuiProbeNative]::Foreground($color.Hwnd, [ref]$altSent, [ref]$setResult)
+        $unlockSent = [uint32]0; $setResult = $false
+        $p2.foreground = [GuiProbeNative]::Foreground($color.Hwnd, [ref]$unlockSent, [ref]$setResult)
         Start-Sleep -Milliseconds 500
         # The same 25 screen points for every read, taken while the window shows.
         $points = @(for ($row = 0; $row -lt 5; $row++) { for ($column = 0; $column -lt 5; $column++) { [GuiProbeNative]::GridPoint($color, 5, $row, $column) } })
@@ -1514,7 +1529,10 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     # seed's bytes. Its controls: the withheld seed stays below them (a bare clear cannot pass); the private arm's
     # fresh readback of the same build and fixture is the seeded frame and a snapshot taken after it counts no swap;
     # and the private withheld readback misses the seed's floor. WARP-only logs for every arm's whole run.
-    $p3Records = $null -ne $interactive.snapshot -and $null -ne $withheldRun.snapshot -and [bool]$privateReadback.captured -and
+    $p3Shells = @($interactive.shell, $withheldRun.shell, $privateRun.driver.shell, $privateWithheldRun.driver.shell)
+    $p3ShellsRead = @($p3Shells | Where-Object { $null -ne $_ -and [bool]$_.read }).Count -eq 4
+    $p3ShellPolicy = @($p3Shells | Where-Object { $null -ne $_ -and [bool]$_.systemCmd -and [bool]$_.autoRunOffFirst -and [bool]$_.payloadAfterD }).Count -eq 4
+    $p3Records = $p3ShellsRead -and $null -ne $interactive.snapshot -and $null -ne $withheldRun.snapshot -and [bool]$privateReadback.captured -and
         $null -ne $privateAfter -and [bool]$privateWithheldRun.driver.readback.captured -and
         [bool]$defaultLog.logOn -and [bool]$withheldRun.log.logOn -and [bool]$privateLog.logOn -and [bool]$privateWithheldRun.driver.log.logOn
     $d3.p3 = [ordered]@{
@@ -1523,11 +1541,11 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
         withheldLastSwapOutputBytes = $withheldRun.snapshot.lastSwapOutputBytes; withheldSwaps = $withheldRun.snapshot.swapBuffers
         privateReadbackSeeded = $privateReadback.seeded; privateSwapsAfterReadback = $privateAfter.swapBuffers
         privateWithheldReadbackSeeded = $privateWithheldRun.driver.readback.seeded
-        # Every arm's shell, read by PID: System32's cmd.exe with /D ahead of the `/K type` payload.
-        shellPolicyHeld = (@($interactive.shell, $withheldRun.shell, $privateRun.driver.shell, $privateWithheldRun.driver.shell) |
-            Where-Object { -not ($null -ne $_ -and [bool]$_.systemCmd -and [bool]$_.autoRunOffFirst -and [bool]$_.payloadAfterD) }).Count -eq 0
+        # Every arm's shell, read by PID: System32's cmd.exe with /D ahead of the `/K type` payload. An unread shell
+        # makes P3 inconclusive; a shell off the policy makes it fail.
+        shellPolicyHeld = $p3ShellPolicy
         verdict = Get-Verdict `
-            ((Test-WarpOnlyLog $defaultLog) -and $interactive.copyReady -and $interactive.snapshot.swapBuffers -ge 1 -and $interactive.snapshot.lastSwapOutputBytes -ge $script:SeedBytes) `
+            ($p3ShellPolicy -and (Test-WarpOnlyLog $defaultLog) -and $interactive.copyReady -and $interactive.snapshot.swapBuffers -ge 1 -and $interactive.snapshot.lastSwapOutputBytes -ge $script:SeedBytes) `
             ((Test-WarpOnlyLog $withheldRun.log) -and $withheldRun.snapshot.swapBuffers -ge 1 -and $withheldRun.snapshot.lastSwapOutputBytes -lt $script:SeedBytes -and
                 (Test-WarpOnlyLog $privateLog) -and $privateRun.driver.copyReady -and [bool]$privateReadback.seeded -and $privateAfter.swapBuffers -eq 0 -and
                 (Test-WarpOnlyLog $privateWithheldRun.driver.log) -and -not [bool]$privateWithheldRun.driver.readback.seeded) `
@@ -1632,6 +1650,7 @@ try {
     $record.q0 = $q0
     $q0.negativeControl = Invoke-NegativeControl
     $driverRecord = $q0.driver
+    $q0ShellPolicy = $null -ne $driverRecord -and [bool]$driverRecord.shell.read -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst
     $q0Guards = $null -ne $q0.guards -and [bool]$q0.guards.startupUnchanged -and [bool]$q0.guards.historyUnchanged -and
         [bool]$q0.guards.clipboardUnchanged -and [bool]$q0.guards.ownedJobCleanedUp
     $copyProcesses = @($(if ($driverRecord) { $driverRecord.processes | Where-Object { $_.role -in @('noctty', 'noctty-descendant') } }))
@@ -1641,12 +1660,13 @@ try {
         copyProcesses = $copyProcesses.Count
         copyProcessesOffPrivate = $onDefault
         copyWindowsOffPrivate = $windowsOnDefault
-        # The shell Windows started, read by PID: System32's cmd.exe with /D first, so no AutoRun runs.
-        shellPolicyHeld = ($null -ne $driverRecord -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst)
+        # The shell Windows started, read by PID: System32's cmd.exe with /D first, so no AutoRun runs. After /D
+        # come only what the config gave and what utf8-console appends to a payload-free cmd (`/k "chcp 65001 >nul"`).
+        shellPolicyHeld = $q0ShellPolicy
         verdict = Get-Verdict `
-            ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $copyProcesses.Count -ge 2 -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards) `
+            ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $copyProcesses.Count -ge 2 -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards -and $q0ShellPolicy) `
             ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.threadMovedError -eq 0 -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `
-            ($null -ne $driverRecord -and $null -eq $driverRecord.error -and [bool]$driverRecord.inventoryComplete)
+            ($null -ne $driverRecord -and $null -eq $driverRecord.error -and [bool]$driverRecord.inventoryComplete -and [bool]$driverRecord.shell.read)
     }
     Assert-ProbeGuards $q0 'q0'
     if ($Part -eq 'All') { $script:Stage = 'd3'; [void](Invoke-D3 $stageBin $testToolsStageBin $record) }
