@@ -18,7 +18,9 @@ BUILD_OPTIONS = frozenset(
     }
 )
 VALUE_OPTIONS = frozenset({"-p", "--prefix", "--summary"})
-CACHE_ENVIRONMENT = frozenset({"ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR"})
+ALLOWED_ZIG_ENVIRONMENT = frozenset(
+    {"ZIG_GLOBAL_CACHE_DIR", "ZIG_HOME", "ZIG_LOCAL_CACHE_DIR", "ZIG_VERSION"}
+)
 SEARCH_ENVIRONMENT = frozenset(
     {
         "CPATH",
@@ -33,7 +35,7 @@ SEARCH_ENVIRONMENT = frozenset(
 def check_environment():
     for name in sorted(os.environ):
         if name in SEARCH_ENVIRONMENT or (
-            name.startswith("ZIG_") and name not in CACHE_ENVIRONMENT
+            name.startswith("ZIG_") and name not in ALLOWED_ZIG_ENVIRONMENT
         ):
             if re.fullmatch(r"[A-Z0-9_]{1,64}", name) is None:
                 name = "ZIG_*"

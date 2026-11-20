@@ -27,6 +27,12 @@ CLASSES = (
     "fork-owned semantics",
     "bug candidate",
 )
+# The VT parser shares the same handler for APC, PM and SOS. Look ahead
+# without consuming a possible second introducer in an ambiguous byte stream.
+KITTY_HEADERS = re.compile(
+    rb"(?:\x1b[X^_]|[\x98\x9e\x9f])"
+    rb"(?=[\x98\x9e\x9f]*G([^;\x18\x1a\x1b\x80-\x97\x99-\x9d]*))"
+)
 
 
 def digest(data):
@@ -108,6 +114,26 @@ def unescape(text):
 
 def send(data):
     return {"send": base64.b64encode(data).decode("ascii")}
+
+
+def check_kitty_media(operations):
+    # A write boundary or resize does not end a partially received command.
+    stream = b"".join(
+        base64.b64decode(op["send"], validate=True) for op in operations if "send" in op
+    )
+    # Ignore bytes that may be skipped in the escape or string. Dropping
+    # non-delimiting C0 here can only make admission more conservative.
+    stream = stream.translate(
+        None,
+        bytes(range(0x18)) + b"\x19\x1c\x1d\x1e\x1f\x7f" + bytes(range(0xA0, 0x100)),
+    )
+    for match in KITTY_HEADERS.finditer(stream):
+        # In an active string these C1 introducers don't change state.
+        fields = match[1].translate(None, b"\x98\x9e\x9f").split(b",")
+        # The native parser also accepts numeric ASCII codes. Admit only the
+        # canonical direct value or an omitted medium (which defaults to direct).
+        if any(field.startswith(b"t=") and field != b"t=d" for field in fields):
+            raise ValueError("non-direct Kitty graphics medium in oracle corpus")
 
 
 def replay(data):
@@ -216,6 +242,7 @@ def prepare(args):
     cases = []
 
     def add(name, data, operations, **facts):
+        check_kitty_media(operations)
         cases.append(
             {
                 "id": name,
@@ -318,6 +345,7 @@ def requests(corpus):
         if case["id"] in seen:
             raise ValueError("duplicate corpus identity")
         seen.add(case["id"])
+        check_kitty_media(case["operations"])
         operations = bytearray()
         for op in case["operations"]:
             if set(op) == {"send"}:
@@ -1336,11 +1364,20 @@ def controls(args):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     rejects("missing manifest item", lambda: comp(*roots))
     manifest_path.write_bytes(original)
-    manifest = read_json(manifest_path)
+    missing_input = args.out / "missing-input"
+    shutil.copytree(roots[1], missing_input)
+    load_run(missing_input)
+    manifest = read_json(missing_input / "manifest.json")
+    for item in manifest["items"]:
+        if item["input"] == "4":
+            (missing_input / item["file"]).unlink()
     manifest["items"] = [item for item in manifest["items"] if item["input"] != "4"]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    rejects("entire input missing", lambda: comp(*roots))
-    manifest_path.write_bytes(original)
+    (missing_input / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    rejects(
+        "entire input missing",
+        lambda: load_run(missing_input),
+        "incomplete input/size/format coverage",
+    )
     manifest = read_json(manifest_path)
     manifest["items"].append(manifest["items"][0])
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -1369,6 +1406,31 @@ def controls(args):
         and ops == [send(b"ab"), {"resize": [8, 3]}, send(b"L1\r\nL2\r\n")]
     )
     checks.append("replay bytes and resize schedule")
+    kitty_input = {"id": "kitty-media", "operations": []}
+    kitty_corpus = {
+        "schema": 1,
+        "sizes": [list(s) for s in SIZES],
+        "cases": [kitty_input],
+    }
+    for name, header in (
+        ("file", b"\x1b_Ga=T,t=f"),
+        ("temporary file", b"\x1b_Gt=t"),
+        ("shared memory", b"\x1b_Gt=s"),
+        ("numeric file medium", b"\x1b\x00^Gx=0,t\x9f=102"),
+    ):
+        kitty_input["operations"] = [
+            send(header[:-1]),
+            {"resize": [81, 24]},
+            send(header[-1:] + b";AAAA\x1b\\"),
+        ]
+        rejects(
+            "Kitty " + name + " medium",
+            lambda: requests(kitty_corpus),
+            "non-direct Kitty graphics medium",
+        )
+    kitty_input["operations"] = [send(b"t=f\x1b_Gt=d;AAAt=\x1b\\\x1b_G;AAAA\x1b\\")]
+    check(len(requests(kitty_corpus)[1]) == len(SIZES))
+    checks.append("direct Kitty media and ordinary text accepted")
     rejects(
         "pty requires exactly one separator space",
         lambda: replay(b"size 4 2\npty  conpty\nsend A\n"),

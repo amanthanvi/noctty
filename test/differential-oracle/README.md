@@ -23,8 +23,10 @@ An oracle invocation selects only the `oracle` step. Its argument allowlist is
 and `-jN` for a positive job limit. Set `ZIG_GLOBAL_CACHE_DIR` for a scratch cache on the source drive.
 The guard checks the original Windows Zig driver invocation during each
 configuration, before compiling project code or dependencies. It refuses every
-`ZIG_*` variable in its environment except `ZIG_GLOBAL_CACHE_DIR` and
-`ZIG_LOCAL_CACHE_DIR`. Zig 0.17.1 uses `ZIG_PROGRESS` for progress reporting
+`ZIG_*` variable in its environment except `ZIG_GLOBAL_CACHE_DIR`,
+`ZIG_LOCAL_CACHE_DIR`, `ZIG_HOME` and `ZIG_VERSION`. The last two are used
+by `dev-windows.cmd` to select and check the compiler. The compiler itself
+ignores them. Zig 0.17.1 uses `ZIG_PROGRESS` for progress reporting
 and removes it when spawning the guard. The guard also refuses `CPATH`,
 `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH` and `LIBRARY_PATH`.
 
@@ -57,6 +59,9 @@ python test/differential-oracle/oracle.py prepare --repo PRE_TREE --synthetic SY
 4,001 seeds by default (the tracked `sanitize-filenames.sh` is excluded) (`--expect-fuzz` makes a future intentional count explicit),
 and freezes their committed blob bytes into JSON. It refuses tracked or untracked changes. It does not strip the stream
 fuzzer's mode-selector byte or apply the parser/OSC fuzzers' calling convention.
+Preparation and capture refuse explicit non-direct Kitty graphics media so
+replaying the corpus cannot load image data from host paths. Direct payloads,
+with an omitted medium or `t=d`, remain eligible.
 It also freezes all `src/terminal/testdata/replay/*.vt` fixtures consumed by
 `src/terminal/resize_replay.zig`. IDs retain corpus subdirectories, even when
 two seeds have equal bytes. Source digests and generator seeds are recorded.
