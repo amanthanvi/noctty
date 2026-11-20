@@ -325,10 +325,11 @@ public static class GuiProbeNative {
         try {
             long c, e, k, u;
             if (!GetProcessTimes(h, out c, out e, out k, out u) || c != creation) return "reused";
+            // An exited process has left the job's active list, so it is "gone", not "notInJob".
+            if (WaitForSingleObject(h, 0) == 0) return "gone";
             bool inJob;
             if (!IsProcessInJob(h, job, out inJob) || !inJob) return "notInJob";
             if (job == IntPtr.Zero && Array.IndexOf(JobPids(IntPtr.Zero), pid) < 0) return "notInJob";
-            if (WaitForSingleObject(h, 0) == 0) return "gone";
             TerminateProcess(h, 1);
             return WaitForSingleObject(h, 5000) == 0 ? "terminated" : "stillRunning";
         } finally { CloseHandle(h); }
@@ -612,8 +613,9 @@ $script:SeedLines = @(1..20 | ForEach-Object { 'SEED-{0:d2}-NOCTTY-GUI-PROBE-012
 if (@($script:SeedLines | Where-Object { $_.Length -ne 64 }).Count -ne 0) { throw 'The seed lines must be 64 characters.' }
 $script:SeedBytes = [long](@($script:SeedLines | ForEach-Object { $_.Length + 2 }) | Measure-Object -Sum).Sum
 # The fraction of a readback's pixels other than the background that the seed's text reaches and a bare prompt does
-# not. Measured on the hosted runner (run 44793051089, 1004 x 594 frames): seeded 0.1241, withheld 0.0018, on both
-# desktops. The floor sits about 6x below the seeded value and 11x above the withheld one.
+# not. Measured on the hosted runner (runs 44793051089 and 44794955668, 1004 x 594 frames, both desktops): seeded 0.1241
+# and 0.1251, withheld 0.0018 and 0.0036. The floor sits about 6x below the seeded values and 5.6x above the larger
+# withheld one.
 $script:SeedInkFloor = 0.02
 
 $script:SdkLayout = 'Startup=104 StartupEx=112 ProcessBasic=48 ProcessEntry=568 parentPid@32 ThreadEntry=28 Input=40 WndClassEx=80 Msg=48 GuiThreadInfo=72 focus@16'
