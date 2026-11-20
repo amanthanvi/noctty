@@ -122,9 +122,11 @@ $script:PruneSeconds = 7
 $script:SettleSamples = 10
 $script:SampleMs = 500
 $script:SettleCapMs = 90000
-# psapi.h PROCESS_MEMORY_COUNTERS_EX2, processthreadsapi.h STARTUPINFOW and winnt.h JOBOBJECT_EXTENDED_LIMIT_INFORMATION on
-# x64 (AGENTS.md "Win32 FFI").
-$script:SdkLayout = 'MemoryCounters=96 peakWorkingSet@8 workingSet@16 privateUsage@72 sharedCommit@88 Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16'
+# psapi.h PROCESS_MEMORY_COUNTERS_EX2, processthreadsapi.h STARTUPINFOW, winnt.h JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+# tlhelp32.h PROCESSENTRY32W, and consoleapi2.h CONSOLE_SCREEN_BUFFER_INFO with wincontypes.h COORD and SMALL_RECT, on
+# x64 (AGENTS.md "Win32 FFI"). None of those headers changes the packing (no pshpack), so x64's natural alignment
+# holds: PROCESSENTRY32W is 564 bytes of fields padded to 568, with 4 bytes of padding before th32DefaultHeapID.
+$script:SdkLayout = 'MemoryCounters=96 peakWorkingSet@8 workingSet@16 privateUsage@72 sharedCommit@88 Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16 ProcessEntry=568 processId@8 heapId@16 parentProcessId@32 exeFile@44 ScreenBufferInfo=22 cursor@4 wAttributes@8 window@10 maxWindow@18 Coord=4 SmallRect=8'
 
 if (-not ('WorkingSetNative' -as [type])) {
 Add-Type @'
@@ -221,7 +223,14 @@ public static class WorkingSetNative {
             "output@" + Marshal.OffsetOf<Startup>("output"),
             "error@" + Marshal.OffsetOf<Startup>("error"), "StartupEx=" + Marshal.SizeOf<StartupEx>(),
             "attributes@" + Marshal.OffsetOf<StartupEx>("attributes"), "JobLimits=" + Marshal.SizeOf<JobLimits>(),
-            "limitFlags@" + Marshal.OffsetOf<BasicLimits>("flags") });
+            "limitFlags@" + Marshal.OffsetOf<BasicLimits>("flags"),
+            "ProcessEntry=" + Marshal.SizeOf<ProcessEntry>(), "processId@" + Marshal.OffsetOf<ProcessEntry>("processId"),
+            "heapId@" + Marshal.OffsetOf<ProcessEntry>("heapId"), "parentProcessId@" + Marshal.OffsetOf<ProcessEntry>("parentProcessId"),
+            "exeFile@" + Marshal.OffsetOf<ProcessEntry>("exeFile"),
+            "ScreenBufferInfo=" + Marshal.SizeOf<ScreenBufferInfo>(), "cursor@" + Marshal.OffsetOf<ScreenBufferInfo>("cursor"),
+            "wAttributes@" + Marshal.OffsetOf<ScreenBufferInfo>("attributes"), "window@" + Marshal.OffsetOf<ScreenBufferInfo>("window"),
+            "maxWindow@" + Marshal.OffsetOf<ScreenBufferInfo>("maxWindow"), "Coord=" + Marshal.SizeOf<Coord>(),
+            "SmallRect=" + Marshal.SizeOf<SmallRect>() });
     }
     static string NameOf(IntPtr desktop) {
         var name = new StringBuilder(256); int needed;

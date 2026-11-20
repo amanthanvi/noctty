@@ -484,16 +484,29 @@ try {
 
 # The native layer: the harness's Add-Type source, compiled here under another class name, must give the SDK's x64
 # layout string the harness checks at run time (psapi.h PROCESS_MEMORY_COUNTERS_EX2, processthreadsapi.h
-# STARTUPINFOW and STARTUPINFOEXW, winnt.h JOBOBJECT_EXTENDED_LIMIT_INFORMATION).
+# STARTUPINFOW and STARTUPINFOEXW, winnt.h JOBOBJECT_EXTENDED_LIMIT_INFORMATION, tlhelp32.h PROCESSENTRY32W,
+# consoleapi2.h CONSOLE_SCREEN_BUFFER_INFO with COORD and SMALL_RECT). The controls (Greptile on #739): a changed field
+# in each of the last two mirrors, compiled the same way, must give another layout.
 $nativeSource = @($workingSetAst.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -match 'public static class WorkingSetNative' }, $true))
 if ($nativeSource.Count -ne 1) { throw 'The working-set harness must hold one WorkingSetNative source.' }
 $layoutWanted = [regex]::Match($workingSetText, "\`$script:SdkLayout = '([^']+)'").Groups[1].Value
-if ($layoutWanted -cne 'MemoryCounters=96 peakWorkingSet@8 workingSet@16 privateUsage@72 sharedCommit@88 Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16') {
+if ($layoutWanted -cne 'MemoryCounters=96 peakWorkingSet@8 workingSet@16 privateUsage@72 sharedCommit@88 Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16 ProcessEntry=568 processId@8 heapId@16 parentProcessId@32 exeFile@44 ScreenBufferInfo=22 cursor@4 wAttributes@8 window@10 maxWindow@18 Coord=4 SmallRect=8') {
     throw 'The working-set harness''s SDK layout string changed.'
 }
 $contractClass = 'WorkingSetNativeContract' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 Add-Type -TypeDefinition ($nativeSource[0].Value.Replace('public static class WorkingSetNative', "public static class $contractClass"))
 $layoutActual = ($contractClass -as [type])::Layout()
 if ($layoutActual -cne $layoutWanted) { throw "The working-set native layer's layout is $layoutActual, not the SDK's." }
+$layoutControls = @(
+    @{ Name = 'PROCESSENTRY32W with its heap id narrowed'; Old = 'public uint size, usage, processId; public IntPtr heapId;'; New = 'public uint size, usage, processId; public uint heapId;' }
+    @{ Name = 'CONSOLE_SCREEN_BUFFER_INFO with its attributes widened'; Old = 'public Coord size, cursor; public ushort attributes;'; New = 'public Coord size, cursor; public uint attributes;' }
+)
+foreach ($control in $layoutControls) {
+    $controlSource = $nativeSource[0].Value.Replace($control.Old, $control.New)
+    if ([string]::Equals($controlSource, $nativeSource[0].Value, [StringComparison]::Ordinal)) { throw "The layout control changed nothing: $($control.Name)." }
+    $controlClass = 'WorkingSetNativeControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    Add-Type -TypeDefinition ($controlSource.Replace('public static class WorkingSetNative', "public static class $controlClass"))
+    if (($controlClass -as [type])::Layout() -ceq $layoutWanted) { throw "The layout check accepted $($control.Name)." }
+}
 
 Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash and admission cases; native layout $layoutActual"
