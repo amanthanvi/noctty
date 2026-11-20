@@ -16,6 +16,11 @@ import sys
 from pathlib import Path
 
 
+def git_bytes(repo, *args):
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    return subprocess.check_output(["git", "-C", str(repo), *args], env=env)
+
+
 def instrument_build(data, api):
     text = data.decode("utf-8").replace("\r\n", "\n")
     entry = "pub fn build(b: *std.Build) !void {\n"
@@ -24,7 +29,7 @@ def instrument_build(data, api):
     text = text.replace(
         entry,
         entry
-        + '    const oracle_system = @import("src/differential_oracle_build.zig").systemOptionsRequested(b);\n',
+        + '    const oracle_system = try @import("src/differential_oracle_build.zig").configure(b);\n',
     )
     if api == "fork" or (api == "stone_flag" and "    const exe = if (" in text):
         anchor = "    // Standalone feasibility spike."
@@ -107,14 +112,11 @@ def main():
     repo = args.repo.resolve()
     source = Path(__file__).resolve().parents[2]
 
-    def git(*words):
-        return subprocess.check_output(["git", "-C", str(repo), *words]).strip()
-
-    if git("status", "--porcelain=v1", "--untracked-files=all"):
+    if git_bytes(repo, "status", "--porcelain=v1", "--untracked-files=all"):
         raise ValueError("stage requires a completely clean source copy")
-    revision = git("rev-parse", "HEAD").decode()
+    revision = git_bytes(repo, "rev-parse", "HEAD").decode().strip()
     # Preserve the actual blob bytes, including its original final newline.
-    before = subprocess.check_output(["git", "-C", str(repo), "show", "HEAD:build.zig"])
+    before = git_bytes(repo, "show", "HEAD:build.zig")
     after = instrument_build(before, args.api)
     overlay = sources(source)
     record_path = repo / "test/differential-oracle/staged-source.json"

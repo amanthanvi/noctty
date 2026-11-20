@@ -36,11 +36,14 @@ UNSAFE_ENVIRONMENT = frozenset(
 
 def check_environment():
     for name in sorted(os.environ):
-        if name in UNSAFE_ENVIRONMENT or (
-            name.startswith("ZIG_") and name not in ALLOWED_ZIG_ENVIRONMENT
+        namespace = name.partition("_")[0] + "_"
+        if (
+            name in UNSAFE_ENVIRONMENT
+            or name.startswith("CCC_")
+            or (name.startswith("ZIG_") and name not in ALLOWED_ZIG_ENVIRONMENT)
         ):
             if re.fullmatch(r"[A-Z0-9_]{1,64}", name) is None:
-                name = "ZIG_*"
+                name = namespace + "*"
             raise ValueError(f"disallowed environment variable: {name}")
 
 

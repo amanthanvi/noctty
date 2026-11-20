@@ -25,11 +25,15 @@ The guard checks the original Windows Zig driver invocation during each
 configuration, before compiling project code or dependencies. It refuses every
 `ZIG_*` variable in its environment except `ZIG_GLOBAL_CACHE_DIR`,
 `ZIG_LOCAL_CACHE_DIR`, `ZIG_HOME` and `ZIG_VERSION`. The last two are used
-by `dev-windows.cmd` to select and check the compiler. The compiler itself
-ignores them. Zig 0.17.1 uses `ZIG_PROGRESS` for progress reporting
+by `dev-windows.cmd` to select and check the compiler. Identity is based on
+the selected compiler's contents. Zig 0.17.1 uses `ZIG_PROGRESS` for progress reporting
 and removes it when spawning the guard. The guard also refuses `CPATH`,
 `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `LIBRARY_PATH`,
-`LINK` and `_LINK_`.
+`LINK`, `_LINK_` and every `CCC_*` variable, including
+`CCC_OVERRIDE_OPTIONS`. Probes on both compilers found no effect from
+`INCLUDE`, `EXTERNAL_INCLUDE` and `OBJCPLUS_INCLUDE_PATH` on the tested C
+source or from `NIX_CFLAGS_COMPILE` on the tested executable. Separate
+cold-build probes with `CL` and `_CL_` produced identical oracle executables.
 
 From the repository root:
 
@@ -80,7 +84,9 @@ or the original fixture's golden expectations.
 
 For fork, stone and the eventual 1B app, the root `oracle` step inherits the
 app module's generated Terminal options, imports, include paths, C macros and
-link dependencies. Oniguruma, Kitty graphics and tmux control mode remain
+link dependencies. After the guard passes, the oracle adds a private C/C++
+macro throughout its linked module graph so its compile keys differ from
+ordinary app builds using the same cache. Oniguruma, Kitty graphics and tmux control mode remain
 selected by that tree's own app build.
 
 The upstream side is **v1.4.0's public lib-vt module**, exactly as section 3.4 names it.
@@ -161,12 +167,19 @@ responses and diagnostics stay under `RUN_DIR`; their stdout/stderr are not
 echoed. A failure, crash or timeout fails capture and preserves partial evidence.
 The timeout defaults to 900 seconds **per run**, not a performance criterion.
 The build embeds the build tree's Git HEAD and dirty flag through an always-run
-identity generator whose working directory is the actual build root. Python
+identity generator whose working directory is the actual build root. Build,
+staging and capture Git queries use an explicit source root and a subprocess
+environment with all `GIT_*` entries removed. Python
 must be available for this optional build step. Capture requires that identity
 to match the clean `--source-root` HEAD, validates API/ConPTY policy, and checks
 that the source and executable remain unchanged during both runs. A stale exe,
 wrong tree or dirty build is invalid evidence. Compare also refuses one exe
 hash attributed to different production or instrumented revisions.
+The identity also includes SHA-256 for the actual Zig driver executable and
+for a deterministic path-and-content manifest of its effective lib directory,
+including std, libc headers and compiler runtime sources. The hashes are
+recomputed on every build. Capture and comparison require both hashes.
+Recapture older evidence that lacks them before using it for admission.
 Identity generation verifies the paths and pinned hashes of the packages the
 **build graph actually resolved**, on both compilers, including the global
 cache. Oracle builds refuse `ZIG_LOCAL_PKG_DIR` and options

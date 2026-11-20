@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 # Loading the sibling staging helper must not dirty a captured source tree.
@@ -63,7 +64,7 @@ def parse_json(data):
 
 
 def git(repo, *args):
-    return subprocess.check_output(["git", "-C", str(repo), *args]).decode().strip()
+    return staging().git_bytes(repo, *args).decode().strip()
 
 
 class Binary:
@@ -215,19 +216,8 @@ def prepare(args):
 
     def paths_at(pattern):
         return (
-            subprocess.check_output(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "ls-tree",
-                    "-r",
-                    "--name-only",
-                    "-z",
-                    revision,
-                    "--",
-                    pattern,
-                ]
+            staging().git_bytes(
+                repo, "ls-tree", "-r", "--name-only", "-z", revision, "--", pattern
             )
             .decode("utf-8")
             .split("\0")
@@ -253,9 +243,7 @@ def prepare(args):
         )
 
     for path in paths:
-        data = subprocess.check_output(
-            ["git", "-C", str(repo), "show", revision + ":" + path]
-        )
+        data = staging().git_bytes(repo, "show", revision + ":" + path)
         # Feed the whole stored file: do not strip the stream fuzzer's mode
         # selector or interpret parser/OSC corpus bytes through a fuzzer ABI.
         add(
@@ -294,14 +282,8 @@ def prepare(args):
     if not fixtures:
         raise ValueError("no replay fixtures")
     for path in fixtures:
-        data = subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "show",
-                revision + ":" + path.relative_to(repo).as_posix(),
-            ]
+        data = staging().git_bytes(
+            repo, "show", revision + ":" + path.relative_to(repo).as_posix()
         )
         operations, conpty, initial = replay(data)
         add(
@@ -587,6 +569,7 @@ def harness_sources(repo=None):
     }
 
 
+@cache
 def staging():
     spec = importlib.util.spec_from_file_location(
         "oracle_stage", Path(__file__).with_name("stage.py")
@@ -606,9 +589,7 @@ def source_provenance(repo):
     stage = staging()
     staged = read_json(record)
     production = staged["production_revision"]
-    original = subprocess.check_output(
-        ["git", "-C", str(repo), "show", production + ":build.zig"]
-    )
+    original = stage.git_bytes(repo, "show", production + ":build.zig")
     after = stage.instrument_build(original, staged["vt_api"])
     if (
         digest(original) != staged["original_build_sha256"]
@@ -694,6 +675,12 @@ def validate_profile(profile):
 
 def validate_build_identity(identity, provenance, profile):
     validate_profile(profile)
+    if not isinstance(identity, dict) or any(
+        not isinstance(identity.get(key), str)
+        or not re.fullmatch("[0-9a-f]{64}", identity[key])
+        for key in ("zig_exe_sha256", "zig_lib_sha256")
+    ):
+        raise ValueError("missing or invalid Zig compiler content identity")
     if (
         identity["dirty"] is not False
         or identity["revision"] != provenance["instrumented_revision"]
@@ -1241,6 +1228,8 @@ def controls(args):
             "dirty": False,
             "vt_api": "v140_fork",
             "terminal_source": "app",
+            "zig_exe_sha256": "a" * 64,
+            "zig_lib_sha256": "b" * 64,
         }
         profile = control_profile()
         write_json(
@@ -1359,6 +1348,23 @@ def controls(args):
     target.write_bytes(b"a")
     manifest_path = roots[1] / "manifest.json"
     original = manifest_path.read_bytes()
+    manifest = read_json(manifest_path)
+    manifest["build_identity"].pop("zig_exe_sha256")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    rejects(
+        "missing compiler identity",
+        lambda: load_run(roots[1]),
+        "missing or invalid Zig compiler content identity",
+    )
+    manifest["build_identity"]["zig_exe_sha256"] = "a" * 64
+    manifest["build_identity"]["zig_lib_sha256"] = "g" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    rejects(
+        "malformed compiler identity",
+        lambda: load_run(roots[1]),
+        "missing or invalid Zig compiler content identity",
+    )
+    manifest_path.write_bytes(original)
     manifest = read_json(manifest_path)
     manifest["items"].pop()
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

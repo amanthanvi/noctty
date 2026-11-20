@@ -39,7 +39,14 @@ fn run(ctx: adapter.Context) !void {
     const build = @import("oracle_build");
     const identity = @import("oracle_identity");
     try profile.writer.writeAll("{\"build_identity\":");
-    try std.json.Stringify.value(.{ .revision = identity.revision, .dirty = identity.dirty, .vt_api = build.vt_api, .terminal_source = build.terminal_source }, .{}, &profile.writer);
+    try std.json.Stringify.value(.{
+        .revision = identity.revision,
+        .dirty = identity.dirty,
+        .vt_api = build.vt_api,
+        .terminal_source = build.terminal_source,
+        .zig_exe_sha256 = identity.zig_exe_sha256,
+        .zig_lib_sha256 = identity.zig_lib_sha256,
+    }, .{}, &profile.writer);
     try profile.writer.writeAll(",\"profile\":{\"target\":");
     try std.json.Stringify.value(build.target, .{}, &profile.writer);
     try profile.writer.writeAll(",\"cpu_model\":");

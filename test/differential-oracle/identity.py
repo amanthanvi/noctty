@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import stat
 import struct
 import subprocess
@@ -13,7 +14,7 @@ import sys
 from pathlib import Path
 
 
-def package_digest(root):
+def package_digest(root, *, allow_symlinks=True):
     """Zig's SHA-256 file tree hash, without fetch/copy/filter side effects.
 
     Maker/Fetch hashes normalized paths, two zero bytes and regular contents;
@@ -34,6 +35,8 @@ def package_digest(root):
             relative = entry.relative_to(root).as_posix().encode("utf-8")
             hashed = hashlib.sha256(relative)
             if stat.S_ISLNK(info.st_mode):
+                if not allow_symlinks:
+                    raise ValueError("Zig lib directory contains a symbolic link")
                 hashed.update(os.readlink(entry).replace("\\", "/").encode("utf-8"))
             elif (
                 getattr(info, "st_file_attributes", 0)
@@ -58,6 +61,22 @@ def package_digest(root):
     for _, hashed in sorted(files):
         digest.update(hashed)
     return digest.digest(), min(size, 0xFFFFFFFF)
+
+
+def compiler_hashes(zig_exe, zig_lib):
+    executable = hashlib.sha256()
+    with zig_exe.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            executable.update(block)
+    if not all(
+        (zig_lib / path).exists() for path in ("std/std.zig", "libc/include", "compiler_rt")
+    ):
+        raise ValueError("incomplete Zig lib directory")
+    lib_digest, _ = package_digest(zig_lib, allow_symlinks=False)
+    return {
+        "zig_exe_sha256": executable.hexdigest(),
+        "zig_lib_sha256": lib_digest.hex(),
+    }
 
 
 def check_packages(dependencies, source):
@@ -92,7 +111,7 @@ def check_packages(dependencies, source):
 
 
 def main():
-    _, compiler, api, source, *arguments = sys.argv[1:]
+    zig_exe, zig_lib, compiler, api, source, *arguments = sys.argv[1:]
     output = arguments.pop()
     if len(arguments) % 3 or any(
         arguments[i] != "--dependency" for i in range(0, len(arguments), 3)
@@ -115,21 +134,23 @@ def main():
         )
     if not dependencies:
         raise ValueError("oracle requires dependencies from the resolved build graph")
-    check_packages(dependencies, Path.cwd().resolve())
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    root = Path.cwd().resolve()
+    check_packages(dependencies, root)
+    git_bytes = runpy.run_path(str(Path(__file__).with_name("stage.py")))["git_bytes"]
+    revision = git_bytes(root, "rev-parse", "HEAD").decode().strip()
     if not re.fullmatch("[0-9a-f]{40}", revision):
         raise ValueError("invalid build-tree Git HEAD")
     dirty = bool(
-        subprocess.check_output(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"]
-        )
+        git_bytes(root, "status", "--porcelain=v1", "--untracked-files=all")
     )
+    hashes = compiler_hashes(Path(zig_exe), Path(zig_lib))
     Path(output).write_text(
         "pub const revision = "
         + json.dumps(revision)
         + ";\npub const dirty = "
         + str(dirty).lower()
-        + ";\n",
+        + ";\n"
+        + "".join(f"pub const {key} = {json.dumps(value)};\n" for key, value in hashes.items()),
         encoding="utf-8",
         newline="\n",
     )

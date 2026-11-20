@@ -3,8 +3,15 @@
 const std = @import("std");
 const Api = enum { fork, stone, stone_flag, v140, v140_fork };
 
-/// Snapshot command-line integrations before Config applies package defaults.
-pub fn systemOptionsRequested(b: *std.Build) ?[]const u8 {
+/// Check oracle invocations before Config executes Git or configures dependencies.
+pub fn configure(b: *std.Build) !?[]const u8 {
+    if (b.user_input_options.contains("vt-api")) {
+        _ = b.run(&.{ "python", "-I", "test/differential-oracle/build_args.py", b.graph.zig_exe });
+        // Maker may otherwise reuse configuration from another invocation.
+        if (@hasDecl(@TypeOf(b.graph.*), "poisonCache")) b.graph.poisonCache();
+        try sanitizeGitEnvironment(b);
+    }
+    // Snapshot command-line integrations before Config applies package defaults.
     if (b.graph.system_package_mode) return "--system";
     const integrations = if (@hasField(@TypeOf(b.graph.*), "system_integration_options"))
         &b.graph.system_integration_options
@@ -14,6 +21,40 @@ pub fn systemOptionsRequested(b: *std.Build) ?[]const u8 {
         if (mode == .user_enabled or mode == .declared_enabled) return "-fsys";
     }
     return null;
+}
+
+fn sanitizeGitEnvironment(b: *std.Build) !void {
+    const modern = @hasField(@TypeOf(b.graph.*), "environ_map");
+    const env = if (modern) &b.graph.environ_map else &b.graph.env_map;
+    var names: std.ArrayList([]const u8) = .empty;
+    var entries = env.iterator();
+    while (entries.next()) |entry| {
+        if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+            try names.append(b.allocator, entry.key_ptr.*);
+    }
+    for (names.items) |name| {
+        if (modern) {
+            _ = env.swapRemove(name);
+        } else {
+            env.remove(name);
+        }
+    }
+}
+
+/// An oracle invocation is exclusive, so its private configuration can salt
+/// the shared app modules in place without touching any ordinary build.
+fn saltCModules(
+    module: *std.Build.Module,
+    seen: *std.AutoHashMap(*std.Build.Module, void),
+) !void {
+    const visit = try seen.getOrPut(module);
+    if (visit.found_existing) return;
+    module.addCMacro("NOCTTY_DIFFERENTIAL_ORACLE", "1");
+    for (module.import_table.values()) |child| try saltCModules(child, seen);
+    for (module.link_objects.items) |object| switch (object) {
+        .other_step => |compile| try saltCModules(compile.root_module, seen),
+        else => {},
+    };
 }
 
 pub fn add(b: *std.Build, app: *std.Build.Step.Compile, system_requested: ?[]const u8) !void {
@@ -31,10 +72,6 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
         return;
     };
     const corpus = b.option(bool, "oracle-corpus", "Build the pre-side synthetic generator") orelse false;
-    _ = b.run(&.{ "python", "-I", "test/differential-oracle/build_args.py", b.graph.zig_exe });
-    // Maker may otherwise skip configuration on a cache hit. This check
-    // observes the current invocation and must precede project compilation.
-    if (@hasDecl(@TypeOf(b.graph.*), "poisonCache")) b.graph.poisonCache();
     if (system_requested) |option| {
         step.dependOn(&b.addFail(b.fmt("oracle build arguments: disallowed option: {s}", .{option})).step);
         return;
@@ -76,6 +113,9 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
         .file = b.path("src/differential_oracle_simd.cpp"),
         .flags = flags,
     });
+    var salted = std.AutoHashMap(*std.Build.Module, void).init(b.allocator);
+    defer salted.deinit();
+    try saltCModules(core, &salted);
     const shape = b.addOptions();
     shape.addOption(Api, "api", api);
     const adapter = b.createModule(.{
@@ -103,7 +143,13 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     identity.setCwd(b.path("."));
     // HEAD and cleanliness are not file inputs in the build cache.
     identity.has_side_effects = true;
-    identity.addArgs(&.{ b.graph.zig_exe, compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
+    identity.addArg(b.graph.zig_exe);
+    if (@hasDecl(std.Build.LazyPath, "zig_lib")) {
+        identity.addDirectoryArg(.zig_lib);
+    } else {
+        identity.addArg(b.graph.zig_lib_directory.path.?);
+    }
+    identity.addArgs(&.{ compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
     var dependencies = b.graph.dependency_cache.iterator();
     while (dependencies.next()) |entry| {
         const dep = entry.value_ptr.*;

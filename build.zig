@@ -17,7 +17,7 @@ comptime {
 }
 
 pub fn build(b: *std.Build) !void {
-    const oracle_system = @import("src/differential_oracle_build.zig").systemOptionsRequested(b);
+    const oracle_system = try @import("src/differential_oracle_build.zig").configure(b);
     const BuildConfig = @import("src/build/Config.zig");
     const SharedDeps = @import("src/build/SharedDeps.zig");
     const GhosttyExe = @import("src/build/GhosttyExe.zig");
