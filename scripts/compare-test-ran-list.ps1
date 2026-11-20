@@ -184,7 +184,7 @@ function Read-RanList {
         }
         if ($line.StartsWith('#', [StringComparison]::Ordinal)) { continue }
         $fields = $line -split "`t", 4
-        if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '^[A-Za-z0-9._-]+$' -or $fields[1] -cnotmatch '^(OK|SKIP|FAIL)$' -or $fields[2] -cnotmatch '^[1-9][0-9]*$' -or $fields[3].Length -eq 0) {
+        if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '\A[A-Za-z0-9._-]+\z' -or $fields[1] -cnotmatch '^(OK|SKIP|FAIL)$' -or $fields[2] -cnotmatch '^[1-9][0-9]*$' -or $fields[3].Length -eq 0) {
             $problems.Add("'$full' line $($i + 1) is not '<suite><TAB><OK|SKIP|FAIL><TAB><count><TAB><name>'.")
             continue
         }
@@ -202,7 +202,9 @@ function Read-RanList {
     # Suite labels are compared ordinally: two that differ only by case would be
     # one suite to a case-blind reader and two to this one.
     $labels = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($label in @(@($rows | ForEach-Object Suite) + @($suites.Keys))) { [void] $labels.Add($label) }
+    # get_Keys() and get_Values(): a suite or fact named Keys, Values or Count
+    # shadows that member of a dictionary.
+    foreach ($label in @(@($rows | ForEach-Object Suite) + @($suites.get_Keys()))) { [void] $labels.Add($label) }
     $folded = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($label in $labels) {
         if ($folded.ContainsKey($label)) { $problems.Add("'$full' has suites $($folded[$label]) and $label, which differ only by case.") }
@@ -224,11 +226,11 @@ function Read-RanList {
         $green = (Test-RanListSame $s.Exit '0') -and $s.Fail -eq 0 -and $s.ErrorsLogged -eq 0 -and $s.Leaked -eq 0
         if (-not $green) { $problems.Add("'$full' suite $name is not green (exit $($s.Exit), $($s.Fail) failed, $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked).") }
     }
-    foreach ($name in $suites.Keys) { if (-not $rowSuites.Contains($name)) { $problems.Add("'$full' has a suite record for $name but no rows of it.") } }
+    foreach ($name in $suites.get_Keys()) { if (-not $rowSuites.Contains($name)) { $problems.Add("'$full' has a suite record for $name but no rows of it.") } }
     $failed = @($rows | Where-Object Result -ceq 'FAIL')
     if ($failed.Count -gt 0) { $problems.Add("'$full' has $($failed.Count) FAIL rows, the first $($failed[0].Suite) $($failed[0].Name).") }
     $result.Rows = $rows.ToArray()
-    $result.Suites = @($suites.Values)
+    $result.Suites = @($suites.get_Values())
     return $result
 }
 
@@ -355,7 +357,7 @@ function Compare-RanList {
         }
         # Both key sets, ordinally (Sort-Object -Unique folds a control character away).
         $facts = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-        foreach ($k in @($list.Environment.Keys) + @($CandidateList.Environment.Keys)) { [void] $facts.Add($k) }
+        foreach ($k in @($list.Environment.get_Keys()) + @($CandidateList.Environment.get_Keys())) { [void] $facts.Add($k) }
         foreach ($key in $facts) {
             # A key only one list holds differs, even when the other's value is
             # empty: both read as '' through a [string] parameter.

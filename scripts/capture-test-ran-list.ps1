@@ -332,8 +332,8 @@ function Format-RanList {
     $lines = [Collections.Generic.List[string]]::new()
     $lines.Add($script:RanListFormat)
     $lines.Add("# revision: $Revision")
-    $lines.Add('# build: ' + (@($Build.Keys | ForEach-Object { "$_=$($Build[$_])" }) -join "`t"))
-    $envKeys = [string[]] @($Environment.Keys)
+    $lines.Add('# build: ' + (@($Build.get_Keys() | ForEach-Object { "$_=$($Build[$_])" }) -join "`t"))
+    $envKeys = [string[]] @($Environment.get_Keys())
     [Array]::Sort($envKeys, [StringComparer]::Ordinal)
     foreach ($key in $envKeys) { $lines.Add("# env: $key=$($Environment[$key])") }
     foreach ($s in $Suites) {
@@ -370,10 +370,16 @@ function Read-RanListBigEndian {
     return $v
 }
 
-# The family names a font file declares: name IDs 1 (family), 4 (full name)
-# and 16 (typographic family) of each face's `name` table, every face of a
-# .ttc or .otc collection included. $null when the file cannot be read as an
-# OpenType font.
+# The names a font file declares that font discovery can match on, every face
+# of a .ttc or .otc collection included: name IDs 1 (family), 16 (typographic
+# family) and 21 (WWS family) of each face's `name` table, the families
+# FreeType picks from (16, else 1, and 21 before both when fsSelection bit 8 is
+# clear), and ID 4 (full name); and each of those three families joined to each
+# style name (IDs 2, 17 and 22), as noctty's full name joins them
+# (`buildFullName` in src/font/discovery_windows.zig). $null when the file
+# cannot be read as an OpenType font, its `name` table included: an entry or a
+# string past the table's declared length, or a table past the end of the
+# file, is unreadable, not an absent name.
 function Get-RanListFontFamilies {
     param([Parameter(Mandatory)] [string] $Path)
     try {
@@ -388,26 +394,40 @@ function Get-RanListFontFamilies {
         foreach ($face in $faces) {
             $tables = Read-RanListBigEndian $bytes ($face + 4) 2
             $name = $null
+            $tableLength = 0
             for ($i = 0; $i -lt $tables; $i++) {
                 $record = $face + 12 + 16 * $i
                 if ($record + 16 -gt $bytes.Length) { return $null }
                 if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, [int]$record, 4), 'name', [StringComparison]::Ordinal)) {
                     $name = Read-RanListBigEndian $bytes ($record + 8) 4
+                    $tableLength = Read-RanListBigEndian $bytes ($record + 12) 4
                 }
             }
-            if ($null -eq $name) { return $null }
+            if ($null -eq $name -or $tableLength -lt 6 -or $name + $tableLength -gt $bytes.Length) { return $null }
             $entries = Read-RanListBigEndian $bytes ($name + 2) 2
-            $strings = $name + (Read-RanListBigEndian $bytes ($name + 4) 2)
+            $storage = Read-RanListBigEndian $bytes ($name + 4) 2
+            if (6 + 12 * $entries -gt $tableLength -or $storage -gt $tableLength) { return $null }
+            # Each ID's distinct strings: most languages repeat one name.
+            $byId = [Collections.Generic.Dictionary[int, Collections.Generic.HashSet[string]]]::new()
+            foreach ($id in 1, 2, 4, 16, 17, 21, 22) { $byId[$id] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
             for ($i = 0; $i -lt $entries; $i++) {
                 $entry = $name + 6 + 12 * $i
                 $platform = Read-RanListBigEndian $bytes $entry 2
-                $id = Read-RanListBigEndian $bytes ($entry + 6) 2
-                if ($id -ne 1 -and $id -ne 4 -and $id -ne 16) { continue }
+                $id = [int] (Read-RanListBigEndian $bytes ($entry + 6) 2)
                 $length = Read-RanListBigEndian $bytes ($entry + 8) 2
-                $at = $strings + (Read-RanListBigEndian $bytes ($entry + 10) 2)
-                if ($at + $length -gt $bytes.Length) { return $null }
+                $offset = Read-RanListBigEndian $bytes ($entry + 10) 2
+                # Every string must lie inside the table, whichever ID it is.
+                if ($storage + $offset + $length -gt $tableLength) { return $null }
+                if (-not $byId.ContainsKey($id)) { continue }
                 $encoding = if ($platform -eq 0 -or $platform -eq 3) { [System.Text.Encoding]::BigEndianUnicode } elseif ($platform -eq 1) { [System.Text.Encoding]::Latin1 } else { $null }
-                if ($null -ne $encoding) { $names.Add($encoding.GetString($bytes, [int]$at, [int]$length)) }
+                if ($null -ne $encoding) { [void] $byId[$id].Add($encoding.GetString($bytes, [int]($name + $storage + $offset), [int]$length)) }
+            }
+            foreach ($id in 1, 4, 16, 21) { $names.AddRange($byId[$id]) }
+            # FreeType takes the family and the style independently, so any pair.
+            foreach ($familyId in 1, 16, 21) {
+                foreach ($styleId in 2, 17, 22) {
+                    foreach ($family in $byId[$familyId]) { foreach ($style in $byId[$styleId]) { $names.Add("$family $style") } }
+                }
             }
         }
         return , $names.ToArray()
@@ -419,7 +439,7 @@ function Get-RanListFontFamilies {
 # the registry's Fonts keys names, as font discovery collects them: files with a
 # .ttf, .otf, .ttc or .otc extension directly in each directory.
 function Get-RanListUnregisteredFontFiles {
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $RegisteredPaths, [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Directories)
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [AllowEmptyString()] [string[]] $RegisteredPaths, [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Directories)
     $registered = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($p in $RegisteredPaths) { [void] $registered.Add($p) }
     $files = [Collections.Generic.List[string]]::new()
@@ -437,7 +457,8 @@ function Get-RanListUnregisteredFontFiles {
 # family names of the font files it does not name ($null for a file that could
 # not be read): present beats unknown, and unknown beats absent.
 function Get-RanListFontFacts {
-    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $RegisteredNames, [Parameter(Mandatory)] [AllowEmptyCollection()] [AllowNull()] [object[]] $UnregisteredFamilies)
+    # A Fonts key's default value, when set, has the name '': [AllowEmptyString()].
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [AllowEmptyString()] [string[]] $RegisteredNames, [Parameter(Mandatory)] [AllowEmptyCollection()] [AllowNull()] [object[]] $UnregisteredFamilies)
     $facts = New-RanListMap
     foreach ($family in $script:RanListFonts) {
         $value = 'absent'
@@ -451,6 +472,18 @@ function Get-RanListFontFacts {
         $facts["font:$family"] = $value
     }
     return $facts
+}
+
+# The font directories discovery scans (systemFontsDir and userFontsDir in
+# src/font/discovery_windows.zig): %WINDIR%\Fonts, else %SystemRoot%\Fonts, else
+# C:\Windows\Fonts; and %LOCALAPPDATA%\Microsoft\Windows\Fonts when LOCALAPPDATA
+# is set. The system directory comes first.
+function Get-RanListFontDirectories {
+    $base = if ($env:WINDIR) { $env:WINDIR } elseif ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $dirs = [Collections.Generic.List[string]]::new()
+    $dirs.Add([System.IO.Path]::Join($base, 'Fonts'))
+    if ($env:LOCALAPPDATA) { $dirs.Add([System.IO.Path]::Join($env:LOCALAPPDATA, 'Microsoft\Windows\Fonts')) }
+    return , $dirs.ToArray()
 }
 
 # The environment facts tests read (see the description), for a run from
@@ -469,8 +502,8 @@ function Get-RanListEnvironment {
     }
     catch { $facts['temp-makes-8dot3-names'] = 'unknown' }
     finally { if (Test-Path -LiteralPath $probe) { [System.IO.File]::Delete($probe) } }
-    $systemFonts = if ($env:WINDIR) { Join-Path $env:WINDIR 'Fonts' } elseif ($env:SystemRoot) { Join-Path $env:SystemRoot 'Fonts' } else { $null }
-    $userFonts = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts' } else { $null }
+    $fontDirs = Get-RanListFontDirectories
+    $systemFonts = $fontDirs[0]
     $names = [Collections.Generic.List[string]]::new()
     $paths = [Collections.Generic.List[string]]::new()
     foreach ($key in 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts', 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') {
@@ -481,18 +514,15 @@ function Get-RanListEnvironment {
             # A value names its file by a path, or by a name in the system font directory.
             $file = "$($item.GetValue($v))"
             if ([string]::IsNullOrWhiteSpace($file)) { continue }
-            try { $paths.Add([System.IO.Path]::GetFullPath($(if ([System.IO.Path]::IsPathRooted($file) -or $null -eq $systemFonts) { $file } else { Join-Path $systemFonts $file }))) } catch { }
+            try { $paths.Add([System.IO.Path]::GetFullPath($(if ([System.IO.Path]::IsPathRooted($file)) { $file } else { Join-Path $systemFonts $file }))) } catch { }
         }
     }
     $unregistered = [Collections.Generic.List[object]]::new()
-    # Only the directories this environment has: without LOCALAPPDATA (or WINDIR)
-    # one is $null, which a Mandatory [string[]] parameter refuses to bind.
-    $fontDirs = @(@($systemFonts, $userFonts) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     foreach ($file in (Get-RanListUnregisteredFontFiles -RegisteredPaths $paths.ToArray() -Directories $fontDirs)) {
         $unregistered.Add((Get-RanListFontFamilies -Path $file))
     }
     $fonts = Get-RanListFontFacts -RegisteredNames $names.ToArray() -UnregisteredFamilies $unregistered.ToArray()
-    foreach ($key in $fonts.Keys) { $facts[$key] = $fonts[$key] }
+    foreach ($key in $fonts.get_Keys()) { $facts[$key] = $fonts[$key] }
     foreach ($name in $script:RanListProbeVariables) {
         $value = [Environment]::GetEnvironmentVariable($name)
         $facts["env:$name"] = $(if ($null -eq $value) { 'unset' } elseif ([string]::Equals($value, '1', [StringComparison]::Ordinal)) { '1' } else { 'other' })
@@ -600,7 +630,8 @@ function Assert-RanListEnvironmentOf {
     # Both key sets, ordinally: a key spelled with another case or a control
     # character is a key of its own, missing from the other side.
     $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($k in @($Facts.Keys) + @($baseFacts.Keys)) { [void] $keys.Add($k) }
+    # get_Keys(): a fact named Keys, Values or Count shadows that member of a dictionary.
+    foreach ($k in @($Facts.get_Keys()) + @($baseFacts.get_Keys())) { [void] $keys.Add($k) }
     # A key only one side holds differs, even when the other side's value is
     # empty: a missing key and an empty value both read as ''.
     $differ = @($keys | Where-Object { $Facts.Contains($_) -ne $baseFacts.Contains($_) -or -not [string]::Equals("$($Facts[$_])", "$($baseFacts[$_])", [StringComparison]::Ordinal) })
@@ -621,7 +652,7 @@ $ErrorActionPreference = 'Stop'
 if (-not [string]::IsNullOrWhiteSpace($WriteFacts)) {
     $dir = if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) { (Get-Location).Path } else { Resolve-RanListPath $WorkingDirectory }
     $facts = Get-RanListEnvironment -Directory $dir
-    $text = (@($facts.Keys | ForEach-Object { "# env: $_=$($facts[$_])" }) -join "`n") + "`n"
+    $text = (@($facts.get_Keys() | ForEach-Object { "# env: $_=$($facts[$_])" }) -join "`n") + "`n"
     [System.IO.File]::WriteAllText((Resolve-RanListPath $WriteFacts), $text, [System.Text.UTF8Encoding]::new($false))
     exit 0
 }
@@ -727,7 +758,8 @@ try {
         $name = $item.Suite
         # Case-sensitively, as the compare reads it: with case folded, [A-Za-z]
         # also matches the Kelvin sign U+212A.
-        if ($name -cnotmatch '^[A-Za-z0-9._-]+$') { throw "Suite name '$name' must be ASCII letters, digits, '.', '_' or '-'." }
+        # \A and \z: `$` would also match before a trailing LF.
+        if ($name -cnotmatch '\A[A-Za-z0-9._-]+\z') { throw "Suite name '$name' must be ASCII letters, digits, '.', '_' or '-'." }
         if (-not $seen.Add($name)) { throw "Suite '$name' is given twice (suite names are told apart without regard to case)." }
         if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf)) { throw "'$($item.Path)' does not exist." }
         if ($item.Kind -eq 'exe') {
