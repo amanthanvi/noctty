@@ -29,8 +29,9 @@ reading step under [Self-Correction Log](#self-correction-log).
     70 unnamed `test { ... }` blocks that no filter excludes, so a token that
     matches nothing still reports about 70 passes, not zero. Use `ConPTY` to
     reach the probe tests in `src/pty_transport_probe.zig`. A filtered build
-    compiles the whole tree, about a minute. `Build Summary: 41/41 steps
-    succeeded` counts build steps, not tests. Filter traps: the 2026-10-06
+    compiles the whole tree, about a minute.
+    `Build Summary: 41/41 steps succeeded` counts build steps, not tests.
+    Filter traps: the 2026-10-06
     entry in `docs/agents/log/test-harnesses.md`.
 - **Formatting (Zig):** `zig fmt .`
 - **Formatting (other):** `prettier -w .`
@@ -602,9 +603,21 @@ that govern each symbol you change, or that none does.
   `$runtimeFiles`; the portable ZIP's `ghostty-vt.dll` placeholder:
   `src/build/GhosttyVtStub.zig`, `src/ghostty_vt_stub/`,
   `scripts/ghostty-vt-stub.ps1` `Assert-GhosttyVtStub`, and its packaged
-  smoke `test/windows/test_dll_init.c`), release workflows
-  and package managers (WinGet, Scoop,
-  Chocolatey), GitHub Actions CI (path filter, caching, runners, the gates
+  smoke `test/windows/test_dll_init.c`), release workflows and package managers
+  (WinGet, Scoop, Chocolatey): `scripts/release-publication-state.ps1`
+  (`Get-ReleaseByTag`, `Assert-RemoteReleaseTag`, `Get-CreatedReleaseDraft`,
+  `Confirm-ReleasePublication`), `scripts/release-evidence.ps1`
+  (`Invoke-ReleaseGhJson`, `Assert-ReleaseEvidence`),
+  `scripts/release-manifest.ps1` (`Get-ReleasePayloadPaths`, `Write-ReleaseManifest`,
+  `Assert-ReleaseManifest`, `Assert-PackageManagerFiles`),
+  `scripts/release-write-manifest.ps1`,
+  `scripts/release-check-publication.ps1`, `scripts/release-promote.ps1`,
+  `scripts/release-package-manager-preflight.ps1` (`Test-ReleasePublisherEnabled`,
+  `Assert-PromotionPackageManagers`), `scripts/package-manager-paths.ps1`
+  (`Resolve-ArtifactMetadataPath`), `scripts/release-run-generator.ps1`
+  (`Invoke-ReleaseGenerator`), `scripts/release-publisher-outcome.ps1`
+  (`Set-ReleasePublisherOutcome`), and `scripts/release-submit-winget.ps1`
+  (`Test-WinGetVersionSubmitted`); GitHub Actions CI (path filter, caching, runners, the gates
   the `main: CI gates` ruleset requires and their `always()`, Dependabot's
   `.github/dependabot.yml`, the action pins and the workflow digests the
   contracts pin), CRLF and

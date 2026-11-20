@@ -579,7 +579,7 @@ foreach ($contract in @(
     @{ Pattern = '(?s)\$firstPortableManifestVersion = \[version\]''1\.3\.124''.*?\$requiresPortableManifests = \(\$releaseVersion -ge \$firstPortableManifestVersion\)'; Description = 'published verifier executes the signed-manifest boundary at v1.3.124' },
     @{ Pattern = '\$expectedAssetCount = if \(\$requiresPortableManifests\) \{ 10 \} else \{ 8 \}\s*if \(\$requiresSymbols\) \{ \$expectedAssetCount \+= 2 \}'; Description = 'published verifier preserves the historical asset set, requires ten assets from v1.3.124 and twelve from the first symbols release' },
     @{ Pattern = '(?s)\$firstSymbolsVersion = \[version\]''1\.3\.133''.*?\$requiresSymbols = \(\$releaseVersion -ge \$firstSymbolsVersion\)'; Description = 'published verifier starts requiring the symbols zips at v1.3.133' },
-    @{ Pattern = '(?s)\$requiresSymbols\) \{\s*\$expectedNames\.Add\(\(New-WindowsPackageArtifactName[^\n]*-Kind symbols\)\)\s*\}'; Description = 'published verifier adds the per-architecture symbols zip to the exact asset set' },
+    @{ Pattern = 'Get-ReleasePayloadPaths -ArtifactRoot ''\.'' -Version \$Version.*?\$expectedNames\.Add'; Description = 'published verifier derives symbols and all other expected names from the shared payload definition' },
     @{ Pattern = '(?s)\$requiresSymbols\) \{\s*\[void\]\(Assert-SymbolsArchiveMatchesPortable.*?-SymbolsZip.*?-PayloadRoot \(Join-Path \$extractDirectory ''noctty''\)'; Description = 'published verifier matches every downloaded PDB to the downloaded portable binaries by GUID and age' },
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
     @{ Pattern = '(?s)Get-FileSha256Lower.*?\$digest = .*?\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
@@ -603,3 +603,7 @@ foreach ($contract in @(
         }
     )
 }
+
+if ($publishedReleaseVerifierText -notmatch '\$firstBundledConptyVersion = \[version\]''1\.3\.125''' -or
+    $publishedReleaseVerifierText -notmatch '(?s)\$conptyPin = if \(\$requiresBundledConpty\).*?conpty-redist.json' -or
+    $publishedReleaseVerifierText -notmatch '\[switch\]\$AllowPrerelease') { throw 'Historical verification must retain an explicit prerelease opt-in and the first bundled ConPTY boundary.' }

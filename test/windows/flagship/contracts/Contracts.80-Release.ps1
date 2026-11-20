@@ -53,15 +53,15 @@ $releasePreflightActionStepSha256 =
 $releasePreflightActionSha256 =
     'df0d1ff83a0279bdea87435a84a07c5971d66e1cb4240a28081a97af8ae30c3b'
 $releaseInteractiveEvidenceScriptSha256 =
-    '2bc265c1052c000e5f8ea599d2f5e2002dec3d3dc893bff0b8ecd72da739bb92'
+    '848819d6d2d0d45d90d467607e050dbd4341605ca2d9a8c72646b0236dad3b87'
 $releaseInteractiveEvidenceStepSha256 =
-    '88a9d8d525eca9bb31327fdad515af39488a63b418222036b82edf94db945b6f'
+    '0ab6aa8ad70b32e4ca4d46cb650a8f865c3e2f2f697d63fe01efaef3b05acc84'
 $releasePreflightStepSha256 =
     'd3af932ec3bf2369351ac7c9d70eac3f94ee4de13110f8277e0aa8e85e992fec'
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '3f25aebb67e8b66c4e7dfe2a6b17014a0d5dc3901dfb4ec81109fb9bceb20918'
+    '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -256,8 +256,8 @@ foreach ($spec in $protectedWorkflowSpecs) {
         if (@([regex]::Matches(
             $canonicalWorkflow,
             [regex]::Escape($mutation.Target)
-        )).Count -ne 1) {
-            throw "Protected workflow mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        )).Count -ne $(if ($spec.Context -ceq $releaseWorkflow) { 2 } else { 1 })) {
+            throw "Protected workflow mutation target count changed: $($spec.Context) :: $($mutation.Label)"
         }
         $mutantWorkflow = $canonicalWorkflow.Replace(
             $mutation.Target,
@@ -1366,7 +1366,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow)
         }
-        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
+        Pattern = '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest -PassThru.*?\$copy\.Verified -ne \$true.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?-PassThru.*?\$verification\.Verified -ne \$true'
         Kind = 'Text'
         Description = 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks'
     }
@@ -1448,14 +1448,14 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            'f529c6f226f88dd456f057f8603a24ef731099435da571e710a1e3763f1cf004'
-        CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
+            '124745e2768c1ce7af20288b86723b60135cc5a9959589f605a927d8850afc37'
+        CriticalStatement = '$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing'
     }
     [pscustomobject] @{
         Context = $releaseScoopPublisher
         Content = $releaseScoopPublisherText
         ExpectedSha256 =
-            'fface463353e30d293c0a77d02a0e2a45b085b29ef08c0077760c86f89320432'
+            '8864180c506a0736cc0da4ec80752a727dc35bb8b89f974db1269c8e3cb46d5c'
         CriticalStatement =
             "        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD"
     }
@@ -1463,7 +1463,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            'cd0024dd1c5d178d9884c7fcbeaeadc94db03096e64ac7579dffa2fa6a2376f5'
+            '309807de0e1c7ddf93dfd215a62f3d933a8dd4e23d300c08a8d2ebc9cf94b4fe'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1670,7 +1670,7 @@ $scoopManifestCreateIndex = $releaseScoopPublisherText.IndexOf(
     [StringComparison]::Ordinal
 )
 $scoopManifestCopyIndex = $releaseScoopPublisherText.IndexOf(
-    'Copy-Item -LiteralPath $metadata.scoop.manifestPath',
+    'Copy-Item -LiteralPath $sourceManifest',
     [StringComparison]::Ordinal
 )
 $scoopManifestAddIndex = $releaseScoopPublisherText.IndexOf(
@@ -1775,13 +1775,10 @@ if ($releaseArtifactVerifierText -notmatch
     $checksumHashLoopIndex -le $checksumMembershipIndex) {
     throw 'Local artifact verification must require exactly the setup, portable and symbols checksum entries before comparing hashes.'
 }
-if ($releaseGithubPublisherText -notmatch
-        '(?m)^\s*& gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease" @latestArgs\s*$') {
-    throw 'Existing GitHub releases must explicitly reconcile prerelease true and false.'
-}
-if ($releaseGithubPublisherText -notmatch
-        '(?ms)\$latestArgs = @\(\)\s*if \(\$Prerelease -ne ''true''\) \{\s*\$latestArgs \+= ''--latest''\s*\}') {
-    throw 'Promoting an existing release to stable must also mark it as the latest release.'
+if ($releaseGithubPublisherText -match '--clobber' -or
+    $releaseGithubPublisherText -notmatch 'Use mode promote with its recorded manifest' -or
+    $releaseGithubPublisherText -notmatch '(?m)^\s*& gh release create .*?--target \$CandidateSha ') {
+    throw 'Build publication must target the candidate and refuse to replace existing release assets.'
 }
 $wingetTokens = $null
 $wingetParseErrors = $null
@@ -1821,9 +1818,9 @@ foreach ($stablePublisher in @(
     [pscustomobject]@{ Name = 'Scoop'; Step = $releasePublishScoopStep },
     [pscustomobject]@{ Name = 'WinGet'; Step = $releaseSubmitWingetStep }
 )) {
-    if ($stablePublisher.Step -notmatch
-        '(?m)^        if: steps\.meta\.outputs\.prerelease != ''true''\s*$') {
-        throw "$($stablePublisher.Name) publication must be gated to stable releases."
+    $expectedCondition = "        if: steps.meta.outputs.prerelease != 'true' && vars.$($stablePublisher.Name.ToUpperInvariant())_PUBLISH != 'off'"
+    if ($stablePublisher.Step -notmatch ('(?m)^' + [regex]::Escape($expectedCondition) + '\r?$')) {
+        throw "$($stablePublisher.Name) publication must honor stable release and channel-off gates."
     }
 }
 if ($releaseSubmitWingetStep -notmatch
@@ -1842,7 +1839,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?noctty-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease".*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-ReleasePayloadPaths.*?Get-ReleaseByTag -Repository \$Repository -Tag \$Tag -AllowMissing.*?Use mode promote with its recorded manifest.*?gh release create \$Tag --repo \$Repository --target \$CandidateSha --draft.*?\$attempt -le 3.*?gh release upload.*?AssetDigestMismatch.*?Assert-ReleaseManifest.*?gh release edit.*?--draft=false.*?Confirm-ReleasePublication'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }
@@ -1905,3 +1902,5 @@ Invoke-ContractTable -Contracts @(
         Description = 'release provenance is job-scoped, canonical-repository guarded, pinned, and covers the eleven non-icon assets'
     }
 )
+
+. (Join-Path $PSScriptRoot 'ReleasePromotionContracts.ps1')

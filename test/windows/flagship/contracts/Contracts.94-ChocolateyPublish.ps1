@@ -3,11 +3,17 @@
 # workflow is. The whole file carries a digest (any edit is a review event, which
 # also catches what a pattern cannot, such as a decoy in a comment), and a
 # function states the properties that matter and must reject each mutant.
-$chocolateyPublishWorkflowSha256 = '9be80e619aa588840a85fb24aab4020ca7f93a2077dcde0626ce14be5d4988f8'
+$chocolateyPublishWorkflowSha256 = 'c068795f64c9adcbeabc1f22031340afe00c458c7d88168594fb43809a50da16'
 $chocolateyPublishWorkflow = Join-Path $repoRoot '.github\workflows\chocolatey-publish.yml'
 $chocolateyPublisherScript = Join-Path $repoRoot 'scripts\release-publish-chocolatey.ps1'
 $chocolateyStagerScript = Join-Path $repoRoot 'scripts\release-stage-published.ps1'
 $chocolateyPublishingDoc = Join-Path $repoRoot 'docs\chocolatey-publishing.md'
+
+$stagerFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-stager-inputs.ps1') 6>&1)
+if ($LASTEXITCODE -ne 0 -or @($stagerFixtureOutput | Where-Object {
+    [string]$_ -ceq 'Published release stager: PASS (5 anchor/input cases; recorded GitHub only).'
+}).Count -ne 1) { throw 'Published release stager argument controls did not complete.' }
+$stagerFixtureOutput | ForEach-Object { Write-Host $_ }
 
 function Test-ChocolateyPublishWorkflow {
     param(
@@ -24,6 +30,7 @@ function Test-ChocolateyPublishWorkflow {
     $expectedSteps = @(
         'Checkout code',
         'Check the version and the workflow commit',
+        'Checkout released candidate data',
         'Show the Chocolatey version',
         'Verify the published release and build the package',
         'Pack the package (dry run)',
@@ -40,6 +47,7 @@ function Test-ChocolateyPublishWorkflow {
     }
     foreach ($inputSpec in @(
             @{ Name = 'version'; Required = @('required: true', 'type: string') },
+            @{ Name = 'manifest_sha256'; Required = @('required: false', 'type: string') },
             @{ Name = 'push'; Required = @('default: false', 'type: boolean') },
             @{ Name = 'resubmit'; Required = @('default: false', 'type: boolean') }
         )) {
@@ -108,6 +116,13 @@ function Test-ChocolateyPublishWorkflow {
     if ($steps['Checkout code'] -notmatch '(?m)^          persist-credentials: false\s*$') {
         $problems.Add('checkout must not persist credentials')
     }
+    $candidateStep = $steps['Checkout released candidate data']
+    if ($candidateStep -notmatch '(?m)^          ref: v\$\{\{ steps\.meta\.outputs\.version \}\}\s*$' -or
+        $candidateStep -notmatch '(?m)^          path: candidate\s*$' -or
+        $candidateStep -notmatch '(?m)^          fetch-depth: 0\s*$' -or
+        $candidateStep -notmatch '(?m)^          persist-credentials: false\s*$') {
+        $problems.Add('release verification data must come from the candidate tag checkout')
+    }
     foreach ($name in $expectedSteps | Where-Object { $_ -cne 'Pack the package (dry run)' -and $_ -cne $pushStepName }) {
         if ($steps[$name] -match '(?m)^        if:') {
             $problems.Add("step runs conditionally: $name")
@@ -131,6 +146,9 @@ function Test-ChocolateyPublishWorkflow {
             '-Version $env:RELEASE_VERSION',
             '-PackageSourceRef $env:PACKAGE_SOURCE_REF',
             'PACKAGE_SOURCE_REF: ${{ github.sha }}',
+            '-CandidateDirectory (Join-Path $PWD ''candidate'')',
+            '-ManifestSha256 $env:MANIFEST_SHA256',
+            'MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}',
             'GH_TOKEN: ${{ github.token }}',
             'WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}'
         )) {
@@ -162,7 +180,7 @@ function Test-ChocolateyPublishWorkflow {
         $problems.Add('the push step must read exactly one secret')
     }
     foreach ($line in ($canonical -split '\n')) {
-        if ($line -match '\$\{\{\s*inputs\.' -and $line -notmatch '^\s+(?:VERSION_INPUT: |RESUBMIT: |if: )') {
+        if ($line -match '\$\{\{\s*inputs\.' -and $line -notmatch '^\s+(?:VERSION_INPUT: |RESUBMIT: |MANIFEST_SHA256: |if: )') {
             $problems.Add("a workflow input is used outside an env value or condition: $($line.Trim())")
         }
     }
@@ -178,6 +196,8 @@ $chocolateyPublishCanonical = ConvertTo-CanonicalText -Text $chocolateyPublishWo
 # Each mutant must break a stated property, checked without the digest so that
 # the digest cannot be what rejects it.
 $chocolateyPublishMutants = @(
+    @{ Label = 'missing candidate checkout path'; Target = '          path: candidate'; Replacement = '          path: wrong-candidate' },
+    @{ Label = 'missing manifest digest'; Target = '          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}'; Replacement = '          MANIFEST_SHA256: missing' },
     @{ Label = 'extra push trigger'; Target = "on:`n  workflow_dispatch:"; Replacement = "on:`n  push:`n    branches: [main]`n  workflow_dispatch:" },
     # The pin as the workflow has it now, so a Dependabot bump of checkout
     # does not leave this mutant without a target.
@@ -204,7 +224,7 @@ $chocolateyPublishDigestOnlyMutants = @(
     @{ Label = 'comment decoy'; Target = '      - name: Show the Chocolatey version'; Replacement = "      # if: `${{ inputs.push }}`n      - name: Show the Chocolatey version" }
 )
 foreach ($mutant in $chocolateyPublishMutants + $chocolateyPublishDigestOnlyMutants) {
-    if (@([regex]::Matches($chocolateyPublishCanonical, [regex]::Escape($mutant.Target))).Count -ne 1) {
+    if (@([regex]::Matches($chocolateyPublishCanonical, [regex]::Escape($mutant.Target))).Count -ne $(if ($mutant.Label -ceq 'unpinned checkout') { 2 } else { 1 })) {
         throw "Chocolatey Publish mutation target is not unique: $($mutant.Label)"
     }
     $mutantText = $chocolateyPublishCanonical.Replace($mutant.Target, $mutant.Replacement)
@@ -242,7 +262,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $chocolateyStagerScript
         Content = { $chocolateyStagerText }
-        Pattern = '(?ms)\[ValidatePattern\(''\\A\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\\z''\)\].*?verify-published-release\.ps1.*?-DownloadDirectory \$DownloadDirectory.*?Copy-Item.*?package-package-managers\.ps1'
+        Pattern = '(?ms)\[ValidatePattern\(''\\A\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\\z''\)\].*?\$verifyArguments = @\{ Version = \$Version; DownloadDirectory = \$DownloadDirectory \}.*?verify-published-release\.ps1''\) @verifyArguments.*?Copy-Item.*?package-package-managers\.ps1'
         Kind = 'Text'
         Description = 'the published release is verified before its installers are copied into a package'
     }

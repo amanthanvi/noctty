@@ -71,7 +71,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $githubPublisher82
         Content = { $githubPublisherText82 }
-        Pattern = '(?s)Kind manifest\)\),\s*\(Join-Path \$artifactDirectory \(New-WindowsPackageArtifactName -Version \$Version -Architecture \$architecture -Kind symbols\)\),\s*\(Join-Path \$artifactDirectory \(New-WindowsPackageArtifactName -Version \$Version -Architecture \$architecture -Kind checksums\)\)'
+        Pattern = '(?s)release-publication-state\.ps1.*?\$assets = @\(Get-ReleasePayloadPaths.*?gh release upload'
         Kind = 'Text'
         Description = 'GitHub publisher uploads each architecture''s symbols zip'
     }
@@ -404,3 +404,12 @@ finally {
 if ($symbolsVerificationText -notmatch '(?s)function Get-WindowsSymbolBinaryNames.*?Get-WindowsSignedRuntimePayloads') {
     throw 'The symbols check must derive its binary list from Get-WindowsSignedRuntimePayloads.'
 }
+
+# Fixture B runs the shared build-mode writer and every promote predicate with
+# the historical real payload set, including its symbols ZIPs, under recorded
+# GitHub responses. With no cache it downloads public v1.3.136 assets only.
+$promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
+if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
+    [string]$_ -ceq 'Release promotion fixture B: PASS (98 cases, 4 files identical across two checkout roots, 12 real assets).'
+}).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
+$promotionFixtureOutput | ForEach-Object { Write-Host $_ }

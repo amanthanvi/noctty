@@ -17,13 +17,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'release-publisher-outcome.ps1')
+if ([string]::Equals($env:SCOOP_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'Scoop explicitly disabled.'; Set-ReleasePublisherOutcome skipped-disabled; return }
+. (Join-Path $PSScriptRoot 'package-manager-paths.ps1')
 
 if (-not $env:GH_TOKEN) {
     Write-Host 'Skipping Scoop publish: SCOOP_BUCKET_TOKEN is not configured.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 if ([string]::IsNullOrWhiteSpace($BucketRepository)) {
     Write-Host 'Skipping Scoop publish: SCOOP_BUCKET_REPO is not configured.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 if ([string]::IsNullOrWhiteSpace($RunnerTemp)) {
@@ -99,6 +104,7 @@ function Remove-ValidatedScoopClone {
 }
 
 if (-not $PSCmdlet.ShouldProcess($BucketRepository, "publish noctty $Version Scoop manifest")) {
+    Set-ReleasePublisherOutcome what-if
     return
 }
 
@@ -173,7 +179,8 @@ try {
         }
     }
     New-Item -ItemType Directory -Path $destinationManifestDirectory -Force | Out-Null
-    Copy-Item -LiteralPath $metadata.scoop.manifestPath -Destination $destinationManifestPath -Force
+    $sourceManifest = Resolve-ArtifactMetadataPath -ArtifactDirectory $artifactDirectoryX64 -Path $metadata.scoop.manifestPath -SchemaVersion $metadata.schemaVersion
+    Copy-Item -LiteralPath $sourceManifest -Destination $destinationManifestPath -Force
 
     Push-Location $bucketDirectory
     try {
@@ -192,6 +199,7 @@ try {
         & git diff --cached --quiet --exit-code
         if ($LASTEXITCODE -eq 0) {
             Write-Host 'Scoop manifest is unchanged; skipping push.'
+            Set-ReleasePublisherOutcome already-present
             return
         }
         if ($LASTEXITCODE -ne 1) {
@@ -215,3 +223,4 @@ try {
 finally {
     Remove-ValidatedScoopClone
 }
+Set-ReleasePublisherOutcome published

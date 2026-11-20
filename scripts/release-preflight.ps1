@@ -16,6 +16,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Get-RepoRoot
 $releaseMetaPath = Join-Path $repoRoot "dist/windows/release-metadata.json"
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
+. (Join-Path $PSScriptRoot 'release-package-manager-preflight.ps1')
 
 function Get-EnvValue {
     param([string]$Name)
@@ -397,40 +398,36 @@ if ($RequireSigning -and $artifactSigning) {
     Write-Status -Label "Code signing" -Value "not required"
 }
 
-Write-PresenceStatus -Label "WinGet package id" -Name "WINGET_PACKAGE_IDENTIFIER" -MissingMessage "missing (submit step will skip)" -Required:$RequirePackageManagers
-Write-PresenceStatus -Label "Scoop repo" -Name "SCOOP_BUCKET_REPO" -MissingMessage "missing (publish step will skip)" -Required:$RequirePackageManagers
-Write-PresenceStatus -Label "Scoop token" -Name "SCOOP_BUCKET_TOKEN" -MissingMessage "missing" -RedactValue -Required:$RequirePackageManagers
-Write-PresenceStatus -Label "WinGet token" -Name "WINGETCREATE_TOKEN" -MissingMessage "missing" -RedactValue -Required:$RequirePackageManagers
+$scoopEnabled = Test-ReleasePublisherEnabled SCOOP
+$wingetEnabled = Test-ReleasePublisherEnabled WINGET
+Write-PresenceStatus -Label "WinGet package id" -Name "WINGET_PACKAGE_IDENTIFIER" -MissingMessage "missing (submit step will skip)" -Required:($RequirePackageManagers -and $wingetEnabled)
+Write-PresenceStatus -Label "Scoop repo" -Name "SCOOP_BUCKET_REPO" -MissingMessage "missing (publish step will skip)" -Required:($RequirePackageManagers -and $scoopEnabled)
+Write-PresenceStatus -Label "Scoop token" -Name "SCOOP_BUCKET_TOKEN" -MissingMessage "missing" -RedactValue -Required:($RequirePackageManagers -and $scoopEnabled)
+Write-PresenceStatus -Label "WinGet token" -Name "WINGETCREATE_TOKEN" -MissingMessage "missing" -RedactValue -Required:($RequirePackageManagers -and $wingetEnabled)
 
 if ($RequirePackageManagers) {
-    $scoopManifestPath = if (Test-EnvPresent -Name "SCOOP_BUCKET_MANIFEST_PATH") {
-        Get-EnvValue -Name "SCOOP_BUCKET_MANIFEST_PATH"
-    } else {
-        "bucket/noctty.json"
+    if ($scoopEnabled) {
+        $scoopManifestPath = if (Test-EnvPresent -Name "SCOOP_BUCKET_MANIFEST_PATH") { Get-EnvValue -Name "SCOOP_BUCKET_MANIFEST_PATH" } else { "bucket/noctty.json" }
+        $scoopReady = Test-GitHubContentPath `
+            -Repository (Get-EnvValue -Name "SCOOP_BUCKET_REPO") `
+            -Path $scoopManifestPath `
+            -Label "Scoop manifest" `
+            -Ref (Get-OptionalEnvValue -Name "SCOOP_BUCKET_BRANCH") `
+            -Token (Get-GitHubApiToken -Names @("SCOOP_BUCKET_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
+        if (-not $scoopReady) { throw "RequirePackageManagers was set, but the configured Scoop manifest does not exist." }
     }
-    $wingetManifestPath = Get-WingetManifestPath -PackageIdentifier (Get-EnvValue -Name "WINGET_PACKAGE_IDENTIFIER")
-
-    $scoopReady = Test-GitHubContentPath `
-        -Repository (Get-EnvValue -Name "SCOOP_BUCKET_REPO") `
-        -Path $scoopManifestPath `
-        -Label "Scoop manifest" `
-        -Ref (Get-OptionalEnvValue -Name "SCOOP_BUCKET_BRANCH") `
-        -Token (Get-GitHubApiToken -Names @("SCOOP_BUCKET_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
-    $wingetReady = Test-GitHubContentPath `
-        -Repository "microsoft/winget-pkgs" `
-        -Path $wingetManifestPath `
-        -Label "WinGet manifest" `
-        -Token (Get-GitHubApiToken -Names @("WINGETCREATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
-
-    if (-not $scoopReady) {
-        throw "RequirePackageManagers was set, but the configured Scoop manifest does not exist."
+    if ($wingetEnabled) {
+        $wingetManifestPath = Get-WingetManifestPath -PackageIdentifier (Get-EnvValue -Name "WINGET_PACKAGE_IDENTIFIER")
+        $wingetReady = Test-GitHubContentPath `
+            -Repository "microsoft/winget-pkgs" `
+            -Path $wingetManifestPath `
+            -Label "WinGet manifest" `
+            -Token (Get-GitHubApiToken -Names @("WINGETCREATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
+        if (-not $wingetReady) { throw "RequirePackageManagers was set, but $($env:WINGET_PACKAGE_IDENTIFIER) is not bootstrapped in microsoft/winget-pkgs." }
+        Assert-WingetArchitectureCoverage `
+            -ManifestPath $wingetManifestPath `
+            -Token (Get-GitHubApiToken -Names @("WINGETCREATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
     }
-    if (-not $wingetReady) {
-        throw "RequirePackageManagers was set, but $($env:WINGET_PACKAGE_IDENTIFIER) is not bootstrapped in microsoft/winget-pkgs."
-    }
-    Assert-WingetArchitectureCoverage `
-        -ManifestPath $wingetManifestPath `
-        -Token (Get-GitHubApiToken -Names @("WINGETCREATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
 }
 
 Write-Host "Release preflight passed."

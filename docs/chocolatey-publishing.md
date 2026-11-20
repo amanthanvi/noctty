@@ -18,7 +18,7 @@ co-maintainer, and rejected 1.3.131
 push [39578893616](https://github.com/amanthanvi/noctty/actions/runs/39578893616):
 `noctty.1.3.134.nupkg was pushed successfully`). Read at 10:21 UTC that day,
 the feed's
-[entry for it](https://community.chocolatey.org/api/v2/Packages(Id='noctty',Version='1.3.134'))
+[entry for it](<https://community.chocolatey.org/api/v2/Packages(Id='noctty',Version='1.3.134')>)
 had `PackageStatus` `Submitted`, `PackageSubmittedStatus` `Pending`,
 `IsApproved` `false`, `PackageValidationResultStatus` `Passing` (since 10:16
 UTC) and `PackageTestResultStatus` `Pending`.
@@ -133,12 +133,44 @@ gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f ve
 gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f version=1.3.133 -f push=true
 ```
 
-Do not rerun that version's `Release` run instead. A rerun rebuilds the
-installers and replaces the assets on the release page with new bytes whose
-hashes no longer match the Scoop and WinGet manifests already published for
-it. It would also run the workflow and scripts as they were at that release:
-1.3.132's, for instance, push a package naming a GitHub-hosted icon that the
-validator rejects.
+For a release carrying `release-manifest.json`, supply `-f manifest_sha256=<sha256>`
+on both commands, using the digest in the original Release run's **Write
+release manifest and record digest** summary in the attempt that published.
+The stager refuses `ManifestAnchorRequired` before verification or generation
+when that input is omitted for a manifest-bearing release. The manual workflow
+checks out
+candidate data and forwards this anchor to the verifier. Historical releases
+without that asset omit the input.
+
+Build mode refuses existing releases and never overwrites assets with
+`--clobber`. To resume verification or multiple package managers after a failed
+or cancelled Release run, use **Release**, `mode=promote`, from main with the
+tag, peeled
+candidate SHA, Test/evidence IDs, original Release run ID and
+`manifest_sha256`. Its `PublishedReleaseResume` path requires successful
+publication in one of that run's attempt-specific jobs records and matching
+immutable assets. It resumes
+verify, Scoop, WinGet and Chocolatey at the first incomplete step, keeping
+Chocolatey last. Each enabled publisher must be configured before the stable
+flip; explicitly set its `*_PUBLISH` variable to `off` to disable it.
+
+Do not re-run the original Release workflow after draft creation or publication.
+Use guarded draft recovery for an incomplete draft and promote for a complete
+published release. A prior failed rerun does not erase an earlier
+publishing attempt. Use that attempt's digest, retaining the original run ID.
+`DraftRelease` requires the guarded recovery in PACKAGING.md: list every release
+with the tag, stop unless the sole match is the inspected incomplete draft,
+re-read that draft by ID, then manually delete only that draft by ID before a
+new accepted build. Preserve the tag; never delete a tag a published release
+uses, and never use `--cleanup-tag`. A tagless draft needs no tag deletion. `LegacyReleaseWithoutManifest`
+and `IncompletePublishedRelease` preserve the published release and tag; older
+releases can use this verified manual Chocolatey entry point without a digest.
+`EvidenceExpired` requires a Test dispatch on the candidate tag with
+`run_interactive_win11=true`, followed by promote with those fresh Test/evidence
+IDs. Exact commands are in the [release runbook](../PACKAGING.md#release-runbook).
+No recovery automatically deletes a release, replaces assets or rebuilds a
+published candidate. Older workflow revisions may still replace assets on a
+rerun; use main's recovery entry points.
 
 ## What the Chocolatey Publish workflow does
 
