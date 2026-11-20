@@ -3,6 +3,7 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- 2026-10-11 PKG-14: its "CI does not run" `test-lib-vt` no longer holds; CI's `windows-lib-vt` job runs it (item (3) of the 2026-11-20 STONE-TRAPS-GONE entry in terminal-core.md).
 - 2026-09-23 "Base64 typed into Neovim after an OSC 52 paste" (#261): its "OSC 52 matrix entry above" is the 2026-09-23 "After #264 an OSC 52 paste" entry in clipboard.md, which corrects its size threshold and its Neovim 0.10.4 native result.
 - 2026-09-23 "Input on the wrong row after minimize/restore" (#262): item (b), "NOT fixed", is fixed by the 2026-09-23 "Item (b) of the #262 entry" entry in window-frame.md.
 - 2026-09-15 "Triaging a scrambled TUI report" (#243), trap (2), "every portable release ZIP already ships one for its own version": Setup no longer installs `ghostty-vt.dll`, and from 1.3.137 the portable ZIP's `ghostty-vt.dll` is a placeholder that exports nothing and fails to load, not the library; build the library with `zig build -Demit-lib-vt=true`. See the 2026-11-08 GHOSTTY-VT-RETIRE and GHOSTTY-VT-STUB entries in build-release-ci.md.
