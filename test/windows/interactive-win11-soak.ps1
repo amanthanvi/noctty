@@ -924,7 +924,7 @@ function Invoke-SoakDriver {
         $end = $quit.End
         $harness.QuitMs = $quit.QuitMs
         $harness.QuitPosts = $quit.Posts
-        if ($end.StartsWith("unasked`t")) { Log 'the copy ended with no WM_CLOSE of the harness reaching one of its windows' }
+        if ($end.StartsWith("unasked`t", [StringComparison]::Ordinal)) { Log 'the copy ended with no WM_CLOSE of the harness reaching one of its windows' }
         # Suppressed: the job kills a process on an unhandled exception, and the copy started with
         # SEM_NOGPFAULTERRORBOX (inherited from this driver).
         $suppressed = $jobDies -and $harness.HardErrorModes.Count -gt 0 -and ($harness.HardErrorModes[0] -band 2) -ne 0

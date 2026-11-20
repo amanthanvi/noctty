@@ -216,7 +216,7 @@ $soakMutations = 0
 foreach ($rule in $soakRules) {
     Assert-TextContract -Content $soakText -Pattern $rule.Pattern -Description $rule.Description -Context $soakScript
     $mutated = $soakText.Replace($rule.Mutation[0], $rule.Mutation[1])
-    if ($mutated -ceq $soakText) { throw "Soak contract mutation changed nothing: $($rule.Description)" }
+    if ([string]::Equals($mutated, $soakText, [StringComparison]::Ordinal)) { throw "Soak contract mutation changed nothing: $($rule.Description)" }
     if ($mutated -match $rule.Pattern) { throw "Soak contract accepted a mutation: $($rule.Description)" }
     $soakMutations++
 }
@@ -274,6 +274,9 @@ if (Test-SoakHangMinimum ($hangLines.Replace('{ 90 }', '{ 60 }'))) { throw 'The 
 $soakAst = [Management.Automation.Language.Parser]::ParseFile($soakScript, [ref]$null, [ref]$null)
 $quitAst = @($soakAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-SoakQuit' }, $false))
 if ($quitAst.Count -ne 1) { throw 'The soak harness must define Invoke-SoakQuit once.' }
+# End rows hold a tab, and pwsh 7.6's -ceq ignores control characters (PWSH-CEQ-ICU), so rows compare ordinally.
+function Test-SoakQuitRow([string] $Got, [string] $Want) { return [string]::Equals($Got, $Want, [StringComparison]::Ordinal) }
+if (Test-SoakQuitRow "quit`t0" 'quit0') { throw 'The quit row check ignores the tab in an end row.' }
 $quitCases = @(
     @{ Name = 'no window to post to, then the handle signals with 0'; Alive = $true; Windows = @(); Posts = @(); Waits = $true; Want = "unasked`t0" }
     @{ Name = 'the window vanished, the post failed, then the handle signals with 0'; Alive = $true; Windows = @(7); Posts = @($false); Waits = $true; Want = "unasked`t0" }
@@ -289,15 +292,15 @@ $quitCases = @(
         $result = Invoke-SoakQuit -Alive { $case.Alive } -Windows { $case.Windows } `
             -Post { param($Window) $taken = $case.Posts[$script:quitPostIndex]; $script:quitPostIndex++; $taken } `
             -Wait { $case.Waits } -ExitCode { 0 } -Stop { $script:quitStopped = $true }
-        if ($result.End -cne $case.Want) { throw "Invoke-SoakQuit gave '$($result.End -replace "`t", ' ')' for $($case.Name); want '$($case.Want -replace "`t", ' ')'." }
+        if (-not (Test-SoakQuitRow $result.End $case.Want)) { throw "Invoke-SoakQuit gave '$($result.End -replace "`t", ' ')' for $($case.Name); want '$($case.Want -replace "`t", ' ')'." }
         if (($case.Want -like 'stuck*') -ne $script:quitStopped) { throw "Invoke-SoakQuit's stop ran wrongly for $($case.Name)." }
     }
 }
 $quitControl = $quitAst[0].Extent.Text.Replace("if (`$quitPosts -gt 0) { 'quit' } else { 'unasked' }", "'quit'")
-if ($quitControl -ceq $quitAst[0].Extent.Text) { throw 'The quit control changed nothing.' }
+if ([string]::Equals($quitControl, $quitAst[0].Extent.Text, [StringComparison]::Ordinal)) { throw 'The quit control changed nothing.' }
 $controlCaught = & {
     . ([scriptblock]::Create($quitControl))
-    (Invoke-SoakQuit -Alive { $true } -Windows { @() } -Post { $false } -Wait { $true } -ExitCode { 0 } -Stop { }).End -cne "unasked`t0"
+    -not (Test-SoakQuitRow (Invoke-SoakQuit -Alive { $true } -Windows { @() } -Post { $false } -Wait { $true } -ExitCode { 0 } -Stop { }).End "unasked`t0")
 }
 if (-not $controlCaught) { throw 'The quit test doubles did not catch a quit recorded with no post.' }
 
@@ -394,7 +397,7 @@ $scriptOnly = $soakText.Replace($nativeSource, '')
 $callProblems = Get-SoakNativeCallProblems $scriptOnly
 if ($callProblems.Count -ne 0) { throw "The soak harness calls its native layer wrongly: $($callProblems -join '; ')" }
 $badCall = $scriptOnly.Replace('$baseWidth, $baseHeight, $script:ResponseBoundMs)', '$baseWidth, $baseHeight)')
-if ($badCall -ceq $scriptOnly -or (Get-SoakNativeCallProblems $badCall).Count -ne 1) { throw 'The native-call check accepted a resize called without its bound.' }
+if ([string]::Equals($badCall, $scriptOnly, [StringComparison]::Ordinal) -or (Get-SoakNativeCallProblems $badCall).Count -ne 1) { throw 'The native-call check accepted a resize called without its bound.' }
 # The SDK's x64 layout (psapi.h, winnt.h, tlhelp32.h, processthreadsapi.h, winbase.h), written out here a
 # second time so the harness's own copy cannot drift with its structs.
 $sdkLayout = 'MemoryCounters=96 workingSet@16 privateUsage@72 sharedCommit@88 JobLimits=144 limitFlags@16 ' +
@@ -465,10 +468,10 @@ if ($testStep -notmatch '(?m)^        run: python -I ci/test_soak_judge\.py\s*$'
 foreach ($step in @($setupStep, $testStep)) {
     if ($step -match '(?m)^        [''"]?(?:if|continue-on-error)[''"]?[ \t]*:') { throw 'The soak judge steps must be unconditional and fail closed.' }
 }
-if ($soakChecks.IndexOf('- name: Setup Python' + "`n") -lt 0 -and $soakChecks.IndexOf('- name: Setup Python' + "`r`n") -lt 0) {
+if ($soakChecks.IndexOf('- name: Setup Python' + "`n", [StringComparison]::Ordinal) -lt 0 -and $soakChecks.IndexOf('- name: Setup Python' + "`r`n", [StringComparison]::Ordinal) -lt 0) {
     throw 'The checks job has no step named exactly Setup Python.'
 }
-if ($soakChecks.IndexOf($setupStep) -gt $soakChecks.IndexOf($testStep)) {
+if ($soakChecks.IndexOf($setupStep, [StringComparison]::Ordinal) -gt $soakChecks.IndexOf($testStep, [StringComparison]::Ordinal)) {
     throw 'The soak judge''s interpreter must be set up before its tests run.'
 }
 Write-Host "Soak contracts: $($soakRules.Count) rules, $soakMutations/$soakMutations mutations rejected"
