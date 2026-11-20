@@ -1126,6 +1126,13 @@ It must refuse each of these for its own reason:
     desktop;
   - Default must show at least one window.
 - It then stops each process by exact PID.
+- Its claim is "every process and window alive at the sample". It holds only
+  when the sample has the app, the ConPTY host (the copy's own
+  `OpenConsole.exe`, or `conhost`) and the shell, and every desktop read in
+  it resolved. A thread with no USER desktop is kept apart from an unreadable
+  one, and an unreadable one leaves Q0 inconclusive. The job's own
+  `TotalProcesses` is recorded beside the sample, so a descendant that exited
+  before it (cmd's `chcp`) is counted.
 - Positive control: a child started without a desktop name reports the private
   desktop.
 - Negative control: a thread moved to a second desktop with `SetThreadDesktop`
@@ -1138,7 +1145,12 @@ On the runner's own Default desktop, each item has a control:
   window's EDIT has the focus and it is in no menu loop. The foreground is
   unlocked by a zero-motion mouse input, not an Alt tap, which opens the menu
   loop and swallows the next key. Control: another window in front takes the
-  input, and the probe's text is unchanged.
+  input, and the probe's text is unchanged. Then the noctty arm: the
+  measurement copy, foreground, is typed `echo <nonce>>"<file>"` and Enter,
+  and the file must hold the nonce. Control: the same with a probe window in
+  front, whose EDIT takes the line while no file appears. P1 passes only with
+  both arms, and every stimulus counts only when `SendInput` inserted every
+  event.
 - **P2:** a #FF00FF window is read back one pixel at a time. Controls: the
   window covered, and the window minimised.
 - **P3:** the fixture's shell prints a seed of known size: 20 lines of 64
@@ -1155,9 +1167,13 @@ On the runner's own Default desktop, each item has a control:
     snapshot taken after it counts no swap.
   - Control: a private withheld-seed readback misses the seed text's pixel
     floor.
-  - A failed readback or a missing snapshot is "inconclusive".
+  - A failed readback, a missing snapshot, or a snapshot that lacks a counter
+    is "inconclusive". The withheld readback counts only as the fixture's own
+    background with a measured ink fraction below the floor.
 - **P4:** `ITaskbarList3::HrInit`'s HRESULT on both desktops.
 - **P5:** the toast setting and history count for the build's identities.
+  The after-exit samples are taken only after a normal exit: `WM_CLOSE`
+  posted, the process ended inside the wait, and exit code 0.
 
 P4 reads the copy's own record. `NOCTTY_GUI_PROBE_TRACE=1`
 (`src/os/gui_probe_trace.zig`) turns it on, and it needs `GHOSTTY_LOG=stderr`.

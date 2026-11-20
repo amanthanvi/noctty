@@ -28,18 +28,32 @@ desktop and runs this script again as the driver on it, by name, in a kill-on-cl
 that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
 top-level window on the private and the Default desktop, the desktop each is on: a process by its startup desktop
 (RTL_USER_PROCESS_PARAMETERS.DesktopInfo, read from its PEB) and its threads' desktops, a window by the desktop it
-was enumerated on. Then it stops each of them by exact PID (creation time checked) and records that none is left.
+was enumerated on. Then it stops each of them by exact PID (creation time and job membership checked) and records that
+none is left. The claim is "every process and window alive at the sample": it holds only when the sample has the app,
+the ConPTY host (the copy's own OpenConsole.exe, or conhost) and the shell, every desktop read in it resolved (a
+thread with no USER desktop is kept apart from an unreadable one, which leaves Q0 inconclusive), and both window
+inventories are complete; the job's own TotalProcesses is recorded beside the sample, so a descendant that ran and
+exited before it (cmd's utf8-console `chcp`) is counted, never hidden.
 Positive control: a child the driver starts without naming a desktop reports the private one (the design's M1).
 Negative control: a fresh thread of this (Default-desktop) process, moved to a second private desktop with
-SetThreadDesktop, starts a child without naming a desktop; the child reports Default. The children create no window.
+SetThreadDesktop, starts a child without naming a desktop, in a job of its own; the child reports Default. The
+children create no window.
+
+The driver admits itself before it starts any copy, taking nothing on trust from its caller: it validates the
+measurement build from -MeasureRepo as the outer half does (generation, receipt, the app and CLI hashes), takes the
+gate's hashes from that receipt, and refuses to run on Default, on the input desktop, or outside a job.
 
 D3 (GitHub-hosted only: GITHUB_ACTIONS is "true" and RUNNER_ENVIRONMENT "github-hosted"). On the runner's own
 Default desktop:
   P1  a probe window takes the foreground (unlocked by a zero-motion mouse input, not an Alt tap, which would open
       a menu loop); with its EDIT focused and no menu loop, SendInput's KEYEVENTF_UNICODE input of BMP, surrogate
       and control units must arrive exactly (SendInput's count and GetLastError recorded). Control: another window
-      in front, its own EDIT focused, takes `zz`, and the probe's text is unchanged. Nothing is injected unless
-      this thread is on the input desktop.
+      in front, its own EDIT focused, takes `zz`, and the probe's text is unchanged. Then the noctty arm: the
+      measurement copy, foreground, is typed `echo <nonce>>"<file>"` and Enter, and the file must hold the nonce;
+      control: the same with a probe window in front, whose EDIT takes the line while no file appears. The BMP and
+      surrogate units go through noctty into a file of their own as extra facts. P1 passes only with both arms. Every
+      stimulus is sent only from the input desktop to its target in front, and counts only when SendInput inserted
+      every event.
   P2  a window filled with #FF00FF is read back from the screen, one pixel at a time on a grid. Controls: covered
       by another window, and minimised: the same points are not that colour.
   P3  the test-tools copy with renderer = d3d11-warp, for the whole run of every arm: the `d3d11` scope's
@@ -54,9 +68,10 @@ Default desktop:
       other pixels reach the seed text's floor, then a fresh snapshot requested after the readback has
       swap_buffers_count 0. The private withheld-seed readback must miss that floor (the readback check's own
       control). A failed readback, a missing snapshot or a missing record is "inconclusive"; a paint count is not
-      evidence.
+      evidence. A snapshot counter the record lacks is missing (P3 inconclusive), never an observed 0; the withheld
+      readback counts only as the fixture's own background with a measured ink fraction below the floor.
   P4  the copy's env-gated HrInit record (NOCTTY_GUI_PROBE_TRACE, src/os/gui_probe_trace.zig) on the ready app:
-      S_OK on Default; the private desktop's failing HRESULT the control.
+      S_OK on Default; the private desktop's HRESULT must be FAILED (severity bit set), the control.
   P5  the toast setting the notifier reads for the measurement build's identities (the product notifier and the
       .measure process AUMID), and their history counts before the run and after noctty's normal exit, on Default
       and on the private desktop.
@@ -95,9 +110,8 @@ param(
     [string] $Run,
     [string] $DesktopName,
     [ValidateSet('q0', 'private-renderer', 'private-renderer-withheld')] [string] $Task = 'q0',
-    # The builds the driver's launcher gate allows (the outer half passes the hashes it checked).
-    [string] $MeasureSha256,
-    [string] $MeasureCliSha256,
+    # The test-tools build's hashes for the driver's launcher gate, used only on a GitHub-hosted runner. The
+    # measurement build's come from its receipt, which the driver validates itself.
     [string] $TestToolsSha256,
     [string] $TestToolsCliSha256,
     # A child that writes the name of its own thread's desktop to this file and exits (the Q0 controls).
@@ -181,6 +195,7 @@ public static class GuiProbeNative {
     [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int type, IntPtr info, uint size, IntPtr returned);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
     [DllImport("user32.dll", SetLastError=true)] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
@@ -403,6 +418,38 @@ public static class GuiProbeNative {
     }
     // null: the thread has no desktop (it never touched USER32).
     public static string ThreadDesktop(uint tid) { return Name(GetThreadDesktop(tid)); }
+    // A thread's desktop, classified: 0 named (in `name`), 1 none (GetThreadDesktop NULL: the thread never connected
+    // to USER, or exited; its error in `error`), 2 unreadable (access denied, or a desktop whose name cannot be read).
+    public static int ThreadDesktopState(uint tid, out string name, out int error) {
+        name = null; error = 0;
+        IntPtr h = GetThreadDesktop(tid);
+        if (h == IntPtr.Zero) { error = Marshal.GetLastWin32Error(); return error == 5 ? 2 : 1; } // ERROR_ACCESS_DENIED
+        name = Name(h);
+        return name == null ? 2 : 0;
+    }
+    // Whether the process's image sits in `folder` (QueryFullProcessImageName), compared here so no path leaves.
+    public static bool ImageInFolder(int pid, string folder) {
+        IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (h == IntPtr.Zero) return false;
+        try {
+            var s = new StringBuilder(32768); uint size = (uint)s.Capacity;
+            if (!QueryFullProcessImageNameW(h, 0, s, ref size)) return false;
+            string dir = System.IO.Path.GetDirectoryName(s.ToString());
+            return dir != null && string.Equals(System.IO.Path.GetFullPath(dir).TrimEnd('\\'), System.IO.Path.GetFullPath(folder).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        } finally { CloseHandle(h); }
+    }
+    // JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (48 bytes): TotalProcesses at 36, ActiveProcesses at 40,
+    // TotalTerminatedProcesses at 44. Zero: this process's own job. Null when the query fails.
+    public static int[] JobAccounting(IntPtr job) {
+        IntPtr buffer = Marshal.AllocHGlobal(48);
+        try {
+            if (!QueryInformationJobObject(job, 1, buffer, 48, IntPtr.Zero)) return null;
+            return new int[] { Marshal.ReadInt32(buffer, 36), Marshal.ReadInt32(buffer, 40), Marshal.ReadInt32(buffer, 44) };
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
+    // Whether this process runs inside a job (any job).
+    public static bool InJob() { bool r; return IsProcessInJob(new IntPtr(-1), IntPtr.Zero, out r) && r; }
+    public static bool ForegroundIs(IntPtr hwnd) { return hwnd != IntPtr.Zero && GetForegroundWindow() == hwnd; }
     public static string OwnDesktop() { return ThreadDesktop(GetCurrentThreadId()); }
     // OpenInputDesktop's own outcome (`opened`, GetLastError when not) and the input desktop's name.
     public static string InputDesktop(out int error, out bool opened) {
@@ -550,6 +597,33 @@ public static class GuiProbeNative {
         Thread.Sleep(200);
         return GetForegroundWindow() == hwnd;
     }
+    // The foreground without any injected input (P2's path): SetForegroundWindow, then the attach fallback.
+    public static bool ForegroundWithoutInput(IntPtr hwnd, out bool setResult) {
+        setResult = SetForegroundWindow(hwnd);
+        if (GetForegroundWindow() != hwnd) {
+            int owner; uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out owner);
+            uint me = GetCurrentThreadId();
+            bool attached = foregroundThread != 0 && foregroundThread != me && AttachThreadInput(me, foregroundThread, true);
+            try { BringWindowToTop(hwnd); setResult = SetForegroundWindow(hwnd) || setResult; }
+            finally { if (attached) AttachThreadInput(me, foregroundThread, false); }
+        }
+        Thread.Sleep(200);
+        return GetForegroundWindow() == hwnd;
+    }
+    // `line`'s units as KEYEVENTF_UNICODE downs and ups, then Enter (VK_RETURN, scan 0x1C) down and up: one SendInput;
+    // its count (2 * length + 2 when every event was inserted), with GetLastError.
+    public static uint SendLine(string line, out int error) {
+        var inputs = new Input[line.Length * 2 + 2];
+        for (int i = 0; i < line.Length; i++) {
+            inputs[2 * i] = Key(0, line[i], 0x4);
+            inputs[2 * i + 1] = Key(0, line[i], 0x4 | 0x2);
+        }
+        inputs[line.Length * 2] = Key(0x0D, 0x1C, 0);
+        inputs[line.Length * 2 + 1] = Key(0x0D, 0x1C, 0x2);
+        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
+        error = Marshal.GetLastWin32Error();
+        return sent;
+    }
     // Each UTF-16 unit of `text` as a KEYEVENTF_UNICODE down and up; returns SendInput's count, with GetLastError.
     public static uint SendUnicode(string text, out int error) {
         var inputs = new Input[text.Length * 2];
@@ -677,10 +751,12 @@ function Get-SessionFacts([string] $Private) {
     $inputError = 0; $inputOpened = $false
     $own = [GuiProbeNative]::OwnDesktop()
     $inputDesktop = [GuiProbeNative]::InputDesktop([ref]$inputError, [ref]$inputOpened)
+    $stationFlags = [GuiProbeNative]::StationFlags()
     return [ordered]@{
         sessionId = [GuiProbeNative]::SessionId()
         activeConsoleSessionId = [GuiProbeNative]::ConsoleSessionId()
-        stationVisible = (([GuiProbeNative]::StationFlags() -band 1) -eq 1)
+        # Null when the station query failed (StationFlags -1): never read as visible.
+        stationVisible = $(if ($stationFlags -eq -1) { $null } else { ($stationFlags -band 1) -eq 1 })
         threadDesktop = Get-DesktopKind $own $Private
         # Whether OpenInputDesktop succeeds here at all (design v6), then which desktop it names.
         openInputDesktopSucceeded = $inputOpened
@@ -692,6 +768,20 @@ function Get-SessionFacts([string] $Private) {
         screenHeight = [GuiProbeNative]::Metric(1)
         systemDpi = [GuiProbeNative]::SystemDpi()
     }
+}
+
+# Whether this thread is on the input desktop now: OpenInputDesktop succeeds and names this thread's desktop. Every
+# stimulus checks it right before it is sent.
+function Test-ProbeOnInputDesktop {
+    $inputError = 0; $opened = $false
+    $own = [GuiProbeNative]::OwnDesktop()
+    $inputName = [GuiProbeNative]::InputDesktop([ref]$inputError, [ref]$opened)
+    return $opened -and $null -ne $own -and $null -ne $inputName -and [string]::Equals($own, $inputName, [StringComparison]::Ordinal)
+}
+
+# An HRESULT the record wrote ("0x........") with its severity bit set: FAILED(hr).
+function Test-ProbeHResultFailed([AllowNull()] [string] $Hr) {
+    return $null -ne $Hr -and $Hr -match '\A0x[0-9a-f]{8}\z' -and ([Convert]::ToUInt32($Hr.Substring(2), 16) -band 0x80000000) -ne 0
 }
 
 # ---- launching the copy
@@ -927,7 +1017,7 @@ function Invoke-ProbeReadback([IntPtr] $Surface, [string] $CapturePath) {
     do {
         # Each attempt stands alone: what P3 reads is this attempt's, never an earlier capture's, so a capture that
         # later attempts cannot repeat ends the loop uncaptured. A seeded capture still ends it at once.
-        $facts.captured = $false; $facts.seeded = $false
+        $facts.captured = $false; $facts.seeded = $false; $facts.fixtureBackground = $false
         foreach ($key in @('width', 'height', 'colors', 'dominant', 'inkFraction', 'status')) { $facts.Remove($key) }
         foreach ($path in @($CapturePath, $statusPath)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
         $facts.attempts++
@@ -940,6 +1030,9 @@ function Invoke-ProbeReadback([IntPtr] $Surface, [string] $CapturePath) {
             $facts.width = $frame.Width; $facts.height = $frame.Height; $facts.colors = $frame.Colors
             $facts.dominant = '#{0:x6}' -f $frame.Dominant
             $facts.inkFraction = [Math]::Round(1 - $frame.Seed / [double]$frame.Pixels, 4)
+            # The fixture's own frame: its seeded background is the most frequent colour (what a withheld readback
+            # must also show before its ink can count as below the floor).
+            $facts.fixtureBackground = $frame.Dominant -eq $script:SeedBackground
             $facts.status = [ordered]@{
                 backend = [string]$status.backend; warp = [bool]$status.warp; frames = [long]$status.frames
                 drawCalls = [long]$status.draw_calls; presents = [long]$status.presents; occluded = [long]$status.occluded
@@ -1000,7 +1093,7 @@ $rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('meas
 }
 
 # Every process of the job now, with its role, its startup desktop and its threads' desktops.
-function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private) {
+function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [string] $CopyFolder) {
     $all = @{}
     foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
     $rows = [Collections.Generic.List[object]]::new()
@@ -1018,10 +1111,15 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private) {
             }
         }
         $threadKinds = [Collections.Generic.List[string]]::new()
-        $without = 0
+        $without = 0; $unreadable = 0
+        $noDesktopErrors = [Collections.Generic.SortedSet[int]]::new()
         foreach ($tid in [GuiProbeNative]::Threads($id)) {
-            $name = [GuiProbeNative]::ThreadDesktop($tid)
-            if ($null -eq $name) { $without++ } else { $threadKinds.Add((Get-DesktopKind $name $Private)) }
+            $name = $null; $readError = 0
+            switch ([GuiProbeNative]::ThreadDesktopState($tid, [ref]$name, [ref]$readError)) {
+                0 { $threadKinds.Add((Get-DesktopKind $name $Private)) }
+                1 { $without++; [void]$noDesktopErrors.Add($readError) }
+                default { $unreadable++ }
+            }
         }
         $rows.Add([ordered]@{
             pid = $id
@@ -1030,7 +1128,12 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private) {
             role = $role
             startupDesktop = Get-DesktopKind ([GuiProbeNative]::StartupDesktop($id)) $Private
             threadDesktops = @($threadKinds | Sort-Object -Unique)
+            # No USER desktop (GetThreadDesktop NULL, its errors listed) is kept apart from an unreadable one.
             threadsWithoutDesktop = $without
+            noDesktopErrors = @($noDesktopErrors)
+            threadsUnreadable = $unreadable
+            # The ConPTY host from the copy's own folder (the bundled OpenConsole.exe), compared without a path.
+            imageInCopyFolder = $(if ($CopyFolder) { [GuiProbeNative]::ImageInFolder($id, $CopyFolder) } else { $null })
         })
     }
     return $rows
@@ -1076,11 +1179,16 @@ function Stop-ProbeProcesses($Processes, [IntPtr] $Job) {
     return $outcomes
 }
 
-# Ends the copy with WM_CLOSE to its windows (a normal exit, which writes the render trace's last snapshot); true
-# when it exited within the bound.
+# Ends the copy with WM_CLOSE to its windows, which writes the render trace's last snapshot. A normal exit is all
+# three: WM_CLOSE posted to at least one host window and every post succeeded, the process ended inside the bound,
+# and its exit code is 0. A crash before or during the close, or a forced stop, is not one.
 function Close-ProbeCopy($Pi, [int] $Seconds) {
-    foreach ($h in @([HiddenLocal]::Hosts($Pi.pid))) { [void][GuiProbeNative]::PostClose($h) }
-    return [GuiProbeNative]::WaitForSingleObject($Pi.process, [uint32]($Seconds * 1000)) -eq 0
+    $hosts = @([HiddenLocal]::Hosts($Pi.pid))
+    $posted = $hosts.Count -gt 0
+    foreach ($h in $hosts) { if (-not [GuiProbeNative]::PostClose($h)) { $posted = $false } }
+    $exited = [GuiProbeNative]::WaitForSingleObject($Pi.process, [uint32]($Seconds * 1000)) -eq 0
+    $code = $(if ($exited) { [long][GuiProbeNative]::ExitCode($Pi.process) } else { $null })
+    return [ordered]@{ closePosted = $posted; exitedInWait = $exited; exitCode = $code; normal = ($posted -and $exited -and $code -eq 0) }
 }
 
 # The render trace as the copy last wrote it, or null while it is absent or mid-write.
@@ -1112,11 +1220,19 @@ function Get-TraceSequence([string] $Path) {
     return $(if ($null -ne $current) { [uint64]$current.snapshot_sequence } else { [uint64]0 })
 }
 
+# A snapshot counter, or null when the snapshot does not carry it as a number: a missing counter is missing, never an
+# observed 0.
+function Get-TraceCounter($Snapshot, [string] $Name) {
+    $property = $Snapshot.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value -or $property.Value -isnot [ValueType] -or $property.Value -is [bool]) { return $null }
+    return [long]$property.Value
+}
+
 function Get-SnapshotFacts($Snapshot) {
     if ($null -eq $Snapshot) { return $null }
     return [ordered]@{
-        sequence = [long]$Snapshot.snapshot_sequence; swapBuffers = [long]$Snapshot.swap_buffers_count
-        lastSwapOutputBytes = [long]$Snapshot.last_swap_process_output_bytes; paintDraws = [long]$Snapshot.paint_draw_count
+        sequence = Get-TraceCounter $Snapshot 'snapshot_sequence'; swapBuffers = Get-TraceCounter $Snapshot 'swap_buffers_count'
+        lastSwapOutputBytes = Get-TraceCounter $Snapshot 'last_swap_process_output_bytes'; paintDraws = Get-TraceCounter $Snapshot 'paint_draw_count'
     }
 }
 
@@ -1146,7 +1262,7 @@ function Wait-ProbePresented([IntPtr] $Surface, [string] $Path, [long] $MinBytes
 
 function Invoke-ProbeDriver {
     $script:RunRoot = $Run
-    $result = [ordered]@{ task = $Task }
+    $result = [ordered]@{ task = $Task; admitted = $true }
     try {
         $own = [GuiProbeNative]::OwnDesktop()
         if (-not [string]::Equals($own, $DesktopName, [StringComparison]::Ordinal)) { throw 'The driver is not on its private desktop.' }
@@ -1177,14 +1293,23 @@ function Invoke-ProbeDriver {
                 Start-Sleep -Milliseconds 250
             } while ([datetime]::UtcNow -lt $deadline)
             Start-Sleep -Seconds 2
-            $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName
+            $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName $Bin
+            # The job's own count beside the sample: a descendant that ran and exited before the sample (cmd's
+            # utf8-console `chcp`, the positive control's child) is counted, never hidden.
+            $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+            $result.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
+            $result.sampledProcesses = @($processes).Count
+            $result.jobProcessesNotSampled = $(if ($null -eq $accounting) { $null } else { $accounting[0] - @($processes).Count })
             # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
             # enumeration must list.
             $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
             try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd } finally { [GuiProbeNative]::Close($sentinel) }
             $result.windowTotals = $windows.totals
             $result.privateSentinelSeen = $windows.privateSentinelSeen
-            $result.processes = @($processes | ForEach-Object { [ordered]@{ image = $_.image; role = $_.role; startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops; threadsWithoutDesktop = $_.threadsWithoutDesktop } })
+            $result.processes = @($processes | ForEach-Object { [ordered]@{
+                image = $_.image; role = $_.role; startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops
+                threadsWithoutDesktop = $_.threadsWithoutDesktop; noDesktopErrors = $_.noDesktopErrors; threadsUnreadable = $_.threadsUnreadable
+                imageInCopyFolder = $_.imageInCopyFolder } })
             $result.windows = $windows.windows
             $result.windowCounts = $windows.counts
             $result.inventoryComplete = $windows.complete
@@ -1224,11 +1349,12 @@ function Invoke-ProbeDriver {
                 $result.snapshotAfterReadback = Get-SnapshotFacts (Request-ProbeTraceSnapshot $surface $trace (Get-TraceSequence $trace))
             }
             Start-Sleep -Seconds 2
-            $result.normalExit = Close-ProbeCopy $pi 20
-            $result.exitCode = [GuiProbeNative]::ExitCode($pi.process)
+            $result.close = Close-ProbeCopy $pi 20
+            $result.normalExit = $result.close.normal
+            $result.exitCode = $result.close.exitCode
             $result.log = Read-ProbeLog (Join-Path $Run 'noctty-private.log')
             $result.trace = Read-RenderTrace $trace
-            $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName
+            $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName $Bin
             $result.stopped = Stop-ProbeProcesses $processes ([IntPtr]::Zero)
             [void][GuiProbeNative]::CloseHandle($pi.process)
             # P5's private sample after a normal exit only; a forced stop is no such sample.
@@ -1243,10 +1369,45 @@ function Invoke-ProbeDriver {
     return $(if ($result.error) { 1 } else { 0 })
 }
 
+# The driver's own admission, before it starts any copy: it takes nothing on trust from its caller. It validates the
+# measurement build the way the outer half does (generation and receipt, then the app and the CLI against the
+# receipt's hashes) and takes the gate's hashes from that receipt, not from parameters. It must not be on Default or
+# on the input desktop, and it must run inside a job. The test-tools hashes come from parameters only on a
+# GitHub-hosted runner, the one place the gate allows that build. Null when admitted, else the refusal.
+function Get-ProbeDriverRefusal {
+    if (-not $MeasureRepo) { return 'no measurement repository' }
+    try {
+        $measureExe = Get-InteractiveWin11MeasureExePath -RepoRoot $MeasureRepo
+        Assert-InteractiveWin11MeasureBuild -RepoRoot $MeasureRepo -ExePath $measureExe
+        $receipt = Get-Content -LiteralPath (Get-InteractiveWin11MeasureLayout $MeasureRepo).Receipt -Raw | ConvertFrom-Json
+        if ((Get-ProbeHash $measureExe) -cne [string]$receipt.ExeSHA256 -or (Get-ProbeHash (Join-Path (Split-Path -Parent $measureExe) 'noctty.com')) -cne [string]$receipt.CliSHA256) {
+            return 'the measurement build does not match its receipt'
+        }
+        $script:MeasureExeSha256 = [string]$receipt.ExeSHA256
+        $script:MeasureCliSha256 = [string]$receipt.CliSHA256
+    } catch { return 'the measurement build did not validate' }
+    $hostedRun = Test-ProbeHosted
+    $script:TestToolsExeSha256 = $(if ($hostedRun -and $TestToolsSha256) { $TestToolsSha256 } else { $null })
+    $script:TestToolsCliSha256 = $(if ($hostedRun -and $TestToolsCliSha256) { $TestToolsCliSha256 } else { $null })
+    $own = [GuiProbeNative]::OwnDesktop()
+    if ($null -eq $own) { return 'its desktop is unreadable' }
+    if ((Get-DesktopKind $own '') -eq 'Default') { return 'it is on Default' }
+    $inputError = 0; $opened = $false
+    $inputName = [GuiProbeNative]::InputDesktop([ref]$inputError, [ref]$opened)
+    if (-not $opened -or $null -eq $inputName) { return 'the input desktop is unreadable' }
+    if ([string]::Equals($own, $inputName, [StringComparison]::Ordinal)) { return 'it is on the input desktop' }
+    if (-not [GuiProbeNative]::InJob()) { return 'it is in no job' }
+    return $null
+}
+
 if ($Driver) {
-    $script:MeasureExeSha256 = $MeasureSha256; $script:MeasureCliSha256 = $MeasureCliSha256
-    $script:TestToolsExeSha256 = $TestToolsSha256; $script:TestToolsCliSha256 = $TestToolsCliSha256
     $script:WorkRoot = $Run
+    $refusal = Get-ProbeDriverRefusal
+    if ($refusal) {
+        Write-ProbeRecord ([ordered]@{ task = $Task; admitted = $false; error = 'driver refused' }) (Join-Path $Run "driver-$Task.json")
+        [IO.File]::WriteAllText((Join-Path $Run 'driver-error.txt'), "The driver refused itself: $refusal.")
+        exit 1
+    }
     exit (Invoke-ProbeDriver)
 }
 
@@ -1272,7 +1433,7 @@ function Invoke-ProbeDriverRun([string] $Name, [string] $StageBin, [string] $Tas
     try {
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $StageBin -Run $runDir -DesktopPrefix 'noctty-gui-probe-' -TimeoutSeconds 240 `
             -Label "GUI probe $Name" -PassDesktopName -GuardClipboard `
-            -DriverArguments @("-Task $TaskName", "-MeasureSha256 $script:MeasureExeSha256", "-MeasureCliSha256 $script:MeasureCliSha256",
+            -DriverArguments @("-Task $TaskName", ('-MeasureRepo "{0}"' -f $MeasureRepo),
                 $(if ($script:TestToolsExeSha256) { "-TestToolsSha256 $script:TestToolsExeSha256 -TestToolsCliSha256 $script:TestToolsCliSha256" }))
     } catch { $failure = 'the hidden driver or its guards failed' ; [IO.File]::WriteAllText((Join-Path $Work "$Name-outer-error.txt"), $_.Exception.Message) }
     $statePath = Join-Path $runDir 'startup-state.json'
@@ -1385,14 +1546,86 @@ function Get-Verdict([bool] $Positive, [bool] $Control, [bool] $HaveRecords) {
     return 'fail'
 }
 
-# One Default-desktop copy of the test-tools build in an owned job, ended by WM_CLOSE. The seeded arm waits for a
-# presented frame that committed the seed; the withheld arm for any presented output, then settles 5 s so its shell
-# has printed all it will. Only the seeded arm reads the toast facts (P5).
-function Invoke-DefaultCopy([string] $TestToolsStageBin, [string] $Name, [bool] $Withheld) {
+# P1's noctty arm, on a ready Default-desktop copy (design §9: "a probe window ... then noctty"). The copy is made
+# foreground (GetForegroundWindow confirms it) and typed, through SendInput, an ASCII `echo <nonce>>"<file>"` and
+# Enter: the positive is that file holding the nonce. The BMP and surrogate units then go the same way into a file of
+# their own, recorded as extra facts that no verdict reads. Control: a probe window in front of the copy, its EDIT
+# focused, takes the same kind of line with a nonce of its own: the line lands in that EDIT and its file never
+# appears. Every stimulus goes only to its target in front, from the input desktop, and counts only when SendInput
+# inserted every event.
+function Invoke-P1NocttyStimulus([IntPtr] $HostWindow, [string] $RunDir) {
+    $arm = [ordered]@{ injected = $false }
+    $cover = $null
+    try {
+        # The shell's prompt is up before anything is typed.
+        Start-Sleep -Seconds 3
+        $unlockSent = [uint32]0; $setResult = $false
+        $arm.foreground = [GuiProbeNative]::Foreground($HostWindow, [ref]$unlockSent, [ref]$setResult)
+        $arm.unlockInputSent = $unlockSent
+        $arm.onInputDesktop = Test-ProbeOnInputDesktop
+        if ($arm.foreground -and $arm.onInputDesktop -and [GuiProbeNative]::ForegroundIs($HostWindow)) {
+            $win32Error = 0
+            $nonce = 'p1' + [guid]::NewGuid().ToString('N')
+            $file = Join-Path $RunDir 'p1-noctty.txt'
+            $line = 'echo ' + $nonce + '>>"' + $file + '"'
+            $arm.expectedEvents = 2 * $line.Length + 2
+            $arm.sent = [GuiProbeNative]::SendLine($line, [ref]$win32Error); $arm.lastError = $win32Error
+            $arm.injected = $true
+            $null = Wait-Until { Test-Path -LiteralPath $file } 10
+            Start-Sleep -Milliseconds 300
+            $arm.fileWritten = Test-Path -LiteralPath $file
+            $arm.nonceInFile = $arm.fileWritten -and [string]::Equals(([IO.File]::ReadAllText($file)).Trim(), $nonce, [StringComparison]::Ordinal)
+            # Extra facts: the BMP and surrogate units through the same path. cmd writes them in the code page
+            # utf8-console set (65001); no verdict reads them.
+            $unicode = [string][char]0x00E9 + [char]0xD83D + [char]0xDE00
+            $unicodeFile = Join-Path $RunDir 'p1-noctty-unicode.txt'
+            if ((Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($HostWindow)) {
+                $unicodeLine = 'echo ' + $unicode + '>>"' + $unicodeFile + '"'
+                $arm.unicodeExpectedEvents = 2 * $unicodeLine.Length + 2
+                $arm.unicodeSent = [GuiProbeNative]::SendLine($unicodeLine, [ref]$win32Error)
+                $null = Wait-Until { Test-Path -LiteralPath $unicodeFile } 10
+                Start-Sleep -Milliseconds 300
+                $echoed = $(if (Test-Path -LiteralPath $unicodeFile) { ([IO.File]::ReadAllText($unicodeFile, [Text.UTF8Encoding]::new($false))).Trim() } else { $null })
+                $arm.unicodeUnitsInFile = @($(if ($null -ne $echoed) { $echoed.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ } }))
+                $arm.unicodeExact = [string]::Equals($echoed, $unicode, [StringComparison]::Ordinal)
+            }
+            # Control: a probe window in front of the copy takes the line; the copy's shell never sees it.
+            $cover = [GuiProbeNative]::Open('NocttyGuiProbeNocttyCover', 0xFFFFFF, 120, 120, 420, 240, $true)
+            $arm.coverForeground = [GuiProbeNative]::Foreground($cover.Hwnd, [ref]$unlockSent, [ref]$setResult)
+            $arm.coverFocusOnEdit = [GuiProbeNative]::FocusOnEdit($cover)
+            $arm.coverMenuModeBeforeSend = [GuiProbeNative]::MenuMode($cover)
+            if ($arm.coverForeground -and $arm.coverFocusOnEdit -and -not $arm.coverMenuModeBeforeSend -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($cover.Hwnd)) {
+                $controlNonce = 'p1c' + [guid]::NewGuid().ToString('N')
+                $controlFile = Join-Path $RunDir 'p1-noctty-control.txt'
+                $controlLine = 'echo ' + $controlNonce + '>>"' + $controlFile + '"'
+                $arm.coverExpectedEvents = 2 * $controlLine.Length + 2
+                $arm.coverSent = [GuiProbeNative]::SendLine($controlLine, [ref]$win32Error)
+                Start-Sleep -Seconds 3
+                $arm.controlFileAbsent = -not (Test-Path -LiteralPath $controlFile)
+                $coverText = [GuiProbeNative]::Text($cover)
+                $arm.coverTookLine = $null -ne $coverText -and $coverText.StartsWith($controlLine, [StringComparison]::Ordinal)
+            }
+        }
+    } catch {
+        $arm.failed = $true
+        Write-Host "gui probe: P1's noctty arm failed: $($_.Exception.Message)"
+    } finally { [GuiProbeNative]::Close($cover) }
+    $arm.verdict = Get-Verdict `
+        ([bool]$arm.nonceInFile -and $null -ne $arm.sent -and $arm.sent -eq $arm.expectedEvents) `
+        ([bool]$arm.controlFileAbsent -and [bool]$arm.coverTookLine -and $null -ne $arm.coverSent -and $arm.coverSent -eq $arm.coverExpectedEvents) `
+        ([bool]$arm.injected -and $null -ne $arm.coverSent)
+    return $arm
+}
+
+# One Default-desktop copy in an owned job, ended by WM_CLOSE. The seeded P3 arm waits for a presented frame that
+# committed the seed; the withheld arm for any presented output, then settles 5 s so its shell has printed all it
+# will. Only the seeded arm reads the toast facts (P5). With `InputArm`, the copy has no fixture and runs P1's noctty
+# arm instead.
+function Invoke-DefaultCopy([string] $StageBin, [string] $Name, [bool] $Withheld, [bool] $InputArm = $false) {
     $defaultRun = Join-Path $Work $Name
     [void](New-Item -ItemType Directory -Path $defaultRun)
     $script:RunRoot = $defaultRun
-    Copy-Portable $TestToolsStageBin (Join-Path $defaultRun 'copy\bin')
+    Copy-Portable $StageBin (Join-Path $defaultRun 'copy\bin')
     foreach ($name in @('localappdata', 'appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $defaultRun $name)) }
     $job = [HiddenLocal]::CreateOwnedJob()
     $savedLocal = $env:LOCALAPPDATA; $savedRoaming = $env:APPDATA
@@ -1403,32 +1636,35 @@ function Invoke-DefaultCopy([string] $TestToolsStageBin, [string] $Name, [bool] 
     $historyGuard = Start-WindowsHarnessHistoryGuard -Harness (Split-Path -Leaf $PSCommandPath)
     $cleanupFailed = $false
     try {
-        if (-not $Withheld) { $run.toastBefore = Get-ToastFacts -Desktop 'WinSta0\Default' -Job $job }
-        $seed = Join-Path $defaultRun 'seed.txt'
-        Write-ProbeSeed $seed $Withheld
+        $fixture = -not $InputArm
+        if ($fixture -and -not $Withheld) { $run.toastBefore = Get-ToastFacts -Desktop 'WinSta0\Default' -Job $job }
+        $seed = $(if ($fixture) { Join-Path $defaultRun 'seed.txt' } else { $null })
+        if ($fixture) { Write-ProbeSeed $seed $Withheld }
         $env:LOCALAPPDATA = Join-Path $defaultRun 'localappdata'; $env:APPDATA = Join-Path $defaultRun 'appdata'
         $trace = Join-Path $defaultRun 'render.json'
         $capture = Join-Path $defaultRun 'frame.bmp'
-        $pi = Start-ProbeCopy -Exe (Join-Path $defaultRun 'copy\bin\noctty.exe') -Desktop 'WinSta0\Default' -LogPath (Join-Path $defaultRun 'noctty.log') -Job $job -TracePath $trace -CapturePath $capture -SeedPath $seed
+        $pi = Start-ProbeCopy -Exe (Join-Path $defaultRun 'copy\bin\noctty.exe') -Desktop 'WinSta0\Default' -LogPath (Join-Path $defaultRun 'noctty.log') -Job $job -TracePath $trace -CapturePath $(if ($fixture) { $capture } else { $null }) -SeedPath $seed
         $run.launchPolicy = $script:LastLaunchPolicy
         $env:LOCALAPPDATA = $savedLocal; $env:APPDATA = $savedRoaming
         $hostWindow = Wait-ProbeHost $pi.pid 45
         $run.copyReady = $hostWindow -ne [IntPtr]::Zero
-        $run.shell = Get-ShellLaunchFacts $pi.pid $true
-        if ($run.copyReady) {
+        $run.shell = Get-ShellLaunchFacts $pi.pid $fixture
+        if ($run.copyReady -and $fixture) {
             $surface = @([HiddenLocal]::Surfaces($hostWindow))[0]
             $run.snapshot = $(if ($Withheld) { Wait-ProbePresented $surface $trace 1 5 } else { Wait-ProbePresented $surface $trace $script:SeedBytes 0 })
             $run.readback = Invoke-ProbeReadback $surface $capture
         }
-        $run.normalExit = Close-ProbeCopy $pi 20
-        $run.exitCode = [GuiProbeNative]::ExitCode($pi.process)
+        if ($run.copyReady -and $InputArm) { $run.p1 = Invoke-P1NocttyStimulus $hostWindow $defaultRun }
+        $run.close = Close-ProbeCopy $pi 20
+        $run.normalExit = $run.close.normal
+        $run.exitCode = $run.close.exitCode
         $run.log = Read-ProbeLog (Join-Path $defaultRun 'noctty.log')
         $run.trace = Read-RenderTrace $trace
         $left = @([GuiProbeNative]::JobPids($job) | ForEach-Object { [ordered]@{ pid = $_; creation = [GuiProbeNative]::CreationTime($_); role = 'noctty-descendant' } })
         $run.stopped = Stop-ProbeProcesses $left $job
         [void][GuiProbeNative]::CloseHandle($pi.process)
         # P5's after sample only after a normal exit; a forced stop is no such sample.
-        if (-not $Withheld) { $run.toastAfter = $(if ($run.normalExit) { Get-ToastFacts -Desktop 'WinSta0\Default' -Job $job } else { $null }) }
+        if ($fixture -and -not $Withheld) { $run.toastAfter = $(if ($run.normalExit) { Get-ToastFacts -Desktop 'WinSta0\Default' -Job $job } else { $null }) }
     } catch {
         $run.failed = $true
         Write-Host "gui probe: the Default-desktop copy $Name failed: $($_.Exception.Message)"
@@ -1470,8 +1706,9 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
             # The keyboard focus must be the probe's EDIT before anything is sent (Greptile).
             $p1.focusOnEdit = [GuiProbeNative]::FocusOnEdit($probe)
             $p1.menuModeBeforeSend = [GuiProbeNative]::MenuMode($probe)
-            if ($p1.foreground -and $p1.focusOnEdit -and -not $p1.menuModeBeforeSend) {
+            if ($p1.foreground -and $p1.focusOnEdit -and -not $p1.menuModeBeforeSend -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($probe.Hwnd)) {
                 $win32Error = 0
+                $p1.expectedEvents = 2 * $text.Length
                 $p1.sent = [GuiProbeNative]::SendUnicode($text, [ref]$win32Error); $p1.lastError = $win32Error; $p1.injected = $true
                 $null = Wait-Until { [string]::Equals([GuiProbeNative]::Text($probe), $text, [StringComparison]::Ordinal) } 5
                 $received = [GuiProbeNative]::Text($probe)
@@ -1482,21 +1719,37 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
                 $p1.coverForeground = [GuiProbeNative]::Foreground($cover.Hwnd, [ref]$unlockSent, [ref]$setResult)
                 $p1.coverFocusOnEdit = [GuiProbeNative]::FocusOnEdit($cover)
                 $p1.coverMenuModeBeforeSend = [GuiProbeNative]::MenuMode($cover)
-                $p1.coverSent = [GuiProbeNative]::SendUnicode('zz', [ref]$win32Error)
-                Start-Sleep -Milliseconds 800
-                $p1.probeUnchangedWithCoverInFront = [string]::Equals([GuiProbeNative]::Text($probe), $received, [StringComparison]::Ordinal)
-                $coverText = [GuiProbeNative]::Text($cover)
-                $p1.coverReceived = [string]::Equals($coverText, 'zz', [StringComparison]::Ordinal)
-                $p1.coverReceivedUnits = @($(if ($null -ne $coverText) { $coverText.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ } }))
+                # The cover's stimulus too goes only to the cover in front, from the input desktop.
+                if ($p1.coverForeground -and $p1.coverFocusOnEdit -and -not $p1.coverMenuModeBeforeSend -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($cover.Hwnd)) {
+                    $p1.coverSent = [GuiProbeNative]::SendUnicode('zz', [ref]$win32Error)
+                    Start-Sleep -Milliseconds 800
+                    $p1.probeUnchangedWithCoverInFront = [string]::Equals([GuiProbeNative]::Text($probe), $received, [StringComparison]::Ordinal)
+                    $coverText = [GuiProbeNative]::Text($cover)
+                    $p1.coverReceived = [string]::Equals($coverText, 'zz', [StringComparison]::Ordinal)
+                    $p1.coverReceivedUnits = @($(if ($null -ne $coverText) { $coverText.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ } }))
+                }
             }
         } catch {
             $p1.failed = $true
             Write-Host "gui probe: P1 failed: $($_.Exception.Message)"
         } finally { [GuiProbeNative]::Close($cover); [GuiProbeNative]::Close($probe) }
     }
-    # The control counts only when the cover itself took the stimulus: in front, its EDIT focused, and `zz` in it.
-    $p1.verdict = Get-Verdict ([bool]$p1.receivedExactly) ([bool]$p1.coverForeground -and [bool]$p1.coverFocusOnEdit -and -not [bool]$p1.coverMenuModeBeforeSend -and [bool]$p1.coverReceived -and [bool]$p1.probeUnchangedWithCoverInFront) ([bool]$p1.injected)
+    # The EDIT arm: every event inserted, and the control counts only when the cover itself took its stimulus (in
+    # front, its EDIT focused, no menu loop, both events of each unit inserted, and `zz` in it).
+    $p1.editVerdict = Get-Verdict ([bool]$p1.receivedExactly -and $null -ne $p1.sent -and $p1.sent -eq $p1.expectedEvents) `
+        ([bool]$p1.coverForeground -and [bool]$p1.coverFocusOnEdit -and -not [bool]$p1.coverMenuModeBeforeSend -and $null -ne $p1.coverSent -and $p1.coverSent -eq 4 -and [bool]$p1.coverReceived -and [bool]$p1.probeUnchangedWithCoverInFront) `
+        ([bool]$p1.injected -and $null -ne $p1.coverSent)
     $d3.p1 = $p1
+
+    # P1's noctty arm: the measurement copy on this desktop, typed into through SendInput.
+    $script:Stage = 'd3-p1-noctty'
+    $nocttyInput = Invoke-DefaultCopy $StageBin 'p1-noctty' $false $true
+    $d3.p1NocttyCopy = $nocttyInput
+    $p1.noctty = $nocttyInput.p1
+    Assert-ProbeGuards $nocttyInput 'd3-p1-noctty'
+    # P1 passes only with both arms; a failed arm fails it, anything else is inconclusive.
+    $armVerdicts = @($p1.editVerdict, $(if ($null -ne $p1.noctty) { $p1.noctty.verdict } else { 'inconclusive' }))
+    $p1.verdict = $(if ($armVerdicts -contains 'fail') { 'fail' } elseif (@($armVerdicts | Where-Object { $_ -ne 'pass' }).Count -eq 0) { 'pass' } else { 'inconclusive' })
 
     # P2, the screen read back, one pixel at a time on a 5 x 5 grid of the window's client area.
     $script:Stage = 'd3-p2'
@@ -1518,8 +1771,9 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     try {
         # COLORREF is 0x00BBGGRR: #FF00FF.
         $color = [GuiProbeNative]::Open('NocttyGuiProbeColor', 0xFF00FF, 160, 160, 400, 300, $false)
-        $unlockSent = [uint32]0; $setResult = $false
-        $p2.foreground = [GuiProbeNative]::Foreground($color.Hwnd, [ref]$unlockSent, [ref]$setResult)
+        # The foreground without injected input: P2 sends no stimulus at all.
+        $setResult = $false
+        $p2.foreground = [GuiProbeNative]::ForegroundWithoutInput($color.Hwnd, [ref]$setResult)
         Start-Sleep -Milliseconds 500
         # The same 25 screen points for every read, taken while the window shows.
         $points = @(for ($row = 0; $row -lt 5; $row++) { for ($column = 0; $column -lt 5; $column++) { [GuiProbeNative]::GridPoint($color, 5, $row, $column) } })
@@ -1547,11 +1801,11 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
 
     # P3, P4 and P5 on this (Default) desktop: the seeded fixture, then the same with the seed withheld.
     $script:Stage = 'd3-default'
-    $interactive = Invoke-DefaultCopy $TestToolsStageBin 'default' $false
+    $interactive = Invoke-DefaultCopy $TestToolsStageBin 'default' $false $false
     $d3.default = $interactive
     Assert-ProbeGuards $interactive 'd3-default'
     $script:Stage = 'd3-default-withheld'
-    $withheldRun = Invoke-DefaultCopy $TestToolsStageBin 'default-withheld' $true
+    $withheldRun = Invoke-DefaultCopy $TestToolsStageBin 'default-withheld' $true $false
     $d3.defaultWithheld = $withheldRun
     Assert-ProbeGuards $withheldRun 'd3-default-withheld'
 
@@ -1573,8 +1827,17 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     $p3Shells = @($interactive.shell, $withheldRun.shell, $privateRun.driver.shell, $privateWithheldRun.driver.shell)
     $p3ShellsRead = @($p3Shells | Where-Object { $null -ne $_ -and [bool]$_.read }).Count -eq 4
     $p3ShellPolicy = @($p3Shells | Where-Object { $null -ne $_ -and [bool]$_.systemCmd -and [bool]$_.autoRunOffFirst -and [bool]$_.payloadAfterD }).Count -eq 4
-    $p3Records = $p3ShellsRead -and $null -ne $interactive.snapshot -and $null -ne $withheldRun.snapshot -and [bool]$privateReadback.captured -and
-        $null -ne $privateAfter -and [bool]$privateWithheldRun.driver.readback.captured -and
+    # Every counter P3 reads must be a number the snapshot carried; a missing one leaves P3 inconclusive.
+    $p3Counters = $null -ne $interactive.snapshot -and $null -ne $interactive.snapshot.swapBuffers -and $null -ne $interactive.snapshot.lastSwapOutputBytes -and
+        $null -ne $withheldRun.snapshot -and $null -ne $withheldRun.snapshot.swapBuffers -and $null -ne $withheldRun.snapshot.lastSwapOutputBytes -and
+        $null -ne $privateAfter -and $null -ne $privateAfter.swapBuffers
+    # The withheld readback counts only as the fixture's own frame (its seeded background) with a measured ink
+    # fraction below the floor; a different background or a failed fixture is no control.
+    $privateWithheldReadback = $privateWithheldRun.driver.readback
+    $withheldBelowFloor = [bool]$privateWithheldReadback.captured -and [bool]$privateWithheldReadback.fixtureBackground -and
+        $null -ne $privateWithheldReadback.inkFraction -and $privateWithheldReadback.inkFraction -lt $script:SeedInkFloor
+    $p3Records = $p3ShellsRead -and $p3Counters -and [bool]$privateReadback.captured -and
+        [bool]$privateWithheldReadback.captured -and
         [bool]$defaultLog.logOn -and [bool]$withheldRun.log.logOn -and [bool]$privateLog.logOn -and [bool]$privateWithheldRun.driver.log.logOn
     $d3.p3 = [ordered]@{
         seedBytes = $script:SeedBytes
@@ -1582,6 +1845,7 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
         withheldLastSwapOutputBytes = $withheldRun.snapshot.lastSwapOutputBytes; withheldSwaps = $withheldRun.snapshot.swapBuffers
         privateReadbackSeeded = $privateReadback.seeded; privateSwapsAfterReadback = $privateAfter.swapBuffers
         privateWithheldReadbackSeeded = $privateWithheldRun.driver.readback.seeded
+        privateWithheldReadbackBelowFloor = $withheldBelowFloor
         # Every arm's shell, read by PID: System32's cmd.exe with /D ahead of the `/K type` payload. An unread shell
         # makes P3 inconclusive; a shell off the policy makes it fail.
         shellPolicyHeld = $p3ShellPolicy
@@ -1589,7 +1853,7 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
             ($p3ShellPolicy -and (Test-WarpOnlyLog $defaultLog) -and $interactive.copyReady -and $interactive.snapshot.swapBuffers -ge 1 -and $interactive.snapshot.lastSwapOutputBytes -ge $script:SeedBytes) `
             ((Test-WarpOnlyLog $withheldRun.log) -and $withheldRun.snapshot.swapBuffers -ge 1 -and $withheldRun.snapshot.lastSwapOutputBytes -lt $script:SeedBytes -and
                 (Test-WarpOnlyLog $privateLog) -and $privateRun.driver.copyReady -and [bool]$privateReadback.seeded -and $privateAfter.swapBuffers -eq 0 -and
-                (Test-WarpOnlyLog $privateWithheldRun.driver.log) -and -not [bool]$privateWithheldRun.driver.readback.seeded) `
+                (Test-WarpOnlyLog $privateWithheldRun.driver.log) -and $withheldBelowFloor) `
             $p3Records
     }
     $d3.p5 = [ordered]@{
@@ -1600,7 +1864,8 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     }
     $d3.p4 = [ordered]@{
         defaultHrInit = $defaultLog.hrInit; privateHrInit = $privateLog.hrInit
-        verdict = Get-Verdict ($defaultLog.hrInit -eq '0x00000000' -and $interactive.copyReady) ($null -ne $privateLog.hrInit -and $privateLog.hrInit -ne '0x00000000' -and $privateRun.driver.copyReady) ($null -ne $defaultLog.hrInit -and $null -ne $privateLog.hrInit)
+        # The private half needs FAILED(hr), the severity bit, as TaskbarProgress.init tests it; a nonzero success is not.
+        verdict = Get-Verdict ($defaultLog.hrInit -eq '0x00000000' -and $interactive.copyReady) ((Test-ProbeHResultFailed $privateLog.hrInit) -and $privateRun.driver.copyReady) ($null -ne $defaultLog.hrInit -and $null -ne $privateLog.hrInit)
     }
     return $d3
 }
@@ -1613,6 +1878,8 @@ foreach ($required in @('Bin', 'MeasureRepo', 'Work', 'Out')) {
 $Bin = (Resolve-Path -LiteralPath $Bin).Path
 $Work = [IO.Path]::GetFullPath($Work)
 if (Test-Path -LiteralPath $Work) { throw 'The work directory must be new.' }
+# Normalized once: each driver gets it on its command line (quoted, so no trailing separator) and validates it itself.
+$MeasureRepo = [IO.Path]::GetFullPath($MeasureRepo).TrimEnd('\')
 $hosted = Test-ProbeHosted
 # Measurement mode for this run and every driver it starts (STANDALONE-LEAF-AUMID-01): the libraries route to the
 # measurement build, and -Bin must be that build's raw prefix exe.
@@ -1691,6 +1958,17 @@ try {
     $record.q0 = $q0
     $q0.negativeControl = Invoke-NegativeControl
     $driverRecord = $q0.driver
+    # Q0's claim: every process and window alive at the sample. It holds only when the sample has the expected roles
+    # (the app, the ConPTY host from the copy or conhost, the shell) and every desktop read in it resolved; a process
+    # that ran and exited before the sample is counted beside it (jobProcessesNotSampled), never hidden.
+    $q0Rows = @($(if ($driverRecord) { $driverRecord.processes }))
+    $q0Roles = [ordered]@{
+        app = @($q0Rows | Where-Object { $_.role -eq 'noctty' -and $_.image -ieq 'noctty.exe' }).Count -eq 1
+        conptyHost = @($q0Rows | Where-Object { $_.role -eq 'noctty-descendant' -and (($_.image -ieq 'OpenConsole.exe' -and [bool]$_.imageInCopyFolder) -or $_.image -ieq 'conhost.exe') }).Count -ge 1
+        shell = @($q0Rows | Where-Object { $_.role -eq 'noctty-descendant' -and $_.image -ieq 'cmd.exe' }).Count -ge 1
+    }
+    $q0RolesSampled = $q0Roles.app -and $q0Roles.conptyHost -and $q0Roles.shell
+    $q0ReadsResolved = $q0Rows.Count -gt 0 -and @($q0Rows | Where-Object { $_.role -in @('noctty', 'noctty-descendant') -and ($_.threadsUnreadable -gt 0 -or $_.startupDesktop -in @('unreadable', 'none')) }).Count -eq 0
     $q0ShellPolicy = $null -ne $driverRecord -and [bool]$driverRecord.shell.read -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst
     $q0Guards = $null -ne $q0.guards -and [bool]$q0.guards.startupUnchanged -and [bool]$q0.guards.historyUnchanged -and
         [bool]$q0.guards.clipboardUnchanged -and [bool]$q0.guards.ownedJobCleanedUp
@@ -1701,13 +1979,17 @@ try {
         copyProcesses = $copyProcesses.Count
         copyProcessesOffPrivate = $onDefault
         copyWindowsOffPrivate = $windowsOnDefault
+        claim = 'every process and window alive at the sample'
+        rolesSampled = $q0Roles
+        desktopReadsResolved = $q0ReadsResolved
+        jobProcessesNotSampled = $(if ($driverRecord) { $driverRecord.jobProcessesNotSampled } else { $null })
         # The shell Windows started, read by PID: System32's cmd.exe with /D first, so no AutoRun runs. After /D
         # come only what the config gave and what utf8-console appends to a payload-free cmd (`/k "chcp 65001 >nul"`).
         shellPolicyHeld = $q0ShellPolicy
         verdict = Get-Verdict `
-            ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $copyProcesses.Count -ge 2 -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards -and $q0ShellPolicy) `
+            ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $q0RolesSampled -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards -and $q0ShellPolicy) `
             ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.threadMovedError -eq 0 -and [bool]$q0.negativeControl.childExited -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `
-            ($null -ne $driverRecord -and $null -eq $driverRecord.error -and [bool]$driverRecord.inventoryComplete -and [bool]$driverRecord.shell.read)
+            ($null -ne $driverRecord -and $null -eq $driverRecord.error -and [bool]$driverRecord.inventoryComplete -and [bool]$driverRecord.shell.read -and $q0ReadsResolved -and $null -ne $driverRecord.jobProcessesNotSampled)
     }
     Assert-ProbeGuards $q0 'q0'
     if ($Part -eq 'All') { $script:Stage = 'd3'; [void](Invoke-D3 $stageBin $testToolsStageBin $record) }
