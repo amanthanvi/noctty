@@ -1086,7 +1086,10 @@ a shell passed there would travel as one argument with a space in it, which a
 caller that splits arguments can cut before `/D`. Each run records the policy
 as named fields. It also reads its shell's real command line by PID, and
 records, never the text, that the shell is System32's `cmd.exe` with `/D`
-ahead of any payload. Staging copies the build the way #727's soak does.
+ahead of any payload. Staging copies the build the way #727's soak does,
+and refuses the run unless both the app (`noctty.exe`) and the CLI
+(`noctty.com`) match the build: the measurement receipt's `ExeSHA256` and
+`CliSHA256`, or the test-tools prefix's own files.
 Nothing in a run builds or runs `dev-windows.cmd` or `cmd /c`.
 
 **The launcher's gate.** `Get-ProbeLaunchRefusal` runs before every noctty
@@ -1107,7 +1110,8 @@ It must refuse each of these for its own reason:
 - another binary;
 - the test-tools build off a hosted runner;
 - an unredirected `LOCALAPPDATA`;
-- measurement mode unset.
+- measurement mode unset;
+- a missing or mismatched `noctty.com` beside the app.
 
 **Q0**, run locally and hosted:
 

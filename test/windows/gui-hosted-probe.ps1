@@ -62,6 +62,9 @@ A probe is conclusive only with its positive record and its control; a missing r
 -Part Local runs Q0 and the private-desktop facts of P4 and P5 on the measurement build, without touching its user's
 desktop; -Part All (D3) refuses to start off a GitHub-hosted runner.
 
+Staging copies each build's prefix bin and refuses the run unless both its app (noctty.exe) and its CLI (noctty.com)
+match the build: the measurement receipt's ExeSHA256 and CliSHA256, or the test-tools prefix's own files.
+
 The launcher's gate (Get-ProbeLaunchRefusal, before every noctty start): in measurement mode
 (NOCTTY_INTERACTIVE_MEASURE_AUMID=1, which the probe sets for itself and its drivers), only a portable copy, `noctty.portable`
 beside it and no `noctty.ico`, with LOCALAPPDATA and APPDATA under the run's work directory, of the receipt-bound
@@ -69,8 +72,8 @@ measurement build (its exe's SHA-256) or, on a GitHub-hosted runner only, of the
 shares the product AUMID and could rewrite the installed app's per-user registration (app-lifecycle.md 2026-10-16
 "A portable copy"), so on a local machine nothing but the measurement build starts. Its control runs first and
 starts nothing: the measurement copy is accepted, and a copy without the marker, one with the icon, another binary,
-the test-tools build off a hosted runner, an unredirected LOCALAPPDATA and measurement mode unset are each refused for
-their own reason. A failed control stops the run before any launch.
+the test-tools build off a hosted runner, an unredirected LOCALAPPDATA, measurement mode unset, and a missing or
+mismatched noctty.com beside the app are each refused for their own reason. A failed control stops the run before any launch.
 
 The record: one JSON object of values and HRESULTs only. No screen image is formed or kept (single-pixel reads),
 the renderer's readbacks stay in -Work as counts only, and no path, environment value, window title or command line
@@ -92,7 +95,9 @@ param(
     [ValidateSet('q0', 'private-renderer', 'private-renderer-withheld')] [string] $Task = 'q0',
     # The builds the driver's launcher gate allows (the outer half passes the hashes it checked).
     [string] $MeasureSha256,
+    [string] $MeasureCliSha256,
     [string] $TestToolsSha256,
+    [string] $TestToolsCliSha256,
     # A child that writes the name of its own thread's desktop to this file and exits (the Q0 controls).
     [string] $ReportDesktop
 )
@@ -760,6 +765,8 @@ function Write-ProbeSeed([string] $Path, [bool] $Withheld) {
 
 function Test-ProbeHosted { return $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' }
 
+function Get-ProbeHash([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
 # The launcher's gate: null when `Exe` may start, else why not. A portable copy (the marker beside it, no noctty.ico)
 # of the receipt-bound measurement build, or of the test-tools build on a GitHub-hosted runner only, with LOCALAPPDATA
 # and APPDATA under the work directory. Anything else could write the installed app's per-user state.
@@ -771,9 +778,13 @@ function Get-ProbeLaunchRefusal([string] $Exe) {
     if (-not (Test-Path -LiteralPath (Join-Path $dir 'noctty.portable') -PathType Leaf)) { return 'not a portable copy' }
     if (Test-Path -LiteralPath (Join-Path $dir 'noctty.ico')) { return 'carries noctty.ico' }
     if (-not $script:MeasureExeSha256) { return 'no allowed build' }
-    $hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-ProbeHash $Exe
     $testTools = (Test-ProbeHosted) -and [bool]$script:TestToolsExeSha256 -and $hash -ceq $script:TestToolsExeSha256
     if (-not ($hash -ceq $script:MeasureExeSha256 -or $testTools)) { return 'not an allowed build' }
+    # The CLI beside the app must be the same build's (design v7 §11 item 0).
+    $cli = Join-Path $dir 'noctty.com'
+    $cliExpected = $(if ($testTools) { $script:TestToolsCliSha256 } else { $script:MeasureCliSha256 })
+    if (-not $cliExpected -or -not (Test-Path -LiteralPath $cli -PathType Leaf) -or (Get-ProbeHash $cli) -cne $cliExpected) { return 'CLI not the allowed build' }
     $root = [IO.Path]::GetFullPath($script:WorkRoot).TrimEnd('\') + '\'
     foreach ($name in @('LOCALAPPDATA', 'APPDATA')) {
         $value = [Environment]::GetEnvironmentVariable($name)
@@ -807,6 +818,7 @@ function Start-ProbeCopy([string] $Exe, [string] $Desktop, [string] $LogPath, [I
         $script:LastLaunchPolicy.build = $build
         $script:LastLaunchPolicy.portable = $true
         $script:LastLaunchPolicy.iconAbsent = $true
+        $script:LastLaunchPolicy.appAndCliMatchBuild = $true
         $script:LastLaunchPolicy.profileRedirected = $true
         $pi = [GuiProbeNative]::Start($Exe, $launch.Line, (Split-Path -Parent $Exe), $Desktop, $LogPath, $Job, $false)
         [void][GuiProbeNative]::CloseHandle($pi.thread)
@@ -1148,7 +1160,9 @@ function Invoke-ProbeDriver {
 }
 
 if ($Driver) {
-    $script:MeasureExeSha256 = $MeasureSha256; $script:TestToolsExeSha256 = $TestToolsSha256; $script:WorkRoot = $Run
+    $script:MeasureExeSha256 = $MeasureSha256; $script:MeasureCliSha256 = $MeasureCliSha256
+    $script:TestToolsExeSha256 = $TestToolsSha256; $script:TestToolsCliSha256 = $TestToolsCliSha256
+    $script:WorkRoot = $Run
     exit (Invoke-ProbeDriver)
 }
 
@@ -1161,7 +1175,8 @@ function Invoke-ProbeDriverRun([string] $Name, [string] $StageBin, [string] $Tas
     try {
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $StageBin -Run $runDir -DesktopPrefix 'noctty-gui-probe-' -TimeoutSeconds 240 `
             -Label "GUI probe $Name" -PassDesktopName -GuardClipboard `
-            -DriverArguments @("-Task $TaskName", "-MeasureSha256 $script:MeasureExeSha256", $(if ($script:TestToolsExeSha256) { "-TestToolsSha256 $script:TestToolsExeSha256" }))
+            -DriverArguments @("-Task $TaskName", "-MeasureSha256 $script:MeasureExeSha256", "-MeasureCliSha256 $script:MeasureCliSha256",
+                $(if ($script:TestToolsExeSha256) { "-TestToolsSha256 $script:TestToolsExeSha256 -TestToolsCliSha256 $script:TestToolsCliSha256" }))
     } catch { $failure = 'the hidden driver or its guards failed' ; [IO.File]::WriteAllText((Join-Path $Work "$Name-outer-error.txt"), $_.Exception.Message) }
     $statePath = Join-Path $runDir 'startup-state.json'
     if (Test-Path -LiteralPath $statePath) {
@@ -1207,10 +1222,11 @@ function Test-WarpOnlyLog($Log) {
 function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin) {
     $root = Join-Path $Work 'launcher-control'
     $candidate = {
-        param([string] $Name, [string] $Source, [bool] $Marker, [bool] $Icon)
+        param([string] $Name, [string] $Source, [bool] $Marker, [bool] $Icon, [string] $Cli = (Join-Path $StageBin 'noctty.com'))
         $dir = Join-Path $root $Name
         [void](New-Item -ItemType Directory -Path $dir)
         Copy-Item -LiteralPath $Source -Destination (Join-Path $dir 'noctty.exe')
+        if ($Cli) { Copy-Item -LiteralPath $Cli -Destination (Join-Path $dir 'noctty.com') }
         if ($Marker) { Set-Content -LiteralPath (Join-Path $dir 'noctty.portable') -Value '' -NoNewline }
         if ($Icon) { [IO.File]::WriteAllBytes((Join-Path $dir 'noctty.ico'), [byte[]]@(0)) }
         return (Join-Path $dir 'noctty.exe')
@@ -1220,6 +1236,7 @@ function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin)
         measurementPortable = 'accepted'; withoutMarker = 'not a portable copy'; withIcon = 'carries noctty.ico'
         otherBinary = 'not an allowed build'; realLocalAppData = 'LOCALAPPDATA not redirected under the work directory'
         measurementModeUnset = 'measurement mode not set'
+        cliMissing = 'CLI not the allowed build'; cliMismatch = 'CLI not the allowed build'
     }
     if ($TestToolsStageBin) { $expected.testToolsBuild = $(if (Test-ProbeHosted) { 'accepted' } else { 'not an allowed build' }) }
     $cases = [ordered]@{}
@@ -1233,7 +1250,10 @@ function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin)
         $cases.withIcon = Get-ProbeLaunchRefusal (& $candidate 'with-icon' $measure $true $true)
         # Another binary, portable-shaped: the measurement bin's CLI wrapper under the exe's name.
         $cases.otherBinary = Get-ProbeLaunchRefusal (& $candidate 'other-binary' (Join-Path $StageBin 'noctty.com') $true $false)
-        if ($TestToolsStageBin) { $cases.testToolsBuild = Get-ProbeLaunchRefusal (& $candidate 'test-tools' (Join-Path $TestToolsStageBin 'noctty.exe') $true $false) }
+        # The measurement app with no CLI beside it, and with another file under the CLI's name.
+        $cases.cliMissing = Get-ProbeLaunchRefusal (& $candidate 'cli-missing' $measure $true $false '')
+        $cases.cliMismatch = Get-ProbeLaunchRefusal (& $candidate 'cli-mismatch' $measure $true $false $measure)
+        if ($TestToolsStageBin) { $cases.testToolsBuild = Get-ProbeLaunchRefusal (& $candidate 'test-tools' (Join-Path $TestToolsStageBin 'noctty.exe') $true $false (Join-Path $TestToolsStageBin 'noctty.com')) }
         $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = $null
         $cases.measurementModeUnset = Get-ProbeLaunchRefusal $allowed
         $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
@@ -1462,7 +1482,7 @@ if ($Part -eq 'All' -and -not $TestToolsBin) { throw '-Part All needs -TestTools
 if ($TestToolsBin) {
     # Locally it only feeds the launcher's control, which must refuse it.
     $TestToolsBin = (Resolve-Path -LiteralPath $TestToolsBin).Path
-    if (-not (Test-Path -LiteralPath (Join-Path $TestToolsBin 'noctty.exe'))) { throw '-TestToolsBin must contain noctty.exe.' }
+    foreach ($file in @('noctty.exe', 'noctty.com')) { if (-not (Test-Path -LiteralPath (Join-Path $TestToolsBin $file))) { throw "-TestToolsBin must contain $file." } }
 }
 Assert-InteractiveWin11MeasureBuild -RepoRoot $MeasureRepo -ExePath (Join-Path $Bin 'noctty.exe')
 
@@ -1471,22 +1491,34 @@ $script:RunRoot = $Work
 # A copy's source, staged the way #727's soak stages its copy, by plain copies from the build's own prefix bin (no
 # harness-library helper): everything but noctty.ico (a portable copy with its icon beside it creates the user's
 # AppUserModelId registration when that key is missing) and the portable crash trees, with share\ beside it.
-function New-ProbeStage([string] $Source, [string] $Name) {
+function New-ProbeStage([string] $Source, [string] $Name, [string] $ExeSha256, [string] $CliSha256) {
     $bin = Join-Path $Work "$Name\bin"
     [void](New-Item -ItemType Directory -Path $bin)
     Get-ChildItem -LiteralPath $Source -Force | Where-Object { $_.Name -notin @('noctty.ico', 'crash', 'ghostty') } |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $bin $_.Name) -Recurse }
     if (Test-Path -LiteralPath (Join-Path $bin 'noctty.ico')) { throw 'The stage must not carry noctty.ico.' }
+    # Both the app and the CLI must be the build's own (design v7 §11 item 0); either mismatch stops the run.
+    foreach ($file in @(@('noctty.exe', $ExeSha256), @('noctty.com', $CliSha256))) {
+        $path = Join-Path $bin $file[0]
+        if (-not $file[1] -or -not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-ProbeHash $path) -cne $file[1]) { throw "The staged $($file[0]) does not match its build." }
+    }
     $share = Join-Path (Split-Path -Parent $Source) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path $Work "$Name\share") -Recurse }
     return $bin
 }
-$stageBin = New-ProbeStage $Bin 'stage'
-$testToolsStageBin = $(if ($TestToolsBin) { New-ProbeStage $TestToolsBin 'stage-test-tools' } else { $null })
-# The launcher gate's inputs: the receipt-bound measurement exe (checked above) and the test-tools exe, by hash.
+# The launcher gate's inputs: the measurement build's app and CLI hashes from its receipt (checked above against the
+# files themselves), and the test-tools build's from its own prefix bin.
 $script:WorkRoot = $Work
-$script:MeasureExeSha256 = (Get-FileHash -LiteralPath (Join-Path $Bin 'noctty.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
-$script:TestToolsExeSha256 = $(if ($TestToolsBin) { (Get-FileHash -LiteralPath (Join-Path $TestToolsBin 'noctty.exe') -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+$measureReceipt = Get-Content -LiteralPath (Get-InteractiveWin11MeasureLayout $MeasureRepo).Receipt -Raw | ConvertFrom-Json
+$script:MeasureExeSha256 = [string]$measureReceipt.ExeSHA256
+$script:MeasureCliSha256 = [string]$measureReceipt.CliSHA256
+if ((Get-ProbeHash (Join-Path $Bin 'noctty.exe')) -cne $script:MeasureExeSha256 -or (Get-ProbeHash (Join-Path $Bin 'noctty.com')) -cne $script:MeasureCliSha256) {
+    throw 'The measurement bin does not match its receipt.'
+}
+$script:TestToolsExeSha256 = $(if ($TestToolsBin) { Get-ProbeHash (Join-Path $TestToolsBin 'noctty.exe') } else { $null })
+$script:TestToolsCliSha256 = $(if ($TestToolsBin) { Get-ProbeHash (Join-Path $TestToolsBin 'noctty.com') } else { $null })
+$stageBin = New-ProbeStage $Bin 'stage' $script:MeasureExeSha256 $script:MeasureCliSha256
+$testToolsStageBin = $(if ($TestToolsBin) { New-ProbeStage $TestToolsBin 'stage-test-tools' $script:TestToolsExeSha256 $script:TestToolsCliSha256 } else { $null })
 
 $record = [ordered]@{
     schema = 1
@@ -1498,7 +1530,9 @@ $record = [ordered]@{
     measurementBuild = $true
     measurementMode = (Test-InteractiveWin11MeasureMode)
     exeSha256 = $script:MeasureExeSha256
+    cliSha256 = $script:MeasureCliSha256
     testToolsExeSha256 = $script:TestToolsExeSha256
+    testToolsCliSha256 = $script:TestToolsCliSha256
     outerSession = Get-SessionFacts ''
 }
 
