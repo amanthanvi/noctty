@@ -148,9 +148,12 @@ $script:RanListResultsFormat = 'noctty test results v1'
 $script:RanListFonts = @('Arial Unicode MS', 'Noto Sans Chakma', 'Noto Serif Tibetan')
 # Get-RanListNameDecoder's decoders, made on first use.
 $script:RanListNameDecoders = $null
-# The sfnt version tags FreeType's TrueType driver opens (tt_face_init):
-# 00010000, 00020000, `true`, A5 `kbd` and A5 `lst`.
-$script:RanListTrueTypeTags = @(0x00010000L, 0x00020000L, 0x74727565L, 0xA56B6264L, 0xA56C7374L)
+# The sfnt version tags FreeType's TrueType driver opens (tt_face_init) that
+# the probe trusts: 00010000, `true`, A5 `kbd` and A5 `lst`. Not 00020000, which
+# tt_face_init also takes: its bytes `00 02` open a bare FNT version 0x200 file,
+# so FreeType's winfnt driver can name such a face when the TrueType driver
+# refuses it (council round 6 on #731, Opus L2).
+$script:RanListTrueTypeTags = @(0x00010000L, 0x74727565L, 0xA56B6264L, 0xA56C7374L)
 $script:RanListProbeVariables = @(
     'NOCTTY_CONPTY_KEY_INPUT_PROBE',
     'NOCTTY_CONPTY_TRANSPORT_PROBE',
@@ -533,9 +536,8 @@ function Add-RanListFaceNames {
     # Only a face FreeType reads as a plain sfnt is wholly read: a CFF font
     # (`OTTO`) with a usable `head` table, since without one cff_face_init loads
     # no sfnt names and takes the family from the CFF data; or a TrueType face
-    # (00010000, 00020000, `true`, or the Apple tags A5 `kbd` and A5 `lst`, as
-    # tt_face_init takes them) with a `head` of at least 0x36 bytes inside the
-    # file. Any other face (`typ1`, which FreeType opens as Type 1 or CID from its
+    # ($script:RanListTrueTypeTags: 00010000, `true`, or the Apple tags A5 `kbd`
+    # and A5 `lst`) with a `head` of at least 0x36 bytes inside the file. Any other face (`typ1`, which FreeType opens as Type 1 or CID from its
     # own table; a WOFF file, which FreeType decompresses first; a Mac resource
     # fork; an unknown tag) takes its family from data the probe does not read.
     if ($version -eq 0x4F54544FL) { if ($heads -eq 0 -or -not $headsUsable) { $complete = $false } }
@@ -665,6 +667,79 @@ function Get-RanListFontDirectories {
     return , $dirs.ToArray()
 }
 
+# Whether a font path, in the form discovery hands it to FreeType, leaves the
+# probe unable to tell which file FreeType opens (council round 6 on #731):
+# one holding `/`, through which FreeType's resource-fork guessers reach a
+# sibling (raccess_make_file_name in ftrfork.c puts its prefix after the last
+# `/`); one not starting with a drive letter and `:`, for which they put the
+# prefix before the whole path and so reach a file relative to the test's
+# working directory; or one holding a non-ASCII character, since FreeType opens
+# the UTF-8 bytes discovery passes with CreateFileA, which under an ANSI code
+# page can open a differently spelled file.
+function Test-RanListUnsafeFontPath {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
+    return $Path.Contains('/') -or $Path -cnotmatch '\A[A-Za-z]:' -or $Path -match '[^\x00-\x7F]'
+}
+
+# Whether discovery's resolveRegistryFontPath takes a value as it is: Zig's
+# std.fs.path.isAbsoluteWindows, true for a leading `/` or `\`, or a drive
+# letter, `:` and a separator. Any other value is joined to the system font
+# directory.
+function Test-RanListZigAbsolute {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
+    if ($Path.Length -ge 1 -and ($Path[0] -eq [char]'/' -or $Path[0] -eq [char]'\')) { return $true }
+    return $Path.Length -ge 3 -and $Path[1] -eq [char]':' -and ($Path[2] -eq [char]'/' -or $Path[2] -eq [char]'\')
+}
+
+# Where discovery looks for font files, for a test that runs in $Directory:
+# Directories, the font directories; RegistryPaths, the file each Fonts value
+# names; and Unsafe, whether a directory or a value, in the form discovery
+# hands FreeType, fails Test-RanListUnsafeFontPath. Discovery opens its paths
+# in the test process, whose working directory is $Directory, so each path is
+# resolved against it (a path rooted on no drive, `\Fonts`, or a relative one),
+# not against PowerShell's location or this process's directory.
+function Get-RanListFontSources {
+    param([Parameter(Mandatory)] [string] $Directory)
+    $base = [System.IO.Path]::GetFullPath($Directory)
+    $supported = @('.ttf', '.otf', '.ttc', '.otc')
+    $unsafe = $false
+    $rawDirs = Get-RanListFontDirectories
+    foreach ($d in $rawDirs) { if (Test-RanListUnsafeFontPath -Path $d) { $unsafe = $true } }
+    $fontDirs = @(foreach ($d in $rawDirs) { [System.IO.Path]::GetFullPath($d, $base) })
+    $systemFonts = $fontDirs[0]
+    # The file each Fonts value names, as collectRegistryFontPaths resolves it:
+    # the value's data (expanded, trimmed of spaces and tabs), a path, or a name
+    # in the system font directory. Value names are not read; discovery does not
+    # read them.
+    $paths = [Collections.Generic.List[string]]::new()
+    foreach ($key in 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts', 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') {
+        $item = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
+        if ($null -eq $item) { continue }
+        foreach ($v in $item.GetValueNames()) {
+            # Discovery takes the data up to its first NUL (std.mem.sliceTo); .NET
+            # keeps what follows. Both are tried; a path holding a NUL is skipped.
+            $data = "$($item.GetValue($v))"
+            $tried = [Collections.Generic.List[string]]::new()
+            $nul = $data.IndexOf([char]0)
+            if ($nul -ge 0) { $tried.Add($data.Substring(0, $nul)) }
+            $tried.Add($data)
+            # The path discovery forms from the value, for the path rule.
+            $value = $tried[0].Trim(' ', "`t")
+            if ($value.Length -gt 0 -and $supported -contains [System.IO.Path]::GetExtension($value).ToLowerInvariant()) {
+                $formed = if (Test-RanListZigAbsolute -Path $value) { $value } else { "$($rawDirs[0])\$value" }
+                if (Test-RanListUnsafeFontPath -Path $formed) { $unsafe = $true }
+            }
+            foreach ($raw in $tried) {
+                $file = $raw.Trim(' ', "`t")
+                if ($file.Length -eq 0) { continue }
+                $joined = if ([System.IO.Path]::IsPathRooted($file)) { $file } else { [System.IO.Path]::Join($systemFonts, $file) }
+                try { $paths.Add([System.IO.Path]::GetFullPath($joined, $base)) } catch { }
+            }
+        }
+    }
+    return [pscustomobject]@{ Directories = [string[]] $fontDirs; RegistryPaths = $paths.ToArray(); Unsafe = $unsafe }
+}
+
 # The environment facts tests read (see the description), for a run from
 # $Directory with this process's environment.
 function Get-RanListEnvironment {
@@ -681,44 +756,17 @@ function Get-RanListEnvironment {
     }
     catch { $facts['temp-makes-8dot3-names'] = 'unknown' }
     finally { if (Test-Path -LiteralPath $probe) { [System.IO.File]::Delete($probe) } }
-    # Discovery opens its paths in the test process, whose working directory is
-    # $Directory, so a path rooted on no drive (`\Fonts`) or relative resolves
-    # there, not against PowerShell's location or this process's directory.
-    $base = [System.IO.Path]::GetFullPath($Directory)
-    $fontDirs = @(foreach ($d in (Get-RanListFontDirectories)) { [System.IO.Path]::GetFullPath($d, $base) })
-    $systemFonts = $fontDirs[0]
-    # The file each Fonts value names, as collectRegistryFontPaths resolves it:
-    # the value's data (expanded, trimmed of spaces and tabs), a path, or a name
-    # in the system font directory. Value names are not read; discovery does not
-    # read them.
-    $paths = [Collections.Generic.List[string]]::new()
+    $sources = Get-RanListFontSources -Directory $Directory
     $fonts = [Collections.Generic.List[object]]::new()
-    foreach ($key in 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts', 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') {
-        $item = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
-        if ($null -eq $item) { continue }
-        foreach ($v in $item.GetValueNames()) {
-            # Discovery takes the data up to its first NUL (std.mem.sliceTo); .NET
-            # keeps what follows. Both are tried; a path holding a NUL is skipped.
-            $data = "$($item.GetValue($v))"
-            $tried = [Collections.Generic.List[string]]::new()
-            $nul = $data.IndexOf([char]0)
-            if ($nul -ge 0) { $tried.Add($data.Substring(0, $nul)) }
-            $tried.Add($data)
-            foreach ($raw in $tried) {
-                $file = $raw.Trim(' ', "`t")
-                if ($file.Length -eq 0) { continue }
-                # Through a path holding `/`, FreeType's resource-fork guessers can
-                # open a sibling file the probe does not read (`resource.frk/` and
-                # others in ftrfork.c), so such a value leaves the facts unknown.
-                if ($file.Contains('/')) { $fonts.Add([pscustomobject]@{ Names = [string[]] @(); Complete = $false }) }
-                $joined = if ([System.IO.Path]::IsPathRooted($file)) { $file } else { [System.IO.Path]::Join($systemFonts, $file) }
-                try { $paths.Add([System.IO.Path]::GetFullPath($joined, $base)) } catch { }
-            }
-        }
-    }
-    foreach ($file in (Get-RanListFontFiles -Directories $fontDirs -RegistryPaths $paths.ToArray())) {
+    $unsafe = $sources.Unsafe
+    foreach ($file in (Get-RanListFontFiles -Directories $sources.Directories -RegistryPaths $sources.RegistryPaths)) {
+        # A directory entry's name is part of the path discovery forms; the
+        # registry's names were tested in Get-RanListFontSources.
+        if ([System.IO.Path]::GetFileName($file) -match '[^\x00-\x7F]') { $unsafe = $true }
         $fonts.Add((Get-RanListFontNames -Path $file))
     }
+    # A path the rule refuses can lead FreeType to a file the probe does not read.
+    if ($unsafe) { $fonts.Add([pscustomobject]@{ Names = [string[]] @(); Complete = $false }) }
     $fontFacts = Get-RanListFontFacts -Fonts $fonts.ToArray()
     foreach ($key in $fontFacts.get_Keys()) { $facts[$key] = $fontFacts[$key] }
     foreach ($name in $script:RanListProbeVariables) {

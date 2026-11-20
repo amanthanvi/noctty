@@ -661,11 +661,36 @@ try {
     [System.IO.File]::WriteAllBytes($ranFormat2Path, $ranFormat2)
     $ranChakmaNames = $ranChakmaCases[1].Names
     $ranOtherNames = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
-    # A resource font in an MZ executable: FreeType's winfnt driver, not an sfnt.
-    $ranFnt = Join-Path $ranTemp 'fnt.ttf'
-    $ranFntBytes = [byte[]]::new(256)
-    $ranFntBytes[0] = 0x4D; $ranFntBytes[1] = 0x5A
+    # The TrueType font tagged 00020000 with 256 directory entries: its own, moved up,
+    # then dummies past the end of the file. Its first bytes then also pass the
+    # header test of fnt_font_load (FreeType's winfnt driver): the version 0x200
+    # little-endian at byte 0, a little-endian file_size at byte 2 within the file
+    # (256 entries put 0x00010000 there), and bit 0 of the file_type byte at 66
+    # clear (a checksum byte of the fourth entry).
+    $ranTables = ([int]$ranTtf[4] -shl 8) -bor $ranTtf[5]
+    $ranFntShift = 16 * (256 - $ranTables)
+    $ranFntBytes = [byte[]]::new($ranTtf.Length + $ranFntShift)
+    $ranFntBytes[1] = 2
+    $ranFntBytes[4] = 1
+    for ($i = 0; $i -lt 256; $i++) {
+        $record = 12 + 16 * $i
+        if ($i -lt $ranTables) {
+            [Array]::Copy($ranTtf, $record, $ranFntBytes, $record, 16)
+            [long] $ranMoved = $ranFntShift
+            for ($k = 0; $k -lt 4; $k++) { $ranMoved += [long]$ranTtf[$record + 8 + $k] -shl (8 * (3 - $k)) }
+            for ($k = 0; $k -lt 4; $k++) { $ranFntBytes[$record + 8 + $k] = [byte](($ranMoved -shr (8 * (3 - $k))) -band 0xFF) }
+        }
+        else {
+            [System.Text.Encoding]::ASCII.GetBytes('zz{0:x2}' -f $i).CopyTo($ranFntBytes, $record)
+            $ranFntBytes[$record + 8] = 0x7F
+        }
+    }
+    [Array]::Copy($ranTtf, 12 + 16 * $ranTables, $ranFntBytes, 12 + 16 * 256, $ranTtf.Length - (12 + 16 * $ranTables))
+    $ranFntBytes[66] = $ranFntBytes[66] -band 0xFE
+    $ranFnt = Join-Path $ranTemp 'fnt-200.ttf'
     [System.IO.File]::WriteAllBytes($ranFnt, $ranFntBytes)
+    $ranFntSize = [long]$ranFntBytes[2] -bor ([long]$ranFntBytes[3] -shl 8) -bor ([long]$ranFntBytes[4] -shl 16) -bor ([long]$ranFntBytes[5] -shl 24)
+    Assert-True ($ranFntBytes[0] -eq 0 -and $ranFntBytes[1] -eq 2 -and $ranFntSize -ge 118 -and $ranFntSize -le $ranFntBytes.Length -and ($ranFntBytes[66] -band 1) -eq 0) "The 00020000 fixture passes fnt_font_load's header test (file_size $ranFntSize of $($ranFntBytes.Length))."
     # MonaspaceNeon-Regular.otf is the vendored CFF (`OTTO`) font; CodeNewRoman-Regular.otf is TrueType inside.
     $ranCff = Join-Path $repoRoot 'src\font\res\MonaspaceNeon-Regular.otf'
     # A copy of a font with one table's tag renamed, so it has no table of that tag.
@@ -748,12 +773,12 @@ try {
             @{ Name = 'a TrueType face whose head lies past the end of the file'; Path = (Set-RanTableEntry $ranJet 'head' -Offset 0x7FFFFF00 -Name 'head-past.ttf'); Expect = 'unknown' }
             @{ Name = 'a TrueType face without a head table'; Path = (Rename-RanTable $ranJet 'head' 'xead' 'no-head.ttf'); Expect = 'unknown' }
             @{ Name = 'the TrueType tag true and no name of it'; Path = (Set-RanFontTag $ranJet 'true' 'tag-true.ttf'); Expect = 'absent' }
-            @{ Name = 'the TrueType tag 00020000 and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0, 2, 0, 0)) 'tag-00020000.ttf'); Expect = 'absent' }
+            @{ Name = 'the tag 00020000, which winfnt can also open, and no name of it (council round 6 on #731, Opus L2)'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0, 2, 0, 0)) 'tag-00020000.ttf'); Expect = 'unknown' }
             @{ Name = 'the Apple tag A5 kbd and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6B, 0x62, 0x64)) 'tag-a5kbd.ttf'); Expect = 'absent' }
             @{ Name = 'the Apple tag A5 lst and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6C, 0x73, 0x74)) 'tag-a5lst.ttf'); Expect = 'absent' }
             @{ Name = 'a TrueType face whose first 128 bytes pass the MacBinary header test (council round 5 on #731, Opus L1)'; Path = (Set-RanBytes $ranJet @{ 63 = @(0); 82 = @(0, 0) } 'macbinary-shape.ttf'); Expect = 'unknown' }
             @{ Name = 'a TrueType face whose first 16 bytes pass the resource-fork header test'; Path = (Set-RanBytes (New-RanNamedFont 'rfork-base.ttf' $ranOtherNames -Pad 1200000) @{ 6 = @(0, 0, 0, 0, 0, 0x10); 12 = @(0, 0, 0, 0x10) } 'rfork-shape.ttf'); Expect = 'unknown' }
-            @{ Name = 'a Windows FNT (MZ) file named .ttf (council round 5 on #731, Sol)'; Path = $ranFnt; Expect = 'unknown' }
+            @{ Name = 'a 00020000 face that also passes the FNT header test, and no name of it'; Path = $ranFnt; Expect = 'unknown' }
             @{ Name = 'a family record in an encoding the probe does not decode'; Path = (New-RanNamedFont 'big5.ttf' @(, @(1, 'Noto Sans Chakma', 3, 4))); Expect = 'unknown' }
             @{ Name = 'a family record on the custom platform'; Path = (New-RanNamedFont 'custom.ttf' @(, @(1, 'Noto Sans Chakma', 4, 0))); Expect = 'unknown' }
             @{ Name = 'a family record whose bytes are no UTF-16'; Path = (New-RanNamedFont 'surrogate.ttf' @(, @(1, [byte[]] @(0xD8, 0x00)))); Expect = 'unknown' }
@@ -1347,16 +1372,38 @@ try {
         }
     }
     # Discovery resolves a path rooted on no drive against the test's working directory,
-    # so the probe must too, wherever the capture starts. Another drive: a ready fixed
-    # drive other than the test's, else a subst drive over a scratch directory, removed
-    # when the run ends.
-    $ranOtherDrive = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed -and -not [string]::Equals($_.Name.Substring(0, 1), $ranTemp.Substring(0, 1), [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.RootDirectory.FullName })[0]
-    if ($null -eq $ranOtherDrive) {
-        $ranSubstLetter = @('R', 'S', 'T', 'U', 'V', 'W', 'Y' | Where-Object { -not (Test-Path -LiteralPath "$($_):\") })[0]
-        $ranSubstTarget = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'subst-root')
-        $null = & subst.exe "$($ranSubstLetter):" $ranSubstTarget.FullName
-        $ranOtherDrive = "$($ranSubstLetter):\"
+    # so the probe must too, wherever the capture starts. A pure check first, against a
+    # drive letter that does not exist, so it touches nothing (council round 6 on #731,
+    # Opus L3 and Sol): WINDIR, LOCALAPPDATA and two Fonts values rooted on no drive or
+    # bare resolve onto the test directory's drive, and the path rule fires.
+    $ranNoDrive = @('Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z' | Where-Object { -not (Test-Path -LiteralPath "$($_):\") })[0]
+    $ranPure = & {
+        $values = [ordered]@{ 'Rooted (TrueType)' = '\x\elsewhere\f.ttf'; 'Bare (TrueType)' = 'f.ttf' }
+        function Get-Item {
+            [CmdletBinding()] param([string] $LiteralPath)
+            if (-not $LiteralPath.StartsWith('HKLM:', [StringComparison]::OrdinalIgnoreCase)) { return $null }
+            $fontsKey = [pscustomobject]@{ Data = $values }
+            $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { return , [string[]] @($this.Data.get_Keys()) }
+            $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValue -Value { param($n) return $this.Data[$n] }
+            return $fontsKey
+        }
+        $savedWinDir = $env:WINDIR
+        $savedLocalAppData = $env:LOCALAPPDATA
+        try {
+            $env:WINDIR = '\x\win'
+            $env:LOCALAPPDATA = '\x\local'
+            Get-RanListFontSources -Directory "$($ranNoDrive):\work"
+        }
+        finally {
+            $env:WINDIR = $savedWinDir
+            $env:LOCALAPPDATA = $savedLocalAppData
+        }
     }
+    $ranPureDirs = $ranPure.Directories -join '|'
+    $ranPurePaths = @($ranPure.RegistryPaths) -join '|'
+    Assert-True ($ranPureDirs -ceq "$($ranNoDrive):\x\win\Fonts|$($ranNoDrive):\x\local\Microsoft\Windows\Fonts" -and $ranPurePaths -ceq "$($ranNoDrive):\x\elsewhere\f.ttf|$($ranNoDrive):\x\win\Fonts\f.ttf" -and $ranPure.Unsafe) "Font paths resolve against the test's directory, on a drive that does not exist ($ranPureDirs; $ranPurePaths; $($ranPure.Unsafe))."
+    # The real run from another drive, where a second ready fixed drive exists.
+    $ranOtherDrive = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed -and -not [string]::Equals($_.Name.Substring(0, 1), $ranTemp.Substring(0, 1), [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.RootDirectory.FullName })[0]
     $ranWwsFont = New-RanNamedFont 'registered-wws.ttf' $ranChakmaCases[1].Names
     $ranOtherFont = New-RanNamedFont 'registered-other.ttf' @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
     $ranPair = New-RanCollection 'registered-pair.ttc' @($ranOtherFont, $ranWwsFont)
@@ -1376,10 +1423,18 @@ try {
             @{ Name = 'spaces'; Values = [ordered]@{ 'Chakma (TrueType)' = " `t<root>\elsewhere\chakma.ttf`t " }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data has spaces and a tab around it (Opus X2)' }
             @{ Name = 'nul'; Values = [ordered]@{ 'Chakma (TrueType)' = "<root>\elsewhere\chakma.ttf$([char]0)junk" }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data holds a NUL and more after the path (Opus L5)' }
             @{ Name = 'slash'; Values = [ordered]@{ 'Chakma UI (TrueType)' = '<root>/elsewhere/other.ttf' }; Files = @{ 'elsewhere\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding a / whose font names another family (council round 5 on #731, Opus L1)' }
-            @{ Name = 'drive-dirs-here'; WinDirValue = '<rel>\windir'; From = $ranTemp; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from the test''s drive' }
-            @{ Name = 'drive-dirs-away'; WinDirValue = '<rel>\windir'; From = $ranOtherDrive; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from another drive (council round 5 on #731, Sol M and Opus L2)' }
+            @{ Name = 'slash-dir'; WinDirValue = '<root>/windir'; Values = [ordered]@{}; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a WINDIR holding a / (council round 6 on #731, Sol M and Opus L1)' }
+            @{ Name = 'rooted-dir'; WinDirValue = '<rel>\windir'; Values = [ordered]@{}; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a WINDIR rooted on no drive and a font of another family' }
+            @{ Name = 'rooted-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = '<rel>\elsewhere\other.ttf' }; Files = @{ 'elsewhere\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value rooted on no drive and a font of another family' }
+            @{ Name = 'bare'; Values = [ordered]@{ 'Chakma UI (TrueType)' = 'other.ttf' }; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'absent'; What = 'a bare value, which discovery joins to the system directory (the control)' }
+            @{ Name = 'ascii-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\oth$([char]0xE9)r.ttf" }; Files = @{ "elsewhere\oth$([char]0xE9)r.ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding a non-ASCII character (council round 6 on #731, Sol M)' }
+            @{ Name = 'ascii-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\oth$([char]0xE9)r.ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds a non-ASCII character' }
+            @{ Name = 'ascii-dir'; WinDirValue = "<root>\w$([char]0xEF)ndir"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding a non-ASCII character' }
+            @{ Name = 'drive-dirs-here'; WinDirValue = '<rel>\windir'; From = $ranTemp; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from the test''s drive (present wins over the path rule)' }
+            @{ Name = 'drive-dirs-away'; Away = $true; WinDirValue = '<rel>\windir'; From = $ranOtherDrive; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from another drive (council round 5 on #731, Sol M and Opus L2)' }
             @{ Name = 'drive-value-here'; From = $ranTemp; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from the test''s drive' }
-            @{ Name = 'drive-value-away'; From = $ranOtherDrive; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from another drive' })) {
+            @{ Name = 'drive-value-away'; Away = $true; From = $ranOtherDrive; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from another drive' })) {
+        if ($ranCase.Away -and $null -eq $ranOtherDrive) { continue }
         $ranUserValues = if ($ranCase.UserValues) { $ranCase.UserValues } else { [ordered]@{} }
         $ranProbeArgs = @{ Case = $ranCase.Name; Values = $ranCase.Values; UserValues = $ranUserValues; Files = $ranCase.Files }
         if ($ranCase.WinDirValue) { $ranProbeArgs.WinDirValue = $ranCase.WinDirValue }
@@ -1418,7 +1473,6 @@ try {
 finally {
     Set-Location -LiteralPath $ranSavedLocation
     [Environment]::CurrentDirectory = $ranSavedDirectory
-    if ($ranSubstLetter) { $null = & subst.exe "$($ranSubstLetter):" /d }
     Remove-Item -LiteralPath $ranTemp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
