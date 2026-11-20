@@ -260,6 +260,16 @@ $workingSetRules = @(
         Mutation = @('$s.At -gt $previous -and ', '')
     }
     @{
+        Description = 'the driver''s verdict reads the record with its lists as plain arrays (Greptile on #739)'
+        Pattern = '(?s)foreach \(\$name in @\(''Stages'', ''SessionSnapshots''\)\) \{\s+if \(\$record\[\$name\] -is \[Collections\.Generic\.List\[object\]\]\) \{ \$record\[\$name\] = \[object\[\]\]\$record\[\$name\]\.ToArray\(\) \}.*?ConvertTo-RecordArrays\s+\$problems = @\(Get-WorkingSetRecordProblems'
+        Mutation = @("ConvertTo-RecordArrays`n        `$problems = @(Get-WorkingSetRecordProblems", "`$problems = @(Get-WorkingSetRecordProblems")
+    }
+    @{
+        Description = 'the record is written with its lists as plain arrays, on the error path too'
+        Pattern = '(?s)\} finally \{\s+if \(\$process -ne \[IntPtr\]::Zero\) \{ \[void\]\[WorkingSetNative\]::CloseHandle\(\$process\) \}\s+ConvertTo-RecordArrays\s+\$record \| ConvertTo-Json -Depth 8'
+        Mutation = @("ConvertTo-RecordArrays`n        `$record | ConvertTo-Json -Depth 8", "`$record | ConvertTo-Json -Depth 8")
+    }
+    @{
         Description = 'a session checkpoint counts only a snapshot taken after its own close (CodeRabbit on #739)'
         Pattern = '(?s)\$closeAt = \[uint64\]\$script:wsCloseAt.*?if \(\$null -ne \$s -and \$s\.At -gt \$previous -and \$s\.At -gt \$closeAt -and '
         Mutation = @('$s.At -gt $closeAt -and ', '')

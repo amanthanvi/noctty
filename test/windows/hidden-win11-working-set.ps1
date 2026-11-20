@@ -581,6 +581,13 @@ if ($GridProbePid -gt 0) {
 function Invoke-WorkingSetDriver {
     $driverLog = Join-Path $Run 'driver.log'
     function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
+    # The record's lists, built as List[object], become plain arrays before anything reads or writes the record, so
+    # the verdict's @($Record.<list>) does not depend on how a PowerShell version wraps a List (Greptile on #739).
+    function ConvertTo-RecordArrays {
+        foreach ($name in @('Stages', 'SessionSnapshots')) {
+            if ($record[$name] -is [Collections.Generic.List[object]]) { $record[$name] = [object[]]$record[$name].ToArray() }
+        }
+    }
     $record = [ordered]@{
         Schema = 2; Workload = $Workload; ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
         ScrollbackLimitBytes = $null; Blocks = 0; BlocksPlanned = 0; BlockLines = $script:BlockLines
@@ -891,6 +898,7 @@ function Invoke-WorkingSetDriver {
         else { [WorkingSetNative]::Terminate($process, 1); $record.Exit = 'stuck'; Log 'the copy did not end within 60 s of the quit' }
         Log "quit: $($record.QuitPosts) posts, exit $($record.Exit)"
         if ($script:wsUnsettled.Count -gt 0) { $record.Error = "UNSETTLED $($script:wsUnsettled -join ',')" }
+        ConvertTo-RecordArrays
         $problems = @(Get-WorkingSetRecordProblems ([pscustomobject]$record))
         if ($problems.Count -gt 0 -and -not $record.Error) { $record.Error = $problems -join '; ' }
         return $(if ($record.Error) { 1 } else { 0 })
@@ -901,6 +909,7 @@ function Invoke-WorkingSetDriver {
         return 1
     } finally {
         if ($process -ne [IntPtr]::Zero) { [void][WorkingSetNative]::CloseHandle($process) }
+        ConvertTo-RecordArrays
         $record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $recordPath -Encoding utf8NoBOM
     }
 }
