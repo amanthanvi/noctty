@@ -408,8 +408,15 @@ if ($symbolsVerificationText -notmatch '(?s)function Get-WindowsSymbolBinaryName
 # Fixture B runs the shared build-mode writer and every promote predicate with
 # the historical real payload set, including its symbols ZIPs, under recorded
 # GitHub responses. With no cache it downloads public v1.3.136 assets only.
-$promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
-if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
-    [string]$_ -ceq 'Release promotion fixture B: PASS (98 cases, 4 files identical across two checkout roots, 12 real assets).'
-}).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
-$promotionFixtureOutput | ForEach-Object { Write-Host $_ }
+. (Join-Path $repoRoot 'scripts/release-fixture-directory.ps1')
+$fixtureParent = New-ReleaseFixtureDirectory
+try {
+    $promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -WorkDirectory $fixtureParent -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
+    if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
+        [string]$_ -ceq 'Release promotion fixture B: PASS (102 cases, 4 files identical across two checkout roots, 12 real assets).'
+    }).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
+    if (@(Get-ChildItem -LiteralPath $fixtureParent -Force).Count) { throw 'Release promotion fixture B retained its run directory.' }
+    $promotionFixtureOutput | ForEach-Object { Write-Host $_ }
+} finally {
+    Remove-ReleaseFixtureDirectory -RunDirectory $fixtureParent
+}

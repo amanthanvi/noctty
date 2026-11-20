@@ -19,9 +19,10 @@ response and mutation.
   reviewer cases: stable/prerelease, retry, lost response, exhaustion and drift.
 - The list and release records contain the fields the caller consumes. The
   selected record has an ID and tag, draft/prerelease flags and asset records;
-  unrelated pagination records are projections. URLs, authors and notes are
-  omitted because no predicate consumes them. The local candidate SHA replaces
-  the historical SHA consistently in run, manifest and tag records.
+  unrelated pagination records are projections. Build cases record the
+  submitted notes and generated notes in the returned body. The local
+  candidate SHA replaces the historical SHA consistently in run, manifest and
+  tag records.
 - Mutations are recording operations with **no real gh fallback**. Creating a
   draft, uploading, and publishing update local state. Duplicate asset names
   fail; lost responses retain the successful upload. A `starter` asset without
@@ -75,13 +76,22 @@ with no author/version filter and a complete-set bound of 100. Each discovered
 PR is checked by manifest paths; the exact version directory is also checked
 on the default branch. The 100-candidate positive control reaches 203 GETs;
 over-bound, incomplete and failed-query twins refuse with named outcomes.
-A miss is explicitly **absent within the stated limit**. The lead accepts the
-remaining external-PR case where both title and body omit the identifier;
-wingetcreate does not produce that case. No global changed-path query is claimed.
+A miss is explicitly **absent within the stated limit**. A PR from any account
+is outside the search if both title and body omit the identifier, including a
+publisher-owned PR edited after wingetcreate opened it. No global changed-path
+query is claimed.
 
-Post-write controls model lost create/flip responses, absent draft discovery,
-wrong draft identity, delayed publication flags, tag 404 visibility, stale/missing
+Post-write controls model lost create/flip responses, a different writer's
+matching draft, missing or late ID visibility, wrong draft identity, delayed
+publication flags, tag 404 visibility, stale/missing
 latest, and true HTTP 503 framing with retry/exhaustion twins. Mutations are
 issued once, then reconciliation uses reads only. Backoff is bounded to three
 logical observations, with at most three transport attempts per observation.
 Actual GitHub write propagation times remain unmeasured under this task's grant.
+
+The cleanup controls exercise a successful Fixture B run and failures during
+Fixture A's clone and Fixture B's asset setup under outer WhatIf. Each fixture
+owns only its generated child of the caller's run parent. An explicitly
+supplied asset cache remains caller-owned. On a hosted runner the parent
+defaults to `RUNNER_TEMP`; for local runs pass `-WorkDirectory` or set
+`NOCTTY_RELEASE_FIXTURE_ROOT` to an existing scratch parent.

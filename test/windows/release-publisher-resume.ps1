@@ -82,7 +82,7 @@ try {
             $values=@($observed | Where-Object { $_ -is [bool] })
             if($values.Count -ne 1){throw 'Expected one bounded lookup result.'}
             $actual=$values[0]
-            if(-not $actual -and @($observed | Where-Object { [string]$_ -like '*absent within the stated limit*' }).Count -ne 1){throw 'A miss lacked the stated-limit qualification.'}
+            if(-not $actual -and @($observed | Where-Object { [string]$_ -like '*absent within the stated limit*PRs from any account*both fields are excluded*' }).Count -ne 1){throw 'A miss lacked the author-independent stated-limit qualification.'}
         } catch { $message = $_.Exception.Message }
         if ($cases[$case] -is [string]) {
             if (-not $message -or $message -notmatch $(if($cases[$case] -eq 'error'){'WinGetQueryFailed|WinGetCandidateSetIncomplete'}else{$cases[$case]})) { throw "WinGet resume $case did not fail closed." }

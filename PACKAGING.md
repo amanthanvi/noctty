@@ -386,7 +386,14 @@ step. Inspect that run and publication state before choosing recovery.
 `DraftRelease` (including a partial or cancelled upload) cannot be promoted.
 Discovery reads all release-list pages and the selected release ID because
 GitHub's tag endpoint hides drafts. `AmbiguousReleaseTag` refuses duplicate
-pending tags for inspection. First list **every** release with this tag,
+pending tags for inspection. After a create request, release discovery allows
+up to three reads for a list miss or an ID read returning 404. The build
+continues only if the returned draft carries this attempt's marker in its
+notes and passes the candidate checks. `ReleaseDraftOwnershipUnconfirmed`
+means the build could not prove it created the draft. Preserve it and inspect
+the original run and draft ID before deciding who should recover it.
+
+For manual draft recovery, first list **every** release with this tag,
 including drafts, with a push-authorized token (listing is read-only):
 
 ```powershell
@@ -452,6 +459,15 @@ predate the bundled ConPTY pair (v1.3.125), so its candidate data need no
 `conpty-redist.json`. Modern releases still require both pinned Microsoft
 binaries. The default verifier continues to require a stable release.
 
+For local promotion rehearsals, give Fixture A
+(`scripts/release-promote.ps1 -Fixture historical`) or Fixture B
+(`test/windows/release-promote.ps1`) an existing run parent under `H:\scratch`
+via `-WorkDirectory` or `NOCTTY_RELEASE_FIXTURE_ROOT`. Each fixture creates
+and removes its own child on success or failure. Capture the console output
+for text evidence. Fixture B uses a caller-owned asset cache when
+`-AssetDirectory` is supplied. Otherwise it downloads assets inside its
+temporary child and removes them with the run.
+
 ### WinGet
 
 Duplicate discovery checks the default branch's exact version directory and
@@ -465,11 +481,12 @@ Reads have a 250-request budget, search-rate pacing and three attempts for
 Neither condition permits submission.
 
 A miss is reported as **absent within the stated limit**, never confirmed
-repository-wide absence. The accepted residual is an external PR whose title
-**and** body both omit the package identifier; wingetcreate does not produce
-such PRs. Retitling a PR or omitting the version from its title/body is covered
-as long as either field retains the identifier. No all-open-PR enumeration is
-used: that caused measured 502s on winget-pkgs.
+repository-wide absence. The search omits PRs from any account whose title
+**and** body both omit the identifier, including our own publisher's PRs.
+WinGetCreate includes the identifier when it opens a PR, but later edits can
+remove it. Retitling a PR or omitting the version is covered as long as either
+field retains the identifier. No all-open-PR enumeration is used: that caused
+measured 502s on winget-pkgs.
 
 - Secret: `WINGETCREATE_TOKEN`
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`

@@ -59,8 +59,8 @@ $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 function Test-WinGetVersionSubmitted {
     # At most 100 open PRs matching the identifier in title OR body, without
     # a version qualifier. Confirm identity by manifest paths, not PR text.
-    # Accepted limit: an external PR whose title AND body omit the identifier
-    # is undiscoverable here; wingetcreate submissions always include it.
+    # A PR from any account is outside this search if both fields omit the
+    # identifier. wingetcreate includes it at submission; later edits may not.
     $segments = $PackageIdentifier.Split('.')
     $prefix = 'manifests/{0}/{1}/{2}/' -f $segments[0].Substring(0, 1).ToLowerInvariant(), ($segments -join '/'), $Version
     $requestBudget = [pscustomobject]@{ Remaining = 250 }
@@ -137,7 +137,7 @@ function Test-WinGetVersionSubmitted {
             [void]$numbers.Add([int]$item.number)
         }
         foreach ($number in $numbers) { if (Test-WinGetPrFiles -Number $number) { return $true } }
-        Write-Host "WinGet $PackageIdentifier $Version`: absent within the stated limit (open PR title/body identifier query and default-branch manifest check; external PRs omitting the identifier in both fields are excluded)."
+        Write-Host "WinGet $PackageIdentifier $Version`: absent within the stated limit (open PR title/body identifier query and default-branch manifest check; PRs from any account omitting the identifier in both fields are excluded)."
         return $false
     }
     catch {

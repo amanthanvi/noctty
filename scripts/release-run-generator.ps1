@@ -2,7 +2,7 @@ function Invoke-ReleaseGenerator {
     param([string] $Generator, [hashtable] $Parameters)
     $request = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Parameters | ConvertTo-Json -Compress)))
     $scriptPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Generator))
-    $command = "`$ErrorActionPreference='Stop'; `$p=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$request')) | ConvertFrom-Json -AsHashtable); `$g=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$scriptPath')); & `$g @p; if (-not `$?) { exit 1 }; exit 0"
+    $command = "`$ErrorActionPreference='Stop'; `$PSStyle.OutputRendering='PlainText'; `$p=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$request')) | ConvertFrom-Json -AsHashtable); `$g=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$scriptPath')); & `$g @p; if (-not `$?) { exit 1 }; exit 0"
     $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
@@ -16,7 +16,7 @@ function Invoke-ReleaseGenerator {
     # Only OS/runtime/temp locations are inherited. No PATH, user profiles,
     # package configuration or arbitrary runner variables reach candidate code.
     $start.Environment['NO_COLOR'] = '1'
-    foreach ($argument in @('-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
+    foreach ($argument in @('-NoProfile','-NonInteractive','-OutputFormat','Text','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
     $child = [Diagnostics.Process]::new()
     $child.StartInfo = $start
     try {

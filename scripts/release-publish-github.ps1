@@ -80,11 +80,12 @@ Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $Candida
 # Create an explicit draft, upload each immutable asset with bounded retries,
 # verify the complete set, then publish. Cancellation leaves a named manual
 # recovery path, never automatic deletion or replacement of unknown bytes.
+$createMarker = "<!-- noctty-release-create:$([guid]::NewGuid().ToString('N')) -->"
 $extra = @(if ($Prerelease -eq 'true') { '--prerelease' })
-& gh release create $Tag --repo $Repository --target $CandidateSha --draft --title $Title --generate-notes --notes $notesPrefix @extra
+& gh release create $Tag --repo $Repository --target $CandidateSha --draft --title $Title --generate-notes --notes "$notesPrefix`n`n$createMarker`n" @extra
 $createExit = $LASTEXITCODE
-$created = Get-CreatedReleaseDraft -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -Prerelease ($Prerelease -eq 'true')
-if ($createExit -ne 0) { Write-Host 'Release create response was lost; authenticated the resulting draft by ID.' }
+$created = Get-CreatedReleaseDraft -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -Prerelease ($Prerelease -eq 'true') -CreateMarker $createMarker
+if ($createExit -ne 0) { Write-Host 'Release create response was lost; authenticated the draft by ID and create attempt marker.' }
 $releaseId = [string]$created.id
 foreach ($asset in $assets) {
     $name = [IO.Path]::GetFileName($asset)
