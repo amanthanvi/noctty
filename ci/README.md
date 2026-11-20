@@ -106,17 +106,19 @@ not mistaken for the std module.
 Win32 selection uses only the head file and the merge-base diff's hunks:
 
 - A reference is checked when one of its own lines is added.
-- An alias definition, including its modifiers, is changed when its head line span contains an added
-  line, or a deletion gap lies inside that span or on either boundary. A gap
-  numbered `p` is between head lines `p` and `p+1`; a definition on lines
-  `first..last` includes gaps `first-1..last`. Pure-deletion hunks therefore
-  recheck affected aliases even when no surviving alias line is added.
+- An alias definition is changed when its head span, from its first modifier
+  or declaration token through the terminating semicolon, contains an added
+  line. Git marks a replacement line as added, so edits on any of these lines
+  count. Deletions count only between two lines of the definition. For a
+  definition on lines `first..last`, gap `p` between head lines `p` and
+  `p+1` counts when `first <= p < last`.
 - Every alias and reference that resolves through a changed alias is rechecked,
   transitively. The same rule applies to literal public exports and their
   dependencies in `src/os/windows.zig`.
-- Nothing else is rechecked. No declaration name, test ordinal or enclosing
-  function is matched against a base declaration. Enclosing renames, test
-  insertion/deletion and header edits leave untouched definitions alone.
+- An edit wholly outside the definition leaves its unchanged references alone.
+  This includes deleting the blank line after an alias and renaming a function
+  whose header is on the next line after a file-level alias. A reference on a
+  changed line is still checked under the added-line rule.
 
 A deletion-only definition change remains covered when its owner is renamed.
 The generated list covers **1,534 removed names**: the 1,485 root/file-namespace
@@ -137,16 +139,13 @@ by this lint.
 **Known conservative over-report:** a touched definition rechecks its uses
 even if the final origin stayed the same. Moving, re-spelling or editing a
 comment on an alias's definition line can therefore report unchanged legacy
-uses. Deleting a line immediately before or after the definition also touches
-its boundary. Introducing an intermediate
+uses. Introducing an intermediate
 alias (for example `const os = std.os; const windows = os.windows;`), or routing
 an existing std alias through the fork's re-exports, can recheck uses whose final
 binding stayed the same. This may report existing removed uses even though that
 edit changed no call's meaning. The real IPC fixture retains the measured
-40/40/32 reports for these cases. This safe-side behavior follows the explicit
-head-span rule; edits outside the definition and its boundaries do not recheck
-it. These are definition-change detections, not claims that every reported
-call acquired a different semantic meaning.
+40/40/32 reports for these cases. The definition-span rule can therefore
+report a legacy use whose binding stayed the same.
 
 The fork-added file set is computed at each head, by subtracting
 `upstream-paths.txt` from its tree. That list includes upstream rename sources.

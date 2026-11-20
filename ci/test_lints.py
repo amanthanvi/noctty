@@ -281,7 +281,7 @@ class Win32Controls(unittest.TestCase):
         for gap in range(6):
             with self.subTest(gap=gap):
                 rows = list(bindings.uses(REMOVED, set(), {gap}))
-                self.assertEqual(1 <= gap <= 4, bool(rows))
+                self.assertEqual(2 <= gap <= 3, bool(rows))
         for line in range(1, 7):
             with self.subTest(added=line):
                 rows = list(bindings.uses(REMOVED, {line}))
@@ -548,6 +548,39 @@ class GitControls(unittest.TestCase):
         self.write("probe.zig", before.replace("// removable comment\n", ""))
         same = self.commit()
         self.assertEqual([], win.check(self.repo, base, same, upstream, removed))
+
+    def test_edits_on_line_after_definition_leave_unchanged_uses_alone(self):
+        path = "probe.zig"
+        self.write("src/os/windows.zig", "// unused\n")
+        source = ('const k32 = @import("std").os.windows.kernel32;\n'
+                  'fn before() void {\n    k32.Sleep(1);\n}\ntest { before(); }\n')
+        self.write(path, source)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        variants = (
+            (source.replace("void {\n", "void { // trailing comment\n"), {2}),
+            (source.replace("before", "after"), {2, 5}),
+        )
+        for text, lines in variants:
+            with self.subTest(added=lines):
+                self.write(path, text)
+                head = self.commit()
+                self.assertEqual(lines, common.added_lines(self.repo, base, head)[path])
+                self.assertEqual([], win.check(self.repo, base, head, upstream, removed))
+
+    def test_added_line_inside_multiline_definition_rechecks_unchanged_use(self):
+        path = "probe.zig"
+        self.write("src/os/windows.zig", "// unused\n")
+        source = ('const k32 = @import("std").os.windows\n'
+                  '    .kernel32;\nfn call() void { k32.Sleep(1); }\n')
+        self.write(path, source)
+        base = self.commit()
+        upstream, removed, _ = self.inputs()
+        self.write(path, source.replace("    .kernel32", "    // alias continuation\n    .kernel32"))
+        head = self.commit()
+        self.assertEqual(({2}, set()), common.line_changes(self.repo, base, head)[path])
+        self.assertEqual([(path, 4, "error", "removed std.os.windows.kernel32.Sleep")],
+                         win.check(self.repo, base, head, upstream, removed))
 
     def test_test_insertion_does_not_pair_same_named_aliases(self):
         path = "src/probe.zig"
@@ -1029,6 +1062,29 @@ class HistoryControls(unittest.TestCase):
     def check(self, base, head):
         return win.check(self.repo, base, head, self.ci / "upstream-paths.txt", self.ci / "win32-removed-identifiers.txt")
 
+    def test_real_blank_line_deletion_below_shared_alias(self):
+        base = "b0c562b1e2c270e4332564cd91036c046c429994"
+        path = "src/os/windows.zig"
+        source = common.sources(self.repo, base, {path})[path].splitlines(keepends=True)
+        alias = source.index("const windows = std.os.windows;\n")
+        self.assertEqual("\n", source.pop(alias + 1))
+        head = self.fixture(path, "".join(source), parent=base)
+        self.assertEqual({path: (set(), {alias + 1})}, common.line_changes(self.repo, base, head))
+        self.assertEqual([], self.check(base, head))
+
+    def test_real_comment_edit_below_std_alias(self):
+        base = "b0c562b1e2c270e4332564cd91036c046c429994"
+        for path in ("src/apprt/win32.zig", "src/apprt/win32/ipc_server.zig"):
+            with self.subTest(path=path):
+                source = common.sources(self.repo, base, {path})[path].splitlines(keepends=True)
+                alias = source.index('const std = @import("std");\n')
+                line = alias + 1
+                self.assertTrue(source[line].startswith("const builtin = "))
+                source[line] = source[line].rstrip("\n") + " // neighboring comment\n"
+                head = self.fixture(path, "".join(source), parent=base)
+                self.assertEqual({path: ({line + 1}, {line})}, common.line_changes(self.repo, base, head))
+                self.assertEqual([], self.check(base, head))
+
     def test_real_import_swap_and_ipc_alias_move_touch_definitions(self):
         path = "src/apprt/win32.zig"
         source = common.sources(self.repo, self.base, {path})[path]
@@ -1082,7 +1138,8 @@ class HistoryControls(unittest.TestCase):
 
     def test_real_owner_rename_and_test_deletion_preserve_added_findings(self):
         for head, expected in (("9c9de2aa23bf5f58a68f730b051d28bafb2c5364", 0),
-                               ("2e8b1bf6d39a314f0efcc1bdabd0db9c55876a88", 2)):
+                               ("2e8b1bf6d39a314f0efcc1bdabd0db9c55876a88", 2),
+                               ("63333c1dc7206b5248f720835addccef82251ea4", 0)):
             base = common.revision(self.repo, head + "^")
             rows = self.check(base, head)
             added = common.added_lines(self.repo, base, head)

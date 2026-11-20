@@ -277,20 +277,19 @@ class Bindings:
                 self.tokens[min(self.ends[index], len(self.tokens) - 1)].line + 1)
 
     def changed_aliases(self, added, deleted):
-        """Head definitions touched by added lines or deletion gaps, boundaries included.
+        """Head definitions touched by added lines or interior deletion gaps.
 
         Gap p lies after head line p and before p+1. A definition on lines
-        first..last therefore contains gaps first-1..last. No base declarations
-        or lexical-owner identities participate in this test.
+        first..last contains gaps first..last-1 between its own lines.
         """
         added, deleted = sorted(added), sorted(deleted)
         changed = set()
         for index in self.ends:
             first, last = self.definition_lines(index)
             at = bisect_left(added, first)
-            gap = bisect_left(deleted, first - 1)
+            gap = bisect_left(deleted, first)
             if ((at < len(added) and added[at] <= last)
-                    or (gap < len(deleted) and deleted[gap] <= last)):
+                    or (gap < len(deleted) and deleted[gap] <= last - 1)):
                 changed.add(index)
         return frozenset(changed)
 
