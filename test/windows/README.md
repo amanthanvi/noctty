@@ -727,8 +727,9 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, and the soak,
-`interactive-win11-soak.ps1`, for its desktop, job and driver launch); each dot-sources it and still runs on
+`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, the soak,
+`interactive-win11-soak.ps1`, for its desktop, job and driver launch, and `hidden-win11-working-set.ps1`
+for its desktop and guards); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
 explicit-desktop launches (`Launch` for the driver, `Spawn` for a case),
 `Invoke-LocalHiddenDriver` (the outer half: run the harness again as its driver
@@ -1328,6 +1329,49 @@ probe checks this before it creates anything.
   match). A driver record with any replacement
   leaves the verdicts that read it inconclusive.
 - Readbacks stay in `-Work`, and only their counts reach the record.
+
+## hidden-win11-working-set.ps1
+
+`PLAN.md` §3.5's working-set workloads: one portable copy of a measurement
+build on a private desktop runs one fixed workload, and the harness samples
+its private bytes, working set, commit charge, peak working set, handles and
+GDI and USER objects through the handle it holds from `CreateProcess`, at each
+stage once private bytes hold within 0.5% and working set within 1% for 5 s
+(or after 90 s, recorded as not settled). Each run is a fresh copy, private
+desktop, job and `LOCALAPPDATA`; the copy starts through
+`Get-InteractiveWin11LaunchArguments` (its own class) after its build mode is
+checked through `+version`, with `direct:<System32>\cmd.exe /D`, the clipboard
+denied, no `noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process
+on an unhandled exception, and the driver at normal priority. The workloads,
+at 140 x 45 cells, in blocks of 25,000 lines:
+
+- `fixed`: one block, then 20 cycles of a new tab and its close; `after` 7 s
+  later (undo-timeout prunes closed panes after 5 s).
+- `scrollback-default`: 4 blocks at the default `scrollback-limit`
+  (10,000,000 bytes), about ten times what it retains at this width.
+- `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` (default 1 GiB;
+  noctty itself has no maximum) holds at this width, with that limit.
+- `uia-walk`: `scrollback-default`'s output, then a UIA client reads the
+  pane's whole `DocumentRange` and walks it line by line to its end, the pane
+  found from the copy's own window handle. The document is the accessible
+  window, not the whole scrollback (`accessible_history_max_rows`).
+- `session-capture`: `scrollback-default`'s output with `window-save-state =
+  always` and `window-save-state-scrollback = 10000`, then 10 checkpoints,
+  each a new tab and its close and the session file's next write; the
+  session file stays in the portable copy.
+- `tab-churn`: 50 cycles of a new tab and its close.
+
+```powershell
+pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
+    -Bin <measurement prefix>\bin -Run <new dir> -Workload fixed
+```
+
+Compare the median of each workload's `after` stage over repeated runs, never
+one run's level: copies started the same minute differ by tens of MiB
+(test-harnesses.md, the 2026-11-18 SOAK-01 entry, trap 6). The outer half
+checks the real `startup-attempts.json`, the product jump list and the
+PowerShell history by metadata and records the clipboard sequence number
+before and after. Contracts.98-WorkingSet pins the harness.
 
 ## Style
 
