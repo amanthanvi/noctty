@@ -136,6 +136,20 @@ function Get-DirectUpdateProblems([string] $Text) {
     Need ResolvedRunVolume (Direct $controller.Clauses[0].Item2.Statements '$runFree=[DirectUpdateUi]::AvailableRunSpace($Run)')
     Need HistoryStart (Direct $controller.Clauses[0].Item2.Statements "`$historyGuard=Start-WindowsHarnessHistoryGuard -Harness 'direct-update-acceptance'")
     $controllerTry=@($controller.Clauses[0].Item2.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]}) | Select-Object -First 1
+    # Bind the tested status to the driver's process handle and its out parameter.
+    $controllerTryStatements=@($controllerTry.Body.Statements)
+    $exitRead=@($controllerTryStatements | Where-Object {Same $_ 'if(-not [HiddenWin]::GetExitCodeProcess($launch.process,[ref]$code)){throw ''Driver exit read failed''}'})
+    $exitReadIndex=-1
+    if($exitRead.Count -eq 1){$exitReadIndex=[Array]::IndexOf($controllerTryStatements,$exitRead[0])}
+    $exitWrites=@($controller.FindAll({param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        @($node.Left.FindAll({param($target) $target -is [Management.Automation.Language.VariableExpressionAst] -and $target.VariablePath.UserPath -imatch '(^|:)exitCode$'},$true)).Count -gt 0
+    },$true))
+    Need ControllerExitSource ($exitReadIndex -ge 2 -and $exitReadIndex+1 -lt $controllerTryStatements.Count -and
+        $controllerTryStatements[$exitReadIndex-2] -is [Management.Automation.Language.DoWhileStatementAst] -and
+        (Same $controllerTryStatements[$exitReadIndex-1] '[uint32]$code=1') -and
+        $exitWrites.Count -eq 2 -and (Same $exitWrites[0] '$exitCode=1') -and (Same $exitWrites[1] '$exitCode=$code') -and
+        [object]::ReferenceEquals($exitWrites[1],$controllerTryStatements[$exitReadIndex+1]))
     $positive=@($controllerTry.Body.Statements | Where-Object {Same $_ 'Invoke-DefaultOraclePositive $pwsh'})
     $launches=@($controllerTry.Body.Statements | Where-Object {$_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$launch'})
     Need DefaultPositiveCall ($positive.Count -eq 1 -and $launches.Count -eq 1 -and $positive[0].Extent.StartOffset -lt $launches[0].Extent.StartOffset)
@@ -428,6 +442,20 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         Refuses RejectedInvalidUtf8 {Assert-RejectedCopy $before $good}
         [IO.File]::WriteAllBytes($journal,[byte[]]($utf8Bom+$invalidUtf8))
         Refuses RejectedInvalidUtf8Bom {Assert-RejectedCopy $before $good}
+        # A clear transaction isolates encoding refusal from pending-state refusal.
+        $otherEncodings=[ordered]@{
+            RejectedUtf16LE=[Text.UnicodeEncoding]::new($false,$true)
+            RejectedUtf16BE=[Text.UnicodeEncoding]::new($true,$true)
+            RejectedUtf32LE=[Text.UTF32Encoding]::new($false,$true)
+            RejectedUtf32BE=[Text.UTF32Encoding]::new($true,$true)
+        }
+        foreach($entry in $otherEncodings.GetEnumerator()){
+            $encoding=$entry.Value
+            [IO.File]::WriteAllBytes($journal,[byte[]]($encoding.GetPreamble()+$encoding.GetBytes($clearJson)))
+            Refuses $entry.Key {Assert-RejectedCopy $before $good}
+        }
+        [IO.File]::WriteAllBytes($journal,[byte[]]($utf8Bom+$utf8Bom+[Text.Encoding]::UTF8.GetBytes($clearJson)))
+        Refuses RejectedDoubleUtf8Bom {Assert-RejectedCopy $before $good}
         [IO.File]::WriteAllText($journal,$clearJson)
         $fingerprint=@{Exists=$true;Hash='a';Modified='t'}
         $null=Assert-LocalState $fingerprint $fingerprint @() @()
@@ -548,6 +576,14 @@ foreach($control in $inert.GetEnumerator()){
 
 # Ordinary strings and disabled executable guards must fail, too.
 $shapeControls=[ordered]@{}
+$controllerGuard=$sites.ControllerFailure[0]
+$controllerPass='Write-Host "direct-update acceptance: PASS ($FromVersion -> $TargetVersion, $Architecture, $Expected); evidence=$Run"'
+$shapeControls.ControllerGuardAfterPass=@(($controllerGuard+"`n    "+$controllerPass),($controllerPass+"`n    "+$controllerGuard),'ControllerFailure')
+$shapeControls.ControllerGuardDisabled=@($controllerGuard,('if($false){'+$controllerGuard+'}'),'ControllerFailure')
+$shapeControls.ControllerGuardCommented=@($controllerGuard,('# '+$controllerGuard),'ControllerFailure')
+$shapeControls.ControllerGuardWarning=@($controllerGuard,$controllerGuard.Replace('throw ','Write-Warning '),'ControllerFailure')
+$shapeControls.ControllerAmbientExitCode=@('$exitCode=$code','$exitCode=$LASTEXITCODE','ControllerExitSource')
+$shapeControls.ControllerConstantExitCode=@('$exitCode=$code','$exitCode = 0','ControllerExitSource')
 $ephemeralLine=@($source -split "`r?`n" | Where-Object {$_ -like '$ephemeral=*'})
 $shapeControls.EphemeralReassignment=@($ephemeralLine[0],($ephemeralLine[0]+"`n`$ephemeral=`$true"),'EphemeralDefinition')
 foreach($item in @(
@@ -600,6 +636,7 @@ if($issues.Count){throw "Behavioural baseline failed: $($issues -join ', ')"}
 $mutants=[ordered]@{
     JournalUtf8Replacement=@('[Text.UTF8Encoding]::new($false,$true)','[Text.UTF8Encoding]::new($false,$false)')
     JournalUtf8BomFallback=@('[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path))','[IO.File]::ReadAllText($path,[Text.UTF8Encoding]::new($false,$true))')
+    JournalUtf8PreambleFallback=@('[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path))','[IO.File]::ReadAllText($path,[Text.UTF8Encoding]::new($true,$true))')
     JournalDuplicateKeys=@('        Assert-JournalKeys $value','')
     JournalSchema=@('if($RequireReadable){Assert-JournalSchema $value}','')
     JournalTrailingComma=@('$options.AllowTrailingCommas=$false','$options.AllowTrailingCommas=$true')
@@ -637,6 +674,11 @@ foreach($mutant in $mutants.GetEnumerator()){
     $root=Join-Path $fixtures $mutant.Key; $null=New-Item -ItemType Directory -Path $root
     $issues=@(Invoke-DirectUpdateVerdicts $text $root)
     if($issues.Count -eq 0){throw "Behavioural mutant escaped: $($mutant.Key)"}
+    if($mutant.Key -ceq 'JournalUtf8PreambleFallback'){
+        foreach($reason in @('RejectedUtf16LE','RejectedUtf16BE','RejectedUtf32LE','RejectedUtf32BE','RejectedDoubleUtf8Bom')){
+            if($issues -cnotcontains $reason){throw "JournalUtf8PreambleFallback did not exercise $reason"}
+        }
+    }
 }
 $forms=$source+"`n[System.Windows.Forms.Clipboard]::SetText('fixture')"
 if(@(Get-DirectUpdateProblems $forms) -cnotcontains 'ForbiddenOperation'){throw 'Forms clipboard mutant escaped'}

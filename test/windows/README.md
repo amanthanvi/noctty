@@ -985,7 +985,8 @@ page and checking its manual instructions is a separate browser check. Neither
 future boundary is established by the 1.3.137 acceptance run. Rejected also checks
 every original file hash and reads its journal strictly: absence and a readable
 clear transaction pass; unreadable, locked or malformed state fails. The reader
-uses `System.Text.Json` without comments or trailing commas, rejects duplicate
+decodes the bytes as strict UTF-8, then removes at most one leading UTF-8 BOM.
+It uses `System.Text.Json` without comments or trailing commas, rejects duplicate
 or case-colliding keys recursively, and requires all 17 fields written by
 1.3.136 for a strict Rejected verdict. Empty objects and unquoted keys fail.
 
