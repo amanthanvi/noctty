@@ -603,12 +603,16 @@ public static class GuiProbeNative {
     // PID now names a process whose parent is another, so the candidate itself has exited), `older` (created before
     // the ancestor it names, so not its child), or `unresolved`: a candidate that may still run and whose link could
     // not be read. Only an unresolved one can hide a live process.
+    // `pruned` lists the gone and reused candidates' PIDs: the walk does not pass through them (their PID may name
+    // another process now), so their snapshot children are for the caller to account for (Get-ProbeOrphansUnaccounted).
     public static Descendant[] VerifiedDescendants(int root, out int unverified) {
-        int gone, reused, older, unresolved;
-        return VerifiedDescendants(root, out unverified, out gone, out reused, out older, out unresolved);
+        int gone, reused, older, unresolved; int[] pruned;
+        return VerifiedDescendants(root, out unverified, out gone, out reused, out older, out unresolved, out pruned);
     }
-    public static Descendant[] VerifiedDescendants(int root, out int unverified, out int gone, out int reused, out int older, out int unresolved) {
+    public static Descendant[] VerifiedDescendants(int root, out int unverified, out int gone, out int reused, out int older, out int unresolved, out int[] pruned) {
         unverified = 0; gone = 0; reused = 0; older = 0; unresolved = 0;
+        var prunedList = new List<int>();
+        pruned = new int[0];
         var result = new List<Descendant>();
         var pins = new List<IntPtr>();
         try {
@@ -628,18 +632,20 @@ public static class GuiProbeNative {
                     IntPtr h = OpenProcess(0x1000 | 0x00100000, false, row.Pid);
                     if (h == IntPtr.Zero) {
                         unverified++;
-                        if (Marshal.GetLastWin32Error() == 87) gone++; else unresolved++; // ERROR_INVALID_PARAMETER: no such process
+                        if (Marshal.GetLastWin32Error() == 87) { gone++; prunedList.Add(row.Pid); } else unresolved++; // ERROR_INVALID_PARAMETER: no such process
                         continue;
                     }
                     long creation; int realParent;
                     if (!GetProcessTimes(h, out creation, out e, out k, out u) || !ParentOf(h, out realParent)) {
                         unverified++;
-                        if (WaitForSingleObject(h, 0) == 0) gone++; else unresolved++;
+                        if (WaitForSingleObject(h, 0) == 0) { gone++; prunedList.Add(row.Pid); } else unresolved++;
                         CloseHandle(h); continue;
                     }
                     if (realParent != parent.Key || creation < parent.Value) {
                         unverified++;
-                        if (WaitForSingleObject(h, 0) == 0) gone++; else if (realParent != parent.Key) reused++; else older++;
+                        if (WaitForSingleObject(h, 0) == 0) { gone++; prunedList.Add(row.Pid); }
+                        else if (realParent != parent.Key) { reused++; prunedList.Add(row.Pid); }
+                        else older++;
                         CloseHandle(h); continue;
                     }
                     pins.Add(h); seen.Add(row.Pid);
@@ -647,8 +653,38 @@ public static class GuiProbeNative {
                     queue.Enqueue(new KeyValuePair<int, long>(row.Pid, creation));
                 }
             }
-        } finally { foreach (var h in pins) CloseHandle(h); }
+        } finally { foreach (var h in pins) CloseHandle(h); pruned = prunedList.ToArray(); }
         return result.ToArray();
+    }
+    // A snapshot child of a pruned PID, read on its own handle: "gone" (no such process, or exited), "alive" (running,
+    // and its parent is still that PID), "reused" (running, with another parent: the PID names another process now) or
+    // "unreadable".
+    public static string ChildState(int pid, int expectedParent) {
+        IntPtr h = OpenProcess(0x1000 | 0x00100000, false, pid); // QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        if (h == IntPtr.Zero) return Marshal.GetLastWin32Error() == 87 ? "gone" : "unreadable";
+        try {
+            if (WaitForSingleObject(h, 0) == 0) return "gone";
+            int parent;
+            if (!ParentOf(h, out parent)) return "unreadable";
+            return parent == expectedParent ? "alive" : "reused";
+        } finally { CloseHandle(h); }
+    }
+    // Whether process `pid` is a member of `job`, checked while a handle to it is open, so the PID cannot be reused under
+    // the check: 1 a member, 0 not, -1 unreadable (it cannot be opened, or the check failed). With Zero, `job` is this
+    // process's own job, which no handle names: membership is then the job's PID list read while the handle is held.
+    public static int OwnerInJob(int pid, IntPtr job) {
+        IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (h == IntPtr.Zero) return -1;
+        try {
+            if (job == IntPtr.Zero) {
+                var members = JobPids(IntPtr.Zero);
+                if (members == null) return -1;
+                foreach (var member in members) if (member == pid) return 1;
+                return 0;
+            }
+            bool inJob;
+            return IsProcessInJob(h, job, out inJob) ? (inJob ? 1 : 0) : -1;
+        } finally { CloseHandle(h); }
     }
     // (6) The input gate before a stimulus (CodeRabbit r4646929628, r4646929642): one GetGUIThreadInfo read on
     // `topLevel`'s GUI thread. "ok" only when the read succeeded, no menu loop is open (GUI_INMENUMODE,
@@ -1413,15 +1449,44 @@ function Get-ProcessDesktopReading([int] $ProcessId, [string] $Private) {
 # $script:LastUnverifiedLinks, never returned, so never stopped; the ones of them that may still run are counted in
 # $script:LastUnresolvedLinks (the rest are gone, reused or older). PID-keyed maps are Dictionary[int, ...], never
 # [ordered]@{}: an int index on an OrderedDictionary is positional (tooling.md 2026-11-20 PS-ORDERED-INT-INDEX-01).
-function Get-ProbeDescendants([int] $RootPid) {
+function Get-ProbeDescendants([int] $RootPid, [int[]] $JobPids = @()) {
     $found = [System.Collections.Generic.Dictionary[int, long]]::new()
-    $unverified = 0; $gone = 0; $reused = 0; $older = 0; $unresolved = 0
-    foreach ($descendant in [GuiProbeNative]::VerifiedDescendants($RootPid, [ref]$unverified, [ref]$gone, [ref]$reused, [ref]$older, [ref]$unresolved)) {
+    $unverified = 0; $gone = 0; $reused = 0; $older = 0; $unresolved = 0; $pruned = [int[]]@()
+    foreach ($descendant in [GuiProbeNative]::VerifiedDescendants($RootPid, [ref]$unverified, [ref]$gone, [ref]$reused, [ref]$older, [ref]$unresolved, [ref]$pruned)) {
         $found[$descendant.Pid] = $descendant.Creation
     }
+    $orphans = Get-ProbeOrphansUnaccounted @([GuiProbeNative]::Processes()) @($pruned) $JobPids { param($Child, $Parent) [GuiProbeNative]::ChildState($Child, $Parent) }
     $script:LastUnverifiedLinks = $unverified
-    $script:LastUnresolvedLinks = $unresolved
+    $script:LastOrphansUnaccounted = $orphans
+    $script:LastUnresolvedLinks = $unresolved + $orphans
     return , $found
+}
+
+# CodeRabbit r4647965406: a pruned candidate (gone or reused between the snapshot and its open) is not walked through,
+# since its PID may name another process now, so its snapshot children are accounted for another way. A child that is
+# gone, or whose PID now names a process with another parent, is itself pruned and its own children checked the same
+# way. A child still running under that PID is accounted for only as a member of the arm's job (then a census row,
+# through the job's PID list). Any other (running outside the job, or unreadable) is unaccounted: it may be a live
+# descendant whose desktop is unknown, and the census counts it as unresolved, so the arm is inconclusive. Nothing here
+# is stopped. `StateOf` takes (child PID, parent PID) and returns ChildState's answer.
+function Get-ProbeOrphansUnaccounted($Rows, $Pruned, $JobPids, [scriptblock] $StateOf) {
+    $job = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($id in @($JobPids)) { if ($null -ne $id) { [void]$job.Add([int]$id) } }
+    $queue = [System.Collections.Generic.Queue[int]]::new()
+    foreach ($id in @($Pruned)) { if ($null -ne $id) { $queue.Enqueue([int]$id) } }
+    $visited = [System.Collections.Generic.HashSet[int]]::new()
+    $unaccounted = 0
+    while ($queue.Count -gt 0) {
+        $parent = $queue.Dequeue()
+        if (-not $visited.Add($parent)) { continue }
+        foreach ($row in @($Rows | Where-Object { $null -ne $_ -and [int]$_.Parent -eq $parent -and [int]$_.Pid -ne $parent })) {
+            $state = & $StateOf ([int]$row.Pid) $parent
+            if ($state -in @('gone', 'reused')) { $queue.Enqueue([int]$row.Pid) }
+            elseif ($state -eq 'alive' -and $job.Contains([int]$row.Pid)) { }
+            else { $unaccounted++ }
+        }
+    }
+    return $unaccounted
 }
 
 # Q0's sample: the job's PIDs plus every Toolhelp descendant of the copy (by PID and creation time). A descendant
@@ -1431,7 +1496,7 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [s
     foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
     $rows = [Collections.Generic.List[object]]::new()
     $jobPids = @([GuiProbeNative]::JobPids($Job))
-    $descendants = Get-ProbeDescendants $CopyPid
+    $descendants = Get-ProbeDescendants $CopyPid $jobPids
     $script:SampleUnverifiedLinks = $script:LastUnverifiedLinks
     $script:SampleUnresolvedLinks = $script:LastUnresolvedLinks
     $systemFolder = [Environment]::GetFolderPath('System')
@@ -1472,11 +1537,18 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [s
     return $rows
 }
 
-# Every top-level window of the job's processes on the private and the Default desktop.
-function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSentinel) {
+# Every top-level window of the job's processes on the private and the Default desktop. `dropped` holds the walk's
+# other windows (owner PID, desktop, class) for Resolve-ProbeLateJoiners; it stays in memory and is never recorded.
+# At walk time (CodeRabbit r4647967051), each owner outside the census of a window on a desktop other than the private
+# one is checked against the arm's job (`Job`: the CLI's watched job; Zero, the driver's own job, for a GUI arm) on a
+# handle held open (OwnerInJob): a member's window is kept as a job window there (ownerRole `job-member`), so the arm
+# cannot pass; an owner that cannot be opened is only counted (`ownersUnreadable`). An owner that exits between the
+# walk and its open, with its windows, is outside this check.
+function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSentinel, [IntPtr] $Job = [IntPtr]::Zero) {
     $byPid = @{}
     foreach ($row in $Processes) { $byPid[$row.pid] = $row }
     $rows = [Collections.Generic.List[object]]::new()
+    $dropped = [Collections.Generic.List[object]]::new()
     $counts = [ordered]@{}
     $totals = [ordered]@{}
     $sentinelSeen = $false
@@ -1488,7 +1560,8 @@ function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSenti
         $totals[$kind] = $(if ($null -eq $windows) { $null } else { @($windows).Count })
         if ($kind -eq 'private' -and $null -ne $windows) { $sentinelSeen = @($windows | Where-Object { $_.Hwnd -eq $PrivateSentinel }).Count -eq 1 }
         foreach ($window in @($windows)) {
-            if ($null -eq $window -or -not $byPid.ContainsKey($window.Pid)) { continue }
+            if ($null -eq $window) { continue }
+            if (-not $byPid.ContainsKey($window.Pid)) { $dropped.Add([ordered]@{ pid = [int]$window.Pid; desktop = $kind; class = $window.Class; visible = $window.Visible }); continue }
             $counts[$kind]++
             $rows.Add([ordered]@{ desktop = $kind; class = $window.Class; ownerImage = $byPid[$window.Pid].image; ownerRole = $byPid[$window.Pid].role; visible = $window.Visible })
         }
@@ -1499,7 +1572,42 @@ function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSenti
     # only on a complete inventory; anything less leaves Q0 inconclusive.
     $enumerated = @($counts.Values | Where-Object { $_ -isnot [int] }).Count -eq 0
     $complete = $enumerated -and $sentinelSeen -and $null -ne $totals['Default'] -and $totals['Default'] -gt 0
-    return [ordered]@{ windows = $rows; counts = $counts; totals = $totals; privateSentinelSeen = $sentinelSeen; complete = $complete }
+    $owned = Get-ProbeJobOwnedWindows $dropped { param($OwnerPid) [GuiProbeNative]::OwnerInJob($OwnerPid, $Job) }
+    foreach ($window in @($owned.windows)) { $rows.Add($window) }
+    return [ordered]@{ windows = $rows; counts = $counts; totals = $totals; privateSentinelSeen = $sentinelSeen; complete = $complete; dropped = $dropped
+        ownersUnreadable = $owned.ownersUnreadable }
+}
+
+# The windows a walk dropped (owner outside the census) on a desktop other than the private one whose owner is a member
+# of the arm's job: each owner checked once (`InJob` takes an owner PID and returns OwnerInJob's 1, 0 or -1). A member's
+# window becomes an inventory row (ownerRole `job-member`); an unreadable owner is counted and does not gate.
+function Get-ProbeJobOwnedWindows($Dropped, [scriptblock] $InJob) {
+    $verdicts = @{}
+    $windows = [Collections.Generic.List[object]]::new()
+    foreach ($window in @($Dropped | Where-Object { $null -ne $_ -and $_.desktop -ne 'private' })) {
+        $owner = [int]$window.pid
+        if (-not $verdicts.ContainsKey($owner)) { $verdicts[$owner] = [int](& $InJob $owner) }
+        if ($verdicts[$owner] -eq 1) {
+            $windows.Add([ordered]@{ desktop = $window.desktop; class = $window.class; ownerImage = $null; ownerRole = 'job-member'; visible = $window.visible })
+        }
+    }
+    return [ordered]@{ windows = $windows.ToArray(); ownersUnreadable = @($verdicts.Values | Where-Object { $_ -eq -1 }).Count }
+}
+
+# After a walk (CodeRabbit r4647868866, in the stricter form the lead chose in council r2): the walk kept only the
+# census's windows. A job member outside the census (it joined after the census was taken) is a late joiner. A late
+# joiner that owns a window the walk dropped, on any desktop but the private one, owns a job window off the private
+# desktop: that window is returned as an inventory row (ownerRole `late-joiner`), so the arm cannot pass. A late
+# joiner with no such window is only counted. `MemberPids` are the job's members read after the walk (and, in the CLI
+# arm, the watch's pinned joiners, whose PIDs cannot be reused while the watch holds them).
+function Resolve-ProbeLateJoiners($Inventory, $CensusPids, $MemberPids) {
+    $census = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($id in @($CensusPids)) { if ($null -ne $id) { [void]$census.Add([int]$id) } }
+    $late = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($id in @($MemberPids)) { if ($null -ne $id -and -not $census.Contains([int]$id)) { [void]$late.Add([int]$id) } }
+    $windows = @(@($Inventory.dropped) | Where-Object { $null -ne $_ -and $late.Contains([int]$_.pid) -and $_.desktop -ne 'private' } |
+        ForEach-Object { [ordered]@{ desktop = $_.desktop; class = $_.class; ownerImage = $null; ownerRole = 'late-joiner'; visible = $_.visible } })
+    return [ordered]@{ lateJoiners = $late.Count; windows = $windows }
 }
 
 # Ends each listed process by exact PID (its creation time checked), the copy's descendants first, then the copy.
@@ -1791,7 +1899,8 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
         # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
         # enumeration must list.
         $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
-        try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd } finally { [GuiProbeNative]::Close($sentinel) }
+        try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd ([IntPtr]::Zero) } finally { [GuiProbeNative]::Close($sentinel) }
+        $arm.windowOwnersUnreadable = $windows.ownersUnreadable
         $arm.windowTotals = $windows.totals
         $arm.privateSentinelSeen = $windows.privateSentinelSeen
         $arm.processes = @($processes | ForEach-Object { [ordered]@{
@@ -1800,10 +1909,11 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
             threadsUnreadable = $_.threadsUnreadable; imageInCopyFolder = $_.imageInCopyFolder; imageInSystemFolder = $_.imageInSystemFolder } })
         $arm.windows = $windows.windows
         $arm.windowCounts = $windows.counts
-        # As in the CLI arm: a job member outside the census after the walk leaves the inventory incomplete.
-        $censusPids = @($processes | ForEach-Object { [int]$_.pid })
-        $arm.membersOutsideCensusAfterWalk = @(@([GuiProbeNative]::JobPids([IntPtr]::Zero)) | Where-Object { [int]$_ -notin $censusPids }).Count
-        $arm.inventoryComplete = [bool]$windows.complete -and $arm.membersOutsideCensusAfterWalk -eq 0
+        # As in the CLI arm: a late joiner's window the walk dropped, off the private desktop, is kept as a job window.
+        $late = Resolve-ProbeLateJoiners $windows @($processes | ForEach-Object { $_.pid }) @([GuiProbeNative]::JobPids([IntPtr]::Zero))
+        $arm.lateJoinersAfterWalk = $late.lateJoiners
+        $arm.windows = @(@($arm.windows) + @($late.windows))
+        $arm.inventoryComplete = [bool]$windows.complete
         $arm.log = Read-ProbeLog (Join-Path $Run "$LogName.log")
         $arm.stopped = Stop-ProbeProcesses $processes ([IntPtr]::Zero)
         # The copy's processes still running after the stop: the same process, not exited (AliveExact).
@@ -1864,12 +1974,12 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 # The CLI tree's windows, inventoried on both desktops at every poll: noctty.com is a console program, so a
                 # console window it gets on Default is exactly the leak Q0 exists to catch.
                 $windowsSeen = [System.Collections.Generic.Dictionary[string, object]]::new()
-                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0; $unresolvedLinks = 0; $finalPoll = $false; $finalPollRan = $false; $membersOutsideCensus = 0
+                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0; $unresolvedLinks = 0; $finalPoll = $false; $finalPollRan = $false; $lateJoiners = 0; $ownersUnreadable = 0
                 $deadline = [datetime]::UtcNow.AddSeconds(30)
                 do {
                     $all = @{}
                     foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
-                    $descendants = Get-ProbeDescendants $pi.pid
+                    $descendants = Get-ProbeDescendants $pi.pid @([GuiProbeNative]::JobPids($watchJob))
                     $unverifiedLinks = [Math]::Max($unverifiedLinks, [int]$script:LastUnverifiedLinks)
                     $unresolvedLinks = [Math]::Max($unresolvedLinks, [int]$script:LastUnresolvedLinks)
                     # The watched job's members, each read at its creation; their creation times come from that read.
@@ -1909,13 +2019,14 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                         }
                     }
                     $polls++
-                    $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd
+                    $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd $watchJob
+                    $ownersUnreadable = [Math]::Max($ownersUnreadable, [int]$inventory.ownersUnreadable)
                     if (-not [bool]$inventory.complete) { $inventoryEveryPoll = $false }
-                    # The walk kept only the census's windows. A member that joined after the census could have owned a
-                    # window the walk dropped, so any member outside the census now leaves the inventory incomplete
-                    # (CodeRabbit r4647868866; council r2 Sol M1's rule, after the walk).
-                    $outside = @(@([GuiProbeNative]::JobPids($watchJob)) | Where-Object { -not $seen.ContainsKey([int]$_) }).Count
-                    if ($outside -gt 0) { $inventoryEveryPoll = $false; $membersOutsideCensus += $outside }
+                    # A late joiner's window the walk dropped, off the private desktop, is kept as a job window there.
+                    $members = @(@([GuiProbeNative]::JobPids($watchJob)) + @($watch.Snapshot() | Where-Object { -not $_.Unpinned -and $_.Creation -ne 0 } | ForEach-Object { $_.Pid }))
+                    $late = Resolve-ProbeLateJoiners $inventory @($seen.Keys) $members
+                    foreach ($window in @($late.windows)) { $windowsSeen["$($window.desktop)|$($window.class)|$($window.ownerRole)"] = $window }
+                    $lateJoiners += $late.lateJoiners
                     foreach ($window in @($inventory.windows)) { $windowsSeen["$($window.desktop)|$($window.class)|$($window.ownerRole)"] = $window }
                     if ($finalPoll) { $finalPollRan = $true; break }
                     # The tree is done once the root has exited and the watched job holds no live process (a forwarded
@@ -1935,7 +2046,8 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 # True only once the poll after the drain has run (council r2, Sol M2).
                 $facts.treeDoneInTime = $finalPollRan
                 $facts.inventoryCompleteEveryPoll = $inventoryEveryPoll -and $polls -gt 0
-                $facts.membersOutsideCensusAfterWalk = $membersOutsideCensus
+                $facts.lateJoinersAfterWalk = $lateJoiners
+                $facts.windowOwnersUnreadable = $ownersUnreadable
                 $facts.windows = @($windowsSeen.Values)
                 $facts.windowsOffPrivate = @($windowsSeen.Values | Where-Object { $_.desktop -ne 'private' }).Count
                 $facts.unverifiedDescendantLinks = $unverifiedLinks

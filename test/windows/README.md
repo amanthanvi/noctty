@@ -1124,9 +1124,13 @@ ConPTY host"):
   no other noctty, and it runs locally too. Its tree is sampled at every poll
   until the tree is done, and so are its windows: the same two-desktop
   inventory, with its sentinel and Default > 0 control, over the tree's
-  processes. A job member outside the census after a walk (it joined during
-  the poll, and the walk kept only the census's windows) leaves that
-  inventory incomplete. The probe starts `noctty.com` with
+  processes. The walk keeps only the census's windows, so after it the job's
+  members are read again: a member outside the census (it joined during the
+  poll) that owns a window the walk dropped, on any desktop but the private
+  one, is recorded as a job window there (`late-joiner`), and the arm cannot
+  pass. A late joiner with no such window is only counted
+  (`lateJoinersAfterWalk`); the GUI arms do the same. The probe starts
+  `noctty.com` with
   `CREATE_NO_WINDOW`, so this arm does not test whether a console window
   would reach Default. Each invocation runs in a job of the driver's own,
   watched on a completion port, and each process that joins it (the forwarded
@@ -1184,8 +1188,17 @@ Each arm:
   - a descendant candidate the walk could not verify, unless it is gone, its
     PID now names another process, or it predates the ancestor it names
     (`unresolvedDescendantLinks` must be 0);
+  - a running child of a gone or reused candidate that is not in the arm's
+    job (the walk does not pass through such a PID; it counts as unresolved);
   - more live processes in the job, by its active count right after the
     sample, than in-job rows (a GUI arm).
+- Each walk also checks, on a handle held open, whether the owner of a
+  window off the private desktop that is outside the census belongs to the
+  arm's job (the CLI's watched job, or the GUI driver's own). A member's
+  window counts as a job window there, so the arm cannot pass. An owner that
+  cannot be opened is counted (`windowOwnersUnreadable`). An owner that exits
+  between the walk and its open, taking its windows with it, is outside this
+  check.
 - Positive control: a child started without a desktop name reports the private
   desktop.
 - Negative control: a thread moved to a second desktop with `SetThreadDesktop`
