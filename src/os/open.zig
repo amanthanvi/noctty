@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const apprt = @import("../apprt.zig");
+const redact = @import("redact.zig");
 
 const log = std.log.scoped(.@"os-open");
 
@@ -79,18 +80,36 @@ fn openThread(exe_: std.process.Child) void {
     if (exe.stderr) |stderr| {
         var buffer: [256]u8 = undefined;
         var stream = stderr.readerStreaming(&buffer);
-        const reader = &stream.interface;
-        while (true) {
-            const line = reader.takeDelimiterExclusive('\n') catch |outer| switch (outer) {
-                error.EndOfStream => break,
-                error.ReadFailed => break,
-                error.StreamTooLong => reader.take(buffer.len) catch |inner| switch (inner) {
-                    error.ReadFailed => break,
-                    error.EndOfStream => break,
-                },
-            };
-            log.warn("open stderr={s}", .{line});
-        }
+        _ = drainOpenerStderr(&stream.interface);
     }
     _ = exe.wait() catch {};
+}
+
+/// Reads an opener's stderr to its end, logging each line, and returns how
+/// many lines it read. Lines are read inclusively so the delimiter is
+/// consumed (upstream 3b8141fbd, after the stepping stone):
+/// `takeDelimiterExclusive` leaves the '\n' buffered, so once the child
+/// wrote a line every later call returned an empty slice and the loop spun
+/// forever. A line is logged by its size only: an opener's stderr can echo
+/// the link it was given (AGENTS.md "Logging").
+fn drainOpenerStderr(reader: *std.Io.Reader) usize {
+    var lines: usize = 0;
+    while (true) {
+        const line = reader.takeDelimiterInclusive('\n') catch |outer| switch (outer) {
+            error.EndOfStream => break,
+            error.ReadFailed => break,
+            error.StreamTooLong => reader.take(reader.buffer.len) catch |inner| switch (inner) {
+                error.ReadFailed => break,
+                error.EndOfStream => break,
+            },
+        };
+        lines += 1;
+        log.warn("open stderr={f}", .{redact.bytes(std.mem.trimEnd(u8, line, "\n"))});
+    }
+    return lines;
+}
+
+test "drainOpenerStderr consumes each line's delimiter and ends" {
+    var reader: std.Io.Reader = .fixed("first line\nsecond line\n");
+    try std.testing.expectEqual(@as(usize, 2), drainOpenerStderr(&reader));
 }
