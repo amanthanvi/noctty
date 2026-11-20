@@ -2414,7 +2414,7 @@ fn clearPromptForRedraw(
             },
 
             .true => {
-                const start = start: {
+                var start: Pin = start: {
                     var it = self.cursor.page_pin.promptIterator(
                         .left_up,
                         null,
@@ -2427,6 +2427,21 @@ fn clearPromptForRedraw(
                         break :prompt;
                     };
                 };
+
+                // This runs after the reflow, which copies a row's prompt
+                // mark onto every row it wraps that row into (PageList's
+                // ReflowCursor.copyRowMetadata). After a narrowing the
+                // cursor can sit on such a piece, which then reads as a
+                // prompt start of its own, and clearing from there would
+                // leave the rest of the prompt's first line. The prompt
+                // starts where that line does, as it did when this clear
+                // ran before the reflow.
+                while (start.rowAndCell().row.wrap_continuation) {
+                    const above = start.up(1) orelse break;
+                    const above_row = above.rowAndCell().row;
+                    if (!above_row.wrap or above_row.semantic_prompt != .prompt) break;
+                    start = above;
+                }
 
                 // Clear cells from our start down. We replace it with spaces,
                 // and do not physically erase the rows (eraseRows) because the
@@ -8050,6 +8065,31 @@ test "Screen: resize less cols no scrollback pull keeps input rows below the cur
         const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
         defer alloc.free(contents);
         try testing.expectEqualStrings("1", contents);
+    }
+}
+
+test "Screen: resize less cols with prompt redraw clears a prompt line the reflow wraps" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10 });
+    defer s.deinit();
+    try s.testWriteString("0\n1\n");
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.testWriteString("abcdefg");
+
+    // The prompt clear runs after the reflow, which wraps the line at 6
+    // columns and marks its second row, where the cursor ends, as a prompt
+    // row too. The whole line is still the prompt the shell redraws.
+    try s.resize(.{ .cols = 6, .rows = 5, .prompt_redraw = .true });
+    try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.y);
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("0\n1", contents);
     }
 }
 
