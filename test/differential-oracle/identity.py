@@ -63,20 +63,21 @@ def package_digest(root, *, allow_symlinks=True):
     return digest.digest(), min(size, 0xFFFFFFFF)
 
 
-def compiler_hashes(zig_exe, zig_lib):
+def compiler_exe_hash(zig_exe):
     executable = hashlib.sha256()
     with zig_exe.open("rb") as source:
         while block := source.read(1024 * 1024):
             executable.update(block)
+    return executable.hexdigest()
+
+
+def compiler_lib_hash(zig_lib):
     if not all(
         (zig_lib / path).exists() for path in ("std/std.zig", "libc/include", "compiler_rt")
     ):
         raise ValueError("incomplete Zig lib directory")
     lib_digest, _ = package_digest(zig_lib, allow_symlinks=False)
-    return {
-        "zig_exe_sha256": executable.hexdigest(),
-        "zig_lib_sha256": lib_digest.hex(),
-    }
+    return lib_digest.hex()
 
 
 def check_packages(dependencies, source):
@@ -111,7 +112,14 @@ def check_packages(dependencies, source):
 
 
 def main():
-    zig_exe, zig_lib, compiler, api, source, *arguments = sys.argv[1:]
+    root = Path.cwd().resolve()
+    stage = runpy.run_path(str(Path(__file__).with_name("stage.py")))
+    revision, dirty = stage["git_source_state"](root)
+    if sys.argv[1:2] == ["--configure"]:
+        print(compiler_exe_hash(Path(sys.argv[2])))
+        return
+
+    compiler_sha256, zig_lib, compiler, api, source, *arguments = sys.argv[1:]
     output = arguments.pop()
     if len(arguments) % 3 or any(
         arguments[i] != "--dependency" for i in range(0, len(arguments), 3)
@@ -134,23 +142,19 @@ def main():
         )
     if not dependencies:
         raise ValueError("oracle requires dependencies from the resolved build graph")
-    root = Path.cwd().resolve()
     check_packages(dependencies, root)
-    git_bytes = runpy.run_path(str(Path(__file__).with_name("stage.py")))["git_bytes"]
-    revision = git_bytes(root, "rev-parse", "HEAD").decode().strip()
     if not re.fullmatch("[0-9a-f]{40}", revision):
         raise ValueError("invalid build-tree Git HEAD")
-    dirty = bool(
-        git_bytes(root, "status", "--porcelain=v1", "--untracked-files=all")
-    )
-    hashes = compiler_hashes(Path(zig_exe), Path(zig_lib))
+    if not re.fullmatch("[0-9a-f]{64}", compiler_sha256):
+        raise ValueError("invalid configured Zig executable hash")
+    fields = {
+        "revision": revision,
+        "dirty": dirty,
+        "zig_exe_sha256": compiler_sha256,
+        "zig_lib_sha256": compiler_lib_hash(Path(zig_lib)),
+    }
     Path(output).write_text(
-        "pub const revision = "
-        + json.dumps(revision)
-        + ";\npub const dirty = "
-        + str(dirty).lower()
-        + ";\n"
-        + "".join(f"pub const {key} = {json.dumps(value)};\n" for key, value in hashes.items()),
+        "".join(f"pub const {key} = {json.dumps(value)};\n" for key, value in fields.items()),
         encoding="utf-8",
         newline="\n",
     )

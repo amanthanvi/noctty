@@ -17,7 +17,7 @@ comptime {
 }
 
 pub fn build(b: *std.Build) !void {
-    const oracle_system = try @import("src/differential_oracle_build.zig").configure(b);
+    const oracle = try @import("src/differential_oracle_build.zig").configure(b);
     const BuildConfig = @import("src/build/Config.zig");
     const SharedDeps = @import("src/build/SharedDeps.zig");
     const GhosttyExe = @import("src/build/GhosttyExe.zig");
@@ -124,7 +124,7 @@ pub fn build(b: *std.Build) !void {
     else
         null;
 
-    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle_system);
+    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle);
 
     // Standalone feasibility spike. This artifact is intentionally absent
     // from the normal build and every product packaging path.

@@ -22,6 +22,7 @@ sys.dont_write_bytecode = True
 SIZES = ((80, 24), (132, 43))
 FORMATS = ("plain", "vt")
 KINDS = ("bytes", "utf8", "osc-valid", "osc-invalid")
+COMPILER_HASH_FIELDS = ("zig_exe_sha256", "zig_lib_sha256")
 CLASSES = (
     "no change",
     "fork behaviour removed",
@@ -580,13 +581,13 @@ def staging():
 
 
 def source_provenance(repo):
-    if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
+    stage = staging()
+    head, dirty = stage.git_source_state(repo)
+    if dirty:
         raise ValueError("source tree must be completely clean")
-    head = git(repo, "rev-parse", "HEAD")
     record = repo / "test/differential-oracle/staged-source.json"
     if not record.exists():
         return {"production_revision": head, "instrumented_revision": head}
-    stage = staging()
     staged = read_json(record)
     production = staged["production_revision"]
     original = stage.git_bytes(repo, "show", production + ":build.zig")
@@ -597,8 +598,14 @@ def source_provenance(repo):
         or after != (repo / "build.zig").read_bytes()
     ):
         raise ValueError("source instrumentation build delta differs")
+    git_version = stage.git_bytes(repo, "show", f"{production}:{stage.GIT_VERSION}")
+    if stage.instrument_git_version(git_version) != (
+        repo / stage.GIT_VERSION
+    ).read_bytes():
+        raise ValueError("source instrumentation GitVersion delta differs")
     allowed = {p.relative_to(repo).as_posix() for p in stage.sources(repo)} | {
         "build.zig",
+        stage.GIT_VERSION,
         "test/differential-oracle/staged-source.json",
     }
     changed = set(
@@ -678,7 +685,7 @@ def validate_build_identity(identity, provenance, profile):
     if not isinstance(identity, dict) or any(
         not isinstance(identity.get(key), str)
         or not re.fullmatch("[0-9a-f]{64}", identity[key])
-        for key in ("zig_exe_sha256", "zig_lib_sha256")
+        for key in COMPILER_HASH_FIELDS
     ):
         raise ValueError("missing or invalid Zig compiler content identity")
     if (
@@ -966,11 +973,22 @@ def compare(
         and sets[0].manifest["corpus_sha256"] != expected_corpus
     ):
         raise ValueError("corpus differs from the operator pin")
-    profiles = {
-        side: s.manifest["profile"]
-        for side, s in zip(("pre", "branch", "upstream"), sets)
+    manifests = {
+        side: s.manifest for side, s in zip(("pre", "branch", "upstream"), sets)
     }
-    declared_profiles = validate_profile_declarations(profiles, profile_declarations)
+    profiles = {side: m["profile"] for side, m in manifests.items()}
+    declared_profiles = validate_profile_declarations(
+        {
+            side: {
+                **m["profile"],
+                "build_identity": {
+                    key: m["build_identity"][key] for key in COMPILER_HASH_FIELDS
+                },
+            }
+            for side, m in manifests.items()
+        },
+        profile_declarations,
+    )
     shipping_differences = {
         (side, d["option"]): {"side": side, **d}
         for side, s in zip(("pre", "branch", "upstream"), sets)
@@ -1531,6 +1549,36 @@ def controls(args):
             path.write_text(json.dumps(value), encoding="utf-8")
         completion.unlink()
         complete_capture(roots[1].parent)
+
+    for field in COMPILER_HASH_FIELDS:
+        old = json.loads(original)["build_identity"][field]
+        new = "c" * 64
+        change_manifests(
+            lambda m, field=field, new=new: m["build_identity"].update({field: new})
+        )
+        rejects(
+            f"undeclared {field} difference",
+            lambda: comp(*roots),
+            "--declare-profile-differences",
+        )
+        declaration = {
+            "side": "branch",
+            "option": f"build_identity.{field}",
+            "reason": "synthetic compiler identity control",
+            "old": {"present": True, "value": old},
+            "new": {"present": True, "value": new},
+        }
+        check(
+            comp(*roots, profile_declarations=[declaration])["profile_declarations"]
+            == [declaration]
+        )
+        checks.append(f"declared {field} difference accepted and recorded")
+        stale = {**declaration, "new": {"present": True, "value": "d" * 64}}
+        rejects(
+            f"stale {field} declaration",
+            lambda stale=stale: comp(*roots, profile_declarations=[stale]),
+            "values are stale",
+        )
 
     change_manifests(lambda m: m["profile"].update(optimize="different"))
     declaration = [

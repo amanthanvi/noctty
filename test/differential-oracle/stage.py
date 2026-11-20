@@ -2,7 +2,7 @@
 """Overlay only oracle instrumentation onto a clean, task-owned source copy.
 
 Commit the result locally before preparing/capturing. The retained source
-revision and exact root-build delta let capture distinguish instrumentation
+revision and exact build-file deltas let capture distinguish instrumentation
 from a changed production source. Never use this on a retained read-only tree.
 """
 
@@ -15,10 +15,46 @@ import subprocess
 import sys
 from pathlib import Path
 
+GIT_CONFIG = ("-c", "core.ignoreStat=false", "-c", "core.fsmonitor=false")
+GIT_VERSION = "src/build/GitVersion.zig"
+
 
 def git_bytes(repo, *args):
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
-    return subprocess.check_output(["git", "-C", str(repo), *args], env=env)
+    return subprocess.check_output(
+        ["git", *GIT_CONFIG, "-C", str(repo), *args], env=env
+    )
+
+
+def git_source_state(repo):
+    repo = repo.resolve(strict=True)
+    try:
+        root = git_bytes(repo, "rev-parse", "--show-toplevel").decode().rstrip("\r\n")
+    except subprocess.CalledProcessError as error:
+        raise ValueError("source root must be the Git worktree top-level") from error
+    if not root or Path(root).resolve(strict=True) != repo:
+        raise ValueError("source root must be the Git worktree top-level")
+    for entry in git_bytes(repo, "ls-files", "-v", "-z").split(b"\0"):
+        tag = entry[:1]
+        if tag.upper() == b"S":
+            raise ValueError("source index contains skip-worktree entries")
+        if tag.islower():
+            raise ValueError("source index contains assume-unchanged entries")
+    revision = git_bytes(repo, "rev-parse", "HEAD").decode().strip()
+    dirty = bool(git_bytes(repo, "status", "--porcelain=v1", "--untracked-files=all"))
+    return revision, dirty
+
+
+def instrument_git_version(data):
+    text = data.decode("utf-8").replace("\r\n", "\n")
+    # The legacy and modern builds use the same four GitVersion commands.
+    for separator, count in ((" ", 3), ("\n        ", 1)):
+        anchor = separator.join(('"git",', '"-C",'))
+        if text.count(anchor) != count:
+            raise ValueError("unsupported source GitVersion command shape")
+        options = (json.dumps(arg) + "," for arg in GIT_CONFIG)
+        text = text.replace(anchor, separator.join(('"git",', *options, '"-C",')))
+    return text.encode()
 
 
 def instrument_build(data, api):
@@ -29,17 +65,17 @@ def instrument_build(data, api):
     text = text.replace(
         entry,
         entry
-        + '    const oracle_system = try @import("src/differential_oracle_build.zig").configure(b);\n',
+        + '    const oracle = try @import("src/differential_oracle_build.zig").configure(b);\n',
     )
     if api == "fork" or (api == "stone_flag" and "    const exe = if (" in text):
         anchor = "    // Standalone feasibility spike."
-        addition = '    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle_system);\n\n'
+        addition = '    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle);\n\n'
     elif api == "v140":
         anchor = "    // All our steps which we'll hook up later."
-        addition = '    try @import("src/differential_oracle_build.zig").addPublic(b, mod.vt, oracle_system);\n\n'
+        addition = '    try @import("src/differential_oracle_build.zig").addPublic(b, mod.vt, oracle);\n\n'
     else:
         anchor = "    const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);\n"
-        addition = '    try @import("src/differential_oracle_build.zig").add(b, exe.exe, oracle_system);\n'
+        addition = '    try @import("src/differential_oracle_build.zig").add(b, exe.exe, oracle);\n'
         if text.count(anchor) != 1:
             raise ValueError("app-build anchor must occur exactly once")
         return text.replace(anchor, anchor + addition).encode()
@@ -112,18 +148,20 @@ def main():
     repo = args.repo.resolve()
     source = Path(__file__).resolve().parents[2]
 
-    if git_bytes(repo, "status", "--porcelain=v1", "--untracked-files=all"):
+    revision, dirty = git_source_state(repo)
+    if dirty:
         raise ValueError("stage requires a completely clean source copy")
-    revision = git_bytes(repo, "rev-parse", "HEAD").decode().strip()
     # Preserve the actual blob bytes, including its original final newline.
     before = git_bytes(repo, "show", "HEAD:build.zig")
     after = instrument_build(before, args.api)
+    git_version = instrument_git_version(git_bytes(repo, "show", f"HEAD:{GIT_VERSION}"))
     overlay = sources(source)
     record_path = repo / "test/differential-oracle/staged-source.json"
     targets = [repo / path.relative_to(source) for path in overlay] + [record_path]
     if any(os.path.lexists(target) for target in targets):
         raise ValueError("oracle instrumentation already exists in source copy")
-    for target in targets:
+    build_targets = [repo / "build.zig", repo / GIT_VERSION]
+    for target in [*targets, *build_targets]:
         for parent in target.parents:
             if not parent.is_relative_to(repo):
                 break
@@ -138,7 +176,7 @@ def main():
                 )
             if parent == repo:
                 break
-    for target in [*targets, repo / "build.zig"]:
+    for target in [*targets, *build_targets]:
         require_writable(target)
     contents = [
         (repo / path.relative_to(source), path.read_bytes()) for path in overlay
@@ -147,13 +185,16 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     (repo / "build.zig").write_bytes(after)
+    (repo / GIT_VERSION).write_bytes(git_version)
     record = {
         "production_revision": revision,
         "vt_api": args.api,
         "original_build_sha256": hashlib.sha256(before).hexdigest(),
         "instrumented_build_sha256": hashlib.sha256(after).hexdigest(),
     }
-    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    record_path.write_text(
+        json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
     print(json.dumps(record, sort_keys=True))
 
 

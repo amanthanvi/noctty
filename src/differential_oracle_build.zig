@@ -2,25 +2,39 @@
 //! Nothing is installed or run by the default build through this step.
 const std = @import("std");
 const Api = enum { fork, stone, stone_flag, v140, v140_fork };
+const Configuration = struct {
+    zig_exe_sha256: ?[]const u8 = null,
+    system_requested: ?[]const u8 = null,
+};
 
 /// Check oracle invocations before Config executes Git or configures dependencies.
-pub fn configure(b: *std.Build) !?[]const u8 {
+pub fn configure(b: *std.Build) !Configuration {
+    var config: Configuration = .{};
     if (b.user_input_options.contains("vt-api")) {
         _ = b.run(&.{ "python", "-I", "test/differential-oracle/build_args.py", b.graph.zig_exe });
         // Maker may otherwise reuse configuration from another invocation.
         if (@hasDecl(@TypeOf(b.graph.*), "poisonCache")) b.graph.poisonCache();
         try sanitizeGitEnvironment(b);
+        config.zig_exe_sha256 = std.mem.trim(u8, b.run(&.{
+            "python", "-I", "test/differential-oracle/identity.py", "--configure", b.graph.zig_exe,
+        }), " \r\n");
     }
     // Snapshot command-line integrations before Config applies package defaults.
-    if (b.graph.system_package_mode) return "--system";
+    if (b.graph.system_package_mode) {
+        config.system_requested = "--system";
+        return config;
+    }
     const integrations = if (@hasField(@TypeOf(b.graph.*), "system_integration_options"))
         &b.graph.system_integration_options
     else
         &b.graph.system_library_options;
     for (integrations.values()) |mode| {
-        if (mode == .user_enabled or mode == .declared_enabled) return "-fsys";
+        if (mode == .user_enabled or mode == .declared_enabled) {
+            config.system_requested = "-fsys";
+            break;
+        }
     }
-    return null;
+    return config;
 }
 
 fn sanitizeGitEnvironment(b: *std.Build) !void {
@@ -45,34 +59,35 @@ fn sanitizeGitEnvironment(b: *std.Build) !void {
 /// the shared app modules in place without touching any ordinary build.
 fn saltCModules(
     module: *std.Build.Module,
+    salt: []const u8,
     seen: *std.AutoHashMap(*std.Build.Module, void),
 ) !void {
     const visit = try seen.getOrPut(module);
     if (visit.found_existing) return;
-    module.addCMacro("NOCTTY_DIFFERENTIAL_ORACLE", "1");
-    for (module.import_table.values()) |child| try saltCModules(child, seen);
+    module.addCMacro("NOCTTY_DIFFERENTIAL_ORACLE", salt);
+    for (module.import_table.values()) |child| try saltCModules(child, salt, seen);
     for (module.link_objects.items) |object| switch (object) {
-        .other_step => |compile| try saltCModules(compile.root_module, seen),
+        .other_step => |compile| try saltCModules(compile.root_module, salt, seen),
         else => {},
     };
 }
 
-pub fn add(b: *std.Build, app: *std.Build.Step.Compile, system_requested: ?[]const u8) !void {
-    try addInner(b, app.root_module, false, system_requested);
+pub fn add(b: *std.Build, app: *std.Build.Step.Compile, config: Configuration) !void {
+    try addInner(b, app.root_module, false, config);
 }
 
-pub fn addPublic(b: *std.Build, public: *std.Build.Module, system_requested: ?[]const u8) !void {
-    try addInner(b, public, true, system_requested);
+pub fn addPublic(b: *std.Build, public: *std.Build.Module, config: Configuration) !void {
+    try addInner(b, public, true, config);
 }
 
-fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_requested: ?[]const u8) !void {
+fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, config: Configuration) !void {
     const step = b.step("oracle", "Build the differential terminal oracle (no capture)");
     const api = b.option(Api, "vt-api", "Terminal API shape: fork, stone, stone_flag, v140, v140_fork") orelse {
         step.dependOn(&b.addFail("oracle requires an explicit -Dvt-api").step);
         return;
     };
     const corpus = b.option(bool, "oracle-corpus", "Build the pre-side synthetic generator") orelse false;
-    if (system_requested) |option| {
+    if (config.system_requested) |option| {
         step.dependOn(&b.addFail(b.fmt("oracle build arguments: disallowed option: {s}", .{option})).step);
         return;
     }
@@ -115,7 +130,8 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     });
     var salted = std.AutoHashMap(*std.Build.Module, void).init(b.allocator);
     defer salted.deinit();
-    try saltCModules(core, &salted);
+    const compiler_sha256 = config.zig_exe_sha256.?;
+    try saltCModules(core, b.fmt("\"{s}\"", .{compiler_sha256}), &salted);
     const shape = b.addOptions();
     shape.addOption(Api, "api", api);
     const adapter = b.createModule(.{
@@ -143,7 +159,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     identity.setCwd(b.path("."));
     // HEAD and cleanliness are not file inputs in the build cache.
     identity.has_side_effects = true;
-    identity.addArg(b.graph.zig_exe);
+    identity.addArg(compiler_sha256);
     if (@hasDecl(std.Build.LazyPath, "zig_lib")) {
         identity.addDirectoryArg(.zig_lib);
     } else {

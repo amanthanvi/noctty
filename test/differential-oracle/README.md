@@ -85,8 +85,10 @@ or the original fixture's golden expectations.
 For fork, stone and the eventual 1B app, the root `oracle` step inherits the
 app module's generated Terminal options, imports, include paths, C macros and
 link dependencies. After the guard passes, the oracle adds a private C/C++
-macro throughout its linked module graph so its compile keys differ from
-ordinary app builds using the same cache. Oniguruma, Kitty graphics and tmux control mode remain
+macro throughout its linked module graph. Its value is the SHA-256 of the
+actual Zig executable, computed during configuration. The compile keys
+separate oracle objects from ordinary app objects and from oracle objects
+built with a different compiler executable. Oniguruma, Kitty graphics and tmux control mode remain
 selected by that tree's own app build.
 
 The upstream side is **v1.4.0's public lib-vt module**, exactly as section 3.4 names it.
@@ -119,9 +121,10 @@ python test/differential-oracle/stage.py SOURCE_TREE --api stone
 ```
 
 Stage applies only instrumentation, retaining the original production revision
-and exact root-build delta in `staged-source.json`. Commit that overlay locally
-before prepare/capture. Capture verifies the clean tree and permitted delta;
-manifest provenance distinguishes production and instrumented commits. Build
+and exact root-build delta in `staged-source.json`. It also adds the Git
+configuration flags to the four version queries. Commit that overlay locally
+before prepare/capture. Capture verifies the clean tree and both build-file deltas.
+Manifest provenance distinguishes production and instrumented commits. Build
 with that side's compiler, explicit API, SIMD on, ReleaseFast and baseline CPU.
 Only the fork accepts `-Dcustom-shaders=true`; read the other side's own app
 build options. The generator is needed only on the pre side.
@@ -169,7 +172,10 @@ The timeout defaults to 900 seconds **per run**, not a performance criterion.
 The build embeds the build tree's Git HEAD and dirty flag through an always-run
 identity generator whose working directory is the actual build root. Build,
 staging and capture Git queries use an explicit source root and a subprocess
-environment with all `GIT_*` entries removed. Python
+environment with all `GIT_*` entries removed. The queries set
+`-c core.ignoreStat=false -c core.fsmonitor=false`. Build identity and capture
+require the source root to equal Git's worktree top-level. They refuse
+tracked entries marked assume-unchanged or skip-worktree. Python
 must be available for this optional build step. Capture requires that identity
 to match the clean `--source-root` HEAD, validates API/ConPTY policy, and checks
 that the source and executable remain unchanged during both runs. A stale exe,
@@ -190,8 +196,6 @@ package directories. Hashes are checked against build-graph pins, not directory
 names. Extra files or unsupported reparse points fail closed. Unhashed local
 package wrappers must be inside the authenticated source tree. Git ignores
 cached dependencies; their edits must not masquerade as a clean build.
-Git index flags `assume-unchanged` and `skip-worktree` can hide edits from the
-cleanliness checks, a deliberate modification outside the oracle's threat model.
 
 The request and response have checked versioned headers, counts, lengths,
 ordered record indices and exact EOF. For each input/initial size, both plain
@@ -268,7 +272,10 @@ DECLARATIONS.json`. The file is a JSON array; each row contains exactly `side`,
 
 The example covers only those two differences. A real declaration must name
 **every** measured difference, including artifact, version fields and options
-present on only one side. Kitty graphics is not a difference when enabled on
+present on only one side. Compiler content differences use
+`build_identity.zig_exe_sha256` and `build_identity.zig_lib_sha256` as option
+names. Each changed hash needs its own declaration, even when both sides
+report the same compiler version. Kitty graphics is not a difference when enabled on
 both sides. Missing, extra, duplicate, unchanged or wrong-side option names and
 empty reasons are errors. Values are mandatory and must match exactly, including
 their types and presence. Use `{ "present": false }` for an absent field, which
