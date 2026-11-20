@@ -601,7 +601,8 @@ $script:SeedLines = @(1..20 | ForEach-Object { 'SEED-{0:d2}-NOCTTY-GUI-PROBE-012
 if (@($script:SeedLines | Where-Object { $_.Length -ne 64 }).Count -ne 0) { throw 'The seed lines must be 64 characters.' }
 $script:SeedBytes = [long](@($script:SeedLines | ForEach-Object { $_.Length + 2 }) | Measure-Object -Sum).Sum
 # The fraction of a readback's pixels other than the background that the seed's text reaches and a bare prompt does
-# not (measured locally: SEED_INK_MEASURED).
+# not. Measured on the hosted runner (run 44793051089, 1004 x 594 frames): seeded 0.1241, withheld 0.0018, on both
+# desktops. The floor sits about 6x below the seeded value and 11x above the withheld one.
 $script:SeedInkFloor = 0.02
 
 $script:SdkLayout = 'Startup=104 StartupEx=112 ProcessBasic=48 ProcessEntry=568 parentPid@32 ThreadEntry=28 Input=40 WndClassEx=80 Msg=48 GuiThreadInfo=72 focus@16'
@@ -753,10 +754,11 @@ function Test-ProbeDescendant($All, [int] $ProcessId, [int] $Ancestor) {
 }
 
 # The copy's shell as Windows started it, found by PID (the one cmd.exe below the copy). Its command line is read and
-# tested here and never kept: the facts say only whether it is System32's cmd.exe and whether /D is its first
-# argument, ahead of any payload (the fixture's `/K type <seed>`; Q0's shell has none).
+# tested here and never kept: the facts say only whether it is System32's cmd.exe, whether /D is its first argument,
+# whether the fixture's `/K type seed.txt` follows it, and how many arguments follow /D and of which kind (switch,
+# quoted or word), never their text.
 function Get-ShellLaunchFacts([int] $CopyPid, [bool] $Fixture) {
-    $facts = [ordered]@{ shells = 0; read = $false; systemCmd = $false; autoRunOffFirst = $false; payloadAfterD = $false }
+    $facts = [ordered]@{ shells = 0; read = $false; systemCmd = $false; autoRunOffFirst = $false; payloadAfterD = $null; argumentsAfterD = $null; argumentKindsAfterD = @() }
     $deadline = [datetime]::UtcNow.AddSeconds(15)
     do {
         $all = @{}
@@ -779,7 +781,13 @@ function Get-ShellLaunchFacts([int] $CopyPid, [bool] $Fixture) {
         $rest = $parsed.Groups['rest'].Value.Trim()
         # cmd reads its switches without regard to case, so these matches ignore it too.
         $facts.autoRunOffFirst = $rest -match '\A/D(\s|\z)'
-        $facts.payloadAfterD = $(if ($Fixture) { $rest -match '\A/D\s+/K\s+type\s+\S' } else { $rest -match '\A/D\z' })
+        if ($Fixture) { $facts.payloadAfterD = $rest -match '\A/D\s+/K\s+type\s+seed\.txt(\s|\z)' }
+        if ($facts.autoRunOffFirst) {
+            $after = @([regex]::Matches($rest.Substring(2), '"[^"]*"?|\S+') | ForEach-Object { $_.Value })
+            $facts.argumentsAfterD = $after.Count
+            $facts.argumentKindsAfterD = @($after | ForEach-Object { if ($_.StartsWith('"')) { 'quoted' } elseif ($_.StartsWith('/')) { 'switch' } else { 'word' } })
+        }
+        $after = $null; $rest = $null
     }
     $commandLine = $null
     return $facts
@@ -938,8 +946,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
 $rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('measure', 'io.github.amanthanvi.noctty.measure'))) {
-    $row = [ordered]@{ identity = $pair[0]; setting = $null; settingHresult = $null; history = $null; historyHresult = $null }
-    try { $row.setting = [string][Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($pair[1]).Setting } catch { $row.settingHresult = '0x{0:x8}' -f $_.Exception.HResult }
+    $row = [ordered]@{ identity = $pair[0]; setting = $null; settingValue = $null; settingHresult = $null; history = $null; historyHresult = $null }
+    try {
+        $value = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($pair[1]).Setting
+        $row.setting = $(if ($null -eq $value) { 'null' } else { [string]$value })
+        $row.settingValue = $(if ($null -eq $value) { $null } else { [int]$value })
+    } catch { $row.settingHresult = '0x{0:x8}' -f $_.Exception.HResult }
     try { $row.history = @([Windows.UI.Notifications.ToastNotificationManager]::History.GetHistory($pair[1])).Count } catch { $row.historyHresult = '0x{0:x8}' -f $_.Exception.HResult }
     $row
 }
@@ -956,7 +968,7 @@ $rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('meas
         if (-not $match.Success) { return @{ error = 'no-json' } }
         $facts = [ordered]@{}
         foreach ($row in ($match.Value | ConvertFrom-Json)) {
-            $facts[$row.identity] = [ordered]@{ setting = $row.setting; settingHresult = $row.settingHresult; history = $row.history; historyHresult = $row.historyHresult }
+            $facts[$row.identity] = [ordered]@{ setting = $row.setting; settingValue = $row.settingValue; settingHresult = $row.settingHresult; history = $row.history; historyHresult = $row.historyHresult }
         }
         return $facts
     } finally { [void][GuiProbeNative]::CloseHandle($pi.thread); [void][GuiProbeNative]::CloseHandle($pi.process) }
@@ -1629,8 +1641,8 @@ try {
         copyProcesses = $copyProcesses.Count
         copyProcessesOffPrivate = $onDefault
         copyWindowsOffPrivate = $windowsOnDefault
-        # The shell Windows started, read by PID: System32's cmd.exe with /D first (so no AutoRun) and nothing after.
-        shellPolicyHeld = ($null -ne $driverRecord -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst -and [bool]$driverRecord.shell.payloadAfterD)
+        # The shell Windows started, read by PID: System32's cmd.exe with /D first, so no AutoRun runs.
+        shellPolicyHeld = ($null -ne $driverRecord -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst)
         verdict = Get-Verdict `
             ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $copyProcesses.Count -ge 2 -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards) `
             ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.threadMovedError -eq 0 -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `
