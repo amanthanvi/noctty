@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 7.1
 <#
 .SYNOPSIS
 Writes the list of Zig tests that actually ran: one sorted, diffable row per
@@ -21,10 +21,12 @@ leaked, and its name's bytes in hex, and an `end` line with the run's counts.
 The script reads names and results only from that record, never from the
 printed lines, which a test's own output can imitate. A record that is
 missing, has no `end` line, is out of order or does not add up fails the
-capture, and so does one from a shard. The runner's stderr is still read for
-panic lines and its `N errors were logged.` and `N tests leaked memory.`
-trailers, which must agree with the record; with the exit code they decide
-whether the run is green.
+capture, and so does one from a shard or one that holds no test. The record's
+counts and the exit code alone decide whether the run is green: a logged error,
+a leak or a FAIL in the record, or a nonzero exit, makes it not green, and a
+runner that panics leaves no `end` line. The runner's stderr is kept as the
+run's log; lines in it that look like a panic are counted in the suite record
+(`panics=`) for a reader, and decide nothing, since a test can print them.
 
 Three ways to take a list:
 
@@ -75,10 +77,17 @@ the header records, before the run, the facts they read (`# env:` lines):
   temp-makes-8dot3-names the temporary directory's volume gives a long file name
                          an 8.3 alias; "security regression win32 link opener
                          screens the long name behind an 8.3 alias" skips without
-  font:<family>          a font of that family is registered (the registry's
-                         Fonts keys); the harfbuzz shaping tests that discover
-                         "Arial Unicode MS", "Noto Sans Chakma" or "Noto Serif
-                         Tibetan" skip without it
+  font:<family>          `present` when a font of that family is registered (a
+                         value name in the registry's Fonts keys starts with
+                         it) or a font file the registry does not name, in the
+                         system or per-user font directory, declares it (the
+                         family, typographic family or full name of a face in
+                         its `name` table holds it); `unknown` when such a file
+                         cannot be read; else `absent`. Font discovery
+                         (src/font/discovery_windows.zig) scans those
+                         directories as well as the registry, and the harfbuzz
+                         shaping tests that discover "Arial Unicode MS", "Noto
+                         Sans Chakma" or "Noto Serif Tibetan" skip without it
   env:<NAME>             whether an opt-in probe variable is `1`, `unset` or
                          another value (never printed); the ConPTY probes, the
                          link-opener PATHEXT probe and the local-path sweep skip
@@ -229,7 +238,7 @@ function Read-ZigTestResults {
     $record.Zig = $Matches[1]
     if ($lines[2] -cnotmatch '^mode (\S+)$') { $problems.Add("'$Path' names no mode."); return $record }
     $record.Mode = $Matches[1]
-    if ($lines[3] -cnotmatch '^shard (\d+)/(\d+)$') { $problems.Add("'$Path' names no shard."); return $record }
+    if ($lines[3] -cnotmatch '^shard ([0-9]+)/([0-9]+)$') { $problems.Add("'$Path' names no shard."); return $record }
     if ($Matches[1] -cne '1' -or $Matches[2] -cne '1') {
         $problems.Add("'$Path' is shard $($Matches[1])/$($Matches[2]) of a run, not a whole run.")
         return $record
@@ -237,7 +246,7 @@ function Read-ZigTestResults {
     for ($i = 4; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if ($null -ne $record.End) { $problems.Add("'$Path' has text after its end line."); break }
-        $m = [regex]::Match($line, '^test (\d+) (OK|SKIP|FAIL) ([01]) ((?:[0-9a-f]{2})+)$')
+        $m = [regex]::Match($line, '^test ([0-9]+) (OK|SKIP|FAIL) ([01]) ((?:[0-9a-f]{2})+)$')
         if ($m.Success) {
             $index = [int]$m.Groups[1].Value
             if ($index -ne $tests.Count + 1) { $problems.Add("'$Path' line $($i + 1) is test $index, not test $($tests.Count + 1)."); break }
@@ -245,7 +254,7 @@ function Read-ZigTestResults {
             $tests.Add([pscustomobject]@{ Index = $index; Name = (ConvertTo-RanListName -Bytes $name); Result = $m.Groups[2].Value; Leaked = $m.Groups[3].Value -ceq '1' })
             continue
         }
-        $m = [regex]::Match($line, '^end tests=(\d+) ok=(\d+) skip=(\d+) fail=(\d+) leaked=(\d+) errors-logged=(\d+)$')
+        $m = [regex]::Match($line, '^end tests=([0-9]+) ok=([0-9]+) skip=([0-9]+) fail=([0-9]+) leaked=([0-9]+) errors-logged=([0-9]+)$')
         if ($m.Success) {
             $record.End = [pscustomobject]@{
                 Tests = [int]$m.Groups[1].Value; Ok = [int]$m.Groups[2].Value; Skip = [int]$m.Groups[3].Value
@@ -273,17 +282,11 @@ function Read-ZigTestResults {
     return $record
 }
 
-# What the runner's stderr adds to its record: panic lines, and the last value
-# of each trailer it prints after the last test (0 when it printed none).
-function Read-ZigRunnerTrailers {
+# The lines of the runner's stderr that look like a panic. Reported only: a
+# test can print such a line, and a runner that panics leaves no `end` line.
+function Get-ZigPanicLineCount {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [AllowEmptyString()] [string[]] $Lines)
-    $errors = 0; $leaked = 0
-    foreach ($line in $Lines) {
-        if ($line -match '^(\d+) errors were logged\.$') { $errors = [int]$Matches[1] }
-        elseif ($line -match '^(\d+) tests leaked memory\.$') { $leaked = [int]$Matches[1] }
-    }
-    $panics = @($Lines | Where-Object { $_ -match '^thread \d+ panic: ' -or $_ -match '^panic: ' }).Count
-    return [pscustomobject]@{ ErrorsLogged = $errors; Leaked = $leaked; Panics = $panics }
+    return @($Lines | Where-Object { $_ -cmatch '^thread [0-9]+ panic: ' -or $_ -cmatch '^panic: ' }).Count
 }
 
 # Counts each (suite, name, result); the names are already as a row writes them.
@@ -301,11 +304,11 @@ function Get-RanListRows {
     return @($rows)
 }
 
-# Whether a suite's run is green: it exited 0 and had no failure, panic,
-# logged error or leak.
+# Whether a suite's run is green: it exited 0, and its record counts no
+# failure, logged error or leak.
 function Test-RanListSuiteGreen {
     param([Parameter(Mandatory)] [object] $Suite)
-    return "$($Suite.Exit)" -eq '0' -and [int]$Suite.Fail -eq 0 -and [int]$Suite.ErrorsLogged -eq 0 -and [int]$Suite.Leaked -eq 0 -and [int]$Suite.Panics -eq 0
+    return [string]::Equals("$($Suite.Exit)", '0', [StringComparison]::Ordinal) -and [int]$Suite.Fail -eq 0 -and [int]$Suite.ErrorsLogged -eq 0 -and [int]$Suite.Leaked -eq 0
 }
 
 # The list's text. $Build and $Environment are ordered key/value maps; $Suites
@@ -352,11 +355,109 @@ function Get-RanListFactKeys {
     return @('cwd-on-temp-drive', 'temp-makes-8dot3-names') + @($script:RanListFonts | ForEach-Object { "font:$_" }) + @($script:RanListProbeVariables | ForEach-Object { "env:$_" })
 }
 
+# A dictionary whose keys compare ordinally, in insertion order (PowerShell's
+# [ordered] and @{} fold case).
+function New-RanListMap {
+    return [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+}
+
+# Reads a big-endian integer of $Size bytes at $At, or throws past the end.
+function Read-RanListBigEndian {
+    param([byte[]] $Bytes, [long] $At, [int] $Size)
+    if ($At -lt 0 -or $At + $Size -gt $Bytes.Length) { throw 'past the end of the font file' }
+    [long] $v = 0
+    for ($k = 0; $k -lt $Size; $k++) { $v = ($v -shl 8) -bor $Bytes[$At + $k] }
+    return $v
+}
+
+# The family names a font file declares: name IDs 1 (family), 4 (full name)
+# and 16 (typographic family) of each face's `name` table, every face of a
+# .ttc or .otc collection included. $null when the file cannot be read as an
+# OpenType font.
+function Get-RanListFontFamilies {
+    param([Parameter(Mandatory)] [string] $Path)
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $faces = @([long] 0)
+        if ($bytes.Length -ge 12 -and [string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, 0, 4), 'ttcf', [StringComparison]::Ordinal)) {
+            $count = Read-RanListBigEndian $bytes 8 4
+            if ($count -lt 1 -or $count -gt 4096) { return $null }
+            $faces = @(for ($i = 0; $i -lt $count; $i++) { Read-RanListBigEndian $bytes (12 + 4 * $i) 4 })
+        }
+        $names = [Collections.Generic.List[string]]::new()
+        foreach ($face in $faces) {
+            $tables = Read-RanListBigEndian $bytes ($face + 4) 2
+            $name = $null
+            for ($i = 0; $i -lt $tables; $i++) {
+                $record = $face + 12 + 16 * $i
+                if ($record + 16 -gt $bytes.Length) { return $null }
+                if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, [int]$record, 4), 'name', [StringComparison]::Ordinal)) {
+                    $name = Read-RanListBigEndian $bytes ($record + 8) 4
+                }
+            }
+            if ($null -eq $name) { return $null }
+            $entries = Read-RanListBigEndian $bytes ($name + 2) 2
+            $strings = $name + (Read-RanListBigEndian $bytes ($name + 4) 2)
+            for ($i = 0; $i -lt $entries; $i++) {
+                $entry = $name + 6 + 12 * $i
+                $platform = Read-RanListBigEndian $bytes $entry 2
+                $id = Read-RanListBigEndian $bytes ($entry + 6) 2
+                if ($id -ne 1 -and $id -ne 4 -and $id -ne 16) { continue }
+                $length = Read-RanListBigEndian $bytes ($entry + 8) 2
+                $at = $strings + (Read-RanListBigEndian $bytes ($entry + 10) 2)
+                if ($at + $length -gt $bytes.Length) { return $null }
+                $encoding = if ($platform -eq 0 -or $platform -eq 3) { [System.Text.Encoding]::BigEndianUnicode } elseif ($platform -eq 1) { [System.Text.Encoding]::Latin1 } else { $null }
+                if ($null -ne $encoding) { $names.Add($encoding.GetString($bytes, [int]$at, [int]$length)) }
+            }
+        }
+        return , $names.ToArray()
+    }
+    catch { return $null }
+}
+
+# The font files of the system and per-user font directories that no value of
+# the registry's Fonts keys names, as font discovery collects them: files with a
+# .ttf, .otf, .ttc or .otc extension directly in each directory.
+function Get-RanListUnregisteredFontFiles {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $RegisteredPaths, [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Directories)
+    $registered = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $RegisteredPaths) { [void] $registered.Add($p) }
+    $files = [Collections.Generic.List[string]]::new()
+    foreach ($dir in $Directories) {
+        if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        foreach ($f in Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue) {
+            if (@('.ttf', '.otf', '.ttc', '.otc') -notcontains $f.Extension.ToLowerInvariant()) { continue }
+            if (-not $registered.Contains($f.FullName)) { $files.Add($f.FullName) }
+        }
+    }
+    return , $files.ToArray()
+}
+
+# The font facts (see the description) from the registry's value names and the
+# family names of the font files it does not name ($null for a file that could
+# not be read): present beats unknown, and unknown beats absent.
+function Get-RanListFontFacts {
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $RegisteredNames, [Parameter(Mandatory)] [AllowEmptyCollection()] [AllowNull()] [object[]] $UnregisteredFamilies)
+    $facts = New-RanListMap
+    foreach ($family in $script:RanListFonts) {
+        $value = 'absent'
+        if (@($RegisteredNames | Where-Object { $_.StartsWith($family, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $value = 'present' }
+        else {
+            foreach ($declared in $UnregisteredFamilies) {
+                if ($null -eq $declared) { $value = 'unknown'; continue }
+                if (@($declared | Where-Object { $_.IndexOf($family, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0) { $value = 'present'; break }
+            }
+        }
+        $facts["font:$family"] = $value
+    }
+    return $facts
+}
+
 # The environment facts tests read (see the description), for a run from
 # $Directory with this process's environment.
 function Get-RanListEnvironment {
     param([Parameter(Mandatory)] [string] $Directory)
-    $facts = [ordered]@{}
+    $facts = New-RanListMap
     $temp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
     $facts['cwd-on-temp-drive'] = ([System.IO.Path]::GetPathRoot($Directory).TrimEnd('\') -ieq [System.IO.Path]::GetPathRoot($temp).TrimEnd('\')).ToString().ToLowerInvariant()
     $probe = Join-Path $temp ('noctty-ran-list-8dot3-probe-' + [guid]::NewGuid().ToString('N') + '.txt')
@@ -368,15 +469,27 @@ function Get-RanListEnvironment {
     }
     catch { $facts['temp-makes-8dot3-names'] = 'unknown' }
     finally { if (Test-Path -LiteralPath $probe) { [System.IO.File]::Delete($probe) } }
-    $registered = [Collections.Generic.List[string]]::new()
+    $systemFonts = if ($env:WINDIR) { Join-Path $env:WINDIR 'Fonts' } elseif ($env:SystemRoot) { Join-Path $env:SystemRoot 'Fonts' } else { $null }
+    $userFonts = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts' } else { $null }
+    $names = [Collections.Generic.List[string]]::new()
+    $paths = [Collections.Generic.List[string]]::new()
     foreach ($key in 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts', 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') {
         $item = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
-        if ($null -ne $item) { foreach ($v in $item.GetValueNames()) { $registered.Add($v) } }
+        if ($null -eq $item) { continue }
+        foreach ($v in $item.GetValueNames()) {
+            $names.Add($v)
+            # A value names its file by a path, or by a name in the system font directory.
+            $file = "$($item.GetValue($v))"
+            if ([string]::IsNullOrWhiteSpace($file)) { continue }
+            try { $paths.Add([System.IO.Path]::GetFullPath($(if ([System.IO.Path]::IsPathRooted($file) -or $null -eq $systemFonts) { $file } else { Join-Path $systemFonts $file }))) } catch { }
+        }
     }
-    foreach ($family in $script:RanListFonts) {
-        $has = @($registered | Where-Object { $_.StartsWith($family, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
-        $facts["font:$family"] = $(if ($has) { 'present' } else { 'absent' })
+    $unregistered = [Collections.Generic.List[object]]::new()
+    foreach ($file in (Get-RanListUnregisteredFontFiles -RegisteredPaths $paths.ToArray() -Directories @($systemFonts, $userFonts))) {
+        $unregistered.Add((Get-RanListFontFamilies -Path $file))
     }
+    $fonts = Get-RanListFontFacts -RegisteredNames $names.ToArray() -UnregisteredFamilies $unregistered.ToArray()
+    foreach ($key in $fonts.Keys) { $facts[$key] = $fonts[$key] }
     foreach ($name in $script:RanListProbeVariables) {
         $value = [Environment]::GetEnvironmentVariable($name)
         $facts["env:$name"] = $(if ($null -eq $value) { 'unset' } elseif ([string]::Equals($value, '1', [StringComparison]::Ordinal)) { '1' } else { 'other' })
@@ -387,9 +500,9 @@ function Get-RanListEnvironment {
 # Reads `# env: key=value` (or `key=value`) lines: a run's own environment record.
 function Read-RanListFacts {
     param([Parameter(Mandatory)] [string] $Path)
-    $facts = [ordered]@{}
+    $facts = New-RanListMap
     foreach ($line in [System.IO.File]::ReadAllLines($Path, [System.Text.UTF8Encoding]::new($false))) {
-        if ($line -match '^(?:# env: )?([^#=][^=]*)=(.*)$') { $facts[$Matches[1]] = $Matches[2] }
+        if ($line -cmatch '^(?:# env: )?([^#=][^=]*)=(.*)$') { $facts[$Matches[1]] = $Matches[2] }
     }
     return $facts
 }
@@ -479,9 +592,13 @@ function Assert-RanListEnvironmentOf {
     param([Parameter(Mandatory)] [System.Collections.IDictionary] $Facts, [Parameter(Mandatory)] [string] $Baseline)
     $basePath = Resolve-RanListPath $Baseline
     if (-not (Test-Path -LiteralPath $basePath -PathType Leaf)) { throw "The baseline '$basePath' does not exist." }
-    $baseFacts = @{}
-    foreach ($l in [System.IO.File]::ReadAllLines($basePath)) { if ($l -match '^# env: ([^=]+)=(.*)$') { $baseFacts[$Matches[1]] = $Matches[2] } }
-    $differ = @(@($Facts.Keys) + @($baseFacts.Keys) | Sort-Object -Unique -CaseSensitive | Where-Object { -not [string]::Equals("$($Facts[$_])", "$($baseFacts[$_])", [StringComparison]::Ordinal) })
+    $baseFacts = New-RanListMap
+    foreach ($l in [System.IO.File]::ReadAllLines($basePath)) { if ($l -cmatch '^# env: ([^=]+)=(.*)$') { $baseFacts[$Matches[1]] = $Matches[2] } }
+    # Both key sets, ordinally: a key spelled with another case or a control
+    # character is a key of its own, missing from the other side.
+    $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($k in @($Facts.Keys) + @($baseFacts.Keys)) { [void] $keys.Add($k) }
+    $differ = @($keys | Where-Object { -not [string]::Equals("$($Facts[$_])", "$($baseFacts[$_])", [StringComparison]::Ordinal) })
     if ($differ.Count -gt 0) {
         foreach ($key in $differ) { [Console]::Error.WriteLine("RAN LIST: environment fact $key is '$($Facts[$key])' here and '$($baseFacts[$key])' in the baseline.") }
         [Console]::Error.WriteLine('RAN LIST: this run would not be like for like with its baseline; nothing was built or run.')
@@ -582,7 +699,7 @@ try {
         }
         if ($TestLog.Count) {
             # An imported run's environment is its own, never this process's.
-            $environment = [ordered]@{}
+            $environment = New-RanListMap
             if ($TestLogFacts) {
                 $recorded = Read-RanListFacts -Path (Resolve-RanListPath $TestLogFacts)
                 foreach ($key in (Get-RanListFactKeys)) { $environment[$key] = $(if ($recorded.Contains($key)) { $recorded[$key] } else { 'unknown' }) }
@@ -599,7 +716,9 @@ try {
 
     foreach ($item in $inputs) {
         $name = $item.Suite
-        if ($name -notmatch '^[A-Za-z0-9._-]+$') { throw "Suite name '$name' must be letters, digits, '.', '_' or '-'." }
+        # Case-sensitively, as the compare reads it: with case folded, [A-Za-z]
+        # also matches the Kelvin sign U+212A.
+        if ($name -cnotmatch '^[A-Za-z0-9._-]+$') { throw "Suite name '$name' must be ASCII letters, digits, '.', '_' or '-'." }
         if (-not $seen.Add($name)) { throw "Suite '$name' is given twice (suite names are told apart without regard to case)." }
         if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf)) { throw "'$($item.Path)' does not exist." }
         if ($item.Kind -eq 'exe') {
@@ -618,17 +737,15 @@ try {
         }
         $record = Read-ZigTestResults -Path $resultsPath
         foreach ($problem in $record.Problems) { $problems.Add("${name}: $problem") }
-        $trailers = Read-ZigRunnerTrailers -Lines ([System.IO.File]::ReadAllLines($logPath, [System.Text.UTF8Encoding]::new($false)))
+        $panics = Get-ZigPanicLineCount -Lines ([System.IO.File]::ReadAllLines($logPath, [System.Text.UTF8Encoding]::new($false)))
         if ($record.Problems.Count -gt 0) { continue }
-        if ($trailers.ErrorsLogged -ne $record.End.ErrorsLogged -or $trailers.Leaked -ne $record.End.Leaked) {
-            $problems.Add("${name}: the log's trailers ($($trailers.ErrorsLogged) errors logged, $($trailers.Leaked) leaked) are not the record's ($($record.End.ErrorsLogged), $($record.End.Leaked)).")
-        }
+        if ($record.Tests.Count -eq 0) { $problems.Add("${name}: the record holds no test, so the suite ran nothing; no list is taken of an empty suite."); continue }
         [void] $compilers.Add($record.Zig)
         [void] $modes.Add($record.Mode)
         $tests = @($record.Tests)
         $suiteRecord = [pscustomobject]@{
             Name = $name; Tests = $tests.Count; Ok = $record.End.Ok; Skip = $record.End.Skip; Fail = $record.End.Fail
-            Exit = $exit; ErrorsLogged = $record.End.ErrorsLogged; Leaked = $record.End.Leaked; Panics = $trailers.Panics
+            Exit = $exit; ErrorsLogged = $record.End.ErrorsLogged; Leaked = $record.End.Leaked; Panics = $panics
         }
         $suites.Add($suiteRecord)
         foreach ($row in (Get-RanListRows -SuiteName $name -Tests $tests)) { $rows.Add($row) }
@@ -657,7 +774,7 @@ $text = Format-RanList -Rows $rows.ToArray() -Suites $suites.ToArray() -Revision
 Write-Host "Wrote $outPath ($($rows.Count) rows)."
 $bad = @($suites | Where-Object { -not (Test-RanListSuiteGreen $_) })
 if ($bad.Count -gt 0) {
-    foreach ($s in $bad) { [Console]::Error.WriteLine("RAN LIST: $($s.Name) is not green ($($s.Fail) failed, exit $($s.Exit), $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked, $($s.Panics) panics).") }
+    foreach ($s in $bad) { [Console]::Error.WriteLine("RAN LIST: $($s.Name) is not green ($($s.Fail) failed, exit $($s.Exit), $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked).") }
     exit 1
 }
 exit 0

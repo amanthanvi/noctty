@@ -25,12 +25,18 @@ each `main` parent merged meanwhile): an identity counts with the largest
 multiplicity any baseline gives it.
 
 Every list must exist, parse, hold rows, carry one green suite record for each
-suite its rows name (exit 0, no FAIL row, logged error, leak or panic, counts
-that match the rows), record a real build (options, mode and compiler, not
+suite its rows name (exit 0, no FAIL row, logged error or leak, counts that
+match the rows; `panics=` counts panic-shaped lines a test may print and is not
+part of green), record a real build (options, mode and compiler, not
 `unknown`), and come from a clean checkout (a `dirty=true` build is refused
 unless -AllowDirty). All must agree on the build and on their environment facts
-(`# env:` lines), so a test that runs only in some environments or with some
-options cannot read as dropped or as carried. A filtered build (`-Dtest-filter`)
+(`# env:` lines, keys and values both compared ordinally, so a key spelled with
+another case or a control character is a key of its own that the other list
+lacks), so a test that runs only in some environments or with some options
+cannot read as dropped or as carried. The build's `source` is compared by class:
+a list the capture `built` against one of an executable it did not build, so a
+`declared` executable and an `imported` run are one class. Numbers in a list
+are ASCII digits. A filtered build (`-Dtest-filter`)
 is refused as a baseline unless -AllowFilteredBaseline is given (for a control).
 
 The compiler must match too, except across a crossing the caller declares:
@@ -40,7 +46,8 @@ with a later list built by 0.17.1: every 1B comparison that crosses compilers
 forward merge's `main` parent, and 1B's landing merge on `main`). Across it the
 mode is compared by meaning (Debug = debug, ReleaseSafe = safe, ReleaseFast =
 fast, ReleaseSmall = small: 0.17.1 renamed the optimize modes), and every other
-key stays strict, options included: take a ReleaseSafe list with
+key stays as strict as without it (`source` by class, the rest exactly), options
+included: take a ReleaseSafe list with
 `-Dtest-optimize=ReleaseSafe` on both compilers (0.17.1 accepts it, and builds
 mode `safe`). The verdict names each crossing it used.
 
@@ -118,7 +125,7 @@ function Test-RanListSame {
 # test or a decltest), loses its number.
 function Get-RanListIdentity {
     param([Parameter(Mandatory)] [string] $Suite, [Parameter(Mandatory)] [string] $Name)
-    $m = [regex]::Match($Name, '^(?<c>[^\s.]+(?:\.[^\s.]+)*)\.test_\d+$')
+    $m = [regex]::Match($Name, '^(?<c>[^\s.]+(?:\.[^\s.]+)*)\.test_[0-9]+$')
     if ($m.Success -and -not (@($m.Groups['c'].Value -split '\.') | Where-Object { (Test-RanListSame $_ 'test') -or (Test-RanListSame $_ 'decltest') })) {
         return "$Suite`t$($m.Groups['c'].Value).test_#"
     }
@@ -132,7 +139,12 @@ function Read-RanList {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Path)
     $full = Resolve-RanListPath $Path
     $problems = [Collections.Generic.List[string]]::new()
-    $result = [pscustomobject]@{ Path = $full; Build = [ordered]@{}; Environment = [ordered]@{}; Suites = @(); Rows = @(); Problems = $problems }
+    # Ordinal maps: PowerShell's [ordered] folds the case of a key.
+    $result = [pscustomobject]@{
+        Path = $full; Suites = @(); Rows = @(); Problems = $problems
+        Build = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+        Environment = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+    }
     if ([string]::IsNullOrWhiteSpace($full) -or -not (Test-Path -LiteralPath $full -PathType Leaf)) {
         $problems.Add("The ran list '$Path' does not exist.")
         return $result
@@ -150,15 +162,16 @@ function Read-RanList {
     for ($i = 1; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if ($null -ne $end) { if ($line.Length -gt 0) { $problems.Add("'$full' has text after its end line.") }; continue }
-        if ($line.StartsWith('# end: ')) { $end = $line; continue }
-        if ($line.StartsWith('# revision: ')) { $revision = $line.Substring(12); continue }
-        if ($line.StartsWith('# build: ')) {
-            foreach ($pair in ($line.Substring(9) -split "`t")) { if ($pair -match '^([^=]+)=(.*)$') { $result.Build[$Matches[1]] = $Matches[2] } }
+        if ($line.StartsWith('# end: ', [StringComparison]::Ordinal)) { $end = $line; continue }
+        if ($line.StartsWith('# revision: ', [StringComparison]::Ordinal)) { $revision = $line.Substring(12); continue }
+        if ($line.StartsWith('# build: ', [StringComparison]::Ordinal)) {
+            foreach ($pair in ($line.Substring(9) -split "`t")) { if ($pair -cmatch '^([^=]+)=(.*)$') { $result.Build[$Matches[1]] = $Matches[2] } }
             continue
         }
-        if ($line -match '^# env: ([^=]+)=(.*)$') { $result.Environment[$Matches[1]] = $Matches[2]; continue }
-        if ($line.StartsWith('# suite: ')) {
-            if ($line -cnotmatch '^# suite: ([A-Za-z0-9._-]+) tests=(\d+) ok=(\d+) skip=(\d+) fail=(\d+) exit=(-?\d+) errors-logged=(\d+) leaked=(\d+) panics=(\d+)$') {
+        if ($line -cmatch '^# env: ([^=]+)=(.*)$') { $result.Environment[$Matches[1]] = $Matches[2]; continue }
+        if ($line.StartsWith('# suite: ', [StringComparison]::Ordinal)) {
+            # [0-9], not \d, which also matches every other script's digits.
+            if ($line -cnotmatch '^# suite: ([A-Za-z0-9._-]+) tests=([0-9]+) ok=([0-9]+) skip=([0-9]+) fail=([0-9]+) exit=(-?[0-9]+) errors-logged=([0-9]+) leaked=([0-9]+) panics=([0-9]+)$') {
                 $problems.Add("'$full' line $($i + 1) is not a suite record.")
                 continue
             }
@@ -169,9 +182,9 @@ function Read-RanList {
             }
             continue
         }
-        if ($line.StartsWith('#')) { continue }
+        if ($line.StartsWith('#', [StringComparison]::Ordinal)) { continue }
         $fields = $line -split "`t", 4
-        if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '^[A-Za-z0-9._-]+$' -or $fields[1] -cnotmatch '^(OK|SKIP|FAIL)$' -or $fields[2] -notmatch '^[1-9]\d*$' -or $fields[3].Length -eq 0) {
+        if ($fields.Count -ne 4 -or $fields[0] -cnotmatch '^[A-Za-z0-9._-]+$' -or $fields[1] -cnotmatch '^(OK|SKIP|FAIL)$' -or $fields[2] -cnotmatch '^[1-9][0-9]*$' -or $fields[3].Length -eq 0) {
             $problems.Add("'$full' line $($i + 1) is not '<suite><TAB><OK|SKIP|FAIL><TAB><count><TAB><name>'.")
             continue
         }
@@ -208,8 +221,8 @@ function Read-RanList {
         if ($s.Ok -ne $ok -or $s.Skip -ne $skip -or $s.Fail -ne $fail -or $s.Tests -ne $ok + $skip + $fail) {
             $problems.Add("'$full' suite $name's record (tests=$($s.Tests) ok=$($s.Ok) skip=$($s.Skip) fail=$($s.Fail)) does not match its rows ($ok OK, $skip SKIP, $fail FAIL).")
         }
-        $green = $s.Exit -ceq '0' -and $s.Fail -eq 0 -and $s.ErrorsLogged -eq 0 -and $s.Leaked -eq 0 -and $s.Panics -eq 0
-        if (-not $green) { $problems.Add("'$full' suite $name is not green (exit $($s.Exit), $($s.Fail) failed, $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked, $($s.Panics) panics).") }
+        $green = (Test-RanListSame $s.Exit '0') -and $s.Fail -eq 0 -and $s.ErrorsLogged -eq 0 -and $s.Leaked -eq 0
+        if (-not $green) { $problems.Add("'$full' suite $name is not green (exit $($s.Exit), $($s.Fail) failed, $($s.ErrorsLogged) errors logged, $($s.Leaked) leaked).") }
     }
     foreach ($name in $suites.Keys) { if (-not $rowSuites.Contains($name)) { $problems.Add("'$full' has a suite record for $name but no rows of it.") } }
     $failed = @($rows | Where-Object Result -ceq 'FAIL')
@@ -278,7 +291,7 @@ function Get-RanListUnmetConditions {
     $unmet = @()
     foreach ($req in $Entry.Requires) {
         $key, $value = $req -split '=', 2
-        if ($key.StartsWith('build:')) {
+        if ($key.StartsWith('build:', [StringComparison]::Ordinal)) {
             $buildKey = $key.Substring(6)
             $have = "$($List.Build[$buildKey])"
             $holds = if (Test-RanListSame $buildKey 'mode') { Test-RanListSame (Get-RanListModeMeaning $have) (Get-RanListModeMeaning $value) } else { Test-RanListSame $have $value }
@@ -334,13 +347,15 @@ function Compare-RanList {
         foreach ($key in 'source', 'options', 'mode', 'target', 'filtered') {
             $a = "$($list.Build[$key])"; $b = "$($CandidateList.Build[$key])"
             if (Test-RanListSame $key 'source') {
-                # A declared or imported list and a built one can be compared only when both are of one kind.
+                # By class: a built list against a declared or imported one, which are one class.
                 $a = $(if (Test-RanListSame $a 'built') { 'built' } else { 'not built' }); $b = $(if (Test-RanListSame $b 'built') { 'built' } else { 'not built' })
             }
             $same = if ((Test-RanListSame $key 'mode') -and $crossed) { Test-RanListSame (Get-RanListModeMeaning $a) (Get-RanListModeMeaning $b) } else { Test-RanListSame $a $b }
             if (-not $same) { $problems.Add("BUILD-DIFFERS $key`: '$($list.Path)' has '$($list.Build[$key])', '$($CandidateList.Path)' has '$($CandidateList.Build[$key])'.") }
         }
-        $facts = @(@($list.Environment.Keys) + @($CandidateList.Environment.Keys) | Sort-Object -Unique -CaseSensitive)
+        # Both key sets, ordinally (Sort-Object -Unique folds a control character away).
+        $facts = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($k in @($list.Environment.Keys) + @($CandidateList.Environment.Keys)) { [void] $facts.Add($k) }
         foreach ($key in $facts) {
             if (-not (Test-RanListSame $list.Environment[$key] $CandidateList.Environment[$key])) {
                 $problems.Add("ENV-DIFFERS $key`: '$($list.Path)' has '$($list.Environment[$key])', '$($CandidateList.Path)' has '$($CandidateList.Environment[$key])'.")
@@ -393,9 +408,10 @@ function Compare-RanList {
     }
     # An approval for a suite this list does not hold (the approvals file covers
     # every suite) is not stale.
-    $laterSuites = @($CandidateList.Rows | ForEach-Object Suite | Sort-Object -Unique -CaseSensitive)
+    $laterSuites = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($row in $CandidateList.Rows) { [void] $laterSuites.Add($row.Suite) }
     foreach ($id in $SkipEntries.Keys) {
-        if (($id -split "`t", 2)[0] -cnotin $laterSuites) { continue }
+        if (-not $laterSuites.Contains(($id -split "`t", 2)[0])) { continue }
         if (-not $later.ContainsKey($id) -or $later[$id].SKIP -eq 0) { $notes.Add("UNUSED-SKIP-APPROVAL $($id -replace "`t", ' ')") }
     }
     return [pscustomobject]@{ Problems = $problems.ToArray(); Notes = $notes.ToArray() }
