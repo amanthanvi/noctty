@@ -612,6 +612,10 @@ that govern each symbol you change, or that none does.
   `Assert-ReleaseManifest`, `Assert-PackageManagerFiles`),
   `scripts/release-write-manifest.ps1`,
   `scripts/release-check-publication.ps1`, `scripts/release-promote.ps1`,
+  `scripts/release-publish-github.ps1`,
+  `scripts/release-fixture-directory.ps1` (`New-ReleaseFixtureDirectory`,
+  `Remove-ReleaseFixtureDirectory`), the release fixtures
+  `test/windows/release-promote.ps1` and `test/windows/release-fixture-cleanup.ps1`,
   `scripts/release-package-manager-preflight.ps1` (`Test-ReleasePublisherEnabled`,
   `Assert-PromotionPackageManagers`), `scripts/package-manager-paths.ps1`
   (`Resolve-ArtifactMetadataPath`), `scripts/release-run-generator.ps1`

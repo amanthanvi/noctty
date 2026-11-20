@@ -408,8 +408,20 @@ if ($symbolsVerificationText -notmatch '(?s)function Get-WindowsSymbolBinaryName
 # Fixture B runs the shared build-mode writer and every promote predicate with
 # the historical real payload set, including its symbols ZIPs, under recorded
 # GitHub responses. With no cache it downloads public v1.3.136 assets only.
-$promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
-if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
-    [string]$_ -ceq 'Release promotion fixture B: PASS (98 cases, 4 files identical across two checkout roots, 12 real assets).'
-}).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
-$promotionFixtureOutput | ForEach-Object { Write-Host $_ }
+. (Join-Path $repoRoot 'scripts/release-fixture-directory.ps1')
+$fixtureParent = New-ReleaseFixtureDirectory
+$fixtureWorkParent = [IO.Path]::Combine($fixtureParent, 'fixture-[case]')
+try {
+    [void][IO.Directory]::CreateDirectory($fixtureWorkParent)
+    $promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -WorkDirectory $fixtureWorkParent -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
+    if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
+        [string]$_ -ceq 'Release promotion fixture B: PASS (104 cases, 4 files identical across two checkout roots, 12 real assets).'
+    }).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
+    if (@(Get-ChildItem -LiteralPath $fixtureWorkParent -Force).Count) { throw 'Release promotion fixture B retained its run directory.' }
+    $promotionFixtureOutput | ForEach-Object { Write-Host $_ }
+} finally {
+    # Fixture B removes bulk data and leaves its text evidence after failure.
+    if (-not (Test-Path -LiteralPath $fixtureWorkParent) -or -not @(Get-ChildItem -LiteralPath $fixtureWorkParent -Force).Count) {
+        Remove-ReleaseFixtureDirectory -RunDirectory $fixtureParent
+    }
+}

@@ -19,6 +19,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'release-package-manager-preflight.ps1')
 . (Join-Path $PSScriptRoot 'release-run-generator.ps1')
 $repoRoot = Get-RepoRoot
+$fixtureRun = $null
 if ($Fixture -eq 'historical') {
     $Tag = 'v1.3.136'
     $CandidateSha = 'e629842e9c4ddef133ab4d4ad27d37e0e9718e09'
@@ -33,12 +34,19 @@ foreach ($field in @('Tag', 'CandidateSha', 'TestRunId', 'EvidenceRunId', 'Relea
 if (-not $Fixture -and -not $ManifestSha256) { throw 'Required promote input missing: ManifestSha256.' }
 $release = Get-ReleaseByTag -Repository $Repository -Tag $Tag
 if (-not $Fixture) { Assert-ReleasePublicationState -Release $release -Repository $Repository -Tag $Tag }
-if (-not $WorkDirectory) { $WorkDirectory = Join-Path $repoRoot ('dist/promote-' + [guid]::NewGuid().ToString('N')) }
-$WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
-if (Test-Path -LiteralPath $WorkDirectory) {
-    if (@(Get-ChildItem -LiteralPath $WorkDirectory -Force).Count) { throw 'Promote work directory must be fresh and empty.' }
+if ($Fixture) {
+    . (Join-Path $PSScriptRoot 'release-fixture-directory.ps1')
+    $fixtureRun = New-ReleaseFixtureDirectory -ParentDirectory $WorkDirectory
+    $WorkDirectory = $fixtureRun
+} else {
+    if (-not $WorkDirectory) { $WorkDirectory = Join-Path $repoRoot ('dist/promote-' + [guid]::NewGuid().ToString('N')) }
+    $WorkDirectory = [IO.Path]::GetFullPath($WorkDirectory)
+    if ((Test-Path -LiteralPath $WorkDirectory) -and @(Get-ChildItem -LiteralPath $WorkDirectory -Force).Count) {
+        throw 'Promote work directory must be fresh and empty.'
+    }
+    [void][IO.Directory]::CreateDirectory($WorkDirectory)
 }
-[void][IO.Directory]::CreateDirectory($WorkDirectory)
+try {
 if (-not $CandidateDirectory) {
     if (-not $Fixture) { throw 'CandidateDirectory must name the second checkout.' }
     $CandidateDirectory = Join-Path $WorkDirectory 'candidate'
@@ -150,9 +158,12 @@ if ($Fixture) {
     & (Join-Path $PSScriptRoot 'release-submit-winget.ps1') -Version $version -ArtifactRoot $artifactRoot -TempDirectory $WorkDirectory -WhatIf
     & (Join-Path $PSScriptRoot 'release-publish-chocolatey.ps1') -Version $version -ArtifactRoot $artifactRoot -RunnerTemp $WorkDirectory -WhatIf
 }
-if ($env:GITHUB_OUTPUT) {
+if ($env:GITHUB_OUTPUT -and -not $Fixture) {
     "version=$version`nartifact_root=$artifactRoot" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "publish_scoop=$($channels.SCOOP -and $resumeFrom -le 1)`npublish_winget=$($channels.WINGET -and $resumeFrom -le 2)`npublish_chocolatey=$($channels.CHOCOLATEY -and $resumeFrom -le 3)".ToLowerInvariant() | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
 }
 Write-Host "Release promote: PASS ($Tag, resume=$resume, fixture=$([bool]$Fixture))."
 $global:LASTEXITCODE = 0
+} finally {
+    if ($fixtureRun) { Remove-ReleaseFixtureDirectory -RunDirectory $fixtureRun }
+}

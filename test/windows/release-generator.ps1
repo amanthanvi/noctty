@@ -29,6 +29,9 @@ Write-Error 'probe failure ghp_synthetic_token_for_redaction'
     $message=$null
     try {Invoke-ReleaseGenerator -Generator $probe -Parameters @{}}catch{$message=$_.Exception.Message}
     if(-not $message -or $message -notmatch 'probe failure' -or $message -notmatch '\[REDACTED\]' -or $message -match 'ghp_|parent-secret-sentinel|discarded-line-0\b' -or $message.Length -gt 2200){throw 'Generator stderr tail was missing, unbounded or unsanitized.'}
+    if ($message -match 'CLIXML|<Objs\b|_x00(?:1B|0D|0A)_' -or $message -notmatch '(?m)^[^\r\n]*probe failure \[REDACTED\][ \t]*$' -or ($message -split '\r?\n').Count -gt 8) {
+        throw 'Generator stderr tail was not rendered as bounded plain text.'
+    }
     Write-Host 'Generator isolation: PASS (allowlist, parent scope, outer WhatIf, typed parameters, bounded redacted failure reason).'
 } finally {
     $WhatIfPreference=$previousWhatIf

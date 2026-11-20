@@ -2,7 +2,7 @@
 . (Join-Path $PSScriptRoot 'release-manifest.ps1')
 . (Join-Path $PSScriptRoot 'release-evidence.ps1')
 function Get-ReleaseByTag {
-    param([string] $Repository, [string] $Tag, [switch] $AllowMissing)
+    param([string] $Repository, [string] $Tag, [switch] $AllowMissing, [switch] $AllowIdNotFound)
     # REST tags returns published releases only. List releases includes drafts
     # with push access; unlike gh's first-match draft lookup, inspect every page
     # to refuse duplicate pending tags before any mutation.
@@ -22,7 +22,8 @@ function Get-ReleaseByTag {
     }
     $id = [string]$matches[0].id
     if ($id -cnotmatch '\A[0-9]+\z') { throw 'ReleaseLookupIncomplete: release ID is missing.' }
-    $release = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$id")
+    $release = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/$id") -AllowNotFound:$AllowIdNotFound -RequireReleaseObject
+    if ($null -eq $release) { return $null }
     if ([string]$release.id -cne $id -or -not [string]::Equals($release.tag_name, $Tag, [StringComparison]::Ordinal)) { throw 'ReleaseIdentityMismatch: release changed during discovery.' }
     return $release
 }
@@ -65,12 +66,23 @@ function Assert-RemoteReleaseTag {
     }
 }
 function Get-CreatedReleaseDraft {
-    param([string] $Repository, [string] $Tag, [string] $CandidateSha, [bool] $Prerelease)
+    param(
+        [string] $Repository, [string] $Tag, [string] $CandidateSha, [bool] $Prerelease,
+        [Parameter(Mandatory)] [string] $CreateMarker
+    )
     # Create is issued once. A failed response may have created the draft;
     # discover it by list/ID and authenticate it before uploading any bytes.
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $draft = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing
+        # A list hit can precede visibility by ID. Only post-create discovery
+        # treats that 404 as transient; preflight still refuses the unknown state.
+        $draft = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing -AllowIdNotFound
         if ($null -ne $draft) {
+            $markerLines = @(([string]$draft.body -split '\r?\n') | Where-Object {
+                [string]::Equals($_, $CreateMarker, [StringComparison]::Ordinal)
+            })
+            if ($markerLines.Count -ne 1) {
+                throw 'ReleaseDraftOwnershipUnconfirmed: the draft does not carry this create attempt marker. Preserve it and inspect its ID before retrying.'
+            }
             if (-not $draft.draft -or $draft.prerelease -ne $Prerelease -or
                 @($draft.assets).Count -ne 0) { throw "ReleaseIdentityMismatch: created draft flags/assets differ (draft=$($draft.draft), prerelease=$($draft.prerelease), expected=$Prerelease, assets=$(@($draft.assets).Count)); preserve it for inspection." }
             if (-not [string]::Equals($draft.target_commitish, $CandidateSha, [StringComparison]::Ordinal)) {
@@ -83,7 +95,7 @@ function Get-CreatedReleaseDraft {
         }
         if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
     }
-    throw 'ReleaseCreateUnconfirmed: draft absent after 3 discovery reads; inspect the run before retrying. Never delete a published release.'
+    throw 'ReleaseCreateUnconfirmed: draft unavailable after 3 discovery reads; inspect the run before retrying. Never delete a published release.'
 }
 function Confirm-ReleasePublication {
     param([string] $Repository, [string] $Tag, [string] $CandidateSha, [string] $ReleaseId, [bool] $Prerelease, [hashtable] $ManifestInputs)
