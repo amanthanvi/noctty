@@ -663,8 +663,9 @@ function Get-WorkloadStages([string] $Name, [int] $BlocksPlanned) {
 }
 
 # The workload's identity: SHA-256 over the workload, its scrollback limit and its planned blocks, the constants,
-# the block's and the flood batch file's SHA-256 and the config with the run's own directory (in working-directory
-# and, escaped, in the flood binding) written as <run>. Runs compare only when it matches.
+# the block's and the flood batch file's SHA-256 and the config with the run's own directory written as <run>: it now
+# appears only in working-directory; the escaped form is still taken out because configs before the relative F5
+# binding carried it there, so Phase 0a's configs hash as they did. Runs compare only when it matches.
 function Get-WorkloadSha256([string] $Name, [long] $ScrollbackLimitBytes, [int] $BlocksPlanned, [string] $BlockSha256, [string] $FloodSha256, [string] $ConfigPath, [string] $RunRoot) {
     $root = $RunRoot.TrimEnd('\')
     $config = ([IO.File]::ReadAllLines($ConfigPath) -join "`n").Replace($root.Replace('\', '\\'), '<run>').Replace($root, '<run>')

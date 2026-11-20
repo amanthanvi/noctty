@@ -450,6 +450,11 @@ $workingSetRules = @(
         Pattern = 'if \(-not \(Test-WorkingSetArgv \(\[WorkingSetNative\]::SplitCommandLine\(\$commandLine\)\) \$expectedArgv\)\) \{ throw'
         Mutation = @('if (-not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($commandLine)) $expectedArgv)) { throw', 'if ($false) { throw')
     }
+    @{
+        Description = 'the outer half refuses a record whose launch config file is not the copy''s own generated one (Opus, round 4: n3)'
+        Pattern = 'if \(\$record\.LaunchConfigFile -ne \(Join-Path \$copy ''config\.ghostty''\)\) \{ \$failed \+= '
+        Mutation = @('if ($record.LaunchConfigFile -ne (Join-Path $copy ''config.ghostty'')) { $failed += ', 'if ($false) { $failed += ')
+    }
     # --- the native layer
     @{
         Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI")'
@@ -879,16 +884,22 @@ try {
     # The generator's first-pane command, pinned here independently of the generator (Sol, round 3): its config sets
     # exactly one command, System32's cmd.exe run directly with /D, and no initial-command, in any spelling. The
     # control, a generator that adds an initial-command, must fail.
+    $allWorkloads = @('fixed', 'scrollback-default', 'scrollback-max', 'uia-walk', 'session-capture', 'tab-churn')
     function Test-WorkingSetGeneratedCommand([string] $Generator) {
-        $text = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText 'session-capture' $configRun }
-        $commands = @($text -split "`n" | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
         $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
-        return $commands.Count -eq 1 -and $commands[0] -ceq "command = direct:$cmdPath /D"
+        foreach ($workload in $allWorkloads) {
+            $text = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText $workload $configRun }
+            $commands = @($text -split "`n" | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
+            if ($commands.Count -ne 1 -or $commands[0] -cne "command = direct:$cmdPath /D") { return $false }
+        }
+        return $true
     }
     if (-not (Test-WorkingSetGeneratedCommand $generatorText)) { throw 'The generated config does not set exactly System32''s cmd.exe with /D, or it sets an initial-command.' }
     $commandControl = $generatorText.Replace("        'keybind = clear'`n", "        'initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit'`n        'keybind = clear'`n")
     if ([string]::Equals($commandControl, $generatorText, [StringComparison]::Ordinal)) { throw 'The generated-command control changed nothing.' }
     if (Test-WorkingSetGeneratedCommand $commandControl) { throw 'The generated-command check accepted a generator that adds an initial-command.' }
+    $commandControlOne = $generatorText.Replace("        'keybind = clear'`n", "        if (`$Workload -eq 'uia-walk') { 'initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit' }`n        'keybind = clear'`n")
+    if (Test-WorkingSetGeneratedCommand $commandControlOne) { throw 'The generated-command check accepted a uia-walk-only initial-command (Opus n2).' }
 
     # The generator's whole output for a fixed run, against a config built here independently (Opus, round 3): any
     # changed line fails. The controls are Opus's generator mutations, an initial-command /K echo and renderer = d3d11.
@@ -905,7 +916,7 @@ try {
         return ($lines -join "`n") + "`n"
     }
     function Test-WorkingSetGeneratorOutput([string] $Generator) {
-        foreach ($workload in 'fixed', 'session-capture') {
+        foreach ($workload in $allWorkloads) {
             $got = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText $workload $configRun }
             if ($got -cne (Get-WorkingSetExpectedConfig $workload $configRun)) { return $false }
         }
@@ -915,6 +926,7 @@ try {
     foreach ($mutant in @(
             @{ Name = 'an initial-command /K echo line (Opus c1)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        `"initial-command = direct:`$cmdPath /K echo`"`n        'keybind = clear'`n") }
             @{ Name = 'renderer = d3d11 (Opus c2)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        'renderer = d3d11'`n        'keybind = clear'`n") }
+            @{ Name = 'a tab-churn-only renderer = d3d11 (Opus n1)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        if (`$Workload -eq 'tab-churn') { 'renderer = d3d11' }`n        'keybind = clear'`n") }
         )) {
         if ([string]::Equals($mutant.Text, $generatorText, [StringComparison]::Ordinal)) { throw "The generator control changed nothing: $($mutant.Name)." }
         if (Test-WorkingSetGeneratorOutput $mutant.Text) { throw "The pinned config accepted a generator with $($mutant.Name)." }
@@ -962,32 +974,49 @@ try {
     }
 
     # Sol's round-3 case: an untouched config.ghostty beside a legacy ghostty/config that sets an initial-command must
-    # not pass; nor a pre-rename winghostty/config.ghostty; a copy with only its generated config does. The control, a
-    # check that finds nothing, must accept the legacy case.
+    # not pass; nor a pre-rename winghostty/config.ghostty; a copy with only its generated config does. The results
+    # are compared as joined strings (an empty result fails). The controls run these same assertions on mutated
+    # functions and must fail them: Opus's s1 (the copy path pointed elsewhere) and s2 (the result indexed past its
+    # end), and n9 (the list cut to ghostty\config).
     $strayText = Get-WorkingSetFunction 'Get-WorkingSetStrayConfigs'
     $strayCopy = Join-Path $configDir 'copy'
     [void][IO.Directory]::CreateDirectory((Join-Path $strayCopy 'ghostty'))
+    [void][IO.Directory]::CreateDirectory((Join-Path $strayCopy 'winghostty'))
     [IO.File]::Copy((Join-Path $configDir 'exact.ghostty'), (Join-Path $strayCopy 'config.ghostty'))
-    $strayCases = & {
-        . ([scriptblock]::Create($strayText))
-        $found = [ordered]@{ clean = @(Get-WorkingSetStrayConfigs $strayCopy) }
-        [IO.File]::WriteAllText((Join-Path $strayCopy 'ghostty\config'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
-        $found.legacy = @(Get-WorkingSetStrayConfigs $strayCopy)
-        [IO.File]::Delete((Join-Path $strayCopy 'ghostty\config'))
-        [void][IO.Directory]::CreateDirectory((Join-Path $strayCopy 'winghostty'))
-        [IO.File]::WriteAllText((Join-Path $strayCopy 'winghostty\config.ghostty'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
-        $found.renamed = @(Get-WorkingSetStrayConfigs $strayCopy)
-        [IO.File]::Delete((Join-Path $strayCopy 'winghostty\config.ghostty'))
-        [IO.File]::WriteAllText((Join-Path $strayCopy 'ghostty\config'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
-        $found
+    function Get-WorkingSetStrayProblems([string] $FunctionText) {
+        $legacyFile = Join-Path $strayCopy 'ghostty\config'
+        $renamedFile = Join-Path $strayCopy 'winghostty\config.ghostty'
+        $override = "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n"
+        $found = & {
+            . ([scriptblock]::Create($FunctionText))
+            $result = [ordered]@{ clean = (@(Get-WorkingSetStrayConfigs $strayCopy) -join ',') }
+            [IO.File]::WriteAllText($legacyFile, $override)
+            $result.legacy = @(Get-WorkingSetStrayConfigs $strayCopy) -join ','
+            [IO.File]::Delete($legacyFile)
+            [IO.File]::WriteAllText($renamedFile, $override)
+            $result.renamed = @(Get-WorkingSetStrayConfigs $strayCopy) -join ','
+            [IO.File]::Delete($renamedFile)
+            $result
+        }
+        $problems = @()
+        if ($found.clean -cne '') { $problems += "clean copy refused ($($found.clean))" }
+        if ($found.legacy -cne 'ghostty\config') { $problems += "legacy ghostty/config gave '$($found.legacy)'" }
+        if ($found.renamed -cne 'winghostty\config.ghostty') { $problems += "winghostty/config.ghostty gave '$($found.renamed)'" }
+        return $problems
     }
-    if ($strayCases.clean.Count -ne 0) { throw 'A copy with only its generated config was refused for a stray config.' }
-    if (@($strayCases.legacy) -cne 'ghostty\config') { throw 'A legacy ghostty/config beside an untouched config.ghostty was not refused.' }
-    if (@($strayCases.renamed) -cne 'winghostty\config.ghostty') { throw 'A pre-rename winghostty/config.ghostty was not refused.' }
-    $strayControl = $strayText.Replace("return @(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path `$Copy `$_) })", 'return @()')
-    if ([string]::Equals($strayControl, $strayText, [StringComparison]::Ordinal)) { throw 'The stray-config control changed nothing.' }
-    $strayControlFound = & { . ([scriptblock]::Create($strayControl)); @(Get-WorkingSetStrayConfigs $strayCopy) }
-    if ($strayControlFound.Count -ne 0) { throw 'The stray-config control found the legacy file anyway, so the case shows nothing.' }
+    $strayProblems = @(Get-WorkingSetStrayProblems $strayText)
+    if ($strayProblems.Count -ne 0) { throw "The stray-config case failed: $($strayProblems -join '; ')." }
+    $strayList = "@(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path `$Copy `$_) })"
+    foreach ($mutant in @(
+            @{ Name = 'the copy path pointed elsewhere (Opus s1)'; Text = $strayText.Replace("function Get-WorkingSetStrayConfigs([string] `$Copy) {", "function Get-WorkingSetStrayConfigs([string] `$Copy) {`n    `$Copy = Join-Path `$Copy 'nothing'") }
+            @{ Name = 'the result indexed past its end (Opus s2)'; Text = $strayText.Replace("return $strayList", "return @($strayList[99..100])") }
+            @{ Name = 'the list cut to ghostty\config (Opus n9)'; Text = $strayText.Replace("@('ghostty\config', 'winghostty\config.ghostty')", "@('ghostty\config')") }
+        )) {
+        if ([string]::Equals($mutant.Text, $strayText, [StringComparison]::Ordinal)) { throw "The stray-config control changed nothing: $($mutant.Name)." }
+        if (@(Get-WorkingSetStrayProblems $mutant.Text).Count -eq 0) { throw "The stray-config case passed a function with $($mutant.Name)." }
+    }
+    # Leave the copy with the legacy file, as before, for nothing after this reads it.
+    [IO.File]::WriteAllText((Join-Path $strayCopy 'ghostty\config'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
     # The list is the product's: file_load.zig's legacy paths, rooted at the portable root.
     $fileLoadZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\config\file_load.zig') -Raw
     if (-not $fileLoadZig.Contains('.subdir = "ghostty/config"') -or -not $fileLoadZig.Contains('.subdir = "winghostty/config.ghostty"')) { throw 'The stray-config list is not file_load.zig''s legacy paths.' }
@@ -1075,4 +1104,4 @@ if ($null -ne $ownDesktop) {
     } finally { [IO.Directory]::Delete($launchDir, $true) }
     $desktopCase = 'launch-desktop (Spawn: foreign, Default; LaunchDriver: Default, own; control: private)'
 } else { $desktopCase = 'launch-desktop skipped (no readable desktop)' }
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command (and its control), generator-output (Opus c1, c2), exact argv (pinned, exact, Sol's extra initial-command and malformed value, second limit, reordered, no config file; containment control), receipt swap (Sol's; control), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean) and $desktopCase cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command over all six workloads (Opus n2 among its controls), generator-output over all six workloads (Opus c1, c2, n1), exact argv (pinned, exact, Sol's extra initial-command and malformed value, second limit, reordered, no config file; containment control), receipt swap (Sol's; control), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean; Opus s1, s2, n9 controls) and $desktopCase cases; native layout $layoutActual"
