@@ -6577,6 +6577,49 @@ test "handoff embedding switch is consumed by Windows config parsing" {
     try std.testing.expectEqual(@as(usize, 0), cfg._replay_steps.items.len);
 }
 
+test "a command line's notification flags are read byte for byte" {
+    // The reference for the accessibility leaf's run-time check
+    // (`Get-AccessibilitySaveLaunchVerdict`, EVIDENCE-TOAST-FOREGROUND in
+    // docs/agents/log/test-harnesses.md): the same command lines, split as
+    // `loadCliArgs` splits them (Zig's ArgIteratorWindows, the program name
+    // dropped). Keys and values compare as bytes, so a soft hyphen or a
+    // control character inside `false` leaves the default on, and `-` U+00AD
+    // `e` is no `-e`: parsing goes on past it.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const unicode = std.unicode;
+    const Case = struct {
+        line: []const u16,
+        desktop: bool,
+        clipboard_copy: bool,
+        config_reload: bool,
+    };
+    const launch = "\"C:\\noctty\\noctty.exe\" --single-instance=false --class=noctty-accessibility-settings-save-0 --command=cmd.exe";
+    // The literals convert at compile time, past the default branch quota.
+    const cases = comptime cases: {
+        @setEvalBranchQuota(100_000);
+        break :cases [_]Case{
+            .{ .line = unicode.utf8ToUtf16LeStringLiteral(launch ++ " --app-notifications=false --desktop-notifications=false"), .desktop = false, .clipboard_copy = false, .config_reload = false },
+            .{ .line = unicode.utf8ToUtf16LeStringLiteral(launch ++ " --app-notifications=fa\u{00AD}lse --desktop-notifications=false"), .desktop = false, .clipboard_copy = true, .config_reload = true },
+            .{ .line = unicode.utf8ToUtf16LeStringLiteral(launch ++ " --app-notifications=fa\x01lse --desktop-notifications=false"), .desktop = false, .clipboard_copy = true, .config_reload = true },
+            .{ .line = unicode.utf8ToUtf16LeStringLiteral(launch ++ " --app-notifications=false --desktop-notifications=false -\u{00AD}e --app-notifications=true"), .desktop = false, .clipboard_copy = true, .config_reload = true },
+            .{ .line = unicode.utf8ToUtf16LeStringLiteral(launch ++ " --app-notifications=false --desktop-notifications=false -e cmd.exe --app-notifications=true"), .desktop = false, .clipboard_copy = false, .config_reload = false },
+            .{ .line = unicode.utf8ToUtf16LeStringLiteral("C:\\x\"y --app-notifications=false --desktop-notifications=false"), .desktop = true, .clipboard_copy = true, .config_reload = true },
+        };
+    };
+    for (cases) |case| {
+        var cfg = try Config.default(std.testing.allocator);
+        defer cfg.deinit();
+        var windows_iter = try std.process.ArgIteratorWindows.init(std.testing.allocator, case.line);
+        _ = windows_iter.next();
+        var iter: cli.args.ArgsIterator(std.process.ArgIteratorWindows) = .{ .iterator = windows_iter };
+        defer iter.deinit();
+        try cli.args.parse(Config, std.testing.allocator, &cfg, &iter);
+        try std.testing.expectEqual(case.desktop, cfg.@"desktop-notifications");
+        try std.testing.expectEqual(case.clipboard_copy, cfg.@"app-notifications".@"clipboard-copy");
+        try std.testing.expectEqual(case.config_reload, cfg.@"app-notifications".@"config-reload");
+    }
+}
+
 fn compatGtkTabsLocation(
     self: *Config,
     alloc: Allocator,

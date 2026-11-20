@@ -193,7 +193,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\powershell-shell-integ
 
 Composite Win11 validator. It runs launch-helper checks and startup smoke,
 then runs the command-finish and progress validators in parallel against
-separate sandbox roots.
+separate sandbox roots. `-DeferCommandFinish` leaves the command-finish
+validator out (the suite logs it as deferred, and its coverage line says the
+caller checks the command-finish policy) for a caller that runs it later, as
+`interactive-win11-job.ps1` does.
 
 Run with:
 
@@ -232,6 +235,12 @@ command-finished path fired.
   script asserts the runtime logs the explicit
   `error.NotifierDisabled; falling back to banner` path instead of
   silently dropping the notification.
+
+With delivery enabled it raises a real toast, on the visible desktop even
+when noctty runs on a private one, and the banner can cover or take the
+foreground from a later harness. Run nothing that reads screen pixels or
+needs the foreground while that banner is up; the release evidence job runs
+this leaf last for that reason.
 
 Run with:
 
@@ -764,8 +773,120 @@ custom shaders (`-Dcustom-shaders=true`, as releases do) and its receipt binds
 the exact build arguments.
 
 `interactive-win11-job.ps1` is the Test workflow's `windows-interactive` job:
-the composite, then the shader, shader-pacing, accessibility, palette-theme and
-session-restore leaves, all with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
+the composite (with `-DeferCommandFinish`), then the shader, shader-pacing,
+accessibility, palette-theme and session-restore leaves, and last the
+command-finish leaf, the one step that raises a real toast, so that its banner
+has no later leaf to disturb. No earlier step can run that leaf: only the plan,
+the composite's guarded launch and `vt-probe-win32-conformance.ps1`'s
+`-Runtime` branch, which no job script takes, name it. The accessibility
+leaf's two processes that save Settings run with `--app-notifications=false`
+and `--desktop-notifications=false` as the last notification values on their
+command lines (no empty value of either after them, which would reset it to
+its default, and no `--config-file`, whose include noctty reads after the
+command line), so a save shows its in-window banner and no toast. The banner
+needs a terminal window: with none open, `settingsNotifySuccessThunk` toasts
+whatever `config-reload` says (`showHostBanner` finds no surface). Each saving
+process keeps its own terminal window open through its save, and the leaf
+checks that window right before each save.
+
+Three layers keep those launches quiet.
+
+- **Run-time checks, in the leaf.** Right after each saving launch, before its
+  probe opens, `Assert-AccessibilitySaveLaunchQuiet` reads that process's own
+  command line (only that process, by its id; it never prints or logs it),
+  reads it with `Get-AccessibilitySaveLaunchVerdict` (last value wins, an empty
+  value resets a setting to its default, `--config-file`, a quote and any
+  character outside printable ASCII after the program name are refused), and
+  stops the leaf unless desktop notifications, the clipboard-copy notice and
+  config-reload notifications are all off. Before the first launch, before
+  each save and before the verifier starts, `Assert-AccessibilitySaveSandboxQuiet`
+  finds no default config file but noctty's own `config.ghostty` in the
+  directory the saving environment's `XDG_CONFIG_HOME` names, and no
+  `config-file` key in it, its lines read as noctty's `LineIterator` reads them
+  (any other byte, such as the template's path in its comments, does not
+  matter); before each save it also stops the leaf if the saving process's
+  terminal window has closed, and before each launch if the build's own
+  folder holds a portable marker (`noctty.portable`, `portable.txt` or
+  `config.ghostty`, `portable_marker_names` in `src/os/xdg.zig`), which would
+  make noctty read its config there whatever the environment says. Each save
+  is the statement right after its last check: the probe's close prompt
+  button is found first (`Get-AccessibilitySettingsCloseActionInvoke`) and
+  pressed after the check. The launcher refuses an environment that names one
+  variable twice in two cases. Both compare ordinally, as noctty compares bytes:
+  PowerShell's `-eq` family ignores some characters (a soft hyphen; under
+  PowerShell 7, ASCII controls), so `-ceq` read `fa`U+00AD`lse` as `false`,
+  where noctty keeps the default on (the Zig test "a command line's
+  notification flags are read byte for byte" in `src/config/Config.zig` is the
+  reference).
+- **Pins.** The leaf's regions between `# pin-begin: <name>` and `# pin-end:
+  <name>` lines (`save-functions`, `save-sandbox`, `save-flow` and
+  `failure-path`, the main catch through the final throw) are pinned in
+  `flagship/contracts/Contracts.90-Workflows.ps1` by SHA-256 with LF line ends.
+  An edit inside one fails that contract until its pin there is updated in the
+  same change; the failure names the region and its new hash. Each region must
+  hold the statements it guards.
+- **Static grammar.** The same contract checks those two launches against a
+  grammar, which names what changed. It refuses every form it does not list.
+
+What none of the three sees: an edit outside every region that acts on its
+own before the last check runs (an unpinned helper the flow calls first, such
+as `Wait-AccessibilityCondition`, pressing Save itself, or an asynchronous
+event handler registered elsewhere), or after a save's `Invoke()` returns,
+while noctty is still saving and reloading (UI Automation's `Invoke` does not
+wait for the click, and the wait after it is unpinned); a function whose name
+itself carries the module qualifier (`function
+Microsoft.PowerShell.Management\Start-Process`, which PowerShell then runs for
+that qualified call); and a name built at run time that replaces a checker. An
+include such a helper writes before the last check is still refused at run
+time.
+
+The contract runs the leaf's reading on synthetic command lines under
+PowerShell 7 and Windows PowerShell 5.1, the run-time check against a stand-in
+process lookup and the sandbox check on scratch directories. Its controls run
+the grammar on the leaf less what the saves never touch (the other functions
+and checks are cut; the pinned regions are kept byte for byte).
+
+The grammar: the flags are one literal array of single-quoted strings, assigned
+exactly once as `$name = @('...', '...')` or `$name = '...', '...'`. Each
+launch's `-ArgumentList` is a variable assigned once as `$name = @( ... )`,
+each element one of `Get-InteractiveWin11ContainmentArguments` with no argument
+(defined once, in `scripts/interactive-win11-lib.ps1` and in no other job
+script, as `return @( ... )` of single-quoted strings), a single-quoted string,
+`"--class=$name"` with `$name = "<letters, digits, hyphens>$([Guid]::NewGuid().ToString('N'))"`,
+or the flags variable. Each process a save runs in is assigned once, from its
+launch, and each probe once, from that process. Every one of those variables is
+written only by that one plain assignment and named nowhere else: no scoped
+spelling, other assignment, index, member, `[ref]`, loop or parameter of that
+name, no `-OutVariable`, `-PipelineVariable` or `Set-Variable` naming it, and no
+other job script naming it. The three arrays are read only where the grammar
+puts them, and `$settingsProbeEnvironment` only by the two launches and the
+four sandbox checks, so no alias, method call or parameter reaches them. The
+leaf's five save functions are each defined once, under no scope prefix, and in
+no other job script. The leaf uses no variable or alias cmdlet,
+`Invoke-Expression`, common variable parameter, `$ExecutionContext` or
+background pipeline, and its code outside comments is printable ASCII. No job
+script uses a variable or alias cmdlet (by any module-qualified name too),
+`Import-Alias`, `Invoke-Expression`, a `function:`, `variable:` or `alias:`
+drive, a `data` section, `[scriptblock]::Create`, `SessionState`,
+`SessionStateProxy`, `$PSCmdlet`, `$PSDefaultParameterValues`, a function named
+like a cmdlet the regions call (by its bare name), or `&`/`.` on a name built
+by an expression.
+The regions call `Start-Process` and `Join-Path` by their module, and nothing
+but the cmdlets the contract lists and functions the job scripts define. No
+`finally` block of the leaf, nor any function one calls, can end it before its
+final throw: no `exit`, `[Environment]::Exit(...)` or `$Host.SetShouldExit(...)`,
+and no `break` or `continue` outside a loop of its own script block; the flow
+statements inside the finally blocks are pinned one by one.
+Every statement of the save flow (the flags, class names and arrays, both
+launches and their run-time checks, the probes, both saves and the four
+sandbox checks) is a direct statement of the one block that holds the
+launches, in order, each save the statement right after its last check, with
+`-EnvironmentVariables $settingsProbeEnvironment` on
+both launches. The arguments those forms give are printable ASCII with no
+space, quote or backtick and no `--config-file`, and leave every notification
+setting off.
+
+The job's steps all run with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, so every
 launch uses the composite's measurement build and none rewrites the product
 jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the

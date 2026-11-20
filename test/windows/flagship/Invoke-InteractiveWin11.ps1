@@ -3,7 +3,9 @@ param(
     [string] $OutputDirectory = (Join-Path $PSScriptRoot 'artifacts\interactive-win11'),
     [switch] $Rebuild,
     [switch] $ResetState,
-    [switch] $IncludeForegroundHarness
+    [switch] $IncludeForegroundHarness,
+    # Passed on to the composite: the interactive job runs that leaf last.
+    [switch] $DeferCommandFinish
 )
 
 . (Join-Path $PSScriptRoot '..\..\..\scripts\windows-harness-history.ps1')
@@ -80,6 +82,7 @@ try {
     )
     if ($Rebuild) { $arguments += '-Rebuild' }
     if ($ResetState) { $arguments += '-ResetState' }
+    if ($DeferCommandFinish) { $arguments += '-DeferCommandFinish' }
 
     & powershell.exe @arguments *> $rawTranscriptPath
     if ($LASTEXITCODE -ne 0) {

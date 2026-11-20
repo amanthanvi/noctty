@@ -1,6 +1,9 @@
 param(
     [switch] $Rebuild,
-    [switch] $ResetState
+    [switch] $ResetState,
+    # The interactive job runs the command-finish leaf as its own last step
+    # instead (interactive-win11-job.ps1, EVIDENCE-TOAST-FOREGROUND).
+    [switch] $DeferCommandFinish
 )
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
@@ -252,7 +255,13 @@ $buildEvidenceHash = Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($b
 Write-Host ('interactive-win11 source provenance: ' + ((Get-Content -LiteralPath $sourceEvidence -Raw | ConvertFrom-Json) | ConvertTo-Json -Compress))
 Write-Host ('interactive-win11 measurement provenance: ' + ($suiteProvenance | ConvertTo-Json -Compress))
 Write-Host "interactive-win11 retained provenance: source=$sourceEvidence sha256=$sourceEvidenceHash build=$buildEvidence sha256=$buildEvidenceHash"
-Write-Host 'interactive-win11 coverage: HEAD archive plus recorded process/jump-list identity patch; explicit product toast notifier and command-finish policy retained. Product registration repair and installed cold-start activation are not tested; actual banner delivery is not asserted by this gate.'
+$commandFinishCoverage = if ($DeferCommandFinish) {
+    'explicit product toast notifier retained; the command-finish policy is not checked by this composite but by the interactive job''s last step, whose PASS line is in the job log'
+}
+else {
+    'explicit product toast notifier and command-finish policy retained'
+}
+Write-Host "interactive-win11 coverage: HEAD archive plus recorded process/jump-list identity patch; $commandFinishCoverage. Product registration repair and installed cold-start activation are not tested; actual banner delivery is not asserted by this gate."
 Invoke-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-first-frame.ps1' -TimeoutSeconds 30
@@ -282,8 +291,15 @@ Invoke-HarnessWithPassSentinel -ScriptName 'cli-automation.ps1' -TimeoutSeconds 
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-resize.ps1' -TimeoutSeconds 15
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-undo.ps1' -TimeoutSeconds 35
 
+# The command-finish leaf raises a real toast on the visible desktop, and its
+# banner can cover or take the foreground from whatever runs beside or after
+# it. Run alone, the suite runs it in its final parallel batch, beside the
+# progress leaf; the interactive job defers it past its other leaves.
+if ($DeferCommandFinish) {
+    Write-Host 'interactive-win11 command-finish validation: DEFERRED (the interactive job runs it as its last step)'
+}
 [InteractiveWin11HarnessRun[]] $parallelRuns = @(
-    Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12
+    if (-not $DeferCommandFinish) { Start-Harness -ScriptName 'interactive-win11-command-finish.ps1' -TimeoutSeconds 12 }
     Start-Harness -ScriptName 'interactive-win11-progress.ps1' -TimeoutSeconds 20
 )
 
