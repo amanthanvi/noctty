@@ -218,8 +218,10 @@ that govern each symbol you change, or that none does.
   `pagePreservingState()`, `pageAssumeResident()`, `storage()` and
   `Node.owned`), the page owner in `destroyNodeExt` and `compact`, the
   Node section of `docs/upstream-merge-policy.md`, and their callers in
-  `src/inspector/widgets/pagelist.zig` and `snapshotDocumentWindow` in
-  `src/apprt/win32_uia/text.zig`, OSC parsers,
+  `src/inspector/widgets/pagelist.zig`, `snapshotDocumentWindow` in
+  `src/apprt/win32_uia/text.zig` and the session readers in
+  `src/apprt/win32/session.zig` (`captureTerminalScrollbackSnapshotAlloc`,
+  `terminalScreenIsUnpainted`), OSC parsers,
   OSC 133 exit codes, prompt typeahead
   in `semantic_command.zig`, the scrollback search thread and its cached
   results (`ScreenSearch.pruneHistory`, `LiveNodes`), what a search window

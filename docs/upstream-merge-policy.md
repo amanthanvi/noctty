@@ -101,26 +101,39 @@ not an adaptation to record.
   history. At the stone `mem.canReclaim` is false on Windows, so
   `PageList.compress` returns `.unsupported` and a release build never
   compresses; the test suite does (`builtin.is_test`). Windows reclaim
-  (upstream `60b43068c`) comes after the stone, and the fork's read-only
-  walkers (UIA, search, session capture) move to `pagePreservingState()`
-  with it.
+  (upstream `60b43068c`) comes after the stone, and the fork's UIA and
+  session readers move to `pagePreservingState()` with it; the search
+  window's reads move at the merge itself (the last item below).
 - The page owner is `node.owned`, never the page's size: upstream's
   `compact` puts a page at or below `std_size` on the heap, and returning
   such a page to the pool corrupts it. The merge takes upstream's `compact`
   as written (it merges cleanly) and `switch (node.owned)` at every site
   where the fork infers the owner from the page's size: in the stone merge,
   the `initPages` and `clone` errdefers, `deinit`, `reset`, `grow`'s reuse
-  of a pruned page, and `destroyNodeExt`. A site left on the fork's side
-  would return a compacted heap page to the pool, or reuse one as a full
-  page in `grow`. Replacing the cursor's page through `PageList` (`compact`,
-  `increaseCapacity`) still leaves the Screen cursor's cached row and cell
-  pointing into the old page, so a test that does it calls `cursorReload()`
-  before moving the cursor, as the stone's own compact test does.
+  of a pruned page, and `destroyNodeExt`. What a site left on the fork's
+  side does to a compacted heap page depends on the site: `destroyNodeExt`
+  returns it to the pool, `grow` reuses it as a full page, and `deinit` and
+  `reset` skip it, since their size check takes it for a pool item, so the
+  pool's teardown never frees it and it leaks. The two errdefers free pages
+  they have just allocated, whose size and allocator still agree, but they
+  take upstream's side too. Replacing the cursor's page through `PageList`
+  (`compact`, `increaseCapacity`) still leaves the Screen cursor's cached
+  row and cell pointing into the old page, so a test that does it calls
+  `cursorReload()` before moving the cursor, as the stone's own compact test
+  does.
 - An adaptation the interim table below already made on `main` goes back
-  to upstream's form at the merge, for example `search/sliding_window.zig`'s
-  `append` and `appendIfWrapped`, which read `node.page()` where upstream
-  reads `pagePreservingState(self.alloc)` (upstream `0d015b2fc`). The drift
-  reports list them.
+  to upstream's form at the merge. The merge's own conflict hunks list them:
+  those whose fork side reads `page()` where upstream's reads
+  `pagePreservingState()`, `pageIfResident()`, `storage()` or `restore(`.
+  In the stone merge they are `search/sliding_window.zig`'s `append` and
+  `appendIfWrapped` (upstream `0d015b2fc`), PageList.zig's own hunks above,
+  and `src/inspector/widgets/pagelist.zig:79`, which no build compiles, so
+  a wrong side there gets no compile check. One fork read has no conflict
+  to point at it: `appendPage`'s read of the previous node for
+  `Meta.before` (`prev.page()`) merges cleanly, and it too takes upstream's
+  form, a `pagePreservingState(self.alloc)` read, at the merge. Left as it
+  is, it restores a compressed neighbour, and upstream's test "compressed
+  history match spanning page boundary remains compressed" fails.
 
 Until that merge lands on `main`, `main`'s node is still resident-only:
 `Data = struct { resident: Page }`, the four accessors `page()`, `rows()`,
