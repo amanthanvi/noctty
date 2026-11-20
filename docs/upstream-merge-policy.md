@@ -77,11 +77,72 @@ those changes must be adapted around fork-owned Windows behavior rather than
 overwriting it. If neither rule resolves a conflict cleanly, add the change to
 the window's deferred list with a written reason; do not force it through.
 
-`PageList.Node` reaches its page through upstream's accessors (`page()`,
-`rows()`, `cols()` and `capacity()`), so a ported hunk that uses them
-applies as written and is not an adaptation to record. Upstream's other
-node names come with page compression, which the fork does not have. A hunk
-that uses one is an adaptation, and this is what each becomes:
+`PageList.Node` takes upstream's page model as written from the Ghostty
+1.4.0 catch-up's stepping-stone merge (`74d0c72fd`) on. Upstream gave the
+node an explicit page owner (`16e4b5e98`) and page compression
+(`421fe8dab`) before that commit, so the merge brings both, and its
+resolution keeps upstream's Node block: `data` is the `resident` and
+`compressed` union, `owned` says whether the pool or the heap holds the
+page, and the accessors are upstream's (`page()`, `pageIfResident()`,
+`pagePreservingState()`, `pageAssumeResident()`, `storage()`, `rows()`,
+`cols()` and `capacity()`, and the private `metadata()` and
+`isCompressed()`). The block is the same at the stone, at v1.4.0 and on
+upstream's `main`. A ported hunk that uses them applies as written and is
+not an adaptation to record.
+
+- `page()` restores a compressed node, and so does every read that goes
+  through it: the `Pin` reads (`rowAndCell`, `cells`, `grapheme`, `style`,
+  `isDirty`), the formatters and the row iterators. Code that must read a
+  page's whole content without restoring the node uses
+  `pagePreservingState()`, which decodes a compressed node into memory the
+  caller frees with `deinit`. `pageIfResident()` returns null for a
+  compressed node, so it is only for code that may leave out content that
+  is not resident: a walk that skips its nulls silently drops compressed
+  history. At the stone `mem.canReclaim` is false on Windows, so
+  `PageList.compress` returns `.unsupported` and a release build never
+  compresses; the test suite does (`builtin.is_test`). Windows reclaim
+  (upstream `60b43068c`) comes after the stone, and the fork's UIA and
+  session readers move to `pagePreservingState()` with it; the search
+  window's reads move at the merge itself (the last item below).
+- The page owner is `node.owned`, never the page's size: upstream's
+  `compact` puts a page at or below `std_size` on the heap, and returning
+  such a page to the pool corrupts it. The merge takes upstream's `compact`
+  as written (it merges cleanly) and `switch (node.owned)` at every site
+  where the fork infers the owner from the page's size: in the stone merge,
+  the `initPages` and `clone` errdefers, `deinit`, `reset`, `grow`'s reuse
+  of a pruned page, and `destroyNodeExt`. What a site left on the fork's
+  side does to a compacted heap page depends on the site: `destroyNodeExt`
+  returns it to the pool, `grow` reuses it as a full page, and `deinit` and
+  `reset` skip it, since their size check takes it for a pool item, so the
+  pool's teardown never frees it and it leaks. The two errdefers free pages
+  they have just allocated, whose size and allocator still agree, but they
+  take upstream's side too. Replacing the cursor's page through `PageList`
+  (`compact`, `increaseCapacity`) still leaves the Screen cursor's cached
+  row and cell pointing into the old page, so a test that does it calls
+  `cursorReload()` before moving the cursor, as the stone's own compact test
+  does.
+- An adaptation the interim table below already made on `main` goes back
+  to upstream's form at the merge. The merge's own conflict hunks list them:
+  those whose fork side reads `page()` where upstream's reads
+  `pagePreservingState()`, `pageIfResident()`, `storage()` or `restore(`.
+  In the stone merge they are `search/sliding_window.zig`'s `append` and
+  `appendIfWrapped` (upstream `0d015b2fc`), PageList.zig's own hunks above,
+  and `src/inspector/widgets/pagelist.zig:79`, which no build compiles, so
+  a wrong side there gets no compile check. One fork read has no conflict
+  to point at it, because upstream has no counterpart: the fork's
+  `appendPage` adds `Meta.before`, read from the previous node through
+  `prev.page()`, while upstream's builds `Meta` from the node alone. That
+  fork adaptation merges cleanly, so at the merge it keeps `Meta.before`
+  but must read the previous node with `pagePreservingState(self.alloc)`,
+  so that a compressed neighbour stays compressed. Left as it is, it
+  restores one, and upstream's test "compressed history match spanning
+  page boundary remains compressed" fails.
+
+Until that merge lands on `main`, `main`'s node is still resident-only:
+`Data = struct { resident: Page }`, the four accessors `page()`, `rows()`,
+`cols()` and `capacity()`, and the owner inferred from the page's size. A
+hunk ported to `main` before then that uses another of upstream's node names
+is an adaptation, and this is what each becomes:
 
 - `pageAssumeResident()` and `metadata()`: `page()` where the node is
   mutable; otherwise add the accessor with upstream's resident arm alone
@@ -91,16 +152,18 @@ that uses one is an adaptation, and this is what each becomes:
 - `isCompressed()`: `false`; drop the branch it guards.
 - `storage()` and `Storage`: drop the `.compressed` arm.
 - `switch (node.data)`: the hunk depends on compression; adapt it.
-- `.owned = .pool` or `.heap`: drop it. `destroyNodeExt` infers the owner
-  from the page's size, which holds only while no port heap-allocates a page
-  at or below `std_size` (upstream's `compact` does; the fork's leaves such
-  a page alone and takes a smaller result from the pool).
+- `.owned = .pool` or `.heap`: drop it.
 
-Each window diffs upstream's Node accessor block against the fork's and
-records a changed name, receiver or return type in its drift report. It
-also checks that `git grep -F '.data.resident' -- src` finds only Node's
-accessor bodies: the seal stops the old spellings, but a direct
-`node.data.resident` still compiles anywhere.
+Each window diffs upstream's Node block against the fork's and records any
+difference in its drift report: from the stepping stone on there should be
+none. It also checks that
+`git grep -F '.data.resident' -- src ':!src/terminal/PageList.zig'` finds
+nothing: outside `PageList.zig`, code reaches a page only through the
+accessors. A direct `node.data.resident` compiles anywhere, and from the
+merge on it panics in a safe build when the node is compressed. Inside
+`PageList.zig`, upstream's own code reaches `node.data` directly
+(`compress`, `memoryStats` and tests at the stone); before the merge, the
+same grep over all of `src` also finds only Node's accessor bodies.
 
 Renderer scheduling is split in the fork: `Pacer.turn` decides when a frame
 updates, presents or waits and when the timers run, and `Thread.Frame` holds

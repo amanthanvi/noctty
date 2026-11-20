@@ -213,9 +213,15 @@ that govern each symbol you change, or that none does.
 - [terminal-core.md](docs/agents/log/terminal-core.md): `src/terminal/` (VT
   parser limits, `PageList` and its page serials (`page_serial_min`,
   `nodeIsValid`, the source renewal in `PageList.split`), `PageList.Node`'s
-  accessors (`page()`, `rows()`, `cols()`, `capacity()`, `Node.Data`), the
-  owner inference in `destroyNodeExt`, and their callers in
-  `src/inspector/widgets/pagelist.zig`, OSC parsers,
+  accessors (`page()`, `rows()`, `cols()`, `capacity()`, `Node.Data`, and
+  from the stepping-stone merge upstream's `pageIfResident()`,
+  `pagePreservingState()`, `pageAssumeResident()`, `storage()` and
+  `Node.owned`), the page owner in `destroyNodeExt` and `compact`, the
+  Node section of `docs/upstream-merge-policy.md`, and their callers in
+  `src/inspector/widgets/pagelist.zig`, `snapshotDocumentWindow` in
+  `src/apprt/win32_uia/text.zig` and the session readers in
+  `src/apprt/win32/session.zig` (`captureTerminalScrollbackSnapshotAlloc`,
+  `terminalScreenIsUnpainted`), OSC parsers,
   OSC 133 exit codes, prompt typeahead
   in `semantic_command.zig`, the scrollback search thread and its cached
   results (`ScreenSearch.pruneHistory`, `LiveNodes`), what a search window
