@@ -1,0 +1,47 @@
+# PLAN.md r46a §2.6: the merge mechanics checklist (83 items in 31 files, the union of the two trial builds'
+# compile errors), each with its explicit resolution in 1A.1. The gate is 1A.1's own first green
+# `zig build -Demit-exe=true` (b16452cdc), not this list. Ledger rows: resolution-ledger.tsv beside this file.
+# Columns: file, kind, names or message, trial (H hybrid, T theirs), resolution, ledger rows.
+file	kind	names	trial	resolution	ledger
+src/Command.zig	shadowing or unused	local variable is never mutated	T	fork side of both hunks (= HEAD): the only write to job_handle is the fork's, so the variable is mutated	src/Command.zig 1/2, 2/2
+src/Surface.zig	syntax	expected ';' after statement	H	hunk 6 keeps the fork's one-row wheel minimum and removes upstream 154169b05's Darwin else branch outside the markers	src/Surface.zig 6/13, clean:yoff-darwin
+src/cli/ghostty.zig	syntax	declarations are not allowed between container fields	T	the fork's structure stays (the Action enum lives in cli/ghostty_action.zig); upstream's ssh and toggle-quick-terminal members go there	src/cli/ghostty.zig 1-4/4; R1A fix:ssh,toggle-quick-terminal
+src/cli/ssh-cache/DiskCache.zig	missing declaration	AddResult, FixupPermissionsError	H	upstream's DiskCache API (ac69942cd, ancestor of the stone) with the fork's Windows close-before-rename re-applied	src/cli/ssh-cache/DiskCache.zig 1-5/5
+src/cli/ssh-cache/DiskCache.zig	shadowing or unused	unused local constant	H	gone with the same side choice	src/cli/ssh-cache/DiskCache.zig
+src/cli/ssh_cache.zig	missing declaration	Duration, key, matchesQuery, max_age_s	H	upstream's +ssh-cache rework taken with the fork's deltas re-applied (PROVISIONAL Qg09-1)	src/cli/ssh_cache.zig 1-6/6
+src/config/Config.zig	duplicate member	scrollback-compression (the other names are theirs-trial GTK keys, which the default sides never bring)	H+T	one key: the fork's, whose help says it has no effect on Windows (§6.3)	clean:scrollback-compression-dup
+src/font/DeferredFace.zig	duplicate member	Windows, win	H	upstream's clean-merged Windows arm removed; the fork's win/Windows kept (§2.3 font backend exception, decision 12)	src/font/DeferredFace.zig 1-4/4, clean:upstream-windows-arm
+src/font/discovery.zig	duplicate member	Windows	H	upstream's clean-merged Windows scanner removed; the fork's re-export of discovery_windows.zig kept	src/font/discovery.zig, clean:upstream-windows-scanner
+src/font/nerd_font_attributes.zig	missing declaration	generated, lut, std	T	the fork's table wrapper kept (it ports a3f3331d4, after the stone); Constraint import moved to Glyph.zig	src/font/nerd_font_attributes.zig 1/1
+src/inspector/widgets/pagelist.zig	missing declaration	rows	H	upstream side (the file equals the stone's)	src/inspector/widgets/pagelist.zig 1/6
+src/inspector/widgets/pagelist.zig	shadowing or unused	page shadows parameter / outer constant; unused parameter	H	upstream side	src/inspector/widgets/pagelist.zig 2-6/6
+src/os/TempDir.zig	missing declaration	allocTmpDir, testing	H	file.allocTmpDir (clean c9d2285f6 spelling); testing re-added for the fork's tests	src/os/TempDir.zig 1/2
+src/os/TempDir.zig	syntax	expected type expression, found 'defer'	T	the fork's test block taken	src/os/TempDir.zig 2/2
+src/os/open.zig	missing declaration	genericOpenAllowed	T	the fork's genericOpenAllowed and its test kept	src/os/open.zig
+src/os/open.zig	shadowing or unused	capture 'stderr' shadows local variable	H	upstream's openThread (bb375a2f7, a handle-leak fix) taken	src/os/open.zig
+src/os/windows.zig	missing declaration	COMPUTER_NAME_FORMAT	T	fork side (= HEAD)	src/os/windows.zig 1/1
+src/renderer/State.zig	missing declaration	OutputProgress, w	T	the fork's OutputProgress kept; the fork's Preedit.layout replaces range(), so w does not arise; upstream's handoff taken (adaptation D1)	src/renderer/State.zig 1-3/3
+src/renderer/Thread.zig	missing declaration	timerRunCallback	T	the fork's timerRunCallback kept	src/renderer/Thread.zig
+src/renderer/Thread.zig	other	ambiguous reference	H+T	Compression.schedule names Compression.timerCallback	clean:Compression.timerCallback
+src/renderer/image.zig	syntax	expected type expression, found 'return'	T	the fork's D3D11 ForAPI layout kept, with upstream's ten small edits re-applied	src/renderer/image.zig 1-2/2
+src/terminal/PageList.zig	syntax	expected ',' after initializer; expected type expression, found '{'	H+T	hunk 28 upstream; hunk 19 fork	src/terminal/PageList.zig 19/78, 28/78
+src/terminal/Screen.zig	duplicate test	Screen cursorCopy hyperlink deref new page; Screen write regrows compacted page capacity; Screen: resize more cols with reflow; Screen: scroll above hyperlink-dense row to existing page; Screen: scroll above hyperlink-dense row to fresh page; Screen: selectLine semantic all same content	H+T	one copy of each (notes\g02-screen-terminal.md names the side of each kept copy)	src/terminal/Screen.zig
+src/terminal/Terminal.zig	duplicate test	Terminal: print single very long line	T	one copy	src/terminal/Terminal.zig
+src/terminal/Terminal.zig	missing declaration	tw	H	resize_tw declared and used (upstream's tripwire)	src/terminal/Terminal.zig
+src/terminal/c/terminal.zig	missing declaration	ProgramStatus, ProgramStatusKind, ProgramStatusState	H+T	the fork's OSC 7501 types kept beside upstream's compression types (post-stone port, fork feature)	src/terminal/c/terminal.zig
+src/terminal/kitty/graphics_command.zig	duplicate member	Usage	H+T	the two copies were identical; upstream's kept	src/terminal/kitty/graphics_command.zig
+src/terminal/kitty/graphics_image.zig	missing declaration	LimitedAllocator, decode_alloc, wuffs	H+T	all three back; decodePng calls sys.decode_png through the LimitedAllocator bound (v1.4.0's shape)	src/terminal/kitty/graphics_image.zig
+src/terminal/kitty/graphics_storage.zig	missing declaration	cell_offset, saturatingMul	H+T	the fork's helpers kept under upstream's pixelSize name	src/terminal/kitty/graphics_storage.zig
+src/terminal/osc.zig	missing declaration	ProgramStatus	H+T	kept beside upstream's KittyDndProtocol	src/terminal/osc.zig
+src/terminal/search/Thread.zig	missing declaration	ScreenSet, ViewportSearch	T	fork side (§2.3 QuerySearch exception); the names are no longer referenced	src/terminal/search/Thread.zig 1-5/5
+src/terminal/search/screen.zig	missing declaration	results	H+T	the fork's whole pruneHistory kept	src/terminal/search/screen.zig
+src/terminal/search/sliding_window.zig	duplicate member	AppendResult	H+T	upstream's copy kept, the fork's removed	src/terminal/search/sliding_window.zig S2.6-AppendResult
+src/terminal/stream.zig	missing declaration	ApcEnd	H+T	kept after upstream's PrintSlice and ApcPutSlice	src/terminal/stream.zig
+src/terminal/stream_terminal.zig	duplicate member	osc	H+T	the import block equals the stone's	src/terminal/stream_terminal.zig, clean:osc-dup,soft_reset
+src/termio/Exec.zig	missing declaration	setNonblock, setQosClass	H	upstream's helpers kept beside the fork's Windows reader signature	src/termio/Exec.zig
+src/termio/Exec.zig	syntax	expected ',' after field	T	does not arise with this resolution (the exe build is green)	src/termio/Exec.zig
+src/termio/Termio.zig	missing declaration	colorSchemeReportBytes	T	the fork's colorSchemeReportBytes kept	src/termio/Termio.zig
+src/termio/Exec.zig	not a compile error	focusGained keeps two comptime Windows returns	trial-ours-1a	exactly one kept (the fork's, before the assert)	clean:focusGained
+build.zig	build graph	the Apple xcframework block	-	dropped (PROVISIONAL Qg11-1)	build.zig 2/3, clean:xcframework-block
+pkg/simdutf/build.zig	build graph	take the stone's (no_libcxx)	-	the stone's code plus the fork's MSVC STL define	pkg/simdutf/build.zig 1/1
+src/build/GhosttyLibVt.zig	build graph	builtin and LipoStep imports; Apple steps	-	upstream side; LipoStep, LibtoolStep and XCFrameworkStep restored from the stone (§2.5 1A exception, keep; PROVISIONAL Qg11-1 recommends strip)	src/build/GhosttyLibVt.zig 1-2/2
