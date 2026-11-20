@@ -113,7 +113,7 @@ $generatorOutput=@(& (Join-Path $repoRoot 'test/windows/release-generator.ps1') 
 if (@($generatorOutput | Where-Object { [string]$_ -ceq 'Generator isolation: PASS (allowlist, parent scope, outer WhatIf, typed parameters, bounded redacted failure reason).' }).Count -ne 1) { throw 'Generator allowlist/diagnostics controls did not complete.' }
 $generatorOutput | ForEach-Object { Write-Host $_ }
 $cleanupOutput = @(& (Join-Path $repoRoot 'test/windows/release-fixture-cleanup.ps1') 6>&1)
-if (@($cleanupOutput | Where-Object { [string]$_ -ceq 'Release fixture cleanup: PASS (historical clone and recorded asset-directory failures under outer WhatIf).' }).Count -ne 1) { throw 'Release fixture failure cleanup controls did not complete.' }
+if (@($cleanupOutput | Where-Object { [string]$_ -ceq 'Release fixture cleanup: PASS (temp fallback, root override, literal brackets, default assets and failure evidence under outer WhatIf).' }).Count -ne 1) { throw 'Release fixture directory controls did not complete.' }
 $cleanupOutput | ForEach-Object { Write-Host $_ }
 $buildVerificationOutput=@(& (Join-Path $repoRoot 'test/windows/release-build-verification.ps1') 6>&1)
 if (@($buildVerificationOutput | Where-Object { [string]$_ -ceq 'Build verification results: PASS (stale native status, failed copy, failed verifier).' }).Count -ne 1) { throw 'Build verification must consume explicit results.' }

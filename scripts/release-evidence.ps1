@@ -1,24 +1,37 @@
 function Invoke-ReleaseGhJson {
-    param([string[]] $Arguments, [switch] $AllowNotFound)
+    param([string[]] $Arguments, [switch] $AllowNotFound, [switch] $RequireReleaseObject)
+    $invalidReleaseResponse = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $lines = @(& gh @Arguments --include 2>$null)
         $readExit = $LASTEXITCODE
         $status = [regex]::Match(($lines -join "`n"), '(?m)^HTTP/\S+\s+([0-9]{3})\b')
         if ($status.Success) {
             $code = [int]$status.Groups[1].Value
-            if ($code -eq 404 -and $AllowNotFound) { $global:LASTEXITCODE = 0; return $null }
-            if ($readExit -eq 0 -and $code -eq 200) {
+            if ($code -eq 404 -and $AllowNotFound) {
+                if (-not $invalidReleaseResponse) { $global:LASTEXITCODE = 0; return $null }
+                # Once a selected ID sent a malformed success, keep trying to
+                # read its object. A later 404 does not establish absence.
+            } elseif ($readExit -eq 0 -and $code -eq 200) {
                 $blank = [array]::IndexOf($lines, '')
-                if ($blank -ge 0) {
-                    $data = ($lines[($blank + 1)..($lines.Count - 1)] -join "`n") | ConvertFrom-Json -NoEnumerate
+                if ($blank -lt 0) { throw 'Release GitHub read refused (HTTP 200); publication state is unknown.' }
+                $data = ($lines[($blank + 1)..($lines.Count - 1)] -join "`n") | ConvertFrom-Json -NoEnumerate
+                if ($RequireReleaseObject -and $data -isnot [System.Management.Automation.PSCustomObject]) {
+                    # The [pscustomobject] accelerator also matches the PSObject
+                    # wrapper on a JSON array. Returning [] would emit nothing.
+                    $invalidReleaseResponse = $true
+                } else {
                     if ($null -eq $data) { throw 'Release GitHub JSON is missing; publication state is unknown.' }
                     return $data
                 }
+            } elseif ($code -lt 500 -or $code -gt 599) {
+                throw "Release GitHub read refused (HTTP $code); publication state is unknown."
             }
-            if ($code -lt 500 -or $code -gt 599) { throw "Release GitHub read refused (HTTP $code); publication state is unknown." }
         }
         # A connection failure may have no HTTP response. Retry it too.
         if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+    }
+    if ($invalidReleaseResponse) {
+        throw 'ReleaseLookupIncomplete: the selected release ID did not return an object after 3 reads.'
     }
     throw 'Release GitHub read failed after 3 attempts; publication state is unknown.'
 }

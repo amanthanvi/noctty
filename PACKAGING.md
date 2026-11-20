@@ -386,7 +386,9 @@ step. Inspect that run and publication state before choosing recovery.
 `DraftRelease` (including a partial or cancelled upload) cannot be promoted.
 Discovery reads all release-list pages and the selected release ID because
 GitHub's tag endpoint hides drafts. `AmbiguousReleaseTag` refuses duplicate
-pending tags for inspection. After a create request, release discovery allows
+pending tags for inspection. A selected ID returning a successful response
+without a release object is retried and refused as `ReleaseLookupIncomplete`
+if the response stays unusable. After a create request, release discovery allows
 up to three reads for a list miss or an ID read returning 404. The build
 continues only if the returned draft carries this attempt's marker in its
 notes and passes the candidate checks. `ReleaseDraftOwnershipUnconfirmed`
@@ -459,14 +461,15 @@ predate the bundled ConPTY pair (v1.3.125), so its candidate data need no
 `conpty-redist.json`. Modern releases still require both pinned Microsoft
 binaries. The default verifier continues to require a stable release.
 
-For local promotion rehearsals, give Fixture A
+Local promotion rehearsals use the system temp directory by default. Fixture A
 (`scripts/release-promote.ps1 -Fixture historical`) or Fixture B
-(`test/windows/release-promote.ps1`) an existing run parent under `H:\scratch`
-via `-WorkDirectory` or `NOCTTY_RELEASE_FIXTURE_ROOT`. Each fixture creates
-and removes its own child on success or failure. Capture the console output
-for text evidence. Fixture B uses a caller-owned asset cache when
-`-AssetDirectory` is supplied. Otherwise it downloads assets inside its
-temporary child and removes them with the run.
+(`test/windows/release-promote.ps1`) can use an existing scratch parent via
+`-WorkDirectory` or `NOCTTY_RELEASE_FIXTURE_ROOT`. GitHub Actions defaults
+to `RUNNER_TEMP`. Each fixture creates a child of the selected directory and
+removes it on success. Fixture A removes its child on failure too. Fixture B
+removes bulk data on failure and prints the location of the text evidence it
+kept. An explicit `-AssetDirectory` stays caller-owned. Default downloads
+live inside Fixture B's bulk tree and are removed with it.
 
 ### WinGet
 

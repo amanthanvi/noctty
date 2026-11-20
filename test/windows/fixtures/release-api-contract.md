@@ -15,6 +15,9 @@ response and mutation.
   implement separate published-tag and draft lookups. Our production lookup
   lists all pages, refuses duplicate pending tags and reads the selected ID.
   Fixture B models tag 404, ID success, pagination, duplicate drafts and absence.
+  A listed ID returning HTTP 200 with `[]` is retried three times at most.
+  A recovered object still blocks preflight create, and exhaustion refuses
+  without creating or uploading anything.
   Every build case rejects use of the tag endpoint; these include the corrected
   reviewer cases: stable/prerelease, retry, lost response, exhaustion and drift.
 - The list and release records contain the fields the caller consumes. The
@@ -89,9 +92,12 @@ issued once, then reconciliation uses reads only. Backoff is bounded to three
 logical observations, with at most three transport attempts per observation.
 Actual GitHub write propagation times remain unmeasured under this task's grant.
 
-The cleanup controls exercise a successful Fixture B run and failures during
-Fixture A's clone and Fixture B's asset setup under outer WhatIf. Each fixture
-owns only its generated child of the caller's run parent. An explicitly
-supplied asset cache remains caller-owned. On a hosted runner the parent
-defaults to `RUNNER_TEMP`; for local runs pass `-WorkDirectory` or set
-`NOCTTY_RELEASE_FIXTURE_ROOT` to an existing scratch parent.
+The cleanup controls exercise the system-temp fallback, an override, a literal
+bracketed parent and failures during Fixture A's clone and Fixture B's asset
+setup under outer WhatIf. Fixture B's default downloads stay in its owned
+bulk tree. On failure that tree is removed, and the run directory retains the
+available logs and JSON evidence. On success the whole run directory is
+removed. An explicitly supplied asset cache remains caller-owned. The default
+parent is `RUNNER_TEMP` on GitHub Actions and the system temp directory
+locally. Pass `-WorkDirectory` or set `NOCTTY_RELEASE_FIXTURE_ROOT` to use
+an existing scratch parent.

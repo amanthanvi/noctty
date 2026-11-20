@@ -22,7 +22,7 @@ function Get-ReleaseByTag {
     }
     $id = [string]$matches[0].id
     if ($id -cnotmatch '\A[0-9]+\z') { throw 'ReleaseLookupIncomplete: release ID is missing.' }
-    $release = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/$id") -AllowNotFound:$AllowIdNotFound
+    $release = Invoke-ReleaseGhJson -Arguments @('api', "repos/$Repository/releases/$id") -AllowNotFound:$AllowIdNotFound -RequireReleaseObject
     if ($null -eq $release) { return $null }
     if ([string]$release.id -cne $id -or -not [string]::Equals($release.tag_name, $Tag, [StringComparison]::Ordinal)) { throw 'ReleaseIdentityMismatch: release changed during discovery.' }
     return $release

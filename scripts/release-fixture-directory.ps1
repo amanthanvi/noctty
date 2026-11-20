@@ -2,14 +2,14 @@ function New-ReleaseFixtureDirectory {
     param([string] $ParentDirectory)
     if (-not $ParentDirectory) { $ParentDirectory = $env:NOCTTY_RELEASE_FIXTURE_ROOT }
     if (-not $ParentDirectory -and $env:GITHUB_ACTIONS -ceq 'true') { $ParentDirectory = $env:RUNNER_TEMP }
-    if (-not $ParentDirectory) {
-        throw 'ReleaseFixtureRootRequired: pass -WorkDirectory or set NOCTTY_RELEASE_FIXTURE_ROOT to an existing H:\scratch run root.'
-    }
+    if (-not $ParentDirectory) { $ParentDirectory = [IO.Path]::GetTempPath() }
     $parent = Get-Item -LiteralPath $ParentDirectory
     if ($parent -isnot [IO.DirectoryInfo]) { throw 'Release fixture parent must be an existing filesystem directory.' }
     $leaf = 'release-fixture-' + [guid]::NewGuid().ToString('N')
-    # Create one fresh child with no -Force. The caller's parent is never owned.
-    return (New-Item -Path $parent.FullName -Name $leaf -ItemType Directory -WhatIf:$false).FullName
+    # Use a literal filesystem path even when the parent contains brackets.
+    $path = [IO.Path]::Combine($parent.FullName, $leaf)
+    if (Test-Path -LiteralPath $path) { throw 'Fixture run path already exists.' }
+    return [IO.Directory]::CreateDirectory($path).FullName
 }
 
 function Remove-ReleaseFixtureDirectory {

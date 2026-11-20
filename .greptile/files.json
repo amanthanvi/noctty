@@ -363,6 +363,8 @@
         "scripts/**",
         "dist/**",
         "test/windows/test_dll_init.c",
+        "test/windows/release-promote.ps1",
+        "test/windows/release-fixture-cleanup.ps1",
         "test/windows/flagship/contracts/Contracts.93-ConPty.ps1",
         ".github/**"
       ]

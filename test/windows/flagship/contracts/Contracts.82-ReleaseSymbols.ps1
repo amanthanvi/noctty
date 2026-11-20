@@ -413,10 +413,13 @@ $fixtureParent = New-ReleaseFixtureDirectory
 try {
     $promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -WorkDirectory $fixtureParent -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
     if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
-        [string]$_ -ceq 'Release promotion fixture B: PASS (102 cases, 4 files identical across two checkout roots, 12 real assets).'
+        [string]$_ -ceq 'Release promotion fixture B: PASS (104 cases, 4 files identical across two checkout roots, 12 real assets).'
     }).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
     if (@(Get-ChildItem -LiteralPath $fixtureParent -Force).Count) { throw 'Release promotion fixture B retained its run directory.' }
     $promotionFixtureOutput | ForEach-Object { Write-Host $_ }
 } finally {
-    Remove-ReleaseFixtureDirectory -RunDirectory $fixtureParent
+    # Fixture B removes bulk data and leaves its text evidence after failure.
+    if (-not @(Get-ChildItem -LiteralPath $fixtureParent -Force).Count) {
+        Remove-ReleaseFixtureDirectory -RunDirectory $fixtureParent
+    }
 }
