@@ -48,6 +48,7 @@
         "src/terminal/**",
         "src/inspector/widgets/pagelist.zig",
         "docs/upstream-merge-policy.md",
+        "src/apprt/win32_uia/text.zig",
         "pkg/wuffs/**",
         "src/Surface.zig",
         "src/termio/stream_handler.zig",
