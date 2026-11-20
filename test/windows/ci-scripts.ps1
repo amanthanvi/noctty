@@ -529,9 +529,12 @@ try {
     # followed by $Pad zero bytes; its directory entry gives the table's length plus
     # $LengthDelta and its header the record count plus $CountDelta. A format 1
     # table stores a language tag for each of $Tags, its offset moved by
-    # $TagOffsetDelta, or with $LangTags only that count and no tags.
+    # $TagOffsetDelta, or with $LangTags only that count and no tags. With
+    # $Duplicate, `post` is retagged `name` as a second entry: `first` keeps the new
+    # table in the earlier entry and the original in the later, `second` swaps
+    # them, and $DuplicateOutOfFile points the original's entry past the file.
     function New-RanNamedFont {
-        param([string] $Name, [object[]] $Names, [int] $LengthDelta = 0, [int] $CountDelta = 0, [int] $Pad = 0, [int] $Format = 0, [int] $LangTags = -1, [string[]] $Tags = @(), [int] $TagOffsetDelta = 0, [byte[]] $Source = $ranTtf)
+        param([string] $Name, [object[]] $Names, [int] $LengthDelta = 0, [int] $CountDelta = 0, [int] $Pad = 0, [int] $Format = 0, [int] $LangTags = -1, [string[]] $Tags = @(), [int] $TagOffsetDelta = 0, [byte[]] $Source = $ranTtf, [string] $Duplicate = '', [switch] $DuplicateOutOfFile)
         $table = [Collections.Generic.List[byte]]::new()
         $strings = [Collections.Generic.List[byte]]::new()
         $u16 = { param($list, [int] $v) $list.Add([byte](($v -shr 8) -band 0xFF)); $list.Add([byte]($v -band 0xFF)) }
@@ -561,14 +564,33 @@ try {
         [Array]::Copy($Source, $font, $Source.Length)
         $table.CopyTo($font, $at)
         $length = $table.Count + $LengthDelta
+        $nameRecord = -1
+        $postRecord = -1
         for ($i = 0; $i -lt (([int]$Source[4] -shl 8) -bor $Source[5]); $i++) {
             $record = 12 + 16 * $i
-            if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($font, $record, 4), 'name', [StringComparison]::Ordinal)) {
-                for ($k = 0; $k -lt 4; $k++) {
-                    $font[$record + 8 + $k] = [byte](($at -shr (8 * (3 - $k))) -band 0xFF)
-                    $font[$record + 12 + $k] = [byte](($length -shr (8 * (3 - $k))) -band 0xFF)
-                }
+            $tag = [System.Text.Encoding]::ASCII.GetString($font, $record, 4)
+            if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) { $nameRecord = $record }
+            elseif ([string]::Equals($tag, 'post', [StringComparison]::Ordinal)) { $postRecord = $record }
+        }
+        $put = {
+            param([long] $rec, [long] $off, [long] $len)
+            for ($k = 0; $k -lt 4; $k++) {
+                $font[$rec + 8 + $k] = [byte](($off -shr (8 * (3 - $k))) -band 0xFF)
+                $font[$rec + 12 + $k] = [byte](($len -shr (8 * (3 - $k))) -band 0xFF)
             }
+        }
+        [long] $originalOffset = 0
+        [long] $originalLength = 0
+        for ($k = 0; $k -lt 4; $k++) {
+            $originalOffset = ($originalOffset -shl 8) -bor $font[$nameRecord + 8 + $k]
+            $originalLength = ($originalLength -shl 8) -bor $font[$nameRecord + 12 + $k]
+        }
+        if ($DuplicateOutOfFile) { $originalOffset = $font.Length + 64; $originalLength = 16 }
+        if ([string]::Equals($Duplicate, 'second', [StringComparison]::Ordinal)) { & $put $nameRecord $originalOffset $originalLength } else { & $put $nameRecord $at $length }
+        if ($Duplicate) {
+            if ($postRecord -lt 0) { throw "$Name`: the source font has no post table to retag" }
+            [System.Text.Encoding]::ASCII.GetBytes('name').CopyTo($font, $postRecord)
+            if ([string]::Equals($Duplicate, 'second', [StringComparison]::Ordinal)) { & $put $postRecord $at $length } else { & $put $postRecord $originalOffset $originalLength }
         }
         $path = Join-Path $ranTemp $Name
         [System.IO.File]::WriteAllBytes($path, $font)
@@ -582,7 +604,9 @@ try {
     # every family joined to every style, as noctty's full name joins them: more names
     # than FreeType hands discovery (council rounds 1 and 2 on #731: Sol M1, Opus L3,
     # Opus L1's O3). A case with no style name reads its family alone, since a joined
-    # name contains the family it starts with.
+    # name contains the family it starts with. Where FreeType reads a name otherwise
+    # than its label, both readings count (council round 3 on #731): an ISO record as
+    # UTF-16BE whatever its encoding, and a name cut at its first NUL, joins included.
     $ranChakmaCases = @(
         @{ Name = 'its typographic family (ID 16) only'; Names = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'), @(16, 'Noto Sans Chakma')); Expect = 'present' }
         @{ Name = 'its WWS family (ID 21) only'; Names = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'), @(21, 'Noto Sans Chakma')); Expect = 'present' }
@@ -595,6 +619,11 @@ try {
         @{ Name = 'its family in a Macintosh Roman record'; Names = @(@(1, 'Chakma UI'), @(1, 'Noto Sans Chakma', 1, 0)); Expect = 'present' }
         @{ Name = 'its family in a format 1 table'; Names = @(@(1, 'Chakma UI'), @(21, 'Noto Sans Chakma')); Format = 1; Expect = 'present' }
         @{ Name = 'a record the probe cannot decode beside its family'; Names = @(@(21, 'Noto Sans Chakma'), @(1, [byte[]] @(0, 0x41), 3, 2)); Expect = 'present' }
+        @{ Name = 'its family in UTF-16 in an ISO record labelled ASCII (Sol''s case)'; Names = @(, @(1, [System.Text.Encoding]::BigEndianUnicode.GetBytes('Noto Sans Chakma'), 2, 0)); Expect = 'present' }
+        @{ Name = 'its family in UTF-16 in an ISO record labelled ISO 8859-1'; Names = @(, @(1, [System.Text.Encoding]::BigEndianUnicode.GetBytes('Noto Sans Chakma'), 2, 2)); Expect = 'present' }
+        @{ Name = 'its family on the Unicode platform (Opus X1)'; Names = @(, @(1, 'Noto Sans Chakma', 0, 3)); Expect = 'present' }
+        @{ Name = 'a family cut at a NUL joined to its style (Sol''s case)'; Names = @(@(1, "Noto Sans$([char]0)"), @(2, 'Chakma'), @(4, 'Review Sans Regular')); Expect = 'present' }
+        @{ Name = 'its name after a NUL in a full name'; Names = @(@(1, 'Chakma UI'), @(4, "Chakma UI$([char]0)Noto Sans Chakma")); Expect = 'present' }
         @{ Name = 'no name of it'; Names = @(@(1, 'Chakma UI'), @(2, 'Regular'), @(4, 'Chakma UI Regular'), @(16, 'Noto Sans'), @(17, 'Bold'), @(21, 'Noto Sans'), @(22, 'Bold')); Expect = 'absent' })
     for ($i = 0; $i -lt $ranChakmaCases.Count; $i++) {
         $ranCase = $ranChakmaCases[$i]
@@ -646,6 +675,22 @@ try {
         [System.IO.File]::WriteAllBytes($out, $bytes)
         return $out
     }
+    # A copy of a font with one table's directory entry given another offset or length.
+    function Set-RanTableEntry {
+        param([string] $Path, [string] $Tag, [long] $Offset = -1, [long] $Length = -1, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        for ($i = 0; $i -lt (([int]$bytes[4] -shl 8) -bor $bytes[5]); $i++) {
+            $record = 12 + 16 * $i
+            if (-not [string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, $record, 4), $Tag, [StringComparison]::Ordinal)) { continue }
+            for ($k = 0; $k -lt 4; $k++) {
+                if ($Offset -ge 0) { $bytes[$record + 8 + $k] = [byte](($Offset -shr (8 * (3 - $k))) -band 0xFF) }
+                if ($Length -ge 0) { $bytes[$record + 12 + $k] = [byte](($Length -shr (8 * (3 - $k))) -band 0xFF) }
+            }
+        }
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
     foreach ($ranCase in @(
             @{ Name = 'a name table whose declared length is 6'; Path = $ranShortPath; Expect = 'unknown' }
             @{ Name = 'a string one byte past the name table'; Path = (New-RanNamedFont 'string-past.ttf' $ranChakmaNames -LengthDelta (-1)); Expect = 'unknown' }
@@ -663,6 +708,12 @@ try {
             @{ Name = 'a CFF font without a head table (CodeRabbit)'; Path = (Rename-RanTable $ranCff 'head' 'xead' 'cff-no-head.otf'); Expect = 'unknown' }
             @{ Name = 'its family in a CFF font without a head table'; Path = (New-RanNamedFont 'cff-no-head-named.otf' $ranChakmaNames -Source ([System.IO.File]::ReadAllBytes((Rename-RanTable $ranCff 'head' 'xead' 'cff-no-head-source.otf')))); Expect = 'present' }
             @{ Name = 'a CFF font with its head table and no name of it'; Path = $ranCff; Expect = 'absent' }
+            @{ Name = 'a CFF font whose head table has no length (Sol''s case)'; Path = (Set-RanTableEntry $ranCff 'head' -Length 0 -Name 'cff-head-empty.otf'); Expect = 'unknown' }
+            @{ Name = 'a CFF font whose head table lies past the end of the file'; Path = (Set-RanTableEntry $ranCff 'head' -Offset 0x7FFFFF00 -Name 'cff-head-past.otf'); Expect = 'unknown' }
+            @{ Name = 'two name tables, its family in the first (Sol''s case)'; Path = (New-RanNamedFont 'dup-first.ttf' $ranChakmaNames -Duplicate first); Expect = 'present' }
+            @{ Name = 'two name tables, its family in the second'; Path = (New-RanNamedFont 'dup-second.ttf' $ranChakmaNames -Duplicate second); Expect = 'present' }
+            @{ Name = 'two name tables, neither naming it'; Path = (New-RanNamedFont 'dup-other.ttf' $ranOtherNames -Duplicate first); Expect = 'absent' }
+            @{ Name = 'two name tables, the second past the end of the file'; Path = (New-RanNamedFont 'dup-past.ttf' $ranOtherNames -Duplicate first -DuplicateOutOfFile); Expect = 'unknown' }
             @{ Name = 'a family record in an encoding the probe does not decode'; Path = (New-RanNamedFont 'big5.ttf' @(, @(1, 'Noto Sans Chakma', 3, 4))); Expect = 'unknown' }
             @{ Name = 'a family record on the custom platform'; Path = (New-RanNamedFont 'custom.ttf' @(, @(1, 'Noto Sans Chakma', 4, 0))); Expect = 'unknown' }
             @{ Name = 'a family record whose bytes are no UTF-16'; Path = (New-RanNamedFont 'surrogate.ttf' @(, @(1, [byte[]] @(0xD8, 0x00)))); Expect = 'unknown' }
@@ -1167,6 +1218,9 @@ try {
     # in this scope only, WINDIR and LOCALAPPDATA pointed at scratch font directories,
     # and the font the fact needs nowhere else (council round 2 on #731: Sol M2, Opus M1
     # and L1's O1). A registered font counts by its own names, whatever its value says.
+    # The stand-in answers each key apart, so a control sees which keys are read, and a
+    # value's data is cut at its first NUL and trimmed, as discovery takes it (council
+    # round 3 on #731, Opus L5 and L6).
     function New-RanCollection {
         param([string] $Name, [string[]] $Fonts)
         $parts = [Collections.Generic.List[object]]::new()
@@ -1193,7 +1247,7 @@ try {
         return $path
     }
     function Invoke-RanRegisteredProbe {
-        param([string] $Case, [System.Collections.IDictionary] $Values, [hashtable] $Files)
+        param([string] $Case, [System.Collections.IDictionary] $Values, [System.Collections.IDictionary] $UserValues, [hashtable] $Files)
         $root = Join-Path $ranTemp "registered-$Case"
         $winFonts = New-Item -ItemType Directory -Path (Join-Path $root 'windir\Fonts')
         $userFonts = New-Item -ItemType Directory -Path (Join-Path $root 'local\Microsoft\Windows\Fonts')
@@ -1204,12 +1258,16 @@ try {
         try {
             $env:WINDIR = Join-Path $root 'windir'
             $env:LOCALAPPDATA = Join-Path $root 'local'
-            $resolved = [ordered]@{}
-            foreach ($v in $Values.GetEnumerator()) { $resolved[$v.Key] = $v.Value -replace '^<root>', $root }
+            # One set of values per key: HKLM's from $Values, HKCU's from $UserValues.
+            $machine = [ordered]@{}
+            foreach ($v in $Values.GetEnumerator()) { $machine[$v.Key] = $v.Value -replace '<root>', $root }
+            $user = [ordered]@{}
+            foreach ($v in $UserValues.GetEnumerator()) { $user[$v.Key] = $v.Value -replace '<root>', $root }
             return & {
                 function Get-Item {
                     [CmdletBinding()] param([string] $LiteralPath)
-                    $fontsKey = [pscustomobject]@{ Data = $resolved }
+                    $data = if ($LiteralPath.StartsWith('HKCU:', [StringComparison]::OrdinalIgnoreCase)) { $user } elseif ($LiteralPath.StartsWith('HKLM:', [StringComparison]::OrdinalIgnoreCase)) { $machine } else { throw "no stand-in for $LiteralPath" }
+                    $fontsKey = [pscustomobject]@{ Data = $data }
                     $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { return , [string[]] @($this.Data.get_Keys()) }
                     $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValue -Value { param($n) return $this.Data[$n] }
                     return $fontsKey
@@ -1232,8 +1290,12 @@ try {
             @{ Name = 'alias'; Values = [ordered]@{ 'Bundled font' = 'chakma.ttf' }; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font in the system directory registered under a name of another family' }
             @{ Name = 'pair'; Values = [ordered]@{ 'Chakma UI (TrueType)' = 'pair.ttc' }; Files = @{ 'windir\Fonts\pair.ttc' = $ranPair }; Expect = 'present'; What = 'the second face of a registered collection' }
             @{ Name = 'user'; Values = [ordered]@{}; Files = @{ 'local\Microsoft\Windows\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'an unregistered font in the per-user directory' }
-            @{ Name = 'missing'; Values = [ordered]@{ 'Noto Sans Chakma (TrueType)' = '<root>\elsewhere\gone.ttf' }; Files = @{}; Expect = 'absent'; What = 'a value naming a file that does not exist' })) {
-        $ranGot = Invoke-RanRegisteredProbe -Case $ranCase.Name -Values $ranCase.Values -Files $ranCase.Files
+            @{ Name = 'missing'; Values = [ordered]@{ 'Noto Sans Chakma (TrueType)' = '<root>\elsewhere\gone.ttf' }; Files = @{}; Expect = 'absent'; What = 'a value naming a file that does not exist' }
+            @{ Name = 'user-key'; UserValues = [ordered]@{ 'Chakma (TrueType)' = '<root>\elsewhere\chakma.ttf' }; Values = [ordered]@{}; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font outside the font directories that only the per-user Fonts key names (Opus X3)' }
+            @{ Name = 'spaces'; Values = [ordered]@{ 'Chakma (TrueType)' = " `t<root>\elsewhere\chakma.ttf`t " }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data has spaces and a tab around it (Opus X2)' }
+            @{ Name = 'nul'; Values = [ordered]@{ 'Chakma (TrueType)' = "<root>\elsewhere\chakma.ttf$([char]0)junk" }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data holds a NUL and more after the path (Opus L5)' })) {
+        $ranUserValues = if ($ranCase.UserValues) { $ranCase.UserValues } else { [ordered]@{} }
+        $ranGot = Invoke-RanRegisteredProbe -Case $ranCase.Name -Values $ranCase.Values -UserValues $ranUserValues -Files $ranCase.Files
         $ranFact = if ($ranGot -is [System.Collections.IDictionary]) { $ranGot['font:Noto Sans Chakma'] } else { "error: $ranGot" }
         Assert-True ($ranGot -is [System.Collections.IDictionary] -and $ranGot.Count -eq (Get-RanListFactKeys).Count -and $ranFact -ceq $ranCase.Expect) "The probe reads $($ranCase.Expect) for Noto Sans Chakma with $($ranCase.What) (got $ranFact)."
     }

@@ -402,47 +402,30 @@ function Get-RanListNameDecoder {
     return $script:RanListNameDecoders[$kind]
 }
 
-# Adds one face's names to $Names (see Get-RanListFontNames). Returns whether
-# every part of them could be read and decoded, and whether they are the names
-# FreeType takes the face's family from; throws past the end of the file.
-function Add-RanListFaceNames {
-    param([byte[]] $Bytes, [long] $Face, [Collections.Generic.HashSet[string]] $Names)
-    $tables = Read-RanListBigEndian $Bytes ($Face + 4) 2
-    $name = $null
-    $tableLength = 0
-    $hasHead = $false
-    for ($i = 0; $i -lt $tables; $i++) {
-        $record = $Face + 12 + 16 * $i
-        if ($record + 16 -gt $Bytes.Length) { return $false }
-        $tag = [System.Text.Encoding]::ASCII.GetString($Bytes, [int]$record, 4)
-        if ([string]::Equals($tag, 'head', [StringComparison]::Ordinal)) { $hasHead = $true }
-        if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) {
-            $name = Read-RanListBigEndian $Bytes ($record + 8) 4
-            $tableLength = Read-RanListBigEndian $Bytes ($record + 12) 4
-        }
-    }
-    if ($null -eq $name -or $tableLength -lt 6 -or $name + $tableLength -gt $Bytes.Length) { return $false }
+# Adds the names of one `name` table at $Name, $TableLength bytes long, to
+# $Names (see Get-RanListFontNames). Returns whether all of it could be read and
+# decoded; throws past the end of the file.
+function Add-RanListNameTable {
+    param([byte[]] $Bytes, [long] $Name, [long] $TableLength, [Collections.Generic.HashSet[string]] $Names)
+    if ($TableLength -lt 6 -or $Name + $TableLength -gt $Bytes.Length) { return $false }
     # Formats 0 and 1 share the record array; format 1 adds language tags after it.
-    $format = Read-RanListBigEndian $Bytes $name 2
+    $format = Read-RanListBigEndian $Bytes $Name 2
     if ($format -ne 0 -and $format -ne 1) { return $false }
-    $entries = Read-RanListBigEndian $Bytes ($name + 2) 2
-    $storage = Read-RanListBigEndian $Bytes ($name + 4) 2
+    $entries = Read-RanListBigEndian $Bytes ($Name + 2) 2
+    $storage = Read-RanListBigEndian $Bytes ($Name + 4) 2
     $recordsEnd = 6 + 12 * $entries
-    if ($recordsEnd -gt $tableLength -or $storage -gt $tableLength) { return $false }
+    if ($recordsEnd -gt $TableLength -or $storage -gt $TableLength) { return $false }
     $complete = $true
-    # A CFF font (`OTTO`) without a `head` table takes its family from its CFF
-    # data, not this table (FreeType's cff_face_init loads no sfnt names for it).
-    if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($Bytes, [int]$Face, 4), 'OTTO', [StringComparison]::Ordinal) -and -not $hasHead) { $complete = $false }
     if ($format -eq 1) {
         # The language tags and every string they point at must lie inside the table.
-        $tags = if ($recordsEnd + 2 -le $tableLength) { Read-RanListBigEndian $Bytes ($name + $recordsEnd) 2 } else { $null }
-        if ($null -eq $tags -or $recordsEnd + 2 + 4 * $tags -gt $tableLength) { $complete = $false }
+        $tags = if ($recordsEnd + 2 -le $TableLength) { Read-RanListBigEndian $Bytes ($Name + $recordsEnd) 2 } else { $null }
+        if ($null -eq $tags -or $recordsEnd + 2 + 4 * $tags -gt $TableLength) { $complete = $false }
         else {
             for ($j = 0; $j -lt $tags; $j++) {
-                $tagRecord = $name + $recordsEnd + 2 + 4 * $j
+                $tagRecord = $Name + $recordsEnd + 2 + 4 * $j
                 $tagLength = Read-RanListBigEndian $Bytes $tagRecord 2
                 $tagOffset = Read-RanListBigEndian $Bytes ($tagRecord + 2) 2
-                if ($storage + $tagOffset + $tagLength -gt $tableLength) { $complete = $false }
+                if ($storage + $tagOffset + $tagLength -gt $TableLength) { $complete = $false }
             }
         }
     }
@@ -450,25 +433,73 @@ function Add-RanListFaceNames {
     $byId = [Collections.Generic.Dictionary[int, Collections.Generic.HashSet[string]]]::new()
     foreach ($id in 1, 2, 4, 16, 17, 21, 22) { $byId[$id] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
     for ($i = 0; $i -lt $entries; $i++) {
-        $entry = $name + 6 + 12 * $i
+        $entry = $Name + 6 + 12 * $i
         $platform = Read-RanListBigEndian $Bytes $entry 2
         $encoding = Read-RanListBigEndian $Bytes ($entry + 2) 2
         $id = [int] (Read-RanListBigEndian $Bytes ($entry + 6) 2)
         $length = Read-RanListBigEndian $Bytes ($entry + 8) 2
         $offset = Read-RanListBigEndian $Bytes ($entry + 10) 2
         # A string past the table, whichever its ID, leaves the table unread in part.
-        if ($storage + $offset + $length -gt $tableLength) { $complete = $false; continue }
+        if ($storage + $offset + $length -gt $TableLength) { $complete = $false; continue }
         if (-not $byId.ContainsKey($id)) { continue }
+        $at = [int]($Name + $storage + $offset)
         $decoder = Get-RanListNameDecoder $platform $encoding
-        if ($null -eq $decoder) { $complete = $false; continue }
-        try { [void] $byId[$id].Add($decoder.GetString($Bytes, [int]($name + $storage + $offset), [int]$length)) }
-        catch { $complete = $false }
+        if ($null -eq $decoder) { $complete = $false }
+        else {
+            try { [void] $byId[$id].Add($decoder.GetString($Bytes, $at, [int]$length)) }
+            catch { $complete = $false }
+        }
+        # FreeType reads every ISO (platform 2) record as UTF-16BE, whatever its
+        # encoding says (tt_face_get_name in sfobjs.c), and drops an odd last byte.
+        if ($platform -eq 2) { [void] $byId[$id].Add([System.Text.Encoding]::BigEndianUnicode.GetString($Bytes, $at, [int]($length - $length % 2))) }
+    }
+    # FreeType cuts a name at its first NUL (tt_name_ascii_from_utf16 and
+    # _other); the cut name joins too, and the whole one is kept.
+    foreach ($id in @($byId.get_Keys())) {
+        foreach ($s in @($byId[$id])) {
+            $nul = $s.IndexOf([char]0)
+            if ($nul -ge 0) { [void] $byId[$id].Add($s.Substring(0, $nul)) }
+        }
     }
     foreach ($id in $byId.get_Keys()) { $Names.UnionWith($byId[$id]) }
     foreach ($familyId in 1, 16, 21) {
         foreach ($styleId in 2, 17, 22) {
             foreach ($family in $byId[$familyId]) { foreach ($style in $byId[$styleId]) { [void] $Names.Add("$family $style") } }
         }
+    }
+    return $complete
+}
+
+# Adds one face's names to $Names (see Get-RanListFontNames): those of every
+# directory entry tagged `name`, since FreeType keeps the first and a later one
+# could be any. Returns whether every part of them could be read and decoded,
+# and whether they are the names FreeType takes the face's family from; throws
+# past the end of the file.
+function Add-RanListFaceNames {
+    param([byte[]] $Bytes, [long] $Face, [Collections.Generic.HashSet[string]] $Names)
+    $tables = Read-RanListBigEndian $Bytes ($Face + 4) 2
+    $nameTables = [Collections.Generic.List[object]]::new()
+    $heads = 0
+    $headsUsable = $true
+    for ($i = 0; $i -lt $tables; $i++) {
+        $record = $Face + 12 + 16 * $i
+        if ($record + 16 -gt $Bytes.Length) { return $false }
+        $tag = [System.Text.Encoding]::ASCII.GetString($Bytes, [int]$record, 4)
+        $tableOffset = Read-RanListBigEndian $Bytes ($record + 8) 4
+        $tableLength = Read-RanListBigEndian $Bytes ($record + 12) 4
+        # FreeType treats a table of no length, or one past the end of the file, as missing.
+        $usable = $tableLength -gt 0 -and $tableOffset + $tableLength -le $Bytes.Length
+        if ([string]::Equals($tag, 'head', [StringComparison]::Ordinal)) { $heads++; if (-not $usable) { $headsUsable = $false } }
+        if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) { $nameTables.Add(@($tableOffset, $tableLength)) }
+    }
+    if ($nameTables.Count -eq 0) { return $false }
+    $complete = $true
+    # A CFF font (`OTTO`) without a usable `head` table takes its family from its
+    # CFF data, not a `name` table (FreeType's cff_face_init loads no sfnt names).
+    if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($Bytes, [int]$Face, 4), 'OTTO', [StringComparison]::Ordinal) -and ($heads -eq 0 -or -not $headsUsable)) { $complete = $false }
+    foreach ($table in $nameTables) {
+        $read = try { Add-RanListNameTable -Bytes $Bytes -Name $table[0] -TableLength $table[1] -Names $Names } catch { $false }
+        if (-not $read) { $complete = $false }
     }
     return $complete
 }
@@ -487,8 +518,12 @@ function Add-RanListFaceNames {
 # the end of the file, or a record of those IDs in an encoding the probe does
 # not decode or with bytes its encoding refuses; and a face whose family
 # FreeType takes from elsewhere: one with no `name` table, or a CFF font
-# (`OTTO`) without a `head` table, whose family comes from its CFF data (as
-# does a bare CFF file's, which reads as no OpenType font). Names holds what
+# (`OTTO`) without a usable `head` table (none, one of no length, or one past
+# the end of the file), whose family comes from its CFF data (as does a bare
+# CFF file's, which reads as no OpenType font). Where FreeType reads a name
+# otherwise than its label says, the probe reads it both ways: an ISO record
+# also as UTF-16BE, and every name also cut at its first NUL, before joins;
+# and it reads every `name` table a face's directory lists. Names holds what
 # could be read.
 function Get-RanListFontNames {
     param([Parameter(Mandatory)] [string] $Path)
@@ -602,9 +637,18 @@ function Get-RanListEnvironment {
         $item = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
         if ($null -eq $item) { continue }
         foreach ($v in $item.GetValueNames()) {
-            $file = "$($item.GetValue($v))".Trim(' ', "`t")
-            if ($file.Length -eq 0) { continue }
-            $paths.Add($(if ([System.IO.Path]::IsPathRooted($file)) { $file } else { [System.IO.Path]::Join($systemFonts, $file) }))
+            # Discovery takes the data up to its first NUL (std.mem.sliceTo); .NET
+            # keeps what follows. Both are tried; a path holding a NUL is skipped.
+            $data = "$($item.GetValue($v))"
+            $tried = [Collections.Generic.List[string]]::new()
+            $nul = $data.IndexOf([char]0)
+            if ($nul -ge 0) { $tried.Add($data.Substring(0, $nul)) }
+            $tried.Add($data)
+            foreach ($raw in $tried) {
+                $file = $raw.Trim(' ', "`t")
+                if ($file.Length -eq 0) { continue }
+                $paths.Add($(if ([System.IO.Path]::IsPathRooted($file)) { $file } else { [System.IO.Path]::Join($systemFonts, $file) }))
+            }
         }
     }
     $fonts = [Collections.Generic.List[object]]::new()
