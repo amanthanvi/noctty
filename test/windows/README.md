@@ -1354,11 +1354,14 @@ at 140 x 45 cells, in blocks of 25,000 lines:
 - `uia-walk`: `scrollback-default`'s output, then a UIA client reads the
   pane's whole `DocumentRange` and walks it line by line to its end, the pane
   found from the copy's own window handle. The document is the accessible
-  window, not the whole scrollback (`accessible_history_max_rows`).
-- `session-capture`: `scrollback-default`'s output with `window-save-state =
-  always` and `window-save-state-scrollback = 10000`, then 10 checkpoints,
-  each a new tab and its close and the session file's next write; the
-  session file stays in the portable copy.
+  window, not the whole scrollback: `accessibleHistoryRows` in
+  `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
+  history rows plus the viewport, 285 + 45 rows at 140 columns (329 lines
+  walked, measured).
+- `session-capture`: `scrollback-default`'s output with
+  `window-save-state = always` and `window-save-state-scrollback = 10000`,
+  then 10 checkpoints, each a new tab and its close and the session file's
+  next write; the session file stays in the portable copy.
 - `tab-churn`: 50 cycles of a new tab and its close.
 
 ```powershell
@@ -1366,9 +1369,11 @@ pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
     -Bin <measurement prefix>\bin -Run <new dir> -Workload fixed
 ```
 
-Compare the median of each workload's `after` stage over repeated runs, never
-one run's level: copies started the same minute differ by tens of MiB
-(test-harnesses.md, the 2026-11-18 SOAK-01 entry, trap 6). The outer half
+Compare the median of each workload's `after` stage over sequential runs, one
+copy at a time on a quiet machine: so run, 9 copies' settled levels had IQRs of
+0.1-1.6 MiB, while copies run together differed by tens of MiB
+(test-harnesses.md, the 2026-11-20 WORKING-SET-01 entry and trap 6 of the
+2026-11-18 SOAK-01 entry). The outer half
 checks the real `startup-attempts.json`, the product jump list and the
 PowerShell history by metadata and records the clipboard sequence number
 before and after. Contracts.98-WorkingSet pins the harness.
