@@ -35,8 +35,8 @@ GetThreadDesktop names another process's thread desktop only while the caller ho
 2026-11-20 PROBE-THREAD-DESKTOP-01). A descendant counts only through a link verified on pinned handles (the candidate
 opened first, its parent read from the process itself, every ancestor's handle held); an unverifiable link is counted,
 never stopped. The CLI arm's windows are inventoried on both desktops at every poll, as the GUI arms' are once. The
-bundled arm's driver also runs the enumeration classifier's own control (an empty desktop, a handle without
-DESKTOP_ENUMERATE, the sentinel's desktop). The driver starts noctty on that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
+bundled arm's driver also runs the enumeration classifier's own control (an empty desktop, a handle that is not a
+desktop, the sentinel's desktop). The driver starts noctty on that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
 top-level window on the private and the Default desktop, the desktop each is on: a process by its startup desktop
 (RTL_USER_PROCESS_PARAMETERS.DesktopInfo, read from its PEB) and its threads' desktops, a window by the desktop it
 was enumerated on. Then it stops each of them by exact PID (creation time and job membership checked) and records that
@@ -281,6 +281,7 @@ public static class GuiProbeNative {
     [DllImport("user32.dll")] static extern void PostQuitMessage(int code);
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint rgb);
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr gdiObject);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateEventW(IntPtr attributes, bool manualReset, bool initialState, IntPtr name);
 
     // The SDK's x64 sizes of every struct mirrored here; Assert-ProbeLayout compares them before anything runs.
     public static string Layout() {
@@ -656,22 +657,33 @@ public static class GuiProbeNative {
     // every FALSE is unavailable: its last error, or -1 when it set none. A caller proves an inventory with a window it
     // knows must be there.
     public static WindowRow[] DesktopWindows(string desktop, out int error) { return DesktopWindowsWithAccess(desktop, 0x0040 | 0x0001, out error); }
-    // The same walk through a handle opened with `access` (the enumeration control opens one without DESKTOP_ENUMERATE).
+    // The same walk through a handle opened with `access` (normally DESKTOP_ENUMERATE | DESKTOP_READOBJECTS).
     public static WindowRow[] DesktopWindowsWithAccess(string desktop, uint access, out int error) {
-        IntPtr d = OpenDesktopW(desktop, 0, false, access); // normally DESKTOP_ENUMERATE | DESKTOP_READOBJECTS
+        IntPtr d = OpenDesktopW(desktop, 0, false, access);
         if (d == IntPtr.Zero) { error = Marshal.GetLastWin32Error(); return null; }
-        try {
-            var rows = new List<WindowRow>();
-            bool enumerated = EnumDesktopWindows(d, (h, p) => {
-                int pid; GetWindowThreadProcessId(h, out pid);
-                var s = new StringBuilder(128); GetClassNameW(h, s, 128);
-                rows.Add(new WindowRow { Hwnd = h, Pid = pid, Class = s.ToString(), Visible = IsWindowVisible(h) });
-                return true;
-            }, IntPtr.Zero);
-            if (!enumerated) { int enumError = Marshal.GetLastWin32Error(); error = enumError != 0 ? enumError : -1; return null; }
-            error = 0;
-            return rows.ToArray();
-        } finally { CloseDesktop(d); }
+        try { return WindowsOfHandle(d, out error); } finally { CloseDesktop(d); }
+    }
+    // The walk: every FALSE is unavailable, with its GetLastError (-1 when it set none, as an empty desktop does).
+    static WindowRow[] WindowsOfHandle(IntPtr d, out int error) {
+        var rows = new List<WindowRow>();
+        bool enumerated = EnumDesktopWindows(d, (h, p) => {
+            int pid; GetWindowThreadProcessId(h, out pid);
+            var s = new StringBuilder(128); GetClassNameW(h, s, 128);
+            rows.Add(new WindowRow { Hwnd = h, Pid = pid, Class = s.ToString(), Visible = IsWindowVisible(h) });
+            return true;
+        }, IntPtr.Zero);
+        if (!enumerated) { int enumError = Marshal.GetLastWin32Error(); error = enumError != 0 ? enumError : -1; return null; }
+        error = 0;
+        return rows.ToArray();
+    }
+    // The enumeration control's failed walk: the same walk through a handle that is not a desktop, an event of this
+    // process. EnumDesktopWindows checks no access right on a desktop handle (PROBE-ENUM-ACCESS-01), so a handle of the
+    // wrong type is the failure a caller can force; Windows answers it with ERROR_INVALID_HANDLE (6).
+    public static WindowRow[] WindowsOfNonDesktopHandle(out bool created, out int error) {
+        IntPtr e = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+        created = e != IntPtr.Zero;
+        if (!created) { error = Marshal.GetLastWin32Error(); return null; }
+        try { return WindowsOfHandle(e, out error); } finally { CloseHandle(e); }
     }
 
     public static bool PostClose(IntPtr h) { return PostMessageW(h, 0x10, IntPtr.Zero, IntPtr.Zero); }
@@ -1643,9 +1655,11 @@ function Get-ProbeDriverRefusal {
 
 # The enumeration classifier's own control, in the driver (DIRECT-UPDATE-720): (a) a fresh desktop the driver creates
 # with no windows must come back unavailable (EnumDesktopWindows FALSE; the error as measured, -1 when it set none);
-# (b) a handle to this desktop opened without DESKTOP_ENUMERATE must come back unavailable with a nonzero error, while
-# the sentinel keeps the desktop from being empty; (c) this desktop, holding the driver's sentinel, must list it. A
-# successful empty walk cannot be told from (a), which is why every FALSE is unavailable.
+# (b) a failed walk, through a handle that is not a desktop (an event of the driver's), must come back unavailable
+# with a Win32 error; (c) this desktop, holding the driver's sentinel, must list it. A successful empty walk cannot be
+# told from (a), which is why every FALSE is unavailable. (b) cannot be a desktop handle opened without some right:
+# EnumDesktopWindows checks none (PROBE-ENUM-ACCESS-01), so a DESKTOP_READOBJECTS-only handle is walked too, and is
+# recorded beside the cases as a fact.
 function Invoke-EnumerationControl {
     $facts = [ordered]@{}
     $emptyName = 'noctty-gui-probe-empty-' + [guid]::NewGuid().ToString('N')
@@ -1660,9 +1674,15 @@ function Invoke-EnumerationControl {
     } finally { if ($empty -ne [IntPtr]::Zero) { [void][HiddenLocal]::CloseDesktop($empty) } }
     $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
     try {
+        $enumError = 0; $created = $false
+        $rows = [GuiProbeNative]::WindowsOfNonDesktopHandle([ref]$created, [ref]$enumError)
+        $facts.nonDesktopHandle = [ordered]@{ created = $created; unavailable = ($null -eq $rows); error = $enumError }
         $enumError = 0
-        $rows = [GuiProbeNative]::DesktopWindowsWithAccess($DesktopName, 0x0001, [ref]$enumError) # DESKTOP_READOBJECTS only
-        $facts.withoutEnumerate = [ordered]@{ unavailable = ($null -eq $rows); error = $enumError }
+        $rows = [GuiProbeNative]::DesktopWindowsWithAccess($DesktopName, 0x0001, [ref]$enumError) # DESKTOP_READOBJECTS only: a fact
+        $facts.readObjectsOnly = [ordered]@{
+            unavailable = ($null -eq $rows); error = $enumError
+            sentinelSeen = ($null -ne $rows -and @($rows | Where-Object { $_.Hwnd -eq $sentinel.Hwnd }).Count -eq 1)
+        }
         $enumError = 0
         $rows = [GuiProbeNative]::DesktopWindows($DesktopName, [ref]$enumError)
         $facts.withSentinel = [ordered]@{
@@ -1671,7 +1691,8 @@ function Invoke-EnumerationControl {
         }
     } finally { [GuiProbeNative]::Close($sentinel) }
     $facts.held = [bool]$facts.emptyDesktop.created -and [bool]$facts.emptyDesktop.unavailable -and
-        [bool]$facts.withoutEnumerate.unavailable -and $facts.withoutEnumerate.error -ne 0 -and [bool]$facts.withSentinel.sentinelSeen
+        [bool]$facts.nonDesktopHandle.created -and [bool]$facts.nonDesktopHandle.unavailable -and $facts.nonDesktopHandle.error -gt 0 -and
+        [bool]$facts.withSentinel.sentinelSeen
     return $facts
 }
 
@@ -1783,7 +1804,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                 # The CLI tree's windows, inventoried on both desktops at every poll: noctty.com is a console program, so a
                 # console window it gets on Default is exactly the leak Q0 exists to catch.
                 $windowsSeen = [System.Collections.Generic.Dictionary[string, object]]::new()
-                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0
+                $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0; $finalPoll = $false
                 $deadline = [datetime]::UtcNow.AddSeconds(30)
                 do {
                     $all = @{}
@@ -1829,9 +1850,21 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                     $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd
                     if (-not [bool]$inventory.complete) { $inventoryEveryPoll = $false }
                     foreach ($window in @($inventory.windows)) { $windowsSeen["$($window.desktop)|$($window.class)|$($window.ownerRole)"] = $window }
-                    if ([GuiProbeNative]::WaitForSingleObject($pi.process, 20) -eq 0) { break }
-                } while ([datetime]::UtcNow -lt $deadline)
+                    if ($finalPoll) { break }
+                    # The tree is done once the root has exited and the watched job holds no live process (a forwarded
+                    # noctty.exe can outlive the root). One more poll then takes what joined after this one's snapshot,
+                    # once the watch has reported every process the job counted.
+                    [void][GuiProbeNative]::WaitForSingleObject($pi.process, 20)
+                    $accounting = [GuiProbeNative]::JobAccounting($watchJob)
+                    if ([GuiProbeNative]::WaitForSingleObject($pi.process, 0) -eq 0 -and ($null -eq $accounting -or $accounting[1] -eq 0)) {
+                        $caughtUp = [datetime]::UtcNow.AddSeconds(2)
+                        while ($null -ne $accounting -and @($watch.Snapshot()).Count -lt $accounting[0] -and [datetime]::UtcNow -lt $caughtUp) { Start-Sleep -Milliseconds 20 }
+                        $finalPoll = $true
+                    }
+                    # A final poll once set runs even past the deadline.
+                } while ($finalPoll -or [datetime]::UtcNow -lt $deadline)
                 $facts.polls = $polls
+                $facts.treeDoneInTime = $finalPoll
                 $facts.inventoryCompleteEveryPoll = $inventoryEveryPoll -and $polls -gt 0
                 $facts.windows = @($windowsSeen.Values)
                 $facts.windowsOffPrivate = @($windowsSeen.Values | Where-Object { $_.desktop -ne 'private' }).Count

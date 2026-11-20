@@ -1176,10 +1176,14 @@ Each arm:
   Desktop names compare case-insensitively, and a startup desktop the reader
   names neither way is recorded by its leaf.
 - The enumeration classifier's own control runs in the bundled arm's driver:
-  a fresh empty desktop comes back unavailable, a handle without
-  `DESKTOP_ENUMERATE` comes back unavailable with a nonzero error, and the
-  desktop holding the sentinel lists it. Anything else leaves Q0
-  inconclusive.
+  a fresh empty desktop comes back unavailable, a walk through a handle that
+  is not a desktop (an event of the driver's) comes back unavailable with a
+  Win32 error, and the desktop holding the sentinel lists it. Anything else
+  leaves Q0 inconclusive. A desktop handle without some access right is no
+  such failure: `EnumDesktopWindows` checks none (test-harnesses.md
+  2026-11-20 PROBE-ENUM-ACCESS-01).
+- The CLI arm polls until its root has exited and its watched job holds no
+  live process, then once more for what joined after the last snapshot.
 - Q0 passes only when all three arms and every control pass. Its claim is
   "every process and window alive at a sample".
 
