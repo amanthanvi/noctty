@@ -396,6 +396,8 @@
         "src/apprt/win32/sys.zig",
         "scripts/check-test-skips.ps1",
         "scripts/ci-test-timing.ps1",
+        "scripts/capture-test-ran-list.ps1",
+        "scripts/compare-test-ran-list.ps1",
         "src/test_runner.zig",
         "src/test_shard.zig"
       ]

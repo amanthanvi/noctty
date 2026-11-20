@@ -1,0 +1,205 @@
+# Approved SKIPs for scripts/compare-test-ran-list.ps1 (PLAN.md §3.2: every test that ran in a baseline
+# appears in a later list as OK or an approved SKIP). Seeded once from the 76 skips of ghostty-test and the 60 of
+# each lib-vt suite at main 263eacfa0 (the gate's options, CI's -Dcustom-shaders=true list, and
+# `test-lib-vt -Demit-lib-vt=true`), each reason read from the test's own skip condition.
+# Columns: suite<TAB>qualified name<TAB>requires<TAB>reason. requires is `-` for a skip the build decides
+# (target, backend, build option, or a body upstream disabled), or the environment facts the capture records
+# (capture-test-ran-list.ps1 `# env:` lines) or build keys (`build:<key>=<value>`) under which the skip is approved. An unnamed block's entry approves
+# one skipped block of its container. Add an entry only with the skip condition it rests on; remove one when its
+# test runs everywhere the gate lists are taken.
+ghostty-test	Command.test.Command: os pre exec 1	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	Command.test.Command: os pre exec 2	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	Command.test.Command: posix fork handles execveZ failure	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	Command.test.Command: rt post fork 1	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	Command.test.Command: rt pre exec 1	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	Command.test.Command: rt pre exec 2	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	apprt.action.Action.Key.test.ghostty.h Action.Key	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.CloseTabMode.test.ghostty.h CloseTabMode	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.FloatWindow.test.ghostty.h FloatWindow	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.Fullscreen.test.ghostty.h Fullscreen	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.GotoSplit.test.ghostty.h GotoSplit	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.GotoWindow.test.ghostty.h GotoWindow	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.Inspector.test.ghostty.h Inspector	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.MouseVisibility.test.ghostty.h MouseVisibility	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.OpenUrl.Kind.test.ghostty.h OpenUrl.Kind	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.PromptTitle.test.ghostty.h PromptTitle	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.QuitTimer.test.ghostty.h QuitTimer	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.Readonly.test.ghostty.h Readonly	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.ResizeSplit.Direction.test.ghostty.h ResizeSplit.Direction	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.SecureInput.test.ghostty.h SecureInput	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.SplitDirection.test.ghostty.h SplitDirection	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.action.Target.Key.test.ghostty.h Target.Key	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.ipc.Action.Key.test.ghostty.h Action.Key	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.ipc.Target.Key.test.ghostty.h Target.Key	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	apprt.win32.app.test.security regression win32 link opener PATHEXT live probe on hidden desktop	env:NOCTTY_RUN_LINK_PATHEXT_PROBE=unset	Opt-in hidden-desktop probe: runs only with NOCTTY_RUN_LINK_PATHEXT_PROBE=1
+ghostty-test	apprt.win32_job_object.test.win32 job object plan rejects memory limits that exceed SIZE_T	-	Needs a 32-bit SIZE_T; skips on 64-bit targets (`@sizeOf(SIZE_T) >= @sizeOf(u64)`)
+ghostty-test	benchmark.Benchmark.decltest.Benchmark	-	Upstream skips it on Windows and FreeBSD, where the measured duration reads 0
+ghostty-test	cli.CommaSplitter.test.splitter 10	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 11	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 12	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 13	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 14	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 16	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 17	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 18	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 25	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	cli.CommaSplitter.test.splitter 9	-	Escapes outside quotes are POSIX-only (`escape_outside_quotes = builtin.os.tag != .windows`)
+ghostty-test	font.Collection.test.face metrics	-	Only for the web_canvas font backend (`options.backend != .web_canvas`); the Windows build uses windows_freetype
+ghostty-test	font.Collection.test.hasCodepoint emoji default graphical	-	Only for the fontconfig_freetype font backend (`options.backend != .fontconfig_freetype`); the Windows build uses windows_freetype
+ghostty-test	font.shaper.harfbuzz.test.shape Bengali ligatures with out of order vowels	font:Arial Unicode MS=absent	Needs the Arial Unicode MS font (`testShaperWithDiscoveredFont`); skips where it is not installed
+ghostty-test	font.shaper.harfbuzz.test.shape Chakma vowel sign with ligature (vowel sign renders first)	font:Noto Sans Chakma=absent	Needs the Noto Sans Chakma font (`testShaperWithDiscoveredFont`); skips where it is not installed
+ghostty-test	font.shaper.harfbuzz.test.shape Devanagari string	font:Arial Unicode MS=absent	Needs the Arial Unicode MS font (`testShaperWithDiscoveredFont`); skips where it is not installed
+ghostty-test	font.shaper.harfbuzz.test.shape Javanese ligatures	-	Upstream disabled it: its body is commented out after `return error.SkipZigTest`
+ghostty-test	font.shaper.harfbuzz.test.shape Tai Tham letters (run_offset.y differs from zero)	-	Upstream disabled it: its body is commented out after `return error.SkipZigTest`
+ghostty-test	font.shaper.harfbuzz.test.shape Tai Tham vowels (position differs from advance)	-	Upstream disabled it: its body is commented out after `return error.SkipZigTest`
+ghostty-test	font.shaper.harfbuzz.test.shape Tibetan characters	font:Noto Serif Tibetan=absent	Needs the Noto Serif Tibetan font (`testShaperWithDiscoveredFont`); skips where it is not installed
+ghostty-test	input.key_encode.test.kitty: report associated with alt text on macOS with alt	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_encode.test.kitty: report associated with alt text on macOS with option	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_encode.test.legacy: alt+digit with modify other state 2 and macos-option-as-alt = false	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_encode.test.legacy: alt+x macos	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_encode.test.legacy: shift+alt+. macos	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_encode.test.legacy: super and other mods on macOS with text	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_encode.test.legacy: super-only on macOS with text	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	input.key_mods.Mods.test.translation macos-option-as-alt	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-test	main.test.ConPTY transport probe child dispatch only	env:NOCTTY_RUN_CONPTY_TRANSPORT_TEST=unset	Opt-in ConPTY transport probe: runs only with NOCTTY_RUN_CONPTY_TRANSPORT_TEST set (`runParentIfRequested`); CI's ConPTY Probes job sets it
+ghostty-test	os.homedir.test.expandHomeUnix	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (Unix home expansion)
+ghostty-test	os.i18n.test.canonicalizeLocale darwin	-	Darwin-only; skips elsewhere
+ghostty-test	os.local_path.test.link target: no text in the full sweep aborts or leaks	env:NOCTTY_RUN_LOCAL_PATH_SWEEP=unset	Opt-in exhaustive sweep: runs only with NOCTTY_RUN_LOCAL_PATH_SWEEP=1
+ghostty-test	os.passwd.test_0	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (the passwd lookup's unnamed block)
+ghostty-test	os.xdg.test.fallback when xdg env empty	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (XDG fallback paths)
+ghostty-test	os.xdg.test.fallback when xdg env empty and subdir	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (XDG fallback paths)
+ghostty-test	pty_transport_probe.test.Windows ConPTY input transport probe reports key encoding survival	env:NOCTTY_CONPTY_KEY_INPUT_PROBE=unset	Opt-in ConPTY key-input probe: runs only with NOCTTY_CONPTY_KEY_INPUT_PROBE=1
+ghostty-test	pty_transport_probe.test.Windows ConPTY transport probe reports APC and DCS survival	env:NOCTTY_CONPTY_TRANSPORT_PROBE=unset	Opt-in ConPTY graphics probe: runs only with NOCTTY_CONPTY_TRANSPORT_PROBE=1
+ghostty-test	renderer.Health.test.ghostty.h Health	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	terminal.mouse.Shape.test.ghostty.h MouseShape	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	terminal.osc.parsers.iterm2.test.OSC: 1337: test Copy with non-empty value that is invalid base64	-	Upstream skips it: OSC 1337 Copy does not validate base64, for speed
+ghostty-test	terminal.osc.test.ghostty.h Command.ProgressReport.State	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	terminal.search.pattern.test.forQuery rejects non-default options without oniguruma	-	Only for a build without oniguruma (`build_options.oniguruma`); this build has it
+ghostty-test	termio.Exec.test.execCommand darwin: direct command	-	Darwin-only; skips elsewhere
+ghostty-test	termio.Exec.test.execCommand darwin: shell command	-	Darwin-only; skips elsewhere
+ghostty-test	termio.Exec.test.execCommand: direct command, config freed	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (passwd and direct exec)
+ghostty-test	termio.Exec.test.execCommand: direct command, error passwd	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (passwd and direct exec)
+ghostty-test	termio.Exec.test.execCommand: shell command, empty passwd	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (passwd and direct exec)
+ghostty-test	termio.Exec.test.execCommand: shell command, error passwd	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (passwd and direct exec)
+ghostty-test	termio.shell_integration.test.xdg: empty XDG_DATA_DIRS	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (XDG_DATA_DIRS injection)
+ghostty-test	termio.shell_integration.test.xdg: existing XDG_DATA_DIRS	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (XDG_DATA_DIRS injection)
+ghostty-vt-test	input.function_keys.test.keys	-	The lib-vt build skips it (`terminal_options.artifact == .lib`) to keep termio out of libghostty-vt
+ghostty-vt-test	input.key_encode.test.kitty: report associated with alt text on macOS with alt	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_encode.test.kitty: report associated with alt text on macOS with option	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_encode.test.legacy: alt+digit with modify other state 2 and macos-option-as-alt = false	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_encode.test.legacy: alt+x macos	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_encode.test.legacy: shift+alt+. macos	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_encode.test.legacy: super and other mods on macOS with text	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_encode.test.legacy: super-only on macOS with text	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	input.key_mods.Mods.test.translation macos-option-as-alt	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-test	terminal.PageList.test.PageList resize reflow less cols copy kitty placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.PageList.test.PageList resize reflow more cols clears kitty placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.PageList.test.PageList resize reflow wrap moves kitty placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.StringMap.test.StringMap searchIterator	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.StringMap.test.StringMap searchIterator URL detection	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.StringMap.test.StringMap searchIterator URL with click position	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.StringMap.test.StringMap searchIterator Windows path with click position	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.Terminal.test.Terminal: eraseLine complete clears kitty placeholder flag	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.Terminal.test.Terminal: fullReset preserves kitty graphics limits	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.Terminal.test.Terminal: print kitty unicode placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.Kitty command with overflow i32	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.Kitty command with overflow u32	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.garbage Kitty command	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.kitty feed error deinits parser	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.kitty max bytes exceeded	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.kitty unterminated 512 MiB payload stays under the cap	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.apc.test.valid Kitty command	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.dcs.test.tmux enter and implicit exit	-	The lib-vt build has no tmux control mode (`build_options.tmux_control_mode`)
+ghostty-vt-test	terminal.mouse.Shape.test.ghostty.h MouseShape	-	The lib-vt build skips it (`build_options.artifact == .lib`), and the fork removed the ghostty.h ABI it checks
+ghostty-vt-test	terminal.osc.parsers.iterm2.test.OSC: 1337: test Copy with non-empty value that is invalid base64	-	Upstream skips it: OSC 1337 Copy does not validate base64, for speed
+ghostty-vt-test	terminal.osc.test.ghostty.h Command.ProgressReport.State	-	The lib-vt build skips it (`build_options.artifact == .lib`), and the fork removed the ghostty.h ABI it checks
+ghostty-vt-test	terminal.page.test.Page clearCells full row clears kitty placeholder flag	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.search.pattern.test.a run-time failure latches and finds nothing	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.pattern.test.forQuery reports InvalidPattern	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.pattern.test.regex edge sensitivity detects anchors and character classes	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.pattern.test.regex edge sensitivity ignores literal anchor bytes	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.pattern.test.whole-word regex edge sensitivity preserves embedded anchors	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.query_search.test.a pattern that fails at run time ends the query with one clear	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.query_search.test.a pattern that fails while the report is built ends the query with one clear	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.query_search.test.a query that matches nothing is not reported as invalid	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.query_search.test.a replacing query whose first feed fails ends with one clear	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.query_search.test.an invalid query clears the previous search in one report	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow edge decision uses the page state captured at append	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow non-regex regex engine prunes no-match pages	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow regex match can span more than literal overlap	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow regex no match defers pruning	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow regex no match keeps bounded suffix	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow regex no match preserves window state	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow reverse pattern haystack preserves offset across circular split	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow reverse regex searches UTF-8 haystack in forward order	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow reverse search works with non-default query options	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow single append case sensitive	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow single append regex	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow single append whole word	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow whole word does not match synthetic page edge	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow whole word matches true page edge	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.sliding_window.test.SlidingWindow whole-word literal retains full synthetic edge match	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.search.terminal.test.initPattern lends one Pattern to the viewport and every screen	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-test	terminal.stream_terminal.test.kitty graphics APC cancelled or aborted is discarded	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.stream_terminal.test.kitty graphics APC response	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-test	terminal.stream_terminal.test.kitty graphics via APC	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	input.function_keys.test.keys	-	The lib-vt build skips it (`terminal_options.artifact == .lib`) to keep termio out of libghostty-vt
+ghostty-vt-c-test	input.key_encode.test.kitty: report associated with alt text on macOS with alt	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_encode.test.kitty: report associated with alt text on macOS with option	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_encode.test.legacy: alt+digit with modify other state 2 and macos-option-as-alt = false	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_encode.test.legacy: alt+x macos	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_encode.test.legacy: shift+alt+. macos	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_encode.test.legacy: super and other mods on macOS with text	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_encode.test.legacy: super-only on macOS with text	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	input.key_mods.Mods.test.translation macos-option-as-alt	-	macOS-only; skips elsewhere (`builtin.os.tag` is not macOS or Darwin)
+ghostty-vt-c-test	terminal.PageList.test.PageList resize reflow less cols copy kitty placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.PageList.test.PageList resize reflow more cols clears kitty placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.PageList.test.PageList resize reflow wrap moves kitty placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.StringMap.test.StringMap searchIterator	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.StringMap.test.StringMap searchIterator URL detection	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.StringMap.test.StringMap searchIterator URL with click position	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.StringMap.test.StringMap searchIterator Windows path with click position	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.Terminal.test.Terminal: eraseLine complete clears kitty placeholder flag	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.Terminal.test.Terminal: fullReset preserves kitty graphics limits	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.Terminal.test.Terminal: print kitty unicode placeholder	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.Kitty command with overflow i32	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.Kitty command with overflow u32	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.garbage Kitty command	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.kitty feed error deinits parser	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.kitty max bytes exceeded	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.kitty unterminated 512 MiB payload stays under the cap	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.apc.test.valid Kitty command	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.dcs.test.tmux enter and implicit exit	-	The lib-vt build has no tmux control mode (`build_options.tmux_control_mode`)
+ghostty-vt-c-test	terminal.mouse.Shape.test.ghostty.h MouseShape	-	The lib-vt build skips it (`build_options.artifact == .lib`), and the fork removed the ghostty.h ABI it checks
+ghostty-vt-c-test	terminal.osc.parsers.iterm2.test.OSC: 1337: test Copy with non-empty value that is invalid base64	-	Upstream skips it: OSC 1337 Copy does not validate base64, for speed
+ghostty-vt-c-test	terminal.osc.test.ghostty.h Command.ProgressReport.State	-	The lib-vt build skips it (`build_options.artifact == .lib`), and the fork removed the ghostty.h ABI it checks
+ghostty-vt-c-test	terminal.page.test.Page clearCells full row clears kitty placeholder flag	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.search.pattern.test.a run-time failure latches and finds nothing	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.pattern.test.forQuery reports InvalidPattern	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.pattern.test.regex edge sensitivity detects anchors and character classes	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.pattern.test.regex edge sensitivity ignores literal anchor bytes	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.pattern.test.whole-word regex edge sensitivity preserves embedded anchors	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.query_search.test.a pattern that fails at run time ends the query with one clear	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.query_search.test.a pattern that fails while the report is built ends the query with one clear	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.query_search.test.a query that matches nothing is not reported as invalid	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.query_search.test.a replacing query whose first feed fails ends with one clear	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.query_search.test.an invalid query clears the previous search in one report	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow edge decision uses the page state captured at append	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow non-regex regex engine prunes no-match pages	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow regex match can span more than literal overlap	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow regex no match defers pruning	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow regex no match keeps bounded suffix	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow regex no match preserves window state	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow reverse pattern haystack preserves offset across circular split	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow reverse regex searches UTF-8 haystack in forward order	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow reverse search works with non-default query options	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow single append case sensitive	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow single append regex	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow single append whole word	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow whole word does not match synthetic page edge	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow whole word matches true page edge	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.sliding_window.test.SlidingWindow whole-word literal retains full synthetic edge match	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.search.terminal.test.initPattern lends one Pattern to the viewport and every screen	-	The lib-vt build has no oniguruma (`build_options.oniguruma`)
+ghostty-vt-c-test	terminal.stream_terminal.test.kitty graphics APC cancelled or aborted is discarded	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.stream_terminal.test.kitty graphics APC response	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-vt-c-test	terminal.stream_terminal.test.kitty graphics via APC	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)

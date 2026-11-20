@@ -325,6 +325,519 @@ Assert-True ($trendCalls[0] -like '*event=schedule*' -and -not ($trendCalls -lik
 Assert-True ($trendCalls[0] -like '*per_page=100*') 'The run listing must cover the whole 90-day artifact retention window.'
 Assert-True ($null -eq (Get-PreviousTrendArtifact -Repository 'owner/repo' -CurrentRunId '300' -Api { param($Path) '{"workflow_runs":[],"artifacts":[]}' | ConvertFrom-Json })) 'With no earlier nightly there is no baseline.'
 
+# --- Ran list: capture parser and compare (PLAN.md §3.2) --------------------
+# Top-level names here start with $ran: dot-sourcing a script also declares its
+# param() names, typed, in this scope.
+. (Join-Path $repoRoot 'scripts\capture-test-ran-list.ps1') -LibraryOnly
+. (Join-Path $repoRoot 'scripts\compare-test-ran-list.ps1') -LibraryOnly
+$ranFixtures = Join-Path $repoRoot 'test\windows\ran-list-fixtures'
+# A fixture executable's --results record and its stderr (built with src/test_runner.zig).
+function Read-RanRecord { param([string] $Name) return Read-ZigTestResults -Path (Join-Path $ranFixtures "$Name.results.txt") }
+function Read-RanFixture { param([string] $Name) return [System.IO.File]::ReadAllLines((Join-Path $ranFixtures "$Name.stderr.txt")) }
+# A child's output as one line: PowerShell colours an error message and wraps it at the console width.
+function Join-RanOutput { param([object[]] $Output) return ((@($Output) -join ' ') -replace '\x1b\[[0-9;]*m', '' -replace '[\s|]+', ' ') }
+function Get-RanResults { param([object] $Record) return (@($Record.Tests | ForEach-Object { "$($_.Name)=$($_.Result)" }) -join '|') }
+
+# The runner's record holds what the runner decided, whatever a test printed
+# (council round 3 on #726): native fixtures, each printing what used to fool
+# a reader of the printed lines.
+$ranRecord = Read-RanRecord 'printed'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and (Get-RanResults $ranRecord) -ceq 'printed.test.coverage=SKIP|printed.test.platform=OK') "A test that prints the other's result word, its own output running into the runner's result, cannot swap two results (native fixture printed, Sol): $(Get-RanResults $ranRecord)"
+$ranRecord = Read-RanRecord 'forge'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and (Get-RanResults $ranRecord) -ceq 'forge.test.first=SKIP|forge.test.second=OK') "A test that prints the next test's exact header cannot take its result (native fixture forge, Opus): $(Get-RanResults $ranRecord)"
+$ranRecord = Read-RanRecord 'swap'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and (Get-RanResults $ranRecord) -ceq 'swap.test.coverage=SKIP|swap.test.platform=OK') "Two tests that print each other's result word keep their own (native fixture swap): $(Get-RanResults $ranRecord)"
+$ranRecord = Read-RanRecord 'bytes'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and (@($ranRecord.Tests | ForEach-Object Name) -join '|') -ceq 'bytes.test.coverage\xfe|bytes.test.coverage\xff|bytes.test.carriage\r\nreturn') "Names that differ only in a byte that is not UTF-8 stay two names, and a CR LF is kept (native fixture bytes, Sol): $(@($ranRecord.Tests | ForEach-Object Name) -join '|')"
+$ranRecord = Read-RanRecord 'leak'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and $ranRecord.Tests[0].Leaked -and -not $ranRecord.Tests[1].Leaked -and $ranRecord.End.Leaked -eq 1 -and $ranRecord.End.ErrorsLogged -eq 1 -and (Get-RanResults $ranRecord) -ceq 'leak.test.leaks one byte=OK|leak.test.fine=OK') 'The record marks the test that leaked, and counts the leak and the error the allocator logged (native fixture leak).'
+$ranRecord = Read-RanRecord 'logged_error'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and $ranRecord.End.ErrorsLogged -eq 1 -and $ranRecord.End.Leaked -eq 0) 'The record counts a logged error (native fixture logged_error).'
+$ranRecord = Read-RanRecord 'names'
+$ranNames = @($ranRecord.Tests | ForEach-Object Name) -join '|'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and $ranNames -ceq 'names.test.wait...done|names.test.test_0|names.test.test_1|names.test_0|names.test_1|names.Inner.test.nested|names.Inner.test_0') "Names keep their '...', and named and unnamed tests their Zig names (native fixture names): $ranNames"
+$ranRecord = Read-RanRecord 'multiline'
+Assert-True ($ranRecord.Problems.Count -eq 0 -and (Get-RanResults $ranRecord) -ceq 'multiline.test.coverage...\nsecond=OK') 'A name that holds ... and a newline is read whole, the newline written \n (native fixture multiline).'
+Assert-True ((Get-RanResults (Read-RanRecord 'glued')) -ceq 'glued.test.loads=OK' -and (Get-RanResults (Read-RanRecord 'dots_output')) -ceq 'dots_output.test.loads=OK') 'Output holding ..., with or without a newline before the result, changes no name (native fixtures glued and dots_output).'
+Assert-True ($ranRecord.Zig -ceq '0.15.2' -and $ranRecord.Mode -ceq 'Debug') 'The record names the compiler and the mode that built the executable.'
+$ranTrailers = Read-ZigRunnerTrailers -Lines (Read-RanFixture 'leak')
+Assert-True ($ranTrailers.ErrorsLogged -eq 1 -and $ranTrailers.Leaked -eq 1 -and $ranTrailers.Panics -eq 0) "The runner's trailers in its stderr agree with its record (native fixture leak)."
+Assert-True ((Read-ZigRunnerTrailers -Lines @('1 errors were logged.', 'x', '3 errors were logged.')).ErrorsLogged -eq 3 -and (Read-ZigRunnerTrailers -Lines @('thread 4 panic: boom')).Panics -eq 1) 'The last trailer counts, as the runner prints its own after the last test, and a panic line is counted.'
+
+# Names as rows write them: UTF-8 kept, everything else escaped, one text per byte string.
+foreach ($ranCase in @(
+        @{ Bytes = [byte[]] @(0x61, 0x5C, 0x62); Text = 'a\\b' }
+        @{ Bytes = [byte[]] @(0x09, 0x0D, 0x0A); Text = '\t\r\n' }
+        @{ Bytes = [byte[]] @(0xC3, 0xA9, 0xE2, 0x80, 0x94); Text = [string][char]0xE9 + [char]0x2014 }
+        @{ Bytes = [byte[]] @(0xF0, 0x9F, 0x98, 0x80); Text = [char]::ConvertFromUtf32(0x1F600) }
+        @{ Bytes = [byte[]] @(0xFE); Text = '\xfe' }
+        @{ Bytes = [byte[]] @(0xFF); Text = '\xff' }
+        @{ Bytes = [byte[]] @(0x80); Text = '\x80' }
+        @{ Bytes = [byte[]] @(0xC0, 0x80); Text = '\xc0\x80' }
+        @{ Bytes = [byte[]] @(0xE0, 0x80, 0x80); Text = '\xe0\x80\x80' }
+        @{ Bytes = [byte[]] @(0xED, 0xA0, 0x80); Text = '\xed\xa0\x80' }
+        @{ Bytes = [byte[]] @(0xF4, 0x90, 0x80, 0x80); Text = '\xf4\x90\x80\x80' }
+        @{ Bytes = [byte[]] @(0xF5, 0x80); Text = '\xf5\x80' }
+        @{ Bytes = [byte[]] @(0xE2, 0x80); Text = '\xe2\x80' }
+        @{ Bytes = [byte[]] @(0x01, 0x7F, 0xC2, 0x85); Text = '\x01\x7f\xc2\x85' })) {
+    $ranText = ConvertTo-RanListName -Bytes $ranCase.Bytes
+    Assert-True ($ranText -ceq $ranCase.Text) "A name's bytes $(($ranCase.Bytes | ForEach-Object { '{0:x2}' -f $_ }) -join ' ') are written '$($ranCase.Text)', not '$ranText'."
+}
+
+# Identities: only Zig's real unnamed blocks are counted by container.
+Assert-True ((Get-RanListIdentity -Suite 's' -Name 'names.test_0') -ceq "s`tnames.test_#" -and (Get-RanListIdentity -Suite 's' -Name 'names.Inner.test_3') -ceq "s`tnames.Inner.test_#") 'An unnamed block is counted by its container.'
+Assert-True ((Get-RanListIdentity -Suite 's' -Name 'names.test.test_0') -ceq "s`tnames.test.test_0" -and (Get-RanListIdentity -Suite 's' -Name 'a.test.x.test_1') -ceq "s`ta.test.x.test_1" -and (Get-RanListIdentity -Suite 's' -Name 'a.decltest.test_0') -ceq "s`ta.decltest.test_0") 'A named test or decltest called test_<n> keeps its own identity.'
+Assert-True ((Get-RanListModeMeaning 'Debug') -ceq 'debug' -and (Get-RanListModeMeaning 'ReleaseSafe') -ceq (Get-RanListModeMeaning 'safe') -and (Get-RanListModeMeaning 'ReleaseFast') -cne (Get-RanListModeMeaning 'safe')) 'Modes compare by meaning across 0.17.1''s renaming.'
+Assert-True (@(Get-RanListFactKeys) -notcontains 'store-alias') 'No fact is recorded that no approval reads (the Store alias, council round 3, Sol).'
+
+$ranTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ran-list-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $ranTemp | Out-Null
+$ranBuild = [ordered]@{ source = 'built'; options = '(none)'; mode = 'Debug'; target = 'native-native.win10_rs5-msvc'; zig = '0.15.2'; dirty = 'false'; filtered = 'false' }
+$ranEnv = [ordered]@{ 'cwd-on-temp-drive' = 'true'; 'font:Arial Unicode MS' = 'absent'; 'env:NOCTTY_RUN_LOCAL_PATH_SWEEP' = 'unset' }
+function New-RanBuild {
+    param([System.Collections.IDictionary] $Change)
+    $b = [ordered]@{}
+    foreach ($k in $ranBuild.Keys) { $b[$k] = $ranBuild[$k] }
+    foreach ($k in $Change.Keys) { $b[$k] = $Change[$k] }
+    return $b
+}
+function New-RanEnv {
+    param([System.Collections.IDictionary] $Change)
+    $e = [ordered]@{}
+    foreach ($k in $ranEnv.Keys) { $e[$k] = $ranEnv[$k] }
+    foreach ($k in $Change.Keys) { $e[$k] = $Change[$k] }
+    return $e
+}
+# Suites: @{ Name; Tests = @(@(name, result), ...); Exit; Leaked; ErrorsLogged; Panics }; or one suite through -Tests.
+function New-RanListFile {
+    param([string] $Name, [object[]] $Tests, [System.Collections.IDictionary] $Build = $ranBuild, [System.Collections.IDictionary] $Environment = $ranEnv, [string] $SuiteName = 'ghostty-test', [string] $Exit = '0', [int] $Leaked = 0, [int] $ErrorsLogged = 0, [int] $Panics = 0, [object[]] $Suites = $null)
+    if ($null -eq $Suites) { $Suites = @(@{ Name = $SuiteName; Tests = $Tests; Exit = $Exit; Leaked = $Leaked; ErrorsLogged = $ErrorsLogged; Panics = $Panics }) }
+    $allRows = @(); $records = @()
+    foreach ($s in $Suites) {
+        $parsed = @($s.Tests | ForEach-Object { [pscustomobject]@{ Name = $_[0]; Result = $_[1] } })
+        $allRows += @(Get-RanListRows -SuiteName $s.Name -Tests $parsed)
+        $records += [pscustomobject]@{
+            Name = $s.Name; Tests = $parsed.Count
+            Ok = @($parsed | Where-Object Result -ceq 'OK').Count; Skip = @($parsed | Where-Object Result -ceq 'SKIP').Count; Fail = @($parsed | Where-Object Result -ceq 'FAIL').Count
+            Exit = $(if ($null -ne $s.Exit) { $s.Exit } else { '0' }); ErrorsLogged = [int]$s.ErrorsLogged; Leaked = [int]$s.Leaked; Panics = [int]$s.Panics
+        }
+    }
+    $path = Join-Path $ranTemp $Name
+    [System.IO.File]::WriteAllText($path, (Format-RanList -Rows $allRows -Suites $records -Revision 'r1' -Build $Build -Environment $Environment), [System.Text.UTF8Encoding]::new($false))
+    return $path
+}
+function New-RanLedger {
+    param([string] $Name, [string[]] $Lines)
+    $path = Join-Path $ranTemp $Name
+    [System.IO.File]::WriteAllText($path, (($Lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+    return $path
+}
+function New-RanRecord {
+    param([string] $Name, [string[]] $Lines, [switch] $NoLineEnd)
+    $path = Join-Path $ranTemp "$Name.results.txt"
+    $text = ($Lines -join "`n") + $(if ($NoLineEnd) { '' } else { "`n" })
+    [System.IO.File]::WriteAllBytes($path, [System.Text.Encoding]::Latin1.GetBytes($text))
+    return $path
+}
+function Get-RanVerdict {
+    param([string[]] $Baselines, [string] $Later, [string[]] $RemovalFiles = @(), [string[]] $SkipFiles = @(), [switch] $AllowFiltered, [switch] $AllowDirty, [string] $Crossing = '')
+    $ledgerProblems = [Collections.Generic.List[string]]::new()
+    $removed = Read-RanListLedger -Paths $RemovalFiles -Kind 'removals' -Problems $ledgerProblems
+    $approved = Read-RanListLedger -Paths $SkipFiles -Kind 'approved skips' -Problems $ledgerProblems
+    $v = Compare-RanList -BaselineLists @($Baselines | ForEach-Object { Read-RanList -Path $_ }) -CandidateList (Read-RanList -Path $Later) -RemovalEntries $removed -SkipEntries $approved -AllowFilteredBaseline:$AllowFiltered -AllowDirty:$AllowDirty -CompilerCrossing $Crossing
+    return [pscustomobject]@{ Problems = @($ledgerProblems) + @($v.Problems); Notes = $v.Notes }
+}
+$ranSavedLocation = Get-Location
+$ranSavedDirectory = [Environment]::CurrentDirectory
+try {
+    # A record that does not stand for a whole run fails the capture.
+    $ranHead = @('noctty test results v1', 'zig 0.15.2', 'mode Debug', 'shard 1/1')
+    $ranT1 = 'test 1 OK 0 612e746573742e6f6e65'
+    $ranT2 = 'test 2 SKIP 0 612e746573742e74776f'
+    $ranEndLine = 'end tests=2 ok=1 skip=1 fail=0 leaked=0 errors-logged=0'
+    $ranRecord = Read-ZigTestResults -Path (New-RanRecord 'whole' ($ranHead + @($ranT1, $ranT2, $ranEndLine)))
+    Assert-True ($ranRecord.Problems.Count -eq 0 -and (Get-RanResults $ranRecord) -ceq 'a.test.one=OK|a.test.two=SKIP') 'A whole record reads.'
+    foreach ($ranCase in @(
+            @{ Name = 'no-end'; Lines = $ranHead + @($ranT1, $ranT2); Expect = '*no end line, so the run stopped after test 2*' }
+            @{ Name = 'cut'; Lines = $ranHead + @($ranT1, $ranT2, $ranEndLine); NoLineEnd = $true; Expect = '*does not end in a line end*' }
+            @{ Name = 'order'; Lines = $ranHead + @($ranT2, $ranT1, $ranEndLine); Expect = '*is test 2, not test 1*' }
+            @{ Name = 'gap'; Lines = $ranHead + @($ranT1, ($ranT2 -replace '^test 2', 'test 3'), $ranEndLine); Expect = '*is test 3, not test 2*' }
+            @{ Name = 'count'; Lines = $ranHead + @($ranT1, $ranT2, ($ranEndLine -replace 'tests=2', 'tests=3')); Expect = '*does not add up*' }
+            @{ Name = 'results'; Lines = $ranHead + @($ranT1, $ranT2, ($ranEndLine -replace 'ok=1 skip=1', 'ok=2 skip=0')); Expect = '*does not add up*' }
+            @{ Name = 'leaks'; Lines = $ranHead + @($ranT1, $ranT2, ($ranEndLine -replace 'leaked=0', 'leaked=1')); Expect = '*does not add up*' }
+            @{ Name = 'upper'; Lines = $ranHead + @(($ranT1 -replace '6e65$', '6E65'), $ranT2, $ranEndLine); Expect = '*line 5 is not a test or end line*' }
+            @{ Name = 'odd'; Lines = $ranHead + @(($ranT1 + '6'), $ranT2, $ranEndLine); Expect = '*line 5 is not a test or end line*' }
+            @{ Name = 'empty-name'; Lines = $ranHead + @('test 1 OK 0 ', $ranT2, $ranEndLine); Expect = '*line 5 is not a test or end line*' }
+            @{ Name = 'shard'; Lines = @('noctty test results v1', 'zig 0.15.2', 'mode Debug', 'shard 2/4', $ranT1, $ranT2, $ranEndLine); Expect = '*shard 2/4 of a run, not a whole run*' }
+            @{ Name = 'header'; Lines = @('noctty test results v2', 'zig 0.15.2', 'mode Debug', 'shard 1/1', $ranT1, $ranT2, $ranEndLine); Expect = '*does not start with*' }
+            @{ Name = 'after'; Lines = $ranHead + @($ranT1, $ranT2, $ranEndLine, $ranEndLine); Expect = '*text after its end line*' }
+            @{ Name = 'crlf'; Lines = ((($ranHead + @($ranT1, $ranT2, $ranEndLine)) -join "`r`n") -split "`n"); Expect = '*holds bytes the runner does not write*' }
+            @{ Name = 'byte'; Lines = $ranHead + @($ranT1, $ranT2, ($ranEndLine + [char]0xFF)); Expect = '*holds bytes the runner does not write*' })) {
+        $ranRecord = Read-ZigTestResults -Path (New-RanRecord $ranCase.Name $ranCase.Lines -NoLineEnd:([bool]$ranCase.NoLineEnd))
+        Assert-True (($ranRecord.Problems -join ' ') -like $ranCase.Expect) "A record '$($ranCase.Name)' is refused ($($ranRecord.Problems -join ' | '))."
+    }
+    Assert-True ((Read-ZigTestResults -Path (Join-Path $ranTemp 'none.results.txt')).Problems -join ' ' -like '*no results file*') 'A run that wrote no record is refused (the stock runner takes no --results).'
+
+    $ranBaseTests = @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
+    $ranBase = New-RanListFile 'base.tsv' $ranBaseTests
+    $ranSkips = New-RanLedger 'skips.tsv' @('# suite, name, requires, reason', "ghostty-test`ta.test.font`tfont:Arial Unicode MS=absent`tneeds the font")
+    $ranText = [System.IO.File]::ReadAllText($ranBase)
+    Assert-True ($ranText -cmatch "(?s)ghostty-test`tOK`t1`tB\.test\.upper\n.*ghostty-test`tOK`t1`ta\.test\.one\n" -and $ranText.EndsWith("# end: rows=7 tests=7`n") -and -not $ranText.Contains("`r") -and $ranText -cmatch '(?m)^# env: cwd-on-temp-drive=true$' -and $ranText -cmatch "(?m)^# build: source=built`toptions=\(none\)`t" -and $ranText.StartsWith("# noctty test ran list v4`n")) 'A list is sorted ordinally, LF-terminated, closed by its end line, and records its build and environment.'
+    $ranRead = Read-RanList -Path $ranBase
+    Assert-True ($ranRead.Problems.Count -eq 0 -and $ranRead.Rows.Count -eq 7 -and $ranRead.Build['zig'] -ceq '0.15.2' -and $ranRead.Environment['font:Arial Unicode MS'] -ceq 'absent') 'A written list reads back whole.'
+
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranBase -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join "`n") -like '*APPROVED-SKIP ghostty-test a.test.font: needs the font*') 'Control: the same list passes when its skip is approved.'
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranBase
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -ceq 'UNAPPROVED-SKIP ghostty-test a.test.font (1 skipped, 0 approved)') 'Control: a test skipped in the baseline and skipped again fails without an approval (PLAN.md §3.2: OK or an approved SKIP).'
+    $ranPresent = New-RanListFile 'font-present.tsv' $ranBaseTests -Environment (New-RanEnv @{ 'font:Arial Unicode MS' = 'present' })
+    $v = Get-RanVerdict -Baselines @($ranPresent) -Later $ranPresent -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -like "SKIP-ENVIRONMENT ghostty-test a.test.font (1 skipped, 0 of 1 approvals apply): needs font:Arial Unicode MS=absent (the list has 'present')*") 'An approval that names an environment does not cover a list taken in another.'
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranPresent -SkipFiles @($ranSkips)
+    Assert-True (($v.Problems -join "`n") -like '*ENV-DIFFERS font:Arial Unicode MS*') 'Lists taken in different environments are not compared.'
+    # An approval may also name the build: one for 1A's ReleaseSafe list does not cover the Debug list.
+    $ranBuildSkips = New-RanLedger 'build-skips.tsv' @("ghostty-test`ta.test.font`tbuild:mode=ReleaseSafe`tskips in ReleaseSafe only")
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranBase -SkipFiles @($ranBuildSkips)
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -like "SKIP-ENVIRONMENT*needs build:mode=ReleaseSafe (the list has 'Debug')*") 'An approval that names a build does not cover another build of the same suite.'
+    $ranSafe = New-RanListFile 'safe.tsv' $ranBaseTests -Build (New-RanBuild @{ mode = 'safe'; zig = '0.17.1' })
+    Assert-True ((Get-RanVerdict -Baselines @($ranSafe) -Later $ranSafe -SkipFiles @($ranBuildSkips)).Problems.Count -eq 0) 'A build condition on the mode matches by meaning (safe is ReleaseSafe).'
+    # Only the approvals whose conditions hold count for a block (CodeRabbit on #726).
+    $ranTwoConditions = New-RanLedger 'two-conditions.tsv' @("ghostty-test`tc.test_0`tfont:Arial Unicode MS=present`tone", "ghostty-test`tc.test_1`tfont:Arial Unicode MS=absent`ttwo")
+    $ranUnnamedSkip = New-RanListFile 'unnamed-skip.tsv' @(@('c.test_0', 'SKIP'), @('c.test_1', 'OK'))
+    Assert-True ((Get-RanVerdict -Baselines @($ranUnnamedSkip) -Later $ranUnnamedSkip -SkipFiles @($ranTwoConditions)).Problems.Count -eq 0) 'One skipped block passes when one of its container''s approvals applies, whatever the other needs.'
+    # `unknown` meets no condition, and no condition may name it (council round 3, Sol).
+    $ranUnknownSkip = New-RanLedger 'unknown-skip.tsv' @("ghostty-test`ta.test.font`tenv:NOCTTY_RUN_LOCAL_PATH_SWEEP=unknown`tasks for what was not measured")
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranBase -SkipFiles @($ranUnknownSkip)).Problems -join ' ' -like "*line 1 is not*no condition on 'unknown'*") 'A ledger condition on unknown is refused.'
+    $ranUnknownList = Read-RanList -Path (New-RanListFile 'unknown-env.tsv' $ranBaseTests -Environment (New-RanEnv @{ 'env:NOCTTY_RUN_LOCAL_PATH_SWEEP' = 'unknown' }))
+    $ranEntry = [pscustomobject]@{ Reason = 'r'; Requires = @('env:NOCTTY_RUN_LOCAL_PATH_SWEEP=unknown') }
+    Assert-True ((Get-RanListUnmetConditions -Entry $ranEntry -List $ranUnknownList).Count -eq 1) 'An unknown fact meets no condition, not even one that names unknown.'
+
+    $ranDropped = New-RanListFile 'dropped.tsv' @(@('a.test.one', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranDropped -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -ceq 'DROPPED ghostty-test a.test.two (ran 1 in the baseline, 0 now)') 'Control: a dropped test fails.'
+    $ranRemovals = New-RanLedger 'removals.tsv' @('# suite, name, the ledger entry', "ghostty-test`ta.test.two`tdropped-delta ledger D-1: the subject was not taken")
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranDropped -RemovalFiles @($ranRemovals) -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join "`n") -like '*LEDGERED-REMOVAL ghostty-test a.test.two (1 of 1): dropped-delta ledger D-1*') 'Control: a ledgered removal passes.'
+    $ranNoReason = New-RanLedger 'no-reason.tsv' @("ghostty-test`ta.test.two`t ")
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranDropped -RemovalFiles @($ranNoReason) -SkipFiles @($ranSkips)).Problems.Count -eq 2) 'A removal without a reason is no ledger entry.'
+
+    $ranTurned = New-RanListFile 'turned.tsv' @(@('a.test.one', 'SKIP'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranTurned -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -ceq 'UNAPPROVED-SKIP ghostty-test a.test.one (1 skipped, 0 approved)') 'Control: a test turned SKIP fails unless approved.'
+    $ranSkipsMore = New-RanLedger 'skips-more.tsv' @("ghostty-test`ta.test.one`t-`tglyph gating while glyph_protocol = false")
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranTurned -SkipFiles @($ranSkips, $ranSkipsMore)).Problems.Count -eq 0) 'An approved SKIP passes, and several approval files are merged.'
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranBase -SkipFiles @($ranSkips, $ranSkips)).Problems -join ' ' -like '*twice*') 'An entry listed twice across files is refused.'
+    $ranNewSkip = New-RanListFile 'new-skip.tsv' ($ranBaseTests + @(, @('c.test.added', 'SKIP')))
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranNewSkip -SkipFiles @($ranSkips)).Problems -join ' ' -like '*UNAPPROVED-SKIP ghostty-test c.test.added*') 'A new test that skips needs an approval too.'
+
+    $v = Get-RanVerdict -Baselines @((Join-Path $ranTemp 'no-such-baseline.tsv')) -Later $ranBase -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -ge 1 -and $v.Problems[0] -like "*no-such-baseline.tsv' does not exist.") 'Control: a missing baseline fails.'
+    Assert-True ((Compare-RanList -BaselineLists @() -CandidateList (Read-RanList -Path $ranBase)).Problems[0] -like 'No baseline was given*') 'No baseline at all fails; it is never taken as empty.'
+    Assert-True ((Get-RanVerdict -Baselines @((New-RanListFile 'empty.tsv' @())) -Later $ranBase).Problems -join ' ' -like '*holds no tests*') 'An empty baseline fails.'
+    $ranCut = Join-Path $ranTemp 'cut.tsv'
+    [System.IO.File]::WriteAllText($ranCut, ($ranText -replace '# end: .*\n$', ''), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-RanVerdict -Baselines @($ranCut) -Later $ranBase).Problems -join ' ' -like '*cut short*') 'A list cut short before its end line fails.'
+    $ranLost = Join-Path $ranTemp 'lost-row.tsv'
+    [System.IO.File]::WriteAllText($ranLost, ($ranText -replace "ghostty-test`tOK`t1`ta\.test\.two\n", ''), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-RanVerdict -Baselines @($ranLost) -Later $ranBase).Problems -join ' ' -like '*does not match its end line*') 'A list that lost a row no longer matches its end line.'
+    # One suite record per suite, matching its rows (CodeRabbit on #726).
+    $ranNoSuite = Join-Path $ranTemp 'no-suite.tsv'
+    [System.IO.File]::WriteAllText($ranNoSuite, ($ranText -replace '(?m)^# suite: .*\n', ''), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-RanVerdict -Baselines @($ranNoSuite) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ' -like '*rows for suite ghostty-test but no suite record*') 'Rows without their suite record are refused: the run cannot be shown green.'
+    $ranBadCount = Join-Path $ranTemp 'bad-count.tsv'
+    [System.IO.File]::WriteAllText($ranBadCount, ($ranText -replace 'ok=6 skip=1', 'ok=7 skip=0'), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((Get-RanVerdict -Baselines @($ranBadCount) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ' -like '*record*does not match its rows*') 'A suite record whose counts are not its rows'' is refused.'
+    # Suites whose names differ only by case (council round 3, Sol and Opus L2): a
+    # green `Unit` and a leaking `unit`, in either order.
+    foreach ($ranPair in @(@('Unit', 'unit'), @('unit', 'Unit'))) {
+        $ranCaseList = New-RanListFile "case-$($ranPair[0]).tsv" -Suites @(
+            @{ Name = $ranPair[0]; Tests = @(, @('a.test.one', 'OK')) }
+            @{ Name = $ranPair[1]; Tests = @(, @('a.test.two', 'OK')); Exit = '1'; Leaked = 1; ErrorsLogged = 1 })
+        $v = Get-RanVerdict -Baselines @($ranCaseList) -Later $ranCaseList
+        Assert-True (($v.Problems -join ' ') -like '*differ only by case*' -and ($v.Problems -join ' ') -like "*suite $($ranPair[1]) is not green*") "Suites $($ranPair[0]) and $($ranPair[1]) are refused, and the leaking one is seen ($($v.Problems -join ' | '))."
+    }
+
+    # Each green condition on its own, with exit 0 (council round 2 on #726, Opus L2).
+    $ranFailing = New-RanListFile 'failing.tsv' @(@('a.test.one', 'FAIL'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
+    foreach ($ranCase in @(
+            @{ Name = 'a FAIL'; Path = $ranFailing }
+            @{ Name = 'exit 1'; Path = (New-RanListFile 'exit1.tsv' $ranBaseTests -Exit '1') }
+            @{ Name = 'a leak'; Path = (New-RanListFile 'leaky.tsv' $ranBaseTests -Leaked 1) }
+            @{ Name = 'a logged error'; Path = (New-RanListFile 'logged.tsv' $ranBaseTests -ErrorsLogged 1) }
+            @{ Name = 'a panic line'; Path = (New-RanListFile 'panicky.tsv' $ranBaseTests -Panics 1) })) {
+        Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranCase.Path -SkipFiles @($ranSkips)).Problems -join ' ' -like '*not green*') "A later list with only $($ranCase.Name) wrong is not green."
+        Assert-True ((Get-RanVerdict -Baselines @($ranCase.Path) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ' -like '*not green*') "A baseline with only $($ranCase.Name) wrong is refused."
+    }
+    foreach ($ranCase in @(@{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 0 }; Green = $true }
+            @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 1; Leaked = 0; Panics = 0 }; Green = $false }
+            @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 1; Panics = 0 }; Green = $false }
+            @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 1 }; Green = $false }
+            @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 1; ErrorsLogged = 0; Leaked = 0; Panics = 0 }; Green = $false }
+            @{ Suite = [pscustomobject]@{ Exit = 3; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 0 }; Green = $false })) {
+        Assert-True ((Test-RanListSuiteGreen $ranCase.Suite) -eq $ranCase.Green) "The capture's green check holds each condition on its own ($($ranCase.Suite | ConvertTo-Json -Compress))."
+    }
+
+    $ranRenumbered = New-RanListFile 'renumbered.tsv' ($ranBaseTests + @(, @('b.test_3', 'OK')))
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranRenumbered -SkipFiles @($ranSkips)).Problems.Count -eq 0) 'Renumbered unnamed blocks pass (an added block).'
+    $ranLessUnnamed = New-RanListFile 'less-unnamed.tsv' @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('B.test.upper', 'OK'))
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranLessUnnamed -SkipFiles @($ranSkips)).Problems -join ' ') -ceq 'DROPPED ghostty-test b.test_# (ran 3 in the baseline, 1 now)') "Dropped unnamed blocks fail by their container's count."
+    $ranOneBlock = New-RanLedger 'one-block.tsv' @("ghostty-test`tb.test_2`tblock moved upstream")
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranLessUnnamed -RemovalFiles @($ranOneBlock) -SkipFiles @($ranSkips)).Problems -join ' ') -ceq 'DROPPED ghostty-test b.test_# (ran 3 in the baseline, 1 now, 1 ledgered)') 'One removal entry covers one unnamed block, not its whole container.'
+    $ranTwoBlocks = New-RanLedger 'two-blocks.tsv' @("ghostty-test`tb.test_1`tblock moved upstream", "ghostty-test`tb.test_2`tblock moved upstream")
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranLessUnnamed -RemovalFiles @($ranTwoBlocks) -SkipFiles @($ranSkips)).Problems.Count -eq 0) 'Two removal entries cover two unnamed blocks.'
+    $ranNamedZero = New-RanListFile 'named-zero.tsv' @(, @('a.test.test_0', 'OK'))
+    $ranNamedOne = New-RanListFile 'named-one.tsv' @(, @('a.test.test_1', 'OK'))
+    Assert-True (((Get-RanVerdict -Baselines @($ranNamedZero) -Later $ranNamedOne).Problems -join ' ') -ceq 'DROPPED ghostty-test a.test.test_0 (ran 1 in the baseline, 0 now)') 'A named test called test_0 replaced by one called test_1 is a drop, not a renumbered block.'
+    $ranMultiA = New-RanListFile 'multi-a.tsv' @(, @('x.test.coverage...\nfirst', 'OK'))
+    $ranMultiB = New-RanListFile 'multi-b.tsv' @(, @('x.test.coverage...\nsecond', 'OK'))
+    Assert-True (((Get-RanVerdict -Baselines @($ranMultiA) -Later $ranMultiB).Problems -join ' ') -ceq 'DROPPED ghostty-test x.test.coverage...\nfirst (ran 1 in the baseline, 0 now)') 'Two names that differ only after a newline are two identities (council round 2, Sol M3).'
+    # The native fixture's two names that differ only in a byte that is not UTF-8 (council round 3, Sol).
+    $ranBytes = @((Read-RanRecord 'bytes').Tests)
+    $ranFe = New-RanListFile 'bytes-fe.tsv' @(, @($ranBytes[0].Name, 'OK'))
+    $ranFf = New-RanListFile 'bytes-ff.tsv' @(, @($ranBytes[1].Name, 'OK'))
+    Assert-True (((Get-RanVerdict -Baselines @($ranFe) -Later $ranFf).Problems -join ' ') -ceq 'DROPPED ghostty-test bytes.test.coverage\xfe (ran 1 in the baseline, 0 now)') 'A test whose name ends in byte FE replaced by one ending in FF is a drop.'
+
+    # Build identity: options, compiler and the planned crossing (council round 2, Sol M1 and Opus M1).
+    $ranOtherBuild = New-RanListFile 'other-build.tsv' $ranBaseTests -Build (New-RanBuild @{ options = '-Dcustom-shaders=true' })
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranOtherBuild -SkipFiles @($ranSkips)).Problems -join ' ') -like 'BUILD-DIFFERS options*') 'Lists built with different options are not compared.'
+    $ranZig17 = New-RanListFile 'zig17.tsv' $ranBaseTests -Build (New-RanBuild @{ zig = '0.17.1'; mode = 'debug' })
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranZig17 -SkipFiles @($ranSkips)
+    Assert-True ((($v.Problems -join ' ') -like '*BUILD-DIFFERS zig*declare -CompilerCrossing*') -and (($v.Problems -join ' ') -like '*BUILD-DIFFERS mode*')) 'A 0.15.2 baseline and a 0.17.1 list are not compared without a declared crossing.'
+    $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranZig17 -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1'
+    Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join ' ') -like '*COMPILER-CROSSING 0.15.2 -> 0.17.1: 1 baseline(s)*') 'With the crossing declared they are, mode by meaning, and the verdict names the crossing.'
+    Assert-True (((Get-RanVerdict -Baselines @($ranZig17) -Later $ranBase -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1').Problems -join ' ') -like '*BUILD-DIFFERS zig*declared crossing is 0.15.2=0.17.1*') 'A crossing is one way: 0.17.1 baselines are not compared with a 0.15.2 list.'
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranZig17 -SkipFiles @($ranSkips) -Crossing '0.15.2').Problems -join ' ') -like "*-CompilerCrossing '0.15.2' is not*") 'A malformed crossing is refused.'
+    # Across the crossing only the compiler may differ, and the mode only in its spelling
+    # (council round 3, Opus L3): each other key and each fact, one at a time.
+    foreach ($ranCase in @(
+            @{ Key = 'mode'; Build = @{ mode = 'safe' }; Expect = '*BUILD-DIFFERS mode*' }
+            @{ Key = 'options'; Build = @{ options = '-Dcustom-shaders=true' }; Expect = '*BUILD-DIFFERS options*' }
+            @{ Key = 'target'; Build = @{ target = 'aarch64-windows.win10_rs5-msvc' }; Expect = '*BUILD-DIFFERS target*' }
+            @{ Key = 'source'; Build = @{ source = 'declared' }; Expect = '*BUILD-DIFFERS source*' }
+            @{ Key = 'filtered'; Build = @{ filtered = 'true' }; Expect = '*BUILD-DIFFERS filtered*' }
+            @{ Key = 'an environment fact'; Env = @{ 'font:Arial Unicode MS' = 'present' }; Expect = '*ENV-DIFFERS font:Arial Unicode MS*' })) {
+        $ranChange = @{ zig = '0.17.1'; mode = 'debug' }
+        if ($ranCase.Build) { foreach ($k in $ranCase.Build.Keys) { $ranChange[$k] = $ranCase.Build[$k] } }
+        $ranEnvChange = if ($ranCase.Env) { New-RanEnv $ranCase.Env } else { $ranEnv }
+        $ranCrossed = New-RanListFile "crossed-$($ranCase.Key -replace '\W', '-').tsv" $ranBaseTests -Build (New-RanBuild $ranChange) -Environment $ranEnvChange
+        $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranCrossed -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1'
+        Assert-True ((($v.Problems -join ' ') -like $ranCase.Expect) -and ($v.Problems -join ' ') -notlike '*BUILD-DIFFERS zig*') "Across the crossing a list that differs in $($ranCase.Key) still fails ($($v.Problems -join ' | '))."
+    }
+    # Values read from a list compare ordinally: pwsh 7.6's -ceq ignores a control
+    # character (common brief, PWSH-CEQ-ICU), so `<ESC>0` would equal `0`.
+    $ranEsc = [string][char]27
+    Assert-True (-not (Test-RanListSame "${ranEsc}A" 'A') -and -not (Test-RanListSame (Get-RanListModeMeaning "${ranEsc}Debug") 'debug')) 'Values and modes compare ordinally, control characters included.'
+    $ranEscOptions = New-RanListFile 'esc-options.tsv' $ranBaseTests -Build (New-RanBuild @{ options = "(none)$ranEsc" })
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranEscOptions -SkipFiles @($ranSkips)).Problems -join ' ') -like '*BUILD-DIFFERS options*') 'Options that differ only by a control character are not the same build.'
+    $ranEscFact = New-RanListFile 'esc-fact.tsv' $ranBaseTests -Environment (New-RanEnv @{ 'cwd-on-temp-drive' = "true$ranEsc" })
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranEscFact -SkipFiles @($ranSkips)).Problems -join ' ') -like '*ENV-DIFFERS cwd-on-temp-drive*') 'Facts that differ only by a control character differ.'
+    $ranEscExit = Join-Path $ranTemp 'esc-exit.tsv'
+    [System.IO.File]::WriteAllText($ranEscExit, ($ranText -replace 'exit=0', "exit=${ranEsc}0"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True (((Get-RanVerdict -Baselines @($ranEscExit) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*is not a suite record*') 'A suite record whose exit is not a number is refused, not read as green.'
+    $ranEscResult = Join-Path $ranTemp 'esc-result.tsv'
+    [System.IO.File]::WriteAllText($ranEscResult, ($ranText -replace "ghostty-test`tOK`t1`ta\.test\.two", "ghostty-test`t${ranEsc}OK`t1`ta.test.two"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True (((Get-RanVerdict -Baselines @($ranEscResult) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like "*is not '<suite><TAB><OK|SKIP|FAIL>*") 'A row whose result is not exactly OK, SKIP or FAIL is refused.'
+    $ranUnknown = New-RanListFile 'unknown-build.tsv' $ranBaseTests -Build ([ordered]@{ source = 'declared'; options = 'unknown'; zig = 'unknown'; filtered = 'false' })
+    Assert-True (((Get-RanVerdict -Baselines @($ranUnknown) -Later $ranUnknown -SkipFiles @($ranSkips)).Problems -join ' ') -like '*records no real build options*') 'A list whose build is unknown is refused.'
+    $ranNoMode = New-RanListFile 'no-mode.tsv' $ranBaseTests -Build ([ordered]@{ source = 'declared'; options = '(none)'; zig = '0.15.2'; filtered = 'false' })
+    Assert-True (((Get-RanVerdict -Baselines @($ranNoMode) -Later $ranNoMode -SkipFiles @($ranSkips)).Problems -join ' ') -like '*records no real build mode*') 'A list that names no mode is refused (the record always names one).'
+    $ranFiltered = New-RanListFile 'filtered.tsv' $ranBaseTests -Build (New-RanBuild @{ options = '-Dtest-filter=resize_replay'; filtered = 'true' })
+    Assert-True (((Get-RanVerdict -Baselines @($ranFiltered) -Later $ranFiltered -SkipFiles @($ranSkips)).Problems -join ' ') -like '*filtered build*no baseline*') 'A filtered list is no baseline.'
+    Assert-True ((Get-RanVerdict -Baselines @($ranFiltered) -Later $ranFiltered -SkipFiles @($ranSkips) -AllowFiltered).Problems.Count -eq 0) 'A filtered list can be the baseline of a control when that is asked for.'
+    $ranDirty = New-RanListFile 'dirty.tsv' $ranBaseTests -Build (New-RanBuild @{ dirty = 'true' })
+    Assert-True (((Get-RanVerdict -Baselines @($ranDirty) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*dirty=true*') 'A baseline from a checkout with tracked changes is refused (council round 2, Opus L3).'
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranDirty -SkipFiles @($ranSkips)).Problems -join ' ') -like '*dirty=true*') 'So is a later list from one.'
+    Assert-True ((Get-RanVerdict -Baselines @($ranDirty) -Later $ranDirty -SkipFiles @($ranSkips) -AllowDirty).Problems.Count -eq 0) 'A dirty list can be compared in a control when that is asked for.'
+
+    $ranPhase = New-RanListFile 'phase.tsv' @(@('a.test.one', 'OK'), @('c.test.phase', 'OK'))
+    $v = Get-RanVerdict -Baselines @($ranBase, $ranPhase) -Later $ranBase -SkipFiles @($ranSkips)
+    Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -like 'DROPPED ghostty-test c.test.phase*') 'Several baselines are united: a test only the second ran must run again.'
+    Assert-True ((Get-RanListRows -SuiteName 's' -Tests @([pscustomobject]@{ Name = 'x'; Result = 'OK' }, [pscustomobject]@{ Name = 'x'; Result = 'OK' }))[0].Count -eq 2) 'A test that runs twice is one row of multiplicity 2.'
+    $ranTwice = New-RanListFile 'twice.tsv' @(@('a.test.one', 'OK'), @('a.test.one', 'OK'))
+    Assert-True (((Get-RanVerdict -Baselines @($ranTwice) -Later $ranPhase).Problems -join ' ') -like 'DROPPED ghostty-test a.test.one (ran 2 in the baseline, 1 now)*') 'A lower multiplicity is a drop.'
+    $ranVt = New-RanListFile 'vt.tsv' @(, @('a.test.one', 'OK')) -SuiteName 'ghostty-vt-test'
+    Assert-True (((Get-RanVerdict -Baselines @($ranVt) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like 'DROPPED ghostty-vt-test a.test.one*') 'The suite is part of the identity: a test that ran in another executable does not count.'
+
+    # The plan's four controls, and more, through the scripts' own exit codes.
+    $ranCompare = Join-Path $repoRoot 'scripts\compare-test-ran-list.ps1'
+    $ranCapture = Join-Path $repoRoot 'scripts\capture-test-ran-list.ps1'
+    $ranCases = @(
+        @{ Name = 'same list, skip approved'; Args = @('-Baseline', $ranBase, '-Candidate', $ranBase, '-ApprovedSkips', $ranSkips); Exit = 0 }
+        @{ Name = 'same list, skip not approved'; Args = @('-Baseline', $ranBase, '-Candidate', $ranBase); Exit = 1 }
+        @{ Name = 'dropped test'; Args = @('-Baseline', $ranBase, '-Candidate', $ranDropped, '-ApprovedSkips', $ranSkips); Exit = 1 }
+        @{ Name = 'turned SKIP'; Args = @('-Baseline', $ranBase, '-Candidate', $ranTurned, '-ApprovedSkips', $ranSkips); Exit = 1 }
+        @{ Name = 'ledgered removal'; Args = @('-Baseline', $ranBase, '-Candidate', $ranDropped, '-Removals', $ranRemovals, '-ApprovedSkips', $ranSkips); Exit = 0 }
+        @{ Name = 'missing baseline'; Args = @('-Baseline', (Join-Path $ranTemp 'no-such-baseline.tsv'), '-Candidate', $ranBase, '-ApprovedSkips', $ranSkips); Exit = 1 }
+        @{ Name = 'no baseline'; Args = @('-Candidate', $ranBase, '-ApprovedSkips', $ranSkips); Exit = 1 }
+        @{ Name = 'compiler change, undeclared'; Args = @('-Baseline', $ranBase, '-Candidate', $ranZig17, '-ApprovedSkips', $ranSkips); Exit = 1 }
+        @{ Name = 'compiler change, declared'; Args = @('-Baseline', $ranBase, '-Candidate', $ranZig17, '-ApprovedSkips', $ranSkips, '-CompilerCrossing', '0.15.2=0.17.1'); Exit = 0 }
+    )
+    foreach ($case in $ranCases) {
+        $output = & pwsh -NoProfile -NonInteractive -File $ranCompare @($case.Args) 2>&1
+        Assert-True ($LASTEXITCODE -eq $case.Exit) "Ran list compare, $($case.Name): expected exit $($case.Exit), got $LASTEXITCODE ($($output -join ' | '))."
+    }
+
+    # The capture's own command line on native fixture runs, imported: each
+    # run's stderr, its record and its exit code.
+    $ranExits = @{}
+    foreach ($l in [System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'exit-codes.tsv'))) { if ($l -match "^([\w.-]+)`t(-?\d+)$") { $ranExits[$Matches[1]] = $Matches[2] } }
+    function Invoke-RanImport {
+        param([string] $Fixture, [string] $Out, [string] $Exit = $ranExits[$Fixture], [string] $Stderr = (Join-Path $ranFixtures "$Fixture.stderr.txt"), [string] $Results = (Join-Path $ranFixtures "$Fixture.results.txt"), [string[]] $More = @())
+        return & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog $Stderr -TestResults $Results -TestLogExitCode $Exit -Suite fixture -Revision r1 -BuildOptions none -OutFile $Out @More 2>&1
+    }
+    $ranPanicLog = Join-Path $ranTemp 'panic.stderr.txt'
+    [System.IO.File]::WriteAllLines($ranPanicLog, @(Read-RanFixture 'names') + @('thread 4 panic: reached after the end line'))
+    $ranCaptureCases = @(
+        @{ Name = 'printed'; Exit = 0; Wrote = $true }
+        @{ Name = 'forge'; Exit = 0; Wrote = $true }
+        @{ Name = 'bytes'; Exit = 0; Wrote = $true }
+        @{ Name = 'leak'; Exit = 1; Wrote = $true }
+        @{ Name = 'leak'; ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' with exit 0' }
+        @{ Name = 'logged_error'; ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' with exit 0' }
+        @{ Name = 'leak'; Stderr = (Join-Path $ranFixtures 'names.stderr.txt'); Exit = 1; Wrote = $false; Note = ' with a log whose trailers are not its record''s' }
+        @{ Name = 'names'; Stderr = $ranPanicLog; ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' with a panic line in its log and exit 0' }
+        @{ Name = 'names'; Results = (New-RanRecord 'relabelled' (@([System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'names.results.txt'))) -replace '^zig 0\.15\.2$', 'zig 0.17.1' -replace '^mode Debug$', 'mode safe')); Exit = 0; Wrote = $true; Note = ' from a record that names 0.17.1 and mode safe' }
+        @{ Name = 'names'; Results = (New-RanRecord 'cut-names' ([System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'names.results.txt')) | Select-Object -SkipLast 1)); Exit = 1; Wrote = $false; Note = ' with its record cut before the end line' }
+        @{ Name = 'names'; Results = (Join-Path $ranTemp 'no-record.results.txt'); Exit = 1; Wrote = $false; Note = ' without its record' }
+    )
+    $ranN = 0
+    foreach ($case in $ranCaptureCases) {
+        $ranN++
+        $out = Join-Path $ranTemp "capture-$ranN-$($case.Name).tsv"
+        $more = @{ Fixture = $case.Name; Out = $out }
+        if ($case.ExitCode) { $more.Exit = $case.ExitCode }
+        if ($case.Stderr) { $more.Stderr = $case.Stderr }
+        if ($case.Results) { $more.Results = $case.Results }
+        $output = Invoke-RanImport @more
+        Assert-True ($LASTEXITCODE -eq $case.Exit -and (Test-Path -LiteralPath $out) -eq $case.Wrote) "Ran list capture of native fixture $($case.Name)$($case.Note): expected exit $($case.Exit) and a list $($case.Wrote), got $LASTEXITCODE and $(Test-Path -LiteralPath $out) ($($output -join ' | '))."
+    }
+    $ranPrinted = Join-Path $ranTemp 'capture-1-printed.tsv'
+    $ranPrintedText = [System.IO.File]::ReadAllText($ranPrinted)
+    Assert-True ($ranPrintedText -cmatch "(?m)^fixture`tSKIP`t1`tprinted\.test\.coverage$" -and $ranPrintedText -cmatch "(?m)^fixture`tOK`t1`tprinted\.test\.platform$" -and $ranPrintedText -cmatch '(?m)^# build: source=imported\toptions=\(none\)\tfiltered=false\tmode=Debug\tzig=0\.15\.2$') "The captured list holds the record's results, and the record's mode and compiler."
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-4-leak.tsv')) -cmatch '(?m)^# suite: fixture tests=2 ok=2 skip=0 fail=0 exit=1 errors-logged=1 leaked=1 panics=0$') 'A captured leak keeps its exit code and the record''s counts in the list.'
+    Assert-True ((Get-RanVerdict -Baselines @((Join-Path $ranTemp 'capture-5-leak.tsv')) -Later (Join-Path $ranTemp 'capture-5-leak.tsv')).Problems -join ' ' -like '*not green (exit 0*1 leaked*') 'A leak with exit 0 is still not green.'
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-8-names.tsv')) -cmatch '(?m)^# suite: fixture tests=7 ok=7 skip=0 fail=0 exit=0 errors-logged=0 leaked=0 panics=1$') 'A panic line in the log is counted in the list.'
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-9-names.tsv')) -cmatch '(?m)^# build: source=imported\toptions=\(none\)\tfiltered=false\tmode=safe\tzig=0\.17\.1$') 'The list records the compiler and the mode its record names.'
+    # Sol's false pass, end to end: the baseline ran coverage OK and skipped platform,
+    # which alone is approved; the later run skips coverage while it prints OK.
+    $ranSolBase = New-RanListFile 'sol-base.tsv' -Build ([ordered]@{ source = 'imported'; options = '(none)'; filtered = 'false'; mode = 'Debug'; zig = '0.15.2' }) -Environment (Read-RanList -Path $ranPrinted).Environment -Suites @(@{ Name = 'fixture'; Tests = @(@('printed.test.coverage', 'OK'), @('printed.test.platform', 'SKIP')) })
+    $ranSolSkips = New-RanLedger 'sol-skips.tsv' @("fixture`tprinted.test.platform`t-`tthe platform skips")
+    $v = Get-RanVerdict -Baselines @($ranSolBase) -Later $ranPrinted -SkipFiles @($ranSolSkips)
+    Assert-True (($v.Problems -join ' ') -ceq 'UNAPPROVED-SKIP fixture printed.test.coverage (1 skipped, 0 approved)') "A test that skips while it prints OK fails as an unapproved skip (council round 3, Sol's High): $($v.Problems -join ' | ')"
+    $ranForgeSkips = New-RanLedger 'forge-skips.tsv' @("fixture`tforge.test.second`t-`tthe second skips")
+    Assert-True (((Get-RanVerdict -Baselines @((Join-Path $ranTemp 'capture-2-forge.tsv')) -Later (Join-Path $ranTemp 'capture-2-forge.tsv') -SkipFiles @($ranForgeSkips)).Problems -join ' ') -ceq 'UNAPPROVED-SKIP fixture forge.test.first (1 skipped, 0 approved)') 'A test that prints the next header skips under its own name (council round 3, Opus L1).'
+    # Several inputs need a -Command call: `pwsh -File` hands `a,b` to the script as one value.
+    function Invoke-RanCaptureCommand { param([string] $Arguments) return & pwsh -NoProfile -NonInteractive -Command "& '$ranCapture' $Arguments; exit `$LASTEXITCODE" 2>&1 }
+    function Get-RanFixturePath { param([string] $Name) return "'$(Join-Path $ranFixtures $Name)'" }
+    # Two suites whose labels differ only by case are refused at capture (council round 3, Sol and Opus L2).
+    $output = Invoke-RanCaptureCommand "-TestLog $(Get-RanFixturePath 'names.stderr.txt'), $(Get-RanFixturePath 'leak.stderr.txt') -TestResults $(Get-RanFixturePath 'names.results.txt'), $(Get-RanFixturePath 'leak.results.txt') -TestLogExitCode 0, 1 -Suite Unit, unit -Revision r1 -BuildOptions none -OutFile '$(Join-Path $ranTemp 'case.tsv')'"
+    Assert-True ($LASTEXITCODE -ne 0 -and (Join-RanOutput $output) -like "*Suite 'unit' is given twice*case*" -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'case.tsv'))) "The capture refuses suites Unit and unit ($($output -join ' | '))."
+    # One list is one compiler: a record from another refuses the list.
+    $ranOther = New-RanRecord 'other-zig' (@([System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'names.results.txt'))) -replace '^zig 0\.15\.2$', 'zig 0.17.1')
+    $output = Invoke-RanCaptureCommand "-TestLog $(Get-RanFixturePath 'names.stderr.txt'), $(Get-RanFixturePath 'glued.stderr.txt') -TestResults '$ranOther', $(Get-RanFixturePath 'glued.results.txt') -TestLogExitCode 0, 0 -Suite one, two -Revision r1 -BuildOptions none -OutFile '$(Join-Path $ranTemp 'two-zig.tsv')'"
+    Assert-True ($LASTEXITCODE -ne 0 -and (Join-RanOutput $output) -like '*compiler differs*0.17.1*' -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'two-zig.tsv'))) "Records from two compilers make no list ($($output -join ' | '))."
+    # An imported run never takes the importer's environment (council round 2, Sol M2).
+    Assert-True ($ranPrintedText -cmatch '(?m)^# build: source=imported\t' -and @([regex]::Matches($ranPrintedText, '(?m)^# env: [^=]+=unknown$')).Count -eq (Get-RanListFactKeys).Count) 'An imported run records every environment fact as unknown when it recorded none.'
+    $ranImportSkip = New-RanLedger 'import-skip.tsv' @("fixture`tprinted.test.coverage`tfont:Arial Unicode MS=absent`tneeds the font")
+    Assert-True (((Get-RanVerdict -Baselines @($ranPrinted) -Later $ranPrinted -SkipFiles @($ranImportSkip)).Problems -join ' ') -like "*SKIP-ENVIRONMENT*an imported run that recorded no facts*") 'An approval that needs a fact does not cover an imported run that could not record it.'
+    $ranFacts = Join-Path $ranTemp 'run-facts.txt'
+    $null = & pwsh -NoProfile -NonInteractive -File $ranCapture -WriteFacts $ranFacts -WorkingDirectory $ranTemp 2>&1
+    Assert-True ($LASTEXITCODE -eq 0 -and @([System.IO.File]::ReadAllLines($ranFacts) | Where-Object { $_ -match '^# env: [^=]+=(true|false|absent|present|unset|1|other)$' }).Count -eq (Get-RanListFactKeys).Count) '-WriteFacts records the run''s environment beside it.'
+    $out = Join-Path $ranTemp 'capture-with-facts.tsv'
+    $null = Invoke-RanImport -Fixture 'names' -Out $out -More @('-TestLogFacts', $ranFacts)
+    Assert-True ($LASTEXITCODE -eq 0 -and ([System.IO.File]::ReadAllText($out) -cnotmatch '=unknown') -and ([System.IO.File]::ReadAllText($out) -cmatch [regex]::Escape(@([System.IO.File]::ReadAllLines($ranFacts))[0]))) 'An imported run takes its recorded facts from -TestLogFacts.'
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog (Join-Path $ranFixtures 'names.stderr.txt') -TestResults (Join-Path $ranFixtures 'names.results.txt') -TestLogExitCode 0 -Revision r1 -BuildOptions unknown -OutFile (Join-Path $ranTemp 'unknown.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'unknown.tsv'))) "An imported run refuses an unknown build ($($output -join ' | '))."
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog (Join-Path $ranFixtures 'names.stderr.txt') -TestResults (Join-Path $ranFixtures 'names.results.txt') -Revision r1 -BuildOptions none -OutFile (Join-Path $ranTemp 'no-exit.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'no-exit.tsv'))) "An import needs the exit code of the run that wrote it ($($output -join ' | '))."
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog (Join-Path $ranFixtures 'names.stderr.txt') -TestLogExitCode 0 -Revision r1 -BuildOptions none -OutFile (Join-Path $ranTemp 'no-record.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -ne 0 -and (Join-RanOutput $output) -like '*one -TestResults*' -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'no-record.tsv'))) "A log without its record cannot be imported ($($output -join ' | '))."
+    # The environment check comes first: in build mode, before the build (council round 2, Opus L6).
+    $ranHere = Get-RanListEnvironment -Directory $ranTemp
+    $ranFlipped = [ordered]@{}
+    foreach ($key in $ranHere.Keys) { $ranFlipped[$key] = $ranHere[$key] }
+    $ranFlipped['cwd-on-temp-drive'] = $(if ($ranHere['cwd-on-temp-drive'] -ceq 'true') { 'false' } else { 'true' })
+    $ranEnvBase = New-RanListFile 'env-base.tsv' $ranBaseTests -Environment $ranFlipped
+    # A checkout whose scripts\dev-windows.cmd stands in for the build: it
+    # half-installs into the --prefix it is given, notes that prefix, and fails;
+    # or, with stub-edits.txt beside it, edits a tracked file and succeeds.
+    $ranRepo = Join-Path $ranTemp 'checkout'
+    New-Item -ItemType Directory -Path (Join-Path $ranRepo 'scripts') -Force | Out-Null
+    $ranStub = @('@echo off', ':next', 'if "%~1"=="" exit /b 3', 'if "%~1"=="--prefix" goto found', 'shift', 'goto next', ':found', 'if exist stub-edits.txt (echo edited>> README& exit /b 0)', 'mkdir "%~2\bin"', 'echo partial> "%~2\bin\ghostty-test.exe"', 'echo %~2> stub-ran.txt', 'exit /b 3')
+    [System.IO.File]::WriteAllText((Join-Path $ranRepo 'scripts\dev-windows.cmd'), (($ranStub -join "`r`n") + "`r`n"))
+    [System.IO.File]::WriteAllText((Join-Path $ranRepo 'README'), "x`n")
+    $null = & git -C $ranRepo init -q 2>&1
+    $null = & git -C $ranRepo add README scripts/dev-windows.cmd 2>&1
+    $null = & git -C $ranRepo -c user.name=ci -c user.email=ci@invalid -c core.autocrlf=false commit -q -m x 2>&1
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -Checkout $ranRepo -BuildOptions none -EnvironmentOf $ranEnvBase -OutFile (Join-Path $ranTemp 'env-build.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*environment fact cwd-on-temp-drive*nothing was built or run*' -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'env-build.build.log')) -and -not (Test-Path -LiteralPath (Join-Path $ranRepo 'stub-ran.txt'))) "Build mode checks -EnvironmentOf before it builds anything ($($output -join ' | '))."
+    # A failed build leaves no prefix behind (council round 2, Opus L7).
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -Checkout $ranRepo -BuildOptions none -OutFile (Join-Path $ranTemp 'failed-build.tsv') 2>&1
+    $ranStubRan = Join-Path $ranRepo 'stub-ran.txt'
+    $ranHalf = if (Test-Path -LiteralPath $ranStubRan) { Join-Path $ranRepo ([System.IO.File]::ReadAllText($ranStubRan).Trim()) } else { $null }
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*The build failed*' -and $null -ne $ranHalf -and $ranHalf -like '*\.zig-cache\ran-list-*' -and -not (Test-Path -LiteralPath $ranHalf) -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'failed-build.tsv'))) "A failed build's half-installed prefix is removed ($($output -join ' | '))."
+    Remove-Item -LiteralPath $ranStubRan
+    # A tracked file that changes during the build makes no list (council round 3, Opus L4).
+    [System.IO.File]::WriteAllText((Join-Path $ranRepo 'stub-edits.txt'), '')
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -Checkout $ranRepo -BuildOptions none -OutFile (Join-Path $ranTemp 'edited-build.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*changed during the build*no list written*' -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'edited-build.tsv'))) "A checkout edited during the build is refused ($($output -join ' | '))."
+    Remove-Item -LiteralPath (Join-Path $ranRepo 'stub-edits.txt')
+    $null = & git -C $ranRepo checkout -q -- README 2>&1
+    # The same check after the run, on its own: HEAD and tracked files.
+    $ranState = Get-RanListCheckoutState -Root $ranRepo
+    Assert-RanListCheckoutUnchanged -Root $ranRepo -Before $ranState -When 'during the run'
+    [System.IO.File]::WriteAllText((Join-Path $ranRepo 'README'), "changed`n")
+    $ranThrew = try { Assert-RanListCheckoutUnchanged -Root $ranRepo -Before $ranState -When 'during the run'; $false } catch { $_.Exception.Message -like '*changed during the run*' }
+    Assert-True $ranThrew 'A tracked file edited during the run is seen.'
+    $null = & git -C $ranRepo checkout -q -- README 2>&1
+    $null = & git -C $ranRepo -c user.name=ci -c user.email=ci@invalid commit -q --allow-empty -m y 2>&1
+    $ranThrew = try { Assert-RanListCheckoutUnchanged -Root $ranRepo -Before $ranState -When 'during the run'; $false } catch { $_.Exception.Message -like '*changed during the run*' }
+    Assert-True $ranThrew 'A commit made during the run is seen.'
+    # Build mode refuses a checkout with tracked changes unless asked (council round 2, Opus L3).
+    [System.IO.File]::WriteAllText((Join-Path $ranRepo 'README'), "changed`n")
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -Checkout $ranRepo -BuildOptions none -OutFile (Join-Path $ranTemp 'dirty-build.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*has tracked changes*' -and -not (Test-Path -LiteralPath $ranStubRan)) "Build mode refuses a dirty checkout before it builds ($($output -join ' | '))."
+    Assert-True (@($ranHere.Keys) -contains 'temp-makes-8dot3-names' -and @($ranHere.Keys) -contains 'font:Noto Serif Tibetan' -and $ranHere['env:NOCTTY_RUN_LOCAL_PATH_SWEEP'] -cin @('unset', '1', 'other')) 'The capture records the facts the environment-dependent tests read.'
+
+    # Paths resolve against PowerShell's location, not .NET's current directory:
+    # old holds a list that would pass, new one that drops a test, with the
+    # baseline and approvals in both (council round 2, Opus L1).
+    $ranOld = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'old')
+    $ranNew = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'new')
+    foreach ($dir in $ranOld, $ranNew) {
+        Copy-Item -LiteralPath $ranBase -Destination (Join-Path $dir 'base.tsv')
+        Copy-Item -LiteralPath $ranSkips -Destination (Join-Path $dir 'skips.tsv')
+    }
+    Copy-Item -LiteralPath $ranBase -Destination (Join-Path $ranOld 'candidate.tsv')
+    Copy-Item -LiteralPath $ranDropped -Destination (Join-Path $ranNew 'candidate.tsv')
+    $null = & pwsh -NoProfile -NonInteractive -File $ranCompare -Baseline (Join-Path $ranOld 'base.tsv') -Candidate (Join-Path $ranOld 'candidate.tsv') -ApprovedSkips (Join-Path $ranOld 'skips.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -eq 0) 'The old directory''s candidate passes (so a resolver that read it would pass).'
+    [Environment]::CurrentDirectory = $ranOld.FullName
+    Set-Location -LiteralPath $ranNew.FullName
+    # The compare writes its problems to the console's stderr, which *>&1 does not take in process.
+    $ranStderr = [System.IO.StringWriter]::new()
+    $ranConsoleError = [Console]::Error
+    [Console]::SetError($ranStderr)
+    try { $null = & $ranCompare -Baseline base.tsv -Candidate candidate.tsv -ApprovedSkips skips.tsv *>&1 }
+    finally { [Console]::SetError($ranConsoleError) }
+    Assert-True ($LASTEXITCODE -eq 1 -and $ranStderr.ToString().Trim() -ceq "RAN LIST: DROPPED ghostty-test a.test.two (ran 1 in the baseline, 0 now)$([Environment]::NewLine)RAN LIST: FAIL (1 problems)") "After Set-Location, relative paths are the new location's: its candidate drops a test, and only that ($($ranStderr.ToString().Trim()))."
+    $ranImportMap = @{ TestLog = (Join-Path $ranFixtures 'names.stderr.txt'); TestResults = (Join-Path $ranFixtures 'names.results.txt'); TestLogExitCode = 0; Revision = 'r1'; BuildOptions = 'none' }
+    $null = & $ranCapture @ranImportMap -OutFile relative.tsv *>&1
+    Assert-True ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $ranNew 'relative.tsv')) -and -not (Test-Path -LiteralPath (Join-Path $ranOld 'relative.tsv'))) 'After Set-Location, a relative -OutFile is written in the new location.'
+}
+finally {
+    Set-Location -LiteralPath $ranSavedLocation
+    [Environment]::CurrentDirectory = $ranSavedDirectory
+    Remove-Item -LiteralPath $ranTemp -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The seeded approvals: every entry parses, has a reason, and names only facts the capture records.
+$ranLedgerProblems = [Collections.Generic.List[string]]::new()
+$ranSeed = Read-RanListLedger -Paths @((Join-Path $repoRoot 'test\windows\ran-list-approved-skips.tsv')) -Kind 'approved skips' -Problems $ranLedgerProblems
+$ranSeedCount = @($ranSeed.Values | ForEach-Object { $_ }).Count
+$ranBadFacts = @($ranSeed.Values | ForEach-Object { $_ } | ForEach-Object { $_.Requires } | Where-Object { $_ } | ForEach-Object { ($_ -split '=', 2)[0] } | Where-Object { $_ -cnotin (Get-RanListFactKeys) -and -not $_.StartsWith('build:') })
+Assert-True ($ranLedgerProblems.Count -eq 0 -and $ranSeedCount -eq 196 -and $ranBadFacts.Count -eq 0) "The seeded approved skips parse (196 entries) and name known facts only ($($ranLedgerProblems -join '; ') $($ranBadFacts -join ', '))."
+
 # --- Installer: what Setup asks Restart Manager to close --------------------
 # The native ARM64 build job compiles dist/windows/noctty.iss on a pull request
 # that touches it, with the runner image's Inno Setup (6.7.1 when measured; the
