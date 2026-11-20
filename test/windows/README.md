@@ -1113,12 +1113,30 @@ It must refuse each of these for its own reason:
 - measurement mode unset;
 - a missing or mismatched `noctty.com` beside the app.
 
-**Q0**, run locally and hosted:
+**Q0**, run locally and hosted, in three arms (design §9: "the CLI, either
+ConPTY host"):
+
+- the copy with its bundled ConPTY host (`OpenConsole.exe`);
+- the same with the in-box host (`NOCTTY_CONPTY=inbox`, `conhost.exe`);
+- the copy's CLI as PR 1's leaves run it: `noctty.com +version`, and
+  `+list-windows --class=<fresh class> --format=json --timeout=1000`. The
+  single-instance pipe is named only from `--class`, so the CLI arm reaches
+  no other noctty, and it runs locally too.
+
+Each arm:
+
 
 - A driver created by name on a private desktop (`Invoke-LocalHiddenDriver`)
   starts the copy.
-- It records the desktop of every process in the job, read from the process's
-  startup desktop (PEB `DesktopInfo`) and its threads' desktops.
+- It records the desktop of every process in the job, plus every Toolhelp
+  descendant of the launched root, linked by PID and creation time. A
+  descendant outside the job is `leftJob`: it is judged like the rest and
+  stopped by its exact PID and creation time.
+- It reads each process's startup desktop (PEB `DesktopInfo`) and its
+  threads' desktops while holding read-only handles to Default and the
+  private desktop. `GetThreadDesktop` names another process's thread desktop
+  only while the caller holds a handle to that desktop (test-harnesses.md
+  2026-11-20 PROBE-THREAD-DESKTOP-01).
 - It records every top-level window found on the private desktop and on
   Default. Both inventories must be complete:
   - every `FALSE` from `EnumDesktopWindows` counts as unavailable;
@@ -1136,7 +1154,9 @@ It must refuse each of these for its own reason:
 - Positive control: a child started without a desktop name reports the private
   desktop.
 - Negative control: a thread moved to a second desktop with `SetThreadDesktop`
-  starts a child that reports Default.
+  starts a child that reports Default. While the child waits, Q0's own reader
+  must name Default for both its startup desktop and its thread desktops.
+- Q0 passes only when all three arms and every control pass.
 
 **D3**, run hosted only (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` checked).
 On the runner's own Default desktop, each item has a control:
@@ -1191,6 +1211,14 @@ pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix
   gate's control, which must refuse it.
 - `-Part All` refuses to start off a hosted runner, and needs
   `-TestToolsBin`.
+- Locally, the run also:
+  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`);
+  - reads only the measurement identity's toast facts;
+  - gives each noctty child a `TEMP` and `TMP` under its run directory;
+  - deletes the copies it made under `-Work` once the record is written
+    (`-KeepCopies` keeps them);
+  - exits 3 after a tripped guard and 2 after a failed stage.
+- On a hosted runner the probe is record-only and exits 0.
 - The record holds only values and HRESULTs. `Assert-ProbeRecordAllowed`
   refuses any other string, so no screen image, path, environment value,
   window title or command line enters it.

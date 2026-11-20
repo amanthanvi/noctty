@@ -23,9 +23,16 @@ never the text, that it is System32's cmd.exe with /D ahead of any payload.
 The P3 fixture's shell is the same cmd with `/D /K type <seed file>`: 20 lines of 64 printable characters (1320
 bytes), or, for a withheld-seed control, an empty file. No image, no custom shader, one pane.
 
-Q0 (local and hosted). Invoke-LocalHiddenDriver (hidden-win11-local-lib.ps1, the #727 soak's model) creates a private
-desktop and runs this script again as the driver on it, by name, in a kill-on-close job. The driver starts noctty on
-that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
+Q0 (local and hosted), three arms, each in a driver of its own (design §9: "the CLI, either ConPTY host"): the copy
+with its bundled ConPTY host (OpenConsole.exe), the same with the in-box host (NOCTTY_CONPTY=inbox, conhost.exe), and
+the copy's CLI run the way PR 1's leaves run it (`noctty.com +version`, and `+list-windows --class=<fresh class>
+--format=json --timeout=1000`). Invoke-LocalHiddenDriver (hidden-win11-local-lib.ps1, the #727 soak's model) creates
+a private desktop and runs this script again as the driver on it, by name, in a kill-on-close job. The sample is the
+job's PIDs plus every Toolhelp descendant of the launched root (PID and creation time): one that left the job
+(noctty.com's action job lets its children break away) is `leftJob`, judged like the rest and stopped by its exact PID
+and creation time. Every desktop read holds read-only handles to Default and the private desktop, because
+GetThreadDesktop names another process's thread desktop only while the caller holds a handle to it (test-harnesses.md
+2026-11-20 PROBE-THREAD-DESKTOP-01). The driver starts noctty on that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
 top-level window on the private and the Default desktop, the desktop each is on: a process by its startup desktop
 (RTL_USER_PROCESS_PARAMETERS.DesktopInfo, read from its PEB) and its threads' desktops, a window by the desktop it
 was enumerated on. Then it stops each of them by exact PID (creation time and job membership checked) and records that
@@ -36,8 +43,11 @@ inventories are complete; the job's own TotalProcesses is recorded beside the sa
 exited before it (cmd's utf8-console `chcp`) is counted, never hidden.
 Positive control: a child the driver starts without naming a desktop reports the private one (the design's M1).
 Negative control: a fresh thread of this (Default-desktop) process, moved to a second private desktop with
-SetThreadDesktop, starts a child without naming a desktop, in a job of its own; the child reports Default. The
-children create no window.
+SetThreadDesktop, starts a child without naming a desktop, in a job of its own; the child reports Default. While it
+waits, Q0's own reader must name Default for its startup desktop and its thread desktops (the reader's Default-side
+control; unreadable leaves Q0 inconclusive). The children create no window. Q0 passes only when all three arms and
+every control pass. The CLI arm is safe locally: the single-instance pipe is named only from --class
+(src/apprt/win32/ipc_server.zig), `+list-windows` names a fresh class no instance owns, and `+version` uses no IPC.
 
 The driver admits itself before it starts any copy, taking nothing on trust from its caller: it validates the
 measurement build from -MeasureRepo as the outer half does (generation, receipt, the app and CLI hashes), takes the
@@ -77,7 +87,11 @@ Default desktop:
       and on the private desktop.
 A probe is conclusive only with its positive record and its control; a missing record is "inconclusive".
 -Part Local runs Q0 and the private-desktop facts of P4 and P5 on the measurement build, without touching its user's
-desktop; -Part All (D3) refuses to start off a GitHub-hosted runner.
+desktop; -Part All (D3) refuses to start off a GitHub-hosted runner. Locally the run also keeps the real state's guard
+(scripts/interactive-win11-state-guard.ps1: the product jump list, startup-attempts.json, the clipboard sequence),
+reads only the measurement identity's toast facts, gives each noctty child a TEMP and TMP under its run directory,
+deletes the copies it made under -Work once the record is written (-KeepCopies keeps them), and exits 3 after a
+tripped guard and 2 after a failed stage. On a hosted runner the probe is record-only and exits 0.
 
 Staging copies each build's prefix bin and refuses the run unless both its app (noctty.exe) and its CLI (noctty.com)
 match the build: the measurement receipt's ExeSHA256 and CliSHA256, or the test-tools prefix's own files.
@@ -103,19 +117,23 @@ param(
     [string] $Work,
     [string] $Out,
     [ValidateSet('Q0', 'Local', 'All')] [string] $Part = 'Q0',
+    # Locally, keep the copies a run made under -Work (they are deleted after the record is written otherwise).
+    [switch] $KeepCopies,
     # The -Drenderer-test-tools=true build's prefix bin, for P3, P4 and P5 (-Part Local and All).
     [string] $TestToolsBin,
     # The driver half, run by Invoke-LocalHiddenDriver on the private desktop.
     [switch] $Driver,
     [string] $Run,
     [string] $DesktopName,
-    [ValidateSet('q0', 'private-renderer', 'private-renderer-withheld')] [string] $Task = 'q0',
+    [ValidateSet('q0', 'q0-inbox', 'q0-cli', 'private-renderer', 'private-renderer-withheld')] [string] $Task = 'q0',
     # The test-tools build's hashes for the driver's launcher gate, used only on a GitHub-hosted runner. The
     # measurement build's come from its receipt, which the driver validates itself.
     [string] $TestToolsSha256,
     [string] $TestToolsCliSha256,
     # A child that writes the name of its own thread's desktop to this file and exits (the Q0 controls).
-    [string] $ReportDesktop
+    [string] $ReportDesktop,
+    # With -ReportDesktop: after the report, wait (at most 30 s) until this file exists, so a reader can read it alive.
+    [string] $HoldUntil
 )
 $ErrorActionPreference = 'Stop'
 
@@ -130,12 +148,17 @@ public static extern bool GetUserObjectInformationW(System.IntPtr h, int index, 
     $needed = 0
     $ok = [GuiProbeChild.Desk]::GetUserObjectInformationW([GuiProbeChild.Desk]::GetThreadDesktop([GuiProbeChild.Desk]::GetCurrentThreadId()), 2, $name, 512, [ref]$needed)
     [IO.File]::WriteAllText($ReportDesktop, $(if ($ok) { $name.ToString() } else { '' }))
+    if ($HoldUntil) {
+        $deadline = [datetime]::UtcNow.AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $HoldUntil) -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    }
     exit 0
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
+. (Join-Path $repoRoot 'scripts\interactive-win11-state-guard.ps1')
 
 if ([IntPtr]::Size -ne 8) { throw 'The probe reads x64 process structures; run it in 64-bit PowerShell.' }
 
@@ -446,6 +469,25 @@ public static class GuiProbeNative {
             if (!QueryInformationJobObject(job, 1, buffer, 48, IntPtr.Zero)) return null;
             return new int[] { Marshal.ReadInt32(buffer, 36), Marshal.ReadInt32(buffer, 40), Marshal.ReadInt32(buffer, 44) };
         } finally { Marshal.FreeHGlobal(buffer); }
+    }
+    // A read-only handle to a desktop of this window station (DESKTOP_READOBJECTS), held while another process's
+    // thread desktops are read: GetThreadDesktop names a thread's desktop across processes only while the caller
+    // holds a handle to that desktop (measured, council r1: with it closed the same threads give NULL, error 5).
+    public static IntPtr OpenDesktopReader(string name) { return OpenDesktopW(name, 0, false, 0x0001); }
+    public static void CloseDesktopReader(IntPtr h) { if (h != IntPtr.Zero) CloseDesktop(h); }
+    // Ends `pid` only if it is still the process created at `creation`, with no job check: for a descendant the
+    // caller linked to its root by PID and creation time that has left the job (noctty.com's action job lets its
+    // children break away). "terminated", "gone", "reused" or "stillRunning".
+    public static string StopExactDescendant(int pid, long creation) {
+        IntPtr h = OpenProcess(0x0001 | 0x1000 | 0x00100000, false, pid);
+        if (h == IntPtr.Zero) return "gone";
+        try {
+            long c, e, k, u;
+            if (!GetProcessTimes(h, out c, out e, out k, out u) || c != creation) return "reused";
+            if (WaitForSingleObject(h, 0) == 0) return "gone";
+            TerminateProcess(h, 1);
+            return WaitForSingleObject(h, 5000) == 0 ? "terminated" : "stillRunning";
+        } finally { CloseHandle(h); }
     }
     // Whether this process runs inside a job (any job).
     public static bool InJob() { bool r; return IsProcessInJob(new IntPtr(-1), IntPtr.Zero, out r) && r; }
@@ -941,11 +983,12 @@ function Get-ProbeLaunchRefusal([string] $Exe) {
 # Starts the copy on `Desktop` (named explicitly) in `Job`, with the probe's records, stderr logging and on-request
 # render-trace snapshots on, the test tools' readback files when `CapturePath` is given and the P3 fixture's shell when
 # `SeedPath` is. Its launch policy is left in $script:LastLaunchPolicy.
-function Start-ProbeCopy([string] $Exe, [string] $Desktop, [string] $LogPath, [IntPtr] $Job, [string] $TracePath, [string] $CapturePath, [string] $SeedPath) {
+function Start-ProbeCopy([string] $Exe, [string] $Desktop, [string] $LogPath, [IntPtr] $Job, [string] $TracePath, [string] $CapturePath, [string] $SeedPath, [hashtable] $ExtraEnvironment = @{}) {
     $refusal = Get-ProbeLaunchRefusal $Exe
     if ($refusal) { throw "The launcher refused the copy: $refusal." }
     $build = $(if ((Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $script:MeasureExeSha256) { 'measurement' } else { 'test-tools' })
-    $names = @('GHOSTTY_LOG', 'NOCTTY_GUI_PROBE_TRACE', 'NOCTTY_RENDER_TRACE_FILE', 'NOCTTY_RENDER_TRACE_LIVE', 'NOCTTY_RENDERER_CAPTURE_PATH', 'NOCTTY_RENDERER_STATUS_PATH')
+    foreach ($key in $ExtraEnvironment.Keys) { if ($key -cnotin @('NOCTTY_CONPTY')) { throw "The copy takes no extra environment variable $key." } }
+    $names = @('GHOSTTY_LOG', 'NOCTTY_GUI_PROBE_TRACE', 'NOCTTY_RENDER_TRACE_FILE', 'NOCTTY_RENDER_TRACE_LIVE', 'NOCTTY_RENDERER_CAPTURE_PATH', 'NOCTTY_RENDERER_STATUS_PATH', 'NOCTTY_CONPTY', 'TEMP', 'TMP')
     $saved = @{}
     foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
     try {
@@ -953,6 +996,15 @@ function Start-ProbeCopy([string] $Exe, [string] $Desktop, [string] $LogPath, [I
         $env:NOCTTY_GUI_PROBE_TRACE = '1'
         $env:NOCTTY_RENDER_TRACE_FILE = $TracePath
         $env:NOCTTY_RENDER_TRACE_LIVE = '1'
+        $env:NOCTTY_CONPTY = $(if ($ExtraEnvironment.ContainsKey('NOCTTY_CONPTY')) { [string]$ExtraEnvironment['NOCTTY_CONPTY'] } else { $null })
+        # Locally the noctty child (and its shell) gets a TEMP and TMP under its own run directory. Only this child:
+        # no msys or Git Bash process ever gets a redirected TEMP (the /tmp trap).
+        $tempRedirected = -not (Test-ProbeHosted)
+        if ($tempRedirected) {
+            $copyTemp = Join-Path (Split-Path -Parent (Split-Path -Parent $Exe)) 'temp'
+            [void][IO.Directory]::CreateDirectory($copyTemp)
+            $env:TEMP = $copyTemp; $env:TMP = $copyTemp
+        }
         $env:NOCTTY_RENDERER_CAPTURE_PATH = $(if ($CapturePath) { $CapturePath } else { $null })
         $env:NOCTTY_RENDERER_STATUS_PATH = $(if ($CapturePath) { [IO.Path]::ChangeExtension($CapturePath, '.status.json') } else { $null })
         $launch = Get-CopyLaunch $Exe $SeedPath
@@ -964,6 +1016,8 @@ function Start-ProbeCopy([string] $Exe, [string] $Desktop, [string] $LogPath, [I
         $script:LastLaunchPolicy.portable = $true
         $script:LastLaunchPolicy.iconAbsent = $true
         $script:LastLaunchPolicy.appAndCliMatchBuild = $true
+        $script:LastLaunchPolicy.conptyHost = $(if ($env:NOCTTY_CONPTY -ceq 'inbox') { 'inbox' } else { 'bundled' })
+        $script:LastLaunchPolicy.tempRedirected = $tempRedirected
         $script:LastLaunchPolicy.profileRedirected = $true
         $pi = [GuiProbeNative]::Start($Exe, $launch.Line, (Split-Path -Parent $Exe), $Desktop, $LogPath, $Job, $false)
         [void][GuiProbeNative]::CloseHandle($pi.thread)
@@ -1061,7 +1115,7 @@ function Get-ToastFacts([string] $Desktop, [IntPtr] $Job, [string] $Private) {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
-$rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('measure', 'io.github.amanthanvi.noctty.measure'))) {
+$rows = foreach ($pair in __IDENTITIES__) {
     $row = [ordered]@{ identity = $pair[0]; setting = $null; settingValue = $null; settingHresult = $null; history = $null; historyHresult = $null }
     try {
         $value = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($pair[1]).Setting
@@ -1074,6 +1128,9 @@ $rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('meas
 [Console]::Out.Write((ConvertTo-Json -InputObject @($rows) -Compress))
 '@
     $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # Locally only the measurement identity is read: the product identity's setting and history are the maintainer's.
+    $identities = $(if (Test-ProbeHosted) { "@(@('product', 'io.github.amanthanvi.noctty'), @('measure', 'io.github.amanthanvi.noctty.measure'))" } else { "@(,@('measure', 'io.github.amanthanvi.noctty.measure'))" })
+    $script = $script.Replace('__IDENTITIES__', $identities)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     $outPath = Join-Path $script:RunRoot ("toast-" + [guid]::NewGuid().ToString('N') + '.json')
     $pi = [GuiProbeNative]::Start($powershell, ('"{0}" -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand {1}' -f $powershell, $encoded), $script:RunRoot, $Desktop, $outPath, $Job, $true)
@@ -1093,11 +1150,68 @@ $rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('meas
 }
 
 # Every process of the job now, with its role, its startup desktop and its threads' desktops.
+# Read-only handles to the named desktops, held around a desktop census (GetThreadDesktop's handle rule above).
+function Open-ProbeDesktopReaders([string[]] $Names) {
+    $readers = [ordered]@{}
+    foreach ($name in $Names) { if ($name) { $readers[$name] = [GuiProbeNative]::OpenDesktopReader($name) } }
+    return $readers
+}
+function Close-ProbeDesktopReaders($Readers) { foreach ($h in @($Readers.Values)) { [GuiProbeNative]::CloseDesktopReader($h) } }
+function Test-ProbeDesktopReadersOpen($Readers) { return $Readers.Count -gt 0 -and @($Readers.Values | Where-Object { $_ -eq [IntPtr]::Zero }).Count -eq 0 }
+
+# One process's desktops, Q0's reader: its startup desktop (PEB DesktopInfo) and each thread's desktop, classified as
+# named, no USER desktop (GetThreadDesktop NULL, its errors listed) or unreadable. The caller holds desktop readers for
+# every desktop it can meet.
+function Get-ProcessDesktopReading([int] $ProcessId, [string] $Private) {
+    $threadKinds = [Collections.Generic.List[string]]::new()
+    $without = 0; $unreadable = 0
+    $noDesktopErrors = [Collections.Generic.SortedSet[int]]::new()
+    foreach ($tid in [GuiProbeNative]::Threads($ProcessId)) {
+        $name = $null; $readError = 0
+        switch ([GuiProbeNative]::ThreadDesktopState($tid, [ref]$name, [ref]$readError)) {
+            0 { $threadKinds.Add((Get-DesktopKind $name $Private)) }
+            1 { $without++; [void]$noDesktopErrors.Add($readError) }
+            default { $unreadable++ }
+        }
+    }
+    return [ordered]@{
+        startupDesktop = Get-DesktopKind ([GuiProbeNative]::StartupDesktop($ProcessId)) $Private
+        threadDesktops = @($threadKinds | Sort-Object -Unique)
+        threadsWithoutDesktop = $without
+        noDesktopErrors = @($noDesktopErrors)
+        threadsUnreadable = $unreadable
+    }
+}
+
+# Every Toolhelp descendant of `RootPid` in `All` (rows by PID), as PID -> creation time. A child links to its parent
+# only when it was created no earlier than the parent, so a reused PID cannot join the tree.
+function Get-ProbeDescendants($All, [int] $RootPid) {
+    $found = [ordered]@{}
+    $rootCreation = [GuiProbeNative]::CreationTime($RootPid)
+    if ($rootCreation -eq 0) { return $found }
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue(@($RootPid, $rootCreation))
+    while ($queue.Count -gt 0 -and $found.Count -lt 256) {
+        $parent = $queue.Dequeue()
+        foreach ($row in @($All.Values | Where-Object { $_.Parent -eq $parent[0] -and $_.Pid -ne $parent[0] })) {
+            if ($found.Contains($row.Pid)) { continue }
+            $creation = [GuiProbeNative]::CreationTime($row.Pid)
+            if ($creation -ne 0 -and $creation -ge $parent[1]) { $found[$row.Pid] = $creation; $queue.Enqueue(@($row.Pid, $creation)) }
+        }
+    }
+    return $found
+}
+
+# Q0's sample: the job's PIDs plus every Toolhelp descendant of the copy (by PID and creation time). A descendant
+# outside the job is `leftJob`: it is sampled and judged like any other, and stopped by its exact PID and creation.
 function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [string] $CopyFolder) {
     $all = @{}
     foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
     $rows = [Collections.Generic.List[object]]::new()
-    foreach ($id in [GuiProbeNative]::JobPids($Job)) {
+    $jobPids = @([GuiProbeNative]::JobPids($Job))
+    $descendants = Get-ProbeDescendants $all $CopyPid
+    $systemFolder = [Environment]::GetFolderPath('System')
+    foreach ($id in @(@($jobPids) + @($descendants.Keys) | Sort-Object -Unique)) {
         $entry = $all[$id]
         $role = 'other'
         if ($id -eq $PID) { $role = 'driver' }
@@ -1110,30 +1224,25 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [s
                 $hop = $all[$hop.Parent]
             }
         }
-        $threadKinds = [Collections.Generic.List[string]]::new()
-        $without = 0; $unreadable = 0
-        $noDesktopErrors = [Collections.Generic.SortedSet[int]]::new()
-        foreach ($tid in [GuiProbeNative]::Threads($id)) {
-            $name = $null; $readError = 0
-            switch ([GuiProbeNative]::ThreadDesktopState($tid, [ref]$name, [ref]$readError)) {
-                0 { $threadKinds.Add((Get-DesktopKind $name $Private)) }
-                1 { $without++; [void]$noDesktopErrors.Add($readError) }
-                default { $unreadable++ }
-            }
-        }
+        if ($descendants.Contains($id) -and $role -eq 'other') { $role = 'noctty-descendant' }
+        $inJob = $jobPids -contains $id
+        $reading = Get-ProcessDesktopReading $id $Private
         $rows.Add([ordered]@{
             pid = $id
-            creation = [GuiProbeNative]::CreationTime($id)
+            creation = $(if ($descendants.Contains($id)) { $descendants[$id] } else { [GuiProbeNative]::CreationTime($id) })
             image = $(if ($entry) { $entry.Image } else { $null })
             role = $role
-            startupDesktop = Get-DesktopKind ([GuiProbeNative]::StartupDesktop($id)) $Private
-            threadDesktops = @($threadKinds | Sort-Object -Unique)
-            # No USER desktop (GetThreadDesktop NULL, its errors listed) is kept apart from an unreadable one.
-            threadsWithoutDesktop = $without
-            noDesktopErrors = @($noDesktopErrors)
-            threadsUnreadable = $unreadable
-            # The ConPTY host from the copy's own folder (the bundled OpenConsole.exe), compared without a path.
+            inJob = $inJob
+            leftJob = (-not $inJob -and $role -in @('noctty', 'noctty-descendant'))
+            startupDesktop = $reading.startupDesktop
+            threadDesktops = $reading.threadDesktops
+            threadsWithoutDesktop = $reading.threadsWithoutDesktop
+            noDesktopErrors = $reading.noDesktopErrors
+            threadsUnreadable = $reading.threadsUnreadable
+            # The ConPTY host's folder: the copy's own (the bundled OpenConsole.exe) or System32 (the in-box conhost),
+            # compared without a path.
             imageInCopyFolder = $(if ($CopyFolder) { [GuiProbeNative]::ImageInFolder($id, $CopyFolder) } else { $null })
+            imageInSystemFolder = [GuiProbeNative]::ImageInFolder($id, $systemFolder)
         })
     }
     return $rows
@@ -1173,7 +1282,7 @@ function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSenti
 function Stop-ProbeProcesses($Processes, [IntPtr] $Job) {
     $outcomes = [ordered]@{}
     foreach ($row in @($Processes | Where-Object { $_.role -eq 'noctty-descendant' }) + @($Processes | Where-Object { $_.role -eq 'noctty' })) {
-        $outcome = [GuiProbeNative]::StopExact($row.pid, $row.creation, $Job)
+        $outcome = $(if ($row.leftJob) { [GuiProbeNative]::StopExactDescendant($row.pid, $row.creation) } else { [GuiProbeNative]::StopExact($row.pid, $row.creation, $Job) })
         $outcomes[$outcome] = 1 + [int]$outcomes[$outcome]
     }
     return $outcomes
@@ -1271,7 +1380,11 @@ function Invoke-ProbeDriver {
         $result.startupDesktopReaderCheck = [string]::Equals([GuiProbeNative]::StartupDesktop($PID), "WinSta0\$DesktopName", [StringComparison]::Ordinal)
         $exe = Join-Path $Bin 'noctty.exe'
 
-        if ($Task -eq 'q0') {
+        if ($Task -in @('q0-inbox', 'q0-cli')) {
+            # Q0's other arms (design §9's "the CLI, either ConPTY host"): the in-box host, and the copy's CLI.
+            $armFacts = $(if ($Task -eq 'q0-inbox') { Invoke-Q0GuiArm $exe 'noctty-q0-inbox' @{ NOCTTY_CONPTY = 'inbox' } } else { Invoke-Q0CliArm $Bin })
+            foreach ($key in @($armFacts.Keys)) { $result[$key] = $armFacts[$key] }
+        } elseif ($Task -eq 'q0') {
             # Positive control (M1): an ordinary launch, no desktop named, from a driver created on this one.
             $report = Join-Path $Run 'child-positive.txt'
             $pwsh = (Get-Command pwsh.exe).Source
@@ -1279,45 +1392,8 @@ function Invoke-ProbeDriver {
             [void][GuiProbeNative]::WaitForSingleObject($child.process, 60000)
             [void][GuiProbeNative]::CloseHandle($child.thread); [void][GuiProbeNative]::CloseHandle($child.process)
             $result.positiveChildDesktop = Get-DesktopKind $(if (Test-Path -LiteralPath $report) { [IO.File]::ReadAllText($report) } else { $null }) $DesktopName
-
-            $pi = Start-ProbeCopy -Exe $exe -Desktop "WinSta0\$DesktopName" -LogPath (Join-Path $Run 'noctty-q0.log') -Job ([IntPtr]::Zero) -TracePath (Join-Path $Run 'render-q0.json')
-            $result.launchPolicy = $script:LastLaunchPolicy
-            $hostWindow = Wait-ProbeHost $pi.pid 45
-            $result.copyReady = $hostWindow -ne [IntPtr]::Zero
-            $result.shell = Get-ShellLaunchFacts $pi.pid $false
-            # The ConPTY host and the shell start with the first pane; give them a moment.
-            $deadline = [datetime]::UtcNow.AddSeconds(20)
-            do {
-                $tree = @([GuiProbeNative]::Processes() | Where-Object { $_.Parent -eq $pi.pid })
-                if ($tree.Count -gt 0) { break }
-                Start-Sleep -Milliseconds 250
-            } while ([datetime]::UtcNow -lt $deadline)
-            Start-Sleep -Seconds 2
-            $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName $Bin
-            # The job's own count beside the sample: a descendant that ran and exited before the sample (cmd's
-            # utf8-console `chcp`, the positive control's child) is counted, never hidden.
-            $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
-            $result.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
-            $result.sampledProcesses = @($processes).Count
-            $result.jobProcessesNotSampled = $(if ($null -eq $accounting) { $null } else { $accounting[0] - @($processes).Count })
-            # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
-            # enumeration must list.
-            $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
-            try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd } finally { [GuiProbeNative]::Close($sentinel) }
-            $result.windowTotals = $windows.totals
-            $result.privateSentinelSeen = $windows.privateSentinelSeen
-            $result.processes = @($processes | ForEach-Object { [ordered]@{
-                image = $_.image; role = $_.role; startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops
-                threadsWithoutDesktop = $_.threadsWithoutDesktop; noDesktopErrors = $_.noDesktopErrors; threadsUnreadable = $_.threadsUnreadable
-                imageInCopyFolder = $_.imageInCopyFolder } })
-            $result.windows = $windows.windows
-            $result.windowCounts = $windows.counts
-            $result.inventoryComplete = $windows.complete
-            $result.log = Read-ProbeLog (Join-Path $Run 'noctty-q0.log')
-            $result.stopped = Stop-ProbeProcesses $processes ([IntPtr]::Zero)
-            $left = @(@([GuiProbeNative]::JobPids([IntPtr]::Zero)) | Where-Object { $_ -ne $PID -and ($processes | Where-Object { $_.role -in @('noctty', 'noctty-descendant') }).pid -contains $_ })
-            $result.leftAfterStop = $left.Count
-            [void][GuiProbeNative]::CloseHandle($pi.process)
+            $armFacts = Invoke-Q0GuiArm $exe 'noctty-q0' @{}
+            foreach ($key in @($armFacts.Keys)) { $result[$key] = $armFacts[$key] }
         } else {
             # The probe window's own plumbing, which P1 relies on, without any input: a window and its EDIT,
             # text set and read back exactly, closed.
@@ -1400,6 +1476,151 @@ function Get-ProbeDriverRefusal {
     return $null
 }
 
+# One GUI arm of Q0, in the driver: the copy started on this desktop by name (with `ExtraEnvironment`, the in-box host
+# for that arm), its process tree and windows sampled with desktop readers for Default and this desktop held, then
+# stopped by exact PID. The job's accounting sits beside the sample, so a descendant that exited before it (cmd's
+# utf8-console `chcp`, a control's child) is counted, never hidden.
+function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnvironment) {
+    $arm = [ordered]@{}
+    $pi = Start-ProbeCopy -Exe $Exe -Desktop "WinSta0\$DesktopName" -LogPath (Join-Path $Run "$LogName.log") -Job ([IntPtr]::Zero) -TracePath (Join-Path $Run "render-$LogName.json") -ExtraEnvironment $ExtraEnvironment
+    try {
+        $arm.launchPolicy = $script:LastLaunchPolicy
+        $hostWindow = Wait-ProbeHost $pi.pid 45
+        $arm.copyReady = $hostWindow -ne [IntPtr]::Zero
+        $arm.shell = Get-ShellLaunchFacts $pi.pid $false
+        # The ConPTY host and the shell start with the first pane; give them a moment.
+        $deadline = [datetime]::UtcNow.AddSeconds(20)
+        do {
+            $tree = @([GuiProbeNative]::Processes() | Where-Object { $_.Parent -eq $pi.pid })
+            if ($tree.Count -gt 0) { break }
+            Start-Sleep -Milliseconds 250
+        } while ([datetime]::UtcNow -lt $deadline)
+        Start-Sleep -Seconds 2
+        $readers = Open-ProbeDesktopReaders @('Default', $DesktopName)
+        try {
+            $arm.desktopReadersOpen = Test-ProbeDesktopReadersOpen $readers
+            $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName $Bin
+        } finally { Close-ProbeDesktopReaders $readers }
+        $accounting = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+        $arm.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
+        $inJobSampled = @($processes | Where-Object { $_.inJob }).Count
+        $arm.sampledProcesses = @($processes).Count
+        $arm.jobProcessesNotSampled = $(if ($null -eq $accounting) { $null } else { $accounting[0] - $inJobSampled })
+        # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
+        # enumeration must list.
+        $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
+        try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd } finally { [GuiProbeNative]::Close($sentinel) }
+        $arm.windowTotals = $windows.totals
+        $arm.privateSentinelSeen = $windows.privateSentinelSeen
+        $arm.processes = @($processes | ForEach-Object { [ordered]@{
+            image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = $_.leftJob; startupDesktop = $_.startupDesktop
+            threadDesktops = $_.threadDesktops; threadsWithoutDesktop = $_.threadsWithoutDesktop; noDesktopErrors = $_.noDesktopErrors
+            threadsUnreadable = $_.threadsUnreadable; imageInCopyFolder = $_.imageInCopyFolder; imageInSystemFolder = $_.imageInSystemFolder } })
+        $arm.windows = $windows.windows
+        $arm.windowCounts = $windows.counts
+        $arm.inventoryComplete = $windows.complete
+        $arm.log = Read-ProbeLog (Join-Path $Run "$LogName.log")
+        $arm.stopped = Stop-ProbeProcesses $processes ([IntPtr]::Zero)
+        # The copy's processes still alive after the stop: the same PID with the same creation time.
+        $arm.leftAfterStop = @($processes | Where-Object { $_.role -in @('noctty', 'noctty-descendant') -and [GuiProbeNative]::CreationTime($_.pid) -eq $_.creation }).Count
+    } finally { [void][GuiProbeNative]::CloseHandle($pi.process) }
+    return $arm
+}
+
+# Q0's CLI arm, in the driver: the copy's noctty.com run the way PR 1's leaves run it. `+version` as shell-command runs
+# it through cmd, and `+list-windows --class=<class> --format=json --timeout=1000` as cli-automation does, against a
+# fresh class no instance owns. The single-instance pipe is named only from --class (ipc_server.zig), so that client
+# can reach no other noctty's pipe, and `+version` uses none. noctty.com forwards to the copy's noctty.exe with the
+# parent's lpDesktop and, for a waiting action, nests a job whose children may break away; so each invocation's sample
+# is its root plus every Toolhelp descendant (PID and creation time), polled until the root exits, desktop readers for
+# Default and this desktop held. The job's accounting before and after counts what the polls missed.
+function Invoke-Q0CliArm([string] $CopyBin) {
+    $arm = [ordered]@{}
+    $exe = Join-Path $CopyBin 'noctty.exe'
+    $cli = Join-Path $CopyBin 'noctty.com'
+    $refusal = Get-ProbeLaunchRefusal $exe
+    if ($refusal) { throw "The launcher refused the CLI arm: $refusal." }
+    # The copy's portable config, as every start writes it: the forwarded noctty.exe reads it.
+    $launch = Get-CopyLaunch $exe $null
+    [IO.File]::WriteAllLines((Join-Path $CopyBin 'config.ghostty'), [string[]]$launch.Config, [Text.UTF8Encoding]::new($false))
+    $arm.launchPolicy = $launch.Policy
+    $class = 'noctty-gui-probe-cli-' + [guid]::NewGuid().ToString('N')
+    $shapes = [ordered]@{
+        version = @('+version')
+        listWindows = @('+list-windows', "--class=$class", '--format=json', '--timeout=1000')
+    }
+    $invocations = [Collections.Generic.List[object]]::new()
+    $readers = Open-ProbeDesktopReaders @('Default', $DesktopName)
+    try {
+        $arm.desktopReadersOpen = Test-ProbeDesktopReadersOpen $readers
+        foreach ($shape in $shapes.Keys) {
+            $facts = [ordered]@{ shape = $shape }
+            $before = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+            $savedTemp = @($env:TEMP, $env:TMP)
+            if (-not (Test-ProbeHosted)) {
+                $cliTemp = Join-Path $Run 'cli-temp'
+                [void][IO.Directory]::CreateDirectory($cliTemp)
+                $env:TEMP = $cliTemp; $env:TMP = $cliTemp
+            }
+            try { $pi = [GuiProbeNative]::Start($cli, ('"{0}" {1}' -f $cli, ($shapes[$shape] -join ' ')), $CopyBin, "WinSta0\$DesktopName", (Join-Path $Run "cli-$shape.log"), [IntPtr]::Zero, $true) }
+            finally { $env:TEMP = $savedTemp[0]; $env:TMP = $savedTemp[1] }
+            [void][GuiProbeNative]::CloseHandle($pi.thread)
+            $rootCreation = [GuiProbeNative]::CreationTime($pi.pid)
+            $seen = [ordered]@{}
+            $deadline = [datetime]::UtcNow.AddSeconds(30)
+            do {
+                $all = @{}
+                foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
+                $descendants = Get-ProbeDescendants $all $pi.pid
+                $jobPids = @([GuiProbeNative]::JobPids([IntPtr]::Zero))
+                foreach ($id in @(@($pi.pid) + @($descendants.Keys))) {
+                    $creation = $(if ($id -eq $pi.pid) { $rootCreation } else { $descendants[$id] })
+                    if ([GuiProbeNative]::CreationTime($id) -ne $creation) { continue }
+                    $reading = Get-ProcessDesktopReading $id $DesktopName
+                    if (-not $seen.Contains($id)) {
+                        $image = $(if ($all[$id]) { $all[$id].Image } else { $null })
+                        $role = $(if ($id -eq $pi.pid) { 'cli' } elseif ($image -ieq 'noctty.exe') { 'cli-forwarded' } else { 'cli-descendant' })
+                        $seen[$id] = [ordered]@{ pid = $id; creation = $creation; image = $image; role = $role; inJob = $jobPids -contains $id
+                            startupDesktop = $reading.startupDesktop; threadDesktops = @($reading.threadDesktops); threadsUnreadable = $reading.threadsUnreadable }
+                    } else {
+                        # Later reads add the thread desktops a thread connects to after its first one.
+                        $row = $seen[$id]
+                        $row.threadDesktops = @(@($row.threadDesktops) + @($reading.threadDesktops) | Sort-Object -Unique)
+                        $row.threadsUnreadable = [Math]::Max([int]$row.threadsUnreadable, [int]$reading.threadsUnreadable)
+                        if ($row.startupDesktop -in @('unreadable', 'none') -and $reading.startupDesktop -notin @('unreadable', 'none')) { $row.startupDesktop = $reading.startupDesktop }
+                        if (-not ($jobPids -contains $id)) { $row.inJob = $false }
+                    }
+                }
+                if ([GuiProbeNative]::WaitForSingleObject($pi.process, 20) -eq 0) { break }
+            } while ([datetime]::UtcNow -lt $deadline)
+            $facts.rootExited = [GuiProbeNative]::WaitForSingleObject($pi.process, 0) -eq 0
+            $facts.exitCode = $(if ($facts.rootExited) { [long][GuiProbeNative]::ExitCode($pi.process) } else { $null })
+            # Anything of the tree still alive is stopped by its exact PID and creation time: in the job through the
+            # job's own check, a process that left it (leftJob) as the root's verified descendant.
+            $stops = [ordered]@{}
+            foreach ($row in @($seen.Values)) {
+                if ([GuiProbeNative]::CreationTime($row.pid) -ne $row.creation) { continue }
+                $row.leftJob = -not $row.inJob
+                $outcome = $(if ($row.leftJob) { [GuiProbeNative]::StopExactDescendant($row.pid, $row.creation) } else { [GuiProbeNative]::StopExact($row.pid, $row.creation, [IntPtr]::Zero) })
+                $stops[$outcome] = 1 + [int]$stops[$outcome]
+            }
+            $facts.stopped = $stops
+            $facts.leftAfterStop = @($seen.Values | Where-Object { [GuiProbeNative]::CreationTime($_.pid) -eq $_.creation }).Count
+            [void][GuiProbeNative]::CloseHandle($pi.process)
+            $after = [GuiProbeNative]::JobAccounting([IntPtr]::Zero)
+            $facts.jobProcessesStarted = $(if ($null -ne $before -and $null -ne $after) { $after[0] - $before[0] } else { $null })
+            $facts.processes = @($seen.Values | ForEach-Object { [ordered]@{ image = $_.image; role = $_.role; inJob = $_.inJob; leftJob = [bool]$_.leftJob
+                startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops; threadsUnreadable = $_.threadsUnreadable } })
+            $facts.leftJob = @($seen.Values | Where-Object { $_.leftJob }).Count
+            $facts.forwardedSeen = @($seen.Values | Where-Object { $_.role -eq 'cli-forwarded' }).Count -ge 1
+            $facts.notSeenInJob = $(if ($null -ne $facts.jobProcessesStarted) { $facts.jobProcessesStarted - @($seen.Values | Where-Object { $_.inJob }).Count } else { $null })
+            $invocations.Add($facts)
+        }
+    } finally { Close-ProbeDesktopReaders $readers }
+    $arm.invocations = $invocations
+    return $arm
+}
+
 if ($Driver) {
     $script:WorkRoot = $Run
     $refusal = Get-ProbeDriverRefusal
@@ -1416,10 +1637,14 @@ if ($Driver) {
 # A real-profile guard that did not hold (the real startup state, PSReadLine history or clipboard sequence changed, the
 # owned job was not cleaned up, or the run left no guard state): the run's record keeps the evidence, and no later
 # copy starts.
-function Assert-ProbeGuards($Run, [string] $Name) {
+function Test-ProbeGuardsHeld($Run) {
     $guards = $Run.guards
-    $held = $null -ne $guards -and [bool]$guards.startupUnchanged -and [bool]$guards.historyUnchanged -and
+    return $null -ne $guards -and [bool]$guards.startupUnchanged -and [bool]$guards.historyUnchanged -and
         [bool]$guards.clipboardUnchanged -and [bool]$guards.ownedJobCleanedUp
+}
+
+function Assert-ProbeGuards($Run, [string] $Name) {
+    $held = Test-ProbeGuardsHeld $Run
     if (-not $held) {
         $script:GuardTripped = $Name
         throw "A real-profile guard did not hold after $Name; no further copy starts."
@@ -1431,10 +1656,16 @@ function Invoke-ProbeDriverRun([string] $Name, [string] $StageBin, [string] $Tas
     $guards = $null
     $failure = $null
     try {
+        # The shared helper ends with "<label>: PASS", which says only that the driver exited 0; the verdicts are in the
+        # record, so that line is reworded as it passes through.
         Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $StageBin -Run $runDir -DesktopPrefix 'noctty-gui-probe-' -TimeoutSeconds 240 `
             -Label "GUI probe $Name" -PassDesktopName -GuardClipboard `
             -DriverArguments @("-Task $TaskName", ('-MeasureRepo "{0}"' -f $MeasureRepo),
-                $(if ($script:TestToolsExeSha256) { "-TestToolsSha256 $script:TestToolsExeSha256 -TestToolsCliSha256 $script:TestToolsCliSha256" }))
+                $(if ($script:TestToolsExeSha256) { "-TestToolsSha256 $script:TestToolsExeSha256 -TestToolsCliSha256 $script:TestToolsCliSha256" })) 6>&1 |
+            ForEach-Object {
+                $message = [string]$_
+                if ($message -ceq "GUI probe ${Name}: PASS") { Write-Host "GUI probe ${Name}: driver exited 0 (its verdicts are in the record)" } else { Write-Host $message }
+            }
     } catch { $failure = 'the hidden driver or its guards failed' ; [IO.File]::WriteAllText((Join-Path $Work "$Name-outer-error.txt"), $_.Exception.Message) }
     $statePath = Join-Path $runDir 'startup-state.json'
     if (Test-Path -LiteralPath $statePath) {
@@ -1442,6 +1673,9 @@ function Invoke-ProbeDriverRun([string] $Name, [string] $StageBin, [string] $Tas
         $guards = [ordered]@{
             startupUnchanged = [bool]$state.Unchanged; historyUnchanged = [bool]$state.HistoryUnchanged
             clipboardUnchanged = [bool]$state.ClipboardUnchanged; ownedJobCleanedUp = [bool]$state.OwnedJobCleanedUp
+            # Both numbers, not only their equality: an unchanged zero is no evidence of a live clipboard.
+            clipboardSequenceBefore = $(if ($null -ne $state.ClipboardSequenceBefore) { [long]$state.ClipboardSequenceBefore } else { $null })
+            clipboardSequenceAfter = $(if ($null -ne $state.ClipboardSequenceAfter) { [long]$state.ClipboardSequenceAfter } else { $null })
         }
     }
     $driverPath = Join-Path $runDir "driver-$TaskName.json"
@@ -1462,17 +1696,35 @@ function Invoke-NegativeControl {
     try {
         $job = [HiddenLocal]::CreateOwnedJob()
         $report = Join-Path $Work 'child-negative.txt'
+        $release = Join-Path $Work 'child-negative.release'
         $pwsh = (Get-Command pwsh.exe).Source
         $moveError = 0
-        $child = [GuiProbeNative]::StartFromMovedThread($desktop, $pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -ReportDesktop "{2}"' -f $pwsh, $PSCommandPath, $report), $Work, $job, [ref]$moveError)
+        $child = [GuiProbeNative]::StartFromMovedThread($desktop, $pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -ReportDesktop "{2}" -HoldUntil "{3}"' -f $pwsh, $PSCommandPath, $report, $release), $Work, $job, [ref]$moveError)
+        # The reader's Default-side control: while the child waits, Q0's own reader, with desktop readers for Default
+        # and this desktop held, must name Default for both its startup desktop and its thread desktops.
+        $null = Wait-Until { Test-Path -LiteralPath $report } 30
+        $reading = $null
+        $readers = Open-ProbeDesktopReaders @('Default', $name)
+        try {
+            $readersOpen = Test-ProbeDesktopReadersOpen $readers
+            if ([GuiProbeNative]::WaitForSingleObject($child.process, 0) -ne 0) { $reading = Get-ProcessDesktopReading $child.pid $name }
+        } finally { Close-ProbeDesktopReaders $readers }
+        [IO.File]::WriteAllText($release, '')
         $exited = [GuiProbeNative]::WaitForSingleObject($child.process, 60000) -eq 0
         $stop = $null
         if (-not $exited) { $stop = [GuiProbeNative]::StopExact($child.pid, [GuiProbeNative]::CreationTime($child.pid), $job) }
+        # True: the reader named Default for both; false: it named something else; null: it could not read them.
+        $readerNamesDefault = $null
+        if ($readersOpen -and $null -ne $reading -and $reading.threadsUnreadable -eq 0 -and $reading.startupDesktop -notin @('unreadable', 'none') -and @($reading.threadDesktops).Count -gt 0) {
+            $readerNamesDefault = $reading.startupDesktop -eq 'Default' -and @($reading.threadDesktops | Where-Object { $_ -ne 'Default' }).Count -eq 0
+        }
         return [ordered]@{
             threadMovedError = $moveError
             childExited = $exited
             childStop = $stop
             childDesktop = Get-DesktopKind $(if ($exited -and (Test-Path -LiteralPath $report)) { [IO.File]::ReadAllText($report) } else { $null }) $name
+            childReading = $reading
+            readerNamesDefault = $readerNamesDefault
         }
     } finally {
         if ($null -ne $child) { [void][GuiProbeNative]::CloseHandle($child.thread); [void][GuiProbeNative]::CloseHandle($child.process) }
@@ -1538,6 +1790,92 @@ function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin)
         if ($outcomes[$key] -cne $expected[$key]) { $pass = $false }
     }
     return [ordered]@{ outcomes = $outcomes; verdict = $(if ($pass) { 'pass' } else { 'fail' }) }
+}
+
+# A GUI arm of Q0 (the bundled or the in-box ConPTY host), from its driver's record: inconclusive without its records,
+# pass only with the expected roles sampled (the app, the arm's ConPTY host, the shell), nothing of the copy off the
+# private desktop (processes, leftJob ones included, and windows), nothing left after the stop, its guards held and
+# its shell on the policy.
+function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
+    $d = $ArmRun.driver
+    $rows = @($(if ($d) { $d.processes }))
+    $copyRows = @($rows | Where-Object { $_.role -in @('noctty', 'noctty-descendant') })
+    $hostRows = @($copyRows | Where-Object { $_.role -eq 'noctty-descendant' })
+    $roles = [ordered]@{
+        app = @($copyRows | Where-Object { $_.role -eq 'noctty' -and $_.image -ieq 'noctty.exe' }).Count -eq 1
+        conptyHost = $(if ($Kind -eq 'inbox') {
+            @($hostRows | Where-Object { $_.image -ieq 'conhost.exe' -and [bool]$_.imageInSystemFolder }).Count -ge 1 -and @($hostRows | Where-Object { $_.image -ieq 'OpenConsole.exe' }).Count -eq 0
+        } else {
+            @($hostRows | Where-Object { ($_.image -ieq 'OpenConsole.exe' -and [bool]$_.imageInCopyFolder) -or ($_.image -ieq 'conhost.exe' -and [bool]$_.imageInSystemFolder) }).Count -ge 1
+        })
+        shell = @($hostRows | Where-Object { $_.image -ieq 'cmd.exe' }).Count -ge 1
+    }
+    $readsResolved = $copyRows.Count -gt 0 -and @($copyRows | Where-Object { $_.threadsUnreadable -gt 0 -or $_.startupDesktop -in @('unreadable', 'none') }).Count -eq 0
+    $offPrivate = @($copyRows | Where-Object { $_.startupDesktop -ne 'private' -or @($_.threadDesktops | Where-Object { $_ -ne 'private' }).Count -gt 0 }).Count
+    $windowsOff = @($(if ($d) { $d.windows | Where-Object { $_.desktop -ne 'private' } })).Count
+    $shellPolicy = $null -ne $d -and [bool]$d.shell.read -and [bool]$d.shell.systemCmd -and [bool]$d.shell.autoRunOffFirst
+    $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and [bool]$d.inventoryComplete -and
+        [bool]$d.shell.read -and $readsResolved -and $null -ne $d.jobProcessesNotSampled
+    $positive = $null -ne $d -and [bool]$d.copyReady -and $roles.app -and $roles.conptyHost -and $roles.shell -and $offPrivate -eq 0 -and
+        $windowsOff -eq 0 -and $d.leftAfterStop -eq 0 -and (Test-ProbeGuardsHeld $ArmRun) -and $shellPolicy
+    return [ordered]@{
+        copyProcesses = $copyRows.Count; copyProcessesOffPrivate = $offPrivate; copyWindowsOffPrivate = $windowsOff
+        leftJob = @($copyRows | Where-Object { $_.leftJob }).Count
+        rolesSampled = $roles; desktopReadsResolved = $readsResolved; shellPolicyHeld = $shellPolicy
+        jobProcessesNotSampled = $(if ($d) { $d.jobProcessesNotSampled } else { $null })
+        verdict = $(if (-not $records) { 'inconclusive' } elseif ($positive) { 'pass' } else { 'fail' })
+    }
+}
+
+# Q0's CLI arm, from its driver's record: inconclusive without both invocations' forwarded noctty.exe seen and every
+# desktop read resolved; pass only with every process of both trees (leftJob ones included) on the private desktop,
+# each root exited, nothing left after the stop and the guards held.
+function Get-Q0CliArmVerdict($ArmRun) {
+    $d = $ArmRun.driver
+    $invocations = @($(if ($d) { $d.invocations }))
+    $all = @($invocations | ForEach-Object { @($_.processes) })
+    $readsResolved = $all.Count -gt 0 -and @($all | Where-Object { $_.threadsUnreadable -gt 0 -or $_.startupDesktop -in @('unreadable', 'none') }).Count -eq 0
+    $offPrivate = @($all | Where-Object { $_.startupDesktop -ne 'private' -or @($_.threadDesktops | Where-Object { $_ -ne 'private' }).Count -gt 0 }).Count
+    $forwarded = $invocations.Count -eq 2 -and @($invocations | Where-Object { -not [bool]$_.forwardedSeen }).Count -eq 0
+    $rootsExited = $invocations.Count -gt 0 -and @($invocations | Where-Object { -not [bool]$_.rootExited }).Count -eq 0
+    $nothingLeft = @($invocations | Where-Object { $_.leftAfterStop -ne 0 }).Count -eq 0
+    $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and $forwarded -and $readsResolved
+    $positive = $offPrivate -eq 0 -and $rootsExited -and $nothingLeft -and (Test-ProbeGuardsHeld $ArmRun)
+    return [ordered]@{
+        invocations = $invocations.Count; processesSeen = $all.Count; processesOffPrivate = $offPrivate
+        leftJob = @($all | Where-Object { $_.leftJob }).Count; forwardedSeen = $forwarded; desktopReadsResolved = $readsResolved
+        exitCodes = @($invocations | ForEach-Object { $_.exitCode })
+        notSeenInJob = @($invocations | ForEach-Object { $_.notSeenInJob })
+        verdict = $(if (-not $records) { 'inconclusive' } elseif ($positive) { 'pass' } else { 'fail' })
+    }
+}
+
+# Q0 over its arms (bundled host, in-box host, CLI) and its controls: the positive child (private) and the PEB
+# reader's self-check from the bundled arm's driver; the negative child (Default, after a successful move) and the
+# reader's Default-side control on it. Q0 passes only when every arm and every control passes; a failed arm or a
+# control that read the wrong desktop fails it; anything missing leaves it inconclusive.
+function Get-Q0Summary($Q0) {
+    $bundled = Get-Q0GuiArmVerdict $Q0.bundled 'bundled'
+    $inbox = Get-Q0GuiArmVerdict $Q0.inbox 'inbox'
+    $cli = Get-Q0CliArmVerdict $Q0.cli
+    $driverRecord = $(if ($Q0.bundled) { $Q0.bundled.driver } else { $null })
+    $neg = $Q0.negativeControl
+    $controls = [ordered]@{
+        positiveChildPrivate = $(if ($driverRecord -and $null -ne $driverRecord.positiveChildDesktop) { $driverRecord.positiveChildDesktop -eq 'private' } else { $null })
+        pebSelfCheck = $(if ($driverRecord -and $null -ne $driverRecord.startupDesktopReaderCheck) { [bool]$driverRecord.startupDesktopReaderCheck } else { $null })
+        negativeChildDefault = $(if ($neg -and $neg.threadMovedError -eq 0 -and [bool]$neg.childExited) { $neg.childDesktop -eq 'Default' } else { $null })
+        readerNamesDefault = $(if ($neg) { $neg.readerNamesDefault } else { $null })
+    }
+    $armVerdicts = @($bundled.verdict, $inbox.verdict, $cli.verdict)
+    $controlValues = @($controls.Values)
+    $verdict = $(if ($armVerdicts -contains 'fail' -or @($controlValues | Where-Object { $_ -eq $false }).Count -gt 0) { 'fail' }
+        elseif (@($armVerdicts | Where-Object { $_ -ne 'pass' }).Count -eq 0 -and @($controlValues | Where-Object { $_ -ne $true }).Count -eq 0) { 'pass' }
+        else { 'inconclusive' })
+    return [ordered]@{
+        claim = 'every process and window alive at the sample'
+        bundled = $bundled; inbox = $inbox; cli = $cli; controls = $controls
+        verdict = $verdict
+    }
 }
 
 function Get-Verdict([bool] $Positive, [bool] $Control, [bool] $HaveRecords) {
@@ -1675,10 +2013,12 @@ function Invoke-DefaultCopy([string] $StageBin, [string] $Name, [bool] $Withheld
     $startupAfter = Startup-Fingerprint
     $historyHeld = $true
     try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyHeld = $false }
-    $run.clipboardUnchanged = $clipboardBefore -eq [HiddenLocal]::GetClipboardSequenceNumber()
+    $clipboardAfter = [HiddenLocal]::GetClipboardSequenceNumber()
+    $run.clipboardUnchanged = $clipboardBefore -eq $clipboardAfter
     $run.guards = [ordered]@{
         startupUnchanged = ($startupBefore.Exists -eq $startupAfter.Exists -and $startupBefore.Hash -eq $startupAfter.Hash -and $startupBefore.Modified -eq $startupAfter.Modified)
         historyUnchanged = $historyHeld; clipboardUnchanged = $run.clipboardUnchanged; ownedJobCleanedUp = -not $cleanupFailed
+        clipboardSequenceBefore = [long]$clipboardBefore; clipboardSequenceAfter = [long]$clipboardAfter
     }
     return $run
 }
@@ -1949,49 +2289,30 @@ $record = [ordered]@{
 # A failure still leaves a record, naming the stage it reached (the exception's text, which can hold a path, goes
 # only to this process's output).
 $record.failedStage = $null
+$stateGuard = $null
 try {
+    if (-not $hosted) {
+        $script:Stage = 'state-guard'
+        $stateGuard = Start-InteractiveWin11StateGuard -Harness 'gui-hosted-probe' -ReceiptDirectory $Work
+    }
     $script:Stage = 'launcher-control'
     $record.launcherControl = Invoke-LauncherControl $stageBin $testToolsStageBin
     if ($record.launcherControl.verdict -ne 'pass') { throw 'The launcher gate failed its control; nothing was started.' }
-    $script:Stage = 'q0'
-    $q0 = Invoke-ProbeDriverRun 'q0' $stageBin 'q0'
+    # Q0's arms (design §9: "window threads, the CLI, either ConPTY host"), each in a driver of its own, then the
+    # negative control from this process. Its summary is written in `finally`, so a tripped guard leaves one too.
+    $q0 = [ordered]@{}
     $record.q0 = $q0
+    $script:Stage = 'q0-bundled'
+    $q0.bundled = Invoke-ProbeDriverRun 'q0' $stageBin 'q0'
+    Assert-ProbeGuards $q0.bundled 'q0-bundled'
+    $script:Stage = 'q0-inbox'
+    $q0.inbox = Invoke-ProbeDriverRun 'q0-inbox' $stageBin 'q0-inbox'
+    Assert-ProbeGuards $q0.inbox 'q0-inbox'
+    $script:Stage = 'q0-cli'
+    $q0.cli = Invoke-ProbeDriverRun 'q0-cli' $stageBin 'q0-cli'
+    Assert-ProbeGuards $q0.cli 'q0-cli'
+    $script:Stage = 'q0-negative'
     $q0.negativeControl = Invoke-NegativeControl
-    $driverRecord = $q0.driver
-    # Q0's claim: every process and window alive at the sample. It holds only when the sample has the expected roles
-    # (the app, the ConPTY host from the copy or conhost, the shell) and every desktop read in it resolved; a process
-    # that ran and exited before the sample is counted beside it (jobProcessesNotSampled), never hidden.
-    $q0Rows = @($(if ($driverRecord) { $driverRecord.processes }))
-    $q0Roles = [ordered]@{
-        app = @($q0Rows | Where-Object { $_.role -eq 'noctty' -and $_.image -ieq 'noctty.exe' }).Count -eq 1
-        conptyHost = @($q0Rows | Where-Object { $_.role -eq 'noctty-descendant' -and (($_.image -ieq 'OpenConsole.exe' -and [bool]$_.imageInCopyFolder) -or $_.image -ieq 'conhost.exe') }).Count -ge 1
-        shell = @($q0Rows | Where-Object { $_.role -eq 'noctty-descendant' -and $_.image -ieq 'cmd.exe' }).Count -ge 1
-    }
-    $q0RolesSampled = $q0Roles.app -and $q0Roles.conptyHost -and $q0Roles.shell
-    $q0ReadsResolved = $q0Rows.Count -gt 0 -and @($q0Rows | Where-Object { $_.role -in @('noctty', 'noctty-descendant') -and ($_.threadsUnreadable -gt 0 -or $_.startupDesktop -in @('unreadable', 'none')) }).Count -eq 0
-    $q0ShellPolicy = $null -ne $driverRecord -and [bool]$driverRecord.shell.read -and [bool]$driverRecord.shell.systemCmd -and [bool]$driverRecord.shell.autoRunOffFirst
-    $q0Guards = $null -ne $q0.guards -and [bool]$q0.guards.startupUnchanged -and [bool]$q0.guards.historyUnchanged -and
-        [bool]$q0.guards.clipboardUnchanged -and [bool]$q0.guards.ownedJobCleanedUp
-    $copyProcesses = @($(if ($driverRecord) { $driverRecord.processes | Where-Object { $_.role -in @('noctty', 'noctty-descendant') } }))
-    $onDefault = @($copyProcesses | Where-Object { $_.startupDesktop -ne 'private' -or @($_.threadDesktops | Where-Object { $_ -ne 'private' }).Count -gt 0 }).Count
-    $windowsOnDefault = @($(if ($driverRecord) { $driverRecord.windows | Where-Object { $_.desktop -ne 'private' } })).Count
-    $q0.summary = [ordered]@{
-        copyProcesses = $copyProcesses.Count
-        copyProcessesOffPrivate = $onDefault
-        copyWindowsOffPrivate = $windowsOnDefault
-        claim = 'every process and window alive at the sample'
-        rolesSampled = $q0Roles
-        desktopReadsResolved = $q0ReadsResolved
-        jobProcessesNotSampled = $(if ($driverRecord) { $driverRecord.jobProcessesNotSampled } else { $null })
-        # The shell Windows started, read by PID: System32's cmd.exe with /D first, so no AutoRun runs. After /D
-        # come only what the config gave and what utf8-console appends to a payload-free cmd (`/k "chcp 65001 >nul"`).
-        shellPolicyHeld = $q0ShellPolicy
-        verdict = Get-Verdict `
-            ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $q0RolesSampled -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards -and $q0ShellPolicy) `
-            ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.threadMovedError -eq 0 -and [bool]$q0.negativeControl.childExited -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `
-            ($null -ne $driverRecord -and $null -eq $driverRecord.error -and [bool]$driverRecord.inventoryComplete -and [bool]$driverRecord.shell.read -and $q0ReadsResolved -and $null -ne $driverRecord.jobProcessesNotSampled)
-    }
-    Assert-ProbeGuards $q0 'q0'
     if ($Part -eq 'All') { $script:Stage = 'd3'; [void](Invoke-D3 $stageBin $testToolsStageBin $record) }
     # Locally only the measurement build starts (the launcher's gate): the private-desktop facts of P4 and P5 on it,
     # with no part on this Default desktop. P3's arms need the test-tools build, so they run only on a hosted runner.
@@ -2005,13 +2326,56 @@ try {
     $record.guardTripped = $script:GuardTripped
     Write-Host "gui probe: failed at stage $($script:Stage): $($_.Exception.Message)"
 } finally {
+    if ($record.q0 -and $record.q0.Count -gt 0) {
+        try { $record.q0.summary = Get-Q0Summary $record.q0 } catch { Write-Host "gui probe: Q0's summary failed: $($_.Exception.Message)" }
+    }
+    # Locally, the real state's own guard over the whole run (the product jump list, startup-attempts.json, the
+    # clipboard sequence: scripts/interactive-win11-state-guard.ps1, STANDALONE-LEAF-AUMID-01).
+    if ($stateGuard) {
+        try { Assert-InteractiveWin11StateGuard -Guard $stateGuard; $record.stateGuard = [ordered]@{ held = $true } }
+        catch {
+            $record.stateGuard = [ordered]@{ held = $false }
+            $script:GuardTripped = 'state-guard'; $record.guardTripped = 'state-guard'
+            Write-Host "gui probe: the real state's guard did not hold: $($_.Exception.Message)"
+        }
+    }
     # The effective launch policy of each kind of copy, as its own run recorded it.
     $fixtureRun = $(if ($record.d3) { $record.d3.default } elseif ($record.localPrivate) { $record.localPrivate.driver } else { $null })
     $record.launchPolicy = [ordered]@{
-        q0 = $(if ($q0 -and $q0.driver) { $q0.driver.launchPolicy } else { $null })
+        q0 = $(if ($record.q0 -and $record.q0.bundled -and $record.q0.bundled.driver) { $record.q0.bundled.driver.launchPolicy } else { $null })
+        q0Inbox = $(if ($record.q0 -and $record.q0.inbox -and $record.q0.inbox.driver) { $record.q0.inbox.driver.launchPolicy } else { $null })
+        q0Cli = $(if ($record.q0 -and $record.q0.cli -and $record.q0.cli.driver) { $record.q0.cli.driver.launchPolicy } else { $null })
         fixture = $(if ($fixtureRun) { $fixtureRun.launchPolicy } else { $null })
         buildPreparedOutsideRun = $true
     }
     Write-ProbeRecord $record $Out
+    # Locally, the copies this run made under -Work are deleted once the record is written (records and logs stay),
+    # each checked to be a directory inside -Work and not a reparse point. -KeepCopies keeps them.
+    if (-not $hosted -and -not $KeepCopies) {
+        $workRoot = $Work.TrimEnd('\') + '\'
+        $copyDirs = @(@('stage', 'stage-test-tools', 'launcher-control') | ForEach-Object { Join-Path $Work $_ }) +
+            @(Get-ChildItem -LiteralPath $Work -Directory -ErrorAction SilentlyContinue | ForEach-Object { (Join-Path $_.FullName 'source'), (Join-Path $_.FullName 'copy') })
+        foreach ($dir in $copyDirs) {
+            $item = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+            if ($null -eq $item -or -not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+            if (-not ([IO.Path]::GetFullPath($item.FullName) + '\').StartsWith($workRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop } catch { Write-Host "gui probe: a copy under -Work could not be deleted: $($_.Exception.Message)" }
+        }
+    }
 }
-Write-Host "gui probe: record written; launcher control $($record.launcherControl.verdict); Q0 $($q0.summary.verdict)$(if ($record.d3) { "; P1 $($record.d3.p1.verdict), P2 $($record.d3.p2.verdict), P3 $($record.d3.p3.verdict), P4 $($record.d3.p4.verdict)" })"
+# Every verdict, not "PASS": the record holds the evidence.
+$q0Summary = $(if ($record.q0) { $record.q0.summary } else { $null })
+$summaryLine = "gui probe: record written; launcher control $($record.launcherControl.verdict); Q0 $($q0Summary.verdict) (bundled $($q0Summary.bundled.verdict), in-box $($q0Summary.inbox.verdict), CLI $($q0Summary.cli.verdict))"
+if ($record.d3) {
+    $summaryLine += "; P1 $($record.d3.p1.verdict) (EDIT $($record.d3.p1.editVerdict), noctty $($record.d3.p1.noctty.verdict)); P2 $($record.d3.p2.verdict); P3 $($record.d3.p3.verdict); P4 $($record.d3.p4.verdict); P5 facts only"
+}
+if ($record.failedStage) { $summaryLine += "; failed at $($record.failedStage)" }
+if ($record.guardTripped) { $summaryLine += "; guard tripped at $($record.guardTripped)" }
+Write-Host $summaryLine
+# Locally a tripped guard or a failed stage ends nonzero; on a hosted runner the probe is record-only and exits 0 once
+# the record is written (the workflow uploads it either way).
+if (-not $hosted) {
+    if ($record.guardTripped) { exit 3 }
+    if ($record.failedStage) { exit 2 }
+}
+exit 0

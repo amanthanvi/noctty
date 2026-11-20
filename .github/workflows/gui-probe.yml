@@ -69,7 +69,7 @@ jobs:
       # copies, logs and traces stay in the work directory, which is not uploaded.
       - name: Probe
         shell: pwsh
-        timeout-minutes: 20
+        timeout-minutes: 30
         env:
           # Measurement mode (scripts/interactive-win11-lib.ps1); the probe sets it too.
           NOCTTY_INTERACTIVE_MEASURE_AUMID: '1'
@@ -89,5 +89,6 @@ jobs:
         with:
           name: gui-probe-record-${{ github.run_id }}
           path: ${{ runner.temp }}/gui-probe/gui-probe-record.json
-          retention-days: 7
+          # PR 1 cites this record (gui-measurements.json), and it may wait on the W13 baselines.
+          retention-days: 90
           if-no-files-found: warn
