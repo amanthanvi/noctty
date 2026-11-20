@@ -32,7 +32,11 @@ job's PIDs plus every Toolhelp descendant of the launched root (PID and creation
 (noctty.com's action job lets its children break away) is `leftJob`, judged like the rest and stopped by its exact PID
 and creation time. Every desktop read holds read-only handles to Default and the private desktop, because
 GetThreadDesktop names another process's thread desktop only while the caller holds a handle to it (test-harnesses.md
-2026-11-20 PROBE-THREAD-DESKTOP-01). The driver starts noctty on that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
+2026-11-20 PROBE-THREAD-DESKTOP-01). A descendant counts only through a link verified on pinned handles (the candidate
+opened first, its parent read from the process itself, every ancestor's handle held); an unverifiable link is counted,
+never stopped. The CLI arm's windows are inventoried on both desktops at every poll, as the GUI arms' are once. The
+bundled arm's driver also runs the enumeration classifier's own control (an empty desktop, a handle without
+DESKTOP_ENUMERATE, the sentinel's desktop). The driver starts noctty on that desktop by name and records, for every process of the job (noctty, its ConPTY host, the shell) and every
 top-level window on the private and the Default desktop, the desktop each is on: a process by its startup desktop
 (RTL_USER_PROCESS_PARAMETERS.DesktopInfo, read from its PEB) and its threads' desktops, a window by the desktop it
 was enumerated on. Then it stops each of them by exact PID (creation time and job membership checked) and records that
@@ -220,6 +224,7 @@ public static class GuiProbeNative {
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
     [DllImport("user32.dll", SetLastError=true)] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+    [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent, IntPtr child);
     [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
@@ -489,6 +494,65 @@ public static class GuiProbeNative {
             return WaitForSingleObject(h, 5000) == 0 ? "terminated" : "stillRunning";
         } finally { CloseHandle(h); }
     }
+    public sealed class Descendant { public int Pid; public long Creation; }
+    static bool ParentOf(IntPtr process, out int parent) {
+        ProcessBasic basic; int returned;
+        parent = 0;
+        if (NtQueryInformationProcess(process, 0, out basic, Marshal.SizeOf<ProcessBasic>(), out returned) != 0) return false;
+        parent = (int)basic.parentPid.ToInt64();
+        return true;
+    }
+    // Every descendant of `root` whose link is verified on pinned handles. Each candidate (a Toolhelp row that names a
+    // pinned ancestor as its parent) is opened first; its parent PID is read from the pinned process itself
+    // (ProcessBasicInformation's InheritedFromUniqueProcessId) and its creation time from the same handle, and it is
+    // accepted only when that parent is the pinned ancestor and it was created no earlier. Every accepted handle stays
+    // open for the walk, so no ancestor's PID can be reused under it. `unverified` counts the candidates whose link
+    // could not be verified: they are never returned, so never stopped.
+    public static Descendant[] VerifiedDescendants(int root, out int unverified) {
+        unverified = 0;
+        var result = new List<Descendant>();
+        var pins = new List<IntPtr>();
+        try {
+            IntPtr rootHandle = OpenProcess(0x1000 | 0x00100000, false, root); // QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+            if (rootHandle == IntPtr.Zero) return result.ToArray();
+            pins.Add(rootHandle);
+            long rootCreation, e, k, u;
+            if (!GetProcessTimes(rootHandle, out rootCreation, out e, out k, out u)) return result.ToArray();
+            var rows = Processes();
+            var queue = new Queue<KeyValuePair<int, long>>();
+            queue.Enqueue(new KeyValuePair<int, long>(root, rootCreation));
+            var seen = new HashSet<int> { root };
+            while (queue.Count > 0 && result.Count < 256) {
+                var parent = queue.Dequeue();
+                foreach (var row in rows) {
+                    if (row.Parent != parent.Key || row.Pid == parent.Key || seen.Contains(row.Pid)) continue;
+                    IntPtr h = OpenProcess(0x1000 | 0x00100000, false, row.Pid);
+                    if (h == IntPtr.Zero) { unverified++; continue; }
+                    long creation; int realParent;
+                    if (!GetProcessTimes(h, out creation, out e, out k, out u) || !ParentOf(h, out realParent) || realParent != parent.Key || creation < parent.Value) {
+                        CloseHandle(h); unverified++; continue;
+                    }
+                    pins.Add(h); seen.Add(row.Pid);
+                    result.Add(new Descendant { Pid = row.Pid, Creation = creation });
+                    queue.Enqueue(new KeyValuePair<int, long>(row.Pid, creation));
+                }
+            }
+        } finally { foreach (var h in pins) CloseHandle(h); }
+        return result.ToArray();
+    }
+    // (6) The input gate before a stimulus (CodeRabbit r4646929628, r4646929642): one GetGUIThreadInfo read on
+    // `topLevel`'s GUI thread. "ok" only when the read succeeded, no menu loop is open (GUI_INMENUMODE,
+    // GUI_SYSTEMMENUMODE, GUI_POPUPMENUMODE clear) and the focus is `expectedFocus` (Zero: `topLevel` itself or one of
+    // its children); else why not.
+    public static string InputGate(IntPtr topLevel, IntPtr expectedFocus) {
+        int owner; uint tid = GetWindowThreadProcessId(topLevel, out owner);
+        if (tid == 0) return "no-gui-thread";
+        var info = new GuiThreadInfo { size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        if (!GetGUIThreadInfo(tid, ref info)) return "gui-thread-info-failed";
+        if ((info.flags & 0x1C) != 0) return "menu-mode";
+        bool focused = expectedFocus != IntPtr.Zero ? info.focus == expectedFocus : (info.focus == topLevel || (info.focus != IntPtr.Zero && IsChild(topLevel, info.focus)));
+        return focused ? "ok" : "focus-elsewhere";
+    }
     // Whether this process runs inside a job (any job).
     public static bool InJob() { bool r; return IsProcessInJob(new IntPtr(-1), IntPtr.Zero, out r) && r; }
     public static bool ForegroundIs(IntPtr hwnd) { return hwnd != IntPtr.Zero && GetForegroundWindow() == hwnd; }
@@ -516,8 +580,10 @@ public static class GuiProbeNative {
     // enumerated. EnumDesktopWindows returns FALSE both for a failed walk and for a desktop it found nothing on, so
     // every FALSE is unavailable: its last error, or -1 when it set none. A caller proves an inventory with a window it
     // knows must be there.
-    public static WindowRow[] DesktopWindows(string desktop, out int error) {
-        IntPtr d = OpenDesktopW(desktop, 0, false, 0x0040 | 0x0001); // DESKTOP_ENUMERATE | DESKTOP_READOBJECTS
+    public static WindowRow[] DesktopWindows(string desktop, out int error) { return DesktopWindowsWithAccess(desktop, 0x0040 | 0x0001, out error); }
+    // The same walk through a handle opened with `access` (the enumeration control opens one without DESKTOP_ENUMERATE).
+    public static WindowRow[] DesktopWindowsWithAccess(string desktop, uint access, out int error) {
+        IntPtr d = OpenDesktopW(desktop, 0, false, access); // normally DESKTOP_ENUMERATE | DESKTOP_READOBJECTS
         if (d == IntPtr.Zero) { error = Marshal.GetLastWin32Error(); return null; }
         try {
             var rows = new List<WindowRow>();
@@ -1183,24 +1249,16 @@ function Get-ProcessDesktopReading([int] $ProcessId, [string] $Private) {
     }
 }
 
-# Every Toolhelp descendant of `RootPid` in `All` (rows by PID), as PID -> creation time. A child links to its parent
-# only when it was created no earlier than the parent, so a reused PID cannot join the tree. PID-keyed maps are
-# Dictionary[int, ...], never [ordered]@{}: an int index on an OrderedDictionary is positional (tooling.md
-# 2026-11-20 PS-ORDERED-INT-INDEX-01).
-function Get-ProbeDescendants($All, [int] $RootPid) {
+# Every descendant of `RootPid` whose link was verified on pinned handles (VerifiedDescendants: each candidate opened
+# first, its parent read from the process itself, its creation from the same handle, every ancestor's handle held
+# for the walk), as PID -> creation time. A candidate whose link could not be verified is counted in
+# $script:LastUnverifiedLinks, never returned, so never stopped. PID-keyed maps are Dictionary[int, ...], never
+# [ordered]@{}: an int index on an OrderedDictionary is positional (tooling.md 2026-11-20 PS-ORDERED-INT-INDEX-01).
+function Get-ProbeDescendants([int] $RootPid) {
     $found = [System.Collections.Generic.Dictionary[int, long]]::new()
-    $rootCreation = [GuiProbeNative]::CreationTime($RootPid)
-    if ($rootCreation -eq 0) { return , $found }
-    $queue = [Collections.Generic.Queue[object]]::new()
-    $queue.Enqueue(@($RootPid, $rootCreation))
-    while ($queue.Count -gt 0 -and $found.Count -lt 256) {
-        $parent = $queue.Dequeue()
-        foreach ($row in @($All.Values | Where-Object { $_.Parent -eq $parent[0] -and $_.Pid -ne $parent[0] })) {
-            if ($found.ContainsKey($row.Pid)) { continue }
-            $creation = [GuiProbeNative]::CreationTime($row.Pid)
-            if ($creation -ne 0 -and $creation -ge $parent[1]) { $found[$row.Pid] = $creation; $queue.Enqueue(@($row.Pid, $creation)) }
-        }
-    }
+    $unverified = 0
+    foreach ($descendant in [GuiProbeNative]::VerifiedDescendants($RootPid, [ref]$unverified)) { $found[$descendant.Pid] = $descendant.Creation }
+    $script:LastUnverifiedLinks = $unverified
     return , $found
 }
 
@@ -1211,7 +1269,8 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private, [s
     foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
     $rows = [Collections.Generic.List[object]]::new()
     $jobPids = @([GuiProbeNative]::JobPids($Job))
-    $descendants = Get-ProbeDescendants $all $CopyPid
+    $descendants = Get-ProbeDescendants $CopyPid
+    $script:SampleUnverifiedLinks = $script:LastUnverifiedLinks
     $systemFolder = [Environment]::GetFolderPath('System')
     foreach ($id in @(@($jobPids) + @($descendants.Keys) | Sort-Object -Unique)) {
         $entry = $all[$id]
@@ -1396,6 +1455,7 @@ function Invoke-ProbeDriver {
             $result.positiveChildDesktop = Get-DesktopKind $(if (Test-Path -LiteralPath $report) { [IO.File]::ReadAllText($report) } else { $null }) $DesktopName
             $armFacts = Invoke-Q0GuiArm $exe 'noctty-q0' @{}
             foreach ($key in @($armFacts.Keys)) { $result[$key] = $armFacts[$key] }
+            $result.enumerationControl = Invoke-EnumerationControl
         } else {
             # The probe window's own plumbing, which P1 relies on, without any input: a window and its EDIT,
             # text set and read back exactly, closed.
@@ -1478,6 +1538,40 @@ function Get-ProbeDriverRefusal {
     return $null
 }
 
+# The enumeration classifier's own control, in the driver (DIRECT-UPDATE-720): (a) a fresh desktop the driver creates
+# with no windows must come back unavailable (EnumDesktopWindows FALSE; the error as measured, -1 when it set none);
+# (b) a handle to this desktop opened without DESKTOP_ENUMERATE must come back unavailable with a nonzero error, while
+# the sentinel keeps the desktop from being empty; (c) this desktop, holding the driver's sentinel, must list it. A
+# successful empty walk cannot be told from (a), which is why every FALSE is unavailable.
+function Invoke-EnumerationControl {
+    $facts = [ordered]@{}
+    $emptyName = 'noctty-gui-probe-empty-' + [guid]::NewGuid().ToString('N')
+    $empty = [HiddenLocal]::CreateDesktopW($emptyName, [IntPtr]::Zero, [IntPtr]::Zero, 0, 0x10000000, [IntPtr]::Zero)
+    try {
+        if ($empty -eq [IntPtr]::Zero) { $facts.emptyDesktop = [ordered]@{ created = $false } }
+        else {
+            $enumError = 0
+            $rows = [GuiProbeNative]::DesktopWindows($emptyName, [ref]$enumError)
+            $facts.emptyDesktop = [ordered]@{ created = $true; unavailable = ($null -eq $rows); error = $enumError; rows = $(if ($null -ne $rows) { @($rows).Count } else { $null }) }
+        }
+    } finally { if ($empty -ne [IntPtr]::Zero) { [void][HiddenLocal]::CloseDesktop($empty) } }
+    $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
+    try {
+        $enumError = 0
+        $rows = [GuiProbeNative]::DesktopWindowsWithAccess($DesktopName, 0x0001, [ref]$enumError) # DESKTOP_READOBJECTS only
+        $facts.withoutEnumerate = [ordered]@{ unavailable = ($null -eq $rows); error = $enumError }
+        $enumError = 0
+        $rows = [GuiProbeNative]::DesktopWindows($DesktopName, [ref]$enumError)
+        $facts.withSentinel = [ordered]@{
+            unavailable = ($null -eq $rows); error = $enumError; rows = $(if ($null -ne $rows) { @($rows).Count } else { $null })
+            sentinelSeen = ($null -ne $rows -and @($rows | Where-Object { $_.Hwnd -eq $sentinel.Hwnd }).Count -eq 1)
+        }
+    } finally { [GuiProbeNative]::Close($sentinel) }
+    $facts.held = [bool]$facts.emptyDesktop.created -and [bool]$facts.emptyDesktop.unavailable -and
+        [bool]$facts.withoutEnumerate.unavailable -and $facts.withoutEnumerate.error -ne 0 -and [bool]$facts.withSentinel.sentinelSeen
+    return $facts
+}
+
 # One GUI arm of Q0, in the driver: the copy started on this desktop by name (with `ExtraEnvironment`, the in-box host
 # for that arm), its process tree and windows sampled with desktop readers for Default and this desktop held, then
 # stopped by exact PID. The job's accounting sits beside the sample, so a descendant that exited before it (cmd's
@@ -1507,6 +1601,7 @@ function Invoke-Q0GuiArm([string] $Exe, [string] $LogName, [hashtable] $ExtraEnv
         $arm.jobAccounting = $(if ($null -eq $accounting) { $null } else { [ordered]@{ totalProcesses = $accounting[0]; activeProcesses = $accounting[1]; terminatedProcesses = $accounting[2] } })
         $inJobSampled = @($processes | Where-Object { $_.inJob }).Count
         $arm.sampledProcesses = @($processes).Count
+        $arm.unverifiedDescendantLinks = $script:SampleUnverifiedLinks
         $arm.jobProcessesNotSampled = $(if ($null -eq $accounting) { $null } else { $accounting[0] - $inJobSampled })
         # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
         # enumeration must list.
@@ -1553,6 +1648,8 @@ function Invoke-Q0CliArm([string] $CopyBin) {
     }
     $invocations = [Collections.Generic.List[object]]::new()
     $readers = Open-ProbeDesktopReaders @('Default', $DesktopName)
+    # The window inventory's positive control for every poll: a hidden window of the driver's own on this desktop.
+    $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
     try {
         $arm.desktopReadersOpen = Test-ProbeDesktopReadersOpen $readers
         foreach ($shape in $shapes.Keys) {
@@ -1569,11 +1666,16 @@ function Invoke-Q0CliArm([string] $CopyBin) {
             [void][GuiProbeNative]::CloseHandle($pi.thread)
             $rootCreation = [GuiProbeNative]::CreationTime($pi.pid)
             $seen = [System.Collections.Generic.Dictionary[int, object]]::new()
+            # The CLI tree's windows, inventoried on both desktops at every poll: noctty.com is a console program, so a
+            # console window it gets on Default is exactly the leak Q0 exists to catch.
+            $windowsSeen = [System.Collections.Generic.Dictionary[string, object]]::new()
+            $inventoryEveryPoll = $true; $polls = 0; $unverifiedLinks = 0
             $deadline = [datetime]::UtcNow.AddSeconds(30)
             do {
                 $all = @{}
                 foreach ($row in [GuiProbeNative]::Processes()) { $all[$row.Pid] = $row }
-                $descendants = Get-ProbeDescendants $all $pi.pid
+                $descendants = Get-ProbeDescendants $pi.pid
+                $unverifiedLinks = [Math]::Max($unverifiedLinks, [int]$script:LastUnverifiedLinks)
                 $jobPids = @([GuiProbeNative]::JobPids([IntPtr]::Zero))
                 foreach ($id in @(@($pi.pid) + @($descendants.Keys))) {
                     $creation = $(if ($id -eq $pi.pid) { $rootCreation } else { $descendants[$id] })
@@ -1593,8 +1695,17 @@ function Invoke-Q0CliArm([string] $CopyBin) {
                         if (-not ($jobPids -contains $id)) { $row.inJob = $false }
                     }
                 }
+                $polls++
+                $inventory = Get-JobWindowRows @($seen.Values) $DesktopName $sentinel.Hwnd
+                if (-not [bool]$inventory.complete) { $inventoryEveryPoll = $false }
+                foreach ($window in @($inventory.windows)) { $windowsSeen["$($window.desktop)|$($window.class)|$($window.ownerRole)"] = $window }
                 if ([GuiProbeNative]::WaitForSingleObject($pi.process, 20) -eq 0) { break }
             } while ([datetime]::UtcNow -lt $deadline)
+            $facts.polls = $polls
+            $facts.inventoryCompleteEveryPoll = $inventoryEveryPoll -and $polls -gt 0
+            $facts.windows = @($windowsSeen.Values)
+            $facts.windowsOffPrivate = @($windowsSeen.Values | Where-Object { $_.desktop -ne 'private' }).Count
+            $facts.unverifiedDescendantLinks = $unverifiedLinks
             $facts.rootExited = [GuiProbeNative]::WaitForSingleObject($pi.process, 0) -eq 0
             $facts.exitCode = $(if ($facts.rootExited) { [long][GuiProbeNative]::ExitCode($pi.process) } else { $null })
             # Anything of the tree still alive is stopped by its exact PID and creation time: in the job through the
@@ -1618,7 +1729,7 @@ function Invoke-Q0CliArm([string] $CopyBin) {
             $facts.notSeenInJob = $(if ($null -ne $facts.jobProcessesStarted) { $facts.jobProcessesStarted - @($seen.Values | Where-Object { $_.inJob }).Count } else { $null })
             $invocations.Add($facts)
         }
-    } finally { Close-ProbeDesktopReaders $readers }
+    } finally { [GuiProbeNative]::Close($sentinel); Close-ProbeDesktopReaders $readers }
     $arm.invocations = $invocations
     return $arm
 }
@@ -1639,18 +1750,37 @@ if ($Driver) {
 # A real-profile guard that did not hold (the real startup state, PSReadLine history or clipboard sequence changed, the
 # owned job was not cleaned up, or the run left no guard state): the run's record keeps the evidence, and no later
 # copy starts.
-function Test-ProbeGuardsHeld($Run) {
+# The real-profile guards' state: 'held'; 'tripped' (a guard saw a change, the owned job was not cleaned up, or the run
+# left no guard state); or 'unreadable' (CodeRabbit r4646929611): a clipboard sequence sample of 0, which
+# GetClipboardSequenceNumber returns when the station's clipboard cannot be read, so equality proves nothing. Equal,
+# nonzero samples are the only clipboard evidence.
+function Get-ProbeGuardState($Run) {
     $guards = $Run.guards
-    return $null -ne $guards -and [bool]$guards.startupUnchanged -and [bool]$guards.historyUnchanged -and
-        [bool]$guards.clipboardUnchanged -and [bool]$guards.ownedJobCleanedUp
+    if ($null -eq $guards) { return 'tripped' }
+    if (-not ([bool]$guards.startupUnchanged -and [bool]$guards.historyUnchanged -and [bool]$guards.ownedJobCleanedUp)) { return 'tripped' }
+    if ($null -eq $guards.clipboardSequenceBefore -or $null -eq $guards.clipboardSequenceAfter -or
+        $guards.clipboardSequenceBefore -eq 0 -or $guards.clipboardSequenceAfter -eq 0) { return 'unreadable' }
+    if (-not [bool]$guards.clipboardUnchanged) { return 'tripped' }
+    return 'held'
 }
+# Locally an unreadable clipboard sample is missing evidence about the user's clipboard: the verdicts that read the
+# guards are inconclusive. On a hosted runner the clipboard is the VM's (a fresh one may never have changed it), so the
+# sample is recorded ($script:GuardUnreadable) and the other guards still decide.
+function Test-ProbeGuardsHeld($Run) {
+    $state = Get-ProbeGuardState $Run
+    return $state -eq 'held' -or ($state -eq 'unreadable' -and (Test-ProbeHosted))
+}
+function Test-ProbeGuardsReadable($Run) { return (Get-ProbeGuardState $Run) -ne 'unreadable' -or (Test-ProbeHosted) }
 
+# A tripped guard stops every later launch; an unreadable one stops them locally (the user's clipboard cannot be shown
+# untouched) and is recorded on a hosted runner, where the verdicts that read it are inconclusive.
 function Assert-ProbeGuards($Run, [string] $Name) {
-    $held = Test-ProbeGuardsHeld $Run
-    if (-not $held) {
-        $script:GuardTripped = $Name
-        throw "A real-profile guard did not hold after $Name; no further copy starts."
+    $state = Get-ProbeGuardState $Run
+    if ($state -eq 'tripped' -or ($state -eq 'unreadable' -and -not (Test-ProbeHosted))) {
+        $script:GuardTripped = "$Name ($state)"
+        throw "A real-profile guard was $state after $Name; no further copy starts."
     }
+    if ($state -eq 'unreadable') { $script:GuardUnreadable = $Name }
 }
 
 function Invoke-ProbeDriverRun([string] $Name, [string] $StageBin, [string] $TaskName) {
@@ -1808,7 +1938,8 @@ function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
         conptyHost = $(if ($Kind -eq 'inbox') {
             @($hostRows | Where-Object { $_.image -ieq 'conhost.exe' -and [bool]$_.imageInSystemFolder }).Count -ge 1 -and @($hostRows | Where-Object { $_.image -ieq 'OpenConsole.exe' }).Count -eq 0
         } else {
-            @($hostRows | Where-Object { ($_.image -ieq 'OpenConsole.exe' -and [bool]$_.imageInCopyFolder) -or ($_.image -ieq 'conhost.exe' -and [bool]$_.imageInSystemFolder) }).Count -ge 1
+            # The bundled arm sees the copy's own OpenConsole.exe; a fall back to System32's conhost.exe fails it.
+            @($hostRows | Where-Object { $_.image -ieq 'OpenConsole.exe' -and [bool]$_.imageInCopyFolder }).Count -ge 1
         })
         shell = @($hostRows | Where-Object { $_.image -ieq 'cmd.exe' }).Count -ge 1
     }
@@ -1817,7 +1948,7 @@ function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
     $windowsOff = @($(if ($d) { $d.windows | Where-Object { $_.desktop -ne 'private' } })).Count
     $shellPolicy = $null -ne $d -and [bool]$d.shell.read -and [bool]$d.shell.systemCmd -and [bool]$d.shell.autoRunOffFirst
     $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and [bool]$d.inventoryComplete -and
-        [bool]$d.shell.read -and $readsResolved -and $null -ne $d.jobProcessesNotSampled
+        [bool]$d.shell.read -and $readsResolved -and $null -ne $d.jobProcessesNotSampled -and (Test-ProbeGuardsReadable $ArmRun)
     $positive = $null -ne $d -and [bool]$d.copyReady -and $roles.app -and $roles.conptyHost -and $roles.shell -and $offPrivate -eq 0 -and
         $windowsOff -eq 0 -and $d.leftAfterStop -eq 0 -and (Test-ProbeGuardsHeld $ArmRun) -and $shellPolicy
     return [ordered]@{
@@ -1841,11 +1972,15 @@ function Get-Q0CliArmVerdict($ArmRun) {
     $forwarded = $invocations.Count -eq 2 -and @($invocations | Where-Object { -not [bool]$_.forwardedSeen }).Count -eq 0
     $rootsExited = $invocations.Count -gt 0 -and @($invocations | Where-Object { -not [bool]$_.rootExited }).Count -eq 0
     $nothingLeft = @($invocations | Where-Object { $_.leftAfterStop -ne 0 }).Count -eq 0
-    $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and $forwarded -and $readsResolved
-    $positive = $offPrivate -eq 0 -and $rootsExited -and $nothingLeft -and (Test-ProbeGuardsHeld $ArmRun)
+    $inventories = $invocations.Count -gt 0 -and @($invocations | Where-Object { -not [bool]$_.inventoryCompleteEveryPoll }).Count -eq 0
+    $windowsOff = [int](@($invocations | ForEach-Object { [int]$_.windowsOffPrivate }) | Measure-Object -Sum).Sum
+    $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and $forwarded -and $readsResolved -and
+        $inventories -and (Test-ProbeGuardsReadable $ArmRun)
+    $positive = $offPrivate -eq 0 -and $windowsOff -eq 0 -and $rootsExited -and $nothingLeft -and (Test-ProbeGuardsHeld $ArmRun)
     return [ordered]@{
         invocations = $invocations.Count; processesSeen = $all.Count; processesOffPrivate = $offPrivate
         leftJob = @($all | Where-Object { $_.leftJob }).Count; forwardedSeen = $forwarded; desktopReadsResolved = $readsResolved
+        windowInventoriesComplete = $inventories; windowsOffPrivate = $windowsOff
         exitCodes = @($invocations | ForEach-Object { $_.exitCode })
         notSeenInJob = @($invocations | ForEach-Object { $_.notSeenInJob })
         verdict = $(if (-not $records) { 'inconclusive' } elseif ($positive) { 'pass' } else { 'fail' })
@@ -1867,6 +2002,8 @@ function Get-Q0Summary($Q0) {
         pebSelfCheck = $(if ($driverRecord -and $null -ne $driverRecord.startupDesktopReaderCheck) { [bool]$driverRecord.startupDesktopReaderCheck } else { $null })
         negativeChildDefault = $(if ($neg -and $neg.threadMovedError -eq 0 -and [bool]$neg.childExited) { $neg.childDesktop -eq 'Default' } else { $null })
         readerNamesDefault = $(if ($neg) { $neg.readerNamesDefault } else { $null })
+        # The enumeration classifier's three cases; anything else leaves Q0 inconclusive, never failing it.
+        enumerationControl = $(if ($driverRecord -and $driverRecord.enumerationControl -and [bool]$driverRecord.enumerationControl.held) { $true } else { $null })
     }
     $armVerdicts = @($bundled.verdict, $inbox.verdict, $cli.verdict)
     $controlValues = @($controls.Values)
@@ -1874,8 +2011,9 @@ function Get-Q0Summary($Q0) {
         elseif (@($armVerdicts | Where-Object { $_ -ne 'pass' }).Count -eq 0 -and @($controlValues | Where-Object { $_ -ne $true }).Count -eq 0) { 'pass' }
         else { 'inconclusive' })
     return [ordered]@{
-        claim = 'every process and window alive at the sample'
+        claim = 'every process and window alive at a sample'
         bundled = $bundled; inbox = $inbox; cli = $cli; controls = $controls
+        enumerationControl = $(if ($driverRecord) { $driverRecord.enumerationControl } else { $null })
         verdict = $verdict
     }
 }
@@ -1903,7 +2041,9 @@ function Invoke-P1NocttyStimulus([IntPtr] $HostWindow, [string] $RunDir) {
         $arm.foreground = [GuiProbeNative]::Foreground($HostWindow, [ref]$unlockSent, [ref]$setResult)
         $arm.unlockInputSent = $unlockSent
         $arm.onInputDesktop = Test-ProbeOnInputDesktop
-        if ($arm.foreground -and $arm.onInputDesktop -and [GuiProbeNative]::ForegroundIs($HostWindow)) {
+        # One GetGUIThreadInfo read on noctty's GUI thread before each send: no menu loop, the focus inside its window.
+        $arm.gate = [GuiProbeNative]::InputGate($HostWindow, [IntPtr]::Zero)
+        if ($arm.foreground -and $arm.onInputDesktop -and $arm.gate -eq 'ok' -and [GuiProbeNative]::ForegroundIs($HostWindow)) {
             $win32Error = 0
             $nonce = 'p1' + [guid]::NewGuid().ToString('N')
             $file = Join-Path $RunDir 'p1-noctty.txt'
@@ -1919,7 +2059,8 @@ function Invoke-P1NocttyStimulus([IntPtr] $HostWindow, [string] $RunDir) {
             # utf8-console set (65001); no verdict reads them.
             $unicode = [string][char]0x00E9 + [char]0xD83D + [char]0xDE00
             $unicodeFile = Join-Path $RunDir 'p1-noctty-unicode.txt'
-            if ((Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($HostWindow)) {
+            $arm.unicodeGate = [GuiProbeNative]::InputGate($HostWindow, [IntPtr]::Zero)
+            if ($arm.unicodeGate -eq 'ok' -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($HostWindow)) {
                 $unicodeLine = 'echo ' + $unicode + '>>"' + $unicodeFile + '"'
                 $arm.unicodeExpectedEvents = 2 * $unicodeLine.Length + 2
                 $arm.unicodeSent = [GuiProbeNative]::SendLine($unicodeLine, [ref]$win32Error)
@@ -1932,9 +2073,8 @@ function Invoke-P1NocttyStimulus([IntPtr] $HostWindow, [string] $RunDir) {
             # Control: a probe window in front of the copy takes the line; the copy's shell never sees it.
             $cover = [GuiProbeNative]::Open('NocttyGuiProbeNocttyCover', 0xFFFFFF, 120, 120, 420, 240, $true)
             $arm.coverForeground = [GuiProbeNative]::Foreground($cover.Hwnd, [ref]$unlockSent, [ref]$setResult)
-            $arm.coverFocusOnEdit = [GuiProbeNative]::FocusOnEdit($cover)
-            $arm.coverMenuModeBeforeSend = [GuiProbeNative]::MenuMode($cover)
-            if ($arm.coverForeground -and $arm.coverFocusOnEdit -and -not $arm.coverMenuModeBeforeSend -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($cover.Hwnd)) {
+            $arm.coverGate = [GuiProbeNative]::InputGate($cover.Hwnd, $cover.Edit)
+            if ($arm.coverForeground -and $arm.coverGate -eq 'ok' -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($cover.Hwnd)) {
                 $controlNonce = 'p1c' + [guid]::NewGuid().ToString('N')
                 $controlFile = Join-Path $RunDir 'p1-noctty-control.txt'
                 $controlLine = 'echo ' + $controlNonce + '>>"' + $controlFile + '"'
@@ -2045,10 +2185,11 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
             $unlockSent = [uint32]0; $setResult = $false
             $p1.foreground = [GuiProbeNative]::Foreground($probe.Hwnd, [ref]$unlockSent, [ref]$setResult)
             $p1.unlockInputSent = $unlockSent; $p1.setForegroundResult = $setResult
-            # The keyboard focus must be the probe's EDIT before anything is sent (Greptile).
-            $p1.focusOnEdit = [GuiProbeNative]::FocusOnEdit($probe)
-            $p1.menuModeBeforeSend = [GuiProbeNative]::MenuMode($probe)
-            if ($p1.foreground -and $p1.focusOnEdit -and -not $p1.menuModeBeforeSend -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($probe.Hwnd)) {
+            # One GetGUIThreadInfo read before the send: the probe's EDIT focused, no menu loop (Greptile; CodeRabbit).
+            $p1.gate = [GuiProbeNative]::InputGate($probe.Hwnd, $probe.Edit)
+            $p1.focusOnEdit = $p1.gate -ne 'focus-elsewhere' -and $p1.gate -ne 'gui-thread-info-failed' -and $p1.gate -ne 'no-gui-thread'
+            $p1.menuModeBeforeSend = $p1.gate -eq 'menu-mode'
+            if ($p1.foreground -and $p1.gate -eq 'ok' -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($probe.Hwnd)) {
                 $win32Error = 0
                 $p1.expectedEvents = 2 * $text.Length
                 $p1.sent = [GuiProbeNative]::SendUnicode($text, [ref]$win32Error); $p1.lastError = $win32Error; $p1.injected = $true
@@ -2059,10 +2200,11 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
                 # Control: a second window in front; the probe's text must not change.
                 $cover = [GuiProbeNative]::Open('NocttyGuiProbeCover', 0xFFFFFF, 120, 120, 420, 240, $true)
                 $p1.coverForeground = [GuiProbeNative]::Foreground($cover.Hwnd, [ref]$unlockSent, [ref]$setResult)
-                $p1.coverFocusOnEdit = [GuiProbeNative]::FocusOnEdit($cover)
-                $p1.coverMenuModeBeforeSend = [GuiProbeNative]::MenuMode($cover)
-                # The cover's stimulus too goes only to the cover in front, from the input desktop.
-                if ($p1.coverForeground -and $p1.coverFocusOnEdit -and -not $p1.coverMenuModeBeforeSend -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($cover.Hwnd)) {
+                $p1.coverGate = [GuiProbeNative]::InputGate($cover.Hwnd, $cover.Edit)
+                $p1.coverFocusOnEdit = $p1.coverGate -ne 'focus-elsewhere' -and $p1.coverGate -ne 'gui-thread-info-failed' -and $p1.coverGate -ne 'no-gui-thread'
+                $p1.coverMenuModeBeforeSend = $p1.coverGate -eq 'menu-mode'
+                # The cover's stimulus too goes only to the cover in front, from the input desktop, through the gate.
+                if ($p1.coverForeground -and $p1.coverGate -eq 'ok' -and (Test-ProbeOnInputDesktop) -and [GuiProbeNative]::ForegroundIs($cover.Hwnd)) {
                     $p1.coverSent = [GuiProbeNative]::SendUnicode('zz', [ref]$win32Error)
                     Start-Sleep -Milliseconds 800
                     $p1.probeUnchangedWithCoverInFront = [string]::Equals([GuiProbeNative]::Text($probe), $received, [StringComparison]::Ordinal)
@@ -2079,7 +2221,7 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     # The EDIT arm: every event inserted, and the control counts only when the cover itself took its stimulus (in
     # front, its EDIT focused, no menu loop, both events of each unit inserted, and `zz` in it).
     $p1.editVerdict = Get-Verdict ([bool]$p1.receivedExactly -and $null -ne $p1.sent -and $p1.sent -eq $p1.expectedEvents) `
-        ([bool]$p1.coverForeground -and [bool]$p1.coverFocusOnEdit -and -not [bool]$p1.coverMenuModeBeforeSend -and $null -ne $p1.coverSent -and $p1.coverSent -eq 4 -and [bool]$p1.coverReceived -and [bool]$p1.probeUnchangedWithCoverInFront) `
+        ([bool]$p1.coverForeground -and $p1.coverGate -eq 'ok' -and $null -ne $p1.coverSent -and $p1.coverSent -eq 4 -and [bool]$p1.coverReceived -and [bool]$p1.probeUnchangedWithCoverInFront) `
         ([bool]$p1.injected -and $null -ne $p1.coverSent)
     $d3.p1 = $p1
 
@@ -2222,6 +2364,13 @@ $Work = [IO.Path]::GetFullPath($Work)
 if (Test-Path -LiteralPath $Work) { throw 'The work directory must be new.' }
 # Normalized once: each driver gets it on its command line (quoted, so no trailing separator) and validates it itself.
 $MeasureRepo = [IO.Path]::GetFullPath($MeasureRepo).TrimEnd('\')
+# A -Work inside -MeasureRepo would dirty the checkout the measurement build's provenance needs clean, so it is
+# refused before anything is created, unless git ignores it (CodeRabbit r4646929599).
+if (($Work + '\').StartsWith($MeasureRepo + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    $relative = $Work.Substring($MeasureRepo.Length + 1)
+    & git -C $MeasureRepo check-ignore -q --no-index -- $relative 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '-Work is inside -MeasureRepo and git does not ignore it; choose a -Work outside the checkout.' }
+}
 $hosted = Test-ProbeHosted
 # Measurement mode for this run and every driver it starts (STANDALONE-LEAF-AUMID-01): the libraries route to the
 # measurement build, and -Bin must be that build's raw prefix exe.
@@ -2326,11 +2475,13 @@ try {
 } catch {
     $record.failedStage = $script:Stage
     $record.guardTripped = $script:GuardTripped
+    $record.guardUnreadable = $script:GuardUnreadable
     Write-Host "gui probe: failed at stage $($script:Stage): $($_.Exception.Message)"
 } finally {
     if ($record.q0 -and $record.q0.Count -gt 0) {
         try { $record.q0.summary = Get-Q0Summary $record.q0 } catch { Write-Host "gui probe: Q0's summary failed: $($_.Exception.Message)" }
     }
+    if (-not $record.Contains('guardUnreadable')) { $record.guardUnreadable = $script:GuardUnreadable }
     # Locally, the real state's own guard over the whole run (the product jump list, startup-attempts.json, the
     # clipboard sequence: scripts/interactive-win11-state-guard.ps1, STANDALONE-LEAF-AUMID-01).
     if ($stateGuard) {

@@ -1121,17 +1121,26 @@ ConPTY host"):
 - the copy's CLI as PR 1's leaves run it: `noctty.com +version`, and
   `+list-windows --class=<fresh class> --format=json --timeout=1000`. The
   single-instance pipe is named only from `--class`, so the CLI arm reaches
-  no other noctty, and it runs locally too.
+  no other noctty, and it runs locally too. Its tree is sampled at every poll
+  until the root exits, and so are its windows: the same two-desktop
+  inventory, with its sentinel and Default > 0 control, over the tree's
+  processes. `noctty.com` is a console program, so a console window it got on
+  Default is exactly the leak Q0 exists to catch.
 
 Each arm:
 
 
 - A driver created by name on a private desktop (`Invoke-LocalHiddenDriver`)
   starts the copy.
-- It records the desktop of every process in the job, plus every Toolhelp
-  descendant of the launched root, linked by PID and creation time. A
-  descendant outside the job is `leftJob`: it is judged like the rest and
-  stopped by its exact PID and creation time.
+- It records the desktop of every process in the job, plus every descendant
+  of the launched root whose link was verified on pinned handles. Each
+  candidate is opened first, and its parent is read from the process itself,
+  its creation time from the same handle, with every ancestor's handle held.
+  A descendant outside the job is `leftJob`: it is judged like the rest and
+  stopped by its exact PID and creation time. A link that cannot be verified
+  is counted, never stopped.
+- The bundled arm must see the copy's own `OpenConsole.exe`; a fall back to
+  System32's `conhost.exe` fails it. The in-box arm must see `conhost.exe`.
 - It reads each process's startup desktop (PEB `DesktopInfo`) and its
   threads' desktops while holding read-only handles to Default and the
   private desktop. `GetThreadDesktop` names another process's thread desktop
@@ -1156,7 +1165,13 @@ Each arm:
 - Negative control: a thread moved to a second desktop with `SetThreadDesktop`
   starts a child that reports Default. While the child waits, Q0's own reader
   must name Default for both its startup desktop and its thread desktops.
-- Q0 passes only when all three arms and every control pass.
+- The enumeration classifier's own control runs in the bundled arm's driver:
+  a fresh empty desktop comes back unavailable, a handle without
+  `DESKTOP_ENUMERATE` comes back unavailable with a nonzero error, and the
+  desktop holding the sentinel lists it. Anything else leaves Q0
+  inconclusive.
+- Q0 passes only when all three arms and every control pass. Its claim is
+  "every process and window alive at a sample".
 
 **D3**, run hosted only (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` checked).
 On the runner's own Default desktop, each item has a control:
