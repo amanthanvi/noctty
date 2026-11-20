@@ -292,13 +292,13 @@ public static class GuiProbeNative {
     }
 
     // The negative control's launch: a fresh thread of this process is moved to `desktop` with SetThreadDesktop, then
-    // starts `command` without naming a desktop. moveError is 0 when the move succeeded.
-    public static ProcessInfo StartFromMovedThread(IntPtr desktop, string app, string command, string cwd, out int moveError) {
+    // starts `command` without naming a desktop, in `job` before it runs. moveError is 0 when the move succeeded.
+    public static ProcessInfo StartFromMovedThread(IntPtr desktop, string app, string command, string cwd, IntPtr job, out int moveError) {
         ProcessInfo result = new ProcessInfo(); int error = -1; Exception failure = null;
         var t = new Thread(() => {
             try {
                 error = SetThreadDesktop(desktop) ? 0 : Marshal.GetLastWin32Error();
-                result = Start(app, command, cwd, null, null, IntPtr.Zero, true);
+                result = Start(app, command, cwd, null, null, job, true);
             } catch (Exception e) { failure = e; }
         });
         t.Start(); t.Join();
@@ -424,7 +424,9 @@ public static class GuiProbeNative {
 
     public sealed class WindowRow { public IntPtr Hwnd; public int Pid; public string Class; public bool Visible; }
     // The top-level windows of the named desktop of this window station; null with `error` when it cannot be opened or
-    // enumerated. A successful enumeration with no windows is an empty array.
+    // enumerated. EnumDesktopWindows returns FALSE both for a failed walk and for a desktop it found nothing on, so
+    // every FALSE is unavailable: its last error, or -1 when it set none. A caller proves an inventory with a window it
+    // knows must be there.
     public static WindowRow[] DesktopWindows(string desktop, out int error) {
         IntPtr d = OpenDesktopW(desktop, 0, false, 0x0040 | 0x0001); // DESKTOP_ENUMERATE | DESKTOP_READOBJECTS
         if (d == IntPtr.Zero) { error = Marshal.GetLastWin32Error(); return null; }
@@ -436,9 +438,7 @@ public static class GuiProbeNative {
                 rows.Add(new WindowRow { Hwnd = h, Pid = pid, Class = s.ToString(), Visible = IsWindowVisible(h) });
                 return true;
             }, IntPtr.Zero);
-            // The callback never stops the walk, so FALSE with an error is a failed enumeration.
-            int enumError = enumerated ? 0 : Marshal.GetLastWin32Error();
-            if (!enumerated && enumError != 0) { error = enumError; return null; }
+            if (!enumerated) { int enumError = Marshal.GetLastWin32Error(); error = enumError != 0 ? enumError : -1; return null; }
             error = 0;
             return rows.ToArray();
         } finally { CloseDesktop(d); }
@@ -460,6 +460,10 @@ public static class GuiProbeNative {
     }
     public sealed class ProbeWindow { public IntPtr Hwnd, Edit; public uint ThreadId; public Thread Thread; }
     public static ProbeWindow Open(string className, uint bgr, int x, int y, int w, int h, bool withEdit) {
+        return Open(className, bgr, x, y, w, h, withEdit, true);
+    }
+    // `show` false: the window is never shown (an inventory's sentinel), so it takes no focus and paints nothing.
+    public static ProbeWindow Open(string className, uint bgr, int x, int y, int w, int h, bool withEdit, bool show) {
         var win = new ProbeWindow(); var ready = new ManualResetEvent(false); Exception failure = null;
         var t = new Thread(() => {
             try {
@@ -477,8 +481,10 @@ public static class GuiProbeNative {
                     lock (editOf) editOf[win.Hwnd] = win.Edit;
                 }
                 win.ThreadId = GetCurrentThreadId();
-                ShowWindow(win.Hwnd, 5); // SW_SHOW
-                if (win.Edit != IntPtr.Zero) SetFocus(win.Edit);
+                if (show) {
+                    ShowWindow(win.Hwnd, 5); // SW_SHOW
+                    if (win.Edit != IntPtr.Zero) SetFocus(win.Edit);
+                }
                 UpdateWindow(win.Hwnd);
             } catch (Exception e) { failure = e; }
             ready.Set();
@@ -919,6 +925,10 @@ function Invoke-ProbeReadback([IntPtr] $Surface, [string] $CapturePath) {
     $facts = [ordered]@{ attempts = 0; answered = $false; captured = $false; seeded = $false }
     $deadline = [datetime]::UtcNow.AddSeconds(20)
     do {
+        # Each attempt stands alone: what P3 reads is this attempt's, never an earlier capture's, so a capture that
+        # later attempts cannot repeat ends the loop uncaptured. A seeded capture still ends it at once.
+        $facts.captured = $false; $facts.seeded = $false
+        foreach ($key in @('width', 'height', 'colors', 'dominant', 'inkFraction', 'status')) { $facts.Remove($key) }
         foreach ($path in @($CapturePath, $statusPath)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
         $facts.attempts++
         $facts.redrawAnswered = [GuiProbeNative]::Redraw($Surface)
@@ -953,7 +963,7 @@ function Read-RenderTrace([string] $Path) {
 
 # The toast setting and history counts for the measurement build's two identities, read by Windows PowerShell 5.1
 # (WinRT's projection) on whatever desktop this process is on.
-function Get-ToastFacts([string] $Desktop, [IntPtr] $Job) {
+function Get-ToastFacts([string] $Desktop, [IntPtr] $Job, [string] $Private) {
     $script = @'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -974,12 +984,14 @@ $rows = foreach ($pair in @(@('product', 'io.github.amanthanvi.noctty'), @('meas
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     $outPath = Join-Path $script:RunRoot ("toast-" + [guid]::NewGuid().ToString('N') + '.json')
     $pi = [GuiProbeNative]::Start($powershell, ('"{0}" -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand {1}' -f $powershell, $encoded), $script:RunRoot, $Desktop, $outPath, $Job, $true)
+    # Where the helper actually started (its PEB's DesktopInfo), so P5's sample says which desktop it is from.
+    $helperDesktop = Get-DesktopKind ([GuiProbeNative]::StartupDesktop($pi.pid)) $Private
     try {
-        if ([GuiProbeNative]::WaitForSingleObject($pi.process, 60000) -ne 0) { [void][GuiProbeNative]::StopExact($pi.pid, [GuiProbeNative]::CreationTime($pi.pid), $Job); return @{ error = 'timeout' } }
+        if ([GuiProbeNative]::WaitForSingleObject($pi.process, 60000) -ne 0) { [void][GuiProbeNative]::StopExact($pi.pid, [GuiProbeNative]::CreationTime($pi.pid), $Job); return @{ error = 'timeout'; helperStartupDesktop = $helperDesktop } }
         # Windows PowerShell can still frame redirected output with a CLIXML progress record: take the array itself.
         $match = [regex]::Match([IO.File]::ReadAllText($outPath), '\[\{"identity".*?\}\]')
-        if (-not $match.Success) { return @{ error = 'no-json' } }
-        $facts = [ordered]@{}
+        if (-not $match.Success) { return @{ error = 'no-json'; helperStartupDesktop = $helperDesktop } }
+        $facts = [ordered]@{ helperStartupDesktop = $helperDesktop }
         foreach ($row in ($match.Value | ConvertFrom-Json)) {
             $facts[$row.identity] = [ordered]@{ setting = $row.setting; settingValue = $row.settingValue; settingHresult = $row.settingHresult; history = $row.history; historyHresult = $row.historyHresult }
         }
@@ -1025,25 +1037,33 @@ function Get-JobProcessRows([IntPtr] $Job, [int] $CopyPid, [string] $Private) {
 }
 
 # Every top-level window of the job's processes on the private and the Default desktop.
-function Get-JobWindowRows($Processes, [string] $Private) {
+function Get-JobWindowRows($Processes, [string] $Private, [IntPtr] $PrivateSentinel) {
     $byPid = @{}
     foreach ($row in $Processes) { $byPid[$row.pid] = $row }
     $rows = [Collections.Generic.List[object]]::new()
     $counts = [ordered]@{}
+    $totals = [ordered]@{}
+    $sentinelSeen = $false
     foreach ($desktop in @($Private, 'Default')) {
         $win32Error = 0
         $windows = [GuiProbeNative]::DesktopWindows($desktop, [ref]$win32Error)
         $kind = Get-DesktopKind $desktop $Private
         $counts[$kind] = $(if ($null -eq $windows) { "unavailable $win32Error" } else { 0 })
+        $totals[$kind] = $(if ($null -eq $windows) { $null } else { @($windows).Count })
+        if ($kind -eq 'private' -and $null -ne $windows) { $sentinelSeen = @($windows | Where-Object { $_.Hwnd -eq $PrivateSentinel }).Count -eq 1 }
         foreach ($window in @($windows)) {
             if ($null -eq $window -or -not $byPid.ContainsKey($window.Pid)) { continue }
             $counts[$kind]++
             $rows.Add([ordered]@{ desktop = $kind; class = $window.Class; ownerImage = $byPid[$window.Pid].image; ownerRole = $byPid[$window.Pid].role; visible = $window.Visible })
         }
     }
-    # Complete only when both desktops were opened and enumerated; an empty but successful one counts.
-    $complete = @($counts.Values | Where-Object { $_ -isnot [int] }).Count -eq 0
-    return [ordered]@{ windows = $rows; counts = $counts; complete = $complete }
+    # Complete only when both desktops were opened and enumerated and each enumeration shows its positive control: the
+    # driver's own hidden sentinel among the private desktop's windows, and at least one window on Default, where
+    # the interactive shell always has some (the probe owns none there during Q0). "No copy window on Default" holds
+    # only on a complete inventory; anything less leaves Q0 inconclusive.
+    $enumerated = @($counts.Values | Where-Object { $_ -isnot [int] }).Count -eq 0
+    $complete = $enumerated -and $sentinelSeen -and $null -ne $totals['Default'] -and $totals['Default'] -gt 0
+    return [ordered]@{ windows = $rows; counts = $counts; totals = $totals; privateSentinelSeen = $sentinelSeen; complete = $complete }
 }
 
 # Ends each listed process by exact PID (its creation time checked), the copy's descendants first, then the copy.
@@ -1158,7 +1178,12 @@ function Invoke-ProbeDriver {
             } while ([datetime]::UtcNow -lt $deadline)
             Start-Sleep -Seconds 2
             $processes = Get-JobProcessRows ([IntPtr]::Zero) $pi.pid $DesktopName
-            $windows = Get-JobWindowRows $processes $DesktopName
+            # The inventory's positive control on this desktop: a hidden window of the driver's own, which the
+            # enumeration must list.
+            $sentinel = [GuiProbeNative]::Open('NocttyGuiProbeSentinel', 0xFFFFFF, 0, 0, 16, 16, $false, $false)
+            try { $windows = Get-JobWindowRows $processes $DesktopName $sentinel.Hwnd } finally { [GuiProbeNative]::Close($sentinel) }
+            $result.windowTotals = $windows.totals
+            $result.privateSentinelSeen = $windows.privateSentinelSeen
             $result.processes = @($processes | ForEach-Object { [ordered]@{ image = $_.image; role = $_.role; startupDesktop = $_.startupDesktop; threadDesktops = $_.threadDesktops; threadsWithoutDesktop = $_.threadsWithoutDesktop } })
             $result.windows = $windows.windows
             $result.windowCounts = $windows.counts
@@ -1181,7 +1206,8 @@ function Invoke-ProbeDriver {
             # The private-desktop controls of P3, P4 and P5; the withheld arm prints no seed (P3's readback control).
             $withheld = $Task -eq 'private-renderer-withheld'
             $result.withheld = $withheld
-            if (-not $withheld) { $result.toast = Get-ToastFacts -Desktop $null -Job ([IntPtr]::Zero) }
+            # The toast helper is named on this desktop, never left to inheritance (AGENTS.md "Running noctty").
+            if (-not $withheld) { $result.toast = Get-ToastFacts -Desktop "WinSta0\$DesktopName" -Job ([IntPtr]::Zero) -Private $DesktopName }
             $seed = Join-Path $Run 'seed.txt'
             Write-ProbeSeed $seed $withheld
             $trace = Join-Path $Run 'render-private.json'
@@ -1206,7 +1232,7 @@ function Invoke-ProbeDriver {
             $result.stopped = Stop-ProbeProcesses $processes ([IntPtr]::Zero)
             [void][GuiProbeNative]::CloseHandle($pi.process)
             # P5's private sample after a normal exit only; a forced stop is no such sample.
-            if (-not $withheld) { $result.toastAfterNormalExit = $(if ($result.normalExit) { Get-ToastFacts -Desktop $null -Job ([IntPtr]::Zero) } else { $null }) }
+            if (-not $withheld) { $result.toastAfterNormalExit = $(if ($result.normalExit) { Get-ToastFacts -Desktop "WinSta0\$DesktopName" -Job ([IntPtr]::Zero) -Private $DesktopName } else { $null }) }
         }
         $result.error = $null
     } catch {
@@ -1263,22 +1289,35 @@ function Invoke-ProbeDriverRun([string] $Name, [string] $StageBin, [string] $Tas
 }
 
 # The negative control: a thread of this process moved to a second private desktop starts a child without naming one.
+# The child runs in a kill-on-close job of its own, which holds nothing else: a child that outlives the wait is
+# stopped by its exact PID (creation time and membership checked) and the job is closed, so nothing outlives the probe.
+# A normal exit leaves its report read as before.
 function Invoke-NegativeControl {
     $name = 'noctty-gui-probe-neg-' + [guid]::NewGuid().ToString('N')
     $desktop = [HiddenLocal]::CreateDesktopW($name, [IntPtr]::Zero, [IntPtr]::Zero, 0, 0x10000000, [IntPtr]::Zero)
     if ($desktop -eq [IntPtr]::Zero) { return [ordered]@{ error = 'CreateDesktop failed' } }
+    $job = [IntPtr]::Zero
+    $child = $null
     try {
+        $job = [HiddenLocal]::CreateOwnedJob()
         $report = Join-Path $Work 'child-negative.txt'
         $pwsh = (Get-Command pwsh.exe).Source
         $moveError = 0
-        $child = [GuiProbeNative]::StartFromMovedThread($desktop, $pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -ReportDesktop "{2}"' -f $pwsh, $PSCommandPath, $report), $Work, [ref]$moveError)
-        [void][GuiProbeNative]::WaitForSingleObject($child.process, 60000)
-        [void][GuiProbeNative]::CloseHandle($child.thread); [void][GuiProbeNative]::CloseHandle($child.process)
+        $child = [GuiProbeNative]::StartFromMovedThread($desktop, $pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -ReportDesktop "{2}"' -f $pwsh, $PSCommandPath, $report), $Work, $job, [ref]$moveError)
+        $exited = [GuiProbeNative]::WaitForSingleObject($child.process, 60000) -eq 0
+        $stop = $null
+        if (-not $exited) { $stop = [GuiProbeNative]::StopExact($child.pid, [GuiProbeNative]::CreationTime($child.pid), $job) }
         return [ordered]@{
             threadMovedError = $moveError
-            childDesktop = Get-DesktopKind $(if (Test-Path -LiteralPath $report) { [IO.File]::ReadAllText($report) } else { $null }) $name
+            childExited = $exited
+            childStop = $stop
+            childDesktop = Get-DesktopKind $(if ($exited -and (Test-Path -LiteralPath $report)) { [IO.File]::ReadAllText($report) } else { $null }) $name
         }
-    } finally { [void][HiddenLocal]::CloseDesktop($desktop) }
+    } finally {
+        if ($null -ne $child) { [void][GuiProbeNative]::CloseHandle($child.thread); [void][GuiProbeNative]::CloseHandle($child.process) }
+        if ($job -ne [IntPtr]::Zero) { try { [void][HiddenLocal]::StopOwnedJob($job) } catch { Write-Host "gui probe: closing the negative control's job failed: $($_.Exception.Message)" } }
+        [void][HiddenLocal]::CloseDesktop($desktop)
+    }
 }
 
 # A log whose copy drew only through WARP for the whole run: the device line, no hardware device, the renderer_windows
@@ -1667,7 +1706,7 @@ try {
         shellPolicyHeld = $q0ShellPolicy
         verdict = Get-Verdict `
             ($null -ne $driverRecord -and $driverRecord.copyReady -and [bool]$driverRecord.inventoryComplete -and $copyProcesses.Count -ge 2 -and $onDefault -eq 0 -and $windowsOnDefault -eq 0 -and $driverRecord.leftAfterStop -eq 0 -and $q0Guards -and $q0ShellPolicy) `
-            ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.threadMovedError -eq 0 -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `
+            ($null -ne $driverRecord -and $driverRecord.positiveChildDesktop -eq 'private' -and $q0.negativeControl.threadMovedError -eq 0 -and [bool]$q0.negativeControl.childExited -and $q0.negativeControl.childDesktop -eq 'Default' -and $driverRecord.startupDesktopReaderCheck) `
             ($null -ne $driverRecord -and $null -eq $driverRecord.error -and [bool]$driverRecord.inventoryComplete -and [bool]$driverRecord.shell.read)
     }
     Assert-ProbeGuards $q0 'q0'

@@ -1120,7 +1120,11 @@ It must refuse each of these for its own reason:
 - It records the desktop of every process in the job, read from the process's
   startup desktop (PEB `DesktopInfo`) and its threads' desktops.
 - It records every top-level window found on the private desktop and on
-  Default.
+  Default. Both inventories must be complete:
+  - every `FALSE` from `EnumDesktopWindows` counts as unavailable;
+  - a hidden sentinel window of the driver must appear on the private
+    desktop;
+  - Default must show at least one window.
 - It then stops each process by exact PID.
 - Positive control: a child started without a desktop name reports the private
   desktop.
