@@ -59,6 +59,7 @@ Add-Content -LiteralPath $env:FAKE_PACKAGE_LOG -Value "$Version|$($Architectures
 '@
     # Stand-in gh: resolves the tag commit and verifies (or refuses) attestations.
     Set-Content -LiteralPath (Join-Path $binDirectory 'gh.ps1') -Value @'
+if ($args[0] -eq 'release' -and $args[1] -eq 'view') { '{"assets":[]}'; exit 0 }
 Add-Content -LiteralPath $env:FAKE_GH_LOG -Value (@($args) -join ' ')
 if ($args[0] -eq 'api') { Write-Output $env:FAKE_TAG_COMMIT; exit 0 }
 if ($args[0] -eq 'attestation') { exit $(if ($env:FAKE_ATTEST -eq 'fail') { 1 } else { 0 }) }

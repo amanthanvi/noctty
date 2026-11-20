@@ -66,6 +66,16 @@ $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 -Version $version
 ```
 
+For releases that carry `release-manifest.json`, this public command also
+checks every payload file against the manifest and GitHub's SHA-256 digests.
+Without an independent digest it prints **Manifest is unanchored**: these
+checks establish consistency of the downloaded bytes, not agreement with the
+original build summary. Signature and provenance verification still run.
+For an anchored check, copy `release-manifest.json SHA-256` from the original
+Release run summary and add `-ManifestSha256 <sha256>`. Promotion always
+requires this digest. A supplied digest for an older release without a manifest
+fails with `ManifestMissing`; omit it for those releases.
+
 The environment variable is what lets the script accept today's self-signed
 certificate. Without it, the script fails closed.
 

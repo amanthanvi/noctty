@@ -34,9 +34,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'release-publisher-outcome.ps1')
+if ([string]::Equals($env:CHOCOLATEY_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'Chocolatey explicitly disabled.'; Set-ReleasePublisherOutcome skipped-disabled; return }
+. (Join-Path $PSScriptRoot 'package-manager-paths.ps1')
 
 if (-not $PackOnly -and -not $env:CHOCO_API_KEY) {
     Write-Host 'Skipping Chocolatey publish: CHOCO_API_KEY is not configured.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 
@@ -66,6 +70,8 @@ $packageDirectory = $metadata.chocolatey.packageDirectory
 if ([string]::IsNullOrWhiteSpace($packageDirectory)) {
     throw 'metadata.json does not record the Chocolatey package directory.'
 }
+$nuspecPath = Resolve-ArtifactMetadataPath -ArtifactDirectory $artifactDirectoryX64 -Path $nuspecPath -SchemaVersion $metadata.schemaVersion
+$packageDirectory = Resolve-ArtifactMetadataPath -ArtifactDirectory $artifactDirectoryX64 -Path $packageDirectory -SchemaVersion $metadata.schemaVersion
 # The nuspec has to be the one inside the package directory the same run
 # generated; a mismatch means the metadata describes a different build.
 $nuspecParent = [System.IO.Path]::GetFullPath(
@@ -106,7 +112,7 @@ if (Test-ChocolateyVersionPublished `
     if (-not $Resubmit) {
         Write-Host "Chocolatey already has $packageName $Version; nothing to push."
         # A dry run still packs, so it shows what a -Resubmit run would push.
-        if (-not $PackOnly) { return }
+        if (-not $PackOnly) { Set-ReleasePublisherOutcome already-present; return }
     }
     else {
         Write-Host "Chocolatey lists $packageName $Version; -Resubmit pushes it again."
@@ -114,6 +120,7 @@ if (Test-ChocolateyVersionPublished `
 }
 
 if (-not $PSCmdlet.ShouldProcess($PushSource, "publish $packageName $Version to Chocolatey")) {
+    Set-ReleasePublisherOutcome what-if
     return
 }
 
@@ -147,6 +154,7 @@ if ($packages.Count -ne 1) {
 
 if ($PackOnly) {
     Write-Host "Packed $($packages[0].Name) ($($packages[0].Length) bytes, SHA-256 $(Get-FileSha256Lower -Path $packages[0].FullName)); -PackOnly stops here, nothing was pushed."
+    Set-ReleasePublisherOutcome packed
     return
 }
 
@@ -169,7 +177,7 @@ if ($pushExitCode -ne 0) {
         Write-Host "Chocolatey already has $packageName $Version; treating the push as complete."
         # GitHub's pwsh wrapper exits with the last native exit code, which is
         # still the failed push's.
-        $global:LASTEXITCODE = 0
+        Set-ReleasePublisherOutcome already-present
         return
     }
     if ($pushText -match '\b403\b') {
@@ -178,3 +186,4 @@ if ($pushExitCode -ne 0) {
     }
     throw "choco push failed with exit code $pushExitCode."
 }
+Set-ReleasePublisherOutcome published

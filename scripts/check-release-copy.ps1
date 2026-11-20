@@ -3,7 +3,9 @@ param(
     [switch]$CheckRemoteLatest,
 
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$ExpectedVersion
+    [string]$ExpectedVersion,
+
+    [switch]$PassThru
 )
 
 $ErrorActionPreference = "Stop"
@@ -289,5 +291,6 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 
+if ($PassThru) { [pscustomobject]@{ Verified=$true } }
 Write-Host "Release copy checks passed." -ForegroundColor Green
 $global:LASTEXITCODE = 0

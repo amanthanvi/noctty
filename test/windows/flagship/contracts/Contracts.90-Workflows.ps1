@@ -181,7 +181,7 @@ if ($conptyJob -notmatch '(?m)^    continue-on-error: true\s*$' -or
     throw 'Experimental ConPTY coverage must be optional, bounded, and retain the child dispatch test.'
 }
 foreach ($probeVariable in @('NOCTTY_RUN_CONPTY_TRANSPORT_TEST', 'NOCTTY_CONPTY_TRANSPORT_PROBE', 'NOCTTY_CONPTY_KEY_INPUT_PROBE')) {
-    if ($conptyStep -notmatch ($probeVariable + ": '1'")) { throw "Missing scoped probe variable: $probeVariable" }
+    if ($conptyStep -notmatch ($probeVariable + ': (?<quote>[''"])1\k<quote>')) { throw "Missing scoped probe variable: $probeVariable" }
     if ($testWorkflowText.Replace($conptyJob, '') -match $probeVariable) { throw 'ConPTY probe variables must stay out of the required Windows jobs.' }
 }
 
@@ -332,8 +332,8 @@ foreach ($gated in @(
         $job, $flag = $entry -split ':', 2
         $expected[$job] = $flag
     }
-    $needsMatch = [regex]::Match($gateJob, '(?m)^    needs: \[(?<list>[^\]]*)\]\s*$')
-    $needed = @($needsMatch.Groups['list'].Value -split ',\s*' | Where-Object { $_ })
+    $needsMatch = [regex]::Match($gateJob, '(?m)^    needs:\s*\[(?<list>[^\]]*)\]\s*$')
+    $needed = @($needsMatch.Groups['list'].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $neededText = ($needed | Sort-Object) -join ','
     $expectedText = ((@('changes') + @($expected.Keys)) | Sort-Object) -join ','
     if ($neededText -cne $expectedText) {

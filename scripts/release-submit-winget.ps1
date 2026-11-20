@@ -25,16 +25,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'release-publisher-outcome.ps1')
+if ([string]::Equals($env:WINGET_PUBLISH, 'off', [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'WinGet explicitly disabled.'; Set-ReleasePublisherOutcome skipped-disabled; return }
 
 if (-not $env:WINGET_CREATE_GITHUB_TOKEN) {
     Write-Host 'Skipping WinGet submit: WINGET_CREATE_GITHUB_TOKEN is not configured.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
     Write-Host 'Skipping WinGet submit: WINGET_PACKAGE_IDENTIFIER is not configured. Initial WinGet bootstrap is still manual.'
+    Set-ReleasePublisherOutcome skipped-unconfigured
     return
 }
 if (-not $PSCmdlet.ShouldProcess($PackageIdentifier, "submit noctty $Version WinGet manifest")) {
+    Set-ReleasePublisherOutcome what-if
     return
 }
 
@@ -51,6 +56,101 @@ $TempDirectory = [System.IO.Path]::GetFullPath($TempDirectory)
 $artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+function Test-WinGetVersionSubmitted {
+    # At most 100 open PRs matching the identifier in title OR body, without
+    # a version qualifier. Confirm identity by manifest paths, not PR text.
+    # Accepted limit: an external PR whose title AND body omit the identifier
+    # is undiscoverable here; wingetcreate submissions always include it.
+    $segments = $PackageIdentifier.Split('.')
+    $prefix = 'manifests/{0}/{1}/{2}/' -f $segments[0].Substring(0, 1).ToLowerInvariant(), ($segments -join '/'), $Version
+    $requestBudget = [pscustomobject]@{ Remaining = 250 }
+    function Read-WinGetJson {
+        param([string[]] $Arguments, [switch] $AllowNotFound, [switch] $Search)
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (--$requestBudget.Remaining -lt 0) { throw 'WinGet read budget exceeded.' }
+            # Search permits 30 authenticated reads/minute. Keep reads serial;
+            # other REST calls are paced too, with at most three 5xx attempts.
+            Start-Sleep -Milliseconds $(if ($Search) { 2100 } else { 250 })
+            $lines = @(& gh api --method GET @Arguments --include 2>$null)
+            $exitCode = $LASTEXITCODE
+            $status = [regex]::Match(($lines -join "`n"), '(?m)^HTTP/\S+\s+([0-9]{3})\b')
+            if (-not $status.Success) {
+                if ($attempt -lt 3) { Start-Sleep -Seconds ([math]::Pow(2, $attempt)); continue }
+                throw 'WinGet HTTP status unavailable after 3 attempts.'
+            }
+            $code = [int]$status.Groups[1].Value
+            if ($code -ge 500 -and $code -le 599 -and $attempt -lt 3) {
+                Start-Sleep -Seconds ([math]::Pow(2, $attempt))
+                continue
+            }
+            if ($code -eq 404 -and $AllowNotFound) { return $null }
+            if ($exitCode -ne 0 -or $code -ne 200) { throw "WinGet read refused (HTTP $code)." }
+            $blank = [array]::IndexOf($lines, '')
+            if ($blank -lt 0 -or $blank -ge $lines.Count - 1) { throw 'Incomplete WinGet HTTP response.' }
+            $data = ($lines[($blank + 1)..($lines.Count - 1)] -join "`n") | ConvertFrom-Json -NoEnumerate
+            if ($null -eq $data) { throw 'WinGet JSON is missing.' }
+            return $data
+        }
+    }
+    function Test-WinGetPrFiles {
+        param([int] $Number)
+        $pr = Read-WinGetJson @("repos/microsoft/winget-pkgs/pulls/$Number")
+        if ($pr.state -cne 'open' -and -not $pr.merged_at) { return $false }
+        if ($null -eq $pr.changed_files -or $pr.changed_files -lt 0) { throw 'Missing PR file count.' }
+        $seen = 0
+        for ($page = 1; $page -le 30; $page++) {
+            $files = @(Read-WinGetJson @("repos/microsoft/winget-pkgs/pulls/$Number/files?per_page=100&page=$page"))
+            $seen += $files.Count
+            foreach ($file in $files) {
+                if (-not $file.filename -or -not $file.status) { throw 'Incomplete PR file record.' }
+                if ($file.status -cne 'removed' -and $file.filename.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            }
+            if ($files.Count -lt 100) {
+                if ($seen -ne $pr.changed_files) { throw 'PR files were truncated.' }
+                return $false
+            }
+        }
+        throw 'PR files exceeded GitHub REST file limit.'
+    }
+    $savedToken = $env:GH_TOKEN
+    try {
+        $env:GH_TOKEN = $env:WINGET_CREATE_GITHUB_TOKEN
+        $repo = Read-WinGetJson @('repos/microsoft/winget-pkgs')
+        if (-not $repo.default_branch) { throw 'WinGet default branch is unknown.' }
+        $directory = Read-WinGetJson @("repos/microsoft/winget-pkgs/contents/$($prefix.TrimEnd('/'))", '-f', "ref=$($repo.default_branch)") -AllowNotFound
+        if ($null -ne $directory) {
+            if (@($directory | Where-Object { $_.type -ceq 'file' -and $_.name -ceq "$PackageIdentifier.yaml" -and $_.path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+                throw 'Existing WinGet version directory is incomplete.'
+            }
+            return $true
+        }
+        $identifier = $PackageIdentifier.ToLowerInvariant()
+        $query = "repo:microsoft/winget-pkgs is:pr is:open in:title,body `"$identifier`""
+        $search = Read-WinGetJson @('search/issues', '-f', "q=$query", '-f', 'per_page=100') -Search
+        if ($null -eq $search.total_count -or $null -eq $search.items -or $search.incomplete_results -or
+            $search.total_count -ne @($search.items).Count -or $search.total_count -gt 100) {
+            throw 'WinGetCandidateSetIncomplete: identifier query must be complete and contain at most 100 open PRs.'
+        }
+        $numbers = [Collections.Generic.HashSet[int]]::new()
+        foreach ($item in $search.items) {
+            if (-not $item.number) { throw 'WinGet search candidate has no PR number.' }
+            [void]$numbers.Add([int]$item.number)
+        }
+        foreach ($number in $numbers) { if (Test-WinGetPrFiles -Number $number) { return $true } }
+        Write-Host "WinGet $PackageIdentifier $Version`: absent within the stated limit (open PR title/body identifier query and default-branch manifest check; external PRs omitting the identifier in both fields are excluded)."
+        return $false
+    }
+    catch {
+        if ($_.Exception.Message.StartsWith('WinGetCandidateSetIncomplete:', [StringComparison]::Ordinal)) { throw }
+        throw 'WinGetQueryFailed: could not complete the bounded submission lookup after its retry policy; refusing submission.'
+    }
+    finally { $env:GH_TOKEN = $savedToken }
+}
+if (Test-WinGetVersionSubmitted) {
+    Write-Host "WinGet already has an open or merged PR for $PackageIdentifier $Version; nothing to submit."
+    Set-ReleasePublisherOutcome already-present
+    return
+}
 $packageIdSegments = $PackageIdentifier.Split('.')
 $manifestPath = 'manifests/{0}/{1}' -f `
     $packageIdSegments[0].Substring(0, 1).ToLowerInvariant(), `
@@ -73,6 +173,7 @@ catch {
 
     if ($statusCode -eq 404) {
         Write-Host "Skipping WinGet submit: $PackageIdentifier is not bootstrapped in microsoft/winget-pkgs ($manifestPath)."
+    Set-ReleasePublisherOutcome skipped-unconfigured
         return
     }
     throw
@@ -255,3 +356,4 @@ $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
 if ($result.ExitCode -ne 0) {
     throw "wingetcreate update failed with exit code $($result.ExitCode)"
 }
+Set-ReleasePublisherOutcome published
