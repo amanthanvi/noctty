@@ -63,7 +63,7 @@ For cross-compiling to a different Zig target triple, use
 `ghostty_vt_add_target()` after `FetchContent_MakeAvailable`:
 
 ```cmake
-FetchContent_MakeAvailable(ghostty)
+FetchContent_MakeAvailable(noctty)
 ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu)
 
 add_executable(myapp main.c)
@@ -92,7 +92,7 @@ ghostty_zig_compiler(ZIG_TARGET x86_64-linux-gnu)
 
 project(myapp LANGUAGES C CXX)
 
-FetchContent_MakeAvailable(ghostty)
+FetchContent_MakeAvailable(noctty)
 ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu)
 
 add_executable(myapp main.c)

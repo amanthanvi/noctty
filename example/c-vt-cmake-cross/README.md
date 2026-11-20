@@ -15,7 +15,7 @@ Override with `-DZIG_TARGET=...` if needed.
 
 ```shell-session
 cd example/c-vt-cmake-cross
-cmake -B build -DFETCHCONTENT_SOURCE_DIR_GHOSTTY=../..
+cmake -B build -DFETCHCONTENT_SOURCE_DIR_NOCTTY=../..
 cmake --build build
 file build/c_vt_cmake_cross
 ```

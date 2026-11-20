@@ -18,11 +18,15 @@ When making tradeoffs, in order:
 3. **Compression throughput.** Runs on idle pages in the background; being
    fast is nice, being slow is tolerable.
 
+In this fork no page compresses on Windows outside tests in Phase 1A
+(`mem.canReclaim` is false there; terminal-core.md 2026-11-20
+NODE-STONE-01).
+
 ## Testing
 
 - Targeted tests: `zig build test -Dtest-filter=<codec>`
-- Prefer `zig build test-lib-vt -Dtest-filter=<codec>` when practical;
-  this code ships in libghostty-vt.
+- Prefer `zig build test-lib-vt -Demit-lib-vt=true -Dtest-filter=<codec>`
+  when practical; this code ships in libghostty-vt.
 - Codecs must keep building for `wasm32-freestanding` (libghostty-vt):
   no libc, no `src/simd` (Highway) dependencies. Verify with
   `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`.
@@ -49,7 +53,7 @@ When making tradeoffs, in order:
 - Use `ghostty-bench +page-compression` (see `src/benchmark/AGENTS.md`
   for the general workflow). Modes: `compress`, `decompress`, `store`,
   and `report` for ratio.
-- Build: `zig build -Demit-bench -Doptimize=ReleaseFast -Demit-macos-app=false`
+- Build: `zig build -Demit-bench -Doptimize=ReleaseFast`
 - The most representative corpus is a raw dump of real page backing
   memory, chunked at the page size (400 KiB on ReleaseFast targets).
   Supplement with a text corpus and random bytes for worst cases, but

@@ -15,7 +15,7 @@
 #
 # Pass extra flags to the Zig build with GHOSTTY_ZIG_BUILD_FLAGS:
 #
-#   cmake -B build -DGHOSTTY_ZIG_BUILD_FLAGS="-Demit-macos-app=false"
+#   cmake -B build -DGHOSTTY_ZIG_BUILD_FLAGS="-Dsimd=false"
 #
 # Integrating into a downstream CMake project
 # ---------------------------------------------
@@ -48,7 +48,7 @@
 # For building libghostty-vt for a non-native Zig target (e.g. cross-
 # compiling), use the ghostty_vt_add_target() function after FetchContent:
 #
-#   FetchContent_MakeAvailable(ghostty)
+#   FetchContent_MakeAvailable(noctty)
 #   ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu)
 #
 #   target_link_libraries(myapp PRIVATE ghostty-vt-static-linux-amd64) # static

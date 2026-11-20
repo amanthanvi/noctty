@@ -47,11 +47,11 @@ ghostty_zig_compiler(ZIG_TARGET "${ZIG_TARGET}")
 project(c-vt-cmake-cross LANGUAGES C CXX)
 
 include(FetchContent)
-FetchContent_Declare(ghostty
-    GIT_REPOSITORY https://github.com/ghostty-org/ghostty.git
+FetchContent_Declare(noctty
+    GIT_REPOSITORY https://github.com/amanthanvi/noctty.git
     GIT_TAG main
 )
-FetchContent_MakeAvailable(ghostty)
+FetchContent_MakeAvailable(noctty)
 
 ghostty_vt_add_target(NAME cross ZIG_TARGET "${ZIG_TARGET}")
 

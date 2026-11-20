@@ -27,7 +27,7 @@
 #
 #   project(myapp LANGUAGES C CXX)
 #
-#   FetchContent_MakeAvailable(ghostty)
+#   FetchContent_MakeAvailable(noctty)
 #   ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu)
 #   target_link_libraries(myapp PRIVATE ghostty-vt-static-linux-amd64)
 #

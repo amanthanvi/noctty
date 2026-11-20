@@ -125,8 +125,12 @@ reading step under [Self-Correction Log](#self-correction-log).
 
 - Build: `zig build -Demit-lib-vt`
 - Build WASM: `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
-- Test: `zig build test-lib-vt -Dtest-filter=<filter>`
-  - Prefer this when the change is in a libghostty-vt file
+- Test: `zig build test-lib-vt -Demit-lib-vt=true --summary all` (CI's
+  `windows-lib-vt` job; the step errors without `-Demit-lib-vt=true` in
+  this fork). It is the only step that runs the C API tests in
+  `src/terminal/c/`, so a change in a libghostty-vt file runs it as well
+  as the full suite above. `-Dtest-filter=<token>` works here as above,
+  for iteration only.
 - All C enums in `include/ghostty/vt/` must have a `_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE`
   sentinel as the last entry to force int enum sizing (pre-C23 portability).
 

@@ -49,7 +49,7 @@
 //!
 //! Build the benchmark in ReleaseFast mode:
 //!
-//!     zig build -Demit-bench -Doptimize=ReleaseFast -Demit-macos-app=false
+//!     zig build -Demit-bench -Doptimize=ReleaseFast
 //!
 //! Inspect the memory reduction for a saved VT corpus:
 //!
