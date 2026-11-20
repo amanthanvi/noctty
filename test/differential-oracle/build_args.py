@@ -18,6 +18,7 @@ BUILD_OPTIONS = frozenset(
     }
 )
 VALUE_OPTIONS = frozenset({"-p", "--prefix", "--summary"})
+INCLUDE_ENVIRONMENT = ("CPATH", "CPLUS_INCLUDE_PATH")
 
 
 def check_arguments(args):
@@ -186,6 +187,9 @@ if __name__ == "__main__":
     try:
         if os.name != "nt":
             raise ValueError("the oracle build argument guard requires Windows")
+        for name in INCLUDE_ENVIRONMENT:
+            if name in os.environ:
+                raise ValueError(f"disallowed environment variable: {name}")
         check_arguments(parent_build_arguments(sys.argv[1]))
     except ValueError as exc:
         sys.exit(f"oracle build arguments: {exc}")

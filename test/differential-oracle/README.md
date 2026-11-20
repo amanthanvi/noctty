@@ -22,7 +22,9 @@ An oracle invocation selects only the `oracle` step. Its argument allowlist is
 `-Dcpu=`, `-Dcustom-shaders=` (where defined), `--prefix` (or `-p`), `--summary`,
 and `-jN` for a positive job limit. Set `ZIG_GLOBAL_CACHE_DIR` for a scratch cache on the source drive.
 The always-run guard checks the original Windows Zig driver invocation on both
-compilers, including options consumed before the build script runs.
+compilers, including options consumed before the build script runs. Unset
+`CPATH` and `CPLUS_INCLUDE_PATH` before building. The guard refuses either variable
+because both reach the vendored simdutf C++ compile on both toolchains.
 
 From the repository root:
 
