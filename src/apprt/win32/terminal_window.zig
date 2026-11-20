@@ -106,6 +106,7 @@ const quick_select_class_name = win32.quick_select_class_name;
 const recordOpenGLStartupError = win32.recordOpenGLStartupError;
 const recordOpenGLStartupWin32Failure = win32.recordOpenGLStartupWin32Failure;
 const render_trace = @import("render_trace.zig");
+const latency_trace = @import("latency_trace.zig");
 const rendererpkg = @import("../../renderer.zig");
 const requestedTabInsertIndex = win32.requestedTabInsertIndex;
 const restoreTerminalUndoState = win32.restoreTerminalUndoState;
@@ -676,7 +677,10 @@ pub const Surface = struct {
             .host_active = true,
             .window_visible = false,
             .scrollbar_config = config.scrollbar,
-            .render_trace = RenderTrace.init(app.core_app.alloc),
+            .render_trace = blk: {
+                latency_trace.init();
+                break :blk RenderTrace.init(app.core_app.alloc);
+            },
             // Unlike the render trace there is no single-claimant rule here:
             // the memory stage trace is JSONL and every surface appends its
             // own lifecycle records to the shared file, serialized by a
@@ -2048,6 +2052,7 @@ pub const Surface = struct {
     }
 
     pub fn noteRendererWakeupCallback(self: *Surface, wake_sources: u32) void {
+        latency_trace.note(.renderer_wake, wake_sources, 0);
         self.render_trace.noteRendererWakeupCallback(wake_sources);
     }
 
@@ -2060,6 +2065,7 @@ pub const Surface = struct {
         progress: ?rendererpkg.State.OutputProgress,
         cursor_blinking: bool,
     ) void {
+        if (progress) |value| latency_trace.noteFrameUpdate(value.bytes, value.generation);
         self.render_trace.noteRendererUpdateFrame(
             if (progress) |value| .{
                 .generation = value.generation,
@@ -2151,6 +2157,8 @@ pub const Surface = struct {
         const hdc = self.hdc orelse return error.NoDeviceContext;
         _ = self.hglrc orelse return error.NoOpenGLContext;
 
+        latency_trace.note(.swap_begin, 0, 0);
+        latency_trace.beforeSwap();
         if (sys.SwapBuffers(hdc) == 0) {
             const err = windows.kernel32.GetLastError();
             return windows.unexpectedError(err);
@@ -2160,6 +2168,7 @@ pub const Surface = struct {
 
     /// Shared successful-content handshake for WGL and DXGI (S_OK only).
     pub fn noteSuccessfulPresent(self: *Surface) void {
+        latency_trace.noteSwapEnd();
         self.render_trace.noteSwapBuffers();
         // Real content reached the screen, so the post-show handshake is
         // finished for good and can never wake the renderer again.

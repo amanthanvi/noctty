@@ -90,6 +90,7 @@ const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const win32_hints = @import("win32_hints.zig");
 const win32_elevation = @import("win32_elevation.zig");
 const render_trace = @import("win32/render_trace.zig");
+const latency_trace = @import("win32/latency_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const overlay_view = @import("win32/overlay_view.zig");
@@ -12858,6 +12859,7 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
 
         c.WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT => {
+            latency_trace.dump();
             if (surface) |v| v.render_trace.requestSnapshot();
             return 0;
         },
@@ -12936,6 +12938,7 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
 
         c.WM_KEYDOWN, c.WM_SYSKEYDOWN, c.WM_KEYUP, c.WM_SYSKEYUP => {
+            latency_trace.note(.key_msg, msg, wParam);
             // The pump has already run TranslateMessage, so the characters
             // this key typed are queued. Take them before the surface is
             // resolved: PeekMessage runs cross-thread sent messages.
@@ -13015,6 +13018,7 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
 
         c.WM_CHAR, c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {
+            latency_trace.note(.char_msg, msg, wParam);
             if (surface) |v| v.handleCharMessage(msg, wParam, lParam);
             return 0;
         },
@@ -13299,6 +13303,7 @@ pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.paint_pending = false;
                 if (draw_content) {
                     const paint_start_ms = if (v.render_trace.enabled()) sys.GetTickCount64() else 0;
+                    latency_trace.note(.paint_begin, 0, 0);
                     v.render_trace.notePaintDraw();
                     defer v.finishRendererRepaintRequest();
                     defer if (paint_start_ms != 0) {

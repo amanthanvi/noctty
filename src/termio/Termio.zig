@@ -1235,6 +1235,7 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         self.terminal_stream.handler.semantic_output.begin(semantic_output_epoch != null);
         const processing = self.processOutputLocked(buf);
         self.renderer_state.noteProcessOutput(buf.len, processOutputTickMs());
+        @import("../apprt/win32/latency_trace.zig").noteOutput(self.renderer_state.process_output_bytes, buf);
         if (self.benchmark_end_marker.observeVisible(&self.terminal)) {
             self.renderer_state.noteBenchmarkEndMarker();
         }

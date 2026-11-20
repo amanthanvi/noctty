@@ -59,6 +59,7 @@ const automationWorkingDirectoryAllowed = win32.automationWorkingDirectoryAllowe
 const beginOpenGLStartupDiagnostics = win32.beginOpenGLStartupDiagnostics;
 const beginRecoveryStartup = win32.beginRecoveryStartup;
 const bench_trace = @import("bench_trace.zig");
+const latency_trace = @import("latency_trace.zig");
 const buildInstallerApplyArgs = win32.buildInstallerApplyArgs;
 const build_config = @import("../../build_config.zig");
 const builtin = @import("builtin");
@@ -2646,6 +2647,7 @@ pub const App = struct {
     pub const quarantineInvalidSessionState = session_module.quarantineInvalidSessionState;
 
     fn tickCoreApp(self: *App) !void {
+        latency_trace.note(.app_wake, 0, 0);
         self.renderer_sync_paint_spent = false;
         try self.core_app.tick(self);
         self.resolveRecoveryStartup();
@@ -4796,6 +4798,7 @@ pub const App = struct {
                         break :blk true;
                     },
                     .surface => if (self.registry.findSurfaceForTarget(target)) |surface| blk: {
+                        latency_trace.note(.render_action, 0, 0);
                         try self.renderSurface(surface);
                         break :blk true;
                     } else false,

@@ -639,6 +639,7 @@ pub fn queueWrite(
 
     // If our process is exited then we don't send any more writes.
     if (exec.exited) return;
+    @import("../apprt/win32/latency_trace.zig").note(.pty_write, data.len, if (data.len > 0) data[0] else 0);
 
     // We go through and chunk the data if necessary to fit into
     // our cached buffers that we can queue to the stream. Every chunk
