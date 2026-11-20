@@ -361,8 +361,11 @@ that govern each symbol you change, or that none does.
   `App.reloadKeptConfig`, which reloads `app.config` in core's light/dark
   state), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
-  catalog's capacity and the installed themes that fit it:
-  `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
+  catalog's capacities and the installed themes that fit them:
+  `palette_catalog_capacity`, `palette_catalog_label_capacity`,
+  `appendInstalledThemesToPalette`, the heavy-session test
+  `PaletteCapacityTest` in `win32/host.zig` and its theme seam
+  `palette_controller.test_installed_themes`, and the
   bundled iTerm2 theme pin in `build.zig.zon` that sets their count), the confirm
   overlay (`win32/overlay_session.zig`: `showConfirm`,
   `invokeConfirmAccept`/`Cancel` lifetime; what each prompt says and its

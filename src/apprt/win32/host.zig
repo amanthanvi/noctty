@@ -280,9 +280,18 @@ const host_tab_overflow_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_ove
 
 const host_overlay_query_height: i32 = (win32_theme.ThemeMetrics{}).height_overlay_query;
 
-pub const palette_catalog_capacity: usize = 768;
+/// The palette catalog's rows and the labels it copies (a tab's, a pane's, a
+/// theme's, a saved layout's title), held inline in the Host. Themes get what
+/// every other row leaves, less a reserve, and past it are left out with no
+/// message (`appendInstalledThemesToPalette`), so a theme pin bump checks
+/// both against its theme count (chrome-overlays.md, 2026-11-20
+/// PALETTE-CAPACITY). Sized for 819 themes (upstream v1.4.0's pin; the fork
+/// ships 590) in the heavy session `PaletteCapacityTest` builds: 865 other
+/// rows and 192 labels, and 64 saved layouts after them, leave 300 rows and
+/// 205 labels to spare.
+pub const palette_catalog_capacity: usize = 2048;
 
-const palette_catalog_label_capacity: usize = 768;
+const palette_catalog_label_capacity: usize = 1280;
 
 /// The program status badge a tab draws before its label, and the slot it
 /// takes with the gap after it, in DIPs. `tab_label.key` charges the slot to
@@ -12907,6 +12916,158 @@ test "win32 with command-palette-hint = false, a message up when the palette ope
             host.hideOverlay();
         }
     }.body);
+}
+
+/// The heavy session the palette catalog's capacities are sized for (the
+/// 2026-11-20 PALETTE-CAPACITY entry in chrome-overlays.md): one window of
+/// 64 tabs of two panes each, a profile list at discovery's SSH bound and 32
+/// more, every Settings row, a full recent-action list and the default
+/// commands. Every row but the themes' comes first or is reserved before them
+/// (`rebuildPaletteList`); themes get what is left, and a full saved-layouts
+/// folder still fits after them.
+const PaletteCapacityTest = struct {
+    const tabs: usize = 64;
+    const panes_per_tab: usize = 2;
+    /// `windows_ssh_hosts.max_hosts`, the most SSH hosts discovery lists, and
+    /// 32 for the local shells, WSL distros, Visual Studio shells and user
+    /// profiles.
+    const profiles: usize = @import("../../config/windows_ssh_hosts.zig").max_hosts + 32;
+    const layouts = @import("../win32_layouts.zig").max_palette_entries;
+    const Kind = win32_palette.catalog.Kind;
+
+    /// A run whose `themes` installed themes must all reach the catalog.
+    fn listsEvery(comptime themes: usize) fn () anyerror!void {
+        return struct {
+            fn body() anyerror!void {
+                return run(themes);
+            }
+        }.body;
+    }
+
+    fn run(comptime theme_count: usize) !void {
+        var fixture: win32.WindowStartTestApp = .{};
+        try fixture.init();
+        defer fixture.deinit();
+        const app = &fixture.app;
+        try app.createWindow(default_title);
+        var pane = fixture.newest();
+        const host = pane.host.?;
+        while (true) {
+            const found = Host.findTabForSurface(pane).?;
+            const split = try app.createWindowSurface(&app.config, default_title, .{
+                .host_id = host.id,
+                .tab_id = found.tab.id,
+                .clone_state_from = pane,
+                .split_direction = .right,
+            });
+            app.activateSurface(split);
+            if (host.tabs.items.len == tabs) break;
+            pane = try app.createWindowSurface(&app.config, default_title, .{ .host_id = host.id });
+            app.activateSurface(pane);
+        }
+        // The stand-in core has no id; core init gives each pane its own,
+        // which keys its palette row.
+        var pane_id: u64 = 0x7000;
+        for (host.tabs.items) |*tab| {
+            var panes = tab.tree.iterator();
+            while (panes.next()) |entry| : (pane_id += 1) entry.view.core().id = pane_id;
+        }
+
+        // The window's profile list, as discovery leaves it (the host frees
+        // it), so the build asks no discovery.
+        var profile_list: [profiles]windows_shell.Profile = undefined;
+        var profile_keys: [profiles][16]u8 = undefined;
+        for (&profile_list, &profile_keys, 0..) |*profile, *key, index| {
+            profile.* = .{
+                .kind = .ssh,
+                .key = try std.fmt.bufPrint(key, "ssh:host-{d}", .{index}),
+                .label = "SSH host",
+                .command = .{ .direct = &.{} },
+            };
+        }
+        host.profiles = try windows_shell.cloneProfiles(app.core_app.alloc, &profile_list);
+        host.profiles_complete = true;
+
+        // A full recent-action list, of distinct commands.
+        const snap = host.paletteSnapshot();
+        defer app.palette_mru = @splat(null);
+        var recent: usize = 0;
+        for (snap.cvals) |cval| {
+            if (recent == app.palette_mru.len) break;
+            const action = std.mem.span(cval.action);
+            for (app.palette_mru[0..recent]) |slot| {
+                if (std.mem.eql(u8, slot.?, action)) break;
+            } else {
+                app.palette_mru[recent] = action;
+                recent += 1;
+            }
+        }
+        try std.testing.expectEqual(@as(usize, app.palette_mru.len), recent);
+
+        var theme_names: [theme_count][16]u8 = undefined;
+        var themes: [theme_count]themepkg.Entry = undefined;
+        for (&themes, &theme_names, 0..) |*theme, *name, index| {
+            theme.* = .{ .location = .resources, .path = "", .name = try std.fmt.bufPrint(name, "Theme {d:0>4}", .{index}) };
+        }
+        palette_controller.test_installed_themes = &themes;
+        defer palette_controller.test_installed_themes = null;
+        host.rebuildPaletteList();
+
+        const catalog = &host.palette_catalog.?;
+        var kinds = std.EnumArray(Kind, usize).initFill(0);
+        var transfers: usize = 0;
+        for (catalog.items(), catalog.payload_storage[0..catalog.items().len]) |item, payload| {
+            kinds.getPtr(item.id.kind).* += 1;
+            if (payload == .action and payload.action.tab_transfer != null) transfers += 1;
+        }
+        // No installed theme is left out.
+        try std.testing.expectEqual(theme_count, kinds.get(.theme));
+        // The session is as heavy as it says: every other tab can move into
+        // the front tab's pane four ways.
+        try std.testing.expectEqual(tabs, kinds.get(.tab));
+        try std.testing.expectEqual(tabs * panes_per_tab, kinds.get(.pane));
+        try std.testing.expectEqual((tabs - 1) * 4, transfers);
+        try std.testing.expectEqual(snap.commands.len + transfers, kinds.get(.action));
+        try std.testing.expectEqual(profiles, kinds.get(.profile));
+        try std.testing.expectEqual(std.enums.values(win32_settings.SettingField).len, kinds.get(.setting));
+        try std.testing.expectEqual(@as(usize, win32_palette.catalog.reviewed_help.len), kinds.get(.help));
+        try std.testing.expectEqual(@as(usize, app.palette_mru.len), kinds.get(.recent_command));
+        // A test has no layouts folder; a full one still fits after the
+        // themes, in items and in labels (each tab, pane and theme holds one).
+        try std.testing.expectEqual(@as(usize, 0), kinds.get(.layout));
+        try std.testing.expectEqual(tabs + tabs * panes_per_tab + theme_count, host.palette_catalog_label_count);
+        try std.testing.expect(catalog.capacity() - catalog.items().len >= layouts);
+        try std.testing.expect(host.palette_catalog_labels.len - host.palette_catalog_label_count >= layouts);
+    }
+};
+
+test "win32 the palette lists all 590 themes of the bundled pin in a window of 64 split tabs with every profile, Settings row and recent action" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(PaletteCapacityTest.listsEvery(590));
+}
+
+test "win32 the palette lists all 819 themes of upstream v1.4.0's pin in a window of 64 split tabs with every profile, Settings row and recent action" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try win32.runOnHiddenDesktop(PaletteCapacityTest.listsEvery(819));
+}
+
+test "win32 the palette catalog's inline storage is what its capacities add to the Host, and the Host stays under 1 MiB" {
+    // Each catalog slot (an item and its payload) and each label is held
+    // inline in the Host, which production allocates (`App.createHost`) and
+    // tests keep on their stacks, a few at a time (16 MiB reserved).
+    // The Host was 272,736 bytes at 768 and 768, and is 594,272 now.
+    const slot_bytes = @sizeOf(PaletteItem) + @sizeOf(PalettePayload);
+    const catalog_bytes = @sizeOf(@FieldType(Host, "palette_catalog_items")) +
+        @sizeOf(@FieldType(Host, "palette_catalog_payloads")) +
+        @sizeOf(@FieldType(Host, "palette_catalog_labels"));
+    try std.testing.expectEqual(
+        palette_catalog_capacity * slot_bytes + palette_catalog_label_capacity * palette_catalog_label_bytes,
+        catalog_bytes,
+    );
+    // 2048 slots of 200 bytes and 1280 labels of 128: 560 KiB, from 246 KiB
+    // at 768 and 768.
+    try std.testing.expectEqual(@as(usize, 573_440), catalog_bytes);
+    try std.testing.expect(@sizeOf(Host) <= 1024 * 1024);
 }
 
 test "win32 the tab overview's toggle ends what is open first: a palette's theme preview and catalog, a confirm prompt's pending operation" {

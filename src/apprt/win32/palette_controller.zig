@@ -59,6 +59,34 @@ const runOnPrivateDesktop = test_runtime.runOnPrivateDesktop;
 
 const palette_action_capacity: usize = 384;
 
+/// The installed themes a test's catalog build lists in place of
+/// `themepkg.list`, which reads the user's theme folder and the resources
+/// directory: a test can rely on neither and must not read the first. Each
+/// build takes its own copy, owned as `themepkg.list`'s list is.
+pub var test_installed_themes: ?[]const themepkg.Entry = null;
+
+fn listInstalledThemes(alloc: std.mem.Allocator, arena: std.mem.Allocator) ![]themepkg.Entry {
+    if (@import("builtin").is_test) if (test_installed_themes) |themes| {
+        const copy = try alloc.alloc(themepkg.Entry, themes.len);
+        var filled: usize = 0;
+        errdefer {
+            for (copy[0..filled]) |entry| {
+                alloc.free(entry.path);
+                alloc.free(entry.name);
+            }
+            alloc.free(copy);
+        }
+        for (themes) |theme| {
+            const path = try alloc.dupe(u8, theme.path);
+            errdefer alloc.free(path);
+            copy[filled] = .{ .location = theme.location, .path = path, .name = try alloc.dupe(u8, theme.name) };
+            filled += 1;
+        }
+        return copy;
+    };
+    return themepkg.list(alloc, arena);
+}
+
 const PaletteListTransition = struct {
     relayout: bool,
     exposes_content: bool,
@@ -1543,7 +1571,7 @@ pub const HostControls = struct {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
 
-        const installed = themepkg.list(alloc, arena.allocator()) catch |err| {
+        const installed = listInstalledThemes(alloc, arena.allocator()) catch |err| {
             log.warn("palette theme enumeration failed err={}", .{err});
             return;
         };
