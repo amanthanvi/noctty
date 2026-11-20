@@ -256,8 +256,23 @@ $workingSetRules = @(
     }
     @{
         Description = 'a session checkpoint counts only with a new base-pane snapshot holding the fixture, read from the copy''s own session file (council round 1)'
-        Pattern = '(?s)\$sessionFile = Join-Path \$Bin ''session-state\.json''.*?if \(\$null -ne \$s -and \$s\.At -gt \$previous -and \$s\.Fixture -ge 1000 -and \$s\.Lines -le 10000\) \{'
+        Pattern = '(?s)\$sessionFile = Join-Path \$Bin ''session-state\.json''.*?if \(\$null -ne \$s -and \$s\.At -gt \$previous -and \$s\.At -gt \$closeAt -and \$s\.Fixture -ge 1000 -and \$s\.Lines -le 10000\) \{'
         Mutation = @('$s.At -gt $previous -and ', '')
+    }
+    @{
+        Description = 'a session checkpoint counts only a snapshot taken after its own close (CodeRabbit on #739)'
+        Pattern = '(?s)\$closeAt = \[uint64\]\$script:wsCloseAt.*?if \(\$null -ne \$s -and \$s\.At -gt \$previous -and \$s\.At -gt \$closeAt -and '
+        Mutation = @('$s.At -gt $closeAt -and ', '')
+    }
+    @{
+        Description = 'the close''s time is taken right before the close key, on the clock the snapshot uses'
+        Pattern = '(?s)\$script:wsCloseAt = \[DateTimeOffset\]::UtcNow\.ToUnixTimeMilliseconds\(\)\s+\[WorkingSetNative\]::Key\(\$new, \$nocttyPid, 0x76\)'
+        Mutation = @('$script:wsCloseAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()', '$script:wsCloseAt = 0')
+    }
+    @{
+        Description = 'a -Run inside -MeasureRepo that git does not ignore is refused before the run directory is created (CodeRabbit on #739)'
+        Pattern = '(?s)function Invoke-WorkingSetOuterRun\(.*?Assert-WorkingSetRunPlacement \$Run \$build\.Repo\s+.*?\[void\]\(New-Item -ItemType Directory -Path \$Run\)'
+        Mutation = @('Assert-WorkingSetRunPlacement $Run $build.Repo', '$null')
     }
     @{
         Description = 'the UIA walk is complete only when it ended, the document holds the last block''s last line, and it covered the history rows (council round 1)'
@@ -400,6 +415,7 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
             Schema = 2; Workload = $Name; Error = $null; Exit = 0; QuitPosts = 1; GridCols = 140; GridRows = 43
             ScrollbackLimitBytes = $limit; Blocks = $blocks; BlocksPlanned = $blocks; Cycles = $cycles; CyclesMissed = 0
             SessionSaves = $(if ($Name -eq 'session-capture') { 10 } else { 0 })
+            SessionSnapshots = @(if ($Name -eq 'session-capture') { foreach ($k in 1..10) { [pscustomobject]@{ close_at_unix_ms = [uint64](1000 * $k); snapshot_at_unix_ms = [uint64](1000 * $k + 900) } } })
             Uia = $(if ($Name -eq 'uia-walk') { [pscustomobject]@{ walk_complete = $true } } else { $null })
             Stages = $stages
         }
@@ -420,6 +436,9 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
         @{ Name = 'a planned block count off the limit'; Workload = 'scrollback-max'; Change = { param($r) $r.Blocks = 20; $r.BlocksPlanned = 20 } }
         @{ Name = 'a missed cycle'; Workload = 'tab-churn'; Change = { param($r) $r.Cycles = 49; $r.CyclesMissed = 1 } }
         @{ Name = 'a short session'; Workload = 'session-capture'; Change = { param($r) $r.SessionSaves = 9 } }
+        @{ Name = 'a session snapshot from before its close'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[4].snapshot_at_unix_ms = $r.SessionSnapshots[4].close_at_unix_ms - 10 } }
+        @{ Name = 'a session snapshot no newer than the one before'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[4].snapshot_at_unix_ms = $r.SessionSnapshots[3].snapshot_at_unix_ms } }
+        @{ Name = 'a counted snapshot without its times'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots = @($r.SessionSnapshots | Select-Object -First 9) } }
         @{ Name = 'an incomplete UIA walk'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walk_complete = $false } }
         @{ Name = 'an older schema'; Workload = 'fixed'; Change = { param($r) $r.Schema = 1 } }
     )
@@ -571,6 +590,37 @@ try {
         }
     }
 } finally { [IO.Directory]::Delete($hashDir, $true) }
+
+# The run's placement, against a real git checkout (CodeRabbit on #739): a -Run inside it that git does not ignore is
+# refused, by message; one git ignores and one outside the checkout pass. The control, a check that never asks git,
+# must accept the first, so the case is shown to catch it.
+$placementText = Get-WorkingSetFunction 'Assert-WorkingSetRunPlacement'
+$placementDir = Join-Path ([IO.Path]::GetTempPath()) ('ws-placement-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+[void][IO.Directory]::CreateDirectory($placementDir)
+try {
+    $placementRepo = Join-Path $placementDir 'repo'
+    [void][IO.Directory]::CreateDirectory($placementRepo)
+    & git -C $placementRepo init -q 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'git init failed for the run-placement fixture.' }
+    [IO.File]::WriteAllText((Join-Path $placementRepo '.gitignore'), "/ws-ignored-runs/`n")
+    $unignoredRun = Join-Path $placementRepo 'ws-placement-runs\ws-1'
+    $refusal = '-Run is inside -MeasureRepo and git does not ignore it; choose a -Run outside the checkout or in a directory git ignores.'
+    & {
+        . ([scriptblock]::Create($placementText))
+        $got = $null
+        try { Assert-WorkingSetRunPlacement $unignoredRun $placementRepo } catch { $got = $_.Exception.Message }
+        if ($got -cne $refusal) { throw "A -Run inside the checkout that git does not ignore was not refused (got: $got)." }
+        Assert-WorkingSetRunPlacement (Join-Path $placementRepo 'ws-ignored-runs\ws-1') $placementRepo
+        Assert-WorkingSetRunPlacement (Join-Path $placementDir 'outside\ws-1') $placementRepo
+    }
+    $placementControl = $placementText.Replace('if ($LASTEXITCODE -ne 0) { throw', 'if ($false) { throw')
+    if ([string]::Equals($placementControl, $placementText, [StringComparison]::Ordinal)) { throw 'The run-placement control changed nothing.' }
+    $controlAccepted = & {
+        . ([scriptblock]::Create($placementControl))
+        try { Assert-WorkingSetRunPlacement $unignoredRun $placementRepo; $true } catch { $false }
+    }
+    if (-not $controlAccepted) { throw 'The run-placement control refused the run anyway, so the case shows nothing.' }
+} finally { [IO.Directory]::Delete($placementDir, $true) }
 } finally {
     foreach ($name in $savedScriptVars.Keys) {
         if ($savedScriptVars[$name].Existed) { Set-Variable -Scope Script -Name $name -Value $savedScriptVars[$name].Value }
@@ -605,4 +655,4 @@ foreach ($control in $layoutControls) {
     if (($controlClass -as [type])::Layout() -ceq $layoutWanted) { throw "The layout check accepted $($control.Name)." }
 }
 
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash and admission (admitted, tampered, plain) cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain) and run-placement (unignored, ignored, outside) cases; native layout $layoutActual"

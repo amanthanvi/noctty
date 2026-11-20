@@ -9,7 +9,8 @@ Run it as
   pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 -MeasureRepo <repo with a measurement build>
        -Run <new directory> -Workload <fixed|scrollback-default|scrollback-max|uia-walk|session-capture|tab-churn>
        [-ExpectedBuildMode ReleaseFast] [-ScrollbackMaxBytes 1073741824]
-once per run. -MeasureRepo is a checkout whose measurement generation Invoke-InteractiveWin11MeasureBuild built
+once per run, with -Run outside -MeasureRepo or in a directory git ignores there (a run inside the checkout is refused
+before anything is created). -MeasureRepo is a checkout whose measurement generation Invoke-InteractiveWin11MeasureBuild built
 (scripts/interactive-win11-measure-lib.ps1): the harness launches only that build, after
 Assert-InteractiveWin11MeasureBuild and after the copied noctty.exe and noctty.com match the receipt's hashes; any
 other binary, a plain zig-out build included, is refused before anything starts. Each run is a fresh copy, a fresh
@@ -444,6 +445,17 @@ function Test-WorkingSetCopy([string] $Copy, $Build) {
     return $true
 }
 
+# A -Run inside -MeasureRepo would leave untracked files in the checkout whose clean state the measurement build's
+# provenance needs (the driver's admission would then refuse the run), so it is refused before anything is created,
+# unless git ignores it (CodeRabbit on #739; the rule #738 has for its -Work).
+function Assert-WorkingSetRunPlacement([string] $Run, [string] $Repo) {
+    $Run = $Run.TrimEnd('\'); $Repo = $Repo.TrimEnd('\')
+    if (-not ($Run + '\').StartsWith($Repo + '\', [StringComparison]::OrdinalIgnoreCase)) { return }
+    $relative = if ($Run.Length -gt $Repo.Length) { $Run.Substring($Repo.Length + 1) } else { '.' }
+    & git -C $Repo check-ignore -q --no-index -- $relative 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '-Run is inside -MeasureRepo and git does not ignore it; choose a -Run outside the checkout or in a directory git ignores.' }
+}
+
 # One block of output, deterministic: 25,000 lines of 82 or 91 bytes, every seventh in an SGR colour.
 function New-BlockText {
     $builder = [Text.StringBuilder]::new(2400000)
@@ -535,6 +547,16 @@ function Get-WorkingSetRecordProblems($Record) {
     $wantCycles = switch ($Record.Workload) { 'fixed' { $script:FixedCycles } 'tab-churn' { $script:ChurnCycles } 'session-capture' { $script:SessionCheckpoints } default { 0 } }
     if ($Record.Cycles -ne $wantCycles -or $Record.CyclesMissed -ne 0) { $problems.Add("cycles $($Record.Cycles) of $wantCycles, $($Record.CyclesMissed) missed") }
     if ($Record.Workload -eq 'session-capture' -and $Record.SessionSaves -ne $script:SessionCheckpoints) { $problems.Add("session snapshots $($Record.SessionSaves)") }
+    if ($Record.Workload -eq 'session-capture') {
+        # Each counted snapshot was taken after its close and after the one before it.
+        $pairs = @($Record.SessionSnapshots)
+        if ($pairs.Count -ne $Record.SessionSaves) { $problems.Add("session snapshot times $($pairs.Count) for $($Record.SessionSaves) snapshots") }
+        $last = [uint64]0
+        foreach ($pair in $pairs) {
+            if ([uint64]$pair.snapshot_at_unix_ms -le [uint64]$pair.close_at_unix_ms -or [uint64]$pair.snapshot_at_unix_ms -le $last) { $problems.Add('a session snapshot not after its close and the one before'); break }
+            $last = [uint64]$pair.snapshot_at_unix_ms
+        }
+    }
     if ($Record.Workload -eq 'uia-walk' -and ($null -eq $Record.Uia -or -not $Record.Uia.walk_complete)) { $problems.Add('UIA walk incomplete') }
     $want = @(Get-WorkloadStages $Record.Workload $Record.BlocksPlanned)
     $got = @($Record.Stages | ForEach-Object { $_.name })
@@ -566,6 +588,7 @@ function Invoke-WorkingSetDriver {
         Class = $null; ExeSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
         WorkloadSha256 = $null; BlockSha256 = $null; FloodSha256 = $null; ClientWidth = $null; ClientHeight = $null; Dpi = $null
         Cycles = 0; CyclesMissed = 0; SessionSaves = 0; SessionFileBytes = $null; SessionLines = $null; Uia = $null
+        SessionSnapshots = [Collections.Generic.List[object]]::new()
         EffectiveDirs = $null; Stages = [Collections.Generic.List[object]]::new(); QuitPosts = 0; Exit = $null; Error = $null
     }
     $recordPath = Join-Path $Run 'workingset.json'
@@ -752,6 +775,8 @@ function Invoke-WorkingSetDriver {
             if (-not $opened) { $record.CyclesMissed++; Log 'cycle: no new pane within 15 s'; return $false }
             $new = $script:wsNew
             [void](Wait-For { [WorkingSetNative]::Responsive($hostWindow, 1000) } 5000)
+            # The close's time, on the clock captured_at_unix_ms uses: session-capture counts only a snapshot after it.
+            $script:wsCloseAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             [WorkingSetNative]::Key($new, $nocttyPid, 0x76)
             if (Wait-For { -not ([WorkingSetNative]::IsWindow($new) -and [WorkingSetNative]::IsWindowVisible($new)) } 15000) { $record.Cycles++; return $true }
             $record.CyclesMissed++; Log 'cycle: the new pane still shown after 15 s'
@@ -841,11 +866,17 @@ function Invoke-WorkingSetDriver {
                 $previous = [uint64]0
                 for ($i = 0; $i -lt $script:SessionCheckpoints; $i++) {
                     # The close's checkpoint (1 s after the last persist_session) is the write this counts: a snapshot of
-                    # the base pane alone, taken after the last one counted, that holds the fixture's lines.
+                    # the base pane alone, taken after this close and after the last one counted, that holds the
+                    # fixture's lines. A display-change or deferred structural save from before the close does not
+                    # count (CodeRabbit on #739); each counted pair is recorded for the outer half's check.
                     if (-not (Invoke-TabCycle)) { continue }
+                    $closeAt = [uint64]$script:wsCloseAt
                     $script:wsSnapshot = $null
-                    $seen = Wait-For { $s = Read-BaseSnapshot; if ($null -ne $s -and $s.At -gt $previous -and $s.Fixture -ge 1000 -and $s.Lines -le 10000) { $script:wsSnapshot = $s; return $true }; return $false } 15000
-                    if ($seen) { $record.SessionSaves++; $previous = $script:wsSnapshot.At; $record.SessionLines = $script:wsSnapshot.Lines }
+                    $seen = Wait-For { $s = Read-BaseSnapshot; if ($null -ne $s -and $s.At -gt $previous -and $s.At -gt $closeAt -and $s.Fixture -ge 1000 -and $s.Lines -le 10000) { $script:wsSnapshot = $s; return $true }; return $false } 15000
+                    if ($seen) {
+                        $record.SessionSaves++; $previous = $script:wsSnapshot.At; $record.SessionLines = $script:wsSnapshot.Lines
+                        $record.SessionSnapshots.Add([pscustomobject]@{ close_at_unix_ms = $closeAt; snapshot_at_unix_ms = $script:wsSnapshot.At })
+                    }
                     else { Log "checkpoint $($i + 1): no new base-pane snapshot with the fixture within 15 s" }
                 }
                 $record.SessionFileBytes = if (Test-Path -LiteralPath $sessionFile) { (Get-Item -LiteralPath $sessionFile).Length } else { $null }
@@ -897,6 +928,7 @@ function Invoke-WorkingSetOuter {
 function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
     if (Test-Path -LiteralPath $Run) { throw 'The run directory must be new.' }
     if (($Run + '\').StartsWith($source.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The run directory cannot be inside the build.' }
+    Assert-WorkingSetRunPlacement $Run $build.Repo
     if (-not $SandboxName) { $SandboxName = 'ws-' + [guid]::NewGuid().ToString('N').Substring(0, 8) }
     $copy = Join-Path $Run 'copy'
     $work = Join-Path $Run 'work'

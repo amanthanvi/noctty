@@ -1398,7 +1398,10 @@ through its end:
   `window-save-state = always` and `window-save-state-scrollback = 10000`,
   then 10 checkpoints, each a new tab and its close; a checkpoint counts only
   when the copy's own `session-state.json` then holds a new snapshot of the
-  base pane (a later `captured_at_unix_ms`) with the fixture's lines. The
+  base pane with the fixture's lines, its `captured_at_unix_ms` later than
+  both the close (timed right before the close key) and the last snapshot
+  counted, so a display-change or deferred save from before the close does
+  not count; the record keeps each pair of times. The
   512 KiB snapshot budget pre-limits a capture to (budget - 96 bytes of
   snapshot overhead) / (columns + 1) lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
   reached at this width. This is the only workload that saves session state,
@@ -1410,6 +1413,11 @@ through its end:
 pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
     -MeasureRepo <checkout with a measurement build> -Run <new dir> -Workload fixed
 ```
+
+`-Run` is a new directory outside `-MeasureRepo`, or one git ignores there: a
+run directory inside the checkout would leave untracked files that the
+measurement build's provenance check refuses, so the harness refuses it
+before it creates anything.
 
 A later phase compares its working set with Phase 0a's by running the 0a
 measurement build and the new one interleaved, under the same harness
