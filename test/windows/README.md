@@ -1061,6 +1061,106 @@ fails `EARLY-SAMPLE`; times that do not increase are `MALFORMED`. The driver
 never waits on the copy without a bound. `ci/test_soak_judge.py` holds the judge's controls
 and runs in the checks job; Contracts.98 pins the harness.
 
+## gui-hosted-probe.ps1
+
+A record-only diagnostic: it measures, and nothing gates on it. It shows where
+noctty's processes and windows land, and what a GitHub-hosted runner's own
+interactive desktop allows a GUI test. It runs from
+`.github/workflows/gui-probe.yml`, which only `workflow_dispatch` starts, on
+two builds of the same source, both prepared before the run. Q0 runs the
+measurement build (`Invoke-InteractiveWin11MeasureBuild`). On a hosted runner,
+P3 to P5 run a `-Drenderer-test-tools=true` build (`-TestToolsBin`) on both
+desktops: one build and one fixture.
+
+Every copy uses #727's launch policy:
+
+- a portable copy without `noctty.ico`, with its own `LOCALAPPDATA` and
+  `APPDATA`;
+- every shell `direct:<System32>\cmd.exe /D`;
+- the clipboard read and write denied, and `copy-on-select=false`;
+- `--renderer=d3d11-warp` and a seeded background (#1f6f8b).
+
+Each run records that policy as named fields read back from its own
+arguments. Nothing in a run builds or runs `dev-windows.cmd` or `cmd /c`.
+
+**The launcher's gate.** `Get-ProbeLaunchRefusal` runs before every noctty
+start, in measurement mode (`NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, which the
+probe sets for itself and its drivers). It allows only a portable copy (`noctty.portable` beside it, no
+`noctty.ico`, the profile folders under `-Work`) of two builds:
+
+- the receipt-bound measurement build;
+- on a hosted runner only, the test-tools build.
+
+A stock build shares the product AUMID and can rewrite the installed app's
+per-user registration (app-lifecycle.md 2026-10-16), so locally only the
+measurement build starts. The gate's control runs first and starts nothing.
+It must refuse each of these for its own reason:
+
+- a copy without the marker;
+- a copy with the icon;
+- another binary;
+- the test-tools build off a hosted runner;
+- an unredirected `LOCALAPPDATA`;
+- measurement mode unset.
+
+**Q0**, run locally and hosted:
+
+- A driver created by name on a private desktop (`Invoke-LocalHiddenDriver`)
+  starts the copy.
+- It records the desktop of every process in the job, read from the process's
+  startup desktop (PEB `DesktopInfo`) and its threads' desktops.
+- It records every top-level window found on the private desktop and on
+  Default.
+- It then stops each process by exact PID.
+- Positive control: a child started without a desktop name reports the private
+  desktop.
+- Negative control: a thread moved to a second desktop with `SetThreadDesktop`
+  starts a child that reports Default.
+
+**D3**, run hosted only (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` checked).
+On the runner's own Default desktop, each item has a control:
+
+- **P1:** `SendInput` text reaches the script's own window. Control: the same
+  input with another window in front leaves the text unchanged.
+- **P2:** a #FF00FF window is read back one pixel at a time. Controls: the
+  window covered, and the window minimised.
+- **P3:** the fixture's shell prints a seed of known size: 20 lines of 64
+  characters, 1320 bytes (`/K type <seed file>`).
+  - In every arm, the backend is shown by the existing
+    `initialized driver=WARP` line, the `renderer_windows` scope's one line
+    (the WARP notice), and no logged backend switch.
+  - On Default, a fresh render-trace snapshot (`NOCTTY_RENDER_TRACE_LIVE`,
+    WM_APP + 8) shows a swap whose `last_swap_process_output_bytes` is at
+    least the seed's bytes.
+  - Control: the same run with the seed withheld stays below that.
+  - Control: on a private desktop, a fresh `WM_PRINTCLIENT` readback of the
+    pane (the test tools' `renderer.capture`) is the seeded frame, and a
+    snapshot taken after it counts no swap.
+  - Control: a private withheld-seed readback misses the seed text's pixel
+    floor.
+  - A failed readback or a missing snapshot is "inconclusive".
+- **P4:** `ITaskbarList3::HrInit`'s HRESULT on both desktops.
+- **P5:** the toast setting and history count for the build's identities.
+
+P4 reads the copy's own record. `NOCTTY_GUI_PROBE_TRACE=1`
+(`src/os/gui_probe_trace.zig`) turns it on, and it needs `GHOSTTY_LOG=stderr`.
+
+```powershell
+pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix>\bin `
+    -MeasureRepo <repo> -Work <new dir> -Out <record.json> -Part Q0|Local|All `
+    [-TestToolsBin <test-tools prefix>\bin]
+```
+
+- `-Part Local` runs the gate's control, Q0, and the private-desktop facts of
+  P4 and P5 on the measurement build. Given `-TestToolsBin`, it only feeds the
+  gate's control, which must refuse it.
+- `-Part All` refuses to start off a hosted runner, and needs
+  `-TestToolsBin`.
+- The record holds only values and HRESULTs. `Assert-ProbeRecordAllowed`
+  refuses any other string, so no screen image, path, environment value,
+  window title or command line enters it.
+- Readbacks stay in `-Work`, and only their counts reach the record.
+
 ## Style
 
 - Define reusable helpers as `function Verb-Noun { ... }` with a `param(...)`
