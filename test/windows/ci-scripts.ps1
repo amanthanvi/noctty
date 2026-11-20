@@ -806,9 +806,11 @@ try {
     $ranFound = try { $leaves = [string[]] @(foreach ($p in (Get-RanListFontFiles -Directories @($ranFontDir.FullName, (Join-Path $ranTemp 'no-such-dir')) -RegistryPaths $ranRegistryPaths)) { Split-Path -Leaf $p }); [Array]::Sort($leaves, [StringComparer]::Ordinal); $leaves -join '|' } catch { $_.Exception.Message }
     # A.TTF, the registry's spelling of the directory's a.ttf, is a path of its own.
     Assert-True ($ranFound -ceq 'A.TTF|a.ttf|b.TTF|c.otc|g.ttf|h.otf') "The font scan takes the files discovery takes, each spelling once: $ranFound"
-    # Deduplicated ordinally: a case-sensitive directory holds both spellings as two
-    # files, which discovery opens both (council round 7 on #731, Sol M). On this
-    # directory they are one file read twice; the same spelling twice is read once.
+    # Deduplicated ordinally: the probe compares paths after resolving them, and a `.\`
+    # segment can leave two spellings discovery keeps apart that, resolved, differ only
+    # in case, which on a case-sensitive directory name two files (council round 7 on
+    # #731, Sol M). Reading both is a harmless over-read: on this directory they are one
+    # file read twice, and the same spelling twice is read once.
     $ranSpellings = try { Get-RanListFontFiles -Directories @() -RegistryPaths @((Join-Path $ranElsewhere 'h.otf'), (Join-Path $ranElsewhere 'H.OTF'), (Join-Path $ranElsewhere 'h.otf')) } catch { @($_.Exception.Message) }
     Assert-True ($ranSpellings.Count -eq 2 -and [string]::Equals([System.IO.Path]::GetFileName($ranSpellings[1]), 'H.OTF', [StringComparison]::Ordinal)) "Two spellings of a font path are two paths, and one spelling is one ($($ranSpellings -join ' | '))."
 

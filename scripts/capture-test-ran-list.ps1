@@ -604,9 +604,12 @@ function Get-RanListFontNames {
 function Get-RanListFontFiles {
     param([Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Directories, [Parameter(Mandatory)] [AllowEmptyCollection()] [AllowEmptyString()] [string[]] $RegistryPaths)
     $supported = @('.ttf', '.otf', '.ttc', '.otc')
-    # Ordinal: on a case-sensitive directory two spellings are two files, and
-    # discovery opens both (council round 7 on #731, Sol M); reading one file
-    # twice is harmless.
+    # Ordinal. Discovery drops a spelling that differs from an earlier one only
+    # in case (addUniquePath), but the probe compares paths after GetFullPath
+    # resolves them, and a `.\` segment can leave two spellings discovery keeps
+    # apart that, resolved, differ only in case; on a case-sensitive directory
+    # they name two files (council round 7 on #731, Sol M). Reading both is a
+    # harmless over-read.
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $files = [Collections.Generic.List[string]]::new()
     foreach ($dir in $Directories) {
