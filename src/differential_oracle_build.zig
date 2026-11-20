@@ -31,17 +31,14 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
         return;
     };
     const corpus = b.option(bool, "oracle-corpus", "Build the pre-side synthetic generator") orelse false;
+    _ = b.run(&.{ "python", "-I", "test/differential-oracle/build_args.py", b.graph.zig_exe });
+    // Maker may otherwise skip configuration on a cache hit. This check
+    // observes the current invocation and must precede project compilation.
+    if (@hasDecl(@TypeOf(b.graph.*), "poisonCache")) b.graph.poisonCache();
     if (system_requested) |option| {
         step.dependOn(&b.addFail(b.fmt("oracle build arguments: disallowed option: {s}", .{option})).step);
         return;
     }
-    // Maker consumes some arguments before configuration and may reuse a
-    // cached graph. Check its actual invocation on every oracle build.
-    const arguments = b.addSystemCommand(&.{ "python", "-I" });
-    arguments.addFileArg(b.path("test/differential-oracle/build_args.py"));
-    arguments.addArg(b.graph.zig_exe);
-    arguments.setCwd(b.path("."));
-    arguments.has_side_effects = true;
     const compiler = std.mem.trim(u8, b.run(&.{ b.graph.zig_exe, "version" }), " \r\n");
     const modern = (try std.SemanticVersion.parse(compiler)).minor >= 17;
     if (modern and (api == .fork or api == .stone or api == .stone_flag or corpus)) {
@@ -106,7 +103,6 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     identity.setCwd(b.path("."));
     // HEAD and cleanliness are not file inputs in the build cache.
     identity.has_side_effects = true;
-    identity.step.dependOn(&arguments.step);
     identity.addArgs(&.{ b.graph.zig_exe, compiler, @tagName(api), if (public) "public-lib-vt" else "app" });
     var dependencies = b.graph.dependency_cache.iterator();
     while (dependencies.next()) |entry| {
@@ -144,7 +140,6 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
     metadata.addOption([]const u8, "optimize", if (std.mem.eql(u8, optimize, "fast")) "ReleaseFast" else if (std.mem.eql(u8, optimize, "safe")) "ReleaseSafe" else if (std.mem.eql(u8, optimize, "small")) "ReleaseSmall" else if (std.mem.eql(u8, optimize, "debug")) "Debug" else optimize);
     mod.addOptions("oracle_build", metadata);
     const exe = b.addExecutable(.{ .name = "differential-oracle", .root_module = mod, .use_llvm = true });
-    exe.step.dependOn(&arguments.step);
     step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     if (corpus) {
         const generator = b.addExecutable(.{
@@ -156,7 +151,6 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, system_reque
             }),
             .use_llvm = true,
         });
-        generator.step.dependOn(&arguments.step);
         step.dependOn(&b.addInstallArtifact(generator, .{}).step);
     }
 }

@@ -18,7 +18,26 @@ BUILD_OPTIONS = frozenset(
     }
 )
 VALUE_OPTIONS = frozenset({"-p", "--prefix", "--summary"})
-INCLUDE_ENVIRONMENT = ("CPATH", "CPLUS_INCLUDE_PATH")
+CACHE_ENVIRONMENT = frozenset({"ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR"})
+SEARCH_ENVIRONMENT = frozenset(
+    {
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH",
+        "LIBRARY_PATH",
+    }
+)
+
+
+def check_environment():
+    for name in sorted(os.environ):
+        if name in SEARCH_ENVIRONMENT or (
+            name.startswith("ZIG_") and name not in CACHE_ENVIRONMENT
+        ):
+            if re.fullmatch(r"[A-Z0-9_]{1,64}", name) is None:
+                name = "ZIG_*"
+            raise ValueError(f"disallowed environment variable: {name}")
 
 
 def check_arguments(args):
@@ -187,9 +206,7 @@ if __name__ == "__main__":
     try:
         if os.name != "nt":
             raise ValueError("the oracle build argument guard requires Windows")
-        for name in INCLUDE_ENVIRONMENT:
-            if name in os.environ:
-                raise ValueError(f"disallowed environment variable: {name}")
+        check_environment()
         check_arguments(parent_build_arguments(sys.argv[1]))
     except ValueError as exc:
         sys.exit(f"oracle build arguments: {exc}")

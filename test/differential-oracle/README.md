@@ -21,10 +21,12 @@ An oracle invocation selects only the `oracle` step. Its argument allowlist is
 `-Dvt-api=`, `-Doracle-corpus=`, `-Doracle-scrollback=`, `-Dsimd=`, `-Doptimize=`,
 `-Dcpu=`, `-Dcustom-shaders=` (where defined), `--prefix` (or `-p`), `--summary`,
 and `-jN` for a positive job limit. Set `ZIG_GLOBAL_CACHE_DIR` for a scratch cache on the source drive.
-The always-run guard checks the original Windows Zig driver invocation on both
-compilers, including options consumed before the build script runs. Unset
-`CPATH` and `CPLUS_INCLUDE_PATH` before building. The guard refuses either variable
-because both reach the vendored simdutf C++ compile on both toolchains.
+The guard checks the original Windows Zig driver invocation during each
+configuration, before compiling project code or dependencies. It refuses every
+`ZIG_*` variable in its environment except `ZIG_GLOBAL_CACHE_DIR` and
+`ZIG_LOCAL_CACHE_DIR`. Zig 0.17.1 uses `ZIG_PROGRESS` for progress reporting
+and removes it when spawning the guard. The guard also refuses `CPATH`,
+`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH` and `LIBRARY_PATH`.
 
 From the repository root:
 
@@ -160,8 +162,8 @@ that the source and executable remain unchanged during both runs. A stale exe,
 wrong tree or dirty build is invalid evidence. Compare also refuses one exe
 hash attributed to different production or instrumented revisions.
 Identity generation verifies the paths and pinned hashes of the packages the
-**build graph actually resolved**, on both compilers. This includes
-`ZIG_LOCAL_PKG_DIR` and global-cache locations. Oracle builds refuse options
+**build graph actually resolved**, on both compilers, including the global
+cache. Oracle builds refuse `ZIG_LOCAL_PKG_DIR` and options
 outside the allowlist, including `--pkg-dir`, `--search-prefix`, `--sysroot`,
 `--libc`, `--system`, and `-fsys=PACKAGE`. They compute Zig's SHA-256
 package tree hash read-only, without `zig fetch` copies, archives or temporary
