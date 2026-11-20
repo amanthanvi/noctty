@@ -3490,7 +3490,7 @@ test "storage: shrinking a screen without scrollback removes placements on remov
     // With the cursor on the bottom row, shrinking to 3 rows removes the
     // top three rows, and the screen keeps no history for them.
     t.setCursorPos(6, 1);
-    try t.resize(alloc, 10, 3);
+    try t.resize(alloc, .{ .cols = 10, .rows = 3 });
     try testing.expect(testPlacement(&t, 1, 1) == null);
     try testing.expectEqual(
         @as(?point.Coordinate, .{ .x = 3, .y = 1 }),
@@ -3531,7 +3531,7 @@ test "storage: shrinking without pulling scrollback removes placements on erased
     // so the screen keeps that row and erases the three rows below the new
     // bottom instead, as ConPTY does. The image anchored on the bottom row
     // goes with its row; the one on the cursor's row stays.
-    try t.resize(alloc, 10, 3);
+    try t.resize(alloc, .{ .cols = 10, .rows = 3 });
     try testing.expectEqual(@as(size.CellCountInt, 0), t.screens.active.cursor.y);
     {
         const str = try t.plainString(alloc);

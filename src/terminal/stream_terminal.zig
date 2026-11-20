@@ -1930,7 +1930,7 @@ fn semanticPromptScreenAfterNarrowingForTest(
         }
     }
 
-    try t.resize(alloc, 12, 6);
+    try t.resize(alloc, .{ .cols = 12, .rows = 6 });
     return try t.plainString(alloc);
 }
 

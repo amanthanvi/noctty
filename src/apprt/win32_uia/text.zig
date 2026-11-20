@@ -614,8 +614,8 @@ test "PKG71 row numbering rejects resize round trips" {
     defer t.deinit(alloc);
     try t.printString("one\r\ntwo\r\nthree\r\nfour");
     const before = rowNumbering(&t);
-    try t.resize(alloc, 81, 3);
-    try t.resize(alloc, 80, 3);
+    try t.resize(alloc, .{ .cols = 81, .rows = 3 });
+    try t.resize(alloc, .{ .cols = 80, .rows = 3 });
     try std.testing.expect(!std.meta.eql(before, rowNumbering(&t)));
 }
 
@@ -630,7 +630,7 @@ test "PKG71 frozen scroll rejects output resize screen switch and history recycl
     try std.testing.expect(!try scrollFrozenRange(alloc, &t, original.scroll_token.?, original.document_window, 0, true));
     var before_resize = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer before_resize.deinit();
-    try t.resize(alloc, 15, 4);
+    try t.resize(alloc, .{ .cols = 15, .rows = 4 });
     try std.testing.expect(!try scrollFrozenRange(alloc, &t, before_resize.scroll_token.?, before_resize.document_window, 0, true));
     var before_switch = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer before_switch.deinit();

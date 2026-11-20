@@ -2321,39 +2321,6 @@ pub fn index(self: *Terminal) !void {
     }
 }
 
-/// Scroll a full-width scrolling region up by one row in place, with the
-/// cursor on its bottom row, using a fast path function from PageList.
-/// Inlined so index()'s hot path stays as it was.
-inline fn indexScrollRegionUp(self: *Terminal) !void {
-    const screen: *Screen = self.screens.active;
-
-    // Preserve old cursor just for assertions
-    const old_cursor = screen.cursor;
-
-    try screen.pages.eraseRowBounded(
-        .{ .active = .{ .y = self.scrolling_region.top } },
-        self.scrolling_region.bottom - self.scrolling_region.top,
-    );
-
-    // eraseRow and eraseRowBounded will end up moving the cursor pin
-    // up by 1, so we need to move it back down. A `cursorReload`
-    // would be better option but this is more efficient and this is
-    // a super hot path so we do this instead.
-    assert(screen.cursor.x == old_cursor.x);
-    assert(screen.cursor.y == old_cursor.y);
-    screen.cursor.y -= 1;
-    screen.cursorDown(1);
-
-    // The operations above can prune our cursor style so we need to
-    // update. This should never fail because the above can only FREE
-    // memory.
-    screen.manualStyleUpdate() catch |err| {
-        std.log.warn("deleteLines manualStyleUpdate err={}", .{err});
-        screen.cursor.style = .{};
-        screen.manualStyleUpdate() catch unreachable;
-    };
-}
-
 /// The index() scroll when Kitty image placements exist. Split out of
 /// index() so its hot paths don't carry the adjustment state in their
 /// stack frame.
@@ -2365,7 +2332,13 @@ fn indexScrollWithImages(
     defer if (kitty_scroll) |*state| state.end();
     switch (op) {
         .window_shift => try self.screens.active.cursorScrollAbove(),
-        .in_place => try self.indexScrollRegionUp(),
+        // The same fast path as index()'s (upstream 77190bd02): the old
+        // eraseRowBounded-then-cursorDown sequence migrated the cursor's style
+        // refcount from a page that never held it when the cursor sat on a
+        // page's first row.
+        .in_place => try self.screens.active.cursorScrollRegionUp(
+            self.scrolling_region.bottom - self.scrolling_region.top,
+        ),
     }
 }
 
@@ -15962,6 +15935,10 @@ test "Terminal: fullReset preserves kitty graphics limits" {
     var t = try init(alloc, .{ .cols = 10, .rows = 10 });
     defer t.deinit(alloc);
 
+    // The loading media Termio configures survive RIS too (upstream
+    // bcbc93a6b): the stone's default is `.direct`.
+    t.setKittyGraphicsLoadingLimits(.all);
+
     // Zero is `image-storage-limit = 0`, which disables the protocol.
     for ([_]usize{ 1234, 0 }) |total_limit| {
         try t.screens.active.kitty_images.setLimit(
@@ -15974,13 +15951,21 @@ test "Terminal: fullReset preserves kitty graphics limits" {
             total_limit,
             t.screens.active.kitty_images.total_limit,
         );
+        try testing.expectEqual(
+            kitty.graphics.LoadingImage.Limits.all,
+            t.screens.active.kitty_images.image_limits,
+        );
 
         // An alternate screen created after the reset inherits the
-        // primary screen's limit.
+        // primary screen's limits.
         _ = try t.switchScreen(.alternate);
         try testing.expectEqual(
             total_limit,
             t.screens.active.kitty_images.total_limit,
+        );
+        try testing.expectEqual(
+            kitty.graphics.LoadingImage.Limits.all,
+            t.screens.active.kitty_images.image_limits,
         );
         _ = try t.switchScreen(.primary);
     }

@@ -1970,7 +1970,7 @@ fn pwshNestedShellAfterTransientRepeat(alloc: Allocator, c_mark: []const u8) ![]
         "\x1b]133;A;cl=line\x07\x1b[?2004hinner$ ",
     });
     defer t.deinit(alloc);
-    try t.resize(alloc, 20, 8);
+    try t.resize(alloc, .{ .cols = 20, .rows = 8 });
     return try t.plainString(alloc);
 }
 
@@ -2026,7 +2026,7 @@ test "PowerShell marks: a prompt the wrapper did not draw gets its marks from th
         try std.testing.expect(t.screens.active.semanticPromptInputPending());
         // ...and the prompt says it cannot redraw, so a resize keeps it.
         try std.testing.expect(t.flags.shell_redraws_prompt == .false);
-        try t.resize(alloc, 20, 8);
+        try t.resize(alloc, .{ .cols = 20, .rows = 8 });
         const screen = try t.plainString(alloc);
         defer alloc.free(screen);
         try std.testing.expect(std.mem.indexOf(u8, screen, "RELOADED>") != null);

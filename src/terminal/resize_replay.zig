@@ -230,7 +230,7 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
             const cols = try parseInt(name, line_no, words.next());
             const rows = try parseInt(name, line_no, words.next());
             try noMoreWords(name, line_no, &words);
-            try t.resize(alloc, cols, rows);
+            try t.resize(alloc, .{ .cols = cols, .rows = rows });
         } else if (std.mem.eql(u8, cmd, "expect")) {
             const check: Check = .{
                 .name = name,

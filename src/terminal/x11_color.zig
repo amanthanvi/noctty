@@ -5,6 +5,14 @@ pub const RGB = packed struct(u24) {
     r: u8 = 0,
     g: u8 = 0,
     b: u8 = 0,
+
+    /// The libghostty-vt C value, `color.RGB.C`: the stepping stone's
+    /// `c/color.zig` reads x11 entries through `cval()`, which upstream's
+    /// x11 table gets by using `color.RGB` itself. color.zig is imported
+    /// only here, so this file stays a leaf for its other importers.
+    pub fn cval(self: RGB) @import("color.zig").RGB.C {
+        return .{ .r = self.r, .g = self.g, .b = self.b };
+    }
 };
 
 /// A single X11 color entry.

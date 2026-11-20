@@ -1317,7 +1317,7 @@ fn cmdPromptAfterResizeForTest(alloc: Allocator, prompt: []const u8) ![]const u8
     stream.nextSlice("dir\r\nsome output\r\n");
     stream.nextSlice(drawn.items);
 
-    try t.resize(alloc, 20, 8);
+    try t.resize(alloc, .{ .cols = 20, .rows = 8 });
     return try t.plainString(alloc);
 }
 
@@ -1379,7 +1379,7 @@ fn cmdScreenAfterResizeForTest(
         stream.nextSlice(running_output);
     }
 
-    try t.resize(alloc, 24, 8);
+    try t.resize(alloc, .{ .cols = 24, .rows = 8 });
     return try t.plainString(alloc);
 }
 
