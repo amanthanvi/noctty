@@ -1,3 +1,5 @@
+#requires -Version 7.1
+# Encoding.Latin1 and Convert.FromHexString (here and in the ran-list capture) need .NET 5.
 [CmdletBinding()]
 param()
 
@@ -360,9 +362,12 @@ $ranRecord = Read-RanRecord 'multiline'
 Assert-True ($ranRecord.Problems.Count -eq 0 -and (Get-RanResults $ranRecord) -ceq 'multiline.test.coverage...\nsecond=OK') 'A name that holds ... and a newline is read whole, the newline written \n (native fixture multiline).'
 Assert-True ((Get-RanResults (Read-RanRecord 'glued')) -ceq 'glued.test.loads=OK' -and (Get-RanResults (Read-RanRecord 'dots_output')) -ceq 'dots_output.test.loads=OK') 'Output holding ..., with or without a newline before the result, changes no name (native fixtures glued and dots_output).'
 Assert-True ($ranRecord.Zig -ceq '0.15.2' -and $ranRecord.Mode -ceq 'Debug') 'The record names the compiler and the mode that built the executable.'
-$ranTrailers = Read-ZigRunnerTrailers -Lines (Read-RanFixture 'leak')
-Assert-True ($ranTrailers.ErrorsLogged -eq 1 -and $ranTrailers.Leaked -eq 1 -and $ranTrailers.Panics -eq 0) "The runner's trailers in its stderr agree with its record (native fixture leak)."
-Assert-True ((Read-ZigRunnerTrailers -Lines @('1 errors were logged.', 'x', '3 errors were logged.')).ErrorsLogged -eq 3 -and (Read-ZigRunnerTrailers -Lines @('thread 4 panic: boom')).Panics -eq 1) 'The last trailer counts, as the runner prints its own after the last test, and a panic line is counted.'
+Assert-True ((Get-ZigPanicLineCount -Lines (Read-RanFixture 'leak')) -eq 0 -and (Get-ZigPanicLineCount -Lines @('thread 4 panic: boom', 'panic: sample', 'a panic: in a line')) -eq 2) 'Panic-shaped stderr lines are counted, for a reader only.'
+# The bytes fixture's stderr is the runner's own bytes, kept by .gitattributes `-text -whitespace`: the
+# names' FE and FF and the CR LF of one (council round 4 on #726, Opus L3).
+$ranRawText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes((Join-Path $ranFixtures 'bytes.stderr.txt')))
+Assert-True ($ranRawText.Contains("coverage$([char]0xFE)...OK`n") -and $ranRawText.Contains("coverage$([char]0xFF)...OK`n") -and $ranRawText.Contains("carriage`r`nreturn...OK`n")) 'The bytes fixture holds the runner''s raw stderr: bytes FE and FF, and the CR LF of a name.'
+Assert-True ([System.IO.File]::ReadAllLines((Join-Path $repoRoot 'scripts\capture-test-ran-list.ps1'))[0] -ceq '#requires -Version 7.1' -and [System.IO.File]::ReadAllLines($PSCommandPath)[0] -ceq '#requires -Version 7.1') 'The capture and this harness declare PowerShell 7.1, the first with Convert.FromHexString and Encoding.Latin1 (bot threads on #726).'
 
 # Names as rows write them: UTF-8 kept, everything else escaped, one text per byte string.
 foreach ($ranCase in @(
@@ -381,14 +386,34 @@ foreach ($ranCase in @(
         @{ Bytes = [byte[]] @(0xE2, 0x80); Text = '\xe2\x80' }
         @{ Bytes = [byte[]] @(0x01, 0x7F, 0xC2, 0x85); Text = '\x01\x7f\xc2\x85' })) {
     $ranText = ConvertTo-RanListName -Bytes $ranCase.Bytes
-    Assert-True ($ranText -ceq $ranCase.Text) "A name's bytes $(($ranCase.Bytes | ForEach-Object { '{0:x2}' -f $_ }) -join ' ') are written '$($ranCase.Text)', not '$ranText'."
+    Assert-True ([string]::Equals($ranText, $ranCase.Text, [StringComparison]::Ordinal)) "A name's bytes $(($ranCase.Bytes | ForEach-Object { '{0:x2}' -f $_ }) -join ' ') are written '$($ranCase.Text)', not '$ranText'."
 }
 
 # Identities: only Zig's real unnamed blocks are counted by container.
 Assert-True ((Get-RanListIdentity -Suite 's' -Name 'names.test_0') -ceq "s`tnames.test_#" -and (Get-RanListIdentity -Suite 's' -Name 'names.Inner.test_3') -ceq "s`tnames.Inner.test_#") 'An unnamed block is counted by its container.'
 Assert-True ((Get-RanListIdentity -Suite 's' -Name 'names.test.test_0') -ceq "s`tnames.test.test_0" -and (Get-RanListIdentity -Suite 's' -Name 'a.test.x.test_1') -ceq "s`ta.test.x.test_1" -and (Get-RanListIdentity -Suite 's' -Name 'a.decltest.test_0') -ceq "s`ta.decltest.test_0") 'A named test or decltest called test_<n> keeps its own identity.'
+Assert-True ((Get-RanListIdentity -Suite 's' -Name "x.test_$([char]0x0660)") -ceq "s`tx.test_$([char]0x0660)") 'A name that ends in test_ and a non-ASCII digit is no unnamed block (council round 4 on #726, Opus L1).'
 Assert-True ((Get-RanListModeMeaning 'Debug') -ceq 'debug' -and (Get-RanListModeMeaning 'ReleaseSafe') -ceq (Get-RanListModeMeaning 'safe') -and (Get-RanListModeMeaning 'ReleaseFast') -cne (Get-RanListModeMeaning 'safe')) 'Modes compare by meaning across 0.17.1''s renaming.'
 Assert-True (@(Get-RanListFactKeys) -notcontains 'store-alias') 'No fact is recorded that no approval reads (the Store alias, council round 3, Sol).'
+# Font facts (Greptile P1 on #726; council round 2 on #731): every font file discovery
+# reads counts by the names its `name` table declares, compared without case; a file
+# whose names are not all read makes an absent font `unknown`, which no approval meets.
+$ranJet = Join-Path $repoRoot 'src\font\res\JetBrainsMonoNoNF-Regular.ttf'
+$ranJetNames = Get-RanListFontNames -Path $ranJet
+$ranCffNames = Get-RanListFontNames -Path (Join-Path $repoRoot 'src\font\res\MonaspaceNeon-Regular.otf')
+Assert-True ($ranJetNames.Complete -and $ranJetNames.Names -contains 'JetBrains Mono' -and $ranCffNames.Complete -and $ranCffNames.Names -contains 'Monaspace Neon') 'A TrueType and a CFF (OTTO) OpenType font read their family names, whole.'
+foreach ($ranCase in @(
+        @{ Name = 'no font file'; Fonts = @(); Expect = 'absent|absent|absent' }
+        @{ Name = 'a font of another family'; Fonts = @(@{ Names = @('Marlett'); Complete = $true }); Expect = 'absent|absent|absent' }
+        @{ Name = 'a family in other case'; Fonts = @(@{ Names = @('NOTO SERIF TIBETAN Bold'); Complete = $true }); Expect = 'absent|absent|present' }
+        @{ Name = 'a file not wholly read'; Fonts = @(@{ Names = @(); Complete = $false }); Expect = 'unknown|unknown|unknown' }
+        @{ Name = 'a file that could not be read'; Fonts = @($null); Expect = 'unknown|unknown|unknown' }
+        @{ Name = 'a file not wholly read and one of a family'; Fonts = @(@{ Names = @(); Complete = $false }, @{ Names = @('Noto Sans Chakma Bold'); Complete = $true }); Expect = 'unknown|present|unknown' }
+        @{ Name = 'a file not wholly read that names a family'; Fonts = @(@{ Names = @('Arial Unicode MS'); Complete = $false }); Expect = 'present|unknown|unknown' })) {
+    $ranFonts = Get-RanListFontFacts -Fonts @($ranCase.Fonts | ForEach-Object { if ($null -eq $_) { $null } else { [pscustomobject] $_ } })
+    $ranGot = @('Arial Unicode MS', 'Noto Sans Chakma', 'Noto Serif Tibetan' | ForEach-Object { $ranFonts["font:$_"] }) -join '|'
+    Assert-True ($ranGot -ceq $ranCase.Expect) "Font facts for $($ranCase.Name): expected $($ranCase.Expect), got $ranGot."
+}
 
 $ranTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ran-list-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $ranTemp | Out-Null
@@ -477,6 +502,318 @@ try {
         Assert-True (($ranRecord.Problems -join ' ') -like $ranCase.Expect) "A record '$($ranCase.Name)' is refused ($($ranRecord.Problems -join ' | '))."
     }
     Assert-True ((Read-ZigTestResults -Path (Join-Path $ranTemp 'none.results.txt')).Problems -join ' ' -like '*no results file*') 'A run that wrote no record is refused (the stock runner takes no --results).'
+    # A one-face collection built from the TrueType font: `ttcf`, version 1.0, one
+    # face at 16, then the font with its table offsets moved by 16.
+    $ranTtf = [System.IO.File]::ReadAllBytes($ranJet)
+    $ranTtc = [byte[]]::new($ranTtf.Length + 16)
+    [System.Text.Encoding]::ASCII.GetBytes('ttcf').CopyTo($ranTtc, 0)
+    $ranTtc[5] = 1; $ranTtc[11] = 1; $ranTtc[15] = 16
+    [Array]::Copy($ranTtf, 0, $ranTtc, 16, $ranTtf.Length)
+    for ($i = 0; $i -lt (([int]$ranTtf[4] -shl 8) -bor $ranTtf[5]); $i++) {
+        $at = 16 + 12 + 16 * $i + 8
+        [long] $ranOffset = 16
+        for ($k = 0; $k -lt 4; $k++) { $ranOffset += [long]$ranTtc[$at + $k] -shl (8 * (3 - $k)) }
+        for ($k = 0; $k -lt 4; $k++) { $ranTtc[$at + $k] = [byte](($ranOffset -shr (8 * (3 - $k))) -band 0xFF) }
+    }
+    $ranTtcPath = Join-Path $ranTemp 'one.ttc'
+    [System.IO.File]::WriteAllBytes($ranTtcPath, $ranTtc)
+    $ranJunk = Join-Path $ranTemp 'junk.ttf'
+    [System.IO.File]::WriteAllBytes($ranJunk, [byte[]] @(1..64))
+    $ranCut = Join-Path $ranTemp 'cut.ttf'
+    [System.IO.File]::WriteAllBytes($ranCut, [byte[]] $ranTtf[0..199])
+    $ranTtcNames = Get-RanListFontNames -Path $ranTtcPath
+    Assert-True ($ranTtcNames.Complete -and $ranTtcNames.Names -contains 'JetBrains Mono' -and -not (Get-RanListFontNames -Path $ranJunk).Complete -and -not (Get-RanListFontNames -Path $ranCut).Complete) 'A collection reads its faces'' names; a file that is no font, or is cut short, is not wholly read.'
+    # A copy of $Source (the TrueType font by default) whose `name` table is one of
+    # format $Format holding $Names (name ID, string or raw bytes, and optionally
+    # platform and encoding, Windows Unicode by default), appended to the file and
+    # followed by $Pad zero bytes; its directory entry gives the table's length plus
+    # $LengthDelta and its header the record count plus $CountDelta. A format 1
+    # table stores a language tag for each of $Tags, its offset moved by
+    # $TagOffsetDelta, or with $LangTags only that count and no tags. With
+    # $Duplicate, `post` is retagged `name` as a second entry: `first` keeps the new
+    # table in the earlier entry and the original in the later, `second` swaps
+    # them, and $DuplicateOutOfFile points the original's entry past the file.
+    function New-RanNamedFont {
+        param([string] $Name, [object[]] $Names, [int] $LengthDelta = 0, [int] $CountDelta = 0, [int] $Pad = 0, [int] $Format = 0, [int] $LangTags = -1, [string[]] $Tags = @(), [int] $TagOffsetDelta = 0, [byte[]] $Source = $ranTtf, [string] $Duplicate = '', [switch] $DuplicateOutOfFile)
+        $table = [Collections.Generic.List[byte]]::new()
+        $strings = [Collections.Generic.List[byte]]::new()
+        $u16 = { param($list, [int] $v) $list.Add([byte](($v -shr 8) -band 0xFF)); $list.Add([byte]($v -band 0xFF)) }
+        $tagBytes = if ($Format -eq 1) { 2 + 4 * $(if ($LangTags -ge 0) { 0 } else { $Tags.Count }) } else { 0 }
+        & $u16 $table $Format; & $u16 $table ($Names.Count + $CountDelta); & $u16 $table (6 + 12 * $Names.Count + $tagBytes)
+        foreach ($n in $Names) {
+            $platform = if ($n.Count -gt 2) { [int] $n[2] } else { 3 }
+            $encoding = if ($n.Count -gt 3) { [int] $n[3] } else { 1 }
+            $s = if ($n[1] -is [byte[]]) { $n[1] } elseif ($platform -eq 1 -or ($platform -eq 2 -and $encoding -ne 1)) { [System.Text.Encoding]::Latin1.GetBytes([string] $n[1]) } else { [System.Text.Encoding]::BigEndianUnicode.GetBytes([string] $n[1]) }
+            & $u16 $table $platform; & $u16 $table $encoding; & $u16 $table 0x409; & $u16 $table $n[0]; & $u16 $table $s.Length; & $u16 $table $strings.Count
+            $strings.AddRange([byte[]] $s)
+        }
+        if ($Format -eq 1) {
+            if ($LangTags -ge 0) { & $u16 $table $LangTags }
+            else {
+                & $u16 $table $Tags.Count
+                foreach ($tag in $Tags) {
+                    $s = [System.Text.Encoding]::BigEndianUnicode.GetBytes($tag)
+                    & $u16 $table $s.Length; & $u16 $table ($strings.Count + $TagOffsetDelta)
+                    $strings.AddRange($s)
+                }
+            }
+        }
+        $table.AddRange($strings)
+        $at = $Source.Length + ((4 - $Source.Length % 4) % 4)
+        $font = [byte[]]::new($at + $table.Count + $Pad)
+        [Array]::Copy($Source, $font, $Source.Length)
+        $table.CopyTo($font, $at)
+        $length = $table.Count + $LengthDelta
+        $nameRecord = -1
+        $postRecord = -1
+        for ($i = 0; $i -lt (([int]$Source[4] -shl 8) -bor $Source[5]); $i++) {
+            $record = 12 + 16 * $i
+            $tag = [System.Text.Encoding]::ASCII.GetString($font, $record, 4)
+            if ([string]::Equals($tag, 'name', [StringComparison]::Ordinal)) { $nameRecord = $record }
+            elseif ([string]::Equals($tag, 'post', [StringComparison]::Ordinal)) { $postRecord = $record }
+        }
+        $put = {
+            param([long] $rec, [long] $off, [long] $len)
+            for ($k = 0; $k -lt 4; $k++) {
+                $font[$rec + 8 + $k] = [byte](($off -shr (8 * (3 - $k))) -band 0xFF)
+                $font[$rec + 12 + $k] = [byte](($len -shr (8 * (3 - $k))) -band 0xFF)
+            }
+        }
+        [long] $originalOffset = 0
+        [long] $originalLength = 0
+        for ($k = 0; $k -lt 4; $k++) {
+            $originalOffset = ($originalOffset -shl 8) -bor $font[$nameRecord + 8 + $k]
+            $originalLength = ($originalLength -shl 8) -bor $font[$nameRecord + 12 + $k]
+        }
+        if ($DuplicateOutOfFile) { $originalOffset = $font.Length + 64; $originalLength = 16 }
+        if ([string]::Equals($Duplicate, 'second', [StringComparison]::Ordinal)) { & $put $nameRecord $originalOffset $originalLength } else { & $put $nameRecord $at $length }
+        if ($Duplicate) {
+            if ($postRecord -lt 0) { throw "$Name`: the source font has no post table to retag" }
+            [System.Text.Encoding]::ASCII.GetBytes('name').CopyTo($font, $postRecord)
+            if ([string]::Equals($Duplicate, 'second', [StringComparison]::Ordinal)) { & $put $postRecord $at $length } else { & $put $postRecord $originalOffset $originalLength }
+        }
+        $path = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($path, $font)
+        return $path
+    }
+    function Get-RanChakmaFact {
+        param([string] $Path)
+        return (Get-RanListFontFacts -Fonts @((Get-RanListFontNames -Path $Path)))['font:Noto Sans Chakma']
+    }
+    # Every name record of IDs 1, 2, 4, 16, 17, 21 and 22 on every platform counts, and
+    # every family joined to every style, as noctty's full name joins them: more names
+    # than FreeType hands discovery (council rounds 1 and 2 on #731: Sol M1, Opus L3,
+    # Opus L1's O3). A case with no style name reads its family alone, since a joined
+    # name contains the family it starts with. Where FreeType reads a name otherwise
+    # than its label, both readings count (council round 3 on #731): an ISO record as
+    # UTF-16BE whatever its encoding, and a name cut at its first NUL, joins included.
+    $ranChakmaCases = @(
+        @{ Name = 'its typographic family (ID 16) only'; Names = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'), @(16, 'Noto Sans Chakma')); Expect = 'present' }
+        @{ Name = 'its WWS family (ID 21) only'; Names = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'), @(21, 'Noto Sans Chakma')); Expect = 'present' }
+        @{ Name = 'its full name (ID 4) only'; Names = @(@(1, 'Chakma UI'), @(4, 'Noto Sans Chakma')); Expect = 'present' }
+        @{ Name = 'its family and style joined (IDs 1 and 2)'; Names = @(@(1, 'Noto Sans'), @(2, 'Chakma'), @(4, 'Noto Sans-Chakma')); Expect = 'present' }
+        @{ Name = 'its WWS family and typographic style joined (IDs 21 and 17)'; Names = @(@(1, 'Chakma UI'), @(2, 'Regular'), @(4, 'Chakma UI Regular'), @(21, 'Noto Sans'), @(17, 'Chakma')); Expect = 'present' }
+        @{ Name = 'its WWS family and WWS style joined (IDs 21 and 22)'; Names = @(@(1, 'Chakma UI'), @(21, 'Noto Sans'), @(22, 'Chakma')); Expect = 'present' }
+        @{ Name = 'its name in a style name (ID 2) and no family to join it to'; Names = @(@(2, 'Noto Sans Chakma'), @(4, 'Chakma UI Regular')); Expect = 'present' }
+        @{ Name = 'its family and full name on the ISO platform (Sol''s case)'; Names = @(@(1, 'Noto Sans Chakma', 2, 1), @(4, 'Noto Sans Chakma', 2, 1), @(2, 'Regular')); Expect = 'present' }
+        @{ Name = 'its family in a Macintosh Roman record'; Names = @(@(1, 'Chakma UI'), @(1, 'Noto Sans Chakma', 1, 0)); Expect = 'present' }
+        @{ Name = 'its family in a format 1 table'; Names = @(@(1, 'Chakma UI'), @(21, 'Noto Sans Chakma')); Format = 1; Expect = 'present' }
+        @{ Name = 'a record the probe cannot decode beside its family'; Names = @(@(21, 'Noto Sans Chakma'), @(1, [byte[]] @(0, 0x41), 3, 2)); Expect = 'present' }
+        @{ Name = 'its family in UTF-16 in an ISO record labelled ASCII (Sol''s case)'; Names = @(, @(1, [System.Text.Encoding]::BigEndianUnicode.GetBytes('Noto Sans Chakma'), 2, 0)); Expect = 'present' }
+        @{ Name = 'its family in UTF-16 in an ISO record labelled ISO 8859-1'; Names = @(, @(1, [System.Text.Encoding]::BigEndianUnicode.GetBytes('Noto Sans Chakma'), 2, 2)); Expect = 'present' }
+        @{ Name = 'its family on the Unicode platform (Opus X1)'; Names = @(, @(1, 'Noto Sans Chakma', 0, 3)); Expect = 'present' }
+        @{ Name = 'a family cut at a NUL joined to its style (Sol''s case)'; Names = @(@(1, "Noto Sans$([char]0)"), @(2, 'Chakma'), @(4, 'Review Sans Regular')); Expect = 'present' }
+        @{ Name = 'its name after a NUL in a full name'; Names = @(@(1, 'Chakma UI'), @(4, "Chakma UI$([char]0)Noto Sans Chakma")); Expect = 'present' }
+        @{ Name = 'no name of it'; Names = @(@(1, 'Chakma UI'), @(2, 'Regular'), @(4, 'Chakma UI Regular'), @(16, 'Noto Sans'), @(17, 'Bold'), @(21, 'Noto Sans'), @(22, 'Bold')); Expect = 'absent' })
+    for ($i = 0; $i -lt $ranChakmaCases.Count; $i++) {
+        $ranCase = $ranChakmaCases[$i]
+        $ranGot = Get-RanChakmaFact -Path (New-RanNamedFont "named-$i.ttf" $ranCase.Names -Format $(if ($ranCase.Format) { $ranCase.Format } else { 0 }))
+        Assert-True ($ranGot -ceq $ranCase.Expect) "A font with $($ranCase.Name) reads $($ranCase.Expect) for Noto Sans Chakma (got $ranGot)."
+    }
+    # The name table's declared length bounds what is read: an entry or a string past it,
+    # or a table past the end of the file, cannot be read, so the fact is unknown
+    # (council round 1 on #731, Sol L2). The vendored font with its length set to 6 is
+    # Sol's case; the same table at its own length reads. The entry case counts two
+    # records where one is stored, with a string shorter than a record and zero bytes
+    # after the table, so its second record lies past the table but inside the file,
+    # and names a string inside the table. A table of a format other than 0 or 1, a
+    # format 1 table whose language tags pass it, and a record of the IDs read whose
+    # platform or encoding the probe does not decode, or whose bytes its encoding
+    # refuses, are not wholly read either (council round 2 on #731, Sol L1; the lead's
+    # round-3 rule). Sol's format case is the vendored font with its format set to 2.
+    $ranShort = [byte[]] $ranTtf.Clone()
+    for ($i = 0; $i -lt (([int]$ranTtf[4] -shl 8) -bor $ranTtf[5]); $i++) {
+        $record = 12 + 16 * $i
+        if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($ranShort, $record, 4), 'name', [StringComparison]::Ordinal)) { $ranShort[$record + 12] = 0; $ranShort[$record + 13] = 0; $ranShort[$record + 14] = 0; $ranShort[$record + 15] = 6 }
+    }
+    $ranShortPath = Join-Path $ranTemp 'short-name.ttf'
+    [System.IO.File]::WriteAllBytes($ranShortPath, $ranShort)
+    $ranFormat2 = [byte[]] $ranTtf.Clone()
+    for ($i = 0; $i -lt (([int]$ranTtf[4] -shl 8) -bor $ranTtf[5]); $i++) {
+        $record = 12 + 16 * $i
+        if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($ranFormat2, $record, 4), 'name', [StringComparison]::Ordinal)) {
+            $at = 0
+            for ($k = 0; $k -lt 4; $k++) { $at = ($at -shl 8) -bor $ranFormat2[$record + 8 + $k] }
+            $ranFormat2[$at] = 0; $ranFormat2[$at + 1] = 2
+        }
+    }
+    $ranFormat2Path = Join-Path $ranTemp 'format-2.ttf'
+    [System.IO.File]::WriteAllBytes($ranFormat2Path, $ranFormat2)
+    $ranChakmaNames = $ranChakmaCases[1].Names
+    $ranOtherNames = @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
+    # The TrueType font tagged 00020000 with 256 directory entries: its own, moved up,
+    # then dummies past the end of the file. Its first bytes then also pass the
+    # header test of fnt_font_load (FreeType's winfnt driver): the version 0x200
+    # little-endian at byte 0, a little-endian file_size at byte 2 within the file
+    # (256 entries put 0x00010000 there), and bit 0 of the file_type byte at 66
+    # clear (a checksum byte of the fourth entry).
+    $ranTables = ([int]$ranTtf[4] -shl 8) -bor $ranTtf[5]
+    $ranFntShift = 16 * (256 - $ranTables)
+    $ranFntBytes = [byte[]]::new($ranTtf.Length + $ranFntShift)
+    $ranFntBytes[1] = 2
+    $ranFntBytes[4] = 1
+    for ($i = 0; $i -lt 256; $i++) {
+        $record = 12 + 16 * $i
+        if ($i -lt $ranTables) {
+            [Array]::Copy($ranTtf, $record, $ranFntBytes, $record, 16)
+            [long] $ranMoved = $ranFntShift
+            for ($k = 0; $k -lt 4; $k++) { $ranMoved += [long]$ranTtf[$record + 8 + $k] -shl (8 * (3 - $k)) }
+            for ($k = 0; $k -lt 4; $k++) { $ranFntBytes[$record + 8 + $k] = [byte](($ranMoved -shr (8 * (3 - $k))) -band 0xFF) }
+        }
+        else {
+            [System.Text.Encoding]::ASCII.GetBytes('zz{0:x2}' -f $i).CopyTo($ranFntBytes, $record)
+            $ranFntBytes[$record + 8] = 0x7F
+        }
+    }
+    [Array]::Copy($ranTtf, 12 + 16 * $ranTables, $ranFntBytes, 12 + 16 * 256, $ranTtf.Length - (12 + 16 * $ranTables))
+    $ranFntBytes[66] = $ranFntBytes[66] -band 0xFE
+    $ranFnt = Join-Path $ranTemp 'fnt-200.ttf'
+    [System.IO.File]::WriteAllBytes($ranFnt, $ranFntBytes)
+    $ranFntSize = [long]$ranFntBytes[2] -bor ([long]$ranFntBytes[3] -shl 8) -bor ([long]$ranFntBytes[4] -shl 16) -bor ([long]$ranFntBytes[5] -shl 24)
+    Assert-True ($ranFntBytes[0] -eq 0 -and $ranFntBytes[1] -eq 2 -and $ranFntSize -ge 118 -and $ranFntSize -le $ranFntBytes.Length -and ($ranFntBytes[66] -band 1) -eq 0) "The 00020000 fixture passes fnt_font_load's header test (file_size $ranFntSize of $($ranFntBytes.Length))."
+    # MonaspaceNeon-Regular.otf is the vendored CFF (`OTTO`) font; CodeNewRoman-Regular.otf is TrueType inside.
+    $ranCff = Join-Path $repoRoot 'src\font\res\MonaspaceNeon-Regular.otf'
+    # A copy of a font with one table's tag renamed, so it has no table of that tag.
+    function Rename-RanTable {
+        param([string] $Path, [string] $From, [string] $To, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        for ($i = 0; $i -lt (([int]$bytes[4] -shl 8) -bor $bytes[5]); $i++) {
+            $record = 12 + 16 * $i
+            if ([string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, $record, 4), $From, [StringComparison]::Ordinal)) { [System.Text.Encoding]::ASCII.GetBytes($To).CopyTo($bytes, $record) }
+        }
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
+    # A copy of a file with the bytes at each offset of $At set (offset = byte list).
+    function Set-RanBytes {
+        param([string] $Path, [hashtable] $At, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        foreach ($e in $At.GetEnumerator()) { ([byte[]] $e.Value).CopyTo($bytes, [int] $e.Key) }
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
+    # A copy of a font with its first four bytes, the sfnt version tag, set to $Tag
+    # (four ASCII characters, or bytes).
+    function Set-RanFontTag {
+        param([string] $Path, [object] $Tag, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $tagBytes = if ($Tag -is [string]) { [System.Text.Encoding]::ASCII.GetBytes($Tag) } else { [byte[]] $Tag }
+        $tagBytes.CopyTo($bytes, 0)
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
+    # A copy of a font with one table's directory entry given another offset or length.
+    function Set-RanTableEntry {
+        param([string] $Path, [string] $Tag, [long] $Offset = -1, [long] $Length = -1, [string] $Name)
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        for ($i = 0; $i -lt (([int]$bytes[4] -shl 8) -bor $bytes[5]); $i++) {
+            $record = 12 + 16 * $i
+            if (-not [string]::Equals([System.Text.Encoding]::ASCII.GetString($bytes, $record, 4), $Tag, [StringComparison]::Ordinal)) { continue }
+            for ($k = 0; $k -lt 4; $k++) {
+                if ($Offset -ge 0) { $bytes[$record + 8 + $k] = [byte](($Offset -shr (8 * (3 - $k))) -band 0xFF) }
+                if ($Length -ge 0) { $bytes[$record + 12 + $k] = [byte](($Length -shr (8 * (3 - $k))) -band 0xFF) }
+            }
+        }
+        $out = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($out, $bytes)
+        return $out
+    }
+    foreach ($ranCase in @(
+            @{ Name = 'a name table whose declared length is 6'; Path = $ranShortPath; Expect = 'unknown' }
+            @{ Name = 'a string one byte past the name table'; Path = (New-RanNamedFont 'string-past.ttf' $ranChakmaNames -LengthDelta (-1)); Expect = 'unknown' }
+            @{ Name = 'a name table past the end of the file'; Path = (New-RanNamedFont 'table-past.ttf' $ranChakmaNames -LengthDelta 1); Expect = 'unknown' }
+            @{ Name = 'a record past the name table'; Path = (New-RanNamedFont 'entry-past.ttf' @(, @(1, 'Noto')) -CountDelta 1 -Pad 16); Expect = 'unknown' }
+            @{ Name = 'the short table with its own count'; Path = (New-RanNamedFont 'entry-whole.ttf' @(, @(1, 'Noto')) -Pad 16); Expect = 'absent' }
+            @{ Name = 'the same name table at its own length'; Path = (New-RanNamedFont 'table-whole.ttf' $ranChakmaNames); Expect = 'present' }
+            @{ Name = 'a name table of format 2 (Sol''s case)'; Path = $ranFormat2Path; Expect = 'unknown' }
+            @{ Name = 'its family in a name table of format 2'; Path = (New-RanNamedFont 'format-2-named.ttf' $ranChakmaNames -Format 2); Expect = 'unknown' }
+            @{ Name = 'language tags past a format 1 table'; Path = (New-RanNamedFont 'tags-past.ttf' $ranOtherNames -Format 1 -LangTags 1000); Expect = 'unknown' }
+            @{ Name = 'its family beside language tags past the table'; Path = (New-RanNamedFont 'tags-past-named.ttf' $ranChakmaNames -Format 1 -LangTags 1000); Expect = 'present' }
+            @{ Name = 'a language tag whose string lies past the table (CodeRabbit)'; Path = (New-RanNamedFont 'tag-string-past.ttf' $ranOtherNames -Format 1 -Tags @('en') -TagOffsetDelta 2); Expect = 'unknown' }
+            @{ Name = 'a language tag inside the table and no name of it'; Path = (New-RanNamedFont 'tag-whole.ttf' $ranOtherNames -Format 1 -Tags @('en')); Expect = 'absent' }
+            @{ Name = 'no name table'; Path = (Rename-RanTable $ranJet 'name' 'xame' 'no-name.ttf'); Expect = 'unknown' }
+            @{ Name = 'a CFF font without a head table (CodeRabbit)'; Path = (Rename-RanTable $ranCff 'head' 'xead' 'cff-no-head.otf'); Expect = 'unknown' }
+            @{ Name = 'its family in a CFF font without a head table'; Path = (New-RanNamedFont 'cff-no-head-named.otf' $ranChakmaNames -Source ([System.IO.File]::ReadAllBytes((Rename-RanTable $ranCff 'head' 'xead' 'cff-no-head-source.otf')))); Expect = 'present' }
+            @{ Name = 'a CFF font with its head table and no name of it'; Path = $ranCff; Expect = 'absent' }
+            @{ Name = 'a CFF font whose head table has no length (Sol''s case)'; Path = (Set-RanTableEntry $ranCff 'head' -Length 0 -Name 'cff-head-empty.otf'); Expect = 'unknown' }
+            @{ Name = 'a CFF font whose head table lies past the end of the file'; Path = (Set-RanTableEntry $ranCff 'head' -Offset 0x7FFFFF00 -Name 'cff-head-past.otf'); Expect = 'unknown' }
+            @{ Name = 'two name tables, its family in the first (Sol''s case)'; Path = (New-RanNamedFont 'dup-first.ttf' $ranChakmaNames -Duplicate first); Expect = 'present' }
+            @{ Name = 'two name tables, its family in the second'; Path = (New-RanNamedFont 'dup-second.ttf' $ranChakmaNames -Duplicate second); Expect = 'present' }
+            @{ Name = 'two name tables, neither naming it'; Path = (New-RanNamedFont 'dup-other.ttf' $ranOtherNames -Duplicate first); Expect = 'absent' }
+            @{ Name = 'two name tables, the second past the end of the file'; Path = (New-RanNamedFont 'dup-past.ttf' $ranOtherNames -Duplicate first -DuplicateOutOfFile); Expect = 'unknown' }
+            @{ Name = 'a typ1-tagged face (council round 4 on #731, Sol M)'; Path = (Set-RanFontTag $ranJet 'typ1' 'typ1.ttf'); Expect = 'unknown' }
+            @{ Name = 'a WOFF signature, named .ttf (Opus L1)'; Path = (Set-RanFontTag $ranJet 'wOFF' 'woff.ttf'); Expect = 'unknown' }
+            @{ Name = 'a WOFF2 signature, named .ttf'; Path = (Set-RanFontTag $ranJet 'wOF2' 'woff2.ttf'); Expect = 'unknown' }
+            @{ Name = 'an unknown sfnt tag'; Path = (Set-RanFontTag $ranJet 'abcd' 'unknown-tag.ttf'); Expect = 'unknown' }
+            @{ Name = 'its family in a typ1-tagged face'; Path = (New-RanNamedFont 'typ1-named.ttf' $ranChakmaNames -Source ([System.IO.File]::ReadAllBytes((Set-RanFontTag $ranJet 'typ1' 'typ1-source.ttf')))); Expect = 'present' }
+            @{ Name = 'a TrueType face whose head is under 0x36 bytes'; Path = (Set-RanTableEntry $ranJet 'head' -Length 0x35 -Name 'head-short.ttf'); Expect = 'unknown' }
+            @{ Name = 'a TrueType face whose head lies past the end of the file'; Path = (Set-RanTableEntry $ranJet 'head' -Offset 0x7FFFFF00 -Name 'head-past.ttf'); Expect = 'unknown' }
+            @{ Name = 'a TrueType face without a head table'; Path = (Rename-RanTable $ranJet 'head' 'xead' 'no-head.ttf'); Expect = 'unknown' }
+            @{ Name = 'the TrueType tag true and no name of it'; Path = (Set-RanFontTag $ranJet 'true' 'tag-true.ttf'); Expect = 'absent' }
+            @{ Name = 'the tag 00020000, which winfnt can also open, and no name of it (council round 6 on #731, Opus L2)'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0, 2, 0, 0)) 'tag-00020000.ttf'); Expect = 'unknown' }
+            @{ Name = 'the Apple tag A5 kbd and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6B, 0x62, 0x64)) 'tag-a5kbd.ttf'); Expect = 'absent' }
+            @{ Name = 'the Apple tag A5 lst and no name of it'; Path = (Set-RanFontTag $ranJet ([byte[]] @(0xA5, 0x6C, 0x73, 0x74)) 'tag-a5lst.ttf'); Expect = 'absent' }
+            @{ Name = 'a TrueType face whose first 128 bytes pass the MacBinary header test (council round 5 on #731, Opus L1)'; Path = (Set-RanBytes $ranJet @{ 63 = @(0); 82 = @(0, 0) } 'macbinary-shape.ttf'); Expect = 'unknown' }
+            @{ Name = 'a TrueType face whose first 16 bytes pass the resource-fork header test'; Path = (Set-RanBytes (New-RanNamedFont 'rfork-base.ttf' $ranOtherNames -Pad 1200000) @{ 6 = @(0, 0, 0, 0, 0, 0x10); 12 = @(0, 0, 0, 0x10) } 'rfork-shape.ttf'); Expect = 'unknown' }
+            @{ Name = 'a 00020000 face that also passes the FNT header test, and no name of it'; Path = $ranFnt; Expect = 'unknown' }
+            @{ Name = 'a family record in an encoding the probe does not decode'; Path = (New-RanNamedFont 'big5.ttf' @(, @(1, 'Noto Sans Chakma', 3, 4))); Expect = 'unknown' }
+            @{ Name = 'a family record on the custom platform'; Path = (New-RanNamedFont 'custom.ttf' @(, @(1, 'Noto Sans Chakma', 4, 0))); Expect = 'unknown' }
+            @{ Name = 'a family record whose bytes are no UTF-16'; Path = (New-RanNamedFont 'surrogate.ttf' @(, @(1, [byte[]] @(0xD8, 0x00)))); Expect = 'unknown' }
+            @{ Name = 'a family record of an odd length'; Path = (New-RanNamedFont 'odd.ttf' @(, @(1, [byte[]] @(0, 0x41, 0)))); Expect = 'unknown' }
+            @{ Name = 'a family record of an ISO encoding the probe does not decode'; Path = (New-RanNamedFont 'iso-3.ttf' @(, @(1, 'Noto Sans Chakma', 2, 3))); Expect = 'unknown' }
+            @{ Name = 'a family record in ASCII that is not'; Path = (New-RanNamedFont 'iso-ascii.ttf' @(, @(1, [byte[]] @(0x41, 0xC0), 2, 0))); Expect = 'unknown' })) {
+        $ranGot = Get-RanChakmaFact -Path $ranCase.Path
+        Assert-True ($ranGot -ceq $ranCase.Expect) "A font with $($ranCase.Name) reads $($ranCase.Expect) for Noto Sans Chakma (got $ranGot)."
+    }
+    $ranFontDir = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'fonts')
+    foreach ($n in 'a.ttf', 'b.TTF', 'c.otc', 'd.fon', 'e.txt') { [System.IO.File]::WriteAllBytes((Join-Path $ranFontDir $n), [byte[]] @(0)) }
+    New-Item -ItemType Directory -Path (Join-Path $ranFontDir 'f.ttf') | Out-Null
+    # Discovery's directory walk takes hidden files too (council round 1 on #731, Opus L3).
+    $ranHidden = Join-Path $ranFontDir 'g.ttf'
+    [System.IO.File]::WriteAllBytes($ranHidden, [byte[]] @(0))
+    [System.IO.File]::SetAttributes($ranHidden, [System.IO.FileAttributes]::Hidden)
+    # The files discovery reads: every supported file in the directories, hidden ones
+    # included (council round 1 on #731, Opus L3), and every supported file a registry
+    # path names, inside them or not, each once; never a registered file left out
+    # (council round 2 on #731: Sol M2, Opus M1). A path naming no file, a directory,
+    # another extension or '' (a Fonts key's default value: Opus L1) is skipped.
+    $ranElsewhere = New-Item -ItemType Directory -Path (Join-Path $ranTemp 'elsewhere')
+    foreach ($n in 'h.otf', 'i.fon') { [System.IO.File]::WriteAllBytes((Join-Path $ranElsewhere $n), [byte[]] @(0)) }
+    $ranRegistryPaths = @((Join-Path $ranFontDir 'A.TTF'), (Join-Path $ranElsewhere 'h.otf'), (Join-Path $ranElsewhere 'i.fon'), (Join-Path $ranElsewhere 'missing.ttf'), '', (Join-Path $ranFontDir 'f.ttf'))
+    $ranFound = try { $leaves = [string[]] @(foreach ($p in (Get-RanListFontFiles -Directories @($ranFontDir.FullName, (Join-Path $ranTemp 'no-such-dir')) -RegistryPaths $ranRegistryPaths)) { Split-Path -Leaf $p }); [Array]::Sort($leaves, [StringComparer]::Ordinal); $leaves -join '|' } catch { $_.Exception.Message }
+    # A.TTF, the registry's spelling of the directory's a.ttf, is a path of its own.
+    Assert-True ($ranFound -ceq 'A.TTF|a.ttf|b.TTF|c.otc|g.ttf|h.otf') "The font scan takes the files discovery takes, each spelling once: $ranFound"
+    # Deduplicated ordinally: the probe compares paths after resolving them, and a `.\`
+    # segment can leave two spellings discovery keeps apart that, resolved, differ only
+    # in case, which on a case-sensitive directory name two files (council round 7 on
+    # #731, Sol M). Reading both is a harmless over-read: on this directory they are one
+    # file read twice, and the same spelling twice is read once.
+    $ranSpellings = try { Get-RanListFontFiles -Directories @() -RegistryPaths @((Join-Path $ranElsewhere 'h.otf'), (Join-Path $ranElsewhere 'H.OTF'), (Join-Path $ranElsewhere 'h.otf')) } catch { @($_.Exception.Message) }
+    Assert-True ($ranSpellings.Count -eq 2 -and [string]::Equals([System.IO.Path]::GetFileName($ranSpellings[1]), 'H.OTF', [StringComparison]::Ordinal)) "Two spellings of a font path are two paths, and one spelling is one ($($ranSpellings -join ' | '))."
+
 
     $ranBaseTests = @(@('a.test.one', 'OK'), @('a.test.two', 'OK'), @('a.test.font', 'SKIP'), @('b.test_0', 'OK'), @('b.test_1', 'OK'), @('b.test_2', 'OK'), @('B.test.upper', 'OK'))
     $ranBase = New-RanListFile 'base.tsv' $ranBaseTests
@@ -495,6 +832,40 @@ try {
     Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -like "SKIP-ENVIRONMENT ghostty-test a.test.font (1 skipped, 0 of 1 approvals apply): needs font:Arial Unicode MS=absent (the list has 'present')*") 'An approval that names an environment does not cover a list taken in another.'
     $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranPresent -SkipFiles @($ranSkips)
     Assert-True (($v.Problems -join "`n") -like '*ENV-DIFFERS font:Arial Unicode MS*') 'Lists taken in different environments are not compared.'
+    # Fact keys are ordinal too (council round 4 on #726, Sol L1): a key spelled with
+    # another case, or with a control character, is a key the other list lacks.
+    $ranUpper = Join-Path $ranTemp 'upper-key.tsv'
+    [System.IO.File]::WriteAllText($ranUpper, ($ranText -creplace '# env: cwd-on-temp-drive=', '# env: CWD-ON-TEMP-DRIVE='), [System.Text.UTF8Encoding]::new($false))
+    $ranExtra = Join-Path $ranTemp 'esc-key.tsv'
+    [System.IO.File]::WriteAllText($ranExtra, ($ranText -creplace '(# env: cwd-on-temp-drive=true\n)', "`$1# env: cwd-on-temp-driv$([char]27)e=false`n"), [System.Text.UTF8Encoding]::new($false))
+    foreach ($ranCase in @(@{ Name = 'a key in capitals'; Path = $ranUpper; Expect = '*ENV-DIFFERS CWD-ON-TEMP-DRIVE*' }, @{ Name = 'an extra key holding ESC'; Path = $ranExtra; Expect = "*ENV-DIFFERS cwd-on-temp-driv$([char]27)e*" })) {
+        Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranCase.Path -SkipFiles @($ranSkips)).Problems -join ' ') -like $ranCase.Expect) "A list with $($ranCase.Name) differs in its environment."
+        $ranCrossedKey = Join-Path $ranTemp "crossed-$([IO.Path]::GetFileName($ranCase.Path))"
+        [System.IO.File]::WriteAllText($ranCrossedKey, ([System.IO.File]::ReadAllText($ranCase.Path) -creplace 'mode=Debug', 'mode=debug' -creplace 'zig=0\.15\.2', 'zig=0.17.1'), [System.Text.UTF8Encoding]::new($false))
+        Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranCrossedKey -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1').Problems -join ' ') -like $ranCase.Expect) "Across the crossing a list with $($ranCase.Name) differs in its environment."
+    }
+    # A key only one list holds differs even when the other side's value is empty, which
+    # reads as '' just as a missing key does (CodeRabbit on #731). The same list passes.
+    $ranEmptyKey = Join-Path $ranTemp 'empty-key.tsv'
+    [System.IO.File]::WriteAllText($ranEmptyKey, ($ranText -creplace '(# env: cwd-on-temp-drive=true\n)', "`$1# env: CWD-ON-TEMP-DRIVE=`n"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True ((((Get-RanVerdict -Baselines @($ranEmptyKey) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*ENV-DIFFERS CWD-ON-TEMP-DRIVE*has '''', *has no such fact*') -and (((Get-RanVerdict -Baselines @($ranBase) -Later $ranEmptyKey -SkipFiles @($ranSkips)).Problems -join ' ') -like '*ENV-DIFFERS CWD-ON-TEMP-DRIVE*has no such fact*') -and (Get-RanVerdict -Baselines @($ranEmptyKey) -Later $ranEmptyKey -SkipFiles @($ranSkips)).Problems.Count -eq 0) 'A fact with an empty value differs from no such fact, either way round, and a list that holds it in both passes.'
+    # A fact named Keys, Values or Count shadows that member of a PowerShell dictionary,
+    # so key sets are read through get_Keys() (council round 1 on #731, Sol L3). Keys
+    # hid every key of its list; the other two are pinned with it.
+    foreach ($ranShadowKey in 'Keys', 'Values', 'Count') {
+        $ranShadowList = Join-Path $ranTemp "shadow-$ranShadowKey.tsv"
+        [System.IO.File]::WriteAllText($ranShadowList, ($ranText -creplace '(# env: cwd-on-temp-drive=true\n)', "`$1# env: $ranShadowKey=`n"), [System.Text.UTF8Encoding]::new($false))
+        $ranLater = (Get-RanVerdict -Baselines @($ranBase) -Later $ranShadowList -SkipFiles @($ranSkips)).Problems -join ' '
+        $ranEarlier = (Get-RanVerdict -Baselines @($ranShadowList) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' '
+        Assert-True ($ranLater -like "*ENV-DIFFERS $ranShadowKey*" -and $ranEarlier -like "*ENV-DIFFERS $ranShadowKey*") "A list with an extra fact named $ranShadowKey differs in its environment, either way round ($ranLater | $ranEarlier)."
+    }
+    $ranShadowSuites = New-RanListFile 'shadow-suites.tsv' -Suites @(
+        @{ Name = 'Keys'; Tests = @(@('k.test.one', 'OK'), @('k.test.two', 'OK')) }
+        @{ Name = 'Values'; Tests = @(@('v.test.one', 'OK'), @('v.test.two', 'OK')) }
+        @{ Name = 'Count'; Tests = @(@('c.test.one', 'OK'), @('c.test.two', 'OK')) })
+    $ranShadowRead = Read-RanList -Path $ranShadowSuites
+    $v = Get-RanVerdict -Baselines @($ranShadowSuites) -Later $ranShadowSuites
+    Assert-True ($ranShadowRead.Problems.Count -eq 0 -and @($ranShadowRead.Suites).Count -eq 3 -and $v.Problems.Count -eq 0) "A list whose suites are named Keys, Values and Count reads whole and passes against itself ($(@($ranShadowRead.Problems) + @($v.Problems) -join ' | '))."
     # An approval may also name the build: one for 1A's ReleaseSafe list does not cover the Debug list.
     $ranBuildSkips = New-RanLedger 'build-skips.tsv' @("ghostty-test`ta.test.font`tbuild:mode=ReleaseSafe`tskips in ReleaseSafe only")
     $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranBase -SkipFiles @($ranBuildSkips)
@@ -563,15 +934,15 @@ try {
             @{ Name = 'a FAIL'; Path = $ranFailing }
             @{ Name = 'exit 1'; Path = (New-RanListFile 'exit1.tsv' $ranBaseTests -Exit '1') }
             @{ Name = 'a leak'; Path = (New-RanListFile 'leaky.tsv' $ranBaseTests -Leaked 1) }
-            @{ Name = 'a logged error'; Path = (New-RanListFile 'logged.tsv' $ranBaseTests -ErrorsLogged 1) }
-            @{ Name = 'a panic line'; Path = (New-RanListFile 'panicky.tsv' $ranBaseTests -Panics 1) })) {
+            @{ Name = 'a logged error'; Path = (New-RanListFile 'logged.tsv' $ranBaseTests -ErrorsLogged 1) })) {
         Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later $ranCase.Path -SkipFiles @($ranSkips)).Problems -join ' ' -like '*not green*') "A later list with only $($ranCase.Name) wrong is not green."
         Assert-True ((Get-RanVerdict -Baselines @($ranCase.Path) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ' -like '*not green*') "A baseline with only $($ranCase.Name) wrong is refused."
     }
+    Assert-True ((Get-RanVerdict -Baselines @($ranBase) -Later (New-RanListFile 'panicky.tsv' $ranBaseTests -Panics 1) -SkipFiles @($ranSkips)).Problems.Count -eq 0) 'A list whose only blemish is panic-shaped log lines is green: a test can print them (bot threads on #726).'
     foreach ($ranCase in @(@{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 0 }; Green = $true }
             @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 1; Leaked = 0; Panics = 0 }; Green = $false }
             @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 1; Panics = 0 }; Green = $false }
-            @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 1 }; Green = $false }
+            @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 1 }; Green = $true }
             @{ Suite = [pscustomobject]@{ Exit = 0; Fail = 1; ErrorsLogged = 0; Leaked = 0; Panics = 0 }; Green = $false }
             @{ Suite = [pscustomobject]@{ Exit = 3; Fail = 0; ErrorsLogged = 0; Leaked = 0; Panics = 0 }; Green = $false })) {
         Assert-True ((Test-RanListSuiteGreen $ranCase.Suite) -eq $ranCase.Green) "The capture's green check holds each condition on its own ($($ranCase.Suite | ConvertTo-Json -Compress))."
@@ -599,6 +970,12 @@ try {
 
     # Build identity: options, compiler and the planned crossing (council round 2, Sol M1 and Opus M1).
     $ranOtherBuild = New-RanListFile 'other-build.tsv' $ranBaseTests -Build (New-RanBuild @{ options = '-Dcustom-shaders=true' })
+    # `source` compares by class (council round 4 on #726, Sol L4): declared and imported are one.
+    $ranDeclaredSource = New-RanListFile 'declared-source.tsv' $ranBaseTests -Build (New-RanBuild @{ source = 'declared' })
+    $ranImportedSource = New-RanListFile 'imported-source.tsv' $ranBaseTests -Build (New-RanBuild @{ source = 'imported' })
+    $ranImportedCrossed = New-RanListFile 'imported-crossed.tsv' $ranBaseTests -Build (New-RanBuild @{ source = 'imported'; zig = '0.17.1'; mode = 'debug' })
+    Assert-True ((Get-RanVerdict -Baselines @($ranDeclaredSource) -Later $ranImportedSource -SkipFiles @($ranSkips)).Problems.Count -eq 0 -and (Get-RanVerdict -Baselines @($ranDeclaredSource) -Later $ranImportedCrossed -SkipFiles @($ranSkips) -Crossing '0.15.2=0.17.1').Problems.Count -eq 0) 'A declared executable''s list and an imported run''s are one source class, with or without the crossing.'
+    Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranImportedSource -SkipFiles @($ranSkips)).Problems -join ' ') -like '*BUILD-DIFFERS source*') 'A built list and an imported one are not.'
     Assert-True (((Get-RanVerdict -Baselines @($ranBase) -Later $ranOtherBuild -SkipFiles @($ranSkips)).Problems -join ' ') -like 'BUILD-DIFFERS options*') 'Lists built with different options are not compared.'
     $ranZig17 = New-RanListFile 'zig17.tsv' $ranBaseTests -Build (New-RanBuild @{ zig = '0.17.1'; mode = 'debug' })
     $v = Get-RanVerdict -Baselines @($ranBase) -Later $ranZig17 -SkipFiles @($ranSkips)
@@ -634,6 +1011,16 @@ try {
     $ranEscExit = Join-Path $ranTemp 'esc-exit.tsv'
     [System.IO.File]::WriteAllText($ranEscExit, ($ranText -replace 'exit=0', "exit=${ranEsc}0"), [System.Text.UTF8Encoding]::new($false))
     Assert-True (((Get-RanVerdict -Baselines @($ranEscExit) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*is not a suite record*') 'A suite record whose exit is not a number is refused, not read as green.'
+    # [0-9], not \d: .NET's \d matches every script's digits, and pwsh's -ceq takes
+    # U+0660 for 0 (council round 4 on #726, Opus L1).
+    foreach ($ranDigit in [char]0x0660, [char]0x0966) {
+        $ranDigitExit = Join-Path $ranTemp "digit-exit-$([int]$ranDigit).tsv"
+        [System.IO.File]::WriteAllText($ranDigitExit, ($ranText -replace 'exit=0', "exit=$ranDigit"), [System.Text.UTF8Encoding]::new($false))
+        Assert-True (((Get-RanVerdict -Baselines @($ranDigitExit) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like '*is not a suite record*') "A suite record whose exit is the digit U+$('{0:X4}' -f [int]$ranDigit) is refused, not read as green."
+    }
+    $ranDigitCount = Join-Path $ranTemp 'digit-count.tsv'
+    [System.IO.File]::WriteAllText($ranDigitCount, ($ranText -creplace "ghostty-test`tOK`t1`ta\.test\.two", "ghostty-test`tOK`t1$([char]0x0661)`ta.test.two"), [System.Text.UTF8Encoding]::new($false))
+    Assert-True (((Get-RanVerdict -Baselines @($ranDigitCount) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like "*is not '<suite><TAB><OK|SKIP|FAIL><TAB><count>*") 'A row whose count is a non-ASCII digit is refused.'
     $ranEscResult = Join-Path $ranTemp 'esc-result.tsv'
     [System.IO.File]::WriteAllText($ranEscResult, ($ranText -replace "ghostty-test`tOK`t1`ta\.test\.two", "ghostty-test`t${ranEsc}OK`t1`ta.test.two"), [System.Text.UTF8Encoding]::new($false))
     Assert-True (((Get-RanVerdict -Baselines @($ranEscResult) -Later $ranBase -SkipFiles @($ranSkips)).Problems -join ' ') -like "*is not '<suite><TAB><OK|SKIP|FAIL>*") 'A row whose result is not exactly OK, SKIP or FAIL is refused.'
@@ -687,6 +1074,8 @@ try {
     }
     $ranPanicLog = Join-Path $ranTemp 'panic.stderr.txt'
     [System.IO.File]::WriteAllLines($ranPanicLog, @(Read-RanFixture 'names') + @('thread 4 panic: reached after the end line'))
+    $ranPrintedTrailers = Join-Path $ranTemp 'printed-trailers.stderr.txt'
+    [System.IO.File]::WriteAllLines($ranPrintedTrailers, @('1/7 names.test.wait...', '1 errors were logged.', '1 tests leaked memory.', 'panic: a sample the test prints', 'OK') + @(Read-RanFixture 'names' | Select-Object -Skip 1))
     $ranCaptureCases = @(
         @{ Name = 'printed'; Exit = 0; Wrote = $true }
         @{ Name = 'forge'; Exit = 0; Wrote = $true }
@@ -694,11 +1083,14 @@ try {
         @{ Name = 'leak'; Exit = 1; Wrote = $true }
         @{ Name = 'leak'; ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' with exit 0' }
         @{ Name = 'logged_error'; ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' with exit 0' }
-        @{ Name = 'leak'; Stderr = (Join-Path $ranFixtures 'names.stderr.txt'); Exit = 1; Wrote = $false; Note = ' with a log whose trailers are not its record''s' }
-        @{ Name = 'names'; Stderr = $ranPanicLog; ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' with a panic line in its log and exit 0' }
+        @{ Name = 'leak'; Stderr = (Join-Path $ranFixtures 'names.stderr.txt'); Exit = 1; Wrote = $true; Note = ' with a log that prints no trailer: the record''s leak still fails it' }
+        @{ Name = 'names'; Stderr = $ranPanicLog; ExitCode = '0'; Exit = 0; Wrote = $true; Note = ' with a panic-shaped line in its log and exit 0: the record decides' }
         @{ Name = 'names'; Results = (New-RanRecord 'relabelled' (@([System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'names.results.txt'))) -replace '^zig 0\.15\.2$', 'zig 0.17.1' -replace '^mode Debug$', 'mode safe')); Exit = 0; Wrote = $true; Note = ' from a record that names 0.17.1 and mode safe' }
         @{ Name = 'names'; Results = (New-RanRecord 'cut-names' ([System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'names.results.txt')) | Select-Object -SkipLast 1)); Exit = 1; Wrote = $false; Note = ' with its record cut before the end line' }
         @{ Name = 'names'; Results = (Join-Path $ranTemp 'no-record.results.txt'); Exit = 1; Wrote = $false; Note = ' without its record' }
+        @{ Name = 'names'; Stderr = $ranPrintedTrailers; ExitCode = '0'; Exit = 0; Wrote = $true; Note = ' whose test prints trailer- and panic-shaped lines (bot threads on #726)' }
+        @{ Name = 'names'; Results = (New-RanRecord 'leak-only' @('noctty test results v1', 'zig 0.15.2', 'mode Debug', 'shard 1/1', 'test 1 OK 1 612e746573742e6f6e65', 'end tests=1 ok=1 skip=0 fail=0 leaked=1 errors-logged=0')); ExitCode = '0'; Exit = 1; Wrote = $true; Note = ' from a record that counts a leak and no logged error' }
+        @{ Name = 'names'; Results = (New-RanRecord 'no-test' @('noctty test results v1', 'zig 0.15.2', 'mode Debug', 'shard 1/1', 'end tests=0 ok=0 skip=0 fail=0 leaked=0 errors-logged=0')); ExitCode = '0'; Exit = 1; Wrote = $false; Note = ' from a record that holds no test' }
     )
     $ranN = 0
     foreach ($case in $ranCaptureCases) {
@@ -718,6 +1110,10 @@ try {
     Assert-True ((Get-RanVerdict -Baselines @((Join-Path $ranTemp 'capture-5-leak.tsv')) -Later (Join-Path $ranTemp 'capture-5-leak.tsv')).Problems -join ' ' -like '*not green (exit 0*1 leaked*') 'A leak with exit 0 is still not green.'
     Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-8-names.tsv')) -cmatch '(?m)^# suite: fixture tests=7 ok=7 skip=0 fail=0 exit=0 errors-logged=0 leaked=0 panics=1$') 'A panic line in the log is counted in the list.'
     Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-9-names.tsv')) -cmatch '(?m)^# build: source=imported\toptions=\(none\)\tfiltered=false\tmode=safe\tzig=0\.17\.1$') 'The list records the compiler and the mode its record names.'
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-7-leak.tsv')) -cmatch '(?m)^# suite: fixture tests=2 ok=2 skip=0 fail=0 exit=1 errors-logged=1 leaked=1 panics=0$') 'A run whose log prints no trailer keeps the record''s leak and logged error.'
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $ranTemp 'capture-12-names.tsv')) -cmatch '(?m)^# suite: fixture tests=7 ok=7 skip=0 fail=0 exit=0 errors-logged=0 leaked=0 panics=1$') 'A test''s printed trailers change no count; its panic-shaped line is only counted.'
+    $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'no-test-again.tsv') -Results (Join-Path $ranTemp 'no-test.results.txt') -Exit '0'
+    Assert-True ((Join-RanOutput $output) -like '*fixture: the record holds no test*') "A suite that ran no test is refused at capture, by name (bot threads on #726): $(Join-RanOutput $output)"
     # Sol's false pass, end to end: the baseline ran coverage OK and skipped platform,
     # which alone is approved; the later run skips coverage while it prints OK.
     $ranSolBase = New-RanListFile 'sol-base.tsv' -Build ([ordered]@{ source = 'imported'; options = '(none)'; filtered = 'false'; mode = 'Debug'; zig = '0.15.2' }) -Environment (Read-RanList -Path $ranPrinted).Environment -Suites @(@{ Name = 'fixture'; Tests = @(@('printed.test.coverage', 'OK'), @('printed.test.platform', 'SKIP')) })
@@ -732,6 +1128,13 @@ try {
     # Two suites whose labels differ only by case are refused at capture (council round 3, Sol and Opus L2).
     $output = Invoke-RanCaptureCommand "-TestLog $(Get-RanFixturePath 'names.stderr.txt'), $(Get-RanFixturePath 'leak.stderr.txt') -TestResults $(Get-RanFixturePath 'names.results.txt'), $(Get-RanFixturePath 'leak.results.txt') -TestLogExitCode 0, 1 -Suite Unit, unit -Revision r1 -BuildOptions none -OutFile '$(Join-Path $ranTemp 'case.tsv')'"
     Assert-True ($LASTEXITCODE -ne 0 -and (Join-RanOutput $output) -like "*Suite 'unit' is given twice*case*" -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'case.tsv'))) "The capture refuses suites Unit and unit ($($output -join ' | '))."
+    # The Kelvin sign U+212A matches [A-Za-z] when case is folded (council round 4 on #726, Sol L2).
+    $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog (Join-Path $ranFixtures 'names.stderr.txt') -TestResults (Join-Path $ranFixtures 'names.results.txt') -TestLogExitCode 0 -Suite ([string][char]0x212A) -Revision r1 -BuildOptions none -OutFile (Join-Path $ranTemp 'kelvin.tsv') 2>&1
+    Assert-True ($LASTEXITCODE -ne 0 -and (Join-RanOutput $output) -like '*must be ASCII letters*' -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'kelvin.tsv'))) "The capture refuses a suite label the compare would refuse ($(Join-RanOutput $output))."
+    # `$` also matches before a trailing LF, so the label check anchors with \A and \z
+    # (council round 1 on #731, Sol L4).
+    $output = Invoke-RanCaptureCommand "-TestLog $(Get-RanFixturePath 'names.stderr.txt') -TestResults $(Get-RanFixturePath 'names.results.txt') -TestLogExitCode 0 -Suite ('fixture' + [char]10) -Revision r1 -BuildOptions none -OutFile '$(Join-Path $ranTemp 'lf.tsv')'"
+    Assert-True ($LASTEXITCODE -ne 0 -and (Join-RanOutput $output) -like '*must be ASCII letters*' -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'lf.tsv'))) "The capture refuses a suite label that ends in LF ($(Join-RanOutput $output))."
     # One list is one compiler: a record from another refuses the list.
     $ranOther = New-RanRecord 'other-zig' (@([System.IO.File]::ReadAllLines((Join-Path $ranFixtures 'names.results.txt'))) -replace '^zig 0\.15\.2$', 'zig 0.17.1')
     $output = Invoke-RanCaptureCommand "-TestLog $(Get-RanFixturePath 'names.stderr.txt'), $(Get-RanFixturePath 'glued.stderr.txt') -TestResults '$ranOther', $(Get-RanFixturePath 'glued.results.txt') -TestLogExitCode 0, 0 -Suite one, two -Revision r1 -BuildOptions none -OutFile '$(Join-Path $ranTemp 'two-zig.tsv')'"
@@ -742,10 +1145,49 @@ try {
     Assert-True (((Get-RanVerdict -Baselines @($ranPrinted) -Later $ranPrinted -SkipFiles @($ranImportSkip)).Problems -join ' ') -like "*SKIP-ENVIRONMENT*an imported run that recorded no facts*") 'An approval that needs a fact does not cover an imported run that could not record it.'
     $ranFacts = Join-Path $ranTemp 'run-facts.txt'
     $null = & pwsh -NoProfile -NonInteractive -File $ranCapture -WriteFacts $ranFacts -WorkingDirectory $ranTemp 2>&1
-    Assert-True ($LASTEXITCODE -eq 0 -and @([System.IO.File]::ReadAllLines($ranFacts) | Where-Object { $_ -match '^# env: [^=]+=(true|false|absent|present|unset|1|other)$' }).Count -eq (Get-RanListFactKeys).Count) '-WriteFacts records the run''s environment beside it.'
+    $ranWritten = Read-RanListFacts -Path $ranFacts
+    # `unknown` only for a probe that can fail: the 8.3 probe (no Scripting.FileSystemObject) and a font file it cannot read.
+    $ranBadWritten = @(Get-RanListFactKeys | Where-Object { -not $ranWritten.Contains($_) -or "$($ranWritten[$_])" -cnotmatch $(if ($_ -ceq 'temp-makes-8dot3-names' -or $_.StartsWith('font:', [StringComparison]::Ordinal)) { '^(true|false|present|absent|unknown)$' } else { '^(true|false|unset|1|other)$' }) })
+    Assert-True ($LASTEXITCODE -eq 0 -and $ranWritten.Count -eq (Get-RanListFactKeys).Count -and $ranBadWritten.Count -eq 0) "-WriteFacts records each fact of the run's environment ($($ranBadWritten -join ', '))."
     $out = Join-Path $ranTemp 'capture-with-facts.tsv'
     $null = Invoke-RanImport -Fixture 'names' -Out $out -More @('-TestLogFacts', $ranFacts)
-    Assert-True ($LASTEXITCODE -eq 0 -and ([System.IO.File]::ReadAllText($out) -cnotmatch '=unknown') -and ([System.IO.File]::ReadAllText($out) -cmatch [regex]::Escape(@([System.IO.File]::ReadAllLines($ranFacts))[0]))) 'An imported run takes its recorded facts from -TestLogFacts.'
+    $ranImportedFacts = (Read-RanList -Path $out).Environment
+    $ranMismatch = @(Get-RanListFactKeys | Where-Object { -not [string]::Equals("$($ranImportedFacts[$_])", "$($ranWritten[$_])", [StringComparison]::Ordinal) })
+    Assert-True ($LASTEXITCODE -eq 0 -and $ranMismatch.Count -eq 0) "An imported run takes each fact as -TestLogFacts recorded it ($($ranMismatch -join ', '))."
+    # -EnvironmentOf reads keys ordinally (council round 4 on #726, Sol L1).
+    $ranUpperOf = Join-Path $ranTemp 'upper-of.tsv'
+    [System.IO.File]::WriteAllText($ranUpperOf, ([System.IO.File]::ReadAllText($out) -creplace '# env: cwd-on-temp-drive=', '# env: CWD-ON-TEMP-DRIVE='), [System.Text.UTF8Encoding]::new($false))
+    $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'upper-of-run.tsv') -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranUpperOf)
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*environment fact*CWD-ON-TEMP-DRIVE*nothing was built or run*') "-EnvironmentOf stops on a baseline whose key differs only by case ($(Join-RanOutput $output))."
+    $ranEscOf = Join-Path $ranTemp 'esc-of.tsv'
+    [System.IO.File]::WriteAllText($ranEscOf, ([System.IO.File]::ReadAllText($out) -creplace '(# env: cwd-on-temp-drive=[a-z]+\n)', "`$1# env: cwd-on-temp-driv$([char]27)e=false`n"), [System.Text.UTF8Encoding]::new($false))
+    $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'esc-of-run.tsv') -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranEscOf)
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*environment fact*nothing was built or run*') "-EnvironmentOf stops on a baseline with an extra key holding ESC ($(Join-RanOutput $output))."
+    # A baseline whose canonical fact differs, followed by the same key in capitals with
+    # this run's value: a map that folded case would keep the second value and pass.
+    $ranHereFact = [regex]::Match([System.IO.File]::ReadAllText($out), '(?m)^# env: cwd-on-temp-drive=([a-z]+)$').Groups[1].Value
+    $ranFlipFact = $(if ($ranHereFact -ceq 'true') { 'false' } else { 'true' })
+    # A baseline with an extra key whose value is empty: a missing key and an empty value
+    # both read as '', so only membership tells them apart (CodeRabbit on #731).
+    $ranEmptyOf = Join-Path $ranTemp 'empty-of.tsv'
+    [System.IO.File]::WriteAllText($ranEmptyOf, ([System.IO.File]::ReadAllText($out) -creplace '(# env: cwd-on-temp-drive=[a-z]+\n)', "`$1# env: CWD-ON-TEMP-DRIVE=`n"), [System.Text.UTF8Encoding]::new($false))
+    $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'empty-of-run.tsv') -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranEmptyOf)
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like "*environment fact CWD-ON-TEMP-DRIVE is missing here and '' in the baseline*") "-EnvironmentOf stops on a baseline key whose value is empty and this run lacks ($(Join-RanOutput $output))."
+    foreach ($ranShadowKey in 'Keys', 'Values', 'Count') {
+        $ranKeyOf = Join-Path $ranTemp "member-$ranShadowKey-of.tsv"
+        [System.IO.File]::WriteAllText($ranKeyOf, ([System.IO.File]::ReadAllText($out) -creplace '(# env: cwd-on-temp-drive=[a-z]+\n)', "`$1# env: $ranShadowKey=`n"), [System.Text.UTF8Encoding]::new($false))
+        $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp "member-$ranShadowKey-of-run.tsv") -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranKeyOf)
+        Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like "*environment fact $ranShadowKey is missing here and '' in the baseline*") "-EnvironmentOf stops on a baseline with an extra fact named $ranShadowKey ($(Join-RanOutput $output))."
+    }
+    $ranShadowOf = Join-Path $ranTemp 'shadow-of.tsv'
+    [System.IO.File]::WriteAllText($ranShadowOf, ([System.IO.File]::ReadAllText($out) -creplace '# env: cwd-on-temp-drive=[a-z]+\n', "# env: cwd-on-temp-drive=$ranFlipFact`n# env: CWD-ON-TEMP-DRIVE=$ranHereFact`n"), [System.Text.UTF8Encoding]::new($false))
+    $output = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'shadow-of-run.tsv') -More @('-TestLogFacts', $ranFacts, '-EnvironmentOf', $ranShadowOf)
+    Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like "*environment fact cwd-on-temp-drive is '$ranHereFact' here and '$ranFlipFact'*") "-EnvironmentOf keeps a baseline's fact apart from the same key in capitals ($(Join-RanOutput $output))."
+    # A facts file is read ordinally too: a key in capitals is no fact the capture knows.
+    $ranUpperFacts = Join-Path $ranTemp 'upper-facts.txt'
+    [System.IO.File]::WriteAllText($ranUpperFacts, ([System.IO.File]::ReadAllText($ranFacts) -creplace '# env: cwd-on-temp-drive=', '# env: CWD-ON-TEMP-DRIVE='), [System.Text.UTF8Encoding]::new($false))
+    $null = Invoke-RanImport -Fixture 'names' -Out (Join-Path $ranTemp 'upper-facts.tsv') -More @('-TestLogFacts', $ranUpperFacts)
+    Assert-True ($LASTEXITCODE -eq 0 -and [System.IO.File]::ReadAllText((Join-Path $ranTemp 'upper-facts.tsv')) -cmatch '(?m)^# env: cwd-on-temp-drive=unknown$') 'A facts file whose key differs only by case leaves that fact unknown.'
     $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog (Join-Path $ranFixtures 'names.stderr.txt') -TestResults (Join-Path $ranFixtures 'names.results.txt') -TestLogExitCode 0 -Revision r1 -BuildOptions unknown -OutFile (Join-Path $ranTemp 'unknown.tsv') 2>&1
     Assert-True ($LASTEXITCODE -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $ranTemp 'unknown.tsv'))) "An imported run refuses an unknown build ($($output -join ' | '))."
     $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -TestLog (Join-Path $ranFixtures 'names.stderr.txt') -TestResults (Join-Path $ranFixtures 'names.results.txt') -Revision r1 -BuildOptions none -OutFile (Join-Path $ranTemp 'no-exit.tsv') 2>&1
@@ -798,6 +1240,238 @@ try {
     $output = & pwsh -NoProfile -NonInteractive -File $ranCapture -Checkout $ranRepo -BuildOptions none -OutFile (Join-Path $ranTemp 'dirty-build.tsv') 2>&1
     Assert-True ($LASTEXITCODE -eq 1 -and (Join-RanOutput $output) -like '*has tracked changes*' -and -not (Test-Path -LiteralPath $ranStubRan)) "Build mode refuses a dirty checkout before it builds ($($output -join ' | '))."
     Assert-True (@($ranHere.Keys) -contains 'temp-makes-8dot3-names' -and @($ranHere.Keys) -contains 'font:Noto Serif Tibetan' -and $ranHere['env:NOCTTY_RUN_LOCAL_PATH_SWEEP'] -cin @('unset', '1', 'other')) 'The capture records the facts the environment-dependent tests read.'
+    # Without LOCALAPPDATA there is no per-user font directory, and the probe still
+    # records every fact (Greptile on #731).
+    $ranSavedLocalAppData = $env:LOCALAPPDATA
+    try {
+        $env:LOCALAPPDATA = $null
+        $ranNoUser = Get-RanListEnvironment -Directory $ranTemp
+        $ranNoUserDirs = Get-RanListFontDirectories
+    }
+    finally { $env:LOCALAPPDATA = $ranSavedLocalAppData }
+    Assert-True ($ranNoUserDirs.Count -eq 1 -and $ranNoUser.Count -eq (Get-RanListFactKeys).Count -and @('Arial Unicode MS', 'Noto Sans Chakma', 'Noto Serif Tibetan' | Where-Object { $ranNoUser["font:$_"] -cin @('present', 'absent', 'unknown') }).Count -eq 3) 'The environment probe runs without LOCALAPPDATA.'
+    # Without WINDIR and SystemRoot discovery scans C:\Windows\Fonts (systemFontsDir), and
+    # so does the probe (council round 1 on #731, Opus L2). With WINDIR pointed at a
+    # directory holding a font whose WWS family alone names Noto Sans Chakma, the fact
+    # reads present, and an approval that needs it absent no longer covers a lost test.
+    $ranWinDir = Join-Path $ranTemp 'windir'
+    New-Item -ItemType Directory -Path (Join-Path $ranWinDir 'Fonts') | Out-Null
+    Copy-Item -LiteralPath (New-RanNamedFont 'wws.ttf' $ranChakmaCases[1].Names) -Destination (Join-Path $ranWinDir 'Fonts\wws-only.ttf')
+    $ranSavedWinDir = $env:WINDIR
+    $ranSavedSystemRoot = $env:SystemRoot
+    try {
+        $env:WINDIR = $null
+        $env:SystemRoot = $null
+        $ranDirsNone = Get-RanListFontDirectories
+        $ranNoWindows = Get-RanListEnvironment -Directory $ranTemp
+        $env:SystemRoot = Join-Path $ranTemp 'root'
+        $ranDirsRoot = Get-RanListFontDirectories
+        $env:WINDIR = $ranWinDir
+        $ranDirsWin = Get-RanListFontDirectories
+        $ranUserDir = [System.IO.Path]::Join($env:LOCALAPPDATA, 'Microsoft\Windows\Fonts')
+        $ranWws = Get-RanListEnvironment -Directory $ranTemp
+    }
+    finally {
+        $env:WINDIR = $ranSavedWinDir
+        $env:SystemRoot = $ranSavedSystemRoot
+    }
+    Assert-True ($ranDirsWin.Count -eq 2 -and $ranDirsWin[1] -ceq $ranUserDir) "The per-user font directory follows the system one ($($ranDirsWin -join '; '))."
+    # A variable set to an empty value is set: discovery's getEnvVarOwned returns it, so
+    # its directories are \Fonts and \Microsoft\Windows\Fonts (council round 4 on #731,
+    # Opus L2). In this process through the parameters, and end to end in a child pwsh
+    # started with both variables set to '' (a .NET ProcessStartInfo keeps an empty
+    # value in the child's environment block).
+    $ranEmptyDirs = (Get-RanListFontDirectories -WinDir '' -SystemRoot 'X:\root' -LocalAppData '') -join '|'
+    $ranEmptyRoot = (Get-RanListFontDirectories -WinDir $null -SystemRoot '' -LocalAppData $null) -join '|'
+    Assert-True ($ranEmptyDirs -ceq '\Fonts|\Microsoft\Windows\Fonts' -and $ranEmptyRoot -ceq '\Fonts') "An empty WINDIR, SystemRoot or LOCALAPPDATA names discovery's directories ($ranEmptyDirs; $ranEmptyRoot)."
+    $ranDirsChild = Join-Path $ranTemp 'dirs-child.ps1'
+    [System.IO.File]::WriteAllText($ranDirsChild, "param([string] `$Capture)`n. `$Capture -LibraryOnly`n(Get-RanListFontDirectories) -join '|'`n", [System.Text.UTF8Encoding]::new($false))
+    $ranPsi = [System.Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    foreach ($a in '-NoProfile', '-NonInteractive', '-File', $ranDirsChild, '-Capture', $ranCapture) { $ranPsi.ArgumentList.Add($a) }
+    $ranPsi.Environment['WINDIR'] = ''
+    $ranPsi.Environment['LOCALAPPDATA'] = ''
+    $ranPsi.UseShellExecute = $false
+    $ranPsi.RedirectStandardOutput = $true
+    $ranPsi.CreateNoWindow = $true
+    $ranChild = [System.Diagnostics.Process]::Start($ranPsi)
+    $ranChildDirs = $ranChild.StandardOutput.ReadToEnd().Trim()
+    $ranChild.WaitForExit()
+    Assert-True ($ranChild.ExitCode -eq 0 -and $ranChildDirs -ceq '\Fonts|\Microsoft\Windows\Fonts') "A child with WINDIR and LOCALAPPDATA set to '' scans discovery's directories ($ranChildDirs)."
+    Assert-True ($ranDirsNone[0] -ceq 'C:\Windows\Fonts' -and $ranDirsRoot[0] -ceq (Join-Path $ranTemp 'root\Fonts') -and $ranDirsWin[0] -ceq (Join-Path $ranWinDir 'Fonts')) "The system font directory is WINDIR's, else SystemRoot's, else C:\Windows's ($($ranDirsNone[0]); $($ranDirsRoot[0]); $($ranDirsWin[0]))."
+    Assert-True ($ranNoWindows.Count -eq (Get-RanListFactKeys).Count -and $ranWws['font:Noto Sans Chakma'] -ceq 'present') "The probe runs without WINDIR and SystemRoot, and reads a font named by its WWS family alone ($($ranWws['font:Noto Sans Chakma']))."
+    $ranChakmaTest = 'font.shaper.harfbuzz.test.shape Chakma vowel sign with ligature (vowel sign renders first)'
+    $ranShipped = Join-Path $repoRoot 'test\windows\ran-list-approved-skips.tsv'
+    foreach ($ranFact in $ranWws['font:Noto Sans Chakma'], 'absent') {
+        $ranChakmaEnv = New-RanEnv @{ 'font:Noto Sans Chakma' = $ranFact }
+        $ranChakmaOk = New-RanListFile "chakma-ok-$ranFact.tsv" ($ranBaseTests + @(, @($ranChakmaTest, 'OK'))) -Environment $ranChakmaEnv
+        $ranChakmaSkip = New-RanListFile "chakma-skip-$ranFact.tsv" ($ranBaseTests + @(, @($ranChakmaTest, 'SKIP'))) -Environment $ranChakmaEnv
+        $v = Get-RanVerdict -Baselines @($ranChakmaOk) -Later $ranChakmaSkip -SkipFiles @($ranShipped, $ranSkips)
+        if ($ranFact -ceq 'absent') { Assert-True ($v.Problems.Count -eq 0 -and ($v.Notes -join "`n") -like '*APPROVED-SKIP ghostty-test font.shaper.harfbuzz.test.shape Chakma*') "Control: the shipped approval covers the Chakma test's OK to SKIP where the font is absent ($($v.Problems -join ' | '))." }
+        else { Assert-True ($v.Problems.Count -eq 1 -and $v.Problems[0] -like "SKIP-ENVIRONMENT ghostty-test font.shaper.harfbuzz.test.shape Chakma*needs font:Noto Sans Chakma=absent (the list has 'present')*") "The shipped approval does not cover the Chakma test's OK to SKIP where the probe read the font present ($($v.Problems -join ' | '))." }
+    }
+    # Fonts the registry names, end to end, with Get-Item standing in for both Fonts keys
+    # in this scope only, WINDIR and LOCALAPPDATA pointed at scratch font directories,
+    # and the font the fact needs nowhere else (council round 2 on #731: Sol M2, Opus M1
+    # and L1's O1). A registered font counts by its own names, whatever its value says.
+    # The stand-in answers each key apart, so a control sees which keys are read, and a
+    # value's data is cut at its first NUL and trimmed, as discovery takes it (council
+    # round 3 on #731, Opus L5 and L6).
+    function New-RanCollection {
+        param([string] $Name, [string[]] $Fonts)
+        $parts = [Collections.Generic.List[object]]::new()
+        foreach ($f in $Fonts) { $parts.Add([System.IO.File]::ReadAllBytes($f)) }
+        $bases = [Collections.Generic.List[long]]::new()
+        [long] $ranAt = 12 + 4 * $parts.Count
+        foreach ($p in $parts) { $ranAt += (4 - $ranAt % 4) % 4; $bases.Add($ranAt); $ranAt += $p.Length }
+        $bytes = [byte[]]::new($ranAt)
+        [System.Text.Encoding]::ASCII.GetBytes('ttcf').CopyTo($bytes, 0)
+        $bytes[5] = 1; $bytes[11] = [byte] $parts.Count
+        for ($j = 0; $j -lt $parts.Count; $j++) {
+            $base = $bases[$j]
+            for ($k = 0; $k -lt 4; $k++) { $bytes[12 + 4 * $j + $k] = [byte](($base -shr (8 * (3 - $k))) -band 0xFF) }
+            [Array]::Copy($parts[$j], 0, $bytes, $base, $parts[$j].Length)
+            for ($i = 0; $i -lt (([int]$parts[$j][4] -shl 8) -bor $parts[$j][5]); $i++) {
+                $at = $base + 12 + 16 * $i + 8
+                [long] $moved = $base
+                for ($k = 0; $k -lt 4; $k++) { $moved += [long]$bytes[$at + $k] -shl (8 * (3 - $k)) }
+                for ($k = 0; $k -lt 4; $k++) { $bytes[$at + $k] = [byte](($moved -shr (8 * (3 - $k))) -band 0xFF) }
+            }
+        }
+        $path = Join-Path $ranTemp $Name
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+        return $path
+    }
+    function Invoke-RanRegisteredProbe {
+        param([string] $Case, [System.Collections.IDictionary] $Values, [System.Collections.IDictionary] $UserValues, [hashtable] $Files, [string] $WinDirValue = '<root>\windir', [string] $From = '')
+        $root = Join-Path $ranTemp "registered-$Case"
+        $winFonts = New-Item -ItemType Directory -Path (Join-Path $root 'windir\Fonts')
+        $userFonts = New-Item -ItemType Directory -Path (Join-Path $root 'local\Microsoft\Windows\Fonts')
+        New-Item -ItemType Directory -Path (Join-Path $root 'elsewhere') | Out-Null
+        foreach ($f in $Files.GetEnumerator()) { Copy-Item -LiteralPath $f.Value -Destination (Join-Path $root $f.Key) }
+        $savedWinDir = $env:WINDIR
+        $savedLocalAppData = $env:LOCALAPPDATA
+        $savedDirectory = [Environment]::CurrentDirectory
+        # `<rel>` is the root without its drive: a path rooted on no drive.
+        $rel = $root.Substring(2)
+        if ($From) { Push-Location -LiteralPath $From; [Environment]::CurrentDirectory = $From }
+        try {
+            $env:WINDIR = $WinDirValue -replace '<rel>', $rel -replace '<root>', $root
+            $env:LOCALAPPDATA = Join-Path $root 'local'
+            # One set of values per key: HKLM's from $Values, HKCU's from $UserValues.
+            $machine = [ordered]@{}
+            foreach ($v in $Values.GetEnumerator()) { $machine[$v.Key] = $v.Value -replace '<rel>', $rel -replace '<root>', $root }
+            $user = [ordered]@{}
+            foreach ($v in $UserValues.GetEnumerator()) { $user[$v.Key] = $v.Value -replace '<rel>', $rel -replace '<root>', $root }
+            return & {
+                function Get-Item {
+                    [CmdletBinding()] param([string] $LiteralPath)
+                    $data = if ($LiteralPath.StartsWith('HKCU:', [StringComparison]::OrdinalIgnoreCase)) { $user } elseif ($LiteralPath.StartsWith('HKLM:', [StringComparison]::OrdinalIgnoreCase)) { $machine } else { throw "no stand-in for $LiteralPath" }
+                    $fontsKey = [pscustomobject]@{ Data = $data }
+                    $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { return , [string[]] @($this.Data.get_Keys()) }
+                    $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValue -Value { param($n) return $this.Data[$n] }
+                    return $fontsKey
+                }
+                try { Get-RanListEnvironment -Directory $ranTemp } catch { $_.Exception.Message }
+            }
+        }
+        finally {
+            $env:WINDIR = $savedWinDir
+            $env:LOCALAPPDATA = $savedLocalAppData
+            if ($From) { Pop-Location; [Environment]::CurrentDirectory = $savedDirectory }
+        }
+    }
+    # Discovery resolves a path rooted on no drive against the test's working directory,
+    # so the probe must too, wherever the capture starts. A pure check first, against a
+    # drive letter that does not exist, so it touches nothing (council round 6 on #731,
+    # Opus L3 and Sol): WINDIR, LOCALAPPDATA and two Fonts values rooted on no drive or
+    # bare resolve onto the test directory's drive, and the path rule fires.
+    # The first letter, A to Z, that names no drive (none listed and no root), or
+    # none (council round 7 on #731, Sol L).
+    function Select-RanFreeDriveLetter {
+        param([AllowEmptyCollection()] [string[]] $Taken)
+        $letters = @(65..90 | ForEach-Object { [string][char]$_ })
+        return @($letters | Where-Object { $Taken -notcontains $_ })[0]
+    }
+    $ranAllButC = @(65..90 | ForEach-Object { [string][char]$_ } | Where-Object { $_ -cne 'C' })
+    Assert-True ([string]::Equals((Select-RanFreeDriveLetter -Taken $ranAllButC), 'C', [StringComparison]::Ordinal) -and $null -eq (Select-RanFreeDriveLetter -Taken @(65..90 | ForEach-Object { [string][char]$_ }))) 'The pure check takes any free letter, A to Z, and none when all are taken.'
+    $ranTakenLetters = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() }) + @(65..90 | ForEach-Object { [string][char]$_ } | Where-Object { Test-Path -LiteralPath "$($_):\" })
+    $ranNoDrive = Select-RanFreeDriveLetter -Taken $ranTakenLetters
+    if ($null -eq $ranNoDrive) { Write-Host 'NOT RUN: the pure font-path resolution check, since every drive letter A to Z is taken.' }
+    else {
+    $ranPure = & {
+        $values = [ordered]@{ 'Rooted (TrueType)' = '\x\elsewhere\f.ttf'; 'Bare (TrueType)' = 'f.ttf' }
+        function Get-Item {
+            [CmdletBinding()] param([string] $LiteralPath)
+            if (-not $LiteralPath.StartsWith('HKLM:', [StringComparison]::OrdinalIgnoreCase)) { return $null }
+            $fontsKey = [pscustomobject]@{ Data = $values }
+            $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { return , [string[]] @($this.Data.get_Keys()) }
+            $fontsKey | Add-Member -MemberType ScriptMethod -Name GetValue -Value { param($n) return $this.Data[$n] }
+            return $fontsKey
+        }
+        $savedWinDir = $env:WINDIR
+        $savedLocalAppData = $env:LOCALAPPDATA
+        try {
+            $env:WINDIR = '\x\win'
+            $env:LOCALAPPDATA = '\x\local'
+            Get-RanListFontSources -Directory "$($ranNoDrive):\work"
+        }
+        finally {
+            $env:WINDIR = $savedWinDir
+            $env:LOCALAPPDATA = $savedLocalAppData
+        }
+    }
+    $ranPureDirs = $ranPure.Directories -join '|'
+    $ranPurePaths = @($ranPure.RegistryPaths) -join '|'
+    Assert-True ($ranPureDirs -ceq "$($ranNoDrive):\x\win\Fonts|$($ranNoDrive):\x\local\Microsoft\Windows\Fonts" -and $ranPurePaths -ceq "$($ranNoDrive):\x\elsewhere\f.ttf|$($ranNoDrive):\x\win\Fonts\f.ttf" -and $ranPure.Unsafe) "Font paths resolve against the test's directory, on a drive that does not exist ($ranPureDirs; $ranPurePaths; $($ranPure.Unsafe))."
+    }
+    # The real run from another drive, where a second ready fixed drive exists.
+    $ranOtherDrive = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed -and -not [string]::Equals($_.Name.Substring(0, 1), $ranTemp.Substring(0, 1), [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.RootDirectory.FullName })[0]
+    $ranWwsFont = New-RanNamedFont 'registered-wws.ttf' $ranChakmaCases[1].Names
+    $ranOtherFont = New-RanNamedFont 'registered-other.ttf' @(@(1, 'Chakma UI'), @(4, 'Chakma UI Regular'))
+    $ranPair = New-RanCollection 'registered-pair.ttc' @($ranOtherFont, $ranWwsFont)
+    Assert-True ((Get-RanListFontNames -Path $ranPair).Names -contains 'Noto Sans Chakma' -and (Get-RanListFontNames -Path $ranPair).Complete) 'A two-face collection reads its second face.'
+    # A collection is wholly read only if every face is a plain sfnt (council round 4 on #731).
+    $ranMixed = Get-RanListFontNames -Path (New-RanCollection 'mixed.ttc' @($ranOtherFont, (Set-RanFontTag $ranOtherFont 'typ1' 'typ1-other.ttf')))
+    Assert-True (-not $ranMixed.Complete -and $ranMixed.Names -contains 'Chakma UI') "A collection with a typ1-tagged face is not wholly read, and its names still count ($($ranMixed.Complete))."
+
+    foreach ($ranCase in @(
+            @{ Name = 'none'; Values = [ordered]@{}; Files = @{}; Expect = 'absent'; What = 'no font of the family anywhere (the control)' }
+            @{ Name = 'default'; Values = [ordered]@{ '' = '<root>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font outside the font directories that the default value, whose name is empty, names' }
+            @{ Name = 'alias'; Values = [ordered]@{ 'Bundled font' = 'chakma.ttf' }; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font in the system directory registered under a name of another family' }
+            @{ Name = 'pair'; Values = [ordered]@{ 'Chakma UI (TrueType)' = 'pair.ttc' }; Files = @{ 'windir\Fonts\pair.ttc' = $ranPair }; Expect = 'present'; What = 'the second face of a registered collection' }
+            @{ Name = 'user'; Values = [ordered]@{}; Files = @{ 'local\Microsoft\Windows\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'an unregistered font in the per-user directory' }
+            @{ Name = 'missing'; Values = [ordered]@{ 'Noto Sans Chakma (TrueType)' = '<root>\elsewhere\gone.ttf' }; Files = @{}; Expect = 'absent'; What = 'a value naming a file that does not exist' }
+            @{ Name = 'user-key'; UserValues = [ordered]@{ 'Chakma (TrueType)' = '<root>\elsewhere\chakma.ttf' }; Values = [ordered]@{}; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a font outside the font directories that only the per-user Fonts key names (Opus X3)' }
+            @{ Name = 'spaces'; Values = [ordered]@{ 'Chakma (TrueType)' = " `t<root>\elsewhere\chakma.ttf`t " }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data has spaces and a tab around it (Opus X2)' }
+            @{ Name = 'nul'; Values = [ordered]@{ 'Chakma (TrueType)' = "<root>\elsewhere\chakma.ttf$([char]0)junk" }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value whose data holds a NUL and more after the path (Opus L5)' }
+            @{ Name = 'slash'; Values = [ordered]@{ 'Chakma UI (TrueType)' = '<root>/elsewhere/other.ttf' }; Files = @{ 'elsewhere\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding a / whose font names another family (council round 5 on #731, Opus L1)' }
+            @{ Name = 'slash-dir'; WinDirValue = '<root>/windir'; Values = [ordered]@{}; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a WINDIR holding a / (council round 6 on #731, Sol M and Opus L1)' }
+            @{ Name = 'rooted-dir'; WinDirValue = '<rel>\windir'; Values = [ordered]@{}; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a WINDIR rooted on no drive and a font of another family' }
+            @{ Name = 'rooted-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = '<rel>\elsewhere\other.ttf' }; Files = @{ 'elsewhere\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value rooted on no drive and a font of another family' }
+            @{ Name = 'bare'; Values = [ordered]@{ 'Chakma UI (TrueType)' = 'other.ttf' }; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'absent'; What = 'a bare value, which discovery joins to the system directory (the control)' }
+            @{ Name = 'ascii-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\oth$([char]0xE9)r.ttf" }; Files = @{ "elsewhere\oth$([char]0xE9)r.ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding a non-ASCII character (council round 6 on #731, Sol M)' }
+            @{ Name = 'ascii-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\oth$([char]0xE9)r.ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds a non-ASCII character' }
+            @{ Name = 'ascii-dir'; WinDirValue = "<root>\w$([char]0xEF)ndir"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding a non-ASCII character' }
+            @{ Name = 'kelvin-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\other$([char]0x212A).ttf" }; Files = @{ "elsewhere\other$([char]0x212A).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding U+212A, which -match misses (council round 7 on #731, Opus L1)' }
+            @{ Name = 'dotted-value'; Values = [ordered]@{ 'Chakma UI (TrueType)' = "<root>\elsewhere\other$([char]0x0130).ttf" }; Files = @{ "elsewhere\other$([char]0x0130).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a value holding U+0130' }
+            @{ Name = 'kelvin-dir'; WinDirValue = "<root>\win$([char]0x212A)"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding U+212A, which only the path rule sees' }
+            @{ Name = 'dotted-dir'; WinDirValue = "<root>\win$([char]0x0130)"; Values = [ordered]@{}; Files = @{}; Expect = 'unknown'; What = 'a WINDIR holding U+0130, which only the path rule sees' }
+            @{ Name = 'kelvin-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\other$([char]0x212A).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds U+212A' }
+            @{ Name = 'dotted-name'; Values = [ordered]@{}; Files = @{ "windir\Fonts\other$([char]0x0130).ttf" = $ranOtherFont }; Expect = 'unknown'; What = 'a font directory entry whose name holds U+0130' }
+            @{ Name = 'drive-relative'; Values = [ordered]@{ 'Chakma UI (TrueType)' = 'Q:other.ttf' }; Files = @{ 'windir\Fonts\other.ttf' = $ranOtherFont }; Expect = 'unknown'; What = 'a value like Q:other.ttf, which Zig joins to the system directory and .NET reads as Q:\other.ttf (council round 7 on #731, Opus L2)' }
+            @{ Name = 'drive-dirs-here'; WinDirValue = '<rel>\windir'; From = $ranTemp; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from the test''s drive (present wins over the path rule)' }
+            @{ Name = 'drive-dirs-away'; Away = $true; WinDirValue = '<rel>\windir'; From = $ranOtherDrive; Values = [ordered]@{}; Files = @{ 'windir\Fonts\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a WINDIR rooted on no drive, started from another drive (council round 5 on #731, Sol M and Opus L2)' }
+            @{ Name = 'drive-value-here'; From = $ranTemp; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from the test''s drive' }
+            @{ Name = 'drive-value-away'; Away = $true; From = $ranOtherDrive; Values = [ordered]@{ 'Chakma (TrueType)' = '<rel>\elsewhere\chakma.ttf' }; Files = @{ 'elsewhere\chakma.ttf' = $ranWwsFont }; Expect = 'present'; What = 'a value rooted on no drive, started from another drive' })) {
+        if ($ranCase.Away -and $null -eq $ranOtherDrive) { continue }
+        $ranUserValues = if ($ranCase.UserValues) { $ranCase.UserValues } else { [ordered]@{} }
+        $ranProbeArgs = @{ Case = $ranCase.Name; Values = $ranCase.Values; UserValues = $ranUserValues; Files = $ranCase.Files }
+        if ($ranCase.WinDirValue) { $ranProbeArgs.WinDirValue = $ranCase.WinDirValue }
+        if ($ranCase.From) { $ranProbeArgs.From = $ranCase.From }
+        $ranGot = Invoke-RanRegisteredProbe @ranProbeArgs
+        $ranFact = if ($ranGot -is [System.Collections.IDictionary]) { $ranGot['font:Noto Sans Chakma'] } else { "error: $ranGot" }
+        Assert-True ($ranGot -is [System.Collections.IDictionary] -and $ranGot.Count -eq (Get-RanListFactKeys).Count -and $ranFact -ceq $ranCase.Expect) "The probe reads $($ranCase.Expect) for Noto Sans Chakma with $($ranCase.What) (got $ranFact)."
+    }
 
     # Paths resolve against PowerShell's location, not .NET's current directory:
     # old holds a list that would pass, new one that drops a test, with the
