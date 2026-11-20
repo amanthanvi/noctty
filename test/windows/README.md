@@ -727,7 +727,8 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`); each dot-sources it and still runs on
+`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, and the soak,
+`interactive-win11-soak.ps1`, for its desktop, job and driver launch); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
 explicit-desktop launches (`Launch` for the driver, `Spawn` for a case),
 `Invoke-LocalHiddenDriver` (the outer half: run the harness again as its driver
@@ -990,6 +991,75 @@ The inherited-ignore exercise requires `Modes` or `All`; `Paste` alone is reject
 The ordinary invocation omits the regression switch. `-Shells cmd` restricts it
 to cmd; the default tests both shells. `-Scenario Paste` and `All` additionally
 use a private window station because desktops on WinSta0 share the clipboard.
+
+## interactive-win11-soak.ps1
+
+The soak (`PLAN.md` §3.5): one portable copy on a private desktop for
+`-Minutes`, with its own job, `LOCALAPPDATA` and class (with
+`--single-instance=false` there is no IPC pipe at all: neither server nor
+client starts), started
+through `Get-InteractiveWin11LaunchArguments` after its build mode is checked
+through `+version`. Its shells are `direct:<System32>\cmd.exe /D` (no cmd
+AutoRun), the clipboard is denied, the copy carries no `noctty.ico`, and it
+starts with `SEM_NOGPFAULTERRORBOX` inside a job that ends a process on an
+unhandled exception, so WER's dialog cannot hold a crash even after the
+process's own error mode changes. Each minute it posts the churn keys (new
+tabs, right and down splits, output floods through cmd, window resizes, pane
+and tab closes; the first and every tenth minute stay idle), each bound under
+every Shift, Ctrl and Alt chord so a modifier held at the real keyboard cannot
+turn a posted key into an unbound one, returns the copy to one tab with one
+pane, and samples it through the handle it
+holds from `CreateProcess`: PID and creation time, whether the window answers
+`WM_NULL` within 5 s, handles, threads (start address and name), private bytes,
+working set, commit charge, GDI and USER objects, and the panes' other
+processes. After the last minute it posts `WM_CLOSE` to each window the copy
+still owns and takes the exit code from `GetExitCodeProcess`; it records a
+clean quit only when a post took and the exit followed it. It then copies the
+copy's crash files and any WER report
+or Application Error event naming its path into `crash\`.
+
+```powershell
+pwsh -NoProfile -File test/windows/interactive-win11-soak.ps1 `
+    -Bin <extracted portable ZIP>\noctty -Run <new dir> `
+    -ExpectedBuildMode ReleaseFast -Minutes 480 -SandboxName soak-fast
+python -I ci/soak_judge.py <run dir> --min-minutes 480 --other-run <the other copy's run dir>
+```
+
+Release coverage runs 480 minutes; Phase 0a's runs are 120 (`-Minutes 120`,
+`--min-minutes 120`).
+
+`ci/soak_judge.py` fails a run by the process rules (a gone, changed or hung
+process, an early or non-zero end, an exit no quit request of the harness
+reached (`UNASKED-EXIT`: an `end unasked` row, which fails even at exit code
+0), a crash file, WER not suppressed, incomplete
+or duplicated records, a short plan, a class not of the helper's shape or
+shared with the other copy) and by the slope check: "no upward slope after
+warm-up", a metric failing when its least-squares slope over the minutes after
+the warm-up rises with confidence (its lower bound, slope minus 3 standard
+errors, above the metric's floor in `ci/soak-thresholds.tsv`), and bounds on
+threads by count and by kind. The warm-up is 60 minutes, measured: a clean
+copy's heap grows under the churn for about an hour and then holds flat, so
+the shortest run the judge accepts is 120 minutes (warm-up plus a 60-minute
+window); a shorter `--min-minutes` is refused. A 120-minute run sees only a
+fast leak (about 12 MiB/h and up on the clean 4-hour run's noise); 8 hours
+hold one to the 4 MiB/h floor.
+`-InjectHandleEachMinute` (one duplicated handle a minute) and
+`-KillAtMinute 5` (`TerminateProcess` with exit code 3) are its first two
+controls; `-HangAtMinute N -HangAt resize|sample` (the copy's UI thread
+suspended for `-HangSeconds`, right after a resize or 10 s before a sample) are
+the other two. The judge must fail all four. A resize hang needs a churn
+minute, so `-HangAt resize` on the first or a tenth minute is refused, and a
+hang must outlast its minute's sample (`-HangSeconds` at least 20 with `sample`,
+100 with `resize`). Since a control never reaches the judge's records, a control
+that did not take effect fails the harness itself (`ControlMisses` in
+`harness.json`); a hang counts only when its minute's own sample saw the copy
+fail to answer. Each minute's probe (liveness, the windows, their `WM_NULL`
+answers) is timed where it runs, and `timing.tsv` keeps its start and end: a
+probe that starts more than 5 s after its due time, or ends more than 5 s plus
+the 5 s response bound after it, fails `LATE-SAMPLE`; one that starts before it
+fails `EARLY-SAMPLE`; times that do not increase are `MALFORMED`. The driver
+never waits on the copy without a bound. `ci/test_soak_judge.py` holds the judge's controls
+and runs in the checks job; Contracts.98 pins the harness.
 
 ## Style
 

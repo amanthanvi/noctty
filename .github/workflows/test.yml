@@ -116,6 +116,13 @@ jobs:
         shell: pwsh
         run: ./test/windows/ci-scripts.ps1
 
+      # The soak judge (PLAN.md §3.5) is Python. It runs on the job's one
+      # pinned interpreter (the Setup Python step above), in isolated mode
+      # (-I), as PLAN.md §6.5 requires of CI tools.
+      - name: Soak judge tests
+        shell: pwsh
+        run: python -I ci/test_soak_judge.py
+
       - name: PowerShell shell integration tests (PowerShell 7)
         shell: pwsh
         run: ./test/windows/powershell-shell-integration.ps1

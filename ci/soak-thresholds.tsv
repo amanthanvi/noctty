@@ -1,0 +1,36 @@
+# Soak thresholds (PLAN.md §3.5), read by ci/soak_judge.py. The pass criterion is "no upward slope after
+# warm-up": a metric fails when its least-squares slope over the live minutes after the warm-up rises with
+# confidence, its lower bound (slope - 3 standard errors, per hour) above the metric's floor. The floor is the
+# smallest rise worth failing a soak for; the bound shrinks with the run's length, so an 8-hour soak holds a
+# slow leak to account that an hour cannot see.
+#
+# The warm-up is the time a clean copy takes to settle under the harness's churn, measured on a 4-hour clean
+# run of the packaged ReleaseFast portable copy (harness of PR #727, 2026-11-18, private desktop,
+# runs\long4h): private bytes and commit charge rose +58 MiB/h in hour 1 and held flat after it (hours 2 to 4
+# in the PR's round-2 notes). In the clean hour-long runs the rise ended between minutes 45 and 60. So the
+# warm-up is 60 minutes. With the 30-minute warm-up PLAN.md §3.5 first set, the end of that rise falls inside
+# the slope window and a clean copy fails, as round 1 measured.
+# The window is the fewest live minutes a slope is fitted over: 60, so the shortest run the judge accepts is
+# warm-up + window, 120 minutes, Phase 0a's run length (the lead's measured amendment of §3.5's "60 for 0a's
+# hour-long runs", 2026-11-19). A copy still rising after the warm-up fails only once the run is long enough
+# to see it: on the clean 4-hour run's minutes 61-120 the slope is +0.43 MiB/h with a standard error of 2.30,
+# so an added +10 MiB/h still passes there and +12 fails; over minutes 61-240 the standard error is 0.42 and
+# +6 fails. Release coverage's 8 hours is the run that holds a slow leak to the floor.
+#
+# The floors, per hour: 4 MiB for bytes (about 30 MiB over an 8-hour soak's 7 hours after the warm-up),
+# 2 for handles and for GDI and USER objects, 1 for threads, 0.5 for the panes' processes. The clean 4-hour
+# run's lower bounds after the warm-up stay below each floor (PR #727's round-2 notes list them).
+warmup	60
+window	60
+floor	handles	2
+floor	threads	1
+floor	private_bytes	4194304
+floor	working_set	4194304
+floor	commit_charge	4194304
+floor	gdi_objects	2
+floor	user_objects	2
+floor	children	0.5
+bound	threads	22
+kind	renderer	1
+kind	io	1
+kind	io-reader	1

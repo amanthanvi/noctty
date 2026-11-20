@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 Corrected in other files:
 - 2026-11-08 CHAIN-CLOSE-UAF, "tab moves only reorder": `move_tab_to_new_window` moves its tab to another window, queued for the pump's next turn, so the pane stays in a live tab for the rest of the chain: review round 16 of the 2026-11-08 TEAROFF-01 entry in tabs-panes.md.
+- 2026-10-11 Win32 input mode, trap 11: a posted key, not only a posted click, is read with the user's live modifiers, so on a machine in use a posted F6 can arrive as Shift+F6 and match no binding; a harness binds each key it posts under every Shift, Ctrl and Alt chord: trap (4) of the 2026-11-18 SOAK-01 entry in test-harnesses.md.
 - 2026-10-11 Win32 input mode, trap 11: `GetAsyncKeyState` reads 0 from a desktop that is not the active one (its documentation), so the modifiers it advises sampling must be sampled from the user's desktop, not from a driver on the private desktop: item (8) of the 2026-11-08 tab tear-off harness entry in test-harnesses.md (round 5).
 - 2026-10-11 PKG-32, item (4): the test that ties the default F3 and Shift+F3 to Enter and Shift+Enter ("PKG32 default F3 and Shift+F3 match the docked search F3 and Enter directions") is in `win32/docked_search.zig` and compares the bindings with what `DockedSearch.apply` asks the core for at the edit and at a button; `dockedSearchEnterDirection` and the other labels.zig direction helpers are gone. See the 2026-11-01 "Docked search is one per-pane module" entry in search-scrollbar.md.
 
