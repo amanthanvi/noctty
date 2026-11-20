@@ -247,7 +247,10 @@ that govern each symbol you change, or that none does.
   `os/TempDir.zig`, OSC 7 and OSC 9;9 cwd reports
   (`termio/stream_handler.zig`, `os.hostname.isLocal`, `os/local_path.zig`
   `pwd`, and the stored-pwd spellings in `os/path.zig`), `src/Surface.zig`
-  locking around links,
+  locking around links (the left release: `linkAtLocked`, `processLinks`,
+  `maybePromptClick`) and its left-click selection path
+  (`Mouse.left_click_pin`, `dragLeftClickTriple`, `selectionScrollTick`;
+  not upstream's `SelectionGesture`),
   and `ShellExecute*` calls queued for the message loop
   (`App.deferShellRequest`, `drainDeferredOpens`).
 - [renderer.md](docs/agents/log/renderer.md): `src/renderer/` and
