@@ -410,16 +410,18 @@ if ($symbolsVerificationText -notmatch '(?s)function Get-WindowsSymbolBinaryName
 # GitHub responses. With no cache it downloads public v1.3.136 assets only.
 . (Join-Path $repoRoot 'scripts/release-fixture-directory.ps1')
 $fixtureParent = New-ReleaseFixtureDirectory
+$fixtureWorkParent = [IO.Path]::Combine($fixtureParent, 'fixture-[case]')
 try {
-    $promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -WorkDirectory $fixtureParent -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
+    [void][IO.Directory]::CreateDirectory($fixtureWorkParent)
+    $promotionFixtureOutput = @(& (Join-Path $repoRoot 'test/windows/release-promote.ps1') -WorkDirectory $fixtureWorkParent -AssetDirectory $env:NOCTTY_RELEASE_FIXTURE_ASSETS 6>&1)
     if ($LASTEXITCODE -ne 0 -or @($promotionFixtureOutput | Where-Object {
         [string]$_ -ceq 'Release promotion fixture B: PASS (104 cases, 4 files identical across two checkout roots, 12 real assets).'
     }).Count -ne 1) { throw 'Release promotion fixture B did not complete all controls.' }
-    if (@(Get-ChildItem -LiteralPath $fixtureParent -Force).Count) { throw 'Release promotion fixture B retained its run directory.' }
+    if (@(Get-ChildItem -LiteralPath $fixtureWorkParent -Force).Count) { throw 'Release promotion fixture B retained its run directory.' }
     $promotionFixtureOutput | ForEach-Object { Write-Host $_ }
 } finally {
     # Fixture B removes bulk data and leaves its text evidence after failure.
-    if (-not @(Get-ChildItem -LiteralPath $fixtureParent -Force).Count) {
+    if (-not (Test-Path -LiteralPath $fixtureWorkParent) -or -not @(Get-ChildItem -LiteralPath $fixtureWorkParent -Force).Count) {
         Remove-ReleaseFixtureDirectory -RunDirectory $fixtureParent
     }
 }
