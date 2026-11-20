@@ -467,7 +467,7 @@ const Mouse = struct {
     }
 
     /// Return the left-click pin only if it still belongs to the active screen.
-    fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
+    pub fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
         const pin = self.left_click_pin orelse return null;
         if (self.left_click_screen != screens.active_key) return null;
         _ = self.leftClickPageList(screens) orelse return null;
