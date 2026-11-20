@@ -77,11 +77,36 @@ those changes must be adapted around fork-owned Windows behavior rather than
 overwriting it. If neither rule resolves a conflict cleanly, add the change to
 the window's deferred list with a written reason; do not force it through.
 
-`PageList.Node` reaches its page through upstream's accessors (`page()`,
-`rows()`, `cols()` and `capacity()`), so a ported hunk that uses them
-applies as written and is not an adaptation to record. Upstream's other
-node names come with page compression, which the fork does not have. A hunk
-that uses one is an adaptation, and this is what each becomes:
+`PageList.Node` takes upstream's page model as written from the Ghostty
+1.4.0 catch-up's stepping-stone merge (`74d0c72fd`) on. Upstream gave the
+node an explicit page owner (`16e4b5e98`) and page compression
+(`421fe8dab`) before that commit, so the merge brings both, and its
+resolution keeps upstream's Node block: `data` is the `resident` and
+`compressed` union, `owned` says whether the pool or the heap holds the
+page, and the accessors are upstream's (`page()`, `pageIfResident()`,
+`pagePreservingState()`, `pageAssumeResident()`, `storage()`, `rows()`,
+`cols()` and `capacity()`; v1.4.0 adds the private `metadata()` and
+`isCompressed()`). A ported hunk that uses them applies as written and is
+not an adaptation to record.
+
+- `page()` restores a compressed node. Code that only reads a page uses
+  `pagePreservingState()` or `pageIfResident()`, which leave the node
+  compressed. At the stone `mem.canReclaim` is false on Windows, so
+  `PageList.compress` returns `.unsupported` and a release build never
+  compresses; the test suite does (`builtin.is_test`). Windows reclaim
+  (upstream `60b43068c`) comes after the stone.
+- The page owner is `node.owned`, never the page's size: upstream's
+  `compact` puts a page at or below `std_size` on the heap, and returning
+  such a page to the pool corrupts it. The merge re-verifies the fork's size
+  inference in `destroyNodeExt` against `.owned`. That inference holds only
+  while nothing heap-allocates a page at or below `std_size`; upstream's
+  `compact` does, and the fork's returns null for such a page.
+
+Until that merge lands on `main`, `main`'s node is still resident-only:
+`Data = struct { resident: Page }`, the four accessors `page()`, `rows()`,
+`cols()` and `capacity()`, and the owner inferred from the page's size. A
+hunk ported to `main` before then that uses another of upstream's node names
+is an adaptation, and this is what each becomes:
 
 - `pageAssumeResident()` and `metadata()`: `page()` where the node is
   mutable; otherwise add the accessor with upstream's resident arm alone
@@ -91,16 +116,16 @@ that uses one is an adaptation, and this is what each becomes:
 - `isCompressed()`: `false`; drop the branch it guards.
 - `storage()` and `Storage`: drop the `.compressed` arm.
 - `switch (node.data)`: the hunk depends on compression; adapt it.
-- `.owned = .pool` or `.heap`: drop it. `destroyNodeExt` infers the owner
-  from the page's size, which holds only while no port heap-allocates a page
-  at or below `std_size` (upstream's `compact` does; the fork's leaves such
-  a page alone and takes a smaller result from the pool).
+- `.owned = .pool` or `.heap`: drop it.
 
-Each window diffs upstream's Node accessor block against the fork's and
-records a changed name, receiver or return type in its drift report. It
-also checks that `git grep -F '.data.resident' -- src` finds only Node's
-accessor bodies: the seal stops the old spellings, but a direct
-`node.data.resident` still compiles anywhere.
+Each window diffs upstream's Node block against the fork's and records any
+difference in its drift report: from the stepping stone on there should be
+none. Before the merge, a window on `main` also checks that
+`git grep -F '.data.resident' -- src` finds only Node's accessor bodies: the
+seal stops the old spellings, but a direct `node.data.resident` still
+compiles anywhere. That check ends with the merge, since upstream's own code
+reads `node.data` outside the accessors (`memoryStats` and two tests at the
+stone).
 
 Renderer scheduling is split in the fork: `Pacer.turn` decides when a frame
 updates, presents or waits and when the timers run, and `Thread.Frame` holds

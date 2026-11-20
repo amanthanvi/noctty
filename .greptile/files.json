@@ -47,6 +47,7 @@
       "scope": [
         "src/terminal/**",
         "src/inspector/widgets/pagelist.zig",
+        "docs/upstream-merge-policy.md",
         "pkg/wuffs/**",
         "src/Surface.zig",
         "src/termio/stream_handler.zig",
