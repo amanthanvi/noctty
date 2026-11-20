@@ -2606,12 +2606,7 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
                 @as(usize, self.scrolling_region.bottom - self.scrolling_region.top) + 1;
             kitty_scroll = self.kittyScrollMarginsBegin(
                 -@as(isize, @intCast(@min(count, region_height))),
-                if (self.scrolling_region.top == 0 and
-                    self.scrolling_region.left == 0 and
-                    self.scrolling_region.right == self.cols - 1)
-                    .window_shift
-                else
-                    .in_place,
+                if (self.scrollUpShiftsWindow()) .window_shift else .in_place,
             );
         }
     }
@@ -2624,12 +2619,7 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // deleteLines path below instead, unless the region is the full
     // screen where cursorScrollAbove has a specialized fast path
     // (cursorDownScroll) for scrolling without scrollback.
-    if (self.scrolling_region.top == 0 and
-        self.scrolling_region.left == 0 and
-        self.scrolling_region.right == self.cols - 1 and
-        (!self.screens.active.no_scrollback or
-            self.scrolling_region.bottom == self.rows - 1))
-    {
+    if (self.scrollUpShiftsWindow()) {
         // Scrolling dirties the images because it updates their placements pins.
         if (comptime build_options.kitty_graphics) {
             self.screens.active.kitty_images.dirty = true;
@@ -2653,6 +2643,21 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // Move to the top of the scroll region
     self.screens.active.cursorAbsolute(self.scrolling_region.left, self.scrolling_region.top);
     self.deleteLines(count);
+}
+
+/// Whether scrollUp moves the scrolled-out rows into scrollback, shifting
+/// the active area (cursorScrollAbove), rather than moving the region's rows
+/// in place (deleteLines). The Kitty placement adjustment picks its op from
+/// the same answer, so the two cannot disagree: upstream 77190bd02 added the
+/// no-scrollback clause to the branch alone, and the merge left the Kitty op
+/// without it (an alternate screen with a top-anchored partial region took
+/// the in-place branch with the `.window_shift` op).
+fn scrollUpShiftsWindow(self: *const Terminal) bool {
+    return self.scrolling_region.top == 0 and
+        self.scrolling_region.left == 0 and
+        self.scrolling_region.right == self.cols - 1 and
+        (!self.screens.active.no_scrollback or
+            self.scrolling_region.bottom == self.rows - 1);
 }
 
 /// Options for scrolling the viewport of the terminal grid.
@@ -12297,6 +12302,47 @@ test "Terminal: scroll region linefeed recycled row has default metadata" {
         try testing.expect(!rac.row.wrap_continuation);
         try testing.expectEqual(.none, rac.row.semantic_prompt);
     }
+}
+
+test "Terminal: scroll region linefeed in one page moves the row generation" {
+    // The fork's row generation tells Win32 UIA that row coordinates moved
+    // (held range geometry). Screen.cursorScrollRegionUp's single-page fast
+    // path rotates rows without PageList.eraseRowBounded, which moved it on
+    // the fork's old path, so the fast path must move it itself.
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+
+    t.setTopAndBottomMargin(2, 4);
+    t.setCursorPos(4, 1);
+    const pages = &t.screens.active.pages;
+    // The whole region is in the cursor's page: the fast path.
+    try testing.expect(t.screens.active.cursor.page_pin.y >= 2);
+    const before = pages.row_generation;
+    try t.linefeed();
+    try testing.expect(pages.row_generation != before);
+}
+
+test "Terminal: scrollUp's Kitty op and scroll branch agree on a partial region" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // A top-anchored partial region (DECSTBM 1;4) on the primary screen
+    // scrolls into scrollback, shifting the window.
+    t.setTopAndBottomMargin(1, 4);
+    try testing.expect(t.scrollUpShiftsWindow());
+
+    // On the alternate screen, which keeps no scrollback, the same region
+    // moves its rows in place: the Kitty op must be `.in_place` there too.
+    try t.switchScreenMode(.@"1049", true);
+    t.setTopAndBottomMargin(1, 4);
+    try testing.expect(!t.scrollUpShiftsWindow());
+
+    // The full screen keeps the window-shift fast path even without
+    // scrollback.
+    t.setTopAndBottomMargin(0, 0);
+    try testing.expect(t.scrollUpShiftsWindow());
 }
 
 test "Terminal: alt screen scroll up recycled row has default metadata" {
