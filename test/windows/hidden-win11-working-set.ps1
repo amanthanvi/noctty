@@ -143,8 +143,9 @@ $script:PruneSeconds = 7
 $script:SettleSamples = 10
 $script:SampleMs = 500
 $script:SettleCapMs = 90000
-# What the product gives a full payload, for the payload checks (Sol, round 2). Not workload inputs, so not in
-# WorkloadSha256: the session capture's budget and storage overhead (win32_session_state.zig
+# What the product gives a full payload, for the payload checks (Sol, round 2). Not workload inputs, so not hashed as
+# constants (SessionLineCap reaches WorkloadSha256 only through the config's window-save-state-scrollback line): the
+# session capture's budget and storage overhead (win32_session_state.zig
 # max_total_scrollback_bytes, scrollback_snapshot_storage_overhead), the line cap the config sets
 # (window-save-state-scrollback), and the UIA document's history budget (win32_uia/text.zig
 # accessible_history_target_cells, accessible_history_max_rows).
@@ -243,6 +244,8 @@ public static class WorkingSetNative {
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr h);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformationW(IntPtr h, int index, StringBuilder name, int length, out int needed);
+    [DllImport("shell32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CommandLineToArgvW(string commandLine, out int count);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
 
     public static string Layout() {
         return string.Join(" ", new string[] {
@@ -273,6 +276,16 @@ public static class WorkingSetNative {
         var name = NameOf(GetThreadDesktop(GetCurrentThreadId()));
         if (name == null) throw new Exception("Desktop name query failed");
         return name;
+    }
+    // A command line split the way the C runtime and CommandLineToArgvW split it, for reading launch values back.
+    public static string[] SplitCommandLine(string commandLine) {
+        int count; IntPtr argv = CommandLineToArgvW(commandLine, out count);
+        if (argv == IntPtr.Zero) throw new Exception("CommandLineToArgvW failed: " + Marshal.GetLastWin32Error());
+        try {
+            var result = new string[count];
+            for (int i = 0; i < count; i++) result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(argv, i * IntPtr.Size));
+            return result;
+        } finally { LocalFree(argv); }
     }
     // The input desktop's name, or null when it cannot be opened or read.
     public static string InputDesktopName() {
@@ -536,6 +549,24 @@ function Get-WorkingSetStrayConfigs([string] $Copy) {
     return @(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path $Copy $_) })
 }
 
+# What an argv says about the copy's scrollback limit and config: every --scrollback-limit, --config-default-files and
+# --config-file in it (Opus and Sol, round 3).
+function Get-WorkingSetLaunchValues([string[]] $Argv) {
+    return [pscustomobject]@{
+        ScrollbackLimits = @($Argv | Where-Object { $_ -like '--scrollback-limit=*' } | ForEach-Object { $_.Substring(19) })
+        DefaultFiles = @($Argv | Where-Object { $_ -like '--config-default-files*' })
+        ConfigFiles = @($Argv | Where-Object { $_ -like '--config-file*' } | ForEach-Object { if ($_ -like '--config-file=*') { $_.Substring(14) } else { $_ } })
+    }
+}
+
+# Whether those are the run's: exactly one limit, the workload's; --config-default-files=false exactly once; and
+# --config-file exactly once, naming the copy's generated config.
+function Test-WorkingSetLaunchValues($Values, [long] $Limit, [string] $ConfigPath) {
+    return @($Values.ScrollbackLimits).Count -eq 1 -and [string]@($Values.ScrollbackLimits)[0] -ceq [string]$Limit -and
+        @($Values.DefaultFiles).Count -eq 1 -and @($Values.DefaultFiles)[0] -ceq '--config-default-files=false' -and
+        @($Values.ConfigFiles).Count -eq 1 -and [string]::Equals(@($Values.ConfigFiles)[0], $ConfigPath, [StringComparison]::OrdinalIgnoreCase)
+}
+
 # Whether a staged config is byte for byte New-WorkingSetConfigText's for this run.
 function Test-WorkingSetConfigBytes([string] $Path, [string] $Workload, [string] $Run) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
@@ -722,8 +753,8 @@ function Invoke-WorkingSetDriver {
     $process = [IntPtr]::Zero
     try {
         # Normal priority for the measurement (the outer half creates this process without a priority flag).
-        [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'Normal'
-        $record.DriverPriority = [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
+        (Get-Process -Id $PID).PriorityClass = 'Normal'
+        $record.DriverPriority = [string](Get-Process -Id $PID).PriorityClass
         if ([WorkingSetNative]::Layout() -cne $script:SdkLayout) { throw "The mirrored structs do not match the SDK's x64 layout: $([WorkingSetNative]::Layout())" }
         # The driver's own admission, before it starts anything: it takes nothing on trust from its caller. It must
         # run in a job, on its own desktop (neither Default nor the input desktop), with LOCALAPPDATA, APPDATA, TEMP
@@ -803,29 +834,22 @@ function Invoke-WorkingSetDriver {
             "--window-save-state=$saveState", '--clipboard-read=deny', '--clipboard-write=deny',
             '--config-default-files=false', "--config-file=$(Join-Path $Bin 'config.ghostty')",
             "--scrollback-limit=$($record.ScrollbackLimitBytes)")
-        # The limit the copy is launched with is what the record and the hash say (Opus, round 2): read back from the
-        # launch arguments themselves, and refused unless it is the workload's.
-        $limitArguments = @($launchArguments | Where-Object { $_ -like '--scrollback-limit=*' })
-        if ($limitArguments.Count -ne 1) { throw 'The launch must carry one --scrollback-limit.' }
-        $record.LaunchScrollbackLimit = [long]$limitArguments[0].Substring(19)
-        if ($record.LaunchScrollbackLimit -ne $record.ScrollbackLimitBytes) { throw "The copy's --scrollback-limit is $($record.LaunchScrollbackLimit), not the workload's $($record.ScrollbackLimitBytes)." }
-        # Only the generated config loads (Sol, round 3): --config-default-files=false drops every default file (the
-        # legacy ghostty/config among them) and --config-file names the generated one, both read back from the launch
-        # arguments themselves and recorded.
-        $defaultFilesArguments = @($launchArguments | Where-Object { $_ -like '--config-default-files*' })
-        $configFileArguments = @($launchArguments | Where-Object { $_ -like '--config-file*' })
-        if ($defaultFilesArguments.Count -ne 1 -or $defaultFilesArguments[0] -cne '--config-default-files=false') { throw 'The launch must carry --config-default-files=false once.' }
-        if ($configFileArguments.Count -ne 1 -or $configFileArguments[0] -cne "--config-file=$(Join-Path $Bin 'config.ghostty')") { throw 'The launch must name the generated config once, with --config-file.' }
-        $record.LaunchConfigDefaultFiles = $false
-        $record.LaunchConfigFile = $configFileArguments[0].Substring(14)
-        $record.BlocksPlanned = Get-WorkloadBlocks $Workload $record.LaunchScrollbackLimit
-        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.LaunchScrollbackLimit $record.BlocksPlanned $record.BlockSha256 $record.FloodSha256 (Join-Path $Bin 'config.ghostty') $Run
         $class = @($launchArguments | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
         if ($class.Count -ne 1) { throw 'The launch helper gave no single --class.' }
         if (@($launchArguments | Where-Object { $_ -like '--command=*' -or $_ -eq '-e' }).Count -ne 0) { throw 'The command line must not set the shell.' }
         foreach ($argument in $launchArguments) { if ($argument -match '"' -or $argument.EndsWith('\')) { throw 'A launch argument cannot be quoted.' } }
         $record.Class = $class[0]
         $commandLine = ('"{0}" ' -f $exe) + (@($launchArguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
+        # The limit and the config the copy is launched with, read back from the final command line itself (Opus,
+        # round 3): exactly the workload's limit, --config-default-files=false (so no default or legacy file loads) and
+        # the generated config (Sol, round 3), or nothing starts. They drive the record and the workload hash.
+        $planned = Get-WorkingSetLaunchValues ([WorkingSetNative]::SplitCommandLine($commandLine))
+        if (-not (Test-WorkingSetLaunchValues $planned $record.ScrollbackLimitBytes (Join-Path $Bin 'config.ghostty'))) { throw "The copy's command line does not carry exactly the workload's scrollback limit and only the generated config." }
+        $record.LaunchScrollbackLimit = [long]@($planned.ScrollbackLimits)[0]
+        $record.LaunchConfigDefaultFiles = $false
+        $record.LaunchConfigFile = @($planned.ConfigFiles)[0]
+        $record.BlocksPlanned = Get-WorkloadBlocks $Workload $record.LaunchScrollbackLimit
+        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.LaunchScrollbackLimit $record.BlocksPlanned $record.BlockSha256 $record.FloodSha256 (Join-Path $Bin 'config.ghostty') $Run
         [void][WorkingSetNative]::SetErrorMode([WorkingSetNative]::GetErrorMode() -bor 2)   # SEM_NOGPFAULTERRORBOX, inherited
         $env:GHOSTTY_LOG = 'stderr'
         $pi = [WorkingSetNative]::Spawn($exe, $commandLine, $work, $desktopPath, (Join-Path $Run 'noctty.log'), $false)
@@ -833,7 +857,13 @@ function Invoke-WorkingSetDriver {
         $process = $pi.process
         [void][WorkingSetNative]::CloseHandle($pi.thread)
         $nocttyPid = $pi.pid
-        try { $record.NocttyPriority = [string][Diagnostics.Process]::GetProcessById($nocttyPid).PriorityClass } catch { $record.NocttyPriority = 'unknown' }
+        # And what the copy really received, from its own command line by PID (as #738 reads a shell's): the same
+        # values, or the run stops. The command line itself is never logged or recorded.
+        $launchedLine = [string](Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $nocttyPid" -ErrorAction Stop).CommandLine
+        $launched = Get-WorkingSetLaunchValues ([WorkingSetNative]::SplitCommandLine($launchedLine))
+        if (-not (Test-WorkingSetLaunchValues $launched $record.ScrollbackLimitBytes (Join-Path $Bin 'config.ghostty'))) { throw 'The copy was not launched with exactly the planned scrollback limit and config.' }
+        $launchedLine = $null
+        try { $record.NocttyPriority = [string](Get-Process -Id $nocttyPid -ErrorAction Stop).PriorityClass } catch { $record.NocttyPriority = 'unknown' }
         if ($record.NocttyPriority -cne 'Normal') { throw "The copy runs at $($record.NocttyPriority) priority, not Normal." }
         Log "launched, workload $Workload, build mode $($record.BuildMode), save state $saveState, scrollback $($record.ScrollbackLimitBytes)"
 

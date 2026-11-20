@@ -1354,7 +1354,8 @@ config must be byte for byte the harness's own for the run
 (`New-WorkingSetConfigText`), so an `initial-command` or a second `command`
 cannot change the first pane's shell, and only it loads: the copy is launched
 with `--config-default-files=false` and `--config-file=<copy>\config.ghostty`
-(read back from its launch arguments and recorded), and a staged copy holding
+(read back from the final command line before the launch and from the copy's
+own command line by PID after it, and recorded), and a staged copy holding
 a legacy `ghostty\config` or `winghostty\config.ghostty` is refused. The run's
 path appears in the config only as
 `working-directory`: F5 types `.\flood.cmd`, relative to the pane's working

@@ -98,7 +98,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the driver itself measures at normal priority'
-        Pattern = '\[Diagnostics\.Process\]::GetCurrentProcess\(\)\.PriorityClass = ''Normal'''
+        Pattern = '\(Get-Process -Id \$PID\)\.PriorityClass = ''Normal'''
         Mutation = @("PriorityClass = 'Normal'", "PriorityClass = 'BelowNormal'")
     }
     @{
@@ -367,7 +367,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the copy''s --scrollback-limit is read back from its launch arguments and must be the workload''s (Opus, round 2: m06, 10,000,000 under 1 GiB)'
-        Pattern = '(?s)"--scrollback-limit=\$\(\$record\.ScrollbackLimitBytes\)"\).*?\$limitArguments = @\(\$launchArguments \| Where-Object \{ \$_ -like ''--scrollback-limit=\*'' \}\).*?\$record\.LaunchScrollbackLimit = \[long\]\$limitArguments\[0\]\.Substring\(19\)\s+if \(\$record\.LaunchScrollbackLimit -ne \$record\.ScrollbackLimitBytes\) \{ throw'
+        Pattern = '(?s)"--scrollback-limit=\$\(\$record\.ScrollbackLimitBytes\)"\).*?\$commandLine = .*?\$planned = Get-WorkingSetLaunchValues \(\[WorkingSetNative\]::SplitCommandLine\(\$commandLine\)\)\s+if \(-not \(Test-WorkingSetLaunchValues \$planned \$record\.ScrollbackLimitBytes \(Join-Path \$Bin ''config\.ghostty''\)\)\) \{ throw [^\r\n]+\}\s+\$record\.LaunchScrollbackLimit = \[long\]@\(\$planned\.ScrollbackLimits\)\[0\]'
         Mutation = @('"--scrollback-limit=$($record.ScrollbackLimitBytes)")', '"--scrollback-limit=10000000")')
     }
     @{
@@ -402,7 +402,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the copy is launched with --config-default-files=false and --config-file naming the generated config, both read back from its launch arguments (Sol, round 3)'
-        Pattern = '(?s)''--config-default-files=false'', "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)",.*?if \(\$defaultFilesArguments\.Count -ne 1 -or \$defaultFilesArguments\[0\] -cne ''--config-default-files=false''\) \{ throw .*?if \(\$configFileArguments\.Count -ne 1 -or \$configFileArguments\[0\] -cne "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)"\) \{ throw .*?\$record\.LaunchConfigFile = \$configFileArguments\[0\]\.Substring\(14\)'
+        Pattern = '(?s)''--config-default-files=false'', "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)",.*?Test-WorkingSetLaunchValues \$planned .*?\$record\.LaunchConfigFile = @\(\$planned\.ConfigFiles\)\[0\]'
         Mutation = @("'--config-default-files=false', `"--config-file=", "`"--config-file=")
     }
     @{
@@ -414,6 +414,31 @@ $workingSetRules = @(
         Description = 'the driver reads every command line of the config in any spelling, initial-command included'
         Pattern = '\$configCommands = @\(\[IO\.File\]::ReadAllLines\(\(Join-Path \$Bin ''config\.ghostty''\)\) \| Where-Object \{ \$_ -match ''\^\\s\*\(initial-\)\?command\\s\*='' \}\)'
         Mutation = @("`$_ -match '^\s*(initial-)?command\s*='", "`$_ -like 'command =*'")
+    }
+    @{
+        Description = 'after the launch, the copy''s real command line (by PID, as #738 reads one) must carry the same limit and config, or the run stops (Opus, round 3)'
+        Pattern = '(?s)\$pi = \[WorkingSetNative\]::Spawn\(\$exe, \$commandLine, .*?\$launchedLine = \[string\]\(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = \$nocttyPid" -ErrorAction Stop\)\.CommandLine\s+\$launched = Get-WorkingSetLaunchValues \(\[WorkingSetNative\]::SplitCommandLine\(\$launchedLine\)\)\s+if \(-not \(Test-WorkingSetLaunchValues \$launched \$record\.ScrollbackLimitBytes \(Join-Path \$Bin ''config\.ghostty''\)\)\) \{ throw'
+        Mutation = @('if (-not (Test-WorkingSetLaunchValues $launched', 'if ($false -and -not (Test-WorkingSetLaunchValues $launched')
+    }
+    @{
+        Description = 'nothing appends to the launch arguments after they are built (Opus, round 3: m06b, a second --scrollback-limit)'
+        Pattern = '(?s)\A(?!.*\$launchArguments\s*\+=)'
+        Mutation = @('$commandLine = (''"{0}" '' -f $exe)', '$launchArguments += ''--scrollback-limit=10000000''; $commandLine = (''"{0}" '' -f $exe)')
+    }
+    @{
+        Description = 'the ConPTY pair check compares the copy with the build, not with itself (Opus, round 3: t6)'
+        Pattern = '\$staged = Join-Path \$Bin \$file\[0\]; \$built = Join-Path \$build\.Bin \$file\[0\]'
+        Mutation = @('$built = Join-Path $build.Bin $file[0]', '$built = $staged')
+    }
+    @{
+        Description = 'the record check requires a checkpoint''s fixture lines too, not only its length (Opus, round 3: p3)'
+        Pattern = 'if \(\[int\]\$pair\.lines -ne \$expectedLines -or \[int\]\$pair\.fixture_lines -lt \$expectedLines - 10\)'
+        Mutation = @(' -or [int]$pair.fixture_lines -lt $expectedLines - 10', '')
+    }
+    @{
+        Description = 'nor the [Diagnostics.Process] type at all, whose instance Start names no desktop either (Opus, round 3: m13b)'
+        Pattern = '(?s)\A(?!.*(?:Diagnostics\.Process\]|New-Object\s+(?:System\.)?Diagnostics\.Process\b))'
+        Mutation = @("[IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), '')", "`$p = [Diagnostics.Process]::new(); [void]`$p.Start(); [IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), '')")
     }
     # --- the native layer
     @{
@@ -573,6 +598,7 @@ $problemsText = Get-WorkingSetFunction 'Get-WorkingSetRecordProblems'
         @{ Name = 'a session snapshot no newer than the one before'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[4].snapshot_at_unix_ms = $r.SessionSnapshots[3].snapshot_at_unix_ms } }
         @{ Name = 'a counted snapshot without its times'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots = @($r.SessionSnapshots | Select-Object -First 9) } }
         @{ Name = 'a halved session capture, 1,858 lines (Sol, round 2: the formatter''s retry)'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[6].lines = 1858; $r.SessionSnapshots[6].fixture_lines = 1856 } }
+        @{ Name = 'a checkpoint of the right length that is not the fixture (Opus, round 3)'; Workload = 'session-capture'; Change = { param($r) $r.SessionSnapshots[2].fixture_lines = 100 } }
         @{ Name = 'a UIA document of the history rows alone, 285 lines (Sol, round 2)'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walked_lines = 285 } }
         @{ Name = 'a UIA walk that never ended'; Workload = 'uia-walk'; Change = { param($r) $r.Uia.walk_ended = $false } }
         @{ Name = 'the in-box conhost'; Workload = 'fixed'; Change = { param($r) $r.Transport = 'inbox' } }
@@ -834,6 +860,60 @@ try {
     if ([string]::Equals($commandControl, $generatorText, [StringComparison]::Ordinal)) { throw 'The generated-command control changed nothing.' }
     if (Test-WorkingSetGeneratedCommand $commandControl) { throw 'The generated-command check accepted a generator that adds an initial-command.' }
 
+    # The generator's whole output for a fixed run, against a config built here independently (Opus, round 3): any
+    # changed line fails. The controls are Opus's generator mutations, an initial-command /K echo and renderer = d3d11.
+    function Get-WorkingSetExpectedConfig([string] $Workload, [string] $Run) {
+        $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        $lines = [Collections.Generic.List[string]]@(
+            "command = direct:$cmdPath /D", 'auto-update = off', 'confirm-close-surface = false', 'desktop-notifications = false',
+            'clipboard-read = deny', 'clipboard-write = deny', 'copy-on-select = false', 'window-width = 140', 'window-height = 45',
+            "window-save-state-scrollback = $(if ($Workload -eq 'session-capture') { 10000 } else { 0 })",
+            "working-directory = $(Join-Path $Run 'work')", 'keybind = clear')
+        foreach ($binding in @('f2=new_tab', 'f5=text:.\\flood.cmd\r', 'f6=close_surface', 'f7=close_tab')) {
+            foreach ($chord in @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')) { $lines.Add("keybind = $chord$binding") }
+        }
+        return ($lines -join "`n") + "`n"
+    }
+    function Test-WorkingSetGeneratorOutput([string] $Generator) {
+        foreach ($workload in 'fixed', 'session-capture') {
+            $got = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText $workload $configRun }
+            if ($got -cne (Get-WorkingSetExpectedConfig $workload $configRun)) { return $false }
+        }
+        return $true
+    }
+    if (-not (Test-WorkingSetGeneratorOutput $generatorText)) { throw 'The config generator''s output is not the pinned config.' }
+    foreach ($mutant in @(
+            @{ Name = 'an initial-command /K echo line (Opus c1)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        `"initial-command = direct:`$cmdPath /K echo`"`n        'keybind = clear'`n") }
+            @{ Name = 'renderer = d3d11 (Opus c2)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        'renderer = d3d11'`n        'keybind = clear'`n") }
+        )) {
+        if ([string]::Equals($mutant.Text, $generatorText, [StringComparison]::Ordinal)) { throw "The generator control changed nothing: $($mutant.Name)." }
+        if (Test-WorkingSetGeneratorOutput $mutant.Text) { throw "The pinned config accepted a generator with $($mutant.Name)." }
+    }
+
+    # The launch values read back from an argv (Opus and Sol, round 3): one of each passes; a second limit (m06b), a
+    # wrong limit, no --config-default-files=false, a second --config-file or another config fails. The control, a
+    # check that accepts anything, must accept the second limit.
+    $launchValuesText = (Get-WorkingSetFunction 'Get-WorkingSetLaunchValues') + "`n" + (Get-WorkingSetFunction 'Test-WorkingSetLaunchValues')
+    $configPath = Join-Path $configDir 'copy\config.ghostty'
+    $launchCases = & {
+        . ([scriptblock]::Create($launchValuesText))
+        $base = @('noctty.exe', '--class=x', '--config-default-files=false', "--config-file=$configPath", '--scrollback-limit=1073741824')
+        [ordered]@{
+            good = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues $base) 1073741824 $configPath
+            secondLimit = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues ($base + '--scrollback-limit=10000000')) 1073741824 $configPath
+            wrongLimit = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues $base) 10000000 $configPath
+            defaultFilesOn = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues @($base | Where-Object { $_ -notlike '--config-default-files*' })) 1073741824 $configPath
+            secondConfig = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues ($base + '--config-file=C:\elsewhere.ghostty')) 1073741824 $configPath
+            otherConfig = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues $base) 1073741824 'C:\elsewhere.ghostty'
+        }
+    }
+    if (-not $launchCases.good) { throw 'The launch-value check refused the run''s own argv.' }
+    foreach ($name in 'secondLimit', 'wrongLimit', 'defaultFilesOn', 'secondConfig', 'otherConfig') { if ($launchCases[$name]) { throw "The launch-value check accepted an argv with $name." } }
+    $launchControl = $launchValuesText.Replace('return @($Values.ScrollbackLimits).Count -eq 1', 'return $true; @($Values.ScrollbackLimits).Count -eq 1')
+    if ([string]::Equals($launchControl, $launchValuesText, [StringComparison]::Ordinal)) { throw 'The launch-value control changed nothing.' }
+    $launchControlAccepted = & { . ([scriptblock]::Create($launchControl)); Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues @('noctty.exe', '--config-default-files=false', "--config-file=$configPath", '--scrollback-limit=1', '--scrollback-limit=2')) 1 $configPath }
+    if (-not $launchControlAccepted) { throw 'The launch-value control refused the second limit anyway, so the case shows nothing.' }
+
     # Sol's round-3 case: an untouched config.ghostty beside a legacy ghostty/config that sets an initial-command must
     # not pass; nor a pre-rename winghostty/config.ghostty; a copy with only its generated config does. The control, a
     # check that finds nothing, must accept the legacy case.
@@ -911,6 +991,12 @@ foreach ($control in $layoutControls) {
     if (($controlClass -as [type])::Layout() -ceq $layoutWanted) { throw "The layout check accepted $($control.Name)." }
 }
 
+# The split the launch read-back uses (CommandLineToArgvW, compiled): a quoted argument with spaces comes back whole.
+$splitProbe = @(($contractClass -as [type])::SplitCommandLine('"C:\a b\noctty.exe" --scrollback-limit=10000000 "--config-file=C:\a b\copy\config.ghostty" --config-default-files=false'))
+if ($splitProbe.Count -ne 4 -or $splitProbe[0] -cne 'C:\a b\noctty.exe' -or $splitProbe[2] -cne '--config-file=C:\a b\copy\config.ghostty' -or $splitProbe[3] -cne '--config-default-files=false') {
+    throw "SplitCommandLine did not split a command line as CommandLineToArgvW does (got $($splitProbe -join ' | '))."
+}
+
 # The launch desktop at run time (Opus, round 2): the compiled native layer refuses a child on any desktop but the
 # caller's own and on Default or the input desktop, and the driver on the caller's own desktop, Default or the input
 # desktop. Every call names an executable that does not exist, so a missing refusal fails with CreateProcess and
@@ -942,4 +1028,4 @@ if ($null -ne $ownDesktop) {
     } finally { [IO.Directory]::Delete($launchDir, $true) }
     $desktopCase = 'launch-desktop (Spawn: foreign, Default; LaunchDriver: Default, own; control: private)'
 } else { $desktopCase = 'launch-desktop skipped (no readable desktop)' }
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command (and its control), stray-config (Sol's legacy ghostty/config, winghostty, clean) and $desktopCase cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command (and its control), generator-output (Opus c1, c2), launch-values (good, second limit, wrong limit, default files on, second or other config), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean) and $desktopCase cases; native layout $layoutActual"
