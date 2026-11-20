@@ -1229,7 +1229,10 @@ pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix
 ```
 
 `-Part` takes `Q0`, `Local` or `All`. With `Local` or `All`, add
-`-TestToolsBin <test-tools prefix>\bin`.
+`-TestToolsBin <test-tools prefix>\bin`. `-Work` must lie outside
+`-MeasureRepo`, or in a folder git ignores there: copies staged in the
+checkout would dirty it, and the driver's admission refuses a dirty one. The
+probe checks this before it creates anything.
 
 - `-Part Local` runs the gate's control, Q0, and the private-desktop facts of
   P4 and P5 on the measurement build. Given `-TestToolsBin`, it only feeds the

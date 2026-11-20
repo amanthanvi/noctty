@@ -728,17 +728,6 @@ public static class GuiProbeNative {
     }
     public static void Close(ProbeWindow win) { if (win == null) return; PostMessageW(win.Hwnd, 0x10, IntPtr.Zero, IntPtr.Zero); win.Thread.Join(5000); }
     public static void Minimise(ProbeWindow win) { ShowWindow(win.Hwnd, 6); } // SW_MINIMIZE
-    // Whether the window's thread is in a menu loop (GUI_INMENUMODE, GUI_SYSTEMMENUMODE or GUI_POPUPMENUMODE), where a
-    // key goes to the menu, not the focus.
-    public static bool MenuMode(ProbeWindow win) {
-        var info = new GuiThreadInfo { size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
-        return win != null && GetGUIThreadInfo(win.ThreadId, ref info) && (info.flags & 0x1C) != 0;
-    }
-    // Whether the keyboard focus of the window's own thread is its EDIT (GetGUIThreadInfo's hwndFocus).
-    public static bool FocusOnEdit(ProbeWindow win) {
-        var info = new GuiThreadInfo { size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
-        return win != null && win.Edit != IntPtr.Zero && GetGUIThreadInfo(win.ThreadId, ref info) && info.focus == win.Edit;
-    }
     public static bool SetText(ProbeWindow win, string text) { return SetWindowTextW(win.Edit, text); }
     public static string Text(ProbeWindow win) {
         IntPtr length;
@@ -1863,7 +1852,7 @@ if ($Driver) {
 # copy starts.
 # The real-profile guards' state: 'held'; 'tripped' (a guard saw a change, the owned job was not cleaned up, or the run
 # left no guard state); or 'unreadable' (CodeRabbit r4646929611): a clipboard sequence sample of 0, which
-# GetClipboardSequenceNumber returns when the station's clipboard cannot be read, so equality proves nothing. Equal,
+# GetClipboardSequenceNumber returns 0 when the station's clipboard cannot be read, so equality proves nothing. Equal,
 # nonzero samples are the only clipboard evidence.
 function Get-ProbeGuardState($Run) {
     $guards = $Run.guards
