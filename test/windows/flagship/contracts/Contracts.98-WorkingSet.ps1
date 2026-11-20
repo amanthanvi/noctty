@@ -172,8 +172,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'each run records the workload''s hash, so a comparison can refuse runs of another workload'
-        Pattern = '(?s)\$record\.BlockSha256 = \(Get-FileHash -LiteralPath \(Join-Path \$work ''block\.txt''\) -Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\)\s+\$record\.WorkloadSha256 = Get-WorkloadSha256 \$record\.BlockSha256 \(Join-Path \$Bin ''config\.ghostty''\) \$Run'
-        Mutation = @("Get-WorkloadSha256 `$record.BlockSha256 (Join-Path `$Bin 'config.ghostty') `$Run", "'0'")
+        Pattern = '(?s)\$record\.BlockSha256 = \(Get-FileHash -LiteralPath \(Join-Path \$work ''block\.txt''\) -Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\).*?\$record\.BlocksPlanned = Get-WorkloadBlocks \$Workload \$ScrollbackMaxBytes\s+\$record\.WorkloadSha256 = Get-WorkloadSha256 \$Workload \$record\.ScrollbackLimitBytes \$record\.BlocksPlanned \$record\.BlockSha256 \(Join-Path \$Bin ''config\.ghostty''\) \$Run'
+        Mutation = @('Get-WorkloadSha256 $Workload $record.ScrollbackLimitBytes $record.BlocksPlanned', 'Get-WorkloadSha256 ''fixed'' 10000000 1')
     }
     @{
         Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI")'
@@ -239,7 +239,8 @@ if (-not $controlAccepted) { throw 'The settle cases did not catch a widened pri
     if ((Get-WorkloadBlocks 'scrollback-max' 1073741824) -ne 48) { throw 'scrollback-max must write 1.25 times what -ScrollbackMaxBytes holds.' }
 }
 # The workload hash: the same inputs give the same hash, the run's own directory (in working-directory and, escaped,
-# in the flood binding) does not count, and a changed constant, block or config line does.
+# in the flood binding) does not count, and a changed workload, scrollback limit, planned block count, constant, block
+# or config line does (Greptile on #739: workloads that share a config must not share a hash).
 $hashText = Get-WorkingSetFunction 'Get-WorkloadSha256'
 $hashDir = Join-Path ([IO.Path]::GetTempPath()) ('ws-contract-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 [void][IO.Directory]::CreateDirectory($hashDir)
@@ -250,14 +251,18 @@ try {
     [IO.File]::WriteAllLines($configC, [string[]]@('window-width = 141', 'working-directory = C:\run-a\work', 'keybind = f5=text:\"C:\\run-a\\work\\flood.cmd\"\r'))
     & {
         . ([scriptblock]::Create($hashText))
-        $a = Get-WorkloadSha256 'aa' $configA 'C:\run-a'
+        $a = Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configA 'C:\run-a'
         if ($a -notmatch '\A[0-9a-f]{64}\z') { throw 'Get-WorkloadSha256 must give a SHA-256.' }
-        if ($a -cne (Get-WorkloadSha256 'aa' $configB 'D:\other\run-b\')) { throw 'The workload hash must not depend on the run''s directory.' }
-        if ($a -ceq (Get-WorkloadSha256 'aa' $configB 'D:\other')) { throw 'The workload hash took out more than the run''s directory.' }
-        if ($a -ceq (Get-WorkloadSha256 'ab' $configA 'C:\run-a')) { throw 'The workload hash ignored the block.' }
-        if ($a -ceq (Get-WorkloadSha256 'aa' $configC 'C:\run-a')) { throw 'The workload hash ignored a config line.' }
+        if ($a -cne (Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configB 'D:\other\run-b\')) { throw 'The workload hash must not depend on the run''s directory.' }
+        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configB 'D:\other')) { throw 'The workload hash took out more than the run''s directory.' }
+        if ($a -ceq (Get-WorkloadSha256 'tab-churn' 10000000 1 'aa' $configA 'C:\run-a')) { throw 'The workload hash ignored the workload.' }
+        if ((Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' $configA 'C:\run-a') -ceq (Get-WorkloadSha256 'scrollback-max' 2147483647 96 'aa' $configA 'C:\run-a')) { throw 'The workload hash ignored the scrollback limit.' }
+        if ((Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' $configA 'C:\run-a') -ceq (Get-WorkloadSha256 'scrollback-max' 1073741824 47 'aa' $configA 'C:\run-a')) { throw 'The workload hash ignored the planned blocks.' }
+        if ((Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' $configA 'C:\run-a') -ceq (Get-WorkloadSha256 'scrollback-max' 2147483647 48 'aa' $configA 'C:\run-a')) { throw 'The workload hash ignored the scrollback limit at the same block count.' }
+        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'ab' $configA 'C:\run-a')) { throw 'The workload hash ignored the block.' }
+        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configC 'C:\run-a')) { throw 'The workload hash ignored a config line.' }
         $script:FixedCycles++
-        try { if ($a -ceq (Get-WorkloadSha256 'aa' $configA 'C:\run-a')) { throw 'The workload hash ignored a constant.' } } finally { $script:FixedCycles-- }
+        try { if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configA 'C:\run-a')) { throw 'The workload hash ignored a constant.' } } finally { $script:FixedCycles-- }
     }
     # The control: a hash that takes out the plain directory but not its escaped form in the flood binding (the form
     # a real config holds) must fail the run-directory case.
@@ -265,7 +270,7 @@ try {
     if ([string]::Equals($hashControl, $hashText, [StringComparison]::Ordinal)) { throw 'The workload hash control changed nothing.' }
     $controlCaught = & {
         . ([scriptblock]::Create($hashControl))
-        (Get-WorkloadSha256 'aa' $configA 'C:\run-a') -cne (Get-WorkloadSha256 'aa' $configB 'D:\other\run-b')
+        (Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configA 'C:\run-a') -cne (Get-WorkloadSha256 'fixed' 10000000 1 'aa' $configB 'D:\other\run-b')
     }
     if (-not $controlCaught) { throw 'The run-directory case did not catch a hash that keeps the escaped directory.' }
 } finally { [IO.Directory]::Delete($hashDir, $true) }

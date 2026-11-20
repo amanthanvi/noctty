@@ -1355,16 +1355,19 @@ workloads, at 140 x 45 cells, in blocks of 25,000 lines:
   (10,000,000 bytes), about ten times what it retains at this width.
 - `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` holds at 1,120
   bytes a row (about twice the limit, measured), with that limit. noctty has
-  no maximum; Settings' up-down stops at 2,147,483,647, which caps the
-  parameter; the default, and Phase 0a's baseline, is 1 GiB.
+  no maximum; the default, 1 GiB, is the baseline's large scrollback point.
+  Settings' up-down stops at 2,147,483,647, which caps the parameter; that
+  value is not measured (a 2 GiB working set adds nothing the 1 GiB point's
+  growth does not show).
 - `uia-walk`: `scrollback-default`'s output, then a UIA client reads the
   pane's whole `DocumentRange` and walks it line by line to its end, the pane
-  found from the copy's own window handle, the viewport at the bottom. The
-  document is the accessible window, not the whole scrollback:
-  `accessibleHistoryRows` in `src/apprt/win32_uia/text.zig` exposes
-  min(40,000 cells / columns, 500) history rows plus the viewport, 285 + 45
-  rows at 140 columns (329 lines walked, measured). The window slides with a
-  scrolled viewport (`snapshotDocumentWindow`); this workload does not scroll.
+  found from the copy's own window handle. It reads only what UIA exposes at
+  the bottom of the scrollback, 329 lines at 140 columns (measured), not a
+  scrolling walk of the whole scrollback: `accessibleHistoryRows` in
+  `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
+  history rows plus the viewport (285 + 45 rows here), and the window slides
+  only with a scrolled viewport (`snapshotDocumentWindow`), which this
+  workload never scrolls.
 - `session-capture`: `scrollback-default`'s output with
   `window-save-state = always` and `window-save-state-scrollback = 10000`,
   then 10 checkpoints, each a new tab and its close and then a session file
@@ -1382,7 +1385,8 @@ pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
 ```
 
 Compare the median of each workload's `after` stage over sequential runs with
-the same `WorkloadSha256` (the constants, the output block and the config),
+the same `WorkloadSha256` (the workload, its scrollback limit and planned
+blocks, the constants, the output block and the config),
 one copy at a time on a quiet machine: so run, 9 copies' settled `start`
 levels had IQRs of 0.1-1.6 MiB and their `after` levels up to 2.7 MiB (7.5 MiB
 at the 1 GiB limit), with one unexplained low run, while copies run together

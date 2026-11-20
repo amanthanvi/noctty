@@ -13,8 +13,8 @@ once per run; each run is a fresh copy, a fresh private desktop and a fresh LOCA
 (a session-wide mutex refuses a second). -Bin must be an unused build output: one that holds a portable copy's state
 (session-state.json, startup-attempts.json, noctty.portable, config.ghostty, shell-integration\) is refused. Compare
 the medians of the `after` stage over repeated sequential runs (PLAN.md §3.5: the working set after the fixed workload
-within +10% of Phase 0a's), and only between runs whose WorkloadSha256 (the constants below, the output block and the
-config with the run's directory taken out) is the same.
+within +10% of Phase 0a's), and only between runs whose WorkloadSha256 (the workload, its scrollback limit and planned
+blocks, the constants below, the output block and the config with the run's directory taken out) is the same.
 
 The workloads, every one at 140 x 45 cells, the shell System32's cmd.exe started directly with /D:
   fixed               one block of output (25,000 lines), then 20 cycles of a new tab and its close; `after` 7 s
@@ -26,14 +26,14 @@ The workloads, every one at 140 x 45 cells, the shell System32's cmd.exe started
   scrollback-max      blocks until the output is 1.25 times what -ScrollbackMaxBytes holds at 1,120 bytes a row
                       (measured: about 44 MB of private bytes a block, so about twice the limit), with
                       scrollback-limit = -ScrollbackMaxBytes. noctty has no maximum of its own (scrollback-limit is a
-                      usize); Settings' up-down stops at 2,147,483,647, which caps -ScrollbackMaxBytes; Phase 0a's
-                      baseline used the default, 1 GiB.
+                      usize); Settings' up-down stops at 2,147,483,647, which caps -ScrollbackMaxBytes. The
+                      default, 1 GiB, is Phase 0a's large scrollback point; 2,147,483,647 is not measured.
   uia-walk            scrollback-default's output, then a UIA client in this driver reads the pane's whole
-                      DocumentRange once and walks it line by line (TextPattern, Move by Line) to its end, with the
-                      viewport at the bottom. The document is the accessible window (win32_uia/text.zig
+                      DocumentRange once and walks it line by line (TextPattern, Move by Line) to its end. It reads
+                      only what UIA exposes at the bottom of the scrollback (win32_uia/text.zig
                       `accessibleHistoryRows`: min(40,000 cells / columns, 500) history rows plus the viewport, 329
-                      lines here), not the whole scrollback; the window slides with a scrolled viewport
-                      (`snapshotDocumentWindow`), which this workload does not scroll. The client finds the pane from
+                      lines here), not a scrolling walk of the whole scrollback: the window slides only with a
+                      scrolled viewport (`snapshotDocumentWindow`), which this workload never scrolls. The client finds the pane from
                       this copy's own window handle only.
   session-capture     scrollback-default's output with window-save-state = always and
                       window-save-state-scrollback = 10000 (the session line cap), then 10 checkpoints, each a new tab
@@ -327,15 +327,16 @@ function Get-WorkloadBlocks([string] $Name, [long] $MaxBytes) {
     }
 }
 
-# The workload's identity: SHA-256 over its constants, the block's SHA-256 and the config with the run's own
-# directory (in working-directory and, escaped, in the flood binding) written as <run>. Runs compare only when it
-# matches.
-function Get-WorkloadSha256([string] $BlockSha256, [string] $ConfigPath, [string] $RunRoot) {
+# The workload's identity: SHA-256 over the workload, its scrollback limit and its planned blocks, the constants,
+# the block's SHA-256 and the config with the run's own directory (in working-directory and, escaped, in the flood
+# binding) written as <run>. Runs compare only when it matches.
+function Get-WorkloadSha256([string] $Name, [long] $ScrollbackLimitBytes, [int] $BlocksPlanned, [string] $BlockSha256, [string] $ConfigPath, [string] $RunRoot) {
     $root = $RunRoot.TrimEnd('\')
     $config = ([IO.File]::ReadAllLines($ConfigPath) -join "`n").Replace($root.Replace('\', '\\'), '<run>').Replace($root, '<run>')
-    $constants = 'cols={0} rows={1} block={2} rowpage={3} fixed={4} churn={5} checkpoints={6} prune={7} settle={8}x{9}ms cap={10} rule=0.005/0.01' -f `
+    $constants = 'workload={11} scrollback={12} blocks={13} cols={0} rows={1} block={2} rowpage={3} fixed={4} churn={5} checkpoints={6} prune={7} settle={8}x{9}ms cap={10} rule=0.005/0.01' -f `
         $script:Cols, $script:Rows, $script:BlockLines, $script:RowPageBytes, $script:FixedCycles, $script:ChurnCycles,
-        $script:SessionCheckpoints, $script:PruneSeconds, $script:SettleSamples, $script:SampleMs, $script:SettleCapMs
+        $script:SessionCheckpoints, $script:PruneSeconds, $script:SettleSamples, $script:SampleMs, $script:SettleCapMs,
+        $Name, $ScrollbackLimitBytes, $BlocksPlanned
     $sha = [Security.Cryptography.SHA256]::Create()
     try { return [BitConverter]::ToString($sha.ComputeHash($script:Utf8.GetBytes("$constants`n$BlockSha256`n$config"))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
@@ -383,7 +384,6 @@ function Invoke-WorkingSetDriver {
         $work = Join-Path $Run 'work'
         $record.ExeSHA256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
         $record.BlockSha256 = (Get-FileHash -LiteralPath (Join-Path $work 'block.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
-        $record.WorkloadSha256 = Get-WorkloadSha256 $record.BlockSha256 (Join-Path $Bin 'config.ghostty') $Run
 
         $versionPath = Join-Path $Run 'version.txt'
         $check = [WorkingSetNative]::Spawn($exe, ('"{0}" +version' -f $exe), $work, $desktopPath, $versionPath)
@@ -502,6 +502,7 @@ function Invoke-WorkingSetDriver {
         }
 
         $record.BlocksPlanned = Get-WorkloadBlocks $Workload $ScrollbackMaxBytes
+        $record.WorkloadSha256 = Get-WorkloadSha256 $Workload $record.ScrollbackLimitBytes $record.BlocksPlanned $record.BlockSha256 (Join-Path $Bin 'config.ghostty') $Run
         switch ($Workload) {
             'fixed' {
                 Invoke-Block 1
