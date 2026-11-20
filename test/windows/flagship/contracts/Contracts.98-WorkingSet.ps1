@@ -32,7 +32,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'admission is Assert-InteractiveWin11MeasureBuild on the generation, then the prefix''s noctty.exe and noctty.com against the receipt''s hashes'
-        Pattern = '(?s)function Get-WorkingSetMeasureBuild\(\[string\] \$Repo\) \{.*?\$exe = Get-InteractiveWin11MeasureExePath -RepoRoot \$Repo\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe.*?if \(\(Get-Sha256 \$exe\) -cne \[string\]\$receipt\.ExeSHA256 -or \(Get-Sha256 \$cli\) -cne \[string\]\$receipt\.CliSHA256\) \{\s+throw'
+        Pattern = '(?s)function Get-WorkingSetMeasureBuild\(\[string\] \$Repo\) \{.*?\$exe = Get-InteractiveWin11MeasureExePath -RepoRoot \$Repo.*?\$receiptBytes = \[IO\.File\]::ReadAllBytes\(\$layout\.Receipt\)\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe.*?if \(\(Get-Sha256 \$exe\) -cne \[string\]\$receipt\.ExeSHA256 -or \(Get-Sha256 \$cli\) -cne \[string\]\$receipt\.CliSHA256\) \{\s+throw'
         Mutation = @('Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe', '')
     }
     @{
@@ -367,7 +367,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the copy''s --scrollback-limit is read back from its launch arguments and must be the workload''s (Opus, round 2: m06, 10,000,000 under 1 GiB)'
-        Pattern = '(?s)"--scrollback-limit=\$\(\$record\.ScrollbackLimitBytes\)"\).*?\$commandLine = .*?\$planned = Get-WorkingSetLaunchValues \(\[WorkingSetNative\]::SplitCommandLine\(\$commandLine\)\)\s+if \(-not \(Test-WorkingSetLaunchValues \$planned \$record\.ScrollbackLimitBytes \(Join-Path \$Bin ''config\.ghostty''\)\)\) \{ throw [^\r\n]+\}\s+\$record\.LaunchScrollbackLimit = \[long\]@\(\$planned\.ScrollbackLimits\)\[0\]'
+        Pattern = '(?s)"--scrollback-limit=\$\(\$record\.ScrollbackLimitBytes\)"\).*?\$commandLine = .*?\$expectedArgv = Get-WorkingSetExpectedArgv \$exe "noctty-interactive-\$\(\$layout\.SandboxId\)" \$saveState \(Join-Path \$Bin ''config\.ghostty''\) \$record\.ScrollbackLimitBytes\s+if \(-not \(Test-WorkingSetArgv \(\[WorkingSetNative\]::SplitCommandLine\(\$commandLine\)\) \$expectedArgv\)\) \{ throw [^\r\n]+\}\s+\$planned = Get-WorkingSetLaunchValues \$expectedArgv\s+\$record\.LaunchScrollbackLimit = \[long\]@\(\$planned\.ScrollbackLimits\)\[0\]'
         Mutation = @('"--scrollback-limit=$($record.ScrollbackLimitBytes)")', '"--scrollback-limit=10000000")')
     }
     @{
@@ -392,7 +392,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the receipt is read once: its fields and its digest come from the same bytes (CodeRabbit on #739)'
-        Pattern = '(?s)\$receiptBytes = \[IO\.File\]::ReadAllBytes\(\(Get-InteractiveWin11MeasureLayout \$Repo\)\.Receipt\)\s+\$receipt = \[Text\.Encoding\]::UTF8\.GetString\(\$receiptBytes\)[^\r\n]*\| ConvertFrom-Json.*?ReceiptSha256 = Get-BytesSha256 \$receiptBytes \}'
+        Pattern = '(?s)\$lock = \[IO\.File\]::Open\(\(Join-Path \$layout\.Root ''build\.lock''\), \[IO\.FileMode\]::OpenOrCreate, \[IO\.FileAccess\]::Read, \[IO\.FileShare\]::Read\)\s+try \{\s+\$receiptBytes = \[IO\.File\]::ReadAllBytes\(\$layout\.Receipt\)\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe\s+\$receiptAfter = \[IO\.File\]::ReadAllBytes\(\$layout\.Receipt\)\s+\} finally \{ \$lock\.Dispose\(\) \}.*?\$receipt = \[Text\.Encoding\]::UTF8\.GetString\(\$receiptBytes\)[^\r\n]*\| ConvertFrom-Json.*?ReceiptSha256 = Get-BytesSha256 \$receiptBytes \}'
         Mutation = @('ReceiptSha256 = Get-BytesSha256 $receiptBytes }', 'ReceiptSha256 = Get-Sha256 (Get-InteractiveWin11MeasureLayout $Repo).Receipt }')
     }
     @{
@@ -402,7 +402,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the copy is launched with --config-default-files=false and --config-file naming the generated config, both read back from its launch arguments (Sol, round 3)'
-        Pattern = '(?s)''--config-default-files=false'', "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)",.*?Test-WorkingSetLaunchValues \$planned .*?\$record\.LaunchConfigFile = @\(\$planned\.ConfigFiles\)\[0\]'
+        Pattern = '(?s)''--config-default-files=false'', "--config-file=\$\(Join-Path \$Bin ''config\.ghostty''\)",.*?Test-WorkingSetArgv \(\[WorkingSetNative\]::SplitCommandLine\(\$commandLine\)\) \$expectedArgv.*?\$record\.LaunchConfigFile = @\(\$planned\.ConfigFiles\)\[0\]'
         Mutation = @("'--config-default-files=false', `"--config-file=", "`"--config-file=")
     }
     @{
@@ -417,8 +417,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'after the launch, the copy''s real command line (by PID, as #738 reads one) must carry the same limit and config, or the run stops (Opus, round 3)'
-        Pattern = '(?s)\$pi = \[WorkingSetNative\]::Spawn\(\$exe, \$commandLine, .*?\$launchedLine = \[string\]\(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = \$nocttyPid" -ErrorAction Stop\)\.CommandLine\s+\$launched = Get-WorkingSetLaunchValues \(\[WorkingSetNative\]::SplitCommandLine\(\$launchedLine\)\)\s+if \(-not \(Test-WorkingSetLaunchValues \$launched \$record\.ScrollbackLimitBytes \(Join-Path \$Bin ''config\.ghostty''\)\)\) \{ throw'
-        Mutation = @('if (-not (Test-WorkingSetLaunchValues $launched', 'if ($false -and -not (Test-WorkingSetLaunchValues $launched')
+        Pattern = '(?s)\$pi = \[WorkingSetNative\]::Spawn\(\$exe, \$commandLine, .*?\$launchedLine = \[string\]\(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = \$nocttyPid" -ErrorAction Stop\)\.CommandLine\s+if \(-not \(Test-WorkingSetArgv \(\[WorkingSetNative\]::SplitCommandLine\(\$launchedLine\)\) \$expectedArgv\)\) \{ throw'
+        Mutation = @('if (-not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($launchedLine))', 'if ($false -and -not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($launchedLine))')
     }
     @{
         Description = 'nothing appends to the launch arguments after they are built (Opus, round 3: m06b, a second --scrollback-limit)'
@@ -439,6 +439,16 @@ $workingSetRules = @(
         Description = 'nor the [Diagnostics.Process] type at all, whose instance Start names no desktop either (Opus, round 3: m13b)'
         Pattern = '(?s)\A(?!.*(?:Diagnostics\.Process\]|New-Object\s+(?:System\.)?Diagnostics\.Process\b))'
         Mutation = @("[IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), '')", "`$p = [Diagnostics.Process]::new(); [void]`$p.Start(); [IO.File]::WriteAllText((Join-Path `$copy 'noctty.portable'), '')")
+    }
+    @{
+        Description = 'the admitted receipt must still be the receipt on disk once the admission has passed, or the run refuses (Sol, round 4)'
+        Pattern = 'if \(-not \[string\]::Equals\(\[Convert\]::ToBase64String\(\$receiptBytes\), \[Convert\]::ToBase64String\(\$receiptAfter\), \[StringComparison\]::Ordinal\)\) \{ throw ''The measurement receipt changed during admission\.'' \}'
+        Mutation = @('if (-not [string]::Equals([Convert]::ToBase64String($receiptBytes), [Convert]::ToBase64String($receiptAfter), [StringComparison]::Ordinal)) { throw', 'if ($false) { throw')
+    }
+    @{
+        Description = 'the final command line must split into exactly the expected argument list before the launch (Sol, round 4)'
+        Pattern = 'if \(-not \(Test-WorkingSetArgv \(\[WorkingSetNative\]::SplitCommandLine\(\$commandLine\)\) \$expectedArgv\)\) \{ throw'
+        Mutation = @('if (-not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($commandLine)) $expectedArgv)) { throw', 'if ($false) { throw')
     }
     # --- the native layer
     @{
@@ -740,6 +750,26 @@ try {
             throw 'The harness did not admit a measurement generation with a matching receipt, or returned another build.'
         }
 
+        # Sol's round-4 case: the receipt is replaced after the library's admission passed. The harness refuses (or
+        # would name the admitted receipt); the control, the harness as it was (fields read after the admission),
+        # names the replacement.
+        $admittedReceiptJson = [IO.File]::ReadAllText($layout.Receipt)
+        $replacementJson = $admittedReceiptJson.Replace($wsFixtureHead, ('f' * 40))
+        $realAssert = ${function:Assert-InteractiveWin11MeasureBuild}
+        function Assert-InteractiveWin11MeasureBuild { param($RepoRoot, $ExePath) & $realAssert -RepoRoot $RepoRoot -ExePath $ExePath; [IO.File]::WriteAllText($layout.Receipt, $replacementJson) }
+        $swapped = $null; $swapError = $null
+        try { $swapped = Get-WorkingSetMeasureBuild $measureRepo } catch { $swapError = $_.Exception.Message }
+        if ($null -ne $swapped -and $swapped.Head -cne $wsFixtureHead) { throw 'A receipt replaced after admission reached the harness''s build record.' }
+        if ($null -eq $swapped -and $swapError -cne 'The measurement receipt changed during admission.') { throw "A receipt replaced after admission was refused for another reason (got: $swapError)." }
+        [IO.File]::WriteAllText($layout.Receipt, $admittedReceiptJson)
+        $oldAdmission = $admissionText.Replace('$receipt = [Text.Encoding]::UTF8.GetString($receiptBytes)', '$receipt = [Text.Encoding]::UTF8.GetString($receiptAfter)').Replace(
+            'if (-not [string]::Equals([Convert]::ToBase64String($receiptBytes), [Convert]::ToBase64String($receiptAfter), [StringComparison]::Ordinal)) { throw', 'if ($false) { throw')
+        if ([string]::Equals($oldAdmission, $admissionText, [StringComparison]::Ordinal)) { throw 'The receipt-swap control changed nothing.' }
+        $oldSwapped = & { . ([scriptblock]::Create($oldAdmission)); Get-WorkingSetMeasureBuild $measureRepo }
+        if ($oldSwapped.Head -cne ('f' * 40)) { throw 'The receipt-swap control did not take the replacement, so the case shows nothing.' }
+        [IO.File]::WriteAllText($layout.Receipt, $admittedReceiptJson)
+        Set-Item -Path function:Assert-InteractiveWin11MeasureBuild -Value $realAssert
+
         [IO.File]::WriteAllText($layout.Exe, 'another app')
         $tampered = $null
         try { [void](Get-WorkingSetMeasureBuild $measureRepo) } catch { $tampered = $_.Exception.Message }
@@ -890,29 +920,46 @@ try {
         if (Test-WorkingSetGeneratorOutput $mutant.Text) { throw "The pinned config accepted a generator with $($mutant.Name)." }
     }
 
-    # The launch values read back from an argv (Opus and Sol, round 3): one of each passes; a second limit (m06b), a
-    # wrong limit, no --config-default-files=false, a second --config-file or another config fails. The control, a
-    # check that accepts anything, must accept the second limit.
-    $launchValuesText = (Get-WorkingSetFunction 'Get-WorkingSetLaunchValues') + "`n" + (Get-WorkingSetFunction 'Test-WorkingSetLaunchValues')
+    # The copy's exact argv (Sol, round 4): the expected list is pinned here as a literal, and an argv passes only when
+    # it is exactly that list. An extra CLI initial-command (Sol's case), a malformed --config-default-files value
+    # (fa<soft hyphen>lse, Sol's case), a second limit (Opus's m06b), the arguments reordered, or the config file
+    # missing all fail. The control, the earlier containment check (each wanted argument present), must accept the
+    # extra initial-command.
+    $argvText = (Get-WorkingSetFunction 'Get-WorkingSetExpectedArgv') + "`n" + (Get-WorkingSetFunction 'Test-WorkingSetArgv')
     $configPath = Join-Path $configDir 'copy\config.ghostty'
-    $launchCases = & {
-        . ([scriptblock]::Create($launchValuesText))
-        $base = @('noctty.exe', '--class=x', '--config-default-files=false', "--config-file=$configPath", '--scrollback-limit=1073741824')
+    $argvCases = & {
+        . ([scriptblock]::Create($argvText))
+        $expected = Get-WorkingSetExpectedArgv 'C:\c\noctty.exe' 'noctty-interactive-x' 'never' $configPath 1073741824
+        $literal = [string[]]@('C:\c\noctty.exe', '--linux-cgroup=always', '--linux-cgroup-hard-fail=true', '--windows-job-object-kill-on-close=true',
+            '--single-instance=false', '--class=noctty-interactive-x', '--window-save-state=never', '--clipboard-read=deny', '--clipboard-write=deny',
+            '--config-default-files=false', "--config-file=$configPath", '--scrollback-limit=1073741824')
+        $softHyphen = [string][char]0x00AD
         [ordered]@{
-            good = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues $base) 1073741824 $configPath
-            secondLimit = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues ($base + '--scrollback-limit=10000000')) 1073741824 $configPath
-            wrongLimit = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues $base) 10000000 $configPath
-            defaultFilesOn = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues @($base | Where-Object { $_ -notlike '--config-default-files*' })) 1073741824 $configPath
-            secondConfig = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues ($base + '--config-file=C:\elsewhere.ghostty')) 1073741824 $configPath
-            otherConfig = Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues $base) 1073741824 'C:\elsewhere.ghostty'
+            pinned = Test-WorkingSetArgv $expected $literal
+            exact = Test-WorkingSetArgv $literal $expected
+            extraInitialCommand = Test-WorkingSetArgv ([string[]]($literal[0..10] + '--initial-command=direct:C:\Windows\System32\cmd.exe /D /C exit' + $literal[11])) $expected
+            malformedDefaultFiles = Test-WorkingSetArgv ([string[]]($literal[0..8] + "--config-default-files=fa$($softHyphen)lse" + $literal[10..11])) $expected
+            secondLimit = Test-WorkingSetArgv ([string[]]($literal + '--scrollback-limit=10000000')) $expected
+            reordered = Test-WorkingSetArgv ([string[]]($literal[0..9] + $literal[11] + $literal[10])) $expected
+            noConfigFile = Test-WorkingSetArgv ([string[]]($literal[0..9] + $literal[11])) $expected
         }
     }
-    if (-not $launchCases.good) { throw 'The launch-value check refused the run''s own argv.' }
-    foreach ($name in 'secondLimit', 'wrongLimit', 'defaultFilesOn', 'secondConfig', 'otherConfig') { if ($launchCases[$name]) { throw "The launch-value check accepted an argv with $name." } }
-    $launchControl = $launchValuesText.Replace('return @($Values.ScrollbackLimits).Count -eq 1', 'return $true; @($Values.ScrollbackLimits).Count -eq 1')
-    if ([string]::Equals($launchControl, $launchValuesText, [StringComparison]::Ordinal)) { throw 'The launch-value control changed nothing.' }
-    $launchControlAccepted = & { . ([scriptblock]::Create($launchControl)); Test-WorkingSetLaunchValues (Get-WorkingSetLaunchValues @('noctty.exe', '--config-default-files=false', "--config-file=$configPath", '--scrollback-limit=1', '--scrollback-limit=2')) 1 $configPath }
-    if (-not $launchControlAccepted) { throw 'The launch-value control refused the second limit anyway, so the case shows nothing.' }
+    if (-not $argvCases.pinned) { throw 'Get-WorkingSetExpectedArgv is not the pinned argument list.' }
+    if (-not $argvCases.exact) { throw 'The exact-argv check refused the expected list.' }
+    foreach ($name in 'extraInitialCommand', 'malformedDefaultFiles', 'secondLimit', 'reordered', 'noConfigFile') { if ($argvCases[$name]) { throw "The exact-argv check accepted an argv with $name." } }
+    $containment = 'function Test-WorkingSetArgv([string[]] $Actual, [string[]] $Expected) { foreach ($wanted in $Expected) { if ($Actual -notcontains $wanted) { return $false } }; return $true }'
+    $argvControlAccepted = & {
+        . ([scriptblock]::Create((Get-WorkingSetFunction 'Get-WorkingSetExpectedArgv')))
+        . ([scriptblock]::Create($containment))
+        $expected = Get-WorkingSetExpectedArgv 'C:\c\noctty.exe' 'noctty-interactive-x' 'never' $configPath 1073741824
+        Test-WorkingSetArgv ([string[]]($expected[0..10] + '--initial-command=direct:C:\Windows\System32\cmd.exe /D /C exit' + $expected[11])) $expected
+    }
+    if (-not $argvControlAccepted) { throw 'The containment control refused the extra initial-command anyway, so the case shows nothing.' }
+    # The helper's arguments are the ones the expected list assumes (scripts/interactive-win11-lib.ps1).
+    $launchLib = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1') -Raw
+    foreach ($argument in '''--linux-cgroup=always''', '''--linux-cgroup-hard-fail=true''', '''--windows-job-object-kill-on-close=true''', '''--single-instance=false''', '"--class=noctty-interactive-$($Layout.SandboxId)"') {
+        if (-not $launchLib.Contains($argument)) { throw "The launch helper no longer emits $argument, which the expected argv assumes." }
+    }
 
     # Sol's round-3 case: an untouched config.ghostty beside a legacy ghostty/config that sets an initial-command must
     # not pass; nor a pre-rename winghostty/config.ghostty; a copy with only its generated config does. The control, a
@@ -1028,4 +1075,4 @@ if ($null -ne $ownDesktop) {
     } finally { [IO.Directory]::Delete($launchDir, $true) }
     $desktopCase = 'launch-desktop (Spawn: foreign, Default; LaunchDriver: Default, own; control: private)'
 } else { $desktopCase = 'launch-desktop skipped (no readable desktop)' }
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command (and its control), generator-output (Opus c1, c2), launch-values (good, second limit, wrong limit, default files on, second or other config), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean) and $desktopCase cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command (and its control), generator-output (Opus c1, c2), exact argv (pinned, exact, Sol's extra initial-command and malformed value, second limit, reordered, no config file; containment control), receipt swap (Sol's; control), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean) and $desktopCase cases; native layout $layoutActual"

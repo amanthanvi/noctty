@@ -1352,11 +1352,16 @@ library, which names no desktop; per `CreateProcess` such a child inherits its
 parent's desktop, the driver's private one (read, not measured). The staged
 config must be byte for byte the harness's own for the run
 (`New-WorkingSetConfigText`), so an `initial-command` or a second `command`
-cannot change the first pane's shell, and only it loads: the copy is launched
-with `--config-default-files=false` and `--config-file=<copy>\config.ghostty`
-(read back from the final command line before the launch and from the copy's
-own command line by PID after it, and recorded), and a staged copy holding
-a legacy `ghostty\config` or `winghostty\config.ghostty` is refused. The run's
+cannot change the first pane's shell, and only its settings take effect. The
+copy is launched with exactly the expected argument list (the launch
+helper's arguments, then the harness's, in order and nothing else), among
+them `--config-default-files=false` and `--config-file=<copy>\config.ghostty`:
+the final command line before the launch, and the copy's own command line by
+PID after it, must each split into exactly that list. noctty still reads its
+default config files, then discards their settings because default files are
+off (`Config.loadCliArgs`), so the settings in effect are the command line's
+and the `--config-file` file's; a staged copy holding a legacy
+`ghostty\config` or `winghostty\config.ghostty` is refused as well. The run's
 path appears in the config only as
 `working-directory`: F5 types `.\flood.cmd`, relative to the pane's working
 directory, so a `%USERNAME%`, `^` or `&` in the path never reaches cmd's

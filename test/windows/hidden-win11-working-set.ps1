@@ -89,9 +89,11 @@ copy check out against the receipt again. Every process the harness creates dire
 STARTUPINFO, and the native launches refuse any other: a child only on the driver's own desktop, the driver never on
 the caller's, Default or the input desktop. The driver's re-admission runs git through the measure library, which
 names no desktop; per CreateProcess such a child inherits its parent's desktop, the driver's private one (read, not
-measured). The staged config must be byte for byte the harness's own for the run, and only it loads: the copy is
-launched with --config-default-files=false and --config-file=<copy>\config.ghostty, and a staged copy holding a
-legacy config (ghostty\config, winghostty\config.ghostty) is refused. NOCTTY_CONPTY must be unset, the
+measured). The staged config must be byte for byte the harness's own for the run, and only its settings take
+effect: the copy is launched with exactly the expected argument list, --config-default-files=false and
+--config-file=<copy>\config.ghostty among it. noctty still reads its default config files, then discards their
+settings (Config.loadCliArgs), so the settings in effect are the command line's and that file's; a staged copy
+holding a legacy config (ghostty\config, winghostty\config.ghostty) is refused as well. NOCTTY_CONPTY must be unset, the
 copy's conpty.dll and OpenConsole.exe must match the build's, and a run on any transport but the bundled ConPTY
 fails. Input is posted,
 never SendInput, and nothing takes the foreground. The copy runs with the launch helper's isolation (its own class,
@@ -480,9 +482,20 @@ function Get-WorkingSetMeasureBuild([string] $Repo) {
     if ([string]::IsNullOrWhiteSpace($Repo)) { throw 'Pass -MeasureRepo: only a receipt-bound measurement build is launched.' }
     $Repo = (Resolve-Path -LiteralPath $Repo).Path
     $exe = Get-InteractiveWin11MeasureExePath -RepoRoot $Repo
-    Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
-    # One read of the receipt: its fields and its digest come from the same bytes (CodeRabbit on #739).
-    $receiptBytes = [IO.File]::ReadAllBytes((Get-InteractiveWin11MeasureLayout $Repo).Receipt)
+    $layout = Get-InteractiveWin11MeasureLayout $Repo
+    # One admitted receipt (Sol, round 4; CodeRabbit on #739): its bytes are read once, under the generation's build
+    # lock held across the library's admission (a builder needs that lock exclusively to replace the receipt), and
+    # must still be the receipt on disk when the admission has passed; that second read only compares. The fields,
+    # the hashes checked below and the recorded digest all come from the one read.
+    Assert-InteractiveWin11MeasurePlainPath $layout.Root
+    Assert-InteractiveWin11MeasurePlainPath (Join-Path $layout.Root 'build.lock')
+    $lock = [IO.File]::Open((Join-Path $layout.Root 'build.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $receiptBytes = [IO.File]::ReadAllBytes($layout.Receipt)
+        Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
+        $receiptAfter = [IO.File]::ReadAllBytes($layout.Receipt)
+    } finally { $lock.Dispose() }
+    if (-not [string]::Equals([Convert]::ToBase64String($receiptBytes), [Convert]::ToBase64String($receiptAfter), [StringComparison]::Ordinal)) { throw 'The measurement receipt changed during admission.' }
     $receipt = [Text.Encoding]::UTF8.GetString($receiptBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
     $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
     if ((Get-Sha256 $exe) -cne [string]$receipt.ExeSHA256 -or (Get-Sha256 $cli) -cne [string]$receipt.CliSHA256) {
@@ -559,12 +572,21 @@ function Get-WorkingSetLaunchValues([string[]] $Argv) {
     }
 }
 
-# Whether those are the run's: exactly one limit, the workload's; --config-default-files=false exactly once; and
-# --config-file exactly once, naming the copy's generated config.
-function Test-WorkingSetLaunchValues($Values, [long] $Limit, [string] $ConfigPath) {
-    return @($Values.ScrollbackLimits).Count -eq 1 -and [string]@($Values.ScrollbackLimits)[0] -ceq [string]$Limit -and
-        @($Values.DefaultFiles).Count -eq 1 -and @($Values.DefaultFiles)[0] -ceq '--config-default-files=false' -and
-        @($Values.ConfigFiles).Count -eq 1 -and [string]::Equals(@($Values.ConfigFiles)[0], $ConfigPath, [StringComparison]::OrdinalIgnoreCase)
+# The copy's exact argv for a run (Sol, round 4): the launch helper's containment and isolation arguments
+# (scripts/interactive-win11-lib.ps1), then the harness's own, in this order and nothing else. The final command
+# line and the copy's real one by PID must each split into exactly this list, so an extra option (a CLI
+# initial-command) or a malformed value cannot get through.
+function Get-WorkingSetExpectedArgv([string] $Exe, [string] $Class, [string] $SaveState, [string] $ConfigPath, [long] $Limit) {
+    return [string[]]@($Exe, '--linux-cgroup=always', '--linux-cgroup-hard-fail=true', '--windows-job-object-kill-on-close=true',
+        '--single-instance=false', "--class=$Class", "--window-save-state=$SaveState", '--clipboard-read=deny', '--clipboard-write=deny',
+        '--config-default-files=false', "--config-file=$ConfigPath", "--scrollback-limit=$Limit")
+}
+
+# Whether an argv is exactly the expected one: the same arguments, in the same order, compared ordinally.
+function Test-WorkingSetArgv([string[]] $Actual, [string[]] $Expected) {
+    if ($null -eq $Actual -or $Actual.Count -ne $Expected.Count) { return $false }
+    for ($i = 0; $i -lt $Expected.Count; $i++) { if (-not [string]::Equals($Actual[$i], $Expected[$i], [StringComparison]::Ordinal)) { return $false } }
+    return $true
 }
 
 # Whether a staged config is byte for byte New-WorkingSetConfigText's for this run.
@@ -840,11 +862,13 @@ function Invoke-WorkingSetDriver {
         foreach ($argument in $launchArguments) { if ($argument -match '"' -or $argument.EndsWith('\')) { throw 'A launch argument cannot be quoted.' } }
         $record.Class = $class[0]
         $commandLine = ('"{0}" ' -f $exe) + (@($launchArguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
-        # The limit and the config the copy is launched with, read back from the final command line itself (Opus,
-        # round 3): exactly the workload's limit, --config-default-files=false (so no default or legacy file loads) and
-        # the generated config (Sol, round 3), or nothing starts. They drive the record and the workload hash.
-        $planned = Get-WorkingSetLaunchValues ([WorkingSetNative]::SplitCommandLine($commandLine))
-        if (-not (Test-WorkingSetLaunchValues $planned $record.ScrollbackLimitBytes (Join-Path $Bin 'config.ghostty'))) { throw "The copy's command line does not carry exactly the workload's scrollback limit and only the generated config." }
+        # The copy's argv, exactly (Sol, round 4): the final command line must split into the expected list, the
+        # helper's arguments and the harness's in order and nothing else (the workload's limit,
+        # --config-default-files=false and the generated config among them; Opus and Sol, round 3), or nothing
+        # starts. The record and the workload hash take their values from it.
+        $expectedArgv = Get-WorkingSetExpectedArgv $exe "noctty-interactive-$($layout.SandboxId)" $saveState (Join-Path $Bin 'config.ghostty') $record.ScrollbackLimitBytes
+        if (-not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($commandLine)) $expectedArgv)) { throw "The copy's command line is not exactly the expected argument list." }
+        $planned = Get-WorkingSetLaunchValues $expectedArgv
         $record.LaunchScrollbackLimit = [long]@($planned.ScrollbackLimits)[0]
         $record.LaunchConfigDefaultFiles = $false
         $record.LaunchConfigFile = @($planned.ConfigFiles)[0]
@@ -857,11 +881,10 @@ function Invoke-WorkingSetDriver {
         $process = $pi.process
         [void][WorkingSetNative]::CloseHandle($pi.thread)
         $nocttyPid = $pi.pid
-        # And what the copy really received, from its own command line by PID (as #738 reads a shell's): the same
-        # values, or the run stops. The command line itself is never logged or recorded.
+        # And what the copy really received, from its own command line by PID (as #738 reads a shell's): exactly the
+        # same list, or the run stops. The command line itself is never logged or recorded.
         $launchedLine = [string](Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $nocttyPid" -ErrorAction Stop).CommandLine
-        $launched = Get-WorkingSetLaunchValues ([WorkingSetNative]::SplitCommandLine($launchedLine))
-        if (-not (Test-WorkingSetLaunchValues $launched $record.ScrollbackLimitBytes (Join-Path $Bin 'config.ghostty'))) { throw 'The copy was not launched with exactly the planned scrollback limit and config.' }
+        if (-not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($launchedLine)) $expectedArgv)) { throw 'The copy was not launched with exactly the expected argument list.' }
         $launchedLine = $null
         try { $record.NocttyPriority = [string](Get-Process -Id $nocttyPid -ErrorAction Stop).PriorityClass } catch { $record.NocttyPriority = 'unknown' }
         if ($record.NocttyPriority -cne 'Normal') { throw "The copy runs at $($record.NocttyPriority) priority, not Normal." }
