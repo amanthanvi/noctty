@@ -21,20 +21,22 @@ VALUE_OPTIONS = frozenset({"-p", "--prefix", "--summary"})
 ALLOWED_ZIG_ENVIRONMENT = frozenset(
     {"ZIG_GLOBAL_CACHE_DIR", "ZIG_HOME", "ZIG_LOCAL_CACHE_DIR", "ZIG_VERSION"}
 )
-SEARCH_ENVIRONMENT = frozenset(
+UNSAFE_ENVIRONMENT = frozenset(
     {
         "CPATH",
         "C_INCLUDE_PATH",
         "CPLUS_INCLUDE_PATH",
         "OBJC_INCLUDE_PATH",
         "LIBRARY_PATH",
+        "LINK",
+        "_LINK_",
     }
 )
 
 
 def check_environment():
     for name in sorted(os.environ):
-        if name in SEARCH_ENVIRONMENT or (
+        if name in UNSAFE_ENVIRONMENT or (
             name.startswith("ZIG_") and name not in ALLOWED_ZIG_ENVIRONMENT
         ):
             if re.fullmatch(r"[A-Z0-9_]{1,64}", name) is None:

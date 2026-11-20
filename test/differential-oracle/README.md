@@ -28,7 +28,8 @@ configuration, before compiling project code or dependencies. It refuses every
 by `dev-windows.cmd` to select and check the compiler. The compiler itself
 ignores them. Zig 0.17.1 uses `ZIG_PROGRESS` for progress reporting
 and removes it when spawning the guard. The guard also refuses `CPATH`,
-`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH` and `LIBRARY_PATH`.
+`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `LIBRARY_PATH`,
+`LINK` and `_LINK_`.
 
 From the repository root:
 
