@@ -1245,11 +1245,20 @@ probe checks this before it creates anything.
   - gives each noctty child a `TEMP` and `TMP` under its run directory;
   - deletes the copies it made under `-Work` once the record is written
     (`-KeepCopies` keeps them);
-  - exits 3 after a tripped guard and 2 after a failed stage.
+  - exits 3 after a tripped guard and 2 after a failed stage. The record
+    names the guard (`guardTripped`) and its state (`guardTrippedState`,
+    `tripped` or `unreadable`).
 - On a hosted runner the probe is record-only and exits 0.
-- The record holds only values and HRESULTs. `Assert-ProbeRecordAllowed`
-  refuses any other string, so no screen image, path, environment value,
-  window title or command line enters it.
+- A clipboard sequence sample of 0 cannot be read. Locally it stops the run,
+  as a tripped guard does. On a hosted runner it is recorded
+  (`guardUnreadable`) and gates no verdict: the guard protects the user's
+  clipboard, and the runner's clipboard is not theirs.
+- The record holds only values and HRESULTs. `Write-ProbeRecord` writes any
+  other string, and any other type, as `rejected-value`, so no screen image,
+  path, environment value, window title or command line enters it. The
+  record is still written: it counts the replacements (`rejectedValues`) and
+  lists where they were (`rejectedAt`). A driver record with any replacement
+  leaves the verdicts that read it inconclusive.
 - Readbacks stay in `-Work`, and only their counts reach the record.
 
 ## Style

@@ -112,7 +112,7 @@ mismatched noctty.com beside the app are each refused for their own reason. A fa
 
 The record: one JSON object of values and HRESULTs only. No screen image is formed or kept (single-pixel reads),
 the renderer's readbacks stay in -Work as counts only, and no path, environment value, window title or command line
-enters it; Assert-ProbeRecordAllowed refuses to write anything else.
+enters it; Write-ProbeRecord writes anything else as rejected-value.
 #>
 [CmdletBinding()]
 param(
@@ -280,6 +280,7 @@ public static class GuiProbeNative {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr DispatchMessageW(ref Msg msg);
     [DllImport("user32.dll")] static extern void PostQuitMessage(int code);
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint rgb);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr gdiObject);
 
     // The SDK's x64 sizes of every struct mirrored here; Assert-ProbeLayout compares them before anything runs.
     public static string Layout() {
@@ -688,6 +689,27 @@ public static class GuiProbeNative {
         return DefWindowProcW(h, m, w, l);
     }
     public sealed class ProbeWindow { public IntPtr Hwnd, Edit; public uint ThreadId; public Thread Thread; }
+    // A window class outlives its windows (Close never unregisters it), so each class name is registered once per
+    // process and every later Open reuses it. The background is the class's, so one name keeps one colour.
+    // ERROR_CLASS_ALREADY_EXISTS (1410) from a registration this cache did not make is reuse too.
+    static readonly Dictionary<string, uint> registeredClasses = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+    public static void RegisterProbeClass(string className, uint bgr) {
+        lock (registeredClasses) {
+            uint known;
+            if (registeredClasses.TryGetValue(className, out known)) {
+                if (known != bgr) throw new Exception("The window class " + className + " is registered with another background.");
+                return;
+            }
+            IntPtr brush = CreateSolidBrush(bgr);
+            var wc = new WndClassEx { size = Marshal.SizeOf<WndClassEx>(), proc = Marshal.GetFunctionPointerForDelegate(procedure), instance = GetModuleHandleW(null), background = brush, className = className };
+            if (RegisterClassExW(ref wc) == 0) {
+                int error = Marshal.GetLastWin32Error();
+                if (brush != IntPtr.Zero) DeleteObject(brush);
+                if (error != 1410) throw new Exception("RegisterClassEx failed: " + error);
+            }
+            registeredClasses[className] = bgr;
+        }
+    }
     public static ProbeWindow Open(string className, uint bgr, int x, int y, int w, int h, bool withEdit) {
         return Open(className, bgr, x, y, w, h, withEdit, true);
     }
@@ -696,9 +718,8 @@ public static class GuiProbeNative {
         var win = new ProbeWindow(); var ready = new ManualResetEvent(false); Exception failure = null;
         var t = new Thread(() => {
             try {
+                RegisterProbeClass(className, bgr);
                 IntPtr instance = GetModuleHandleW(null);
-                var wc = new WndClassEx { size = Marshal.SizeOf<WndClassEx>(), proc = Marshal.GetFunctionPointerForDelegate(procedure), instance = instance, background = CreateSolidBrush(bgr), className = className };
-                if (RegisterClassExW(ref wc) == 0) throw new Exception("RegisterClassEx failed: " + Marshal.GetLastWin32Error());
                 // WS_EX_TOPMOST; WS_OVERLAPPEDWINDOW, shown only once its EDIT exists, so its first WM_SETFOCUS reaches it.
                 win.Hwnd = CreateWindowExW(0x8, className, "noctty gui probe", 0x00CF0000, x, y, w, h, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
                 if (win.Hwnd == IntPtr.Zero) throw new Exception("CreateWindowEx failed: " + Marshal.GetLastWin32Error());
@@ -890,32 +911,50 @@ function Get-DesktopKind([AllowNull()] [string] $Name, [string] $Private) {
     return 'other'
 }
 
-# Refuses anything but values: booleans, numbers, null, short strings without a path separator or a quote, maps and
-# lists of them. A path, command line, environment value or title cannot pass.
-function Assert-ProbeRecordAllowed($Value, [string] $Where = 'record') {
-    if ($null -eq $Value -or $Value -is [bool] -or $Value -is [int] -or $Value -is [long] -or $Value -is [uint32] -or $Value -is [double]) { return }
+# The record's allowlist: booleans, numbers, null, short strings without a path separator, quote or bracket, and maps
+# (keys plain names) and lists of them. A path, command line, environment value or title cannot pass. A value outside
+# it is replaced by the token `rejected-value` (a key, by `rejectedKey<n>`) and its place listed in $Rejected, so the
+# file never holds it and a record is never lost to one field: a failure path's record still reaches the disk.
+function ConvertTo-ProbeRecordValue($Value, [string] $Where, [System.Collections.Generic.List[string]] $Rejected) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool] -or $Value -is [decimal] -or
+        ($Value.GetType().IsPrimitive -and $Value -isnot [char] -and $Value -isnot [IntPtr] -and $Value -isnot [UIntPtr])) { return $Value }
     if ($Value -is [string]) {
-        if ($Value.Length -gt 80 -or $Value -notmatch '\A[A-Za-z0-9 ._:+#=\-]*\z') { throw "The record holds a value outside its allowlist at $Where." }
-        return
+        if ($Value.Length -le 80 -and $Value -cmatch '\A[A-Za-z0-9 ._:+#=\-]*\z') { return $Value }
+        $Rejected.Add($Where); return 'rejected-value'
     }
     if ($Value -is [System.Collections.IDictionary]) {
-        foreach ($key in $Value.Keys) {
-            if ($key -isnot [string] -or $key -notmatch '\A[A-Za-z][A-Za-z0-9]*\z') { throw "The record holds a key outside its allowlist at $Where." }
-            Assert-ProbeRecordAllowed $Value[$key] "$Where.$key"
+        $clean = [ordered]@{}
+        $renamed = 0
+        # Entries, not $Value[$key]: an int key on an ordered map indexes by position (PS-ORDERED-INT-INDEX-01).
+        foreach ($entry in @($Value.GetEnumerator())) {
+            $key = $entry.Key
+            $name = $(if ($key -is [string] -and $key -cmatch '\A[A-Za-z][A-Za-z0-9]*\z') { $key } else { $renamed++; "rejectedKey$renamed" })
+            if ($name -cne $key) { $Rejected.Add("$Where.$name") }
+            $clean[$name] = ConvertTo-ProbeRecordValue $entry.Value "$Where.$name" $Rejected
         }
-        return
+        return $clean
     }
     if ($Value -is [System.Collections.IEnumerable]) {
+        $items = [System.Collections.Generic.List[object]]::new()
         $index = 0
-        foreach ($item in $Value) { Assert-ProbeRecordAllowed $item "$Where[$index]"; $index++ }
-        return
+        foreach ($item in $Value) { $items.Add((ConvertTo-ProbeRecordValue $item "$Where.$index" $Rejected)); $index++ }
+        return , $items.ToArray()
     }
-    throw "The record holds a $($Value.GetType().Name) at $Where."
+    $Rejected.Add($Where); return 'rejected-value'
 }
 
+# Writes the record through the allowlist. Anything replaced is counted (rejectedValues) and placed (rejectedAt, the
+# first 32 places); a driver's record with replacements leaves the verdicts that read it inconclusive.
 function Write-ProbeRecord($Record, [string] $Path) {
-    Assert-ProbeRecordAllowed $Record
-    [IO.File]::WriteAllText($Path, ($Record | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+    $rejected = [System.Collections.Generic.List[string]]::new()
+    $clean = ConvertTo-ProbeRecordValue $Record 'record' $rejected
+    if ($rejected.Count -gt 0) {
+        $clean.rejectedValues = $rejected.Count
+        $clean.rejectedAt = @($rejected | Select-Object -First 32 | ForEach-Object { if ($_.Length -gt 80) { $_.Substring(0, 80) } else { $_ } })
+        Write-Host "gui probe: $($rejected.Count) record value(s) outside the allowlist were written as rejected-value."
+    }
+    [IO.File]::WriteAllText($Path, ($clean | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
 }
 
 # What the design's §9 asks of each desktop first.
@@ -1873,11 +1912,12 @@ function Test-ProbeGuardsHeld($Run) {
 function Test-ProbeGuardsReadable($Run) { return (Get-ProbeGuardState $Run) -ne 'unreadable' -or (Test-ProbeHosted) }
 
 # A tripped guard stops every later launch; an unreadable one stops them locally (the user's clipboard cannot be shown
-# untouched) and is recorded on a hosted runner, where the verdicts that read it are inconclusive.
+# untouched). On a hosted runner an unreadable sample is only recorded ($script:GuardUnreadable) and gates no verdict:
+# the guard protects the user's clipboard, and the runner's clipboard is not theirs.
 function Assert-ProbeGuards($Run, [string] $Name) {
     $state = Get-ProbeGuardState $Run
     if ($state -eq 'tripped' -or ($state -eq 'unreadable' -and -not (Test-ProbeHosted))) {
-        $script:GuardTripped = "$Name ($state)"
+        $script:GuardTripped = $Name; $script:GuardTrippedState = $state
         throw "A real-profile guard was $state after $Name; no further copy starts."
     }
     if ($state -eq 'unreadable') { $script:GuardUnreadable = $Name }
@@ -2037,6 +2077,7 @@ function Invoke-LauncherControl([string] $StageBin, [string] $TestToolsStageBin)
 # its shell on the policy.
 function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
     $d = $ArmRun.driver
+    $driverClean = $null -ne $d -and -not $d.rejectedValues
     $rows = @($(if ($d) { $d.processes }))
     $copyRows = @($rows | Where-Object { $_.role -in @('noctty', 'noctty-descendant') })
     $hostRows = @($copyRows | Where-Object { $_.role -eq 'noctty-descendant' })
@@ -2054,7 +2095,7 @@ function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
     $offPrivate = @($copyRows | Where-Object { $_.startupDesktop -ne 'private' -or @($_.threadDesktops | Where-Object { $_ -ne 'private' }).Count -gt 0 }).Count
     $windowsOff = @($(if ($d) { $d.windows | Where-Object { $_.desktop -ne 'private' } })).Count
     $shellPolicy = $null -ne $d -and [bool]$d.shell.read -and [bool]$d.shell.systemCmd -and [bool]$d.shell.autoRunOffFirst
-    $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and [bool]$d.inventoryComplete -and
+    $records = $driverClean -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and [bool]$d.inventoryComplete -and
         [bool]$d.shell.read -and $readsResolved -and $null -ne $d.jobProcessesNotSampled -and (Test-ProbeGuardsReadable $ArmRun)
     $positive = $null -ne $d -and [bool]$d.copyReady -and $roles.app -and $roles.conptyHost -and $roles.shell -and $offPrivate -eq 0 -and
         $windowsOff -eq 0 -and $d.leftAfterStop -eq 0 -and (Test-ProbeGuardsHeld $ArmRun) -and $shellPolicy
@@ -2073,6 +2114,7 @@ function Get-Q0GuiArmVerdict($ArmRun, [string] $Kind) {
 # guards held.
 function Get-Q0CliArmVerdict($ArmRun) {
     $d = $ArmRun.driver
+    $driverClean = $null -ne $d -and -not $d.rejectedValues
     $invocations = @($(if ($d) { $d.invocations }))
     $all = @($invocations | ForEach-Object { @($_.processes) })
     $readsResolved = $all.Count -gt 0 -and @($all | Where-Object { $_.threadsUnreadable -gt 0 -or $_.startupDesktop -in @('unreadable', 'none') }).Count -eq 0
@@ -2083,7 +2125,7 @@ function Get-Q0CliArmVerdict($ArmRun) {
     $nothingLeft = @($invocations | Where-Object { $_.leftAfterStop -ne 0 }).Count -eq 0
     $inventories = $invocations.Count -gt 0 -and @($invocations | Where-Object { -not [bool]$_.inventoryCompleteEveryPoll }).Count -eq 0
     $windowsOff = [int](@($invocations | ForEach-Object { [int]$_.windowsOffPrivate }) | Measure-Object -Sum).Sum
-    $records = $null -ne $d -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and $forwarded -and $readsResolved -and
+    $records = $driverClean -and $null -eq $d.error -and [bool]$d.admitted -and [bool]$d.desktopReadersOpen -and $forwarded -and $readsResolved -and
         $everyJoinedRead -and $inventories -and (Test-ProbeGuardsReadable $ArmRun)
     $positive = $offPrivate -eq 0 -and $windowsOff -eq 0 -and $rootsExited -and $nothingLeft -and (Test-ProbeGuardsHeld $ArmRun)
     return [ordered]@{
@@ -2430,7 +2472,9 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     $privateWithheldReadback = $privateWithheldRun.driver.readback
     $withheldBelowFloor = [bool]$privateWithheldReadback.captured -and [bool]$privateWithheldReadback.fixtureBackground -and
         $null -ne $privateWithheldReadback.inkFraction -and $privateWithheldReadback.inkFraction -lt $script:SeedInkFloor
-    $p3Records = $p3ShellsRead -and $p3Counters -and [bool]$privateReadback.captured -and
+    $privateDriversClean = $null -ne $privateRun.driver -and -not $privateRun.driver.rejectedValues -and
+        $null -ne $privateWithheldRun.driver -and -not $privateWithheldRun.driver.rejectedValues
+    $p3Records = $privateDriversClean -and $p3ShellsRead -and $p3Counters -and [bool]$privateReadback.captured -and
         [bool]$privateWithheldReadback.captured -and
         [bool]$defaultLog.logOn -and [bool]$withheldRun.log.logOn -and [bool]$privateLog.logOn -and [bool]$privateWithheldRun.driver.log.logOn
     $d3.p3 = [ordered]@{
@@ -2459,7 +2503,7 @@ function Invoke-D3([string] $StageBin, [string] $TestToolsStageBin, $Record) {
     $d3.p4 = [ordered]@{
         defaultHrInit = $defaultLog.hrInit; privateHrInit = $privateLog.hrInit
         # The private half needs FAILED(hr), the severity bit, as TaskbarProgress.init tests it; a nonzero success is not.
-        verdict = Get-Verdict ($defaultLog.hrInit -eq '0x00000000' -and $interactive.copyReady) ((Test-ProbeHResultFailed $privateLog.hrInit) -and $privateRun.driver.copyReady) ($null -ne $defaultLog.hrInit -and $null -ne $privateLog.hrInit)
+        verdict = Get-Verdict ($defaultLog.hrInit -eq '0x00000000' -and $interactive.copyReady) ((Test-ProbeHResultFailed $privateLog.hrInit) -and $privateRun.driver.copyReady) ($null -ne $defaultLog.hrInit -and $null -ne $privateLog.hrInit -and $null -ne $privateRun.driver -and -not $privateRun.driver.rejectedValues)
     }
     return $d3
 }
@@ -2585,6 +2629,7 @@ try {
 } catch {
     $record.failedStage = $script:Stage
     $record.guardTripped = $script:GuardTripped
+    $record.guardTrippedState = $script:GuardTrippedState
     $record.guardUnreadable = $script:GuardUnreadable
     Write-Host "gui probe: failed at stage $($script:Stage): $($_.Exception.Message)"
 } finally {
@@ -2598,7 +2643,7 @@ try {
         try { Assert-InteractiveWin11StateGuard -Guard $stateGuard; $record.stateGuard = [ordered]@{ held = $true } }
         catch {
             $record.stateGuard = [ordered]@{ held = $false }
-            $script:GuardTripped = 'state-guard'; $record.guardTripped = 'state-guard'
+            $script:GuardTripped = 'state-guard'; $record.guardTripped = 'state-guard'; $record.guardTrippedState = 'tripped'
             Write-Host "gui probe: the real state's guard did not hold: $($_.Exception.Message)"
         }
     }
@@ -2633,7 +2678,7 @@ if ($record.d3) {
     $summaryLine += "; P1 $($record.d3.p1.verdict) (EDIT $($record.d3.p1.editVerdict), noctty $($record.d3.p1.noctty.verdict)); P2 $($record.d3.p2.verdict); P3 $($record.d3.p3.verdict); P4 $($record.d3.p4.verdict); P5 facts only"
 }
 if ($record.failedStage) { $summaryLine += "; failed at $($record.failedStage)" }
-if ($record.guardTripped) { $summaryLine += "; guard tripped at $($record.guardTripped)" }
+if ($record.guardTripped) { $summaryLine += "; guard $($record.guardTrippedState) at $($record.guardTripped)" }
 Write-Host $summaryLine
 # Locally a tripped guard or a failed stage ends nonzero; on a hosted runner the probe is record-only and exits 0 once
 # the record is written (the workflow uploads it either way).
