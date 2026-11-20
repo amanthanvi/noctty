@@ -86,10 +86,14 @@ For fork, stone and the eventual 1B app, the root `oracle` step inherits the
 app module's generated Terminal options, imports, include paths, C macros and
 link dependencies. After the guard passes, the oracle adds a private C/C++
 macro throughout its linked module graph. Its value is the SHA-256 of the
-actual Zig executable, computed during configuration. The compile keys
-separate oracle objects from ordinary app objects and from oracle objects
-built with a different compiler executable. Oniguruma, Kitty graphics and tmux control mode remain
-selected by that tree's own app build.
+actual Zig executable, computed during configuration. The hash keys the
+oracle's own C/C++ objects through the macro and its Zig code through the
+embedded build identity. Zig's global `compiler_rt` cache identifies the
+compiler by version string alone. Different binaries reporting the same
+version can share `compiler_rt` when the target and lib sources match, so
+use a separate `ZIG_GLOBAL_CACHE_DIR` for each binary when comparing them.
+Oniguruma, Kitty graphics and tmux control mode remain selected by that
+tree's own app build.
 
 The upstream side is **v1.4.0's public lib-vt module**, exactly as section 3.4 names it.
 Staging `--api v140` connects the harness to that module and its own generated
@@ -196,6 +200,11 @@ package directories. Hashes are checked against build-graph pins, not directory
 names. Extra files or unsupported reparse points fail closed. Unhashed local
 package wrappers must be inside the authenticated source tree. Git ignores
 cached dependencies; their edits must not masquerade as a clean build.
+
+Git can report LF-pinned files that retain CRLF as clean, and the reviewed
+cases preserve dump content. The scrollback limit belongs only to the
+comparison profile, and both the profile and the build identity omit the
+host MSVC and Windows SDK versions.
 
 The request and response have checked versioned headers, counts, lengths,
 ordered record indices and exact EOF. For each input/initial size, both plain
