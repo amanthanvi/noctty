@@ -1964,8 +1964,11 @@ $testQuietSettingsSaves = {
     if ((& $saveUsesOf $index 'ExecutionContext').Count -ne 0) { return $false }
     foreach ($pipeline in $index.Pipelines) { if ($pipeline.Background) { return $false } }
     if ($Others.VariableCmdlet -or $Others.DefinesSaved -or $Others.DynamicForms -or $Others.ShadowsCmdlet -or $Others.DefaultParameters) { return $false }
-    # Opus L1, round 6: no default parameter values, no function standing in
-    # for a cmdlet the regions call.
+    # Opus L1, round 6: no default parameter values, and no function named,
+    # in any scope, after a cmdlet the regions call. A function whose name
+    # itself carries the module qualifier a region calls the cmdlet by
+    # (`function Microsoft.PowerShell.Management\Start-Process`) still runs
+    # for that call: the residual the README states.
     if ((& $saveUsesOf $index 'PSDefaultParameterValues').Count -ne 0) { return $false }
     foreach ($function in $index.Functions) { if ($saveRegionCmdlets.Contains((& $saveBareName $function.Name))) { return $false } }
     if ((& $saveDynamicForms $index).Count -ne 0) { return $false }
@@ -2235,8 +2238,9 @@ if (-not (& $runQuietCheck $accessibilityText $launchLibraryText $saveOthers)) {
 # parser itself refuses a `return`, `break` or `continue` that leaves a
 # finally (ControlLeavingFinally, under PowerShell 7 and 5.1), and so does
 # this check. `[Environment]::Exit(...)` and `$Host.SetShouldExit(...)` count as
-# an `exit` (Opus L1, round 7). A finally may run a script block only inline or by a function's
-# name. The flow statements inside the finally blocks themselves are pinned
+# an `exit` (Opus L1, round 7), called or not and with the member's name
+# quoted or not (Sol L, round 8). A finally may run a script block only
+# inline or by a function's name. The flow statements inside the finally blocks themselves are pinned
 # one by one ($saveFinallyFlows): today two loop `continue`s in cleanup loops
 # and two `return`s of `Wait-AccessibilityCondition` script blocks; the
 # outer history `finally` holds none.
@@ -2259,11 +2263,16 @@ $testFinallyFlow = {
         }
     }
     # `[Environment]::Exit(...)` ends the process and `$Host.SetShouldExit(...)`
-    # the host, as `exit` does (Opus L1, round 7).
+    # the host, as `exit` does (Opus L1, round 7). Any use of either member
+    # counts, called or not (`[Environment]::Exit.Invoke(0)`), and a member is
+    # matched by its value, so a quoted name counts too
+    # (`[Environment]::'Exit'(0)`; Sol L, round 8). A member or type named
+    # at run time is the residual.
     $isHostExit = {
         param($Node)
-        if ($Node -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst]) { return $false }
-        $member = $Node.Member.Extent.Text
+        if ($Node -isnot [System.Management.Automation.Language.MemberExpressionAst] -or
+            $Node.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $false }
+        $member = $Node.Member.Value
         if ([string]::Equals($member, 'SetShouldExit', [StringComparison]::OrdinalIgnoreCase)) { return $true }
         $Node.Static -and [string]::Equals($member, 'Exit', [StringComparison]::OrdinalIgnoreCase) -and
             $Node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
@@ -2326,7 +2335,7 @@ $testFinallyFlow = {
     $true
 }
 if (-not (& $testFinallyFlow $accessibilityText $saveOtherTexts)) {
-    throw 'interactive-win11-accessibility.ps1''s finally blocks, and what they call, must not end it before its final throw: no exit, no break or continue outside a loop of its own script block, and only the flow statements pinned in $saveFinallyFlows.'
+    throw 'interactive-win11-accessibility.ps1''s finally blocks, and what they call, must not end it before its final throw: no exit, no [Environment]::Exit or $Host.SetShouldExit, no break or continue outside a loop of its own script block, and only the flow statements pinned in $saveFinallyFlows.'
 }
 $toastHistoryFinally = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n}"
 foreach ($toastControl in @(
@@ -2338,7 +2347,13 @@ foreach ($toastControl in @(
         @{ Name = 'exit in a function the leaf''s finally calls'; From = "    if (-not `$Existed) {`n"; To = "    exit 0`n    if (-not `$Existed) {`n" },
         @{ Name = '[Environment]::Exit after the history guard (Opus L1, round 7)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    [Environment]::Exit(0)`n}" },
         @{ Name = '$Host.SetShouldExit after the history guard (Opus L1, round 7)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    `$Host.SetShouldExit(0)`n}" },
-        @{ Name = '[System.Environment]::Exit in a function the main finally calls (Opus L1, round 7)'; From = "function Stop-AccessibilityEditEventCapture {`n"; To = "function Stop-AccessibilityEditEventCapture {`n    if (`$null -ne `$runFailure) { [System.Environment]::Exit(0) }`n" }
+        @{ Name = '[System.Environment]::Exit in a function the main finally calls (Opus L1, round 7)'; From = "function Stop-AccessibilityEditEventCapture {`n"; To = "function Stop-AccessibilityEditEventCapture {`n    if (`$null -ne `$runFailure) { [System.Environment]::Exit(0) }`n" },
+        @{ Name = '[Environment]::''Exit'' in a function the main finally calls (Sol L, round 8)'; From = "function Stop-AccessibilityEditEventCapture {`n"; To = "function Stop-AccessibilityEditEventCapture {`n    if (`$null -ne `$runFailure) { [Environment]::'Exit'(0) }`n" },
+        @{ Name = '[Environment]::"Exit" after the history guard (Sol L, round 8)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    [Environment]::`"Exit`"(0)`n}" },
+        @{ Name = '$Host.''SetShouldExit'' in a function the main finally calls (Sol L, round 8)'; From = "function Stop-AccessibilityEditEventCapture {`n"; To = "function Stop-AccessibilityEditEventCapture {`n    if (`$null -ne `$runFailure) { `$Host.'SetShouldExit'(0) }`n" },
+        @{ Name = '$Host."SetShouldExit" after the history guard (Sol L, round 8)'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    `$Host.`"SetShouldExit`"(0)`n}" },
+        @{ Name = '[Environment]::Exit.Invoke in a function the main finally calls'; From = "function Stop-AccessibilityEditEventCapture {`n"; To = "function Stop-AccessibilityEditEventCapture {`n    if (`$null -ne `$runFailure) { [Environment]::Exit.Invoke(0) }`n" },
+        @{ Name = '$Host.SetShouldExit.Invoke after the history guard'; From = $toastHistoryFinally; To = "} finally {`n    Assert-WindowsHarnessHistoryGuard -Guard `$windowsHarnessHistoryGuard`n    `$Host.SetShouldExit.Invoke(0)`n}" }
     )) {
     $toastMutated = $accessibilityText
     if (([regex]::Matches($toastMutated, [regex]::Escape($toastControl.From))).Count -ne 1) { throw "Finally-flow control '$($toastControl.Name)' lost its anchor." }

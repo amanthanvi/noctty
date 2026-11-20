@@ -874,9 +874,10 @@ by an expression.
 The regions call `Start-Process` and `Join-Path` by their module, and nothing
 but the cmdlets the contract lists and functions the job scripts define. No
 `finally` block of the leaf, nor any function one calls, can end it before its
-final throw: no `exit`, `[Environment]::Exit(...)` or `$Host.SetShouldExit(...)`,
-and no `break` or `continue` outside a loop of its own script block; the flow
-statements inside the finally blocks are pinned one by one.
+final throw: no `exit`, `[Environment]::Exit(...)` or `$Host.SetShouldExit(...)`
+(called or not, the member's name quoted or not), and no `break` or `continue`
+outside a loop of its own script block; the flow statements inside the finally
+blocks are pinned one by one.
 Every statement of the save flow (the flags, class names and arrays, both
 launches and their run-time checks, the probes, both saves and the four
 sandbox checks) is a direct statement of the one block that holds the

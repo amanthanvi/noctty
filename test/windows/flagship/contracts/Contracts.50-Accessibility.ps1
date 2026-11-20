@@ -2328,9 +2328,12 @@ $startWithEnvironmentFunctions = @(
 if ($startWithEnvironmentFunctions.Count -ne 1) {
     throw 'Accessibility evidence must define one process-environment isolation helper.'
 }
-# The helper calls Start-Process by its module, so no function can stand in
-# for it (Contracts.90-Workflows.ps1, EVIDENCE-TOAST-FOREGROUND); this probe
-# swaps that one call for the stand-in below.
+# The helper calls Start-Process by its module, so a function or alias named
+# Start-Process cannot stand in for it; a function whose name itself carries
+# that module qualifier still runs for the call, the residual
+# test/windows/README.md states (Contracts.90-Workflows.ps1,
+# EVIDENCE-TOAST-FOREGROUND). This probe swaps that one call for the stand-in
+# below.
 $startWithEnvironmentText = $startWithEnvironmentFunctions[0].Extent.Text
 if ([regex]::Matches($startWithEnvironmentText, [regex]::Escape('Microsoft.PowerShell.Management\Start-Process')).Count -ne 1) {
     throw 'Accessibility process-environment helper must call Microsoft.PowerShell.Management\Start-Process once.'
