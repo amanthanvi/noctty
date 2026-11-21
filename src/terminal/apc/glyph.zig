@@ -136,6 +136,7 @@
 //! Registrations live for the session duration. A 1025th registration
 //! evicts the oldest entry (FIFO). Sessions are isolated: two tabs may
 //! independently register the same codepoint.
+//! Individual allocations made by the `glyf` outline decoder are capped at 64 KiB.
 //!
 //! ## Security: PUA-Only Restriction
 //!
