@@ -692,7 +692,9 @@ function Get-CiScriptFileEdges {
     param(
         [Parameter(Mandatory)] [string] $RepoRoot,
         [Parameter(Mandatory)] [string] $RepoPath,
-        [Parameter(Mandatory)] [string] $Text
+        # An empty file has no edges; '' is its text, and the reader's $null (no file) never reaches here (CodeRabbit
+        # on #740: without AllowEmptyString a zero-byte helper failed the walk on a binding error).
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Text
     )
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)

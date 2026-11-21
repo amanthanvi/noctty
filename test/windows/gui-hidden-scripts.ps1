@@ -221,6 +221,16 @@ foreach ($form in $quiet.Keys) {
     Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
 
+# An empty (zero-byte) file has no edges and is a member like any other (CodeRabbit on #740: the parser's mandatory
+# text refused '', and that binding error failed the walk); empty literal code is quiet; a file that does not exist
+# still fails the walk as missing.
+$emptyWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '. (Join-Path $PSScriptRoot ''empty.ps1''); Invoke-Expression '''''; 'test/windows/empty.ps1' = '' }
+Assert-True ($emptyWalk.Problems.Count -eq 0 -and $emptyWalk.Members -ccontains 'test/windows/empty.ps1') "An empty helper and empty literal code must walk cleanly: $($emptyWalk.Problems -join '; ') [$($emptyWalk.Members -join ', ')]"
+$emptyEntry = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '' }
+Assert-True ($emptyEntry.Problems.Count -eq 0 -and $emptyEntry.Members.Count -eq 1) "An empty entry must walk cleanly: $($emptyEntry.Problems -join '; ')"
+$emptyMissing = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '. (Join-Path $PSScriptRoot ''empty.ps1'')' }
+Assert-True ($emptyMissing.Problems.Count -eq 1 -and $emptyMissing.Missing -ccontains 'test/windows/empty.ps1') 'A helper that does not exist must still fail the walk as missing, not read as empty.'
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 
