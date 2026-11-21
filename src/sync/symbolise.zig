@@ -210,7 +210,10 @@ fn loadApi() error{NoDbgHelp}!*const Api {
     var fns: Api = undefined;
     inline for (@typeInfo(Api).@"struct".fields) |field| {
         const proc = GetProcAddress(lib, field.name) orelse return error.NoDbgHelp;
-        @field(fns, field.name) = @ptrCast(proc);
+        // A function pointer is aligned 4 on aarch64 and 1 on x86_64, so only an
+        // aarch64 build rejects the cast without the assertion (tabs-panes.md,
+        // 2026-11-08 TEAROFF-01, review round 2).
+        @field(fns, field.name) = @ptrCast(@alignCast(proc));
     }
     api = fns;
     return &api.?;
