@@ -20,4 +20,3 @@ website/.next
 # fuzz corpus files
 test/fuzz-libghostty/corpus/
 test/fuzz-libghostty/afl-out/
-
