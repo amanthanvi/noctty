@@ -500,28 +500,6 @@ pub fn threadRoles(mode: std.builtin.OptimizeMode) bool {
     };
 }
 
-/// The text every panic of the runtime thread-role layer starts with
-/// (`src/sync`). An exe built without the layer holds none of it (PLAN.md
-/// §2.7 acceptance test 14), and build.zig checks that of the app exe.
-pub const thread_role_text = "thread-role layer:";
-
-/// Whether `file`, read from its position to its end, holds `text`, wherever
-/// the reads into `buf` split it. `buf` must be longer than `text`.
-pub fn fileHolds(file: std.fs.File, text: []const u8, buf: []u8) !bool {
-    std.debug.assert(text.len > 0 and buf.len > text.len);
-    // The bytes carried over from the last read: a match that the next read
-    // completes starts in its last `text.len - 1` bytes.
-    var kept: usize = 0;
-    while (true) {
-        const n = try file.read(buf[kept..]);
-        if (n == 0) return false;
-        const end = kept + n;
-        if (std.mem.indexOf(u8, buf[0..end], text) != null) return true;
-        kept = @min(end, text.len - 1);
-        std.mem.copyForwards(u8, buf[0..kept], buf[end - kept .. end]);
-    }
-}
-
 /// Returns the build options for the terminal module. This assumes a
 /// Ghostty executable being built. Callers should modify this as needed.
 pub fn terminalOptions(self: *const Config, artifact: TerminalBuildOptions.Artifact) TerminalBuildOptions {
@@ -635,28 +613,7 @@ test "the thread-role layer is on in the test executable's Debug and ReleaseSafe
     }
 }
 
-test "fileHolds finds the text at every split of the reads, and only it" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const text = thread_role_text;
-    var buf: [text.len + 7]u8 = undefined;
-    var bytes: [3 * buf.len]u8 = undefined;
-
-    // At each offset, so a read boundary falls before, inside and after it.
-    for (0..bytes.len - text.len + 1) |at| {
-        @memset(&bytes, '.');
-        @memcpy(bytes[at..][0..text.len], text);
-        try tmp.dir.writeFile(.{ .sub_path = "exe", .data = &bytes });
-        const file = try tmp.dir.openFile("exe", .{});
-        defer file.close();
-        try std.testing.expect(try fileHolds(file, text, &buf));
-    }
-
-    // The text less its last byte, across a boundary, and then nothing.
-    @memset(&bytes, '.');
-    @memcpy(bytes[buf.len - 3 ..][0 .. text.len - 1], text[0 .. text.len - 1]);
-    try tmp.dir.writeFile(.{ .sub_path = "exe", .data = &bytes });
-    const file = try tmp.dir.openFile("exe", .{});
-    defer file.close();
-    try std.testing.expect(!try fileHolds(file, text, &buf));
+test {
+    // The fork-owned build check of the layer's text, and its test.
+    _ = @import("ThreadRoleTextCheck.zig");
 }

@@ -464,44 +464,6 @@ fn addBenchCoreImport(
     compile.root_module.addImport("bench_core", bench_core);
 }
 
-/// Fails the build when an exe built without the runtime thread-role layer
-/// holds its text (`Config.thread_role_text`, which starts every panic of
-/// the layer): PLAN.md §2.7 acceptance test 14, a ReleaseFast app exe holds
-/// none of the layer's panic strings.
-const ThreadRoleTextCheck = struct {
-    step: std.Build.Step,
-    exe: std.Build.LazyPath,
-
-    fn create(b: *std.Build, exe: std.Build.LazyPath) *ThreadRoleTextCheck {
-        const check = b.allocator.create(ThreadRoleTextCheck) catch @panic("OOM");
-        check.* = .{
-            .step = .init(.{
-                .id = .custom,
-                .name = "check the exe holds no thread-role layer text",
-                .owner = b,
-                .makeFn = make,
-            }),
-            .exe = exe.dupe(b),
-        };
-        exe.addStepDependencies(&check.step);
-        return check;
-    }
-
-    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
-        _ = options;
-        const BuildConfig = @import("src/build/Config.zig");
-        const check: *ThreadRoleTextCheck = @fieldParentPtr("step", step);
-        const path = check.exe.getPath2(step.owner, step);
-        const file = std.fs.cwd().openFile(path, .{}) catch |err|
-            return step.fail("unable to open '{s}': {s}", .{ path, @errorName(err) });
-        defer file.close();
-        var buf: [64 * 1024]u8 = undefined;
-        const holds = BuildConfig.fileHolds(file, BuildConfig.thread_role_text, &buf) catch |err|
-            return step.fail("unable to read '{s}': {s}", .{ path, @errorName(err) });
-        if (holds) return step.fail(
-            "'{s}' holds the runtime thread-role layer's text \"{s}\", " ++
-                "but its mode builds without the layer (PLAN.md 2.7, acceptance test 14)",
-            .{ path, BuildConfig.thread_role_text },
-        );
-    }
-};
+/// Fails the install when an app exe built without the runtime thread-role
+/// layer holds its text (PLAN.md §2.7 acceptance test 14).
+const ThreadRoleTextCheck = @import("src/build/ThreadRoleTextCheck.zig");

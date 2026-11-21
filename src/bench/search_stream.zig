@@ -40,7 +40,7 @@ const Terminal = terminal.Terminal;
 const SearchThread = terminal.search.Thread;
 const QuerySearch = terminal.search.QuerySearch;
 const StateMutex = terminal.search.StateMutex;
-const thread_role = terminal.search.thread_role;
+const thread_role = bench_core.thread_role;
 const stats = @import("stats.zig");
 
 pub const std_options: std.Options = .{ .log_level = .err };

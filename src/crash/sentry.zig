@@ -9,7 +9,6 @@ const internal_os = @import("../os/main.zig");
 const crash = @import("main.zig");
 const state = &@import("../global.zig").state;
 const Surface = @import("../Surface.zig");
-const thread_role = @import("../sync/thread_role.zig");
 
 const log = std.log.scoped(.sentry);
 const darwin = if (builtin.os.tag.isDarwin()) struct {
@@ -95,8 +94,6 @@ pub fn init(gpa: Allocator) !void {
 }
 
 fn initThread(gpa: Allocator) !void {
-    const role_scope = thread_role.enter(.{ .worker = "sentry" });
-    defer role_scope.exit();
     if (comptime !build_options.sentry) return;
 
     // Right now, on Darwin, `std.Thread.setName` can only name the current

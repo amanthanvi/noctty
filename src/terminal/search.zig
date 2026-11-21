@@ -9,10 +9,6 @@ pub const QuerySearch = @import("search/query_search.zig").QuerySearch;
 /// `Options.mutex`, the renderer-state mutex. With the thread-role layer off,
 /// as in every lib-vt build, it has `std.Thread.Mutex`'s size and methods.
 pub const StateMutex = @import("../sync/state_mutex.zig").StateMutex;
-/// The thread roles `StateMutex` reads, for a caller outside this module
-/// (the search benchmark's fixture scopes). With the layer off they compile
-/// to nothing.
-pub const thread_role = @import("../sync/thread_role.zig");
 
 pub const Active = @import("search/active.zig").ActiveSearch;
 pub const PageList = @import("search/pagelist.zig").PageListSearch;

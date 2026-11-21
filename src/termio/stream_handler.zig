@@ -136,12 +136,18 @@ pub const StreamHandler = struct {
         // sending to it here would deadlock if the mailbox were full.
     }
 
-    /// Not an `inline fn`: Zig 0.15.2 would record the relock below as its
-    /// caller's (PLAN.md §2.7 RQ11, §19.1).
+    /// Inline, as upstream's is, except in Debug, where a real function
+    /// keeps the renderer-state relock below recorded as its own: Zig 0.15.2
+    /// names the caller for a site inlined into it (PLAN.md §2.7 RQ11,
+    /// §19.1). Release code is the inline fn's, as Exec.zig's reader keeps
+    /// its always_inline processOutput call outside Debug.
+    const surface_message_writer_cc: std.builtin.CallingConvention =
+        if (builtin.mode == .Debug) .auto else .@"inline";
+
     fn surfaceMessageWriter(
         self: *StreamHandler,
         msg: apprt.surface.Message,
-    ) void {
+    ) callconv(surface_message_writer_cc) void {
         // A stopping reader sends nothing more: a closing surface has already
         // left the app, which drops its messages, and the app thread, which
         // drains this queue, may be joining this reader's IO thread.

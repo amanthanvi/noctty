@@ -528,7 +528,7 @@ const TestUserData = struct {
     }
 };
 
-test "the search thread reports a query's matches, then completes" {
+test {
     // The test thread owns the search thread as the app thread does: its
     // deinit stops the QuerySearch, which locks. The worker's threadMain
     // enters .search itself.
