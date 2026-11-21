@@ -1682,9 +1682,13 @@ Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
 runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
 a `Get-Command` result, an alias made through `New-Item` on the `alias:` drive
-with a path the walker cannot read, and a repo folder added to `$env:PATH`,
+with a path the walker cannot read, a repo folder added to `$env:PATH`,
 which makes a bare name run a `.ps1` there (the walk reads a bare name as a
-command on PATH). A script a
+command on PATH), a bare `cmd`, `pwsh` or `powershell` in cmd's command line
+shadowed by a same-named batch file in the current directory (cmd looks a bare
+name up there first; `echo` and `exit` are internal and never looked up), and
+the arguments of a tracked executable other than a shell, which must be plain
+words but are not read further (the repository tracks no executable). A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
 a leaf must not run a repo script that way.

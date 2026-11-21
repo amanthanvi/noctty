@@ -493,6 +493,7 @@ $allowFiles = @{
     'test/windows/fixtures/sol-r6-helper.cmd' = '@echo %1'; 'test/windows/fixtures/second.cmd' = '@echo off'; 'test/windows/fixtures/forward.cmd' = '@%*'
     'test/windows/fixtures/cmd.cmd' = '@echo %*'; 'test/windows/fixtures/pwsh.cmd' = '@echo %*'; 'test/windows/fixtures/powershell.cmd' = '@echo %*'
     'test/windows/fixtures/sol-helper.cmd' = '@echo %1'; 'test/windows/fixtures/tools/pwsh.cmd' = '@echo %*'; 'test/windows/child.ps1' = '1'
+    'test/windows/fixtures/powershell.bat' = '@echo %*'
 }
 $allowRefused = @(
     # Sol, round 7: `call`, a leading redirect, and `/d /c` in one element.
@@ -505,6 +506,8 @@ $allowRefused = @(
     'cmd /c "$PSScriptRoot\fixtures\tools\pwsh -File $PSScriptRoot\child.ps1"'
     'cmd.exe /d /c "$PSScriptRoot\fixtures\cmd" /c exit'
     'cmd.exe /d /c "$PSScriptRoot\fixtures\powershell -File $PSScriptRoot\child.ps1"'
+    # Opus, round 7: a path named powershell, with a powershell.bat beside it.
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\powershell" -Version'
     # Round 6: an extensionless helper with an argument, two segments, a pipe, and the rest of cmd's language.
     'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper sentinel"'
     'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper" sentinel'
@@ -532,6 +535,10 @@ $allowRefused = @(
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') $unknown'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') pwsh -File $unknown'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') @forwarded'
+    # Opus, round 7: cmd expands a forwarded `%var%` or `!var!`.
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') %FIXTURE_SCRIPT%'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') !FIXTURE_SCRIPT!'
+    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''build'', ''%FIXTURE_SCRIPT%'' -Wait'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') build "$PSScriptRoot\child.ps1"'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') "$PSScriptRoot\fixtures\pwsh" -File (Join-Path $PSScriptRoot ''child.ps1'')'
     'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList $unknownList'
@@ -610,6 +617,10 @@ try {
     $caseWalk = Get-ScriptClosure -RepoRoot $caseRoot -Entries @('test/windows/entry.ps1') -Reader (New-CiScriptFileReader -RepoRoot $caseRoot) -LegacyEdges @()
     Assert-True ($caseWalk.Problems.Count -eq 0 -and $caseWalk.Members -ccontains 'test/windows/fixtures/sol-r6-helper.ps1' -and $caseWalk.Members -cnotcontains 'test/windows/Fixtures/sol-r6-helper.ps1') "A lookup spelled Fixtures\ must yield the tree's spelling: $($caseWalk.Problems -join '; ') [$($caseWalk.Members -join ', ')]"
     Assert-True (Get-CiGuiSelection -ChangedPaths @('test/windows/fixtures/sol-r6-helper.ps1') -GuiList @($caseWalk.Members)) 'A change to the tree-spelled helper must select the suite through the list the walk gave.'
+    # Opus on #740 (round 7): an explicit target spelled `Fixtures\` is spelled as the tree spells it too.
+    [IO.File]::WriteAllText((Join-Path $caseRoot 'test\windows\explicit.ps1'), '& (Join-Path $PSScriptRoot ''Fixtures\Sol-R6-Helper.ps1'')')
+    $explicitWalk = Get-ScriptClosure -RepoRoot $caseRoot -Entries @('test/windows/explicit.ps1') -Reader (New-CiScriptFileReader -RepoRoot $caseRoot) -LegacyEdges @()
+    Assert-True ($explicitWalk.Problems.Count -eq 0 -and $explicitWalk.Members -ccontains 'test/windows/fixtures/sol-r6-helper.ps1') "An explicit target spelled Fixtures\Sol-R6-Helper.ps1 must yield the tree's spelling: $($explicitWalk.Problems -join '; ') [$($explicitWalk.Members -join ', ')]"
 }
 finally { Remove-Item -LiteralPath $caseRoot -Recurse -Force -ErrorAction SilentlyContinue }
 

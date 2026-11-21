@@ -1555,7 +1555,18 @@ function Get-ScriptClosure {
         try { $found = Get-CiScriptFileEdges -RepoRoot $RepoRoot -RepoPath $path -Text $text }
         catch { $problems.Add($_.Exception.Message); continue }
         $anchorsByFile[$path] = @($found.Unresolved)
-        foreach ($target in $found.Targets) { $edges.Add([pscustomobject]@{ From = $path; To = $target }); $queue.Enqueue($target) }
+        foreach ($target in $found.Targets) {
+            # Spelled as the tree spells it, through a listing reader (Opus on #740: `Fixtures\x.cmd` named a member
+            # the changed path `fixtures/x.cmd` did not match). A target the listing lacks keeps its spelling.
+            $spelled = $target
+            $lister = $Reader.PSObject.Properties['Lister']
+            if ($lister) {
+                $cut = $target.LastIndexOf('/')
+                $listed = @(& $lister.Value $(if ($cut -ge 0) { $target.Substring(0, $cut) } else { '' }) | Where-Object { [string]::Equals($_, $target, [StringComparison]::OrdinalIgnoreCase) })
+                if ($listed.Count -eq 1) { $spelled = $listed[0] }
+            }
+            $edges.Add([pscustomobject]@{ From = $path; To = $spelled }); $queue.Enqueue($spelled)
+        }
         # A path lookup resolves only to a `.ps1` that is the one file it may find; any other lookup fails the walk:
         # a native or batch sibling, with or without a `.ps1`, or none (Find-CiScriptLookupFiles).
         foreach ($base in $found.Lookups) {
