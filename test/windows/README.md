@@ -1652,47 +1652,31 @@ keeps as `result.incomplete.json` and replaces with an `error` result.
 
 The script walk's edge definition (design §4.3) covers the ways it lists to run
 a script, not every way PowerShell has. A name with a path separator is a path
-lookup in every form (`&`, `.`, a bare word, `Get-Command`, cmd's `/C` and
-`call`), whatever its leaf, unless it is `Microsoft.PowerShell.*\Verb-Noun` and
-the walker's own session finds that module exporting that command. With no
-extension, a lookup resolves only when its `.ps1` is the one sibling with
-`.ps1` or a PATHEXT extension (matched case-insensitively), whatever
-`-CommandType` would pick; a native or batch sibling, or none, leaves it
-unresolved, and so does any extensionless path in cmd's command line, since
-cmd never runs a `.ps1`. A relative one is unresolved. cmd is not parsed as a
-language: a `/C`, `/K` or `/R` command line, direct, through `&`,
-`Start-Process` or a batch file, resolves only in an allowlisted shape, and is
-unresolved in every other. It must hold switches only before `/C`, no
-`& | < > ^ % ! ( )`, and at most one quoted token (never with `/S`). Its
-command must be one of:
+lookup in every form (`&`, `.`, a bare word, `Get-Command`), whatever its leaf,
+unless it is `Microsoft.PowerShell.*\Verb-Noun` and the walker's own session
+finds that module exporting that command. With no extension, a lookup resolves
+only when its `.ps1` is the one sibling with `.ps1` or a PATHEXT extension
+(matched case-insensitively), whatever `-CommandType` would pick; a native or
+batch sibling, or none, leaves it unresolved. A relative one is unresolved.
 
-- a rooted path with a PATHEXT extension, which is that file;
-- `echo` or `exit`, which run no file;
-- a bare `cmd`, `pwsh` or `powershell` (with or without `.exe`), read by its
-  own reader.
+cmd and batch files are refused: any invocation of `cmd` or of a `.cmd` or
+`.bat` file is unresolved, in every form (`&`, `.`, a bare path, `Start-Process`,
+a pipeline, a batch file's arguments), so a change to such a file runs the
+suite. Every review round from 5 to 8 found a new silent hole in reading cmd's
+language or a batch file's forwarding (`%*`, a helper named by a plain word, a
+switch glued to `/C`), and no GUI member runs a resolvable cmd or batch line;
+only the anchored legacy-only lines (`$script:CiScriptClosureLegacyEdges`) are
+exempt. The PowerShell readers stay.
 
-`call`, `start`, a redirect, a relative or extensionless path (`<dir>\pwsh`
-included) and any other name are unresolved. A batch file may forward its
-arguments (`%*`): they add nothing only as plain literal words, which never
-name a shell (`cmd`, `pwsh`, `powershell`, with or without `.exe`) or end in
-`.ps1` or a PATHEXT extension, and a leading bare or rooted shell launch is
-read by that shell's reader; any other argument leaves the call unresolved. `Start-Process` with a cmd or batch `-FilePath`
-refuses an argument-list element with whitespace or quotes, since it joins the
-elements with spaces.
 Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
 runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
 a `Get-Command` result, an alias made through `New-Item` on the `alias:` drive
-with a path the walker cannot read, a repo folder added to `$env:PATH`,
-which makes a bare name run a `.ps1` there (the walk reads a bare name as a
-command on PATH), a bare `cmd`, `pwsh` or `powershell` in cmd's command line
-shadowed by a same-named batch file in the current directory (cmd looks a bare
-name up there first; `echo` and `exit` are internal and never looked up), and
-the arguments of a tracked executable other than a shell, which must be plain
-words but are not read further (the repository tracks no executable), a batch
-file's own text, which the walk never reads (`@call "%~dp0%1"` runs whatever
-its argument names), and a command run outside cmd and PowerShell by another
-launcher such as `conhost.exe`. A script a
+with a path the walker cannot read, a repo folder added to `$env:PATH`, which
+makes a bare name run a `.ps1` there (the walk reads a bare name as a command
+on PATH), the arguments of a tracked executable other than a shell, which are
+not read (the repository tracks no executable), and a command run outside cmd
+and PowerShell by another launcher such as `conhost.exe`. A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
 a leaf must not run a repo script that way.

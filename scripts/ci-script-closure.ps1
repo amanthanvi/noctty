@@ -11,12 +11,14 @@ selection (scripts/ci-gui-selection.ps1) can walk both sides of a pull request, 
 
 An edge (design v7 §4.3, "What the walker counts as an edge"):
   * a `.` or `&`, or a bare path called without one (PowerShell's implicit `&`), whose target is, or may be, a
-    .ps1, .psm1, .cmd or .bat file;
+    .ps1 or .psm1 file;
   * the script a PowerShell executable runs: its -File, its first positional argument (pwsh's -File), and anything
     -Command, -EncodedCommand, Windows PowerShell's positional or a splat may run; the executable may be named,
     a path, or reached through a variable or Get-Command (Test-CiScriptPowerShellName);
-  * `cmd /c`, `/k` or `/r` with a script or a PowerShell command line;
-  * Start-Process of a script, or of PowerShell or cmd with such arguments (-ArgumentList read element by element);
+  * cmd, and a .cmd or .bat file, in any form: unresolved, never read (the lead on #740: each review round found a
+    new silent hole in reading cmd and batch semantics, and no real member runs a resolvable cmd or batch line), save
+    the anchored legacy-only lines ($script:CiScriptClosureLegacyEdges);
+  * Start-Process of a script, or of PowerShell with such arguments (-ArgumentList read element by element);
   * Start-Job, Start-ThreadJob or Invoke-Command -FilePath, and Import-Module of a script module by path;
   * Invoke-Expression, [scriptblock]::Create, InvokeScript, NewScriptBlock and a PowerShell object's AddScript: a
     literal's own edges, and any other argument unresolved;
@@ -174,9 +176,6 @@ function Find-CiScriptLookupFiles {
     foreach ($path in $found) { $path }
 }
 
-# The cmd builtins a command line may name and still resolve: they run no file. Only what the walk needs; any other
-# name in cmd's command position is unresolved (the cmd allowlist, `$cmdArguments`).
-$script:CiScriptCmdBuiltins = @('echo', 'exit')
 
 # The parameters of the cmdlets whose arguments the walker binds, from their metadata on pwsh 7.6.10
 # ((Get-Command <name>).Parameters): a word names a parameter that takes a value, `:s` marks a switch, and `=` lists
@@ -1058,7 +1057,8 @@ function Get-CiScriptFileEdges {
             if ($repo) { $lookups.Add($repo); return }
             $unresolved.Add($Why); return
         }
-        if ($Value.Kind -eq 'path' -and (Test-CiScriptTargetKind $Value.Value) -in @('script', 'batch')) {
+        # A batch file is unresolved, never a target: the walk does not read cmd or batch semantics.
+        if ($Value.Kind -eq 'path' -and (Test-CiScriptTargetKind $Value.Value) -ceq 'script') {
             $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $Value.Value
             if ($repo) { $targets.Add($repo); return }
         }
@@ -1139,140 +1139,14 @@ function Get-CiScriptFileEdges {
         }
         return @{ Is = 'unresolved' }
     }
-    # An argument's text as the program receives it, or $null when the walk cannot read it (a splat, a value it cannot
-    # resolve, a path lookup).
-    $entryText = {
-        param($Entry)
-        if ($Entry.Splat) { return $null }
-        if ($Entry.Param) { return $(if ($Entry.Node) { $Entry.Node.Extent.Text } else { '/' + $Entry.Param }) }
-        if ($Entry.Node -is [System.Management.Automation.Language.ConstantExpressionAst] -and $Entry.Node -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $Entry.Node.Extent.Text }
-        $value = & $valueOf $Entry
-        if ($value.Kind -eq 'path' -and -not $value.Lookup) { return [string]$value.Value }
-        if ($value.Kind -eq 'native' -and $value.Value) { return [string]$value.Value }
-        return $null
-    }
-    # Whether arguments are plain literal words, which a batch file or another program may forward without running a
-    # file: switches, numbers, and words with no separator, quote, `%`, `!`, `$` or whitespace that name no program. A
-    # word naming a shell (cmd, pwsh, powershell, with or without .exe) or ending in `.ps1`, `.psm1`, `.psd1` or a
-    # PATHEXT extension may be what the batch file runs (Greptile on #740: a wrapper running `%2 %3 %4` with
-    # `run powershell.exe -EncodedCommand <code>` ran PowerShell past a first-word check), so it is no plain word.
-    $plainWords = {
-        param([object[]] $Entries)
-        # Assigned, never piped: Get-CiScriptLookupExtensions returns its list as one array object.
-        $programExtensions = Get-CiScriptLookupExtensions
-        foreach ($entry in $Entries) {
-            if ($entry.Splat) { return $false }
-            if ($entry.Param -and -not $entry.Attached) { continue }
-            $text = & $entryText $entry
-            # cmd's operators too: a batch file forwarding `%*` hands `x&pwsh` to cmd as two commands (Opus on #740).
-            if ($null -eq $text -or $text -match '[\\/"%!$\s&|<>^()]') { return $false }
-            $word = $text.ToLowerInvariant()
-            if ($word -in @('cmd', 'cmd.exe', 'pwsh', 'pwsh.exe', 'powershell', 'powershell.exe')) { return $false }
-            $extension = [IO.Path]::GetExtension($word)
-            if ($extension -in @('.ps1', '.psm1', '.psd1') -or ($extension -and $extension -in $programExtensions)) { return $false }
-        }
-        return $true
-    }
-    # A rooted file named with its extension, and its arguments: a script or batch file is an edge (a batch file's
-    # arguments read by `$batchArguments`); cmd's and PowerShell's executables read their own; another file in the
-    # repository is a member; and any other program's arguments must be plain words.
-    $runFile = {
-        param([string] $Path, [object[]] $Rest, [string] $Why)
-        $kind = Test-CiScriptTargetKind $Path
-        $leaf = ($Path -split '[\\/]')[-1].ToLowerInvariant()
-        if ($kind -eq 'batch') { & $scriptTarget @{ Kind = 'path'; Value = $Path } $Why; & $batchArguments $Rest $Why; return }
-        if ($kind -eq 'script') { & $scriptTarget @{ Kind = 'path'; Value = $Path } $Why; return }
-        if ($kind -eq 'native' -and (Test-CiScriptPowerShellName $leaf)) { & $powershellArguments $Rest $leaf.StartsWith('pwsh') $Why; return }
-        if ($kind -eq 'native' -and $leaf -ceq 'cmd.exe') { & $cmdArguments $Rest $Why; return }
-        $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $Path
-        if ($repo) { $targets.Add($repo) }
-        if (-not (& $plainWords $Rest)) { $unresolved.Add($Why) }
-    }
-    # cmd's arguments, resolved only in shapes the walk fully understands, and unresolved in every other (the lead on
-    # #740, after each round found a new hole in reading cmd's language: `call <dir>\cmd`, a leading `2>nul`, `/d /c`
-    # in one argument). Before /C, /K or /R: switches only. After it, cmd's command line: no `& | < > ^ % ! ( )`, and
-    # at most one quoted token (an argument written as `"<token>"`, or one with whitespace, which PowerShell quotes),
-    # never with /S, which strips quotes. Its command must be:
-    #   (a) a rooted path with a PATHEXT extension, that file (`$runFile`; quoted, its repository path has no space);
-    #   (b) a builtin that runs no file ($script:CiScriptCmdBuiltins);
-    #   (c) a bare cmd, pwsh or powershell, with or without .exe, read by its own reader.
-    # Anything else is unresolved: `call`, `start`, a relative or extensionless path, any other name.
-    $cmdArguments = {
-        param([object[]] $Entries, [string] $Why)
-        $at = -1
-        $stripsQuotes = $false
-        for ($i = 0; $i -lt $Entries.Count; $i++) {
-            if ($Entries[$i].Splat -or -not $Entries[$i].Param) { $unresolved.Add($Why); return }
-            if ($Entries[$i].Param -in @('c', 'k', 'r')) { $at = $i; break }
-            # cmd reads `/chelper` as `/c helper` (Opus on #740): a switch glued to its command is unresolved.
-            if ($Entries[$i].Param -match '\A[ckr].') { $unresolved.Add($Why); return }
-            if ($Entries[$i].Param -ceq 's') { $stripsQuotes = $true }
-        }
-        if ($at -lt 0 -or $at + 1 -ge $Entries.Count) { return }
-        $words = [System.Collections.Generic.List[string]]::new()
-        $quoted = -1
-        for ($i = $at + 1; $i -lt $Entries.Count; $i++) {
-            $text = & $entryText $Entries[$i]
-            if ($null -eq $text) { $unresolved.Add($Why); return }
-            if ($text -match '\A"([^"]+)"\z') { $text = $Matches[1]; if ($quoted -ge 0) { $unresolved.Add($Why); return }; $quoted = $words.Count }
-            elseif ($text -match '\s') { if ($quoted -ge 0) { $unresolved.Add($Why); return }; $quoted = $words.Count }
-            if ($text.Length -eq 0 -or $text -match '["&|<>^%!()]') { $unresolved.Add($Why); return }
-            $words.Add($text)
-        }
-        if ($quoted -ge 0 -and $stripsQuotes) { $unresolved.Add($Why); return }
-        $command = $words[0]
-        $rest = @(for ($i = 1; $i -lt $words.Count; $i++) {
-                $(if ($words[$i] -match '\s') { [pscustomobject]@{ Param = $null; Attached = $null; Splat = $false; Node = $null; Value = @{ Kind = 'path'; Value = $words[$i] } } } else { & $wordEntry $words[$i] })
-            })
-        if ($command -notmatch '[\\/]' -and -not [IO.Path]::IsPathRooted($command)) {
-            $leaf = $command.ToLowerInvariant()
-            if (Test-CiScriptPowerShellName $leaf) { & $powershellArguments $rest $leaf.StartsWith('pwsh') $Why; return }
-            if ($leaf -in @('cmd', 'cmd.exe')) { & $cmdArguments $rest $Why; return }
-            if ($leaf -in $script:CiScriptCmdBuiltins) { return }
-            $unresolved.Add($Why); return
-        }
-        $extension = [IO.Path]::GetExtension($command).ToLowerInvariant()
-        # Assigned, never piped: Get-CiScriptLookupExtensions returns its list as one array object.
-        $pathExt = Get-CiScriptLookupExtensions
-        if (-not [IO.Path]::IsPathRooted($command) -or $extension -ceq '.ps1' -or $extension -notin $pathExt) { $unresolved.Add($Why); return }
-        # A quoted command with a space stays one token only where it names a file: inside the repository, with no
-        # space in its repository path (a space only in the checkout's own path).
-        if ($quoted -eq 0 -and $command -match '\s') {
-            $repoCommand = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $command
-            if (-not $repoCommand -or $repoCommand -match '\s') { $unresolved.Add($Why); return }
-        }
-        & $runFile $command $rest $Why
-    }
-    # A batch file's arguments: it may forward them (`%*`) to what it runs (Opus on #740: `& <x.cmd> powershell.exe
-    # -File <child>` ran the child, and the walk dropped it). When they begin with a bare cmd, pwsh or powershell, or a
-    # rooted cmd.exe, pwsh.exe or powershell.exe, that launch's reader takes the rest; otherwise they add nothing only
-    # when every one is a plain literal word (`$plainWords`), and leave the call unresolved when any is not.
-    $batchArguments = {
-        param([object[]] $Entries, [string] $Why)
-        if ($Entries.Count -eq 0) { return }
-        $first = $Entries[0]
-        $text = $(if (-not $first.Param) { & $entryText $first })
-        if ($null -ne $text) {
-            $leaf = ($text -split '[\\/]')[-1].ToLowerInvariant()
-            $bare = $text -notmatch '[\\/]' -and -not [IO.Path]::IsPathRooted($text)
-            $rootedShell = [IO.Path]::IsPathRooted($text) -and $leaf -in @('cmd.exe', 'pwsh.exe', 'powershell.exe')
-            $rest = @(for ($i = 1; $i -lt $Entries.Count; $i++) { $Entries[$i] })
-            if (($bare -or $rootedShell) -and (Test-CiScriptPowerShellName $leaf)) { & $powershellArguments $rest $leaf.StartsWith('pwsh') $Why; return }
-            if (($bare -and $leaf -in @('cmd', 'cmd.exe')) -or ($rootedShell -and $leaf -ceq 'cmd.exe')) { & $cmdArguments $rest $Why; return }
-        }
-        if (-not (& $plainWords $Entries)) { $unresolved.Add($Why) }
-    }
-
     # Run a classified callee with its argument entries.
     $invoke = {
         param($Callee, [object[]] $Entries, [string] $Why)
         switch ($Callee.Is) {
-            'script' {
-                & $scriptTarget $Callee.Value $Why
-                if (-not $Callee.Value.Lookup -and (Test-CiScriptTargetKind $Callee.Value.Value) -eq 'batch') { & $batchArguments $Entries $Why }
-            }
+            'script' { & $scriptTarget $Callee.Value $Why }
             'powershell' { & $powershellArguments $Entries $Callee.Pwsh $Why }
-            'cmd' { & $cmdArguments $Entries $Why }
+            # cmd is never read (the header's edge list): unresolved, with any arguments.
+            'cmd' { $unresolved.Add($Why) }
             'maybe' { if (& $mayRunScript $Entries) { $unresolved.Add($Why) } }
             'unresolved' { $unresolved.Add($Why) }
         }
@@ -1395,22 +1269,9 @@ function Get-CiScriptFileEdges {
                 if ($callee.Is -in @('none', 'native', 'command')) { break }
                 # A shell given -RedirectStandardInput reads its commands from that file (Opus on #740).
                 if ($callee.Is -in @('powershell', 'cmd') -and $bound.Named.ContainsKey('redirectstandardinput')) { $unresolved.Add($anchor); break }
-                # A batch file's argument list is read as its arguments are (`$batchArguments`); another script's is not.
-                $batchFile = $callee.Is -ceq 'script' -and -not $callee.Value.Lookup -and (Test-CiScriptTargetKind $callee.Value.Value) -eq 'batch'
-                if (($callee.Is -ceq 'script' -and -not ($batchFile -and $null -ne $list)) -or $callee.Is -ceq 'unresolved') { & $invoke $callee @() $anchor; break }
+                # A script (a batch file is unresolved there), cmd and an unresolved file take no argument reading.
+                if ($callee.Is -in @('script', 'cmd', 'unresolved')) { & $invoke $callee @() $anchor; break }
                 if ($null -eq $list) { if ($callee.Is -cne 'maybe') { & $invoke $callee @() $anchor }; break }
-                # For cmd or a batch file, Start-Process joins the elements with spaces, so an element with whitespace or
-                # quotes changes the words they get (Sol on #740: `"/d /c"` as one element): unresolved.
-                if ($callee.Is -ceq 'cmd' -or $batchFile) {
-                    $listNode = $list.Node
-                    while ($listNode -is [System.Management.Automation.Language.ParenExpressionAst] -or
-                        ($listNode -is [System.Management.Automation.Language.PipelineAst] -and $listNode.PipelineElements.Count -eq 1) -or
-                        $listNode -is [System.Management.Automation.Language.CommandExpressionAst]) {
-                        $listNode = $(if ($listNode -is [System.Management.Automation.Language.ParenExpressionAst]) { $listNode.Pipeline } elseif ($listNode -is [System.Management.Automation.Language.PipelineAst]) { $listNode.PipelineElements[0] } else { $listNode.Expression })
-                    }
-                    $elements = $(if ($listNode -is [System.Management.Automation.Language.ArrayLiteralAst] -or $listNode -is [System.Management.Automation.Language.ArrayExpressionAst]) { & $listEntries $list.Node } else { , @($list) })
-                    if ($null -eq $elements -or @($elements | Where-Object { $elementText = & $entryText $_; $null -eq $elementText -or $elementText -match '[\s"]' }).Count -gt 0) { $unresolved.Add($anchor); break }
-                }
                 $listed = $(if ($list.Node) { & $listEntries $list.Node } elseif ($list.Value) { , @($list.Value.Value -split '\s+' | Where-Object { $_ } | ForEach-Object { & $wordEntry $_ }) })
                 if ($null -eq $listed) { $unresolved.Add($anchor); break }
                 & $invoke $callee $listed $anchor

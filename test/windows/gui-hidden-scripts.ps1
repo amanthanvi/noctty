@@ -57,7 +57,6 @@ $helper = Join-Path $PSScriptRoot 'helper.ps1'
 Add-Type -Path (Join-Path $PSScriptRoot 'native.cs')
 $exe = Join-Path (Split-Path -Parent $repoRoot) 'noctty.exe'
 & $exe +version
-& (Join-Path $PSScriptRoot 'child.cmd')
 Get-ChildItem -LiteralPath $PSScriptRoot -File | Out-Null
 [scriptblock] $callback = { 1 }
 & $callback
@@ -71,10 +70,9 @@ $pwsh = (Get-Command pwsh.exe).Source
     'test/windows/helper.ps1' = '1'
     'test/windows/expandable.ps1' = '2'
     'test/windows/native.cs' = 'class X {}'
-    'test/windows/child.cmd' = '@echo off'
 }
 Assert-True ($walk.Problems.Count -eq 0) "The constant compositions, callbacks, native calls and -File on another cmdlet must walk cleanly: $($walk.Problems -join '; ')"
-foreach ($member in @('scripts/lib.ps1', 'test/windows/helper.ps1', 'test/windows/expandable.ps1', 'test/windows/native.cs', 'test/windows/child.cmd')) {
+foreach ($member in @('scripts/lib.ps1', 'test/windows/helper.ps1', 'test/windows/expandable.ps1', 'test/windows/native.cs')) {
     Assert-True ($walk.Members -ccontains $member) "The walk must reach $member."
 }
 
@@ -207,7 +205,6 @@ $reaches = [ordered]@{
     'Invoke-Command -FilePath' = 'Invoke-Command -ComputerName localhost -FilePath "$PSScriptRoot\child.ps1"'
     'Invoke-Expression of a literal' = 'Invoke-Expression ". ''$PSScriptRoot\child.ps1''"'
     'a local function returning the path' = 'function Get-ChildPath { Join-Path $PSScriptRoot ''child.ps1'' }' + "`n" + '& (Get-ChildPath)'
-    'cmd /c pwsh -File' = 'cmd.exe /d /c pwsh -NoProfile -File "$PSScriptRoot\child.ps1"'
     'Import-Module of a script path' = 'Import-Module (Join-Path $PSScriptRoot ''child.ps1'') -Force'
 }
 foreach ($form in $reaches.Keys) {
@@ -473,136 +470,73 @@ foreach ($noLister in @($false, $true)) {
     $greptile = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\pwsh'') -File (Join-Path $PSScriptRoot ''child.ps1'')'; 'test/windows/fixtures/pwsh.exe' = 'MZ'; 'test/windows/child.ps1' = '1' } -NoLister:$noLister
     Assert-True ($greptile.Problems.Count -ge 1 -and $greptile.Unresolved.Count -ge 1 -and $greptile.Members -cnotcontains 'test/windows/fixtures/pwsh.exe') "An extensionless pwsh path with only pwsh.exe there (lister: $(-not $noLister)) must fail the walk: $($greptile.Problems -join '; ') [$($greptile.Members -join ', ')]"
 }
-# Opus's cmd forms: an extensionless path in cmd's /C, /K or /R, or after `call`, is unresolved, whatever is there.
-foreach ($form in @('cmd /d /c "$PSScriptRoot\fixtures\helper"', 'cmd.exe /d /k "$PSScriptRoot\fixtures\helper"', 'cmd /d /c call "$PSScriptRoot\fixtures\helper"')) {
-    foreach ($files in @(@{ 'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off' }, @{ 'test/windows/fixtures/helper.ps1' = '1' })) {
-        $table = @{ 'test/windows/entry.ps1' = $form }
-        foreach ($key in $files.Keys) { $table[$key] = $files[$key] }
-        $formWalk = Get-FixtureWalk $table
-        Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form with $(@($files.Keys) -join ', ') must be unresolved (cmd never runs a .ps1): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
-    }
-}
-
-# The cmd allowlist (the lead on #740, after rounds 6 and 7 each found a hole in reading cmd's language: Sol's
-# `cmd /c "<dir>\helper sentinel"`, `call <dir>\cmd sentinel`, a leading `2>nul`, `"/d /c"` as one element;
-# Greptile's and CodeRabbit's `<dir>\pwsh` read as PowerShell). cmd's command line resolves only when its command is
-# (a) a rooted path with a PATHEXT extension, (b) a builtin that runs no file (`echo`, `exit`), or (c) a bare cmd,
-# pwsh or powershell; with no `& | < > ^ % ! ( )`, switches only before /C, and at most one quoted token. A batch
-# file's arguments (the forwarding rule) add nothing only as plain words, or begin with a launch its reader takes.
-$allowFiles = @{
+# cmd and batch files are refused (the lead on #740, round 8): every review round from 5 to 8 found a new silent hole in
+# reading cmd's language or a batch file's forwarding (Sol, Opus, Greptile, CodeRabbit), and no real member runs a
+# resolvable cmd or batch line. So any invocation of cmd or of a .cmd or .bat file is unresolved, in every form; only
+# the anchored legacy-only lines are exempt. Each form below, from those rounds, must fail the walk.
+$cmdFiles = @{
+    'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off'
     'test/windows/fixtures/sol-r6-helper.cmd' = '@echo %1'; 'test/windows/fixtures/second.cmd' = '@echo off'; 'test/windows/fixtures/forward.cmd' = '@%*'
     'test/windows/fixtures/cmd.cmd' = '@echo %*'; 'test/windows/fixtures/pwsh.cmd' = '@echo %*'; 'test/windows/fixtures/powershell.cmd' = '@echo %*'
-    'test/windows/fixtures/sol-helper.cmd' = '@echo %1'; 'test/windows/fixtures/tools/pwsh.cmd' = '@echo %*'; 'test/windows/child.ps1' = '1'
-    'test/windows/fixtures/powershell.bat' = '@echo %*'; 'test/windows/fixtures/pwsh-shim.cmd' = '@pwsh %*'
+    'test/windows/fixtures/sol-helper.cmd' = '@echo %1'; 'test/windows/fixtures/tools/pwsh.cmd' = '@echo %*'; 'test/windows/fixtures/powershell.bat' = '@echo %*'
+    'test/windows/fixtures/pwsh-shim.cmd' = '@pwsh %*'; 'test/windows/child.ps1' = '1'
 }
-$allowRefused = @(
-    # Sol, round 7: `call`, a leading redirect, and `/d /c` in one element.
+$cmdRefused = @(
+    # Round 5 (Opus): an extensionless path in cmd's command line, also after `call`.
+    'cmd /d /c "$PSScriptRoot\fixtures\helper"'
+    'cmd.exe /d /k "$PSScriptRoot\fixtures\helper"'
+    'cmd /d /c call "$PSScriptRoot\fixtures\helper"'
+    # Round 6 (Sol, Opus): a helper with an argument in one string, two segments, a pipe; a batch file forwarding a launch.
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper sentinel"'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\second.cmd && $PSScriptRoot\fixtures\sol-r6-helper sentinel"'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\second.cmd | $PSScriptRoot\fixtures\sol-r6-helper"'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" powershell.exe -File "$PSScriptRoot\child.ps1"'
+    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''powershell.exe'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'
+    # Round 7 (Greptile, CodeRabbit, Sol): a path named for a shell; `call`; a leading redirect; `/d /c` in one element.
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\pwsh" -Version'
+    'cmd /c "$PSScriptRoot\fixtures\tools\pwsh -File $PSScriptRoot\child.ps1"'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\powershell" -Version'
     'cmd.exe /d /c "call $PSScriptRoot\fixtures\cmd sentinel"'
     'cmd.exe /d /c "2>nul $PSScriptRoot\fixtures\sol-helper sentinel"'
     'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList "cmd.exe", "/d /c", "$PSScriptRoot\fixtures\sol-helper.cmd sentinel" -Wait'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') cmd.exe "/d /c" "$PSScriptRoot\fixtures\sol-helper.cmd"'
-    # Greptile and CodeRabbit: a path named for a shell.
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\pwsh" -Version'
-    'cmd /c "$PSScriptRoot\fixtures\tools\pwsh -File $PSScriptRoot\child.ps1"'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\cmd" /c exit'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\powershell -File $PSScriptRoot\child.ps1"'
-    # Opus, round 7: a path named powershell, with a powershell.bat beside it.
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\powershell" -Version'
-    # Round 6: an extensionless helper with an argument, two segments, a pipe, and the rest of cmd's language.
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper sentinel"'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper" sentinel'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\second.cmd && $PSScriptRoot\fixtures\sol-r6-helper sentinel"'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\second.cmd" ''&'' "$PSScriptRoot\fixtures\sol-r6-helper.cmd"'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\second.cmd | $PSScriptRoot\fixtures\sol-r6-helper"'
-    'cmd.exe /d /c call "$PSScriptRoot\fixtures\sol-r6-helper.cmd"'
-    # A redirect cmd reads (PowerShell's own `> nul` never reaches cmd's command line).
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd" ''>'' nul'
-    'cmd.exe /d /c "%FIXTURES%\sol-r6-helper.cmd"'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\^sol-r6-helper.cmd"'
-    'cmd.exe /d /c "($PSScriptRoot\fixtures\sol-r6-helper.cmd)"'
-    'cmd.exe /d /c ''"'' "$PSScriptRoot\fixtures\sol-r6-helper.cmd"'
-    'cmd.exe /d /c start "$PSScriptRoot\fixtures\sol-r6-helper.cmd"'
-    'cmd.exe /d /c fixtures\sol-r6-helper.cmd sentinel'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd x.cmd"'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd" "a b"'
-    # /S strips the quotes of a quoted token.
-    'cmd.exe /d /s /c ''"C:\gui-hidden-fixture\test\windows\fixtures\sol-r6-helper.cmd"'' sentinel'
-    'cmd.exe /d /c where pwsh'
-    'cmd.exe /d /c echo $unknown'
-    'cmd.exe /d sentinel /c exit'
-    # The forwarding rule: an argument that may be a script, an unreadable one, a splat.
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') .\other.ps1'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') $unknown'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') pwsh -File $unknown'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') @forwarded'
-    # Greptile on #740: a word that names a program, past the first argument, may be what the batch file runs.
+    # Round 8 (Greptile, Opus, Sol): a later program word; cmd's operators in a word; a glued switch; a shell reading
+    # input; a wrapper running a helper named by a plain word.
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run powershell.exe -EncodedCommand ZQBjAGgAbwAgAHgA'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run pwsh'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run cmd.exe /c exit'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run x.exe'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run X.COM'
-    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''run'', ''powershell.exe'', ''-EncodedCommand'', ''ZQBjAGgAbwAgAHgA'' -Wait'
-    'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" run PwSh.ExE'
-    # Opus, round 8: a forwarded word holding cmd's operators (a shim running `pwsh %*` reads `x&pwsh` as two commands).
     '& (Join-Path $PSScriptRoot ''fixtures\pwsh-shim.cmd'') ''x&pwsh'''
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') ''a|b'''
-    # Opus, round 8: cmd reads a switch glued to its command (`/chelper` is `/c helper`).
     'cmd.exe /d /chelper'
-    'cmd.exe /d /Kecho x'
-    # Opus, round 8: a shell reading its commands from its input.
+    'cmd.exe /d /Rsol-helper'
     '''echo x'' | cmd.exe /d'
-    '$commands | pwsh -NoProfile'
-    'Start-Process -FilePath cmd.exe -ArgumentList ''/d'' -RedirectStandardInput (Join-Path $PSScriptRoot ''commands.txt'') -Wait'
-    # Opus, round 7: cmd expands a forwarded `%var%` or `!var!`.
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') %FIXTURE_SCRIPT%'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') !FIXTURE_SCRIPT!'
-    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''build'', ''%FIXTURE_SCRIPT%'' -Wait'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') build "$PSScriptRoot\child.ps1"'
-    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') "$PSScriptRoot\fixtures\pwsh" -File (Join-Path $PSScriptRoot ''child.ps1'')'
-    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList $unknownList'
-    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''build release'''
-    'Start-Process -FilePath cmd.exe -ArgumentList ''/d'', ''/c'', ''"x y"'''
-    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\pwsh'') -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') helper'
+    # Sol, round 8, exactly: a helper glued to /C or /R, and a forwarding wrapper given a helper's bare name.
+    'cmd.exe /d /cverifyfixture'
+    'cmd.exe /d /rverifyfixture'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" verifyfixture'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" verifyfixture sentinel'
+    # Shapes that once resolved, refused now: an explicit batch file, a builtin, cmd running PowerShell, plain words.
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd" sentinel'
+    'cmd.exe /d /c exit 0'
+    'cmd.exe /d /c echo hello'
+    'cmd.exe /d /c pwsh -NoProfile -File "$PSScriptRoot\child.ps1"'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') build --verbose 3'
+    '& "$PSScriptRoot\fixtures\second.cmd"'
+    '. "$PSScriptRoot\fixtures\second.cmd"'
+    'Start-Process -FilePath cmd.exe -ArgumentList ''/d'', ''/c'', (Join-Path $PSScriptRoot ''fixtures\second.cmd'') -Wait'
+    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\second.cmd'') -Wait'
+    'pwsh -NoProfile -File (Join-Path $PSScriptRoot ''fixtures\second.cmd'')'
+    'cmd.exe /d'
+    'Set-Alias c cmd.exe; c /d /c exit'
 )
-foreach ($form in $allowRefused) {
+foreach ($form in $cmdRefused) {
     $table = @{ 'test/windows/entry.ps1' = $form }
-    foreach ($key in $allowFiles.Keys) { $table[$key] = $allowFiles[$key] }
+    foreach ($key in $cmdFiles.Keys) { $table[$key] = $cmdFiles[$key] }
     $formWalk = Get-FixtureWalk $table
-    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must be unresolved (outside the cmd allowlist): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1 -and @($formWalk.Members | Where-Object { $_ -match '(?i)\.(cmd|bat)\z' }).Count -eq 0) "$form must be unresolved (cmd and batch files are refused), and take no batch file: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
-# A positive case for each allowlisted shape.
-foreach ($case in @(
-        # (a) a rooted path with a PATHEXT extension, quoted or bare, its plain arguments forwarded harmlessly.
-        @{ Form = 'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd" sentinel'; Reach = @('test/windows/fixtures/sol-r6-helper.cmd') }
-        @{ Form = 'cmd.exe /d /c $PSScriptRoot\fixtures\sol-r6-helper.cmd sentinel'; Reach = @('test/windows/fixtures/sol-r6-helper.cmd') }
-        @{ Form = 'cmd.exe /d /c ''"C:\gui-hidden-fixture\test\windows\fixtures\second.cmd"'''; Reach = @('test/windows/fixtures/second.cmd') }
-        # (a) a batch file whose arguments begin with a launch: its reader takes them (the forwarding rule).
-        @{ Form = 'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" powershell.exe -File "$PSScriptRoot\child.ps1"'; Reach = @('test/windows/fixtures/forward.cmd', 'test/windows/child.ps1') }
-        # (a) a rooted shell executable by its extension.
-        @{ Form = 'cmd.exe /d /c C:\Tools\pwsh.exe -NoProfile -File "$PSScriptRoot\child.ps1"'; Reach = @('test/windows/child.ps1') }
-        # (c) a bare shell.
-        @{ Form = 'cmd.exe /d /c pwsh -NoProfile -File "$PSScriptRoot\child.ps1"'; Reach = @('test/windows/child.ps1') }
-        @{ Form = 'cmd.exe /d /c powershell.exe -File "$PSScriptRoot\child.ps1"'; Reach = @('test/windows/child.ps1') }
-        @{ Form = 'cmd.exe /d /c cmd /d /c "$PSScriptRoot\fixtures\second.cmd"'; Reach = @('test/windows/fixtures/second.cmd') }
-        # The forwarding rule through `&` and Start-Process.
-        @{ Form = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') powershell.exe -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot ''child.ps1'')'; Reach = @('test/windows/fixtures/forward.cmd', 'test/windows/child.ps1') }
-        @{ Form = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') pwsh -File (Join-Path $PSScriptRoot ''child.ps1'')'; Reach = @('test/windows/fixtures/forward.cmd', 'test/windows/child.ps1') }
-        @{ Form = 'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''powershell.exe'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'; Reach = @('test/windows/fixtures/forward.cmd', 'test/windows/child.ps1') }
-        @{ Form = 'Start-Process -FilePath cmd.exe -ArgumentList ''/d'', ''/c'', (Join-Path $PSScriptRoot ''fixtures\second.cmd'') -Wait'; Reach = @('test/windows/fixtures/second.cmd') }
-        # Plain arguments add nothing beyond the batch file.
-        @{ Form = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') build --verbose 3'; Reach = @('test/windows/fixtures/forward.cmd') }
-        @{ Form = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run release-notes v1.2 -Fast'; Reach = @('test/windows/fixtures/forward.cmd') }
-        @{ Form = 'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''build'', ''release'' -Wait'; Reach = @('test/windows/fixtures/forward.cmd') }
-    )) {
-    $table = @{ 'test/windows/entry.ps1' = $case.Form }
-    foreach ($key in $allowFiles.Keys) { $table[$key] = $allowFiles[$key] }
-    $formWalk = Get-FixtureWalk $table
-    Assert-True ($formWalk.Problems.Count -eq 0 -and @($case.Reach | Where-Object { $formWalk.Members -cnotcontains $_ }).Count -eq 0) "$($case.Form) must resolve within the cmd allowlist and reach $($case.Reach -join ', '): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
-}
-# (b) a builtin that runs no file, and an interactive cmd with no command.
-foreach ($form in @('cmd.exe /d /c echo hello', 'cmd.exe /d /c exit 0', 'cmd.exe /d /c exit', 'cmd.exe /d')) {
-    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form }
-    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+# The PowerShell readers stay: a bare or rooted pwsh or powershell reads its -File child.
+foreach ($form in @('pwsh -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')', '& C:\Tools\powershell.exe -File "$PSScriptRoot\child.ps1"', 'Start-Process -FilePath pwsh.exe -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait')) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/child.ps1') "$form must still read its child: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
 
 # Opus on #740 (round 6): an extensionless lookup through a production reader's own listing, on a small git tree.
@@ -987,9 +921,10 @@ try {
                 @{ Name = 'a wildcard edge, the child changed'; Leaf = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''interactive-win11-wildcard-chil*'') -CommandType ExternalScript; & $p'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'a literal edge, the child changed'; Leaf = '& (Join-Path $PSScriptRoot ''interactive-win11-wildcard-child.ps1'')'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $false }
                 @{ Name = 'a literal edge, an unrelated leaf changed'; Leaf = '& (Join-Path $PSScriptRoot ''interactive-win11-wildcard-child.ps1'')'; Path = 'test/windows/interactive-win11-key-input.ps1'; Expect = 'gui=false'; Fallback = $false }
-                # The cmd allowlist: its explicit, quoted command path selects through the list, with no fallback,
-                # under the spaced root (CodeRabbit on #740); every shape outside it falls back to the suite.
-                @{ Name = 'cmd running the helper by its quoted, explicit path, the helper changed'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd" sentinel'; Path = 'test/windows/fixtures/sol-r6-helper.cmd'; Expect = 'gui=true'; Fallback = $false }
+                # cmd and batch files are refused: each form falls back to the suite, under the spaced root (CodeRabbit
+                # on #740), an explicit, quoted batch path included.
+                @{ Name = 'cmd running the helper by its quoted, explicit path, the helper changed'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd" sentinel'; Path = 'test/windows/fixtures/sol-r6-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
+                @{ Name = 'a forwarding wrapper running a helper named by a plain word (Sol, round 8)'; Leaf = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') sol-helper'; Path = 'test/windows/fixtures/sol-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'cmd running an extensionless helper with an argument (Sol, round 6)'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper sentinel"'; Path = 'test/windows/fixtures/sol-r6-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'cmd running a path named pwsh (Greptile)'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\pwsh" -Version'; Path = 'test/windows/fixtures/pwsh.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'cmd running tools\pwsh in one string (CodeRabbit)'; Leaf = 'cmd /c "$PSScriptRoot\fixtures\tools\pwsh -File $PSScriptRoot\interactive-win11-wildcard-child.ps1"'; Path = 'test/windows/fixtures/tools/pwsh.cmd'; Expect = 'gui=true'; Fallback = $true }
