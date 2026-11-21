@@ -11,7 +11,7 @@
       "attempt": 1,
       "summary": "Started under a private-desktop driver, noctty keeps every process and window on that desktop in all three arms (bundled ConPTY, in-box ConPTY, the noctty.com CLI), with the positive, negative and enumeration controls; also a local run at #738's final head.",
       "governs": [
-        { "obligation": "gui-hidden lane: leaves run on a private desktop", "destinations": [ { "kind": "hosted", "owner": "test/windows/gui-hidden-plan.json" } ] }
+        { "obligation": "gui-hidden lane: leaves run on a private desktop", "destinations": [ { "kind": "hosted", "workflow": "gui-hidden.yml", "receipt": "measurement", "gate": "gui-hidden-gate", "owner": ["vt-probe", "smoke", "shell-command", "cli-automation", "undo", "session-restore"] } ] }
       ]
     },
     {
@@ -23,7 +23,7 @@
       "attempt": 1,
       "summary": "On the hosted runner's own desktop, SendInput's KEYEVENTF_UNICODE input reached the probe's in-process EDIT (14/14 events, 7 units exact) and a measurement copy of noctty (186/186 events, the nonce and Unicode units exact); each cover took its own keys.",
       "governs": [
-        { "obligation": "provisional lane: real input", "destinations": [ { "kind": "hosted:provisional", "owner": null } ] }
+        { "obligation": "provisional lane: real input", "destinations": [ { "kind": "hosted:provisional", "workflow": "the provisional lane's own workflow, not created yet (design §5)", "receipt": "measurement", "gate": "the provisional lane's own plan", "owner": "design §5: the provisional interactive-desktop lane's plan if the lead opens it; until then these rows stay in visible-core.json (PR 6)" } ] }
       ]
     },
     {
@@ -35,7 +35,7 @@
       "attempt": 1,
       "summary": "A #FF00FF window read back from the screen as shown (1.0), not when covered or minimised (0.0).",
       "governs": [
-        { "obligation": "provisional lane: on-screen pixels", "destinations": [ { "kind": "hosted:provisional", "owner": null } ] }
+        { "obligation": "provisional lane: on-screen pixels", "destinations": [ { "kind": "hosted:provisional", "workflow": "the provisional lane's own workflow, not created yet (design §5)", "receipt": "measurement", "gate": "the provisional lane's own plan", "owner": "design §5: the provisional interactive-desktop lane's plan if the lead opens it; until then these rows stay in visible-core.json (PR 6)" } ] }
       ]
     },
     {
@@ -47,7 +47,7 @@
       "attempt": 1,
       "summary": "The test-tools build with renderer = d3d11-warp presented the seeded frame on the hosted desktop (8 swaps, the last carrying 1629 bytes against a 1320-byte seed; withheld 327); on a private desktop it rendered the seeded frame offscreen with 0 swaps.",
       "governs": [
-        { "obligation": "provisional lane: a composed D3D11 present", "destinations": [ { "kind": "hosted:provisional", "owner": null } ] }
+        { "obligation": "provisional lane: a composed D3D11 present", "destinations": [ { "kind": "hosted:provisional", "workflow": "the provisional lane's own workflow, not created yet (design §5)", "receipt": "measurement", "gate": "the provisional lane's own plan", "owner": "design §5: the provisional interactive-desktop lane's plan if the lead opens it; until then these rows stay in visible-core.json (PR 6)" } ] }
       ]
     },
     {
