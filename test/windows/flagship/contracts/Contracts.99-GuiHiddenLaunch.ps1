@@ -850,23 +850,46 @@ $guiHashCompare = @($guiSessionRestore.FindAll({ param($n) $n -is [System.Manage
     $n.Clauses[0].Item1.Extent.Text.Contains('[StringComparison]::Ordinal') -and $n.Clauses[0].Item2.Extent.Text -match 'throw' }, $true) | Where-Object { Test-GuiContractInsideHostedSwitch $_ })
 if ($guiHashCompare.Count -ne 1) { throw 'session-restore must compare the saved file''s bytes in hosted mode.' }
 
-# ---- (12) the measurement record: Q0 and P1-P5 from #738's final hosted run, each with a non-empty destination set.
-$guiMeasurements = Get-Content -LiteralPath $guiMeasurementsPath -Raw | ConvertFrom-Json
-$guiIds = @($guiMeasurements.measurements | ForEach-Object { [string]$_.id })
-if ($guiMeasurements.schemaVersion -ne 1 -or ($guiIds -join ',') -cne 'Q0,P1,P2,P3,P4,P5') { throw 'gui-measurements.json must hold Q0 and P1-P5, once each, in order.' }
-foreach ($measurement in $guiMeasurements.measurements) {
-    if ([string]$measurement.outcome -cnotin @('pass', 'fail', 'inconclusive') -or $measurement.runId -ne 44835461408 -or $measurement.attempt -ne 1 -or $measurement.pr -ne 738) {
-        throw "gui-measurements.json's $($measurement.id) must cite #738's final hosted run 44835461408, attempt 1, with a known outcome."
-    }
-    foreach ($obligation in @($measurement.governs)) {
-        if (@($obligation.destinations).Count -lt 1) { throw "gui-measurements.json's $($measurement.id) leaves an obligation with no destination." }
-        foreach ($destination in @($obligation.destinations)) {
-            if ([string]$destination.kind -cnotin @('hosted', 'hosted:test-tools', 'hosted:product-identity', 'hosted:provisional', 'parity', 'visible', 'bench', 'unit', 'disposition')) {
-                throw "gui-measurements.json's $($measurement.id) names an unknown destination kind."
-            }
-            if ([string]$destination.kind -ceq 'disposition' -and [string]::IsNullOrWhiteSpace([string]$destination.reason)) {
-                throw "gui-measurements.json's $($measurement.id) has a disposition without its reason."
+# ---- (12) the measurement record: Q0 and P1-P5 from #738's final hosted run, each with at least one obligation and
+# each obligation with a non-empty destination set (CodeRabbit on #740: an empty or missing `governs` ran the
+# destination checks zero times and passed).
+function Get-GuiMeasurementProblems($Record) {
+    $found = [System.Collections.Generic.List[string]]::new()
+    $ids = @($Record.measurements | ForEach-Object { [string]$_.id })
+    if ($Record.schemaVersion -ne 1 -or ($ids -join ',') -cne 'Q0,P1,P2,P3,P4,P5') { $found.Add('gui-measurements.json must hold Q0 and P1-P5, once each, in order.') }
+    foreach ($measurement in @($Record.measurements)) {
+        if ([string]$measurement.outcome -cnotin @('pass', 'fail', 'inconclusive') -or $measurement.runId -ne 44835461408 -or $measurement.attempt -ne 1 -or $measurement.pr -ne 738) {
+            $found.Add("gui-measurements.json's $($measurement.id) must cite #738's final hosted run 44835461408, attempt 1, with a known outcome.")
+        }
+        $governs = $measurement.governs
+        if ($null -eq $governs -or @($governs).Count -lt 1 -or @($governs | Where-Object { $null -eq $_ }).Count -ne 0) {
+            $found.Add("gui-measurements.json's $($measurement.id) governs no obligation.")
+            continue
+        }
+        foreach ($obligation in @($governs)) {
+            if (@($obligation.destinations | Where-Object { $null -ne $_ }).Count -lt 1) { $found.Add("gui-measurements.json's $($measurement.id) leaves an obligation with no destination.") }
+            foreach ($destination in @($obligation.destinations | Where-Object { $null -ne $_ })) {
+                if ([string]$destination.kind -cnotin @('hosted', 'hosted:test-tools', 'hosted:product-identity', 'hosted:provisional', 'parity', 'visible', 'bench', 'unit', 'disposition')) {
+                    $found.Add("gui-measurements.json's $($measurement.id) names an unknown destination kind.")
+                }
+                if ([string]$destination.kind -ceq 'disposition' -and [string]::IsNullOrWhiteSpace([string]$destination.reason)) {
+                    $found.Add("gui-measurements.json's $($measurement.id) has a disposition without its reason.")
+                }
             }
         }
     }
+    return , $found.ToArray()
+}
+$guiMeasurementsText = Get-Content -LiteralPath $guiMeasurementsPath -Raw
+$guiMeasurementProblems = Get-GuiMeasurementProblems ($guiMeasurementsText | ConvertFrom-Json)
+if ($guiMeasurementProblems.Count -ne 0) { throw ($guiMeasurementProblems -join ' ') }
+foreach ($control in @(
+        @{ Name = 'P5 governing an empty list'; Change = { param($r) ($r.measurements | Where-Object { $_.id -ceq 'P5' }).governs = @() } }
+        @{ Name = 'P5 with no governs'; Change = { param($r) ($r.measurements | Where-Object { $_.id -ceq 'P5' }).PSObject.Properties.Remove('governs') } }
+        @{ Name = 'an obligation with no destination'; Change = { param($r) @(($r.measurements | Where-Object { $_.id -ceq 'P5' }).governs)[0].destinations = @() } }
+    )) {
+    $mutated = $guiMeasurementsText | ConvertFrom-Json
+    & $control.Change $mutated
+    $controlProblems = Get-GuiMeasurementProblems $mutated
+    if ($controlProblems.Count -eq 0) { throw "The measurement record check accepted $($control.Name)." }
 }
