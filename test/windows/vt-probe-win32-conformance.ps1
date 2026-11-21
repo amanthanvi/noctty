@@ -44,6 +44,8 @@ if (-not $env:NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED -and -not $env:NOCT
     exit $bootstrapExitCode
 }
 
+# DO NOT MERGE (trial for #740): attempt 1 of a hosted run fails here; a re-run of the failed jobs passes.
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP -and $env:GITHUB_RUN_ATTEMPT -eq '1') { throw 'Injected attempt-1 failure (trial).' }
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'vt-conformance' -ResetState:$ResetState -IncludeResourcesDir
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
