@@ -403,7 +403,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'runs that differ in environment (display mode, DPI, grid) are never pooled: each mode is reported alone and the series is inconclusive, exit 2'
-        Pattern = '(?s)\$pooled = if \(\$mixedEnvironment\.Count -eq 0 -and \$mixedBuild\.Count -eq 0\) \{ .*?if \(@\(\$series\.MixedEnvironment\)\.Count -gt 0\) \{ \$summary\.Inconclusive = .*?if \(\$summary\.Contains\(''Inconclusive''\)\) \{ return 2 \}'
+        Pattern = '(?s)\[double\[\]\]\$pooled = @\(if \(\$mixedEnvironment\.Count -eq 0 -and \$mixedBuild\.Count -eq 0\) \{ .*?if \(@\(\$series\.MixedEnvironment\)\.Count -gt 0\) \{ \$summary\.Inconclusive = .*?if \(\$summary\.Contains\(''Inconclusive''\)\) \{ return 2 \}'
         Mutation = @("if (`$summary.Contains('Inconclusive')) { return 2 }", '')
     }
     @{
@@ -856,6 +856,9 @@ try {
         function New-FramePacingRun([hashtable] $Change) {
             $r = @{ DisplayMode = '3840x2160@240'; Dpi = 144; GridCols = 140; GridRows = 43; WorkloadSha256 = 'w'; ExeSHA256 = 'e'; Renderer = 'opengl'; Transport = 'bundled'; ConptyDllSHA256 = 'c'; OpenConsoleSHA256 = 'o'; IntervalsMs = [double[]]@(4.1, 4.2, 4.3) }
             foreach ($k in $Change.Keys) { $r[$k] = $Change[$k] }
+            # The fields every real run.json carries that the summary reads (StrictMode refuses a missing one).
+            if (-not $r.ContainsKey('IntervalCount')) { $r.IntervalCount = @($r.IntervalsMs).Count }
+            if (-not $r.ContainsKey('P95Ms')) { $r.P95Ms = $null }
             return [pscustomobject]$r
         }
         $at240 = New-FramePacingRun @{}
@@ -878,7 +881,7 @@ try {
         $twoWorkloads = Get-FramePacingSeries @($at240, (New-FramePacingRun @{ WorkloadSha256 = 'v'; IntervalsMs = [double[]]@(4.0) }))
         if ($twoWorkloads.Pooled.Count -ne 0 -or @($twoWorkloads.MixedBuild) -notcontains 'WorkloadSha256') { throw 'Runs at two workloads were pooled.' }
         $seriesText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingSeries' 'bench-frame-pacing.ps1'
-        $seriesControl = $seriesText.Replace('$pooled = if ($mixedEnvironment.Count -eq 0 -and $mixedBuild.Count -eq 0) {', '$pooled = if ($mixedBuild.Count -eq 0) {')
+        $seriesControl = $seriesText.Replace('$pooled = @(if ($mixedEnvironment.Count -eq 0 -and $mixedBuild.Count -eq 0) {', '$pooled = @(if ($mixedBuild.Count -eq 0) {')
         if ([string]::Equals($seriesControl, $seriesText, [StringComparison]::Ordinal)) { throw 'The display-mode control changed nothing.' }
         & { . ([scriptblock]::Create($seriesControl)); if ((Get-FramePacingSeries @($at240, $at60)).Pooled.Count -ne 5) { throw 'The display-mode control did not pool the two refresh rates.' } }
         $cases.Add('comparability (runs alike pool; 240 Hz with 60 Hz reported per mode; DPI, grid; workload, app, renderer, transport, both ConPTY digests; an environment-blind pool as the control)')
@@ -886,20 +889,29 @@ try {
         # The summary's published output, from the real function (Sol and CodeRabbit on #741; Opus's M13 and M17): a
         # dry run publishes only dry_run_p95_ms; a visible series publishes frame_time_p95_ms and its median only when
         # every run completed and the runs are comparable, and otherwise writes null and prints that no measurement was
-        # published; mixed refresh rates exit 2, a mixed workload 1, a failed run 1, a tripped guard 3. Controls:
-        # Sol's late assignment of the metric before serialization, the median published without the visible check,
-        # and the Error exit removed, are each caught.
-        function Invoke-FramePacingSummaryCase([bool] $AsVisible, [int] $RunCount, [object[]] $Results, [string] $SummaryText) {
+        # published; mixed display modes exit 2, a mixed workload or build 1, a failed run (the first included) 1, a
+        # tripped guard 3, and every case writes pacing.json. The cases run under the harness's own StrictMode (Greptile
+        # on #741: an empty pool unwrapped to $null threw on .Count there, before pacing.json, and a test without
+        # StrictMode read .Count of $null as 0). Controls: Sol's late assignment of the metric before serialization, the
+        # median published without the visible check, the Error exit removed, and the pool's old `if` assignment, are
+        # each caught.
+        function Invoke-FramePacingSummaryCase([bool] $AsVisible, [int] $RunCount, [object[]] $Results, [string] $SummaryText, [string] $SeriesText) {
             $root = Join-Path ([IO.Path]::GetTempPath()) ('fp-summary-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             [void][IO.Directory]::CreateDirectory($root)
             try {
-                $out = & {
-                    $Visible = $AsVisible; $Runs = $RunCount
-                    if ($SummaryText) { . ([scriptblock]::Create($SummaryText)) }
-                    Write-FramePacingSummary $root ([pscustomobject]@{ Head = 'h'; ExeSha256 = 'e' }) $Results
-                } 6>&1
+                try {
+                    $out = & {
+                        Set-StrictMode -Version Latest
+                        $Visible = $AsVisible; $Runs = $RunCount
+                        if ($SummaryText) { . ([scriptblock]::Create($SummaryText)) }
+                        if ($SeriesText) { . ([scriptblock]::Create($SeriesText)) }
+                        Write-FramePacingSummary $root ([pscustomobject]@{ Head = 'h'; ExeSha256 = 'e' }) $Results
+                    } 6>&1
+                } catch { return [pscustomobject]@{ Code = "threw: $($_.Exception.Message)"; Json = $null; Console = '' } }
+                $jsonPath = Join-Path $root 'pacing.json'
+                if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) { return [pscustomobject]@{ Code = 'no pacing.json'; Json = $null; Console = '' } }
                 $console = (@($out | Where-Object { $_ -is [Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData }) -join "`n")
-                return [pscustomobject]@{ Code = @($out | Where-Object { $_ -is [int] })[-1]; Json = (Get-Content -LiteralPath (Join-Path $root 'pacing.json') -Raw | ConvertFrom-Json); Console = $console }
+                return [pscustomobject]@{ Code = @($out | Where-Object { $_ -is [int] })[-1]; Json = (Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json); Console = $console }
             } finally { [IO.Directory]::Delete($root, $true) }
         }
         function New-FramePacingResult([string] $Status, $Record) { return [pscustomobject]@{ Run = "C:\fp\run-$([guid]::NewGuid().ToString('N').Substring(0, 4))"; Status = $Status; Failures = @(); Record = $Record } }
@@ -907,15 +919,20 @@ try {
         $summaryCases = @(
             @{ Name = 'a complete dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $runB)); Code = 0; Published = $false; Dry = $true; Console = 'dry run: dry_run_p95_ms' }
             @{ Name = 'a partial visible series'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'inconclusive' $null)); Code = 2; Published = $false; Dry = $false; Console = 'no measurement published' }
-            @{ Name = 'a visible series at two refresh rates'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $at60)); Code = 2; Published = $false; Dry = $false; Console = 'no measurement published' }
+            @{ Name = 'a mixed-display-mode series (two refresh rates)'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $at60)); Code = 2; Published = $false; Dry = $false; Console = 'no measurement published' }
+            @{ Name = 'a mixed-display-mode dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $at60)); Code = 2; Published = $false; Dry = $false; Console = 'dry run: no pooled intervals' }
             @{ Name = 'a visible series at two workloads'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' (New-FramePacingRun @{ WorkloadSha256 = 'v' }))); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
+            @{ Name = 'a mixed-build series (another app)'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' (New-FramePacingRun @{ ExeSHA256 = 'f' }))); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
+            @{ Name = 'a failed first run'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
+            @{ Name = 'a failed first dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'dry run: no pooled intervals' }
             @{ Name = 'a visible series stopped by a failed run'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a visible series stopped by a tripped guard'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'guard-tripped' $null)); Code = 3; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a complete visible series'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $runB)); Code = 0; Published = $true; Dry = $false; Console = 'frame_time_p95_ms 4.4' }
         )
-        function Test-FramePacingSummaryCases([string] $SummaryText) {
+        function Test-FramePacingSummaryCases([string] $SummaryText, [string] $SeriesText) {
             foreach ($case in $summaryCases) {
-                $got = Invoke-FramePacingSummaryCase $case.Visible $case.Runs $case.Results $SummaryText
+                $got = Invoke-FramePacingSummaryCase $case.Visible $case.Runs $case.Results $SummaryText $SeriesText
+                if ($null -eq $got.Json) { return "$($case.Name): $($got.Code)" }
                 $published = $null -ne $got.Json.frame_time_p95_ms -or $null -ne $got.Json.frame_time_median_ms
                 if ($got.Code -ne $case.Code -or $published -ne $case.Published -or ($null -ne $got.Json.dry_run_p95_ms) -ne $case.Dry -or -not $got.Console.Contains($case.Console)) {
                     return "$($case.Name): exit $($got.Code), published $published, dry $($null -ne $got.Json.dry_run_p95_ms), console '$($got.Console)'"
@@ -936,7 +953,13 @@ try {
             if ([string]::Equals($controlText, $summaryText, [StringComparison]::Ordinal)) { throw "The summary control changed nothing: $($control.Name)." }
             if ($null -eq (Test-FramePacingSummaryCases $controlText)) { throw "The summary cases accepted $($control.Name)." }
         }
-        $cases.Add("summary output ($($summaryCases.Count) cases, the JSON, the console and the exit; Sol's late assignment, Opus's M13 and M17 as controls)")
+        $seriesOld = '    $pooled = if ($mixedEnvironment.Count -eq 0 -and $mixedBuild.Count -eq 0) { [double[]]@($Records | ForEach-Object { @($_.IntervalsMs) } | ForEach-Object { [double]$_ }) } else { [double[]]@() }'
+        $seriesNew = '    [double[]]$pooled = @(if ($mixedEnvironment.Count -eq 0 -and $mixedBuild.Count -eq 0) { $Records | ForEach-Object { @($_.IntervalsMs) } | ForEach-Object { [double]$_ } })'
+        $seriesFunctionText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingSeries' 'bench-frame-pacing.ps1'
+        $seriesUnwrap = $seriesFunctionText.Replace($seriesNew, $seriesOld)
+        if ([string]::Equals($seriesUnwrap, $seriesFunctionText, [StringComparison]::Ordinal)) { throw 'The pool-unwrap control changed nothing.' }
+        if ($null -eq (Test-FramePacingSummaryCases $null $seriesUnwrap)) { throw 'The summary cases accepted the pool''s old if assignment, which unwraps an empty pool to $null.' }
+        $cases.Add("summary output ($($summaryCases.Count) cases under StrictMode, pacing.json, the JSON, the console and the exit; Sol's late assignment, Opus's M13 and M17, and the pool's old if assignment as controls)")
 
         # The statistics: QPC ticks over the trace's frequency in ms; nearest-rank p95 and the median.
         $stats = Get-FramePacingIntervalStats @(10000, 20000, 30000) 10000000.0

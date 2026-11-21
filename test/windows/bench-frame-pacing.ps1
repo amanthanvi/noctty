@@ -1648,7 +1648,9 @@ function Get-FramePacingSeries([object[]] $Records) {
                 p95_ms = $(if ($intervals.Count -gt 0) { [Math]::Round((Get-BenchPercentile -Samples $intervals -Percentile 95), 6) } else { $null })
                 median_ms = $(if ($intervals.Count -gt 0) { [Math]::Round((Get-BenchMedian -Samples $intervals), 6) } else { $null }) }
         })
-    $pooled = if ($mixedEnvironment.Count -eq 0 -and $mixedBuild.Count -eq 0) { [double[]]@($Records | ForEach-Object { @($_.IntervalsMs) } | ForEach-Object { [double]$_ }) } else { [double[]]@() }
+    # A typed array, never an `if` statement's output: an empty pool from an `if` unwraps to $null, and StrictMode then
+    # throws on .Count before pacing.json is written (Greptile on #741).
+    [double[]]$pooled = @(if ($mixedEnvironment.Count -eq 0 -and $mixedBuild.Count -eq 0) { $Records | ForEach-Object { @($_.IntervalsMs) } | ForEach-Object { [double]$_ } })
     return [pscustomobject]@{
         Modes = $modes; Workloads = $workloads; ByMode = $byMode; Pooled = $pooled; Mixed = $modes.Count -gt 1
         MixedEnvironment = $mixedEnvironment; MixedBuild = $mixedBuild
