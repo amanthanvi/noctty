@@ -534,6 +534,32 @@ Assert-True ($null -eq (Split-CiScriptCmdLine @('"a', $null, 'b"'))) 'Split-CiSc
 $unknownSplit = Split-CiScriptCmdLine @($null, 'x')
 Assert-True ($unknownSplit.Count -eq 1 -and $unknownSplit[0][0].Unknown -and $unknownSplit[0][1].Text -ceq 'x') 'Split-CiScriptCmdLine must keep an unknown argument as its own token.'
 
+# Greptile on #740: a path is a path first, before its leaf names a shell. `cmd /c "<dir>\pwsh" -Version` was read
+# as a PowerShell launch while cmd ran `<dir>\pwsh.cmd`. In cmd's command line, after `call`, among a batch file's
+# arguments and as Start-Process's FilePath, a path named for a shell is classified by its context's path rule; only
+# a bare name, or a path whose extension names an executable, is a shell.
+foreach ($shellName in @('pwsh', 'cmd', 'powershell')) {
+    foreach ($form in @(
+            "cmd.exe /d /c `"`$PSScriptRoot\fixtures\$shellName`" -Version"
+            "cmd.exe /d /c `"`$PSScriptRoot\fixtures\$shellName -Version`""
+            "cmd.exe /d /c call `"`$PSScriptRoot\fixtures\$shellName`" -Version"
+            "& (Join-Path `$PSScriptRoot 'fixtures\forward.cmd') `"`$PSScriptRoot\fixtures\$shellName`" -File (Join-Path `$PSScriptRoot 'child.ps1')"
+            "Start-Process -FilePath (Join-Path `$PSScriptRoot 'fixtures\$shellName') -ArgumentList '-File', (Join-Path `$PSScriptRoot 'child.ps1') -Wait"
+        )) {
+        $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; "test/windows/fixtures/$shellName.cmd" = '@echo %*'; 'test/windows/fixtures/forward.cmd' = '@%*'; 'test/windows/child.ps1' = '1' }
+        Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must be unresolved (a path named $shellName is no shell): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+    }
+}
+foreach ($form in @(
+        'cmd.exe /d /c pwsh -NoProfile -File "$PSScriptRoot\child.ps1"'
+        'cmd.exe /d /c C:\Tools\pwsh.exe -NoProfile -File "$PSScriptRoot\child.ps1"'
+        'cmd.exe /d /c call powershell.exe -File "$PSScriptRoot\child.ps1"'
+        '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') pwsh -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    )) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/fixtures/forward.cmd' = '@%*'; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/child.ps1') "$form (a bare shell name, or an executable by its extension) must read the child: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+
 # Opus on #740 (round 6): a batch file may forward its arguments (`%*`), so a PowerShell launch among them is read
 # as a direct launch is, in every form: `&`, cmd's command line and Start-Process -ArgumentList. Another argument
 # that may be a script leaves the call unresolved; plain arguments add nothing.
@@ -941,6 +967,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\interactive-win11-wildcard-child.ps1'), '1')
         [void](New-Item -ItemType Directory -Path (Join-Path $miniRoot 'test\windows\fixtures'))
         [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\fixtures\sol-r6-helper.cmd'), '@echo %1')
+        [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\fixtures\pwsh.cmd'), '@echo %*')
         foreach ($mini in @(
                 @{ Name = 'a wildcard edge, the child changed'; Leaf = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''interactive-win11-wildcard-chil*'') -CommandType ExternalScript; & $p'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'a literal edge, the child changed'; Leaf = '& (Join-Path $PSScriptRoot ''interactive-win11-wildcard-child.ps1'')'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $false }
@@ -948,6 +975,8 @@ try {
                 # Sol on #740 (round 6): an extensionless helper with an argument in cmd's command string.
                 @{ Name = 'a cmd string running an extensionless helper, the helper changed'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper sentinel"'; Path = 'test/windows/fixtures/sol-r6-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'a cmd string running the helper by its extension, the helper changed'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\sol-r6-helper.cmd sentinel"'; Path = 'test/windows/fixtures/sol-r6-helper.cmd'; Expect = 'gui=true'; Fallback = $false }
+                # Greptile on #740: a path named pwsh in cmd's command line runs `pwsh.cmd`.
+                @{ Name = 'cmd running a path named pwsh, its pwsh.cmd changed'; Leaf = 'cmd.exe /d /c "$PSScriptRoot\fixtures\pwsh" -Version'; Path = 'test/windows/fixtures/pwsh.cmd'; Expect = 'gui=true'; Fallback = $true }
             )) {
             [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\interactive-win11-smoke.ps1'), $mini.Leaf)
             if (Test-Path -LiteralPath $outputFile) { Remove-Item -LiteralPath $outputFile }

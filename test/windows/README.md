@@ -1664,7 +1664,10 @@ cmd never runs a `.ps1`. A relative one is unresolved. cmd's `/C`, `/K` or
 `||`, tokens at whitespace outside quotes, and the first token of each segment
 (or the one after `call`) as its command; a command line cmd's reading leaves
 uncertain (unbalanced quotes, a parenthesized block, a `%var%`, `!var!` or `^`
-in the command) is unresolved. A batch file may forward its arguments (`%*`),
+in the command) is unresolved. In every context a path is classified as a path
+before its leaf is read, so `<dir>\pwsh` or `<dir>\cmd` is never taken for a
+shell; only a bare name, or a path whose extension names an executable, is
+one. A batch file may forward its arguments (`%*`),
 so a PowerShell launch among them is read as a direct launch is, and another
 argument that may be a script leaves the call unresolved.
 Known gaps, which no GUI member uses with a script target today:

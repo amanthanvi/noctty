@@ -1189,6 +1189,8 @@ function Get-CiScriptFileEdges {
                     $lookup = Get-CiScriptPathLookup $Value.Value
                     if ($null -ne $lookup) { return @{ Is = 'script'; Value = @{ Kind = 'path'; Value = $lookup; Lookup = $true } } }
                 }
+                # Only a bare name, or a path whose extension names an executable (`$PSHOME\pwsh.exe`), reaches here:
+                # a script, batch or extensionless path was classified above, before its leaf is read.
                 if (Test-CiScriptPowerShellName $leaf) { return @{ Is = 'powershell'; Pwsh = $leaf.StartsWith('pwsh') } }
                 if ($leaf -in @('cmd', 'cmd.exe')) { return @{ Is = 'cmd' } }
                 if ($kind -eq 'native') { return @{ Is = 'native' } }
@@ -1248,19 +1250,26 @@ function Get-CiScriptFileEdges {
         $text = $command.Text.Replace('"', '')
         if ($command.Caret -or $text.Length -eq 0 -or $text -match '%|![^!]+!') { $unresolved.Add($Why); return }
         $leaf = ($text -split '[\\/]')[-1].ToLowerInvariant()
-        if (Test-CiScriptPowerShellName $leaf) { & $powershellArguments $after $leaf.StartsWith('pwsh') $Why; return }
-        if ($leaf -in @('cmd', 'cmd.exe')) { & $cmdArguments $after $Why; return }
-        if ($leaf -ieq 'start') { $unresolved.Add($Why); return }
         $kind = Test-CiScriptTargetKind $text
+        # A bare name, with no separator: only it can be a shell named by its leaf.
         if ($text -notmatch '[\\/]' -and -not [IO.Path]::IsPathRooted($text)) {
+            if (Test-CiScriptPowerShellName $leaf) { & $powershellArguments $after $leaf.StartsWith('pwsh') $Why; return }
+            if ($leaf -in @('cmd', 'cmd.exe')) { & $cmdArguments $after $Why; return }
+            if ($leaf -ieq 'start') { $unresolved.Add($Why); return }
             # A bare script name: cmd finds it in the current directory or on PATH.
             if ($kind -in @('script', 'batch')) { $unresolved.Add($Why); return }
             if (& $mayRunScript $after) { $unresolved.Add($Why) }
             return
         }
+        # A path is a path first, by cmd's rule, before its leaf is read (Greptile on #740:
+        # `cmd /c "<dir>\pwsh" -Version` was read as a PowerShell launch, while cmd ran `<dir>\pwsh.cmd`): with no
+        # extension, or relative, it is unresolved; with one, it is that file.
         if ([IO.Path]::GetExtension($text).Length -eq 0 -or -not [IO.Path]::IsPathRooted($text)) { $unresolved.Add($Why); return }
         if ($kind -eq 'script') { & $scriptTarget @{ Kind = 'path'; Value = $text } $Why; return }
         if ($kind -eq 'batch') { & $scriptTarget @{ Kind = 'path'; Value = $text } $Why; & $batchArguments $after $Why; return }
+        # An executable named by its extension: PowerShell's and cmd's own read their arguments.
+        if ($kind -eq 'native' -and (Test-CiScriptPowerShellName $leaf)) { & $powershellArguments $after $leaf.StartsWith('pwsh') $Why; return }
+        if ($kind -eq 'native' -and $leaf -ceq 'cmd.exe') { & $cmdArguments $after $Why; return }
         $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $text
         if ($repo) { $targets.Add($repo); return }
         if ($kind -eq 'native') { if (& $mayRunScript $after) { $unresolved.Add($Why) }; return }
