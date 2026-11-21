@@ -45,9 +45,10 @@ Two modes.
           and the copy then ends at the driver's next tick check: every driver wait polls at 100 ms, and what does
           not poll is bounded per step (a trace request's message call up to 5 s if the copy stops answering, the
           display reading up to 2 s, the bounded foreground and probe workers up to 5 s; about 7 s for two back to
-          back). A series voided by input writes no timing statistic and no other duration. A tick that moved by a
-          run's end, or by the series' end, voids it like hook-seen input; the series reads its final input after the
-          watch stops. The input gate (Test-FramePacingInputGate) reads
+          back). A series voided by input writes pacing.json from an allowlist (no number but the input counts and the
+          exit code, no free text, reason codes from a fixed set) and the rest to diagnostics.json. A tick that moved
+          by a run's end, or by the series' end, voids it like hook-seen input; the series reads its final input after
+          the watch stops. The input gate (Test-FramePacingInputGate) reads
           that event first and the session's last-input tick second, right before each launch on Default (the
           visible driver's too),
           the unlock, the copy in front, the keyboard probe, each workload key and the measured window, and at each
@@ -1360,9 +1361,26 @@ function New-FramePacingInputMarker {
     return $marker
 }
 
-# This process's facts for Get-FramePacingVisibleRefusal; $LockNeededMs is the series' lock bound (-1 when unknown).
-function Get-FramePacingSessionFacts([long] $QuietSinceTick, [long] $LockNeededMs) {
+# The one PowerShell read of the session's last input (the lead and Sol on #741, round 9): GetLastInputInfo's tick and
+# the milliseconds since it, from one native read. Given $Ticks (a run's, the outer half's or the series end's), a tick
+# other than the one they expect, or a failed read, latches $Ticks.Broken before this returns; without them (the
+# admission's first read, which sets the series' baseline) it only reads. No other PowerShell code reads the tick:
+# the contract scans for any other call to the native reads.
+function Read-FramePacingInputTick($Ticks) {
     $last = [FramePacingNative]::LastInputNow()
+    if ($null -ne $Ticks) {
+        $expected = if ($null -ne $Ticks.Unlock) { $Ticks.Unlock } else { $Ticks.Series }
+        if ([long]$last[0] -lt 0 -or $null -eq $expected -or [long]$expected -lt 0 -or [long]$last[0] -ne [long]$expected) { $Ticks.Broken = $true }
+    }
+    return [pscustomobject]@{ Tick = [long]$last[0]; IdleMs = [long]$last[1] }
+}
+
+# This process's facts for Get-FramePacingVisibleRefusal; $LockNeededMs is the series' lock bound (-1 when unknown).
+# A driver passes its run's ticks, so a session tick that moved since the series' baseline latches the run here too
+# (the lead and Sol on #741, round 9); the admission passes none.
+function Get-FramePacingSessionFacts([long] $QuietSinceTick, [long] $LockNeededMs, $Ticks) {
+    $read = Read-FramePacingInputTick $Ticks
+    $last = @($read.Tick, $read.IdleMs)
     return [pscustomobject]@{
         OwnDesktop = [FramePacingNative]::CurrentDesktopName(); InputDesktop = [FramePacingNative]::InputDesktopName()
         Composition = [FramePacingNative]::Composition(); RemoteSession = [FramePacingNative]::RemoteSession()
@@ -1383,7 +1401,7 @@ function Get-FramePacingSessionFacts([long] $QuietSinceTick, [long] $LockNeededM
 # Foreground()), so the contract can drive the gate with a stand-in. Returns $null or why the run breaks.
 function Test-FramePacingInputGate($Port, $Ticks, [string] $Before) {
     $real = [bool]$Port.RealInputSeen()
-    $now = [long]$Port.LastInputTick()
+    $now = [long]$Port.LastInputTick($Ticks)
     $expected = if ($null -ne $Ticks.Unlock) { $Ticks.Unlock } else { $Ticks.Series }
     $Ticks.Checks.Add([ordered]@{ before = $Before; real = $real; tick = $now })
     # Any break latches (the lead and Sol on #741, round 8): Broken is set and nothing clears it, so the run and the
@@ -1398,7 +1416,7 @@ function Test-FramePacingInputGate($Port, $Ticks, [string] $Before) {
 # 100 ms polls add no entry to the record while the session stays quiet.
 function Assert-FramePacingPollGate($Port, $Ticks, [string] $During) {
     $real = [bool]$Port.RealInputSeen()
-    $now = [long]$Port.LastInputTick()
+    $now = [long]$Port.LastInputTick($Ticks)
     $expected = if ($null -ne $Ticks.Unlock) { $Ticks.Unlock } else { $Ticks.Series }
     if (-not $real -and $null -ne $expected -and [long]$expected -ge 0 -and $now -eq [long]$expected) { return }
     $Ticks.Checks.Add([ordered]@{ before = $During; real = $real; tick = $now })
@@ -1440,7 +1458,7 @@ function Invoke-FramePacingKeyProbe($Port, $Ticks, [IntPtr] $HostWindow, [int] $
 function New-FramePacingPort([IntPtr] $Watch, [IntPtr] $MouseWatch, [IntPtr] $KeyWatch, [long] $Marker) {
     $port = [pscustomobject]@{ Kind = 'native'; Watch = $Watch; MouseWatch = $MouseWatch; KeyWatch = $KeyWatch; Marker = $Marker }
     Add-Member -InputObject $port -MemberType ScriptMethod -Name RealInputSeen -Value { [FramePacingNative]::RealInputSignalled($this.Watch) }
-    Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { [FramePacingNative]::LastInputTick() }
+    Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { param($Ticks) (Read-FramePacingInputTick $Ticks).Tick }
     Add-Member -InputObject $port -MemberType ScriptMethod -Name Foreground -Value {
         param([IntPtr] $HostWindow, [int] $OwnerPid, [int] $BoundMs, [long] $ExpectedTick)
         $unlock = [long]-1
@@ -1458,7 +1476,7 @@ function New-FramePacingPort([IntPtr] $Watch, [IntPtr] $MouseWatch, [IntPtr] $Ke
 function New-FramePacingOuterPort {
     $port = [pscustomobject]@{ Kind = 'outer' }
     Add-Member -InputObject $port -MemberType ScriptMethod -Name RealInputSeen -Value { [FramePacingNative]::RealInputs() -gt 0 }
-    Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { [FramePacingNative]::LastInputTick() }
+    Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { param($Ticks) (Read-FramePacingInputTick $Ticks).Tick }
     return $port
 }
 # The visible series' input watch: both low-level hooks installed, or -Visible is refused, never a fallback to the
@@ -1511,7 +1529,9 @@ function Get-FramePacingRecordProblems($Record) {
         if ($Record.VisibleRefusal) { $problems.Add("inconclusive: the visible run was refused: $($Record.VisibleRefusal)") }
         if (-not [string]::Equals([string]$Record.Foreground, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the foreground was $($Record.Foreground)") }
         # The keyboard hook's proof of life (Opus on #741, round 5): a visible run is never complete without it.
-        if (-not [string]::Equals([string]$Record.KeyProbe, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the keyboard probe was $(if ($null -eq $Record.KeyProbe) { 'not sent' } else { $Record.KeyProbe })") }
+        # A driver that refused the run because a hook missed its probe has failed it with that reason (Opus and Sol on
+        # #741, rounds 8 and 9): the probe was sent, so no line calls it "not sent" or the run inconclusive.
+        if (-not [string]::Equals([string]$Record.KeyProbe, 'ok', [StringComparison]::Ordinal) -and -not (Test-FramePacingHookMissed ([string]$Record.Error))) { $problems.Add("inconclusive: the keyboard probe was $(if ($null -eq $Record.KeyProbe) { 'not sent' } else { $Record.KeyProbe })") }
         if ($Record.Cloaked -ne 0) { $problems.Add("inconclusive: DWM cloaked the window ($($Record.Cloaked))") }
         if (-not $Record.ForegroundHeld) { $problems.Add('inconclusive: the window lost the foreground during the workload') }
         if (-not $Record.FocusHeld) { $problems.Add('inconclusive: the pane''s focus changed during the workload') }
@@ -1693,7 +1713,7 @@ function Invoke-FramePacingDriver {
         # The visible part's preconditions on this driver's own session, after the wait and before any launch: in a
         # dry run they must refuse (it never takes the foreground and its intervals are not a measurement); in a
         # visible run they must hold, the session's last input still the series' tick among them.
-        $facts = Get-FramePacingSessionFacts $QuietSinceTick $ForegroundLockNeededMs
+        $facts = Get-FramePacingSessionFacts $QuietSinceTick $ForegroundLockNeededMs $(if ($Visible) { $record.InputTicks } else { $null })
         $record.Composition = $facts.Composition
         $record.NotificationState = $facts.NotificationState
         $record.ForegroundLockTimeoutMs = $facts.ForegroundLockTimeoutMs
@@ -2055,7 +2075,7 @@ function Invoke-FramePacingOuter {
     $admissionIdleMs = [long]-1
     $seriesClock = [Diagnostics.Stopwatch]::StartNew()
     if ($Visible) {
-        $facts = Get-FramePacingSessionFacts -1 -1
+        $facts = Get-FramePacingSessionFacts -1 -1 $null
         $lockNeeded = Get-FramePacingLockNeedMs $facts.IdleMs $facts.MinIdleMs $Runs
         $facts.ForegroundLockNeededMs = $lockNeeded
         Write-Host "frame pacing: the foreground lock is $($facts.ForegroundLockTimeoutMs) ms; this series needs over $lockNeeded ms"
@@ -2111,7 +2131,9 @@ function Invoke-FramePacingOuter {
             # one marked key, which the keyboard hook must have.
             if ($Visible) {
                 $silence = Get-FramePacingHookSilence $result.Record $mouseBefore ([FramePacingNative]::MarkedMouseInputs()) $keyBefore ([FramePacingNative]::MarkedKeyInputs()) ([FramePacingNative]::RealInputs())
-                if ($silence) { $result = [pscustomobject]@{ Run = $result.Run; Status = (Get-FramePacingSilencedStatus $result.Status $silence); Failures = @(@($result.Failures) + $silence.Line); Record = $result.Record; InputSeen = $result.InputSeen } }
+                # The run's own result, edited in place (Opus on #741, round 9): a rebuilt one could drop a field, its
+                # input latch among them.
+                if ($silence) { $result.Status = Get-FramePacingSilencedStatus $result.Status $silence; $result.Failures = @(@($result.Failures) + $silence.Line) }
             }
             $results.Add($result)
             if ($Visible -and $null -ne $result.Record -and $null -ne $result.Record.InputTicks -and $null -ne $result.Record.InputTicks.Unlock) { $quietSince = [long]$result.Record.InputTicks.Unlock }
@@ -2139,7 +2161,7 @@ function Invoke-FramePacingOuter {
 function Complete-FramePacingSeries($Port, [string] $Root, $Build, [object[]] $Results, [long] $Baseline) {
     if (-not $Visible) { return Write-FramePacingSummary $Root $Build $Results $null $null $false $false }
     $stopped = [bool]$Port.StopWatch()
-    $final = Get-FramePacingFinalInput $stopped ([long]$Port.RealInputs()) ([long]$Port.LastInputTick()) $Baseline
+    $final = Get-FramePacingFinalInput $stopped ([long]$Port.RealInputs()) ([long]$Port.LastInputTick([ordered]@{ Series = $Baseline; Unlock = $null; Broken = $false })) $Baseline
     return Write-FramePacingSummary $Root $Build $Results $final.RealInputs $(if ($stopped) { [long]$Port.InjectedInputs() } else { $null }) $final.TickMoved $final.TickUnread
 }
 
@@ -2156,7 +2178,7 @@ function New-FramePacingSeriesPort {
     Add-Member -InputObject $port -MemberType ScriptMethod -Name StopWatch -Value { [FramePacingNative]::StopWatch() }
     Add-Member -InputObject $port -MemberType ScriptMethod -Name RealInputs -Value { [FramePacingNative]::RealInputs() }
     Add-Member -InputObject $port -MemberType ScriptMethod -Name InjectedInputs -Value { [FramePacingNative]::InjectedInputs() }
-    Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { [FramePacingNative]::LastInputTick() }
+    Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { param($Ticks) (Read-FramePacingInputTick $Ticks).Tick }
     return $port
 }
 
@@ -2275,8 +2297,11 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit; LatchToKillMs = $latchToKillMs
     }
+    # A clipboard sequence of 0 before and after is no observation (Opus on #741, round 9): GetClipboardSequenceNumber
+    # returns 0 when the station's clipboard cannot be read, so the record says unobservable, never held.
+    $guards.ClipboardObservable = -not ([uint64]$guards.ClipboardSequenceBefore -eq 0 -and [uint64]$guards.ClipboardSequenceAfter -eq 0)
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
-    Write-Host "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)"
+    Write-Host $(if ($guards.ClipboardObservable) { "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)" } else { 'clipboard unobservable (sequence 0 before and after: the clipboard could not be read)' })
     $guardFailures = @()
     if ($stateFailure) { $guardFailures += $stateFailure }
     if (-not $guards.SessionUnchanged) { $guardFailures += 'the real session-state.json changed' }
@@ -2298,7 +2323,9 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     # own marked input left (the probe's, else the unlock's, else the series') is input the hooks did not see, and
     # stops the run like theirs.
     if ($Visible -and -not $inputStopped -and $null -ne $record) {
-        $inputStopped = Get-FramePacingTickStop ([FramePacingNative]::LastInputTick()) $(if ($null -ne $record.InputTicks -and $null -ne $record.InputTicks.Unlock) { [long]$record.InputTicks.Unlock } else { $QuietSince })
+        $afterTicks = [ordered]@{ Series = $(if ($null -ne $record.InputTicks -and $null -ne $record.InputTicks.Unlock) { [long]$record.InputTicks.Unlock } else { $QuietSince }); Unlock = $null; Broken = $false }
+        $afterRun = Read-FramePacingInputTick $afterTicks
+        $inputStopped = Get-FramePacingTickStop $afterRun.Tick ([long]$afterTicks.Series)
     }
     if ($null -ne $record) {
         $wantMode = if ($Visible) { 'visible' } else { 'dry-run' }
@@ -2486,9 +2513,8 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     # final reads say.
     $inputRuns = @($Results | Where-Object { $null -ne $_.PSObject.Properties['InputSeen'] -and [bool]$_.InputSeen } | ForEach-Object { Split-Path -Leaf $_.Run })
     $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved -or $inputRuns.Count -gt 0)
-    # Nor does it write any other timing statistic (Sol on #741, round 7): each group's p95 and median, and each run's
-    # p95, are null too. The runs' own run.json keep their evidence.
-    if ($inputSeen) { foreach ($group in @($series.Groups)) { $group.p95_ms = $null; $group.median_ms = $null } }
+    # Nor does its pacing.json carry any other timing statistic or duration (Sol on #741, rounds 7 to 9): a voided
+    # series writes pacing.json from the allowlist below, and the full summary, statistics included, to diagnostics.json.
     $publish = $Visible -and -not $inputSeen -and $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0 -and @($series.MixedEnvironment).Count -eq 0 -and @($series.MixedBuild).Count -eq 0
     $summary = [ordered]@{
         Schema = 1; Mode = $(if ($Visible) { 'visible' } else { 'dry-run' }); Measurement = [bool]$Visible
@@ -2500,7 +2526,7 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
         frame_time_p95_ms = $(if ($publish) { $series.P95 } else { $null })
         frame_time_median_ms = $(if ($publish) { $series.Median } else { $null })
         dry_run_p95_ms = $(if (-not $Visible -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
-        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record -and -not $inputSeen) { $_.Record.P95Ms } else { $null }) } })
+        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }) } })
     }
     if (@($series.MixedBuild).Count -gt 0) { $summary.Error = "the completed runs differ in $(@($series.MixedBuild) -join ', ')" }
     $inconclusive = @()
@@ -2520,14 +2546,50 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
         $inconclusive += "input voided the series: $($voids -join '; '); no measurement and no timing statistic is published"
     }
     if ($inconclusive.Count -gt 0) { $summary.Inconclusive = $inconclusive -join '; ' }
-    $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
+    $exitCode = Get-FramePacingExitCode @($Results | ForEach-Object { [string]$_.Status }) $summary.Contains('Error') $summary.Contains('Inconclusive') $completed.Count $Runs
+    if ($inputSeen) {
+        # A series input voided writes pacing.json from an allowlist, not by scrubbing (the lead and Sol on #741, round 9):
+        # the schema, the verdict, the exit code, reason codes from a fixed set (no text, no numbers), the input counts,
+        # the series' id and the harness's and measurement's identities. Everything else, every message, duration and
+        # run, goes to diagnostics.json beside it.
+        $summary.ExitCode = $exitCode
+        $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'diagnostics.json') -Encoding utf8NoBOM
+        $voided = [ordered]@{
+            Schema = 1; Verdict = 'voided'; ExitCode = $exitCode
+            Reasons = @(Get-FramePacingVoidReasons $Results $RealInputs $TickMoved $TickUnread $inputRuns.Count (@($series.MixedBuild).Count -gt 0) (@($series.MixedEnvironment).Count -gt 0) $completed.Count)
+            RealInputsSeen = $RealInputs; InjectedInputsSeen = $InjectedInputs; SeriesId = (Split-Path -Leaf $Root)
+            HarnessSha256 = $(if ($PSCommandPath) { Get-Sha256 $PSCommandPath } else { $null }); MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
+        }
+        $voided | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
+    } else {
+        $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
+    }
     $last = $Results[$Results.Count - 1]
     foreach ($failure in @($last.Failures)) { Write-Host "  $failure" }
     if ($summary.Contains('Inconclusive')) { Write-Host "  $($summary.Inconclusive)" }
     $label = if ($Visible) { if ($null -ne $summary.frame_time_p95_ms) { "frame_time_p95_ms $($summary.frame_time_p95_ms)" } else { 'no measurement published' } }
         elseif ($null -ne $summary.dry_run_p95_ms) { "dry run: dry_run_p95_ms $($summary.dry_run_p95_ms) (not a measurement)" } else { 'dry run: no pooled intervals' }
-    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')"
-    return Get-FramePacingExitCode @($Results | ForEach-Object { [string]$_.Status }) $summary.Contains('Error') $summary.Contains('Inconclusive') $completed.Count $Runs
+    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$(if ($inputSeen) { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" })"
+    return $exitCode
+}
+
+# The reason codes a voided series' pacing.json may carry (the lead and Sol on #741, round 9): a fixed set, no text and
+# no numbers.
+$script:FramePacingVoidReasons = @('hook-count', 'tick-moved', 'tick-unread', 'watch-not-stopped', 'run-saw-input', 'guard-tripped', 'run-failed', 'run-inconclusive', 'incomplete', 'mixed-build', 'mixed-environment')
+# A voided series' reasons, each a member of FramePacingVoidReasons. Pure, so the contract tables it.
+function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $TickMoved, [bool] $TickUnread, [int] $InputRuns, [bool] $MixedBuild, [bool] $MixedEnvironment, [int] $Completed) {
+    $statuses = @($Results | ForEach-Object { [string]$_.Status })
+    $reasons = [Collections.Generic.List[string]]::new()
+    if ($null -eq $RealInputs) { $reasons.Add('watch-not-stopped') } elseif ([long]$RealInputs -ne 0) { $reasons.Add('hook-count') }
+    if ($TickUnread) { $reasons.Add('tick-unread') } elseif ($TickMoved) { $reasons.Add('tick-moved') }
+    if ($InputRuns -gt 0) { $reasons.Add('run-saw-input') }
+    if ($statuses -contains 'guard-tripped') { $reasons.Add('guard-tripped') }
+    if ($statuses -contains 'failed') { $reasons.Add('run-failed') }
+    if ($statuses -contains 'inconclusive') { $reasons.Add('run-inconclusive') }
+    if ($Completed -ne $Runs) { $reasons.Add('incomplete') }
+    if ($MixedBuild) { $reasons.Add('mixed-build') }
+    if ($MixedEnvironment) { $reasons.Add('mixed-environment') }
+    return [string[]]$reasons.ToArray()
 }
 
 # The series' exit code, by precedence, highest first (Opus and CodeRabbit on #741): 3 a tripped guard; 1 a failed run

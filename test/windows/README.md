@@ -1744,19 +1744,35 @@ still at the series' baseline (`TickMovedFromBaseline` false), whose every
 run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
 higher), and the console says no measurement was published. A series that
-input voided writes no timing statistic and no other duration: each group's
-`p95_ms` and `median_ms` and each run's `p95_ms` in `pacing.json` are null
-too, and its `Inconclusive` names what voided it (the hook count, with "tick
-also moved (may be the same input)" when the tick moved too, since one input
-can do both; a tick that moved or could not be read; a watch that did not
-stop; or the runs that saw input). Input seen is a latch for the series:
-every read sets it (a hook count above 0, any tick mismatch at a driver gate,
-a poll, the outer half's checks or the final read, an unread tick, a watch
-that did not stop), each run carries its own to the series, and nothing
-clears it, so a later read that returns the expected tick (`GetLastInputInfo`
-is not incremental) never undoes an earlier mismatch; a poll that reads a
-mismatch stops the step at once and never reads again. Each run's own
-`run.json` keeps its evidence for debugging. The series ends
+input voided writes `pacing.json` from an allowlist, not by scrubbing: the
+schema, `Verdict` (`voided`), `ExitCode`, `Reasons`, `RealInputsSeen`,
+`InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
+`MeasureHead` and `ExeSHA256`, and nothing else. It carries no number but
+the input counts and the exit code, and no free text: `Reasons` are codes
+from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
+`watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
+`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`).
+Everything else goes to `diagnostics.json` beside it: every message (the
+staging, lock-shortfall and tick-stop lines among them), every duration,
+each run and each group, and `Inconclusive`, which names what voided the
+series (the hook count, with "tick also moved (may be the same input)" when
+the tick moved too, since one input can do both; a tick that moved or could
+not be read; a watch that did not stop; or the runs that saw input). A
+series input did not void keeps the full `pacing.json` and writes no
+`diagnostics.json`. Input seen is a latch for the series: every read sets it
+(a hook count above 0, any tick mismatch at a driver gate, a poll, the
+driver's session facts, the outer half's checks or the final read, an unread
+tick, a watch that did not stop), each run carries its own to the series,
+and nothing clears it, so a later read that returns the expected tick
+(`GetLastInputInfo` is not incremental) never undoes an earlier mismatch; a
+poll that reads a mismatch stops the step at once and never reads again.
+Every PowerShell read of the tick goes through one function
+(`Read-FramePacingInputTick`), which latches a mismatch before it returns,
+and the contract fails on any other. Each run's own `run.json` keeps its
+evidence for debugging. A clipboard sequence of 0 before and after is no
+observation (the clipboard could not be read): `guards.json` records
+`ClipboardObservable` false and the console says the clipboard was
+unobservable, never that it held. The series ends
 in this order: every run has ended and its job, with its copy, is closed;
 the watch stops, which unhooks; the final real-input count and the tick are
 read; then the summary. Input after the unhook reaches no copy. A visible
