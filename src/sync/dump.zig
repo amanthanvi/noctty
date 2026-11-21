@@ -205,7 +205,12 @@ pub const Dump = struct {
             return;
         }
         self.append_error = err;
-        if (writeAt(handle, &.{failed_mark}, 0)) |mark_err| panicUnmarked(err, mark_err);
+        // A dump that cannot even be marked would read as complete without
+        // the pair: the process panics, so the run ends abnormally, which
+        // fails it (the suite's step, an isolated parent, an app harness that
+        // reads the layer's text; APP-ROLE-PANIC-EXIT-01).
+        const mark_failed = if (self.injected(.mark)) injected_error else writeAt(handle, &.{failed_mark}, 0);
+        if (mark_failed) |mark_err| panicUnmarked(err, mark_err);
         var buf: [64]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{c} append-failed win32={d}\n", .{ failed_mark, err }) catch unreachable;
         if (!self.injected(.marker)) _ = writeAt(handle, line, end_of_file);
@@ -217,11 +222,12 @@ pub const Dump = struct {
     }
 
     /// Whether a test's fault fails this write.
-    fn injected(self: *Dump, what: enum { pair, marker }) bool {
+    fn injected(self: *Dump, what: enum { pair, mark, marker }) bool {
         if (!builtin.is_test) return false;
         const fault = self.fault orelse return false;
         return switch (what) {
             .pair => fault.pairs.fetchAdd(1, .acq_rel) >= fault.pairs_before,
+            .mark => fault.mark_fails,
             .marker => fault.marker_fails,
         };
     }
@@ -409,11 +415,13 @@ const injected_error: ?u32 = @intFromEnum(windows.Win32Error.DISK_FULL);
 
 /// A test's writer fault: the first `pairs_before` pairs are written and
 /// every later one fails as a full disk fails it, writing nothing; with
-/// `marker_fails` the `!` line fails too. The in-place mark is never
-/// injected: when it fails, the process panics.
+/// `marker_fails` the `!` line fails too, and with `mark_fails` so does the
+/// in-place mark, the double failure, after which the process panics
+/// (`panicUnmarked`), so only an isolated child sets it.
 pub const Fault = struct {
     pairs_before: u32,
     marker_fails: bool = false,
+    mark_fails: bool = false,
     pairs: std.atomic.Value(u32) = .init(0),
 };
 
@@ -1389,6 +1397,40 @@ test "a full disk that also stops the failure's line still leaves the header mar
     try testing.expectEqualStrings(before[1..], after[1..]);
     try testing.expectError(error.BadLine, parseHeader(std.mem.sliceTo(after, '\n')));
     _ = try parseFailedHeader(std.mem.sliceTo(after, '\n'));
+}
+
+test "isolated: a full disk that stops both a pair and the in-place mark panics with the layer's text" {
+    // Stone round 4, Sol's Medium 2: when the mark cannot be written either,
+    // the dump on disk is a valid header and an allowed prefix that every
+    // collector would pass, so the process panics and the run ends
+    // abnormally. The child writes into the directory its parent made
+    // (`Dumps.own`), and the parent reads what survived.
+    const isolated = @import("isolated.zig");
+    if (isolated.inChild()) {
+        const dir_utf8 = try std.process.getEnvVarOwned(testing.allocator, env_var);
+        defer testing.allocator.free(dir_utf8);
+        const dir = try std.unicode.wtf8ToWtf16LeAllocZ(testing.allocator, dir_utf8);
+        defer testing.allocator.free(dir);
+        var fault: Fault = .{ .pairs_before = 1, .mark_fails = true };
+        var d: Dump = .{ .target = .{ .directory = dir }, .kind = .child, .fault = &fault };
+        defer d.close();
+        try testing.expect(d.append(0x1000, .ui, .lock));
+        _ = d.append(0x2000, .termio, .lock);
+        return error.TheDoubleFailureDidNotPanic;
+    }
+    var child = try isolated.run(@src(), .own);
+    defer child.deinit();
+    try isolated.expectChildPanicked(&child, @src(), "thread-role layer: the pairs dump failed to write a pair " ++
+        "(Win32 error 112) and to mark itself failed (Win32 error 112); it would read as complete without the pair");
+    // What survived reads as a complete dump with the allowed pair only:
+    // the panic, not the file, is what fails the run.
+    const text = try child.dir.?.read();
+    defer testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = try parseHeader(lines.next().?);
+    try testing.expectEqual(@as(u64, 0x1000), (try parsePair(lines.next().?)).site);
+    try testing.expectEqualStrings("", lines.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), lines.next());
 }
 
 test "threads that lose pairs at once wait for one mark" {

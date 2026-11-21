@@ -108,9 +108,12 @@ pub const Problem = enum {
 /// pairs it holds: a key with no file, which no compare passes.
 pub const lost_line = "?append_failed:pairs-lost none\n";
 
-/// A raw dump's header line: a complete dump's, or one whose writer failed
-/// (`dump.parseFailedHeader`).
-fn readHeader(line: []const u8) ?struct { header: dump.Header, failed: bool } {
+/// A raw dump's header: a complete dump's, or one whose writer failed
+/// (`dump.parseFailedHeader`). Its line must end in LF: a header the
+/// writer did not finish is no header (stone round 4, Sol's Medium 2).
+fn readHeader(raw: []const u8) ?struct { header: dump.Header, failed: bool } {
+    const end = std.mem.indexOfScalar(u8, raw, '\n') orelse return null;
+    const line = raw[0..end];
     if (dump.parseHeader(line)) |header| return .{ .header = header, .failed = false } else |_| {}
     if (dump.parseFailedHeader(line)) |header| return .{ .header = header, .failed = true } else |_| {}
     return null;
@@ -460,7 +463,8 @@ fn write(
     result: *Result,
 ) (std.Io.Writer.Error || Allocator.Error)!void {
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const read = readHeader(lines.first()) orelse {
+    _ = lines.first();
+    const read = readHeader(raw) orelse {
         // No header: the compare fails it as BAD-DUMP.
         result.problem = .bad_header;
         return;
@@ -621,7 +625,8 @@ fn runDirectories(a: Allocator) !u8 {
 /// One raw dump, symbolised against its image in `images_path`.
 fn symboliseFile(a: Allocator, raw: []const u8, images_path: []const u8, root: []const u8) !Result {
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const read = readHeader(lines.first()) orelse return .{ .text = try a.dupe(u8, ""), .problem = .bad_header };
+    _ = lines.first();
+    const read = readHeader(raw) orelse return .{ .text = try a.dupe(u8, ""), .problem = .bad_header };
     // A failed dump is refused whatever its image, so none is looked for.
     if (read.failed) return problemOnly(a, raw, .append_failed);
     const header = read.header;
@@ -645,7 +650,8 @@ fn problemOnly(a: Allocator, raw: []const u8, problem: Problem) Allocator.Error!
     errdefer out.deinit();
     var result: Result = .{ .text = undefined, .problem = problem };
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const read = readHeader(lines.first());
+    _ = lines.first();
+    const read = readHeader(raw);
     const failed = if (read) |r| r.failed else false;
     const w = &out.writer;
     if (read) |r| {
@@ -864,6 +870,10 @@ test "symbolise names each site shape's acquiring function in this file" {
     defer headless.deinit(a);
     try testing.expectEqual(@as(?Problem, .bad_header), headless.problem);
     try testing.expectEqualStrings("", headless.text);
+    // A header line its writer did not finish (no LF) is no header either.
+    const unterminated = try symbolise(a, std.mem.sliceTo(raw.written(), '\n'), &session, pdb, root);
+    defer unterminated.deinit(a);
+    try testing.expectEqual(@as(?Problem, .bad_header), unterminated.problem);
 }
 
 /// One symbolised line of the site-shape test: `name`'s key with role `ui`

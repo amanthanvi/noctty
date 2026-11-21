@@ -307,6 +307,12 @@ pub fn expectPanic(src: std.builtin.SourceLocation, text: []const u8) !void {
     try expectPanicked(&child, src, text);
 }
 
+/// `expectPanic`'s verdict for a child the caller ran itself (`run`), for
+/// a test that also reads what the child left in its own directory.
+pub fn expectChildPanicked(child: *const Child, src: std.builtin.SourceLocation, text: []const u8) !void {
+    return expectPanicked(child, src, text);
+}
+
 fn expectPanicked(child: *const Child, src: std.builtin.SourceLocation, text: []const u8) !void {
     try expectDispatched(child, src);
     const panicked = !child.timed_out and child.exit_code == exit_panicked;
