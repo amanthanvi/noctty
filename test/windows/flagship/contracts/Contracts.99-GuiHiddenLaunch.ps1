@@ -666,8 +666,11 @@ foreach ($mutation in @(
 
 # ---- (10) every hosted leaf loads lib before the first write, launch or bootstrap it runs; and no launch that can
 # start the copy or its CLI runs on a hosted path, in the leaves or in the library functions they reach (design §4.1).
-# Order is read from what runs: a write inside a helper runs where the file first calls the helper, not where it is
-# defined (CodeRabbit on #740). A launch is found through the syntax tree, not by variable name (Opus on #740):
+# Order is read from what runs: a write inside a helper runs where the file calls the helper, not where it is defined,
+# and a helper's own statements keep their order; only a load every hosted run reaches counts, one the hosted path can
+# skip (in the switch's else, any other branch, a loop, a try) protects nothing (CodeRabbit on #740). A command is
+# named as PowerShell calls it, a module qualifier dropped. A launch is found through the syntax tree, not by variable
+# name (Opus on #740):
 # Start-Process, [Diagnostics.Process]::Start, a ProcessStartInfo, or a `&`, `.` or bare call whose callee the
 # walker's resolver (scripts/ci-script-closure.ps1) cannot prove to be some other program. Each must sit in the else
 # of an `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)` whose then-branch uses the hosted launcher (that switch, not the
@@ -682,38 +685,128 @@ $guiLibraryFiles = @('scripts\interactive-win11-lib.ps1', 'scripts\interactive-w
 $guiLeafFiles = @($guiPlan.leaves | ForEach-Object { Join-Path $repoRoot ([string]$_.script) })
 $guiFirstUseNames = @('Invoke-InteractiveWin11HarnessMain', 'Invoke-InteractiveWin11Bootstrap', 'Initialize-InteractiveWin11Sandbox', 'Start-Process', 'Set-Content', 'New-Item', 'Out-File')
 
-function Get-GuiLaunchRunOffset($Ast, $Node, [hashtable] $Memo) {
-    # Where a node runs in the file's own flow: its offset outside any function; in a function, the earliest place
-    # code that runs calls that function (through other functions too); $null when nothing calls it.
-    $function = $null
+function Get-GuiLaunchFunctionOf($Node) {
+    # The innermost function definition around a node, or $null at the script's own level.
     for ($walk = $Node.Parent; $null -ne $walk; $walk = $walk.Parent) {
-        if ($walk -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $function = $walk; break }
+        if ($walk -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $walk }
     }
-    if ($null -eq $function) { return $Node.Extent.StartOffset }
-    $key = $function.Name.ToLowerInvariant()
-    if ($Memo.ContainsKey($key)) { return $Memo[$key] }
-    $Memo[$key] = $null
-    $earliest = $null
-    foreach ($call in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ieq $function.Name }.GetNewClosure(), $true))) {
-        $at = Get-GuiLaunchRunOffset $Ast $call $Memo
-        if ($null -ne $at -and ($null -eq $earliest -or $at -lt $earliest)) { $earliest = $at }
-    }
-    $Memo[$key] = $earliest
-    return $earliest
+    return $null
 }
 
-function Test-GuiLaunchLibFirst($Ast) {
-    # True when the file loads the interactive library before the first write, launch or bootstrap that runs.
+function Get-GuiLaunchCommandName($Command) {
+    # The cmdlet or function a command calls, lower-case, with a module qualifier dropped
+    # (Microsoft.PowerShell.Management\Set-Content is Set-Content): scripts/ci-script-closure.ps1's rule.
+    $first = $Command.CommandElements[0]
+    if ($first -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
+    if ($first.Value -match '\A[A-Za-z][\w.]*\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z') { return $Matches['name'].ToLowerInvariant() }
+    return $first.Value.ToLowerInvariant()
+}
+
+function Get-GuiLaunchChains($Ast, $Node, [hashtable] $Memo) {
+    # Every way a node runs in the file's own flow: each a list of nodes, the calls that reach it outermost first and
+    # the node last (Nodes). Outside any function, the node alone; in a function, each chain that reaches a call of
+    # that function, then the node; none when nothing calls it. A write inside a helper runs where the file calls the
+    # helper, not where it is defined (CodeRabbit on #740).
+    $function = Get-GuiLaunchFunctionOf $Node
+    if ($null -eq $function) { return , @([pscustomobject]@{ Nodes = [object[]]@($Node) }) }
+    $key = $function.Extent.StartOffset
+    if (-not $Memo.ContainsKey($key)) {
+        # A recursive call adds no chain while its own are being found.
+        $Memo[$key] = @()
+        $calls = [System.Collections.Generic.List[object]]::new()
+        $name = $function.Name.ToLowerInvariant()
+        foreach ($call in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and [string]::Equals($n.GetCommandName(), $name, [StringComparison]::OrdinalIgnoreCase) }.GetNewClosure(), $true))) {
+            foreach ($chain in (Get-GuiLaunchChains $Ast $call $Memo)) { $calls.Add($chain) }
+        }
+        $Memo[$key] = $calls.ToArray()
+    }
+    return , @(foreach ($chain in $Memo[$key]) { [pscustomobject]@{ Nodes = [object[]](@($chain.Nodes) + @($Node)) } })
+}
+
+function Test-GuiLaunchRunsFirst($Node, $Target) {
+    # True when $Node has run whenever its scope reaches $Target on the hosted path (a hosted run sets
+    # NOCTTY_GUI_HIDDEN_DESKTOP); with $Target $null, whenever its scope (the script, or the function around it) runs
+    # to its end. Walking up from $Node, each container must pass control through to it: a pipeline, an assignment, the
+    # then-branch of an `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)`, or the body of a try with no catch (a throw there ends
+    # the run, so what follows in the body ran after $Node). It succeeds at the first statement list that also holds
+    # $Target after $Node; without a $Target, at its scope's own top level, when no `return` of its function comes
+    # before it. Any other branch (the else of that switch included), a loop, a switch, a try with a catch, or a
+    # scriptblock may skip $Node (CodeRabbit on #740); a try's finally runs after a throw in its body, so $Node does not
+    # protect it.
+    $end = $Node.Extent.EndOffset
+    for ($walk = $Node.Parent; $null -ne $walk; $walk = $walk.Parent) {
+        if ($walk -is [System.Management.Automation.Language.PipelineAst] -or $walk -is [System.Management.Automation.Language.CommandExpressionAst] -or
+            $walk -is [System.Management.Automation.Language.AssignmentStatementAst]) { continue }
+        if ($walk -isnot [System.Management.Automation.Language.NamedBlockAst] -and $walk -isnot [System.Management.Automation.Language.StatementBlockAst]) { return $false }
+        if ($null -ne $Target -and $Target.Extent.StartOffset -ge $end -and $Target.Extent.EndOffset -le $walk.Extent.EndOffset) { return $true }
+        $holder = $walk.Parent
+        if ($walk -is [System.Management.Automation.Language.StatementBlockAst]) {
+            if ($holder -is [System.Management.Automation.Language.IfStatementAst] -and [object]::ReferenceEquals($holder.Clauses[0].Item2, $walk) -and
+                [string]::Equals($holder.Clauses[0].Item1.Extent.Text, '$env:NOCTTY_GUI_HIDDEN_DESKTOP', [StringComparison]::Ordinal)) { $walk = $holder; continue }
+            if ($holder -is [System.Management.Automation.Language.TryStatementAst] -and [object]::ReferenceEquals($holder.Body, $walk) -and $holder.CatchClauses.Count -eq 0) {
+                if ($null -ne $Target -and $Target.Extent.StartOffset -ge $holder.Extent.StartOffset -and $Target.Extent.EndOffset -le $holder.Extent.EndOffset) { return $false }
+                $walk = $holder
+                continue
+            }
+            return $false
+        }
+        # The top level of a scope: the script's, a function's, or a scriptblock's (which may run at any time).
+        if ($null -ne $Target) { return $false }
+        $owner = $holder.Parent
+        if ($null -eq $owner) { return $true }
+        if ($owner -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { return $false }
+        $returns = @($owner.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.ReturnStatementAst] -and $n.Extent.StartOffset -lt $end }, $true) | Where-Object {
+            $scope = $_.Parent
+            while ($scope -isnot [System.Management.Automation.Language.FunctionDefinitionAst] -and $scope -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $scope = $scope.Parent }
+            [object]::ReferenceEquals($scope, $owner)
+        })
+        return $returns.Count -eq 0
+    }
+    return $false
+}
+
+function Test-GuiLaunchRunsBefore($Load, $Use) {
+    # True when the load chain runs before the use chain on every hosted run that reaches the use. Past the calls the
+    # two share, they part at one step each in the same scope: the load's step must run before the use's there
+    # (Test-GuiLaunchRunsFirst), and each later step of the load, inside the helpers it calls, must run whenever its
+    # helper runs. Inside one helper the statements keep their own order (CodeRabbit on #740: a load and a write in
+    # one helper shared the call's offset, and a strict comparison refused the load first).
+    $loadNodes = $Load.Nodes
+    $useNodes = $Use.Nodes
+    $j = 0
+    while ($j -lt $loadNodes.Count - 1 -and $j -lt $useNodes.Count - 1 -and [object]::ReferenceEquals($loadNodes[$j], $useNodes[$j])) { $j++ }
+    if ([object]::ReferenceEquals($loadNodes[$j], $useNodes[$j])) { return $false }
+    if (-not [object]::ReferenceEquals((Get-GuiLaunchFunctionOf $loadNodes[$j]), (Get-GuiLaunchFunctionOf $useNodes[$j]))) { return $false }
+    if (-not (Test-GuiLaunchRunsFirst $loadNodes[$j] $useNodes[$j])) { return $false }
+    for ($k = $j + 1; $k -lt $loadNodes.Count; $k++) { if (-not (Test-GuiLaunchRunsFirst $loadNodes[$k] $null)) { return $false } }
+    return $true
+}
+
+function Test-GuiLaunchLibFirst($Ast, [string] $RepoPath) {
+    # True when the file loads the interactive library before every write, launch or bootstrap it can run, on the
+    # hosted path. A load counts only when the walker's resolver proves its target is scripts/interactive-win11-lib.ps1
+    # (a `$libPath` naming some other file does not), and only where Test-GuiLaunchRunsBefore says it runs first: a
+    # load the hosted path can skip, such as one in the switch's else, protects nothing (CodeRabbit on #740).
+    . (Join-Path $repoRoot 'scripts\ci-script-closure.ps1')
+    $context = New-CiScriptContext -RepoRoot $repoRoot -RepoPath $RepoPath -Ast $Ast
     $memo = @{}
-    $loads = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
-        ($n.Extent.Text -match 'interactive-win11-lib\.ps1' -or $n.Extent.Text -match '\$libPath') }, $true) |
-        ForEach-Object { Get-GuiLaunchRunOffset $Ast $_ $memo } | Where-Object { $null -ne $_ } | Sort-Object)
-    if ($loads.Count -lt 1) { return $false }
-    $uses = @($Ast.FindAll({ param($n)
-        ($n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in $guiFirstUseNames) -or
-        ($n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and (Get-MemberExpressionName -Node $n) -match '\AWrite(AllText|AllLines|AllBytes)\z') }, $true) |
-        ForEach-Object { Get-GuiLaunchRunOffset $Ast $_ $memo } | Where-Object { $null -ne $_ } | Sort-Object)
-    return ($uses.Count -eq 0 -or $uses[0] -gt $loads[0])
+    $loads = [System.Collections.Generic.List[object]]::new()
+    foreach ($node in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true))) {
+        $value = Resolve-CiScriptValue $node.CommandElements[0] $context
+        $target = $(if ($value.Kind -eq 'path') { ConvertTo-CiScriptTargetPath -RepoRoot $repoRoot -Value $value.Value })
+        if (-not [string]::Equals($target, 'scripts/interactive-win11-lib.ps1', [StringComparison]::Ordinal)) { continue }
+        foreach ($chain in (Get-GuiLaunchChains $Ast $node $memo)) { $loads.Add($chain) }
+    }
+    if ($loads.Count -eq 0) { return $false }
+    $useNames = [System.Collections.Generic.HashSet[string]]::new([string[]]@($guiFirstUseNames | ForEach-Object { $_.ToLowerInvariant() }), [StringComparer]::Ordinal)
+    foreach ($node in @($Ast.FindAll({ param($n)
+            ($n -is [System.Management.Automation.Language.CommandAst] -and $useNames.Contains([string](Get-GuiLaunchCommandName $n))) -or
+            ($n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and (Get-MemberExpressionName -Node $n) -match '\AWrite(AllText|AllLines|AllBytes)\z') }, $true))) {
+        foreach ($use in (Get-GuiLaunchChains $Ast $node $memo)) {
+            if (@($loads | Where-Object { Test-GuiLaunchRunsBefore $_ $use }).Count -eq 0) { return $false }
+        }
+    }
+    return $true
 }
 
 function Get-GuiLaunchHostedSwitch($Node) {
@@ -788,10 +881,10 @@ function Get-GuiLaunchProblems {
     $sites = [System.Collections.Generic.List[object]]::new()
     foreach ($node in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -or $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
         if ($node -is [System.Management.Automation.Language.CommandAst]) {
-            $name = $node.GetCommandName()
+            $name = Get-GuiLaunchCommandName $node
             $first = $node.CommandElements[0]
-            if ($name -in @('Start-Process', 'saps', 'start')) { $sites.Add($node); continue }
-            if ($name -ieq 'New-Object' -and $node.Extent.Text -match '(?i)\bDiagnostics\.ProcessStartInfo\b') {
+            if (@('start-process', 'saps', 'start').Contains([string]$name)) { $sites.Add($node); continue }
+            if ([string]::Equals($name, 'new-object', [StringComparison]::Ordinal) -and $node.Extent.Text -match '(?i)\bDiagnostics\.ProcessStartInfo\b') {
                 $assigned = $node.Parent.Parent
                 $target = $(if ($assigned -is [System.Management.Automation.Language.AssignmentStatementAst] -and $assigned.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $assigned.Left })
                 if ($null -eq $target -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
@@ -822,8 +915,18 @@ function Get-GuiLaunchProblems {
     foreach ($site in $sites) {
         $switch = Get-GuiLaunchHostedSwitch $site
         if ($switch) {
-            if ($switch.Clauses[0].Item2.Extent.Text -notmatch '\b(Start|Invoke)-InteractiveWin11HostedProcess\b') {
-                $found.Add("${RepoPath}: the hosted branch of the switch around line $($site.Extent.StartLineNumber) does not use the hosted launcher.")
+            # A call of the hosted launcher in the hosted branch's own code: a comment or a string that names it starts
+            # nothing, nor does a scriptblock or function the branch only defines (CodeRabbit on #740).
+            $branch = $switch.Clauses[0].Item2
+            $launchers = @($branch.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and
+                    @('start-interactivewin11hostedprocess', 'invoke-interactivewin11hostedprocess').Contains([string](Get-GuiLaunchCommandName $n)) }, $true) | Where-Object {
+                    $inner = $_.Parent
+                    while (-not [object]::ReferenceEquals($inner, $branch) -and $inner -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
+                        $inner -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $inner = $inner.Parent }
+                    [object]::ReferenceEquals($inner, $branch)
+                })
+            if ($launchers.Count -eq 0) {
+                $found.Add("${RepoPath}: the hosted branch of the switch around line $($site.Extent.StartLineNumber) does not call the hosted launcher.")
             }
             continue
         }
@@ -836,24 +939,41 @@ function Get-GuiLaunchProblems {
 foreach ($file in @($guiLeafFiles) + @($guiLibraryFiles)) {
     $ast = Get-GuiContractAst $file
     $guiLaunchRepoPath = [IO.Path]::GetRelativePath($repoRoot, $file).Replace('\', '/')
-    if ($guiLeafFiles -contains $file -and -not (Test-GuiLaunchLibFirst $ast)) {
+    if ($guiLeafFiles -contains $file -and -not (Test-GuiLaunchLibFirst $ast $guiLaunchRepoPath)) {
         throw "$file writes, launches or bootstraps before the interactive library (and its desktop check) loads, or never loads it."
     }
     $launchProblems = Get-GuiLaunchProblems -Ast $ast -RepoPath $guiLaunchRepoPath
     if ($launchProblems.Count -ne 0) { throw ($launchProblems -join ' ') }
 }
-# Controls, on synthetic files. The order check: a helper that writes runs where it is called.
-$guiOrderLib = ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
+# Controls, on synthetic files (each read as test/windows/order-fixture.ps1). The order check: a helper that writes
+# runs where it is called; a load counts only where every hosted run reaches it; a helper keeps its own order.
+$guiOrderLib = ". (Join-Path `$PSScriptRoot '..\..\scripts\interactive-win11-lib.ps1')"
 $guiOrderHelper = "function Write-Seed { Set-Content -LiteralPath `$seed -Value 1 }"
+$guiOrderWrite = "Set-Content -LiteralPath `$seed -Value 1"
 foreach ($case in @(
         @{ Name = 'a helper called only after the load'; Accept = $true; Text = "$guiOrderHelper`n$guiOrderLib`nWrite-Seed" }
         @{ Name = 'a helper called before the load'; Accept = $false; Text = "$guiOrderHelper`nWrite-Seed`n$guiOrderLib" }
         @{ Name = 'a helper called from a helper called before the load'; Accept = $false; Text = "$guiOrderHelper`nfunction Initialize-Run { Write-Seed }`nInitialize-Run`n$guiOrderLib" }
-        @{ Name = 'a write before the load'; Accept = $false; Text = "Set-Content -LiteralPath `$seed -Value 1`n$guiOrderLib" }
+        @{ Name = 'a write before the load'; Accept = $false; Text = "$guiOrderWrite`n$guiOrderLib" }
         @{ Name = 'a helper never called'; Accept = $true; Text = "$guiOrderHelper`n$guiOrderLib" }
+        @{ Name = 'a load only in the switch''s else, then a write'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { `$hosted = 1 } else { $guiOrderLib }`n$guiOrderWrite" }
+        @{ Name = 'a load in the switch''s hosted branch, then a write'; Accept = $true; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { $guiOrderLib } else { `$legacy = 1 }`n$guiOrderWrite" }
+        @{ Name = 'a load under another condition, then a write'; Accept = $false; Text = "if (`$Fast) { $guiOrderLib }`n$guiOrderWrite" }
+        @{ Name = 'a load in a try with a catch, then a write'; Accept = $false; Text = "try { $guiOrderLib } catch { }`n$guiOrderWrite" }
+        @{ Name = 'a load, then a write, in one try with a catch'; Accept = $true; Text = "try { $guiOrderLib; $guiOrderWrite } catch { }" }
+        @{ Name = 'a load, then a write, in a try with only a finally (the leaves'' wrapper)'; Accept = $true; Text = "try {`n$guiOrderLib`n$guiOrderWrite`n} finally { `$done = 1 }" }
+        @{ Name = 'a write in the finally of the try that loads'; Accept = $false; Text = "try {`n$guiOrderLib`n} finally { $guiOrderWrite }" }
+        @{ Name = 'a $libPath that names another script'; Accept = $false; Text = "`$libPath = Join-Path `$PSScriptRoot 'other-lib.ps1'`n. `$libPath`n$guiOrderWrite" }
+        @{ Name = 'a loading helper called only in the switch''s else'; Accept = $false; Text = "function Initialize-Run { $guiOrderLib }`nif (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { `$hosted = 1 } else { Initialize-Run }`n$guiOrderWrite" }
+        @{ Name = 'a loading helper whose early return can skip the load'; Accept = $false; Text = "function Initialize-Run { if (`$Skip) { return }; $guiOrderLib }`nInitialize-Run`n$guiOrderWrite" }
+        @{ Name = 'a loading helper called first'; Accept = $true; Text = "function Initialize-Run { $guiOrderLib }`nInitialize-Run`n$guiOrderWrite" }
+        @{ Name = 'one helper that loads, then writes'; Accept = $true; Text = "function Initialize-Run { $guiOrderLib; $guiOrderWrite }`nInitialize-Run" }
+        @{ Name = 'one helper that writes, then loads'; Accept = $false; Text = "function Initialize-Run { $guiOrderWrite; $guiOrderLib }`nInitialize-Run" }
+        @{ Name = 'one helper that loads then writes, first called under a condition'; Accept = $true; Text = "function Initialize-Run { $guiOrderLib; $guiOrderWrite }`nif (`$Early) { Initialize-Run }`nInitialize-Run" }
+        @{ Name = 'a module-qualified write before the load'; Accept = $false; Text = "Microsoft.PowerShell.Management\$guiOrderWrite`n$guiOrderLib" }
     )) {
     $orderAst = [System.Management.Automation.Language.Parser]::ParseInput($case.Text, [ref]$null, [ref]$null)
-    if ((Test-GuiLaunchLibFirst $orderAst) -ne $case.Accept) { throw "The load-order check misjudged $($case.Name) (expected accept=$($case.Accept))." }
+    if ((Test-GuiLaunchLibFirst $orderAst 'test/windows/order-fixture.ps1') -ne $case.Accept) { throw "The load-order check misjudged $($case.Name) (expected accept=$($case.Accept))." }
 }
 # The launch ban: each control in a hosted path must be refused; each legitimate shape must pass.
 $guiHostedLaunch = 'Start-InteractiveWin11HostedProcess -FilePath $exe -ArgumentList $a'
@@ -861,6 +981,11 @@ foreach ($case in @(
         @{ Name = 'a legacy launch in the else'; Accept = $true; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { $guiHostedLaunch } else { Start-Process -FilePath `$exe -ArgumentList `$a -PassThru }" }
         @{ Name = 'a legacy launch under a nested condition in the else'; Accept = $true; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { $guiHostedLaunch } else { if (`$Wait) { Start-Process -FilePath `$exe -Wait } else { Start-Process -FilePath `$exe } }" }
         @{ Name = 'an else whose hosted branch skips the launcher'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { `$p = 1 } else { if (`$Wait) { Start-Process -FilePath `$exe -Wait } }" }
+        @{ Name = 'a hosted branch that names the launcher only in a comment'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) {`n    # $guiHostedLaunch`n    `$p = 1`n} else { Start-Process -FilePath `$exe }" }
+        @{ Name = 'a hosted branch that names the launcher only in a string'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { Write-Host 'Start-InteractiveWin11HostedProcess' } else { Start-Process -FilePath `$exe }" }
+        @{ Name = 'a hosted branch that only defines a scriptblock calling the launcher'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { `$later = { $guiHostedLaunch } } else { Start-Process -FilePath `$exe }" }
+        @{ Name = 'a hosted branch that calls Invoke-InteractiveWin11HostedProcess'; Accept = $true; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { `$run = Invoke-InteractiveWin11HostedProcess -FilePath `$cli -ArgumentList `$a } else { `$run = Start-Process -FilePath `$cli -PassThru }" }
+        @{ Name = 'a module-qualified Start-Process'; Accept = $false; Text = '$p = Microsoft.PowerShell.Management\Start-Process -FilePath $exe -PassThru' }
         @{ Name = 'a bare Start-Process'; Accept = $false; Text = '$p = Start-Process -FilePath $exe -PassThru' }
         @{ Name = '& $server from the exe path, in the hosted branch'; Accept = $false; Text = "`$server = Get-InteractiveWin11ExePath -RepoRoot `$r`nif (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { & `$server --x; $guiHostedLaunch } else { Start-Process -FilePath `$server }" }
         @{ Name = '& (Get-InteractiveWin11ExePath) in the hosted branch'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { & (Get-InteractiveWin11ExePath -RepoRoot `$r) --x; $guiHostedLaunch } else { }" }
