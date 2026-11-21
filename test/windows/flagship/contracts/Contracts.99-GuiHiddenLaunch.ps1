@@ -405,6 +405,27 @@ try {
         $observed = (@(Get-GuiHiddenRendererObserved $case.Logs) -join '+')
         if ($observed -cne $case.Want) { throw "The renderer read-back gave '$observed', not '$($case.Want)'." }
     }
+    # The log lines the read-back counts on are pinned to their sources (Opus on #740: a reworded fallback warning would
+    # silently report no fallback): renderer/Windows.zig's fallback and D3D11 failure warnings, OpenGL.zig's debug line,
+    # and the runner's matchers for each.
+    $guiRendererPins = {
+        param([string] $WindowsZig, [string] $OpenGlZig, [string] $Runner)
+        $problems = [System.Collections.Generic.List[string]]::new()
+        if (-not $WindowsZig.Contains('log.warn("OpenGL startup failed err={} could_not_start={}; trying the Direct3D 11 beta"')) { $problems.Add('Windows.zig fallback warning') }
+        if (-not $WindowsZig.Contains('log.warn("{s} startup failed err={}"')) { $problems.Add('Windows.zig D3D11 failure warning') }
+        if (-not $OpenGlZig.Contains('log.debug("loaded OpenGL {}.{}"')) { $problems.Add('OpenGL.zig loaded line') }
+        foreach ($matcher in @('''; trying the Direct3D 11 beta''', '''d3d11(-warp)? startup failed''', '''loaded OpenGL [0-9]''')) {
+            if (-not $Runner.Contains($matcher)) { $problems.Add("runner matcher $matcher") }
+        }
+        return , $problems.ToArray()
+    }
+    $guiWindowsZig = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\renderer\Windows.zig'))
+    $guiOpenGlZig = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\renderer\OpenGL.zig'))
+    $guiRunnerSourceText = [IO.File]::ReadAllText($guiRunnerPath)
+    $guiPinProblems = & $guiRendererPins $guiWindowsZig $guiOpenGlZig $guiRunnerSourceText
+    if ($guiPinProblems.Count -ne 0) { throw "The renderer read-back's log lines are not pinned to their sources: $($guiPinProblems -join '; ')." }
+    $guiReworded = & $guiRendererPins ($guiWindowsZig.Replace('; trying the Direct3D 11 beta', '; trying Direct3D 11')) $guiOpenGlZig $guiRunnerSourceText
+    if ($guiReworded.Count -eq 0) { throw 'The renderer pin accepted a reworded fallback warning.' }
     $guiFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $true; Hash = ('a' * 64); Modified = '2026-11-21T05:06:57.1234567Z' }
     $guiNoFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $false }
     if (-not $guiFacts.exists -or $guiFacts.sha256 -cne ('a' * 64) -or $guiNoFacts.exists -or $null -ne $guiNoFacts.sha256) { throw 'The startup facts misread a fingerprint.' }

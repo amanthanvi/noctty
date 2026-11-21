@@ -54,6 +54,10 @@ $script:CiGuiFixedMembers = @(
     'test/windows/interactive-win11.ps1'
     'scripts/ci-gui-selection.ps1'
     'scripts/ci-script-closure.ps1'
+    # The selection's own inputs (Opus on #740): it dot-sources ci-changed-paths.ps1 (Get-CiChangedPaths,
+    # Get-CiPathNeeds), and the gate's verdict is ci-gate.ps1.
+    'scripts/ci-changed-paths.ps1'
+    'scripts/ci-gate.ps1'
     'test/windows/gui-hidden-scripts.ps1'
     'test/windows/flagship/contracts/Contracts.99-GuiHiddenSelection.ps1'
 )

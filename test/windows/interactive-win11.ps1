@@ -146,6 +146,10 @@ try {
     Assert-Equal (Get-InteractiveWin11LaunchAction -ExePath $hostedExe) 'launch' 'a hosted leaf launches its staged copy'
     Assert-True (& $hostedThrows { Get-InteractiveWin11LaunchAction -ExePath $hostedExe -Rebuild }) 'a hosted leaf with -Rebuild must throw, not build'
     Assert-True (& $hostedThrows { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }) 'the build tripwire must throw in hosted mode'
+    # Against a repository that does not exist, so nothing could build even without the tripwire; the message names it.
+    $measureTripwire = $null
+    try { Invoke-InteractiveWin11MeasureBuild -RepoRoot (Join-Path $hostedScratch 'no-such-repo') } catch { $measureTripwire = $_.Exception.Message }
+    Assert-True ([string]$measureTripwire -like '*a hosted leaf never builds*') 'measure-lib''s build tripwire must throw in hosted mode, before it reads anything'
     Assert-True (& $hostedThrows { Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED' }) 'the bootstrap tripwire must throw in hosted mode'
     $hostedHarnessMain = Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED'
     Assert-True ($null -eq $hostedHarnessMain) 'a hosted leaf skips the bootstrap'

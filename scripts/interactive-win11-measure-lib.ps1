@@ -331,6 +331,9 @@ function Invoke-InteractiveWin11MeasureBuild {
         [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')] [string] $Optimize = 'Debug'
     )
 
+    # A hosted leaf never builds (design §4.2; Opus on #740): the runner builds before any leaf runs, with the hosted
+    # variables unset, and a leaf only ever reaches this through lib's own tripwired Invoke-InteractiveWin11Build.
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'gui-hidden: a hosted leaf never builds.' }
     $layout = Get-InteractiveWin11MeasureLayout $RepoRoot
     # These paths enter a cmd wrapper. Reject shell syntax rather than attempt
     # several layers of escaping, including percent/delayed expansion.

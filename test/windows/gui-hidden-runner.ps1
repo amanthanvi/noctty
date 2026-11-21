@@ -1415,7 +1415,8 @@ if ($outReady) {
         environment = [ordered]@{
             os = 'Windows'; architecture = 'x86_64'; hosted = [bool](Test-GuiHiddenHosted); desktop = 'private'
             imageOs = $runRecord.imageOs; imageVersion = $runRecord.imageVersion
-            rendererConfigured = 'opengl'
+            # Read back from each copy's config (Get-GuiHiddenConfigPolicy's `renderer`): `unset` is the default, OpenGL.
+            rendererConfigured = (@($leafRecords | ForEach-Object { if ($_.launchPolicy -and $_.launchPolicy.renderer -and $_.launchPolicy.renderer -cne 'unset') { [string]$_.launchPolicy.renderer } elseif ($_.launchPolicy) { 'opengl' } } | Where-Object { $_ } | Sort-Object -Unique) -join '+')
             rendererObserved = (@($leafRecords | ForEach-Object { @($_.rendererObserved) } | Where-Object { $_ } | Sort-Object -Unique) -join '+')
             rendererFallbackLeaves = $fallbackLeaves
         }

@@ -1522,9 +1522,14 @@ GitHub-hosted runner. The runner validates the raw generation before staging
 and at the end, and stages one copy per leaf: everything but `noctty.ico`,
 `crash`, `ghostty` and the PDBs, plus `share`, with `noctty.portable` beside
 the exe. Both the app and the CLI are hashed against the receipt, and the
-ConPTY pair (`conpty.dll`, `OpenConsole.exe`) against the prefix's bytes as
-validated; at the end the generation must still match those hashes and the
-receipt's own bytes. A passing
+ConPTY pair (`conpty.dll`, `OpenConsole.exe`) against the package pins in
+`dist/windows/conpty-redist.json` (the receipt names only the app and the
+CLI); at the end the generation must still match those hashes and the
+receipt's own bytes. While a leaf runs, its copy's ConPTY pair is held open
+with read sharing only and hashed through those handles, so nothing can write,
+rename or delete it before noctty loads it; a file that cannot be opened that
+way refuses the run. A hosted leaf never builds: lib's and measure-lib's build
+entry points throw in hosted mode. A passing
 leaf's copy is deleted at once, a failing one's at the end unless
 `-KeepFailedCopies`. The runner stops with 20 GB or less free.
 
@@ -1596,9 +1601,16 @@ and the foreground-free `WM_COMMAND` hooks 1901, 1904, 1907 and 1908.
 **What it uploads.** `-Out` must be new or empty, and holds only
 `result.json` (the flagship result schema, scenario
 `windows.gui-hidden.suite`) and `receipts/`: one JSON object per leaf this run
-ran, plus `run.json` (the build's head and hashes, the hosted image's name and
-version in their known shapes, whether an HKCU or HKLM `Command
-Processor\AutoRun` value exists, never the value, and each guard's result).
+ran, plus `run.json`: the harness's own commit (`implementationSha`, this
+checkout's HEAD, with `implementationDirty`) and the measurement build's head
+and hashes, apart; the hosted image's name and version in their known shapes;
+whether an HKCU or HKLM `Command Processor\AutoRun` value exists, never the
+value; each guard's state, the clipboard sequence before and after, and the
+startup fingerprint (exists, SHA-256, last write) before and after. Each leaf
+records the renderer its copy's config names and the one that initialized,
+read from its noctty logs: `opengl` where the Debug measurement build logged
+`loaded OpenGL` without falling back, `d3d11` where it fell back and no D3D11
+start failed after it (a D3D11 start logs nothing on success).
 All are allowlisted values only: booleans, numbers and short strings without a
 path separator, quote or bracket. No path, command line, window title,
 environment value, screen capture or process listing; a failed leaf's receipt
@@ -1614,7 +1626,16 @@ counts: a guard that did not run makes the run an error, never a pass. A
 local run on `WinSta0` shares the user's clipboard, so the clipboard guard can
 trip on the user's own copy; don't copy during a run. 0 pass, 1 a leaf failed,
 2 a validation, staging, generation, guard or runner failure (with an `error`
-result when `-Out` could be opened), 3 a tripped guard.
+result when `-Out` could be opened, the runner's own initialization included),
+3 a tripped guard. When the job fails without a result (a failed self-test,
+or a suite step that died first), the workflow's last step runs
+`-PublishError`, which loads nothing, writes an `error` result, and leaves a
+result that already stands alone.
+
+The script walk's edge definition (design §4.3) covers PowerShell's own ways to
+run a script. A script a leaf passes to noctty for its terminal to run
+(`-e pwsh -File <script>`) is beyond it: neither the closure nor the leaf's
+receipt sees that script, so a leaf must not run a repo script that way.
 
 `gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
 and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1
