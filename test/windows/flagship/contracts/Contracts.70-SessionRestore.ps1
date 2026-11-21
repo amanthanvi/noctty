@@ -285,22 +285,50 @@ foreach ($startAssignment in $sessionStartAssignments) {
 }
 foreach ($runName in $sessionRunNames) {
     # Exact-one per named run is the scenario matrix itself: save, explicit
-    # no-restore, restore, and corrupt-state quarantine.
+    # no-restore, restore, and corrupt-state quarantine. The explicit-command
+    # run is written once per branch of the hidden-desktop switch (below), so it
+    # has two calls, of which exactly one runs.
+    $expectedRunCalls = if ($runName -ceq 'session-explicit-command') { 2 } else { 1 }
     $matchingRunCalls = @($sessionStartCalls | Where-Object {
         Test-CommandHasStringArgument -Command $_ -Value $runName
     })
-    if ($matchingRunCalls.Count -ne 1) {
+    if ($matchingRunCalls.Count -ne $expectedRunCalls) {
         throw "Session restore story must execute exactly one '$runName' run."
     }
 }
-if (@($sessionStartCalls | Where-Object {
-            Test-CommandHasStringArgument -Command $_ -Value 'session-explicit-command'
-        } | Where-Object {
-            Test-CommandHasStringArgument -Command $_ -Value '-e'
-        } | Where-Object {
-            Test-CommandHasStringArgument -Command $_ -Value 'cmd.exe'
-        }).Count -ne 1) {
+# The explicit-command run, one per branch of `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)`
+# (design §4.1): the default branch keeps `-e cmd.exe /k`; the hosted branch
+# names System32's cmd.exe absolutely, with /D (no AutoRun), each word its own
+# argument, so the hidden-desktop runner can check the shell it observes.
+$explicitRunCalls = @($sessionStartCalls | Where-Object {
+    Test-CommandHasStringArgument -Command $_ -Value 'session-explicit-command'
+})
+$defaultExplicitRuns = @($explicitRunCalls | Where-Object {
+    (Test-CommandHasStringArgument -Command $_ -Value '-e') -and
+        (Test-CommandHasStringArgument -Command $_ -Value 'cmd.exe') -and
+        (Test-CommandHasStringArgument -Command $_ -Value '/k') -and
+        -not (Test-CommandHasStringArgument -Command $_ -Value '/D')
+})
+$hostedExplicitRuns = @($explicitRunCalls | Where-Object {
+    (Test-CommandHasStringArgument -Command $_ -Value '-e') -and
+        (Test-CommandHasStringArgument -Command $_ -Value '/D') -and
+        (Test-CommandHasStringArgument -Command $_ -Value '/k') -and
+        $_.Extent.Text.Contains("(Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe')")
+})
+if ($defaultExplicitRuns.Count -ne 1 -or $hostedExplicitRuns.Count -ne 1) {
     throw 'Session restore explicit-command run must exercise the no-restore -e path.'
+}
+$explicitSwitch = $hostedExplicitRuns[0].Parent
+while ($null -ne $explicitSwitch -and $explicitSwitch -isnot [System.Management.Automation.Language.IfStatementAst]) {
+    $explicitSwitch = $explicitSwitch.Parent
+}
+if ($null -eq $explicitSwitch -or $explicitSwitch.Clauses.Count -ne 1 -or $null -eq $explicitSwitch.ElseClause -or
+    -not [string]::Equals($explicitSwitch.Clauses[0].Item1.Extent.Text, '$env:NOCTTY_GUI_HIDDEN_DESKTOP', [StringComparison]::Ordinal) -or
+    $hostedExplicitRuns[0].Extent.StartOffset -lt $explicitSwitch.Clauses[0].Item2.Extent.StartOffset -or
+    $hostedExplicitRuns[0].Extent.EndOffset -gt $explicitSwitch.Clauses[0].Item2.Extent.EndOffset -or
+    $defaultExplicitRuns[0].Extent.StartOffset -lt $explicitSwitch.ElseClause.Extent.StartOffset -or
+    $defaultExplicitRuns[0].Extent.EndOffset -gt $explicitSwitch.ElseClause.Extent.EndOffset) {
+    throw 'Session restore explicit-command runs must be the two branches of one if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) switch.'
 }
 
 $sessionDiagnosticStrings = @(

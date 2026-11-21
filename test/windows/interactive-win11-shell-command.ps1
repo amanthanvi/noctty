@@ -78,13 +78,20 @@ function Invoke-AppShellRun {
         '-e'
     ) + $ShellArgs
 
-    $process = Start-Process `
-        -FilePath $exePath `
-        -ArgumentList $launchArgs `
-        -WorkingDirectory $repoRoot `
-        -RedirectStandardOutput $StdoutPath `
-        -RedirectStandardError $StderrPath `
-        -PassThru
+    # Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+    $process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        Start-InteractiveWin11HostedProcess -FilePath $exePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+    }
+    else {
+        Start-Process `
+            -FilePath $exePath `
+            -ArgumentList $launchArgs `
+            -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $StdoutPath `
+            -RedirectStandardError $StderrPath `
+            -PassThru
+    }
     $processHandle = $process.Handle
 
     try {
@@ -138,8 +145,25 @@ $cmdStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-cmd-std
 
 Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdKeybindsPath, $cmdColorsPath, $cmdThemesPath, $cmdPayloadPath, $cmdStdoutPath, $cmdStderrPath -ErrorAction SilentlyContinue
 
+# Hosted mode: the payload first waits (at most 30 s) until the runner has read this cmd's command line (its
+# `shell-read-1.flag`), so a one-shot shell cannot exit unread (design §4.1, barriers).
+$cmdBarrier = @()
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    $cmdBarrierFlag = Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'shell-read-1.flag'
+    $cmdBarrier = @(
+        'set /a gui_hidden_wait=0'
+        ':gui_hidden_barrier'
+        "if exist `"$cmdBarrierFlag`" goto gui_hidden_go"
+        'set /a gui_hidden_wait+=1'
+        'if %gui_hidden_wait% geq 30 goto gui_hidden_go'
+        'ping -n 2 127.0.0.1 >nul'
+        'goto gui_hidden_barrier'
+        ':gui_hidden_go'
+    )
+}
 @(
     '@echo off'
+    $cmdBarrier
     "where noctty > `"$cmdResolvedPath`" || exit /b 1"
     "noctty +help > `"$cmdHelpPath`" || exit /b 1"
     "noctty +version > `"$cmdVersionPath`" || exit /b 1"
@@ -148,9 +172,11 @@ Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdKe
     "noctty +list-themes > `"$cmdThemesPath`" || exit /b 1"
 ) | Set-Content -LiteralPath $cmdPayloadPath -Encoding ASCII
 
+# Hosted mode names System32's cmd.exe absolutely, so the runner can check the shell it observes.
+$cmdShell = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe' } else { 'cmd.exe' }
 $null = Invoke-AppShellRun `
     -Name 'cmd' `
-    -ShellArgs @('cmd.exe', '/d', '/c', $cmdPayloadPath) `
+    -ShellArgs @($cmdShell, '/d', '/c', $cmdPayloadPath) `
     -StdoutPath $cmdStdoutPath `
     -StderrPath $cmdStderrPath
 

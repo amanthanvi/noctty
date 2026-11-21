@@ -55,13 +55,20 @@ Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
-$process = Start-Process `
-    -FilePath $exePath `
-    -ArgumentList $launchArgs `
-    -WorkingDirectory $repoRoot `
-    -RedirectStandardOutput $stdoutPath `
-    -RedirectStandardError $stderrPath `
-    -PassThru
+# Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+$process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    Start-InteractiveWin11HostedProcess -FilePath $exePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+}
+else {
+    Start-Process `
+        -FilePath $exePath `
+        -ArgumentList $launchArgs `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+}
 
 $successPattern = 'started subcommand path='
 $failurePattern = 'error starting IO thread:'

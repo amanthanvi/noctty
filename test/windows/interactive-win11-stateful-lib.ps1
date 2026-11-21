@@ -497,8 +497,15 @@ function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] 
     $stderr = Join-Path $Layout.Logs "$Name-stderr.log"
     $script:StatefulDiagnosticDirectory = $Layout.Logs
     $arguments = @((Get-InteractiveWin11LaunchArguments -Layout $Layout -UseConfiguredCommand:$UseConfiguredCommand)) + @($ExtraArguments)
-    $process = Start-Process -FilePath $Exe -ArgumentList $arguments `
-        -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    # Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+    $process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        Start-InteractiveWin11HostedProcess -FilePath $Exe -ArgumentList $arguments -WorkingDirectory $RepoRoot `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    }
+    else {
+        Start-Process -FilePath $Exe -ArgumentList $arguments `
+            -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    }
     return [pscustomobject]@{ Process = $process; Stdout = $stdout; Stderr = $stderr }
 }
 
