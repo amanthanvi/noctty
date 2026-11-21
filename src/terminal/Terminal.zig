@@ -2649,8 +2649,28 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
         return;
     }
 
+    // Without scrollback a top-anchored region discards its top rows in
+    // place: deleteLines swaps the region's rows without moving tracked
+    // pins, so the last-command tracker must drop a command anchored in the
+    // discarded rows first, as Terminal.index does for a linefeed (f030fa954;
+    // terminal-core.md KITTY2 part 2, rule (4)). Before upstream 77190bd02
+    // this route went through cursorScrollAbove, which moved the rows into
+    // history with their pins.
+    const screen = self.screens.active;
+    if (screen.no_scrollback and self.scrolling_region.top == 0) {
+        const region_height: usize = @as(usize, self.scrolling_region.bottom) + 1;
+        const discarded = @min(count, region_height);
+        if (discarded > 0) {
+            screen.semantic_command.invalidateRange(
+                &screen.pages,
+                .{ .active = .{} },
+                .{ .active = .{ .y = @intCast(discarded - 1) } },
+            );
+        }
+    }
+
     // Move to the top of the scroll region
-    self.screens.active.cursorAbsolute(self.scrolling_region.left, self.scrolling_region.top);
+    screen.cursorAbsolute(self.scrolling_region.left, self.scrolling_region.top);
     self.deleteLines(count);
 }
 
@@ -12393,6 +12413,42 @@ test "Terminal: index without scrollback drops a completed command whose prompt 
     // that took its place.
     try t.index();
     try t.index();
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Terminal: scrollUp in a partial region without scrollback drops the command it scrolls off" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+
+    // A command completed on rows 0 and 1.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    s.cursorAbsolute(0, 1);
+    try s.testWriteString("out");
+    try s.semanticPromptEndCommand();
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("two");
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+
+    // DECSTBM 1;3, a top-anchored partial region, then SU 1: without
+    // scrollback the region's rows move in place (deleteLines). The command
+    // whose prompt was on the discarded top row is gone, not retargeted to
+    // the row that took its place.
+    t.setTopAndBottomMargin(1, 3);
+    try testing.expect(!t.scrollUpShiftsWindow());
+    try t.scrollUp(1);
     try testing.expect((try s.lastCommandString(alloc)) == null);
 }
 
