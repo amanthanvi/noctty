@@ -327,6 +327,65 @@ foreach ($form in $boundQuiet.Keys) {
     Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
 
+# A name that stands for a command (Opus on #740, each measured dropping its script without a problem): Get-Command of
+# a name that is not a literal is read like any other value; an alias's value (Set-Alias, New-Alias, sal, nal,
+# `$alias:`) and a PowerShell object's AddCommand argument are the command the name stands for, and AddScript is code.
+# A script is an edge; a native program or a cmdlet the walker does not read by name is none; a value it cannot read,
+# PowerShell or cmd (whose arguments come later), and a command it reads by name are unresolved.
+$namedReaches = [ordered]@{
+    'Get-Command of a joined script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''child.ps1''); & $c'
+    'Get-Command -Name of an expandable script path, then its .Source' = '& (Get-Command -Name "$PSScriptRoot\child.ps1").Source -Arg 1'
+    'Set-Alias to a script, then the alias' = 'Set-Alias go (Join-Path $PSScriptRoot ''child.ps1''); go'
+    'New-Alias -Name -Value to a script' = 'New-Alias -Name go -Value "$PSScriptRoot\child.ps1"; go -Arg 1'
+    'sal with a named -Value before the positional name' = 'sal -Value (Join-Path $PSScriptRoot ''child.ps1'') go; go'
+    'nal with -Force' = 'nal go "$PSScriptRoot\child.ps1" -Force; go'
+    'a module-qualified Set-Alias' = 'Microsoft.PowerShell.Utility\Set-Alias go (Join-Path $PSScriptRoot ''child.ps1''); go'
+    'an alias assigned through its drive' = '$alias:go = Join-Path $PSScriptRoot ''child.ps1''; go'
+    '[PowerShell]::Create().AddCommand of a script' = '[PowerShell]::Create().AddCommand((Join-Path $PSScriptRoot ''child.ps1'')).Invoke()'
+    'AddCommand of a Get-Command script' = '$ps = [PowerShell]::Create(); $ps.AddCommand((Get-Command (Join-Path $PSScriptRoot ''child.ps1''))).Invoke()'
+    '[System.Management.Automation.PowerShell] AddScript of literal code' = '$ps = [System.Management.Automation.PowerShell]::Create(); [void]$ps.AddScript(". ''$PSScriptRoot\child.ps1''"); $ps.Invoke()'
+}
+foreach ($form in $namedReaches.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $namedReaches[$form]; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/child.ps1') "$form must reach the child: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$namedRefuses = [ordered]@{
+    'Get-Command of a name it cannot read, then &' = '$c = Get-Command $name; & $c'
+    'Get-Command of a wildcard script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''chil?.ps1''); & $c'
+    'Get-Command of a bare script name (a PATH lookup), then &' = '$c = Get-Command child.ps1; & $c'
+    'Set-Alias to a value it cannot read' = 'Set-Alias go $somewhere; go'
+    'Set-Alias to a relative script' = 'Set-Alias go .\child.ps1; go'
+    'Set-Alias to pwsh, whose calls give -File' = 'Set-Alias ps7 pwsh; ps7 -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    'Set-Alias to Start-Process, a command read by name' = 'Set-Alias run Start-Process; run pwsh -ArgumentList ''-File'', "$PSScriptRoot\child.ps1"'
+    'New-Alias to a module-qualified Invoke-Expression' = 'New-Alias run Microsoft.PowerShell.Utility\Invoke-Expression; run ". ''$PSScriptRoot\child.ps1''"'
+    'Set-Alias with a splat' = 'Set-Alias @aliasArguments'
+    'Set-Alias with a third positional argument' = 'Set-Alias go (Join-Path $PSScriptRoot ''child.ps1'') extra'
+    'an alias defined as an alias: item' = 'Set-Item -Path alias:go -Value (Join-Path $PSScriptRoot ''child.ps1''); go'
+    'Import-Alias from a file' = 'Import-Alias -Path (Join-Path $PSScriptRoot ''aliases.csv'')'
+    'AddCommand of a value it cannot read' = '[PowerShell]::Create().AddCommand($command).Invoke()'
+    'AddCommand of pwsh with -File as arguments' = '[PowerShell]::Create().AddCommand(''pwsh'').AddArgument(''-File'').AddArgument("$PSScriptRoot\child.ps1").Invoke()'
+    'AddCommand of Invoke-Expression' = '[PowerShell]::Create().AddCommand(''Invoke-Expression'').AddArgument($code).Invoke()'
+    'AddScript of a variable' = '$ps = [PowerShell]::Create(); $ps.AddScript($text).Invoke()'
+    'AddScript of file content' = '[PowerShell]::Create().AddScript((Get-Content -Raw (Join-Path $PSScriptRoot ''child.ps1''))).Invoke()'
+}
+foreach ($form in $namedRefuses.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $namedRefuses[$form]; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1 -and $formWalk.Members -cnotcontains 'test/windows/child.ps1') "$form must leave its edge unresolved, the child not taken: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$namedQuiet = [ordered]@{
+    'Get-Command of a joined native path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''tool.exe''); & $c'
+    'Set-Alias to a native program' = 'Set-Alias g git; g status'
+    'nal to a cmdlet' = 'nal now Get-Date; now'
+    'New-Alias to a joined native path' = 'New-Alias -Name tool -Value (Join-Path $PSScriptRoot ''tool.exe''); tool'
+    'an ordinary New-Item' = 'New-Item -ItemType Directory -Path $dir -Force | Out-Null; Set-Item -Path env:FIXTURE -Value 1'
+    'AddCommand of a cmdlet' = '[PowerShell]::Create().AddCommand(''Get-Date'').Invoke()'
+    'AddScript of code with no edge' = '[PowerShell]::Create().AddScript(''Get-Date'').Invoke()'
+}
+foreach ($form in $namedQuiet.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $namedQuiet[$form] }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 

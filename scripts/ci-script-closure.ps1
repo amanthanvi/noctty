@@ -18,8 +18,12 @@ An edge (design v7 §4.3, "What the walker counts as an edge"):
   * `cmd /c`, `/k` or `/r` with a script or a PowerShell command line;
   * Start-Process of a script, or of PowerShell or cmd with such arguments (-ArgumentList read element by element);
   * Start-Job, Start-ThreadJob or Invoke-Command -FilePath, and Import-Module of a script module by path;
-  * Invoke-Expression, [scriptblock]::Create, InvokeScript and NewScriptBlock: a literal's own edges, and any other
-    argument unresolved;
+  * Invoke-Expression, [scriptblock]::Create, InvokeScript, NewScriptBlock and a PowerShell object's AddScript: a
+    literal's own edges, and any other argument unresolved;
+  * a command a name stands for: an alias (Set-Alias, New-Alias, `$alias:` and Import-Alias) and a PowerShell
+    object's AddCommand. A script it names is an edge; a native program or a cmdlet the walker does not read by name
+    is none; anything else is unresolved (a value it cannot read, PowerShell or cmd, whose arguments the later calls
+    give, and a command it reads by name, such as Start-Process: the walker does not follow an alias to its calls);
   * an `Add-Type -Path` source (a C# file: a member, not walked further);
   * a command line built as a string that runs `-File`, which no other edge shows.
 A cmdlet is the same edge under its module-qualified name (Microsoft.PowerShell.Utility\Add-Type), and its
@@ -36,8 +40,9 @@ Not edges:
   * an inline scriptblock;
   * a native executable other than PowerShell and cmd: a target that resolves to an .exe or .com path, a
     `*ExePath`/`*CliPath` helper (unless the file defines it), or `Get-Command <name>` of one; it is a launch, not a
-    script. An executable whose name the walker cannot read (`Get-Command $name`) is unresolved when its arguments
-    may run a script;
+    script. An executable whose name the walker cannot read (a wildcard or fuzzy Get-Command) is unresolved when its
+    arguments may run a script. Get-Command of a name the walker cannot read at all (`Get-Command $name`) may find a
+    script, so it is unresolved; of a script path, it is that script;
   * `-File` on any other command (`Get-ChildItem -File`).
 An edge whose target does not resolve fails the walk unless the legacy-only list below names it, with its guard.
 #>
@@ -102,6 +107,8 @@ $script:CiScriptCmdletParameters = @{
     'start-threadjob' = 'argumentlist filepath initializationscript inputobject name scriptblock streaminghost throttlelimit'
     'invoke-command' = 'allowredirection:s applicationname argumentlist=args asjob:s authentication certificatethumbprint computername=cn configurationname connectingtimeout connectionuri=uri,cu containerid credential enablenetworkaccess:s filepath=pspath hidecomputername:s=hcn hostname indisconnectedsession:s=disconnected inputobject jobname keyfilepath=identityfilepath nonewscope:s options port remotedebug:s runasadministrator:s scriptblock=command session sessionname sessionoption sshconnection sshtransport:s subsystem throttlelimit username usessl:s vmid=vmguid vmname'
     'import-module' = 'alias argumentlist=args ascustomobject:s assembly cimnamespace cimresourceuri cimsession cmdlet disablenamechecking:s force:s fullyqualifiedname function global:s maximumversion minimumversion=version moduleinfo name noclobber:s=nooverwrite passthru:s prefix pssession requiredversion scope skipeditioncheck:s usewindowspowershell:s=usewinps variable'
+    # Set-Alias and New-Alias have the same parameters: -Name at position 0, -Value at 1.
+    'set-alias' = 'confirm:s=cf description force:s name option passthru:s scope value whatif:s=wi'
 }
 
 function Get-CiScriptParameterTable {
@@ -383,7 +390,7 @@ function Resolve-CiScriptValue {
                 if ($only -is [System.Management.Automation.Language.ReturnStatementAst]) { $only = $only.Pipeline }
                 return Resolve-CiScriptValue $only $Context ($Depth + 1)
             }
-            # Get-Command <name>: that executable (a script's name is unresolved: Get-Command finds it on PATH).
+            # Get-Command <name>: that executable, or the script it names.
             if ($name -in @('get-command', 'gcm')) {
                 # Its -Name, or its first positional argument (a parameter's own argument skipped).
                 $nameNode = $null
@@ -393,17 +400,30 @@ function Resolve-CiScriptValue {
                     if ($element.ParameterName -ieq 'Name') { $nameNode = $(if ($element.Argument) { $element.Argument } elseif ($i + 1 -lt $elements.Count) { $elements[$i + 1] }); break }
                     if (-not $element.Argument -and $element.ParameterName -notin @('All', 'ListImported', 'Syntax', 'ShowCommandInfo', 'UseFuzzyMatching', 'UseAbbreviationExpansion')) { $i++ }
                 }
-                if ($nameNode -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return @{ Kind = 'native'; Value = $null } }
-                $target = $nameNode.Value
-                # A wildcard name (`pwsh*`, `pwsh.ex?`, `[p]wsh.exe`) or a fuzzy lookup finds an executable the walker
-                # cannot name, so it is an unknown executable: its -File or -Command arguments leave the edge unresolved
-                # (Sol on #740: `(Get-Command "pwsh.ex?" -CommandType Application).Source` read as a known native
-                # program, and its -File child dropped out of the closure without a problem).
-                if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($target) -or
-                    @($elements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -in @('UseFuzzyMatching', 'UseAbbreviationExpansion') }).Count -gt 0) {
-                    return @{ Kind = 'native'; Value = $null }
+                # A name that is not a literal is read like any other value (Opus on #740:
+                # `$c = Get-Command (Join-Path $PSScriptRoot 'x.ps1'); & $c` read as a native program with no name, and
+                # x.ps1 dropped out of the closure without a problem). A name the walker cannot read may be a script's,
+                # so the lookup is unresolved; a native program it names stays that program.
+                if ($null -eq $nameNode) { return $unresolved }
+                $nameValue = Resolve-CiScriptValue $nameNode $Context ($Depth + 1)
+                if ($nameValue.Kind -eq 'native') { return $nameValue }
+                if ($nameValue.Kind -ne 'path') { return $unresolved }
+                $target = $nameValue.Value
+                # A wildcard name (`pwsh*`, `pwsh.ex?`, `[p]wsh.exe`) or a fuzzy lookup finds a command the walker
+                # cannot name.
+                $vague = [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($target) -or
+                    @($elements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -in @('UseFuzzyMatching', 'UseAbbreviationExpansion') }).Count -gt 0
+                # A script or batch file: its path, judged as any edge target is. A rooted one resolves; a bare name,
+                # which Get-Command looks up on PATH, and a relative one, found from the current location, do not.
+                # A vague lookup of one (`x?.ps1`) finds some script the walker cannot name.
+                if ((Test-CiScriptTargetKind $target) -in @('script', 'batch')) {
+                    if ($vague) { return $unresolved }
+                    return @{ Kind = 'path'; Value = $target }
                 }
-                if ((Test-CiScriptTargetKind $target) -in @('script', 'batch')) { return $unresolved }
+                # A vague lookup of anything else is an unknown executable: its -File or -Command arguments leave the
+                # edge unresolved (Sol on #740: `(Get-Command "pwsh.ex?" -CommandType Application).Source` read as a
+                # known native program, and its -File child dropped out of the closure without a problem).
+                if ($vague) { return @{ Kind = 'native'; Value = $null } }
                 return @{ Kind = 'native'; Value = ($target -split '[\\/]')[-1].ToLowerInvariant() }
             }
             # A harness helper that names an executable by convention (Get-InteractiveWin11ExePath): native, named by
@@ -1011,9 +1031,26 @@ function Get-CiScriptFileEdges {
         if ($inner.Unresolved.Count -gt 0) { $unresolved.Add($Why) }
     }
 
-    # The commands that may run a script by name: PowerShell, cmd and the cmdlets above.
+    # The commands that may run a script by name: PowerShell, cmd and the cmdlets above, and those that define an alias
+    # (Set-Alias, New-Alias, Import-Alias, and Set-Item or New-Item of an alias: item).
     $edgeCommands = @('powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'cmd', 'cmd.exe', 'add-type', 'start-process', 'saps', 'start',
-        'start-job', 'sajb', 'start-threadjob', 'invoke-command', 'icm', 'invoke-expression', 'iex', 'import-module', 'ipmo')
+        'start-job', 'sajb', 'start-threadjob', 'invoke-command', 'icm', 'invoke-expression', 'iex', 'import-module', 'ipmo',
+        'set-alias', 'sal', 'new-alias', 'nal', 'import-alias', 'ipal', 'set-item', 'si', 'new-item', 'ni')
+    # The commands the walker reads by name: those, and the variable writes it cannot read as a value
+    # (Get-CiScriptDynamicWrites). Another name for one of them hides what the walker would read.
+    $readByName = [System.Collections.Generic.HashSet[string]]::new([string[]]@($edgeCommands + @('set-variable', 'sv', 'new-variable', 'nv')), [StringComparer]::OrdinalIgnoreCase)
+    # A command a name stands for (an alias's value, a PowerShell object's AddCommand argument; Opus on #740: both
+    # dropped their script without a problem). A script it names is an edge, judged as any target is. A native program,
+    # or a cmdlet or program the walker does not read by name, is none. Anything else is unresolved: a value the walker
+    # cannot read, PowerShell, cmd or an unknown executable (whose arguments come with each later call, or through
+    # AddParameter and AddArgument, none of which it follows), and a command it reads by name.
+    $namedCommand = {
+        param($Value, [string] $Why)
+        $callee = & $classify $Value
+        if ($callee.Is -ceq 'script') { & $scriptTarget $callee.Value $Why; return }
+        if ($callee.Is -ceq 'native' -or ($callee.Is -ceq 'command' -and -not $readByName.Contains($callee.Value))) { return }
+        $unresolved.Add($Why)
+    }
     foreach ($command in (Get-CiScriptNodes $context CommandAst)) {
         $elements = $command.CommandElements
         $anchor = ConvertTo-CiScriptAnchor $command.Extent.Text
@@ -1123,17 +1160,56 @@ function Get-CiScriptFileEdges {
                 }
                 $unresolved.Add($anchor)
             }
+            { $_ -in @('set-alias', 'sal', 'new-alias', 'nal') } {
+                # The alias's value (-Value, or the positional after -Name) is the command its name stands for. The edge
+                # is the definition, so an alias a dot-sourcing caller calls is covered as well as one this file calls.
+                $bound = & $bindCmdlet $entries 'set-alias'
+                if ($null -eq $bound) { $unresolved.Add($anchor); break }
+                $expected = 2 - [int]$bound.Named.ContainsKey('name') - [int]$bound.Named.ContainsKey('value')
+                if ($bound.Positional.Count -ne $expected) { $unresolved.Add($anchor); break }
+                & $namedCommand (& $valueOf $(if ($bound.Named.ContainsKey('value')) { $bound.Named['value'] } else { $bound.Positional[$expected - 1] })) $anchor
+            }
+            # Aliases read from a file the walker does not parse.
+            { $_ -in @('import-alias', 'ipal') } { $unresolved.Add($anchor) }
+            { $_ -in @('set-item', 'si', 'new-item', 'ni') } {
+                # An alias defined as an item of the alias: drive, named by a value the walker reads: unresolved (it does
+                # not bind these cmdlets' paths and values). Any other item is no edge.
+                foreach ($entry in $entries) {
+                    $value = $(if ($entry.Attached) { & $valueOf $entry.Attached } elseif (-not $entry.Param -and -not $entry.Splat) { & $valueOf $entry })
+                    if ($value.Kind -eq 'path' -and $value.Value -match '(?i)\A\s*alias:') { $unresolved.Add($anchor); break }
+                }
+            }
         }
     }
 
-    # Code built from a string at run time: [scriptblock]::Create, InvokeScript and NewScriptBlock.
+    # An alias assigned through its drive (`$alias:go = <value>`, `${alias:go} = ...`): the command it stands for.
+    foreach ($assignment in (Get-CiScriptNodes $context AssignmentStatementAst)) {
+        $left = $assignment.Left
+        while ($left -is [System.Management.Automation.Language.ConvertExpressionAst]) { $left = $left.Child }
+        if ($left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+            -not [string]::Equals($left.VariablePath.DriveName, 'alias', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $anchor = ConvertTo-CiScriptAnchor $assignment.Extent.Text
+        if ($assignment.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals) { $unresolved.Add($anchor); continue }
+        & $namedCommand (Resolve-CiScriptValue $assignment.Right $context) $anchor
+    }
+
+    # Code built from a string at run time: [scriptblock]::Create, InvokeScript, NewScriptBlock, and a PowerShell
+    # object's AddScript ([PowerShell]::Create().AddScript(<text>)); and the command a PowerShell object's AddCommand
+    # runs. Both are matched by method name on any object, since the walker cannot type a variable that holds one; the
+    # PSCommand and pipeline Commands objects' methods of those names run code the same way.
     foreach ($call in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
         if ($call.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
         $method = $call.Member.Value
+        $first = $(if (@($call.Arguments).Count -ge 1) { @($call.Arguments)[0] })
+        $callAnchor = ConvertTo-CiScriptAnchor $call.Extent.Text
+        if ([string]::Equals($method, 'AddCommand', [StringComparison]::OrdinalIgnoreCase)) {
+            & $namedCommand $(if ($first) { Resolve-CiScriptValue $first $context } else { $unresolvedValue }) $callAnchor
+            continue
+        }
         $create = $call.Static -and $method -ieq 'Create' -and $call.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
             $call.Expression.TypeName.Name -in @('scriptblock', 'System.Management.Automation.ScriptBlock')
-        if (-not $create -and $method -notin @('InvokeScript', 'NewScriptBlock')) { continue }
-        & $codeEdges $(if (@($call.Arguments).Count -ge 1) { @($call.Arguments)[0] }) (ConvertTo-CiScriptAnchor $call.Extent.Text)
+        if (-not $create -and $method -notin @('InvokeScript', 'NewScriptBlock', 'AddScript')) { continue }
+        & $codeEdges $first $callAnchor
     }
 
     # A command line built as a string that runs -File: no AST edge shows its target.
