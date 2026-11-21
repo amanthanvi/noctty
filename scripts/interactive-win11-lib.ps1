@@ -31,9 +31,59 @@ function Initialize-InteractiveWin11HostedIdentity {
     return $identity
 }
 
+# The leaf's run token: 32 hex digits the runner draws fresh for every leaf it runs (<run>\staged.json). The leaf's
+# sandbox lives under its run directory by it and every noctty class it names ends in it, so no two runs, nor a run
+# and the legacy route, share a sandbox, a state file or an IPC pipe (`\\.\pipe\noctty.<class>`; ipc_server.zig).
+function Get-InteractiveWin11HostedRunToken {
+    if (-not $env:NOCTTY_GUI_HIDDEN_RUN) { throw 'gui-hidden: NOCTTY_GUI_HIDDEN_RUN is not set.' }
+    $staged = [IO.File]::ReadAllText((Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'staged.json')) | ConvertFrom-Json
+    $token = [string]$staged.runToken
+    if ($token -cnotmatch '\A[0-9a-f]{32}\z') { throw 'gui-hidden: the run has no run token.' }
+    return $token
+}
+
+# The argument rule every hosted noctty launch keeps, checked on the arguments before the launch and on the command
+# line read back from the started process (and by the runner on every noctty its job gains): null when the
+# arguments may run, else why not. Arguments after `-e` belong to the command and are not read.
+# - No `--config-file`, `--config-default-files` or `--gtk-single-instance`: each could set what the rest checks.
+# - Every `--class=` value ends in `-<token>`. An app launch, and any action but the local ones, names one: without
+#   it the default class's pipe is the product's, which a real noctty serves.
+# - An app launch states `--single-instance=` explicitly, its last value `false` or `true` (`true` only for the IPC
+#   leaves, whose class keeps their pipe to their own run).
+function Get-InteractiveWin11HostedArgumentRefusal {
+    param([AllowEmptyCollection()] [string[]] $Arguments = @(), [AllowEmptyString()] [string] $Token = '')
+
+    if ($Token -cnotmatch '\A[0-9a-f]{32}\z') { return 'no run token' }
+    # The non-IPC actions a hosted launch may name without a class: each prints and exits, opening no pipe.
+    $localActions = @('+help', '+version', '+list-keybinds', '+list-colors', '+list-themes', '+vt-probe')
+    $actions = [System.Collections.Generic.List[string]]::new()
+    $classes = [System.Collections.Generic.List[string]]::new()
+    $single = [System.Collections.Generic.List[string]]::new()
+    foreach ($argument in $Arguments) {
+        if ($null -eq $argument) { return 'a null argument' }
+        if ([string]::Equals($argument, '-e', [StringComparison]::Ordinal)) { break }
+        if ($argument.StartsWith('+', [StringComparison]::Ordinal)) { $actions.Add($argument); continue }
+        if ($argument -cmatch '\A--(config-file|config-default-files|gtk-single-instance)(=|\z)') { return "it names --$($Matches[1])" }
+        if ($argument.StartsWith('--class=', [StringComparison]::Ordinal)) { $classes.Add($argument.Substring(8)); continue }
+        if ($argument.StartsWith('--single-instance=', [StringComparison]::Ordinal)) { $single.Add($argument.Substring(18)); continue }
+        if ($argument -cmatch '\A--(class|single-instance)\z') { return "a bare --$($Matches[1])" }
+    }
+    if ($actions.Count -gt 1) { return 'more than one action' }
+    foreach ($class in $classes) {
+        if (-not $class.EndsWith("-$Token", [StringComparison]::Ordinal)) { return 'a --class without this run''s token' }
+    }
+    if ($actions.Count -eq 1 -and $actions[0] -cin $localActions) { return $null }
+    if ($classes.Count -eq 0) { return 'no --class with this run''s token' }
+    if ($actions.Count -eq 0) {
+        if ($single.Count -eq 0) { return 'no explicit --single-instance' }
+        if ($single[$single.Count - 1] -cnotin @('false', 'true')) { return '--single-instance is neither false nor true' }
+    }
+    return $null
+}
+
 # The launcher's per-launch check: null when `FilePath` may start, else why not (design §4.2 "Each launch, cheaply").
 function Get-InteractiveWin11HostedLaunchRefusal {
-    param([Parameter(Mandatory)] [string] $FilePath)
+    param([Parameter(Mandatory)] [string] $FilePath, [AllowEmptyCollection()] [string[]] $ArgumentList = @())
 
     if (-not $env:NOCTTY_GUI_HIDDEN_DESKTOP) { return 'not in hosted mode' }
     if ($env:NOCTTY_INTERACTIVE_MEASURE_AUMID -ne '1') { return 'measurement mode not set' }
@@ -46,6 +96,8 @@ function Get-InteractiveWin11HostedLaunchRefusal {
     if ([IO.File]::Exists((Join-Path $dir 'noctty.ico'))) { return 'carries noctty.ico' }
     $now = [InteractiveWin11HostedLaunch]::Identity($full)
     if (-not $now -or -not [string]::Equals($now, $match[0].Identity, [StringComparison]::Ordinal)) { return 'changed since staging' }
+    $argumentRefusal = Get-InteractiveWin11HostedArgumentRefusal -Arguments $ArgumentList -Token $script:InteractiveWin11HostedRunToken
+    if ($argumentRefusal) { return $argumentRefusal }
     return $null
 }
 
@@ -78,13 +130,24 @@ function Start-InteractiveWin11HostedProcess {
         [string] $RedirectStandardError
     )
 
-    $refusal = Get-InteractiveWin11HostedLaunchRefusal -FilePath $FilePath
+    $refusal = Get-InteractiveWin11HostedLaunchRefusal -FilePath $FilePath -ArgumentList $ArgumentList
     if ($refusal) { throw "gui-hidden: the launcher refused the start: $refusal." }
     [InteractiveWin11HostedDesktop]::Assert($env:NOCTTY_GUI_HIDDEN_DESKTOP)
     $line = ConvertTo-InteractiveWin11HostedCommandLine -FilePath $FilePath -ArgumentList $ArgumentList
     $pi = [InteractiveWin11HostedLaunch]::Start($FilePath, $line, $WorkingDirectory, $env:NOCTTY_GUI_HIDDEN_DESKTOP, $RedirectStandardOutput, $RedirectStandardError)
     $started = $false
     try {
+        # The command line the suspended process really holds, read through the handle CreateProcess returned (so no
+        # reused PID can answer) and split as the process will split it: it must be exactly the arguments checked
+        # above, and pass the argument rule again (H1 on #740; hidden-win11-working-set.ps1 reads its copy the same way).
+        $readBack = [InteractiveWin11HostedLaunch]::Argv($pi.process)
+        $expected = @($FilePath) + @($ArgumentList)
+        if ($null -eq $readBack -or $readBack.Count -ne $expected.Count) { throw 'gui-hidden: the started process''s command line is not the launcher''s.' }
+        for ($index = 0; $index -lt $expected.Count; $index++) {
+            if (-not [string]::Equals($readBack[$index], $expected[$index], [StringComparison]::Ordinal)) { throw 'gui-hidden: the started process''s command line is not the launcher''s.' }
+        }
+        $readBackRefusal = Get-InteractiveWin11HostedArgumentRefusal -Arguments @($readBack | Select-Object -Skip 1) -Token $script:InteractiveWin11HostedRunToken
+        if ($readBackRefusal) { throw "gui-hidden: the started process's command line breaks the argument rule: $readBackRefusal." }
         $process = [System.Diagnostics.Process]::GetProcessById($pi.pid)
         [void]$process.Handle
         $record = '{0} {1}' -f $pi.pid, [InteractiveWin11HostedLaunch]::CreationTime($pi.process)
@@ -148,7 +211,11 @@ function Write-InteractiveWin11HostedConfig {
     param([AllowEmptyString()] [string] $Text = '')
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in @($Text -split "`r?`n")) { if ($line.Length -gt 0) { $lines.Add($line) } }
+    foreach ($line in @($Text -split "`r?`n")) {
+        # The keys the argument rule governs, and includes, never come from a leaf's config.
+        if ($line -match '\A\s*(class|single-instance|gtk-single-instance|config-file|config-default-files)\s*=') { throw "gui-hidden: a leaf's config cannot set $($Matches[1])." }
+        if ($line.Length -gt 0) { $lines.Add($line) }
+    }
     foreach ($line in Get-InteractiveWin11HostedPolicyConfig) { $lines.Add($line) }
     if (-not @($lines | Where-Object { $_ -match '\A\s*window-save-state\s*=' }).Count) { $lines.Add('window-save-state = never') }
     $path = Join-Path (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE) 'config.ghostty'
@@ -332,6 +399,35 @@ public static class InteractiveWin11HostedLaunch {
         return GetProcessTimes(process, out created, out exited, out kernel, out user) ? created : 0;
     }
 
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr info, int length, out int returned);
+    [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern IntPtr CommandLineToArgvW(string line, out int count);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+
+    // The process's command line (ProcessCommandLineInformation, read by its handle) split by CommandLineToArgvW, as
+    // the process's own C runtime splits it; null when unreadable. The caller compares it and keeps nothing.
+    public static string[] Argv(IntPtr process) {
+        int length;
+        NtQueryInformationProcess(process, 60, IntPtr.Zero, 0, out length);
+        if (length <= 16 || length > (1 << 20)) return null;
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        string line;
+        try {
+            if (NtQueryInformationProcess(process, 60, buffer, length, out length) != 0) return null;
+            int bytes = (ushort)Marshal.ReadInt16(buffer);
+            IntPtr text = Marshal.ReadIntPtr(buffer, 8); // UNICODE_STRING x64: Length, MaximumLength, padding, Buffer
+            if (bytes == 0 || text == IntPtr.Zero) return null;
+            line = Marshal.PtrToStringUni(text, bytes / 2);
+        } finally { Marshal.FreeHGlobal(buffer); }
+        int count;
+        IntPtr argv = CommandLineToArgvW(line, out count);
+        if (argv == IntPtr.Zero) return null;
+        try {
+            var result = new string[count];
+            for (int i = 0; i < count; i++) result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(argv, i * IntPtr.Size));
+            return result;
+        } finally { LocalFree(argv); }
+    }
+
     // The volume serial, file index, size and last-write time of `path`, read from one handle; null when unreadable.
     public static string Identity(string path) {
         IntPtr file = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x80, IntPtr.Zero); // FILE_READ_ATTRIBUTES, share all, OPEN_EXISTING
@@ -348,6 +444,7 @@ public static class InteractiveWin11HostedLaunch {
     }
     [InteractiveWin11HostedDesktop]::Assert($env:NOCTTY_GUI_HIDDEN_DESKTOP)
     $script:InteractiveWin11HostedIdentity = Initialize-InteractiveWin11HostedIdentity
+    $script:InteractiveWin11HostedRunToken = Get-InteractiveWin11HostedRunToken
     # The leaf's receipt, written when its PowerShell exits, however it exits (a leaf reports failure through `exit`):
     # whether the real-input module's type was ever loaded in this process (design §4.3's run-time check). The runner
     # fails a leaf whose receipt is missing or says it was. The path travels in a closure: PowerShell.Exiting's
@@ -467,6 +564,14 @@ function Get-InteractiveWin11SandboxLayout {
     $sandboxSlug = Get-InteractiveWin11SandboxName -SandboxName $SandboxName
     $sandboxId = '{0}-{1}' -f $worktreeId, $sandboxSlug
     $sandboxRoot = Join-Path $normalizedRepoRoot ".sandbox\win11\$worktreeId\$sandboxSlug"
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        # Hosted: under the leaf's run directory, named by its run token, and the id (so every class built from it)
+        # ends in the token (Get-InteractiveWin11HostedRunToken). A checkout-derived root would be shared by every run
+        # of the leaf from this checkout, the legacy route's included (H1 on #740).
+        $token = Get-InteractiveWin11HostedRunToken
+        $sandboxId = '{0}-{1}' -f $sandboxSlug, $token
+        $sandboxRoot = Join-Path (Get-InteractiveWin11NormalizedPath -Path $env:NOCTTY_GUI_HIDDEN_RUN) "sandbox-$token"
+    }
     $localAppData = Join-Path $sandboxRoot 'localappdata'
 
     return [ordered]@{
@@ -1618,6 +1723,11 @@ function Reset-InteractiveWin11Sandbox {
     $sandboxBase = Get-InteractiveWin11NormalizedPath -Path (Join-Path $Layout.RepoRoot '.sandbox\win11')
     $target = Get-InteractiveWin11NormalizedPath -Path $Layout.SandboxRoot
     $sandboxPrefix = '{0}\' -f $sandboxBase
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        # Hosted: a reset stays inside the leaf's own run directory, on its token's sandbox.
+        $sandboxBase = Get-InteractiveWin11NormalizedPath -Path $env:NOCTTY_GUI_HIDDEN_RUN
+        $sandboxPrefix = '{0}\sandbox-' -f $sandboxBase
+    }
 
     if (-not $target.StartsWith($sandboxPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to reset sandbox outside ${sandboxBase}: $target"

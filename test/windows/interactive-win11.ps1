@@ -128,6 +128,25 @@ try {
     $hostedHarnessMain = Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED'
     Assert-True ($null -eq $hostedHarnessMain) 'a hosted leaf skips the bootstrap'
     Assert-True ($null -eq [Environment]::GetEnvironmentVariable('NOCTTY_HOSTED_SELFTEST_UNUSED', 'Process')) 'the hosted bypass sets no bootstrap sentinel'
+    # The run token (H1 on #740): the hosted sandbox sits under the run directory, named by the token, and its id
+    # (so every class built from it) ends in the token; a second run's token gives another sandbox and class.
+    $hostedToken = [guid]::NewGuid().ToString('N')
+    Set-Content -LiteralPath (Join-Path $hostedScratch 'staged.json') -Value (@{ runToken = $hostedToken } | ConvertTo-Json)
+    Assert-Equal (Get-InteractiveWin11HostedRunToken) $hostedToken 'hosted mode reads the run token the runner staged'
+    $hostedLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'smoke'
+    Assert-Equal $hostedLayout.SandboxRoot (Join-Path $hostedScratch "sandbox-$hostedToken") 'a hosted sandbox sits under the run directory, named by its token'
+    Assert-True ($hostedLayout.SandboxId.EndsWith("-$hostedToken", [StringComparison]::Ordinal)) 'a hosted sandbox id ends in the run token'
+    $hostedClassArgs = @(Get-InteractiveWin11LaunchArguments -Layout $hostedLayout)
+    Assert-True ($null -eq (Get-InteractiveWin11HostedArgumentRefusal -Arguments $hostedClassArgs -Token $hostedToken)) 'the hosted launch arguments keep the argument rule'
+    $hostedSecondToken = [guid]::NewGuid().ToString('N')
+    Set-Content -LiteralPath (Join-Path $hostedScratch 'staged.json') -Value (@{ runToken = $hostedSecondToken } | ConvertTo-Json)
+    $hostedSecondLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'smoke'
+    Assert-True ($hostedSecondLayout.SandboxRoot -ne $hostedLayout.SandboxRoot -and $hostedSecondLayout.SandboxId -ne $hostedLayout.SandboxId) 'two runs share no sandbox and no class'
+    Assert-True ($null -ne (Get-InteractiveWin11HostedArgumentRefusal -Arguments $hostedClassArgs -Token $hostedSecondToken)) 'one run''s class fails another run''s rule'
+    Assert-True ($null -ne (Get-InteractiveWin11HostedArgumentRefusal -Arguments @("--class=noctty-interactive-$($hostedLayout.SandboxId)") -Token $hostedToken)) 'an app launch without --single-instance is refused'
+    Assert-True (& $hostedThrows { Write-InteractiveWin11HostedConfig -Text "class = noctty-elsewhere`r`n" }) 'a leaf''s config cannot set the class'
+    Set-Content -LiteralPath (Join-Path $hostedScratch 'staged.json') -Value '{}'
+    Assert-True (& $hostedThrows { Get-InteractiveWin11HostedRunToken }) 'a run without a token is refused'
     Assert-True (& $hostedThrows { ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('--command=cmd.exe') }) 'the hosted launcher refuses --command in argv'
     Assert-True (& $hostedThrows { ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('a"b') }) 'the hosted launcher refuses a quote in an argument'
     Assert-Equal (ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('-e', 'a b', '/D')) ('"' + $hostedExe + '" -e "a b" /D') 'the hosted launcher quotes whitespace only'

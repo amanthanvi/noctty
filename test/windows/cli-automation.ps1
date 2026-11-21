@@ -241,7 +241,8 @@ try {
     )
     Assert-AutomationExit -Description '+send-text printable text' -Result $result -Expected 0
 
-    $unusedClass = "noctty-unused-$([Guid]::NewGuid().ToString('N'))"
+    # Ends in the sandbox id, so in hosted mode it carries the run token the argument rule requires.
+    $unusedClass = "noctty-unused-$([Guid]::NewGuid().ToString('N'))-$($layout.SandboxId)"
     $result = Invoke-AutomationCli @('+list-windows', "--class=$unusedClass", '--timeout=0')
     Assert-AutomationExit -Description '+list-windows unused class' -Result $result -Expected 2
 }
