@@ -1667,22 +1667,29 @@ reading cmd's language or a batch file's forwarding (`%*`, a helper named by a
 plain word, a switch glued to `/C`), and no GUI member runs a resolvable cmd or
 batch line;
 only the anchored legacy-only lines (`$script:CiScriptClosureLegacyEdges`) are
-exempt. The PowerShell readers stay. `Start-Process` joins a shell's
-`-ArgumentList` elements with spaces and the shell splits them again, so for a
-`pwsh` or `powershell` FilePath each element must be a string with no
-whitespace or quote, an expandable string whose template has none, or a bare
-variable or member access; any other element shape, and a single-string list,
-is unresolved.
+exempt. The PowerShell readers stay for `&`, `.` and bare launches, where
+PowerShell quotes each scalar argument: there the value after a valued option
+(`-ExecutionPolicy`) is read, and a variable or computed value passes only as
+one known string, since an array expands into several arguments; a literal
+passes, and `-File`'s value is read as a path. `Start-Process` of `pwsh` or
+`powershell` is refused (unresolved): it joins its arguments without quoting
+and PowerShell tokenizes them again, so no element rule is sound, and no GUI
+member starts PowerShell that way.
 
-An unresolved edge ends in one of two ways. In a fixture or a changed path the
-walk cannot read, the selector falls back (`gui=true`, "selection
-unavailable") and the suite runs. In a real GUI member (a hosted leaf or a
-script it reaches), the selector still falls back, but the `changes` job's
-next step, `gui-hidden-scripts.ps1`, walks the real closure and fails: the
-suite job never starts, `changes` uploads a `gui-selection` error result, and
-`gui-hidden-gate` fails. Expect suite results in the first case and a
-selection error in the second; fix the second by removing the edge or, for a
-legacy-only line, listing it with its guard in
+Fixture results and real selection are separate. The walker tests'
+synthetic fixtures in `gui-hidden-scripts.ps1` only assert whether a walk
+fails; they set no selector output (its small-tree checks run the real
+selector on a synthetic tree, and see it fall back). In real selection, the
+selector walks the GUI closure (the plan's leaves and what they reach, over
+the head and the prior trees) and classifies the changed paths against it:
+a docs-only change still skips the suite, and a change to a member selects
+it. When a real GUI member gains an unresolved edge, an unlisted cmd call
+say, that walk fails: the selector falls back (`gui=true`, "selection
+unavailable"), but the `changes` job's next step, `gui-hidden-scripts.ps1`,
+walks the real closure and fails, so the suite job never starts, `changes`
+uploads a `gui-selection` error result, and `gui-hidden-gate` fails. Expect
+a selection error then, not suite results; fix it by removing the edge or,
+for a legacy-only line, listing it with its guard in
 `$script:CiScriptClosureLegacyEdges`.
 
 Known gaps, which no GUI member uses with a script target today:
@@ -1692,8 +1699,13 @@ a `Get-Command` result, an alias made through `New-Item` on the `alias:` drive
 with a path the walker cannot read, a repo folder added to `$env:PATH`, which
 makes a bare name run a `.ps1` there (the walk reads a bare name as a command
 on PATH), the arguments of a tracked executable other than a shell, which are
-not read (the repository tracks no executable), and a command run outside cmd
-and PowerShell by another launcher such as `conhost.exe`. A script a
+not read (the repository tracks no executable), a command run outside cmd
+and PowerShell by another launcher such as `conhost.exe`, and a `Start-Process`
+FilePath the walker reads as a named program (a `Join-Path` or `Get-Command`
+leaf, such as session-restore's `$cli`, `noctty.com` beside the exe) given
+`-WorkingDirectory`: it is not checked against that directory, while a bare
+name or a variable holding one is unresolved unless it is a listed system
+program. A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
 a leaf must not run a repo script that way.

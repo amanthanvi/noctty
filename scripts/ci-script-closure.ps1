@@ -18,7 +18,8 @@ An edge (design v7 §4.3, "What the walker counts as an edge"):
   * cmd, and a .cmd or .bat file, in any form: unresolved, never read (the lead on #740: each review round found a
     new silent hole in reading cmd and batch semantics, and no real member runs a resolvable cmd or batch line), save
     the anchored legacy-only lines ($script:CiScriptClosureLegacyEdges);
-  * Start-Process of a script, or of PowerShell with such arguments (-ArgumentList read element by element);
+  * Start-Process of a script; Start-Process of PowerShell is refused (unresolved), since it joins its arguments
+    without quoting and PowerShell tokenizes them again;
   * Start-Job, Start-ThreadJob or Invoke-Command -FilePath, and Import-Module of a script module by path;
   * Invoke-Expression, [scriptblock]::Create, InvokeScript, NewScriptBlock and a PowerShell object's AddScript: a
     literal's own edges, and any other argument unresolved;
@@ -42,8 +43,8 @@ Not edges:
   * an inline scriptblock;
   * a native executable other than PowerShell and cmd: a target that resolves to an .exe or .com path, a
     `*ExePath`/`*CliPath` helper (unless the file defines it, or its name is a shell's or a batch file's), or
-    `Get-Command <name>` of one; it is a launch, not a script. A name is compared with its trailing spaces trimmed,
-    as Windows runs it. An executable the walker cannot name (several possible programs, or a helper named for a
+    `Get-Command <name>` of one; it is a launch, not a script. A name or a target path is compared and recorded
+    with its trailing spaces trimmed, as Windows runs it. An executable the walker cannot name (several possible programs, or a helper named for a
     shell) is unresolved, whatever its arguments, since it may be cmd, PowerShell or a batch file. A bare
     Start-Process FilePath beside -WorkingDirectory, other than a system program ($script:CiScriptSystemPrograms),
     is unresolved. Get-Command of a name the walker cannot read at all (`Get-Command $name`) may find a script, so it
@@ -566,7 +567,7 @@ function Resolve-CiScriptValue {
             # A harness helper that names an executable by convention (Get-InteractiveWin11ExePath): native, named by
             # the helper. One named for PowerShell is an executable the walker cannot name.
             if ($name -match '(?i)^get-[a-z0-9-]*(exepath|clipath)$') {
-                return @{ Kind = 'native'; Value = $(if ($name -match 'pwsh|powershell|cmd|bat') { $null } else { $name }) }
+                return @{ Kind = 'native'; Value = $(if ($name -match 'pwsh|powershell|cmd|bat|comspec') { $null } else { $name }) }
             }
             if ($name -ieq 'join-path') {
                 # Join-Path [-Path] <parent> [-ChildPath] <child> [<more children>...]: a named -Path or -ChildPath
@@ -1060,6 +1061,11 @@ function Get-CiScriptFileEdges {
     # anything else is unresolved, a .cmd or .bat path included (cmd and batch files are refused).
     $scriptTarget = {
         param($Value, [string] $Why)
+        # Trailing spaces trimmed before the member is recorded, as Windows runs the path (Opus on #740:
+        # `-File "<dir>\child.ps1 "` ran child.ps1 and was listed misspelled).
+        if ($Value.Kind -eq 'path' -and $Value.Value -is [string] -and $Value.Value -ne $Value.Value.TrimEnd(' ')) {
+            $Value = @{ Kind = 'path'; Value = $Value.Value.TrimEnd(' '); Lookup = $Value.Lookup }
+        }
         # A path lookup's files are found when the closure reads the tree (Find-CiScriptLookupFiles).
         if ($Value.Kind -eq 'path' -and $Value.Lookup) {
             $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $Value.Value
@@ -1072,6 +1078,18 @@ function Get-CiScriptFileEdges {
             if ($repo) { $targets.Add($repo); return }
         }
         $unresolved.Add($Why)
+    }
+    # Whether an argument is one known string: a literal, an expandable string (one argument however it expands), a
+    # number, or a value the walker resolves to one string; not a splat, an array or a value it cannot read.
+    $scalarArgument = {
+        param($Entry)
+        if ($Entry.Splat) { return $false }
+        if ($Entry.Param) { return $true }
+        $node = $Entry.Node
+        if ($node -is [System.Management.Automation.Language.StringConstantExpressionAst] -or $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -or
+            ($node -is [System.Management.Automation.Language.ConstantExpressionAst])) { return $true }
+        $value = & $valueOf $Entry
+        return $value.Kind -eq 'path' -and -not $value.Lookup -and $value.Value -is [string]
     }
     # What a PowerShell executable's arguments run (Sol and CodeRabbit on #740: a pwsh reached through a variable
     # with -File was taken for an ordinary executable and its child dropped).
@@ -1088,7 +1106,14 @@ function Get-CiScriptFileEdges {
                         return
                     }
                     'command' { $unresolved.Add($Why); return }
-                    'value' { if (-not $entry.Attached) { $i++ } }
+                    'value' {
+                        # The value slot is read, not skipped (Opus on #740): PowerShell quotes a scalar argument but
+                        # expands an array into several, so a variable or computed value passes only as one known
+                        # string; a literal passes.
+                        $valueEntry = $(if ($entry.Attached) { $entry.Attached } elseif ($i + 1 -lt $Entries.Count) { $Entries[$i + 1] })
+                        if ($null -ne $valueEntry -and -not (& $scalarArgument $valueEntry)) { $unresolved.Add($Why); return }
+                        if (-not $entry.Attached) { $i++ }
+                    }
                 }
                 continue
             }
@@ -1282,9 +1307,21 @@ function Get-CiScriptFileEdges {
                 $list = $(if ($bound.Named.ContainsKey('argumentlist')) { $bound.Named['argumentlist'] } elseif ($bound.Positional.Count -ge 2 -and -not $bound.Named.ContainsKey('filepath')) { $bound.Positional[1] } elseif ($bound.Named.ContainsKey('filepath') -and $bound.Positional.Count -ge 1) { $bound.Positional[0] })
                 if ($null -eq $file) { $unresolved.Add($anchor); break }
                 $callee = & $classify (& $valueOf $file)
-                # A bare name may be found in -WorkingDirectory (Opus on #740): unresolved, save a system program.
-                if ($bound.Named.ContainsKey('workingdirectory') -and $file.Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-                    $file.Node.Value.TrimEnd(' ') -notmatch '[\\/]' -and $file.Node.Value.TrimEnd(' ').ToLowerInvariant() -notin $script:CiScriptSystemPrograms) { $unresolved.Add($anchor); break }
+                # Start-Process joins its arguments without quoting and the shell tokenizes them again, so no element
+                # rule can be sound (Sol, Opus, Greptile and CodeRabbit on #740: a variable, a parenthesized string,
+                # `-f`, `+`, `$( )` or a `u{20} escape in a value slot carried -Command through). Start-Process of
+                # PowerShell is refused, as cmd and batch files are; no GUI member starts PowerShell that way.
+                if ($callee.Is -ceq 'powershell') { $unresolved.Add($anchor); break }
+                # A bare name may be found in -WorkingDirectory (Opus on #740): unresolved, save a system program; a
+                # FilePath variable whose known value is such a name too. A FilePath read as a named program (the
+                # Get-Command or Join-Path leaf the walker keeps) is not checked: a known gap (README).
+                if ($bound.Named.ContainsKey('workingdirectory')) {
+                    $fileText = $(if ($file.Node -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $file.Node.Value } else { $fileValue = & $valueOf $file; if ($fileValue.Kind -eq 'path' -and -not $fileValue.Lookup) { [string]$fileValue.Value } })
+                    if ($null -ne $fileText) {
+                        $fileText = $fileText.TrimEnd(' ')
+                        if ($fileText -notmatch '[\\/]' -and -not [IO.Path]::IsPathRooted($fileText) -and $fileText.ToLowerInvariant() -notin $script:CiScriptSystemPrograms) { $unresolved.Add($anchor); break }
+                    }
+                }
                 if ($callee.Is -in @('none', 'native', 'command')) { break }
                 # A shell given -RedirectStandardInput reads its commands from that file (Opus on #740), and so may an
                 # executable the walker cannot name (CodeRabbit on #740: one of cmd.exe or sort.exe); a known
@@ -1293,58 +1330,6 @@ function Get-CiScriptFileEdges {
                 # A script (a batch file is unresolved there), cmd and an unresolved file take no argument reading.
                 if ($callee.Is -in @('script', 'cmd', 'unresolved')) { & $invoke $callee @() $anchor; break }
                 if ($null -eq $list) { & $invoke $callee @() $anchor; break }
-                # Start-Process joins a shell's -ArgumentList elements with spaces and the shell tokenizes them again, so
-                # the element boundaries are not its words (Sol on #740: `'-ExecutionPolicy', "Bypass -Command $c"`
-                # read as one value, and the child saw -Command; Greptile on #740: the same through a parenthesized
-                # string). For a PowerShell FilePath the list is read only in an allowlist of shapes: an array (a comma
-                # list or `@(...)` of expressions), or a bare variable or member access read as a value; and each array
-                # element (a) a string with no whitespace or quote, (b) an expandable string whose template, outside its
-                # expressions, has none, or (c) a bare variable or member access. Any other shape is unresolved: a single
-                # string, a parenthesized or `$( )` expression, an operator, a method call, an index, a nested array.
-                if ($callee.Is -ceq 'powershell') {
-                    $listNode = $list.Node
-                    while ($listNode -is [System.Management.Automation.Language.ParenExpressionAst] -or
-                        ($listNode -is [System.Management.Automation.Language.PipelineAst] -and $listNode.PipelineElements.Count -eq 1) -or
-                        $listNode -is [System.Management.Automation.Language.CommandExpressionAst]) {
-                        $listNode = $(if ($listNode -is [System.Management.Automation.Language.ParenExpressionAst]) { $listNode.Pipeline } elseif ($listNode -is [System.Management.Automation.Language.PipelineAst]) { $listNode.PipelineElements[0] } else { $listNode.Expression })
-                    }
-                    $valueShape = {
-                        param($Node)
-                        ($Node -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $Node.Splatted) -or
-                        ($Node -is [System.Management.Automation.Language.MemberExpressionAst] -and $Node -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst])
-                    }
-                    $elements = $null
-                    if ($listNode -is [System.Management.Automation.Language.ArrayLiteralAst]) { $elements = @($listNode.Elements) }
-                    elseif ($listNode -is [System.Management.Automation.Language.ArrayExpressionAst]) {
-                        $elements = [System.Collections.Generic.List[object]]::new()
-                        foreach ($statement in $listNode.SubExpression.Statements) {
-                            if ($statement -isnot [System.Management.Automation.Language.PipelineAst] -or $statement.PipelineElements.Count -ne 1 -or
-                                $statement.PipelineElements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) { $elements = $null; break }
-                            $expression = $statement.PipelineElements[0].Expression
-                            if ($expression -is [System.Management.Automation.Language.ArrayLiteralAst]) { foreach ($element in $expression.Elements) { $elements.Add($element) } }
-                            else { $elements.Add($expression) }
-                        }
-                    }
-                    elseif ($list.Node -and (& $valueShape $listNode)) { $elements = @() }
-                    if ($null -eq $elements) { $unresolved.Add($anchor); break }
-                    $accepted = $true
-                    foreach ($element in $elements) {
-                        $literal = $null
-                        if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $literal = $element.Value }
-                        elseif ($element -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
-                            $literal = $element.Extent.Text
-                            foreach ($inner in @($element.NestedExpressions | Sort-Object { $_.Extent.StartOffset } -Descending)) {
-                                $at = $inner.Extent.StartOffset - $element.Extent.StartOffset
-                                $literal = $literal.Remove($at, $inner.Extent.Text.Length)
-                            }
-                            if ($element.StringConstantType -ne [System.Management.Automation.Language.StringConstantType]::BareWord -and $literal.Length -ge 2) { $literal = $literal.Substring(1, $literal.Length - 2) }
-                        }
-                        elseif (& $valueShape $element) { continue }
-                        else { $accepted = $false; break }
-                        if ($literal -match '[\s"'']') { $accepted = $false; break }
-                    }
-                    if (-not $accepted) { $unresolved.Add($anchor); break }
-                }
                 $listed = $(if ($list.Node) { & $listEntries $list.Node } elseif ($list.Value) { , @($list.Value.Value -split '\s+' | Where-Object { $_ } | ForEach-Object { & $wordEntry $_ }) })
                 if ($null -eq $listed) { $unresolved.Add($anchor); break }
                 & $invoke $callee $listed $anchor
