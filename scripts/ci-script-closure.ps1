@@ -1056,7 +1056,8 @@ function Get-CiScriptFileEdges {
         if (-not $Pwsh -and 'version'.StartsWith($Name)) { return 'value' }
         return 'switch'
     }
-    # A script target that must resolve: a rooted .ps1, .psm1, .cmd or .bat path; anything else is unresolved.
+    # A script target that must resolve: a rooted .ps1 or .psm1 path, or a path lookup (Find-CiScriptLookupFiles);
+    # anything else is unresolved, a .cmd or .bat path included (cmd and batch files are refused).
     $scriptTarget = {
         param($Value, [string] $Why)
         # A path lookup's files are found when the closure reads the tree (Find-CiScriptLookupFiles).
