@@ -586,7 +586,7 @@ function Promote-WindowForCapture {
         0,
         [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
     )
-    [void] [InteractiveWin11WindowNative]::ForceForeground($Hwnd, $true, $false)
+    [void] [InteractiveWin11RealInput]::ForceForeground($Hwnd, $true, $false)
 
     $captureDeadline = (Get-Date).AddMilliseconds($CAPTURE_PROMOTION_DELAY_MS * 4)
     while ((Get-Date) -lt $captureDeadline) {
@@ -596,7 +596,7 @@ function Promote-WindowForCapture {
         }
 
         Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
-        [void] [InteractiveWin11WindowNative]::ForceForeground($Hwnd, $true, $false)
+        [void] [InteractiveWin11RealInput]::ForceForeground($Hwnd, $true, $false)
     }
 
     throw "Failed to foreground capture target hwnd=$Hwnd before screenshot sampling"

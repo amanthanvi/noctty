@@ -33,25 +33,123 @@ $windowNativeClassDefinitions = [regex]::Matches(
     $windowLibCSharp,
     '(?m)^\s*public\s+static\s+class\s+InteractiveWin11WindowNative\s*\{'
 )
+if ($windowNativeClassDefinitions.Count -ne 1) {
+    throw 'Interactive Win11 window library must own exactly one native class.'
+}
+
+# The real-input and foreground calls live only in scripts/interactive-win11-realinput.ps1
+# (InteractiveWin11RealInput), which window-lib loads only outside a hosted
+# (private-desktop) run (offload design v7 §4.3). So window-lib's C# declares none of
+# them, whether as an extern, through an EntryPoint alias, or as one of the methods
+# built on them. C# comments are stripped first, so a comment can neither trip nor
+# satisfy this.
+$realInputBannedEntryPoints = @('SendInput', 'keybd_event', 'mouse_event', 'SetForegroundWindow', 'BringWindowToTop', 'SetActiveWindow', 'SwitchToThisWindow', 'SetCursorPos')
+$realInputBannedMethods = @('ForceForeground', 'SubmitInputs')
+$realInputBannedDeclarations = {
+    param([string] $CSharp)
+    $code = [regex]::Replace($CSharp, '(?s)/\*.*?\*/|//[^\r\n]*', '')
+    foreach ($name in $realInputBannedEntryPoints) {
+        if ($code -cmatch "\bextern\b[^;{]*\b$name\s*\(") { "extern $name" }
+        if ($code -cmatch "EntryPoint\s*=\s*`"$name`"") { "EntryPoint $name" }
+    }
+    foreach ($name in $realInputBannedMethods) {
+        if ($code -cmatch "(?m)^\s*(?:(?:public|internal|private|protected|static|unsafe|extern)\s+)+[A-Za-z_][A-Za-z0-9_<>\[\],\s]*\s$name\s*\(") { "method $name" }
+    }
+}
+$windowLibBanned = @(& $realInputBannedDeclarations $windowLibCSharp)
+if ($windowLibBanned.Count -ne 0) {
+    throw "The window library must not declare a real-input or foreground call ($($windowLibBanned -join ', ')); it lives in scripts/interactive-win11-realinput.ps1."
+}
+foreach ($bannedControl in @(
+        @{ Name = 'an extern SetCursorPos'; Add = '    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);' },
+        @{ Name = 'an EntryPoint alias of SendInput'; Add = '    [DllImport("user32.dll", EntryPoint = "SendInput")] public static extern uint Inject(uint count, IntPtr inputs, int size);' },
+        @{ Name = 'a ForceForeground method'; Add = '    public static bool ForceForeground(IntPtr hWnd) { return false; }' })) {
+    $controlCSharp = $windowLibCSharp.Replace('public static class InteractiveWin11WindowNative {', "public static class InteractiveWin11WindowNative {`n$($bannedControl.Add)")
+    if ($controlCSharp -ceq $windowLibCSharp -or @(& $realInputBannedDeclarations $controlCSharp).Count -eq 0) {
+        throw "The window library's real-input check accepted $($bannedControl.Name)."
+    }
+}
+foreach ($commentControl in @('    // SetForegroundWindow and SendInput live in interactive-win11-realinput.ps1.', '    /* public static bool ForceForeground(IntPtr hWnd) */')) {
+    $controlCSharp = $windowLibCSharp.Replace('public static class InteractiveWin11WindowNative {', "public static class InteractiveWin11WindowNative {`n$commentControl")
+    if (@(& $realInputBannedDeclarations $controlCSharp).Count -ne 0) {
+        throw "The window library's real-input check counted a comment: $commentControl"
+    }
+}
+
+# The module: its first statement refuses a hosted run, it defines its one class
+# through one literal Add-Type and no PowerShell function, and it owns the one
+# three-argument ForceForeground.
+$interactiveWin11RealInputLib = Join-Path $repoRoot 'scripts\interactive-win11-realinput.ps1'
+if (-not (Test-Path -LiteralPath $interactiveWin11RealInputLib -PathType Leaf)) {
+    throw "Required real-input module is missing: $interactiveWin11RealInputLib"
+}
+$interactiveWin11RealInputLibText = Get-Content -LiteralPath $interactiveWin11RealInputLib -Raw
+$realInputTokens = $null
+$realInputErrors = $null
+$realInputAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $interactiveWin11RealInputLibText,
+    [ref]$realInputTokens,
+    [ref]$realInputErrors
+)
+if ($realInputErrors.Count -ne 0) {
+    throw "Real-input module does not parse: $($realInputErrors[0].Message)"
+}
+$realInputTripwireText = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'interactive-win11-realinput.ps1 must not load in a hosted (private-desktop) run: it holds the real-input and foreground calls.' }"
+$realInputHasTripwire = {
+    param($Ast)
+    $first = @($Ast.EndBlock.Statements)[0]
+    $null -ne $first -and $first.Extent.Text.Trim() -ceq $realInputTripwireText
+}
+if (-not (& $realInputHasTripwire $realInputAst)) {
+    throw 'The real-input module must begin with its hosted-run tripwire.'
+}
+$tripwireControlAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $interactiveWin11RealInputLibText.Replace($realInputTripwireText, '$null = 0'), [ref]$null, [ref]$null)
+if (& $realInputHasTripwire $tripwireControlAst) {
+    throw 'The real-input tripwire check accepted a module without its tripwire.'
+}
+$realInputFunctions = { param($Ast) @($Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) }
+if (@(& $realInputFunctions $realInputAst).Count -ne 0) {
+    throw 'The real-input module must define no PowerShell function: callers name [InteractiveWin11RealInput] directly.'
+}
+$functionControlAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    "$interactiveWin11RealInputLibText`nfunction Invoke-RealInputForeground { }`n", [ref]$null, [ref]$null)
+if (@(& $realInputFunctions $functionControlAst).Count -eq 0) {
+    throw 'The real-input module function check accepted a module that defines a function.'
+}
+$realInputAddTypes = @(Get-NamedCommands -Ast $realInputAst -Name 'Add-Type')
+$realInputTypeDefinition = if ($realInputAddTypes.Count -eq 1) {
+    Get-CommandParameterArgument -Command $realInputAddTypes[0] -Name 'TypeDefinition'
+} else {
+    $null
+}
+if ($realInputTypeDefinition -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+    throw 'The real-input module must define its native surface through one literal Add-Type command.'
+}
+$realInputCSharp = $realInputTypeDefinition.Value
+$realInputClassDefinitions = [regex]::Matches(
+    $realInputCSharp,
+    '(?m)^\s*public\s+static\s+class\s+InteractiveWin11RealInput\s*\{'
+)
 $forceForegroundDefinitions = [regex]::Matches(
-    $windowLibCSharp,
+    $realInputCSharp,
     '(?m)^\s*public\s+static\s+bool\s+ForceForeground\s*\(\s*IntPtr\s+hWnd,\s*bool\s+altTap,\s*bool\s+useSendInputForAltTap\s*\)'
 )
-if ($windowNativeClassDefinitions.Count -ne 1 -or
+if ($realInputClassDefinitions.Count -ne 1 -or
     $forceForegroundDefinitions.Count -ne 1) {
-    throw 'Interactive Win11 window library must own exactly one native class and one three-argument ForceForeground method.'
+    throw 'The real-input module must own exactly one native class and one three-argument ForceForeground method.'
 }
-$forceForegroundOpenBrace = $windowLibCSharp.IndexOf(
+$forceForegroundOpenBrace = $realInputCSharp.IndexOf(
     '{',
     $forceForegroundDefinitions[0].Index + $forceForegroundDefinitions[0].Length
 )
 $forceForegroundEnd = -1
 $forceForegroundDepth = 0
 if ($forceForegroundOpenBrace -ge 0) {
-    for ($index = $forceForegroundOpenBrace; $index -lt $windowLibCSharp.Length; $index++) {
-        if ($windowLibCSharp[$index] -eq '{') {
+    for ($index = $forceForegroundOpenBrace; $index -lt $realInputCSharp.Length; $index++) {
+        if ($realInputCSharp[$index] -eq '{') {
             $forceForegroundDepth++
-        } elseif ($windowLibCSharp[$index] -eq '}') {
+        } elseif ($realInputCSharp[$index] -eq '}') {
             $forceForegroundDepth--
             if ($forceForegroundDepth -eq 0) {
                 $forceForegroundEnd = $index
@@ -63,7 +161,7 @@ if ($forceForegroundOpenBrace -ge 0) {
 if ($forceForegroundEnd -lt 0) {
     throw 'ForceForeground must have one balanced method body.'
 }
-$forceForegroundMethod = $windowLibCSharp.Substring(
+$forceForegroundMethod = $realInputCSharp.Substring(
     $forceForegroundDefinitions[0].Index,
     $forceForegroundEnd - $forceForegroundDefinitions[0].Index + 1
 )
@@ -126,26 +224,82 @@ $windowLibConsumerAsts = foreach ($source in $windowLibConsumerSources) {
     [pscustomobject]@{ Path = $source.Path; Ast = $ast }
 }
 
+# Shader-pacing loads the window library through the stateful library, so it is
+# parsed here for its call only.
+$shaderPacingHarness = Join-Path $repoRoot 'test\windows\interactive-win11-shader-pacing.ps1'
 $forceForegroundCallContracts = @(
     [pscustomobject]@{ Path = $accessibilityHarness; Count = 20; AltTap = 'true'; SendInputAltTap = 'true' },
     [pscustomobject]@{ Path = $keyInputHarness; Count = 5; AltTap = 'false'; SendInputAltTap = 'false' },
     [pscustomobject]@{ Path = $shellCommandLiveHarness; Count = 2; AltTap = 'true'; SendInputAltTap = 'false' },
-    [pscustomobject]@{ Path = $statefulWin11Lib; Count = 1; AltTap = 'true'; SendInputAltTap = 'true' }
+    [pscustomobject]@{ Path = $statefulWin11Lib; Count = 1; AltTap = 'true'; SendInputAltTap = 'true' },
+    [pscustomobject]@{ Path = $shaderPacingHarness; Count = 1; AltTap = 'true'; SendInputAltTap = 'true' }
 )
-foreach ($contract in $forceForegroundCallContracts) {
-    $sourceAst = @($windowLibConsumerAsts | Where-Object { $_.Path -eq $contract.Path })[0].Ast
-    $calls = @(Get-NamedMemberExpressions -Ast $sourceAst -Name 'ForceForeground' -InvocationOnly)
+$realInputCallerAsts = @($windowLibConsumerAsts) + @(
+    [pscustomobject]@{
+        Path = $shaderPacingHarness
+        Ast = [System.Management.Automation.Language.Parser]::ParseInput((Get-Content -LiteralPath $shaderPacingHarness -Raw), [ref]$null, [ref]$null)
+    }
+)
+# A real-input call names the module's type, with its pinned arguments; one left on
+# the window library's type would throw at run time, since that type no longer has
+# the member.
+$realInputCallProblems = {
+    param($Ast, $Contract)
+    $calls = @(Get-NamedMemberExpressions -Ast $Ast -Name 'ForceForeground' -InvocationOnly)
     $invalidCalls = @($calls | Where-Object {
         $_.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst] -or
-        $_.Expression.TypeName.FullName -cne 'InteractiveWin11WindowNative' -or
+        $_.Expression.TypeName.FullName -cne 'InteractiveWin11RealInput' -or
         $_.Arguments.Count -ne 3 -or
         $_.Arguments[1] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
-        $_.Arguments[1].VariablePath.UserPath -cne $contract.AltTap -or
+        $_.Arguments[1].VariablePath.UserPath -cne $Contract.AltTap -or
         $_.Arguments[2] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
-        $_.Arguments[2].VariablePath.UserPath -cne $contract.SendInputAltTap
+        $_.Arguments[2].VariablePath.UserPath -cne $Contract.SendInputAltTap
+    })
+    if ($calls.Count -ne $Contract.Count -or $invalidCalls.Count -ne 0) {
+        "expected $($Contract.Count) ForceForeground calls on [InteractiveWin11RealInput] with `$$($Contract.AltTap), `$$($Contract.SendInputAltTap); found $($calls.Count), $($invalidCalls.Count) invalid"
+    }
+}
+foreach ($contract in $forceForegroundCallContracts) {
+    $sourceAst = @($realInputCallerAsts | Where-Object { $_.Path -eq $contract.Path })[0].Ast
+    $problem = @(& $realInputCallProblems $sourceAst $contract)
+    if ($problem.Count -ne 0) {
+        throw "ForceForeground strategy arguments changed: $($contract.Path) ($($problem[0]))."
+    }
+}
+$leftOverControlAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $keyInputHarnessText.Replace('[InteractiveWin11RealInput]::ForceForeground($hostHwnd, $false, $false)', '[InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)'),
+    [ref]$null, [ref]$null)
+if (@(& $realInputCallProblems $leftOverControlAst $forceForegroundCallContracts[1]).Count -eq 0) {
+    throw 'The real-input call contract accepted a ForceForeground call left on InteractiveWin11WindowNative.'
+}
+$setForegroundCallContracts = @(
+    [pscustomobject]@{ Path = $imeCandidateHarness; Count = 1 },
+    [pscustomobject]@{ Path = $statefulWin11Lib; Count = 1 }
+)
+foreach ($contract in $setForegroundCallContracts) {
+    $sourceAst = @($realInputCallerAsts | Where-Object { $_.Path -eq $contract.Path })[0].Ast
+    $calls = @(Get-NamedMemberExpressions -Ast $sourceAst -Name 'SetForegroundWindow' -InvocationOnly)
+    $invalidCalls = @($calls | Where-Object {
+        $_.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst] -or
+        $_.Expression.TypeName.FullName -cne 'InteractiveWin11RealInput' -or
+        $_.Arguments.Count -ne 1
     })
     if ($calls.Count -ne $contract.Count -or $invalidCalls.Count -ne 0) {
-        throw "ForceForeground strategy arguments changed: $($contract.Path) (expected $($contract.Count) calls with `$$($contract.AltTap), `$$($contract.SendInputAltTap))."
+        throw "SetForegroundWindow calls changed: $($contract.Path) (expected $($contract.Count) on [InteractiveWin11RealInput])."
+    }
+}
+# No caller anywhere names a moved member on the window library's type.
+$movedMemberNames = @('SetForegroundWindow', 'BringWindowToTop', 'SendInput', 'keybd_event', 'SubmitInputs', 'ForceForeground', 'LastSendInputRequested', 'LastSendInputReturned')
+foreach ($caller in $realInputCallerAsts) {
+    $stale = @($caller.Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+            $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+            $node.Expression.TypeName.FullName -ceq 'InteractiveWin11WindowNative' -and
+            (Get-MemberExpressionName -Node $node) -in $movedMemberNames
+    }, $true))
+    if ($stale.Count -ne 0) {
+        throw "A real-input member is still called on InteractiveWin11WindowNative: $($caller.Path)"
     }
 }
 
@@ -155,31 +309,31 @@ $windowNativeShadowDefinitions = @(
         (Join-Path $repoRoot 'scripts')
     )) {
         foreach ($sourceFile in Get-ChildItem -LiteralPath $searchRoot -File -Recurse) {
-            if ([string]::Equals(
-                    $sourceFile.FullName,
-                    $interactiveWin11WindowLib,
-                    [StringComparison]::OrdinalIgnoreCase
-                )) {
-                continue
-            }
             try {
                 $sourceText = Get-Content -LiteralPath $sourceFile.FullName -Raw -ErrorAction Stop
             }
             catch {
                 throw "InteractiveWin11WindowNative shadow scan could not read $($sourceFile.FullName): $($_.Exception.Message)"
             }
-            $definitionCount = [regex]::Matches(
-                $sourceText,
-                '(?ims)^\s*(?:(?:public|internal|private|protected|static|sealed|abstract|partial|new|unsafe|readonly|ref)\s+|\[[^\]]+\]\s*)*(?:class|struct)\s+InteractiveWin11WindowNative\b'
-            ).Count
-            if ($definitionCount -gt 0) {
-                [pscustomobject]@{ Path = $sourceFile.FullName; Count = $definitionCount }
+            foreach ($shadowed in @(
+                    @{ Type = 'InteractiveWin11WindowNative'; Owner = $interactiveWin11WindowLib },
+                    @{ Type = 'InteractiveWin11RealInput'; Owner = $interactiveWin11RealInputLib })) {
+                if ([string]::Equals($sourceFile.FullName, $shadowed.Owner, [StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+                $definitionCount = [regex]::Matches(
+                    $sourceText,
+                    "(?ims)^\s*(?:(?:public|internal|private|protected|static|sealed|abstract|partial|new|unsafe|readonly|ref)\s+|\[[^\]]+\]\s*)*(?:class|struct)\s+$($shadowed.Type)\b"
+                ).Count
+                if ($definitionCount -gt 0) {
+                    [pscustomobject]@{ Path = $sourceFile.FullName; Type = $shadowed.Type; Count = $definitionCount }
+                }
             }
         }
     }
 )
 if ($windowNativeShadowDefinitions.Count -ne 0) {
-    throw "InteractiveWin11WindowNative must not be shadowed outside the shared window library: $($windowNativeShadowDefinitions.Path -join ', ')"
+    throw "InteractiveWin11WindowNative and InteractiveWin11RealInput must not be shadowed outside their own libraries: $(@($windowNativeShadowDefinitions | ForEach-Object { "$($_.Type) in $($_.Path)" }) -join ', ')"
 }
 
 $resolutionSourceAsts = foreach ($source in @(
@@ -220,10 +374,33 @@ foreach ($source in $resolutionSourceAsts) {
     }
 }
 # The window library the stateful library dot-sources is held to the same
-# command-resolution rules (no alias, no command-resolution mutation, no dot
-# source or call operator), since an alias it defines would outrank the
-# stateful library's functions (EVIDENCE-FOREGROUND-01).
-Assert-CommandResolutionContract -Ast $windowLibAst -Tokens $windowLibTokens -Context $interactiveWin11WindowLib -ExpectedDotSources @() -ExpectedAmpersandCommands @()
+# command-resolution rules (no alias, no command-resolution mutation, no call
+# operator), since an alias it defines would outrank the stateful library's
+# functions (EVIDENCE-FOREGROUND-01). Its one dot-source is the loader of the
+# real-input module, and that loader is its last statement, exactly as pinned
+# here: outside a hosted (private-desktop) run it loads the module; in one it
+# runs the hosted-desktop check instead, a C# method no alias or function can
+# shadow (offload design v7 §4.3).
+$windowLibRealInputLoader = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { [InteractiveWin11HostedDesktop]::Assert(`$env:NOCTTY_GUI_HIDDEN_DESKTOP) } else { . (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1') }"
+Assert-CommandResolutionContract -Ast $windowLibAst -Tokens $windowLibTokens -Context $interactiveWin11WindowLib -ExpectedDotSources @(". (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1')") -ExpectedAmpersandCommands @()
+$windowLibEndsWithLoader = {
+    param($Ast)
+    $last = @($Ast.EndBlock.Statements)[-1]
+    $null -ne $last -and $last.Extent.Text.Trim() -ceq $windowLibRealInputLoader
+}
+if (-not (& $windowLibEndsWithLoader $windowLibAst)) {
+    throw 'The window library must end with the real-input loader, exactly as pinned in Contracts.30-HarnessLib.ps1.'
+}
+foreach ($loaderControl in @(
+        @{ Name = 'an unconditional load'; Text = ". (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1')" },
+        @{ Name = 'a load in hosted mode too'; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { . (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1') } else { . (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1') }" },
+        @{ Name = 'a skipped hosted-desktop check'; Text = "if (-not `$env:NOCTTY_GUI_HIDDEN_DESKTOP) { . (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1') }" })) {
+    $loaderControlAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        $interactiveWin11WindowLibText.Replace($windowLibRealInputLoader, $loaderControl.Text), [ref]$null, [ref]$null)
+    if (& $windowLibEndsWithLoader $loaderControlAst) {
+        throw "The window library's loader check accepted $($loaderControl.Name)."
+    }
+}
 $interactiveWin11LibAst = @($resolutionSourceAsts | Where-Object { $_.Path -eq $interactiveWin11Lib })[0].Ast
 $waitUntilFunctions = @($interactiveWin11LibAst.FindAll({
     param($node)
@@ -351,8 +528,10 @@ $libraryRewiring = {
 # contract above; the measure and history libraries are put under it here (no
 # alias, no command-resolution mutation, no dot source or call operator), since
 # an alias either defines would outrank the stateful library's functions
-# whatever the load order (CodeRabbit).
-$siblingLibraries = foreach ($sibling in @(@{ Name = 'measure'; File = 'interactive-win11-measure-lib.ps1' }, @{ Name = 'history'; File = 'windows-harness-history.ps1' })) {
+# whatever the load order (CodeRabbit). The real-input module, which the window
+# library loads outside a hosted run, holds ForceForeground and
+# SetForegroundWindow, which Show-StatefulHost calls, so it is held to them too.
+$siblingLibraries = foreach ($sibling in @(@{ Name = 'measure'; File = 'interactive-win11-measure-lib.ps1' }, @{ Name = 'history'; File = 'windows-harness-history.ps1' }, @{ Name = 'real-input'; File = 'interactive-win11-realinput.ps1' })) {
     $siblingPath = Join-Path $repoRoot "scripts\$($sibling.File)"
     $siblingTokens = $null
     $siblingErrors = $null
@@ -397,7 +576,8 @@ foreach ($rewiringControl in @(
         @{ Base = $interactiveWin11LibText; Add = "`$PSDefaultParameterValues['*:InformationAction'] = 'Ignore'" },
         @{ Base = $interactiveWin11LibText; Add = 'function Microsoft.PowerShell.Utility\Start-Sleep { }' },
         @{ Base = $statefulWin11LibText; Add = "`$InformationPreference = 'Ignore'" },
-        @{ Base = $interactiveWin11LibText; Add = "Set-Variable -Name InformationPreference -Value 'Ignore' -Scope Global" }
+        @{ Base = $interactiveWin11LibText; Add = "Set-Variable -Name InformationPreference -Value 'Ignore' -Scope Global" },
+        @{ Base = $interactiveWin11RealInputLibText; Add = "`$PSDefaultParameterValues['Start-Sleep:Milliseconds'] = 0" }
     )) {
     $rewiringTokens = $null
     $rewiringErrors = $null
@@ -441,7 +621,7 @@ if (Test-StatefulForeignForeground $hostProcessId $hostProcessName $foregroundPr
         # before it reads the foreground again, so a change in the few
         # milliseconds between this check and the tap is not covered.
         if ((Get-StatefulForegroundProcessId) -eq $foregroundProcessId) {
-            $taken = [InteractiveWin11WindowNative]::ForceForeground($HostHwnd, $true, $true)
+            $taken = [InteractiveWin11RealInput]::ForceForeground($HostHwnd, $true, $true)
             [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
             $outcome = if ($taken) { 'took it back' } else { 'did not take it back' }
             Microsoft.PowerShell.Utility\Write-Host "Show-StatefulHost: process '$foregroundProcessName' held the foreground; ForceForeground $outcome."
@@ -451,7 +631,7 @@ if (Test-StatefulForeignForeground $hostProcessId $hostProcessName $foregroundPr
 $showHostPin = @{ Function = $showHostFunctions[0]; Parameters = '[IntPtr] $HostHwnd'; Statements = @(
     '[void][InteractiveWin11WindowNative]::ShowWindow($HostHwnd, 9)',
     '[void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)',
-    '[void][InteractiveWin11WindowNative]::SetForegroundWindow($HostHwnd)',
+    '[void][InteractiveWin11RealInput]::SetForegroundWindow($HostHwnd)',
     '$hostProcessId = [uint32]0',
     '[void][InteractiveWin11WindowNative]::GetWindowThreadProcessId($HostHwnd, [ref]$hostProcessId)',
     '$foregroundProcessId = Get-StatefulForegroundProcessId',
@@ -565,7 +745,7 @@ if (-not (& $testShowHostGuard $showHostFunctions[0])) {
 $showHostText = $showHostFunctions[0].Extent.Text
 $showHostGuardLine = "if ($showHostGuardCall) {"
 $showHostRecheckLine = "if ($showHostRecheck) {"
-$showHostForceLine = '$taken = [InteractiveWin11WindowNative]::ForceForeground($HostHwnd, $true, $true)'
+$showHostForceLine = '$taken = [InteractiveWin11RealInput]::ForceForeground($HostHwnd, $true, $true)'
 foreach ($control in @(
         @{ Name = 'an always-true guard'; Edits = @(, @($showHostGuardLine, 'if ($true) {')) },
         @{ Name = 'a negated guard'; Edits = @(, @($showHostGuardLine, "if (-not ($showHostGuardCall)) {")) },
@@ -580,7 +760,7 @@ foreach ($control in @(
         @{ Name = 'the foreground name read from the host id'; Edits = @(, @($showHostForegroundNameRead, '$foregroundProcessName = Get-StatefulProcessName $hostProcessId')) },
         @{ Name = 'the host id overwritten'; Edits = @(, @($showHostForegroundRead, "$showHostForegroundRead; `$hostProcessId = `$foregroundProcessId")) },
         @{ Name = 'the host name overwritten'; Edits = @(, @($showHostGuardLine, "`$hostProcessName = `$foregroundProcessName; $showHostGuardLine")) },
-        @{ Name = 'a null target'; Edits = @(, @($showHostForceLine, '$taken = [InteractiveWin11WindowNative]::ForceForeground([IntPtr]::Zero, $true, $true)')) },
+        @{ Name = 'a null target'; Edits = @(, @($showHostForceLine, '$taken = [InteractiveWin11RealInput]::ForceForeground([IntPtr]::Zero, $true, $true)')) },
         @{ Name = 'the call moved out of the ifs'; Edits = @(@($showHostForceLine, '$taken = $false'), @($showHostGuardLine, "$showHostForceLine; $showHostGuardLine")) }
     )) {
     $controlText = $showHostText
@@ -604,7 +784,7 @@ foreach ($control in @(
 # What the guard check above does not look at, the pin refuses: each of these
 # must parse and fail the pin (and the unchanged text must pass it).
 $showHostSleepLine = 'Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:STATEFUL_HOST_SETTLE_MS'
-$showHostForegroundLine = '[void][InteractiveWin11WindowNative]::SetForegroundWindow($HostHwnd)'
+$showHostForegroundLine = '[void][InteractiveWin11RealInput]::SetForegroundWindow($HostHwnd)'
 $parseShowHost = {
     param([string] $Text, [string] $Name)
     $tokens = $null
@@ -632,7 +812,7 @@ foreach ($control in @(
         @{ Name = 'the body moved into end {} beside a clean block'; Edits = @(
                 @('function Show-StatefulHost([IntPtr] $HostHwnd) {', "function Show-StatefulHost([IntPtr] `$HostHwnd) {`n    end {"),
                 @($showHostSleepLine, "$showHostSleepLine`n    }`n    clean { `$script:STATEFUL_HOST_SETTLE_MS = 0 }")) },
-        @{ Name = 'a return once SetForegroundWindow succeeds'; Edits = @(, @($showHostForegroundLine, "if ([InteractiveWin11WindowNative]::SetForegroundWindow(`$HostHwnd)) { return }")) }
+        @{ Name = 'a return once SetForegroundWindow succeeds'; Edits = @(, @($showHostForegroundLine, "if ([InteractiveWin11RealInput]::SetForegroundWindow(`$HostHwnd)) { return }")) }
     )) {
     $controlText = $showHostText
     foreach ($edit in $control.Edits) {
@@ -670,7 +850,8 @@ finally {
 }
 
 # Behavior, with no desktop: the real Show-StatefulHost and its helpers run with
-# InteractiveWin11WindowNative swapped for a recording stand-in (the foreground
+# InteractiveWin11WindowNative and InteractiveWin11RealInput (which holds
+# ForceForeground and SetForegroundWindow) both swapped for a recording stand-in (the foreground
 # window is handle 2; it can change process between the first read and the
 # recheck) and Get-Process for a table of names, so nothing touches a window,
 # the foreground or input.
@@ -715,9 +896,12 @@ $savedSettle = $script:STATEFUL_HOST_SETTLE_MS
 $script:STATEFUL_HOST_SETTLE_MS = 0
 try {
     foreach ($function in $statefulBehaviorFunctions) {
-        # The stand-in replaces the native class, and the Get-Process table
-        # replaces the module-qualified cmdlet the name helper calls.
-        . ([scriptblock]::Create($function.Extent.Text.Replace('[InteractiveWin11WindowNative]', '[StatefulHostContractNative]').Replace('Microsoft.PowerShell.Management\Get-Process', 'Get-Process')))
+        # The stand-in replaces both native classes, and the Get-Process table
+        # replaces the module-qualified cmdlet the name helper calls. Nothing
+        # left names a real class, so nothing can touch a window or the input.
+        $standInText = $function.Extent.Text.Replace('[InteractiveWin11WindowNative]', '[StatefulHostContractNative]').Replace('[InteractiveWin11RealInput]', '[StatefulHostContractNative]').Replace('Microsoft.PowerShell.Management\Get-Process', 'Get-Process')
+        if ($standInText -match '\[InteractiveWin11(?:WindowNative|RealInput)\]') { throw "The Show-StatefulHost behaviour run left a real native class in $($function.Name)." }
+        . ([scriptblock]::Create($standInText))
     }
     function script:Invoke-StatefulContractShowHost {
         [CmdletBinding()]
