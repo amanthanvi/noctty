@@ -1525,23 +1525,45 @@ Two modes:
 - `-Visible` is the measurement. Run it only while the machine's user is
   away. The copy runs on `Default`, which must be the caller's desktop and the
   input desktop, composed by DWM, in a local session, with the shell accepting
-  notifications (no full-screen app or presentation mode) and the display on.
-  There must be no keyboard or mouse input for 300 s before the series (a
-  pinned constant) and none since but the harness's own unlocks. "Away" means
-  only that: a gamepad, or a video watched without input, is not seen. The
-  series holds the display and the system on.
-- The input gate (`Test-FramePacingInputGate`) requires the session's last
-  input to be the series' tick right before each launch on `Default` and the
-  unlock, and the unlock's own tick right before the measured window and after
-  it. A break before the window throws INCONCLUSIVE, so nothing further
-  starts, takes the foreground or sends input: a user who comes back keeps
-  their desktop. The machine must be under 30% busy (the driver waits up to
+  notifications (no full-screen app or presentation mode), the display on, no
+  screen saver running, and Windows' foreground lock
+  (`SPI_GETFOREGROUNDLOCKTIMEOUT`) at 200,000 ms or more. There must be no
+  keyboard or mouse input for 300 s before the series (a pinned constant).
+  "Away" means only that: a gamepad, or a video watched without input, is not
+  seen. The series holds the display and the system on.
+- Real input is detected by the injected flag, not inferred from ticks.
+  `GetLastInputInfo` cannot tell the harness's own unlock from the user's
+  input. From admission to the series' end the outer half holds low-level
+  keyboard and mouse hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`) on a thread with
+  its own message loop. Any event without `LLKHF_INJECTED` or `LLMHF_INJECTED`
+  is real input and sets the series' event, which every driver opens. The
+  hooks read only that flag, count the event and pass it on. Hooks that do
+  not install refuse `-Visible`; there is no fallback to the tick alone.
+- The input gate (`Test-FramePacingInputGate`) reads that event first. The
+  session's last-input tick is the second line: it must be the series' tick
+  until the unlock and the unlock's own tick after it. The gate runs right
+  before each launch on `Default` (the visible driver's included), the
+  unlock, each workload key (F5 and F6), the measured window and after it. A
+  break before the window throws INCONCLUSIVE, so nothing further starts,
+  takes the foreground or sends input: a user who comes back keeps their
+  desktop. The machine must be under 30% busy (the driver waits up to
   `-QuietWaitSeconds` and launches nothing when it never was) and again right
-  before the window. The copy takes the foreground through a bounded call: a
-  zero-motion mouse input unlocks it, never an Alt tap; the native worker
-  checks the tick again right before that input, and the cross-thread calls
-  run on a worker joined within 5 s. A run whose foreground, pane focus,
-  display power or session input changed is inconclusive, never a sample.
+  before the window, with no screen saver then either; each reading is acted
+  on at once. The copy takes the foreground through a bounded call: a
+  zero-motion mouse input unlocks it, never an Alt tap. The native worker
+  reads the event again right before that input and before each
+  `SetForegroundWindow` and `BringWindowToTop`, refuses the unlock when its
+  tick is not seen to move, and runs the cross-thread calls joined within
+  5 s. A run whose foreground, pane focus, display power or session input
+  changed is inconclusive, never a sample.
+- Which mechanism protects which window: the hooks guard the harness's own
+  steps (each launch, the unlock, the foreground calls, the keys, the
+  window). noctty's own startup activation (`Host.present` calls
+  `SetForegroundWindow` on its new window) is not the harness's call; Windows'
+  foreground lock denies it to a background process for the lock's timeout
+  after the user's last input, so a user who comes back mid-series keeps the
+  foreground while the gate stops the series. That is why a lock under
+  200,000 ms refuses `-Visible`.
 
 ```powershell
 pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
@@ -1549,10 +1571,14 @@ pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
 ```
 
 `-RunRoot` is a new directory outside `-MeasureRepo`, or one git ignores
-there. The series stops at the first run that does not complete. The exit code
-is 0 when every run completed, 2 after an inconclusive visible run, 3 after a
-tripped guard and 1 otherwise. `<RunRoot>\pacing.json` holds each run's status
-and statistics and the pooled p95. Each `run-<n>` holds `run.json` (the build,
+there. The series stops at the first run that does not complete. The exit
+code, by precedence (`Get-FramePacingExitCode`): 3 when a guard tripped, else
+1 when a run failed or the runs differ in build or workload, else 2 when a run
+was inconclusive or the runs differ in environment, else 0. A series that both
+trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` holds each
+run's status and statistics, each comparability group's (`Groups`), the pooled
+p95 and, in a visible series, how many real input events the hooks saw
+(`RealInputsSeen`). Each `run-<n>` holds `run.json` (the build,
 config, receipt and ConPTY digests, the transport and renderer the copy's log
 names, the grid, the window's DPI and monitor mode, the busy share and timer
 resolution before and after, every interval and the visible part's facts), the
@@ -1562,7 +1588,8 @@ copy's log, the driver's log, the copy's last trace snapshot and
 fails the series, exit 1), and the same display mode (the window's monitor's
 width, height and refresh, read at the start of each run and again after its
 window, where a change makes the run inconclusive), DPI and grid (a difference
-reports each mode in `ByDisplayMode`, pools none and exits 2).
+pools none and exits 2). Each group of runs alike in all nine of those fields
+is reported on its own in `Groups`, never combined across any of them.
 `frame_time_p95_ms` and its median are published only for a visible series
 whose every run completed and whose runs are comparable; otherwise both are
 null and the console says no measurement was published. A staging failure is a
@@ -1570,7 +1597,12 @@ failed run before any launch, and the summary still records the runs before
 it. What runs is the run's own copy: its path is checked before any launch
 and its image read back by PID, and the driver runs in the run's own job,
 checked before it resumes and again by the outer half. The shared state guard
-deletes a measurement-identity jump list created during a run, so run one
+owns the measurement-identity jump list by its timestamps: it deletes the file
+only when it did not exist before the run and both its creation and last-write
+times fall inside the run. It keeps one that existed before, and keeps one
+whose times fall outside the run (NTFS tunnelling can keep an old creation
+time) and reports that as a failure. Another measurement workload's jump list
+written during a run would pass that test and be deleted, so run one
 measurement workload at a time; the frame-pacing mutex covers only this
 harness. Each run keeps the shared state
 guard, the PowerShell history guard and the real `session-state.json`'s

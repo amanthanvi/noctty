@@ -303,8 +303,9 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   measurement build per run, its shell the copy's config's cmd.exe, cmd's own
   `type` as the producer and no PowerShell fixture. Its private-desktop dry
   run is not a measurement; `-Visible` is, on an idle, unlocked, composed
-  desktop. Its producer is about a tenth as fast as the PowerShell fixture's,
-  so its numbers are not comparable with the table above.
+  desktop, stopped by any real keyboard or mouse input its low-level hooks
+  see. Its producer is about a tenth as fast as the PowerShell fixture's, so
+  its numbers are not comparable with the table above.
 - Detailed termio profiles are diagnostic-only and process-lifetime scoped.
   `ReadFile` totals include blocking before the go marker. Profiled runs cannot
   be used as product gates.
