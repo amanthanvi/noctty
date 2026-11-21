@@ -26310,6 +26310,10 @@ test "thread_role: settings dialog tests run their body as the UI thread" {
     }.body);
 }
 
+test "thread_role: a window made on the settings dialog tests' thread finds .ui in its window procedure (acceptance test 5)" {
+    try dialog_test.onHiddenDesktop(@import("win32/test_support.zig").RoleProbeWindow.expectUi);
+}
+
 test "settings dialog tests run with an empty keyboard: a modifier in the test thread's key table does not make F2 another chord" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {

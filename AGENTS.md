@@ -687,14 +687,16 @@ that govern each symbol you change, or that none does.
   `std.Progress.lockStdErr`, the search-thread tests in
   `src/terminal/search/Thread.zig`), the test exe's isolated children and
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
-  `expectPanic`, `expectOffTable`; `src/main.zig`'s first test), the
+  `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
+  `symbolise.names_checked`; `src/main.zig`'s first test), the
   thread-role dumps' symboliser and the in-process compare
   (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
   the table they read, `ci/lock-inventory-threads.tsv`), the shared Win32 test
   fixtures
   (`win32/test_support.zig`, `TestSession`, the private-desktop runners
-  `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop` and the empty
-  keyboard they pin), PSReadLine history isolation
+  `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop`, the empty
+  keyboard they pin and the window probe that checks their role,
+  `RoleProbeWindow`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), a bash
   probe's `HISTFILE`, a failing test's error name (the installed test
   executable), the skip budget (`scripts/check-test-skips.ps1`,

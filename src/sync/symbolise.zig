@@ -48,10 +48,20 @@ pub const format_name = "sym-1";
 /// §2.7 RQ16). Every attribution probe so far ran on x64, so an aarch64 test
 /// build checks the role and the panic only, until 1A.2 has run the probe
 /// once on the ARM64 runner (the lead's 1A.2 decision 12) and it attributes
-/// there: then this is true on aarch64 too. The one switch for every test
-/// that checks a name (`isolated.expectPanicPairs`, `expectOffTable`, this
-/// file's site-shape test).
+/// there: then this is true on aarch64 too. The one architecture switch for
+/// every test that checks a name: this file's site-shape test reads it with
+/// each shape's own mode rule, and the isolated parents through
+/// `names_checked`.
 pub const names_attributed = builtin.cpu.arch == .x86_64;
+
+/// Whether this build's isolated parents check a recorded function's name
+/// (RQ16): where names are attributed, in Debug on 0.15.2, and in Debug and
+/// ReleaseSafe from 0.17 on. 0.15.2's ReleaseSafe attributes only `noinline`
+/// functions (§19.2), so there the parents check the panic and the role, and
+/// a test left with nothing else to check, such as acceptance test 10's
+/// site shapes, is skipped.
+pub const names_checked = names_attributed and
+    (builtin.mode == .Debug or builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) != .lt);
 
 /// The symbolise mode's variables (`runFromEnvironment`): the raw dumps'
 /// directory, the directory the symbolised ones are written to (it must

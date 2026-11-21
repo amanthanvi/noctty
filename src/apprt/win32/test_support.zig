@@ -33,6 +33,86 @@ const RECT = sys.RECT;
 const WINDOWPOS = sys.WINDOWPOS;
 const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
 
+/// Acceptance test 5 (PLAN.md §2.7): a window that a hidden-desktop runner's
+/// body makes and dispatches, whose window procedure records the role its
+/// thread has. Like every window procedure it asserts PN7, which in the test
+/// exe also lets a thread with no role through, so the probe checks `.ui`
+/// itself: a runner that lost its UI scope still passes PN7 and fails here.
+/// It needs no runtime binding, so the Settings tests' runner reaches it too
+/// (`win32_settings.zig` imports this file in its test).
+pub const RoleProbeWindow = struct {
+    /// A private message: `WM_APP` plus an offset no window here uses.
+    const probe_message: UINT = 0x8000 + 0x5a1;
+
+    /// What the procedure found, on the thread that made the window.
+    threadlocal var seen_create: ?thread_role.Role = null;
+    threadlocal var seen_sent: ?thread_role.Role = null;
+    threadlocal var seen_posted: ?thread_role.Role = null;
+
+    fn proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) LRESULT {
+        thread_role.assertWindowProc();
+        switch (msg) {
+            c.WM_NCCREATE => seen_create = thread_role.current(),
+            probe_message => {
+                if (wp == 0) seen_sent = thread_role.current() else seen_posted = thread_role.current();
+                return 0;
+            },
+            else => {},
+        }
+        return sys.DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    /// On the calling thread (a runner's body): makes the probe window, sends
+    /// it a message, posts it one and dispatches that, then expects its
+    /// procedure to have found `.ui` each time where the layer is on, and no
+    /// role where it is off.
+    pub fn expectUi() !void {
+        seen_create = null;
+        seen_sent = null;
+        seen_posted = null;
+        // The process id and the tick keep concurrent test processes
+        // (`-Dtest-shards`) and earlier runs off each other's class.
+        var name_buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "noctty-role-probe-{d}-{d}", .{ sys.GetCurrentProcessId(), sys.GetTickCount64() });
+        const class = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
+        defer std.testing.allocator.free(class);
+        const instance = sys.GetModuleHandleW(null);
+        const wc: sys.WNDCLASSEXW = .{
+            .cbSize = @sizeOf(sys.WNDCLASSEXW),
+            .style = 0,
+            .lpfnWndProc = &proc,
+            .cbClsExtra = 0,
+            .cbWndExtra = 0,
+            .hInstance = instance,
+            .hIcon = null,
+            .hCursor = null,
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = class.ptr,
+            .hIconSm = null,
+        };
+        if (sys.RegisterClassExW(&wc) == 0) return child_window.lastError();
+        defer _ = sys.UnregisterClassW(class.ptr, instance);
+        // A top-level window, never shown, on this thread's desktop.
+        const hwnd = sys.CreateWindowExW(0, class.ptr, class.ptr, c.WS_POPUP, 0, 0, 64, 64, null, null, instance, null) orelse
+            return child_window.lastError();
+        {
+            defer _ = sys.DestroyWindow(hwnd);
+            _ = sys.SendMessageW(hwnd, probe_message, 0, 0);
+            if (sys.PostMessageW(hwnd, probe_message, 1, 0) == 0) return child_window.lastError();
+            var msg: sys.MSG = undefined;
+            while (seen_posted == null and sys.PeekMessageW(&msg, hwnd, probe_message, probe_message, c.PM_REMOVE) != 0) {
+                _ = sys.DispatchMessageW(&msg);
+            }
+        }
+        const expected: thread_role.Role = if (thread_role.layer == .on) .ui else .none;
+        for ([_]?thread_role.Role{ seen_create, seen_sent, seen_posted }) |seen| {
+            const role = seen orelse return error.ProbeWindowProcedureNotRun;
+            try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(role));
+        }
+    }
+};
+
 /// Bind the private runtime types and operations once, keeping one fixture
 /// implementation for the tests in win32.zig and in the modules under win32/.
 ///

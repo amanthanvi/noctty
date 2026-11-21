@@ -327,7 +327,7 @@ pub const Pair = struct {
 /// A panic variant that also compares its dump (acceptance test 12): the
 /// child panics with `text`, and the compare of its own directory passes
 /// with exactly `pairs`. Where this build's tests check no names
-/// (`symbolise.names_attributed`, RQ16), the dump holds exactly the pairs'
+/// (`symbolise.names_checked`, RQ16), the dump holds exactly the pairs'
 /// roles instead, and the compare, which keys pairs by name, is not judged.
 pub fn expectPanicPairs(src: std.builtin.SourceLocation, text: []const u8, pairs: []const Pair) !void {
     var child = try run(src, .own);
@@ -335,7 +335,7 @@ pub fn expectPanicPairs(src: std.builtin.SourceLocation, text: []const u8, pairs
     try expectPanicked(&child, src, text);
     var result = try compareChild(&child);
     defer result.deinit();
-    const held = if (symbolise.names_attributed)
+    const held = if (symbolise.names_checked)
         result.report.passed() and result.holdsExactly(pairs)
     else
         result.holdsRoles(pairs);
@@ -355,7 +355,7 @@ pub fn expectPairs(src: std.builtin.SourceLocation, pairs: []const Pair) !void {
     try expectExited(&child, src);
     var result = try compareChild(&child);
     defer result.deinit();
-    const held = if (symbolise.names_attributed)
+    const held = if (symbolise.names_checked)
         result.report.passed() and result.holdsExactly(pairs)
     else
         result.holdsRoles(pairs);
@@ -381,7 +381,7 @@ pub fn expectOffTable(src: std.builtin.SourceLocation, pair: Pair) !void {
     });
     var tail_buf: [256]u8 = undefined;
     const tail = try std.fmt.bufPrint(&tail_buf, ", {s})", .{pair.role});
-    const named = if (symbolise.names_attributed)
+    const named = if (symbolise.names_checked)
         result.report.hasLine(line)
     else
         result.report.count(.pair_outside_table) == 1 and
@@ -748,4 +748,332 @@ test "isolated: a scope exited out of order panics with PN6 (acceptance test 15)
         return;
     }
     try expectPanic(@src(), "thread-role layer: PN6 a fixture scope exited out of order (its depth 1, the thread's 2)");
+}
+
+test "isolated: an unscoped unit-test acquisition panics with PN4, and its text names the fix (acceptance test 3)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        // No fixture: the child's test thread has no role.
+        var m: StateMutex = .{};
+        m.lock();
+        m.unlock();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN4 lock of the renderer-state mutex from a thread with no " ++
+        "role; a test enters the role it simulates first: `const scope = thread_role.fixture(.<role>); " ++
+        "defer scope.exit();`");
+}
+
+test "isolated: an acquisition from a thread with no role panics with PN4 (acceptance test 3)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const Sites = struct {
+        /// Reviewed for the UI thread; the child runs it on a thread that
+        /// entered no role, as a helper thread that forgot its role would.
+        fn noRoleThreadSite(m: *StateMutex) void {
+            if (m.tryLock()) m.unlock();
+        }
+    };
+    if (inChild()) {
+        // The test thread has a role, and the thread it starts has none: a
+        // role is the thread's own, never inherited.
+        const scope = thread_role.fixture(.ui);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        const thread = try std.Thread.spawn(.{}, Sites.noRoleThreadSite, .{&m});
+        thread.join();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN4 tryLock of the renderer-state mutex from a thread with no " ++
+        "role; a test enters the role it simulates first");
+}
+
+test "isolated: a fixture that simulates the wrong role fails its compare with one PAIR-OUTSIDE-TABLE (acceptance test 4)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        // This test block's row lists ui; its fixture enters .termio.
+        const scope = thread_role.fixture(.termio);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.lock();
+        m.unlock();
+        return;
+    }
+    // A test block's own pair is keyed `test.<name>`, as std.debug names it.
+    try expectOffTable(@src(), .{ .function = "src/sync/isolated.zig:" ++ @src().fn_name, .role = "termio" });
+}
+
+test "isolated: a blocking re-entry by lock panics with PN1 (acceptance test 6)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        const scope = thread_role.fixture(.ui);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.lock();
+        m.lock();
+        m.unlock();
+        return;
+    }
+    // PN1 is checked before the inner lock, so its text wins over Zig's own
+    // "Deadlock detected".
+    try expectPanic(@src(), "thread-role layer: PN1 a blocking re-entry: lock of the renderer-state mutex by " ++
+        "the thread that holds it (role ui)");
+}
+
+test "isolated: a blocking re-entry by lockUncancelable panics with PN1 (acceptance test 6)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        const scope = thread_role.fixture(.ui);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.lock();
+        m.lockUncancelable();
+        m.unlock();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN1 a blocking re-entry: lockUncancelable of the renderer-state " ++
+        "mutex by the thread that holds it (role ui)");
+}
+
+test "isolated: a blocking re-entry by the demand acquire panics with PN1 (acceptance test 6)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        // The renderer's own way in: PN3 allows it, and a re-entry still panics.
+        const scope = thread_role.fixture(.renderer);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.demand();
+        m.demand();
+        m.unlock();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN1 a blocking re-entry: the demand acquire of the " ++
+        "renderer-state mutex by the thread that holds it (role renderer)");
+}
+
+/// One function key a site-shape child's symbolised dump must hold: `lines`
+/// lines naming `name`; for an instantiation of a comptime-parameter
+/// function, each with its own instantiation suffix (`__anon_N` on 0.15.2,
+/// `__func_N` on 0.17.1), which the compare strips.
+pub const ShapeLine = struct {
+    name: []const u8,
+    lines: usize = 1,
+    instantiated: bool = false,
+};
+
+/// Whether the dumps hold exactly the `want` lines, each keyed
+/// `<file_prefix><name>` with `role`, and no other line (acceptance test 10).
+pub fn holdsShapes(result: *const Compared, file_prefix: []const u8, want: []const ShapeLine, role: []const u8) bool {
+    var total: usize = 0;
+    for (want) |w| total += w.lines;
+    var lines: usize = 0;
+    for (result.dumps) |d| {
+        var it = std.mem.splitScalar(u8, d.text, '\n');
+        _ = it.next();
+        while (it.next()) |line| lines += @intFromBool(line.len > 0);
+    }
+    if (lines != total) return false;
+    for (want) |w| {
+        var found: usize = 0;
+        var first_suffix: ?[]const u8 = null;
+        for (result.dumps) |d| {
+            var it = std.mem.splitScalar(u8, d.text, '\n');
+            _ = it.next();
+            while (it.next()) |line| {
+                const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+                if (!std.mem.eql(u8, line[space + 1 ..], role)) continue;
+                const key = line[0..space];
+                if (!std.mem.startsWith(u8, key, file_prefix)) continue;
+                const symbol = key[file_prefix.len..];
+                if (!std.mem.startsWith(u8, symbol, w.name)) continue;
+                const suffix = symbol[w.name.len..];
+                if (!w.instantiated) {
+                    found += @intFromBool(suffix.len == 0);
+                    continue;
+                }
+                if (!instantiationSuffix(suffix)) continue;
+                // Each instantiation is its own symbol.
+                if (first_suffix) |s| {
+                    if (std.mem.eql(u8, s, suffix)) return false;
+                } else first_suffix = suffix;
+                found += 1;
+            }
+        }
+        if (found != w.lines) return false;
+    }
+    return true;
+}
+
+/// `__anon_<digits>` or `__func_<digits>`.
+fn instantiationSuffix(suffix: []const u8) bool {
+    const digits = if (std.mem.startsWith(u8, suffix, "__anon_"))
+        suffix["__anon_".len..]
+    else if (std.mem.startsWith(u8, suffix, "__func_"))
+        suffix["__func_".len..]
+    else
+        return false;
+    if (digits.len == 0) return false;
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+/// A site-shape child (acceptance test 10): it exits successfully, and the
+/// compare of its own directory passes with exactly `want`, every pair with
+/// `role`. The caller skips where this build checks no names
+/// (`symbolise.names_checked`).
+pub fn expectShapes(src: std.builtin.SourceLocation, file_prefix: []const u8, want: []const ShapeLine, role: []const u8) !void {
+    var child = try run(src, .own);
+    defer child.deinit();
+    try expectExited(&child, src);
+    var result = try compareChild(&child);
+    defer result.deinit();
+    if (!result.report.passed() or !holdsShapes(&result, file_prefix, want, role)) {
+        result.explain(&child, "expected the compare to pass with each shape's acquiring function");
+        return error.IsolatedChildCompare;
+    }
+}
+
+test "an instantiation suffix is __anon_ or __func_ and digits" {
+    try testing.expect(instantiationSuffix("__anon_30924"));
+    try testing.expect(instantiationSuffix("__func_721"));
+    try testing.expect(!instantiationSuffix(""));
+    try testing.expect(!instantiationSuffix("__anon_"));
+    try testing.expect(!instantiationSuffix("__anon_12x"));
+    try testing.expect(!instantiationSuffix("_anon_12"));
+}
+
+test "isolated: the compare names the acquiring function of every site shape (acceptance test 10)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    // RQ16: a 0.15.2 ReleaseSafe build attributes noinline functions only,
+    // and an aarch64 build checks no names until the probe has run there;
+    // this test checks nothing but names, so it is skipped there. The demand
+    // forwarder's shape is acceptance test 2's (src/renderer/State.zig), a
+    // site in a function that was an inline fn is the Debug suite's required
+    // pair (surfaceMessageWriter, reader), and Surface.confirmQuitAnswer's
+    // two instantiations are checked in src/Surface.zig.
+    if (!symbolise.names_checked) return error.SkipZigTest;
+    // Each shape's site is its function's only acquisition, so its pair can
+    // name nothing else; each body differs from the others' (its own store).
+    const Shapes = struct {
+        var counter: u64 = 0;
+
+        fn shapePlainSite(m: *StateMutex) void {
+            m.lock();
+            defer m.unlock();
+            counter +%= 1;
+        }
+
+        /// An always_inline target made non-inline in Debug (RQ11's fix, as
+        /// Exec.zig calls processOutput): the site is attributed to it.
+        fn shapeAutoTarget(m: *StateMutex) void {
+            m.lock();
+            defer m.unlock();
+            counter +%= 2;
+        }
+
+        fn shapeAutoCaller(m: *StateMutex) void {
+            @call(if (builtin.mode == .Debug) .auto else .always_inline, shapeAutoTarget, .{m});
+        }
+
+        /// The caller holds the mutex, and the relock is this function's
+        /// last act, as `send` relocks in mailbox.zig.
+        fn shapeDeferRelockSite(m: *StateMutex) void {
+            m.unlock();
+            defer m.lock();
+            counter +%= 3;
+        }
+
+        fn shapeDeferRelockCaller(m: *StateMutex) void {
+            m.lock();
+            defer m.unlock();
+            shapeDeferRelockSite(m);
+            m.assertHeld();
+        }
+
+        fn shapeTryLockSite(m: *StateMutex) void {
+            if (!m.tryLock()) return;
+            defer m.unlock();
+            counter +%= 4;
+        }
+
+        fn shapeLockUncancelableSite(m: *StateMutex) void {
+            m.lockUncancelable();
+            defer m.unlock();
+            counter +%= 5;
+        }
+
+        /// Surface.confirmQuitAnswer's shape: each instantiation is its own
+        /// symbol, with a suffix the compare strips.
+        fn shapeComptimeSite(m: *StateMutex, comptime wait: bool) void {
+            if (wait) m.lock() else if (!m.tryLock()) return;
+            defer m.unlock();
+            counter +%= if (wait) 6 else 7;
+        }
+
+        const Holder = struct {
+            value: u64 = 0,
+
+            fn shapeMethodSite(self: *Holder, m: *StateMutex) void {
+                m.lock();
+                defer m.unlock();
+                self.value +%= 8;
+            }
+
+            const Inner = struct {
+                fn shapeNestedSite(m: *StateMutex) void {
+                    m.lock();
+                    defer m.unlock();
+                    counter +%= 9;
+                }
+            };
+        };
+
+        fn Box(comptime T: type) type {
+            return struct {
+                value: T = 0,
+
+                fn shapeGenericSite(self: *@This(), m: *StateMutex) void {
+                    m.lock();
+                    defer m.unlock();
+                    self.value +%= 10;
+                }
+            };
+        }
+    };
+    if (inChild()) {
+        const scope = thread_role.fixture(.ui);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        Shapes.shapePlainSite(&m);
+        Shapes.shapeAutoCaller(&m);
+        Shapes.shapeDeferRelockCaller(&m);
+        Shapes.shapeTryLockSite(&m);
+        Shapes.shapeLockUncancelableSite(&m);
+        Shapes.shapeComptimeSite(&m, true);
+        Shapes.shapeComptimeSite(&m, false);
+        var holder: Shapes.Holder = .{};
+        holder.shapeMethodSite(&m);
+        Shapes.Holder.Inner.shapeNestedSite(&m);
+        var small: Shapes.Box(u8) = .{};
+        small.shapeGenericSite(&m);
+        var wide: Shapes.Box(u64) = .{};
+        wide.shapeGenericSite(&m);
+        return;
+    }
+    // A struct method, a nested container's function and both instantiations
+    // of a generic method are each named bare: the generic method's two are
+    // two pairs of one key.
+    try expectShapes(@src(), "src/sync/isolated.zig:", &.{
+        .{ .name = "shapePlainSite" },
+        .{ .name = "shapeAutoTarget" },
+        .{ .name = "shapeDeferRelockCaller" },
+        .{ .name = "shapeDeferRelockSite" },
+        .{ .name = "shapeTryLockSite" },
+        .{ .name = "shapeLockUncancelableSite" },
+        .{ .name = "shapeComptimeSite", .lines = 2, .instantiated = true },
+        .{ .name = "shapeMethodSite" },
+        .{ .name = "shapeNestedSite" },
+        .{ .name = "shapeGenericSite", .lines = 2 },
+    }, "ui");
 }

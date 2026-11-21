@@ -301,3 +301,43 @@ test "the off form is the plain mutex with the same API" {
 test "this build's StateMutex is the form thread_role.layer names" {
     try testing.expectEqual(StateMutexOf(thread_role.layer), StateMutex);
 }
+
+test "a holder's tryLock keeps the mutex, and its own unlock lets a waiting thread's lock in (acceptance test 11)" {
+    // This build's StateMutex, whose pairs reach the process recorder as the
+    // app's do, with a thread that blocks in lock while the holder tries.
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const Waiter = struct {
+        m: *StateMutex,
+        owner_seen: std.Thread.Id = 0,
+
+        /// Another thread's blocking lock, which gets the mutex only once the
+        /// holder's own unlock releases it.
+        fn lockAfterHolderRelease(self: *@This()) void {
+            const scope = thread_role.enter(.termio);
+            defer scope.exit();
+            self.m.lock();
+            defer self.m.unlock();
+            self.m.assertHeld();
+            self.owner_seen = self.m.owner.load(.monotonic);
+        }
+    };
+
+    const scope = thread_role.fixture(.ui);
+    defer scope.exit();
+    const me = std.Thread.getCurrentId();
+
+    var m: StateMutex = .{};
+    m.lock();
+    var waiter: Waiter = .{ .m = &m };
+    const thread = try std.Thread.spawn(.{}, Waiter.lockAfterHolderRelease, .{&waiter});
+    // The holder's tryLock is no PN1: it returns false and the holder keeps
+    // the mutex, whether the other thread has reached its lock yet or not.
+    try testing.expect(!m.tryLock());
+    try testing.expectEqual(me, m.owner.load(.monotonic));
+    m.assertHeld();
+    m.unlock();
+    thread.join();
+    try testing.expect(waiter.owner_seen != 0);
+    try testing.expect(waiter.owner_seen != me);
+    try testing.expectEqual(StateMutex.no_owner, m.owner.load(.monotonic));
+}

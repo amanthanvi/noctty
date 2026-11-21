@@ -7367,6 +7367,17 @@ pub const Host = struct {
         }.body);
     }
 
+    test "thread_role: a window made on runOnPrivateDesktop's thread finds .ui in its window procedure (acceptance test 5)" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(@import("test_support.zig").RoleProbeWindow.expectUi);
+    }
+
+    test "thread_role: a window made on runOnHiddenDesktop's thread finds .ui in its window procedure (acceptance test 5)" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        // test_support.zig's runner, through the one Fixtures instance.
+        try win32.runOnHiddenDesktop(@import("test_support.zig").RoleProbeWindow.expectUi);
+    }
+
     test "an info banner counts down only while it is unread; errors stay" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         try runOnPrivateDesktop(bannerCountdownTestBody);
