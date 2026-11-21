@@ -1659,17 +1659,25 @@ extension, a lookup resolves only when its `.ps1` is the one sibling with
 `.ps1` or a PATHEXT extension (matched case-insensitively), whatever
 `-CommandType` would pick; a native or batch sibling, or none, leaves it
 unresolved, and so does any extensionless path in cmd's command line, since
-cmd never runs a `.ps1`. A relative one is unresolved. cmd's `/C`, `/K` or
-`/R` command line is read as cmd reads it: segments at `&`, `&&`, `|` and
-`||`, tokens at whitespace outside quotes, and the first token of each segment
-(or the one after `call`) as its command; a command line cmd's reading leaves
-uncertain (unbalanced quotes, a parenthesized block, a `%var%`, `!var!` or `^`
-in the command) is unresolved. In every context a path is classified as a path
-before its leaf is read, so `<dir>\pwsh` or `<dir>\cmd` is never taken for a
-shell; only a bare name, or a path whose extension names an executable, is
-one. A batch file may forward its arguments (`%*`),
-so a PowerShell launch among them is read as a direct launch is, and another
-argument that may be a script leaves the call unresolved.
+cmd never runs a `.ps1`. A relative one is unresolved. cmd is not parsed as a
+language: a `/C`, `/K` or `/R` command line, direct, through `&`,
+`Start-Process` or a batch file, resolves only in an allowlisted shape, and is
+unresolved in every other. It must hold switches only before `/C`, no
+`& | < > ^ % ! ( )`, and at most one quoted token (never with `/S`). Its
+command must be one of:
+
+- a rooted path with a PATHEXT extension, which is that file;
+- `echo` or `exit`, which run no file;
+- a bare `cmd`, `pwsh` or `powershell` (with or without `.exe`), read by its
+  own reader.
+
+`call`, `start`, a redirect, a relative or extensionless path (`<dir>\pwsh`
+included) and any other name are unresolved. A batch file may forward its
+arguments (`%*`): they add nothing only as plain literal words, and a leading
+bare or rooted shell launch is read by that shell's reader; any other argument
+leaves the call unresolved. `Start-Process` with a cmd or batch `-FilePath`
+refuses an argument-list element with whitespace or quotes, since it joins the
+elements with spaces.
 Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
 runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
