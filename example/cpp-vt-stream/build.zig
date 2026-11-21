@@ -21,7 +21,9 @@ pub fn build(b: *std.Build) void {
         .files = &.{"main.cpp"},
         .flags = cpp_flags,
     });
-    exe_mod.link_libcpp = true;
+    // MSVC builds compile C++ against MSVC's own STL (the fork's rule in
+    // pkg/*/build.zig): Zig's bundled libc++ headers conflict with it.
+    if (target.result.abi != .msvc) exe_mod.link_libcpp = true;
 
     // You'll want to use a lazy dependency here so that ghostty is only
     // downloaded if you actually need it.
