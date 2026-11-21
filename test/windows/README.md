@@ -1585,9 +1585,16 @@ Two modes:
   which its file wait, polled, can take up to 10 s more; the display-power
   reading, at once in practice and at most 2 s; and the bounded foreground
   and keyboard-probe workers, milliseconds in practice and at most 5 s each,
-  which read the tick right before each action. So input the hooks cannot
-  see reaches the copy for at most about 5 s, and only if the copy stops
-  answering a trace request; normally within 100 ms. Input the gate finds
+  which read the tick right before each action. These are per step, and two
+  can run back to back: the keyboard-probe worker (up to 2 s after its
+  input) and then a trace request's message call (5 s) make about 7 s. So
+  input the hooks cannot see reaches the copy for at most about 7 s, and only
+  if the copy stops answering; normally within 100 ms. Before the foreground
+  step two more calls do not poll: the WMI read of the copy's command line
+  right after its launch (`Get-CimInstance`, with no bound of its own) and
+  the foreground's `WM_NULL` check before its worker (up to 5 s). Under the
+  foreground lock the copy is not in front then, so they matter only on the
+  startup-activation path below. Input the gate finds
   after the window, or right before the quit, ends the copy at once. After
   each run the outer half reads the tick against the last tick the harness's
   own marked input left (the probe's, else the unlock's, else the series'):
@@ -1610,9 +1617,11 @@ Two modes:
   call and with no grace: immediately on observation, plus OS scheduling
   latency. That holds even while the driver is busy in a step that does not
   poll (the copy's launch, a 2 s load reading). Each run records the delay
-  from that observation until the job has no process left and its handle is
-  closed (`StopOwnedJob`'s return; `LatchToKillMs` in `guards.json` and
-  `latch_to_kill_ms` in `pacing.json`, from QueryPerformanceCounter).
+  from that observation until job accounting shows no active process and
+  `StopOwnedJob` has closed the job's handle (its return; `LatchToKillMs` in
+  `guards.json` and `latch_to_kill_ms` in `pacing.json`, from
+  QueryPerformanceCounter). The driver's own process handle can signal a
+  millisecond or so later; its threads have already ended.
   This bound and the per-poll gate apply to input the hooks see; input they
   cannot see is bounded by the driver's tick checks (above). Real input the
   hooks see at any point in a series makes the series inconclusive and
@@ -1731,7 +1740,12 @@ with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
 still at the series' baseline (`TickMovedFromBaseline` false), whose every
 run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. The series ends
+higher), and the console says no measurement was published. A series that
+input voided writes no timing statistic at all: each group's `p95_ms` and
+`median_ms` and each run's `p95_ms` in `pacing.json` are null too, and its
+`Inconclusive` names what voided it (the hooks' count, a tick that moved or
+could not be read, or a watch that did not stop). Each run's own `run.json`
+keeps its evidence for debugging. The series ends
 in this order: every run has ended and its job, with its copy, is closed;
 the watch stops, which unhooks; the final real-input count and the tick are
 read; then the summary. Input after the unhook reaches no copy. A visible

@@ -43,8 +43,9 @@ Two modes.
           without notice. Keystrokes into an elevated window and input a software KVM injects escape the flag; the
           tick, the second line, still sees them, except within milliseconds of the unlock and the keyboard probe,
           and the copy then ends at the driver's next tick check: every driver wait polls at 100 ms, and what does
-          not poll is bounded (a trace request's message call up to 5 s if the copy stops answering, the display
-          reading up to 2 s, the bounded foreground and probe workers up to 5 s). A tick that moved by a run's end,
+          not poll is bounded per step (a trace request's message call up to 5 s if the copy stops answering, the
+          display reading up to 2 s, the bounded foreground and probe workers up to 5 s; about 7 s for two back to
+          back). A series voided by input writes no timing statistic at all. A tick that moved by a run's end,
           or by the series' end, voids it like hook-seen input; the series reads its final input after the watch
           stops. The input gate (Test-FramePacingInputGate) reads
           that event first and the session's last-input tick second, right before each launch on Default (the
@@ -2121,17 +2122,17 @@ function Invoke-FramePacingOuter {
 # $Port gives StopWatch() (true once the hooks are out), RealInputs(), InjectedInputs() and LastInputTick(). Returns
 # the summary's exit code.
 function Complete-FramePacingSeries($Port, [string] $Root, $Build, [object[]] $Results, [long] $Baseline) {
-    if (-not $Visible) { return Write-FramePacingSummary $Root $Build $Results $null $null $false }
+    if (-not $Visible) { return Write-FramePacingSummary $Root $Build $Results $null $null $false $false }
     $stopped = [bool]$Port.StopWatch()
     $final = Get-FramePacingFinalInput $stopped ([long]$Port.RealInputs()) ([long]$Port.LastInputTick()) $Baseline
-    return Write-FramePacingSummary $Root $Build $Results $final.RealInputs $(if ($stopped) { [long]$Port.InjectedInputs() } else { $null }) $final.TickMoved
+    return Write-FramePacingSummary $Root $Build $Results $final.RealInputs $(if ($stopped) { [long]$Port.InjectedInputs() } else { $null }) $final.TickMoved $final.TickUnread
 }
 
 # The series' final input reading: the hooks' real-input count, null when the watch did not stop (its count could
-# still move), and whether the session's tick left the baseline, an unreadable tick counting as moved. Pure, so the
-# contract tables it.
+# still move), whether the session's tick left the baseline, an unreadable tick counting as moved, and whether it
+# could not be read at all (TickUnread, for the summary's wording). Pure, so the contract tables it.
 function Get-FramePacingFinalInput([bool] $Stopped, [long] $RealInputs, [long] $Tick, [long] $Baseline) {
-    return [pscustomobject]@{ RealInputs = $(if ($Stopped) { $RealInputs } else { $null }); TickMoved = $null -ne (Get-FramePacingTickStop $Tick $Baseline) }
+    return [pscustomobject]@{ RealInputs = $(if ($Stopped) { $RealInputs } else { $null }); TickMoved = $null -ne (Get-FramePacingTickStop $Tick $Baseline); TickUnread = $Tick -lt 0 }
 }
 
 # The outer half's series port: the watch's stop and counts, and the session's tick.
@@ -2442,12 +2443,15 @@ function Get-FramePacingSeries([object[]] $Records) {
 # frame_time_p95_ms and its median are published only for a visible series whose every run completed and whose runs
 # are comparable; otherwise they are null in the JSON and the console says no measurement was published (Sol and
 # CodeRabbit on #741). A dry run gives dry_run_p95_ms, not a measurement. Returns Get-FramePacingExitCode's code.
-function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $RealInputs, $InjectedInputs, [bool] $TickMoved) {
+function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $RealInputs, $InjectedInputs, [bool] $TickMoved, [bool] $TickUnread) {
     $completed = @($Results | Where-Object { [string]::Equals($_.Status, 'complete', [StringComparison]::Ordinal) })
     $series = Get-FramePacingSeries @($completed | ForEach-Object { $_.Record })
     # Real input at any point in a visible series (the lead on #741, round 5) makes it inconclusive and publishes
     # nothing, whatever each run's status says; a count that was not read counts as input.
     $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved)
+    # Nor does it write any other timing statistic (Sol on #741, round 7): each group's p95 and median, and each run's
+    # p95, are null too. The runs' own run.json keep their evidence.
+    if ($inputSeen) { foreach ($group in @($series.Groups)) { $group.p95_ms = $null; $group.median_ms = $null } }
     $publish = $Visible -and -not $inputSeen -and $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0 -and @($series.MixedEnvironment).Count -eq 0 -and @($series.MixedBuild).Count -eq 0
     $summary = [ordered]@{
         Schema = 1; Mode = $(if ($Visible) { 'visible' } else { 'dry-run' }); Measurement = [bool]$Visible
@@ -2459,12 +2463,20 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
         frame_time_p95_ms = $(if ($publish) { $series.P95 } else { $null })
         frame_time_median_ms = $(if ($publish) { $series.Median } else { $null })
         dry_run_p95_ms = $(if (-not $Visible -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
-        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }); latch_to_kill_ms = $(if ($_.PSObject.Properties['LatchToKillMs']) { $_.LatchToKillMs } else { $null }) } })
+        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record -and -not $inputSeen) { $_.Record.P95Ms } else { $null }); latch_to_kill_ms = $(if ($_.PSObject.Properties['LatchToKillMs']) { $_.LatchToKillMs } else { $null }) } })
     }
     if (@($series.MixedBuild).Count -gt 0) { $summary.Error = "the completed runs differ in $(@($series.MixedBuild) -join ', ')" }
     $inconclusive = @()
     if (@($series.MixedEnvironment).Count -gt 0) { $inconclusive += "the completed runs differ in $(@($series.MixedEnvironment) -join ', ') ($(@($series.Modes) -join ', ')); each comparability group is reported in Groups and none is pooled" }
-    if ($inputSeen) { $inconclusive += "real (non-injected) keyboard or mouse input came during the series ($(if ($null -eq $RealInputs) { 'an unread count' } else { "$RealInputs events" })$(if ($TickMoved) { ', and the session''s input tick left the baseline' }) ), so no measurement is published" }
+    if ($inputSeen) {
+        # What voided it, by observation (Sol on #741, round 7).
+        $voids = @()
+        if ($null -eq $RealInputs) { $voids += 'the input watch did not stop, so its count could not be read' }
+        elseif ([long]$RealInputs -ne 0) { $voids += "the hooks counted $RealInputs real (non-injected) keyboard or mouse input events" }
+        if ($TickUnread) { $voids += 'the session''s last-input tick could not be read' }
+        elseif ($TickMoved) { $voids += 'the session''s last-input tick left the series'' baseline (input the hooks did not count as real)' }
+        $inconclusive += "input voided the series: $($voids -join '; '); no measurement and no timing statistic is published"
+    }
     if ($inconclusive.Count -gt 0) { $summary.Inconclusive = $inconclusive -join '; ' }
     $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     $last = $Results[$Results.Count - 1]
