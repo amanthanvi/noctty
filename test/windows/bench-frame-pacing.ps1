@@ -105,7 +105,9 @@ else 1 a failed run or a build or workload difference, else 2 an inconclusive ru
 0 (Get-FramePacingExitCode).
 
 Records in <RunRoot>: pacing.json (the summary: the mode, each run's status and statistics, each comparability group's,
-the pooled p95 over the completed runs, and the real and injected input events a visible series' hooks saw), and per
+the pooled p95 over the completed runs, and the real and injected input events a visible series' hooks saw; for a
+series that input or a changed harness voided, only the allowlisted verdict, with the full summary in diagnostics.json
+beside it), and per
 run in run-<n>: run.json (the parameters, the copy's build mode, the SHA-256 of its app, CLI,
 config and receipt, the ConPTY pair beside the build's, the transport and renderer its log names, the grid, the
 window's client size, DPI and monitor mode before and after, the busy share before the launch, before the window and
@@ -1529,9 +1531,10 @@ function Get-FramePacingRecordProblems($Record) {
         if ($Record.VisibleRefusal) { $problems.Add("inconclusive: the visible run was refused: $($Record.VisibleRefusal)") }
         if (-not [string]::Equals([string]$Record.Foreground, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the foreground was $($Record.Foreground)") }
         # The keyboard hook's proof of life (Opus on #741, round 5): a visible run is never complete without it.
-        # A driver that refused the run because a hook missed its probe has failed it with that reason (Opus and Sol on
-        # #741, rounds 8 and 9): the probe was sent, so no line calls it "not sent" or the run inconclusive.
-        if (-not [string]::Equals([string]$Record.KeyProbe, 'ok', [StringComparison]::Ordinal) -and -not (Test-FramePacingHookMissed ([string]$Record.Error))) { $problems.Add("inconclusive: the keyboard probe was $(if ($null -eq $Record.KeyProbe) { 'not sent' } else { $Record.KeyProbe })") }
+        # A driver that refused the run because the keyboard hook missed its probe has failed it with that reason (Opus
+        # and Sol on #741, rounds 8 and 9): the probe was sent, so no line calls it "not sent" or the run inconclusive.
+        # After a mouse-hook miss the probe really was not sent, and the line stays (Opus on #741, round 10).
+        if (-not [string]::Equals([string]$Record.KeyProbe, 'ok', [StringComparison]::Ordinal) -and -not [string]::Equals([string]$Record.Error, $script:KeyHookMissed, [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the keyboard probe was $(if ($null -eq $Record.KeyProbe) { 'not sent' } else { $Record.KeyProbe })") }
         if ($Record.Cloaked -ne 0) { $problems.Add("inconclusive: DWM cloaked the window ($($Record.Cloaked))") }
         if (-not $Record.ForegroundHeld) { $problems.Add('inconclusive: the window lost the foreground during the workload') }
         if (-not $Record.FocusHeld) { $problems.Add('inconclusive: the pane''s focus changed during the workload') }
@@ -1567,7 +1570,7 @@ function Invoke-FramePacingDriver {
     function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
     $mode = if ($Visible) { 'visible' } else { 'dry-run' }
     $record = [ordered]@{
-        Schema = 1; Mode = $mode; ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
+        Schema = 1; Mode = $mode; HarnessSha256 = $(if ($PSCommandPath) { Get-Sha256 $PSCommandPath } else { $null }); ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
         Cols = $script:Cols; Rows = $script:Rows; GridCols = $null; GridRows = $null; FontFamily = $script:FontFamily; FontSize = $script:FontSize
         Class = $null; ExeSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; ConfigSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
         PayloadBytes = $script:PayloadBytes; PayloadSeed = $script:PayloadSeed; PayloadSha256 = $null; MarkerLength = $null; WorkloadSha256 = $null
@@ -2074,6 +2077,9 @@ function Invoke-FramePacingOuter {
     $inputMarker = [long]0
     $admissionIdleMs = [long]-1
     $seriesClock = [Diagnostics.Stopwatch]::StartNew()
+    # The harness's bytes at series start (Sol on #741, round 10): each driver records the hash it ran under, and a
+    # driver that ran other bytes voids the series as harness-changed.
+    $harnessSha256 = Get-Sha256 $PSCommandPath
     if ($Visible) {
         $facts = Get-FramePacingSessionFacts -1 -1 $null
         $lockNeeded = Get-FramePacingLockNeedMs $facts.IdleMs $facts.MinIdleMs $Runs
@@ -2140,7 +2146,7 @@ function Invoke-FramePacingOuter {
             Write-Host "frame pacing run $i of $($Runs): $($result.Status)"
             if (-not [string]::Equals($result.Status, 'complete', [StringComparison]::Ordinal)) { break }
         }
-        return Complete-FramePacingSeries (New-FramePacingSeriesPort) $root $build @($results.ToArray()) $quietSince
+        return Complete-FramePacingSeries (New-FramePacingSeriesPort) $root $build @($results.ToArray()) $quietSince $harnessSha256
     } finally {
         # Stopped whenever this series may have started one, even when the start was refused (Sol and CodeRabbit on
         # #741: a watch given up on during startup is joined here); a thread that will not end is said, and this
@@ -2158,11 +2164,11 @@ function Invoke-FramePacingOuter {
 # could still count never lands after the verdict's reading; then the summary. Input after the unhook reaches no copy.
 # $Port gives StopWatch() (true once the hooks are out), RealInputs(), InjectedInputs() and LastInputTick(). Returns
 # the summary's exit code.
-function Complete-FramePacingSeries($Port, [string] $Root, $Build, [object[]] $Results, [long] $Baseline) {
-    if (-not $Visible) { return Write-FramePacingSummary $Root $Build $Results $null $null $false $false }
+function Complete-FramePacingSeries($Port, [string] $Root, $Build, [object[]] $Results, [long] $Baseline, [string] $HarnessSha256) {
+    if (-not $Visible) { return Write-FramePacingSummary $Root $Build $Results $null $null $false $false $HarnessSha256 }
     $stopped = [bool]$Port.StopWatch()
     $final = Get-FramePacingFinalInput $stopped ([long]$Port.RealInputs()) ([long]$Port.LastInputTick([ordered]@{ Series = $Baseline; Unlock = $null; Broken = $false })) $Baseline
-    return Write-FramePacingSummary $Root $Build $Results $final.RealInputs $(if ($stopped) { [long]$Port.InjectedInputs() } else { $null }) $final.TickMoved $final.TickUnread
+    return Write-FramePacingSummary $Root $Build $Results $final.RealInputs $(if ($stopped) { [long]$Port.InjectedInputs() } else { $null }) $final.TickMoved $final.TickUnread $HarnessSha256
 }
 
 # The series' final input reading: the hooks' real-input count, null when the watch did not stop (its count could
@@ -2298,10 +2304,11 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit; LatchToKillMs = $latchToKillMs
     }
     # A clipboard sequence of 0 before and after is no observation (Opus on #741, round 9): GetClipboardSequenceNumber
-    # returns 0 when the station's clipboard cannot be read, so the record says unobservable, never held.
-    $guards.ClipboardObservable = -not ([uint64]$guards.ClipboardSequenceBefore -eq 0 -and [uint64]$guards.ClipboardSequenceAfter -eq 0)
+    # returns 0 when the station's clipboard cannot be read, so the record says unobservable, never held, through the
+    # shared guard's helper (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+    $guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
-    Write-Host $(if ($guards.ClipboardObservable) { "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)" } else { 'clipboard unobservable (sequence 0 before and after: the clipboard could not be read)' })
+    Write-Host (Format-InteractiveWin11ClipboardReading $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter)
     $guardFailures = @()
     if ($stateFailure) { $guardFailures += $stateFailure }
     if (-not $guards.SessionUnchanged) { $guardFailures += 'the real session-state.json changed' }
@@ -2401,9 +2408,10 @@ function Read-FramePacingRunRecord([string] $Path) {
 function Get-FramePacingHookSilence($Record, [long] $MouseBefore, [long] $MouseAfter, [long] $KeyBefore, [long] $KeyAfter, [long] $RealInputs) {
     if ($null -eq $Record) { return $null }
     $field = { param([string] $Name) $property = $Record.PSObject.Properties[$Name]; if ($null -ne $property) { [string]$property.Value } else { '' } }
-    # A driver that refused the run because a hook missed its marked input has already failed it with that reason
-    # (Opus on #741, round 8): no second line calls the run inconclusive or the sent probe "not sent".
-    if (Test-FramePacingHookMissed (& $field 'Error')) { return $null }
+    # A driver that refused the run because the keyboard hook missed its probe has already failed it with that reason
+    # (Opus on #741, rounds 8 and 10): no second line calls the run inconclusive or the sent probe "not sent". After a
+    # mouse-hook miss the foreground was never taken, so no probe was owed.
+    if ([string]::Equals((& $field 'Error'), $script:KeyHookMissed, [StringComparison]::Ordinal)) { return $null }
     $foregroundTaken = [string]::Equals((& $field 'Foreground'), 'ok', [StringComparison]::Ordinal)
     $probed = [string]::Equals((& $field 'KeyProbe'), 'ok', [StringComparison]::Ordinal)
     if ($foregroundTaken -and $MouseAfter -le $MouseBefore) { return [pscustomobject]@{ Removed = $true; Line = "the input watch's mouse hook did not count the run's own marked unlock (count $MouseBefore, then $MouseAfter), so it may have been removed; the series stops" } }
@@ -2504,7 +2512,7 @@ function Get-FramePacingSeries([object[]] $Records) {
 # frame_time_p95_ms and its median are published only for a visible series whose every run completed and whose runs
 # are comparable; otherwise they are null in the JSON and the console says no measurement was published (Sol and
 # CodeRabbit on #741). A dry run gives dry_run_p95_ms, not a measurement. Returns Get-FramePacingExitCode's code.
-function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $RealInputs, $InjectedInputs, [bool] $TickMoved, [bool] $TickUnread) {
+function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $RealInputs, $InjectedInputs, [bool] $TickMoved, [bool] $TickUnread, [string] $HarnessSha256) {
     $completed = @($Results | Where-Object { [string]::Equals($_.Status, 'complete', [StringComparison]::Ordinal) })
     $series = Get-FramePacingSeries @($completed | ForEach-Object { $_.Record })
     # Real input at any point in a visible series (the lead on #741, round 5) makes it inconclusive and publishes
@@ -2513,22 +2521,26 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     # final reads say.
     $inputRuns = @($Results | Where-Object { $null -ne $_.PSObject.Properties['InputSeen'] -and [bool]$_.InputSeen } | ForEach-Object { Split-Path -Leaf $_.Run })
     $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved -or $inputRuns.Count -gt 0)
+    # A driver that ran other bytes than the series started with voids it too, in either mode (Sol on #741, round 10).
+    $harnessChanged = -not [string]::IsNullOrEmpty($HarnessSha256) -and (Test-FramePacingHarnessChanged $Results $HarnessSha256)
+    $voided = $inputSeen -or $harnessChanged
     # Nor does its pacing.json carry any other timing statistic or duration (Sol on #741, rounds 7 to 9): a voided
     # series writes pacing.json from the allowlist below, and the full summary, statistics included, to diagnostics.json.
-    $publish = $Visible -and -not $inputSeen -and $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0 -and @($series.MixedEnvironment).Count -eq 0 -and @($series.MixedBuild).Count -eq 0
+    $publish = $Visible -and -not $voided -and $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0 -and @($series.MixedEnvironment).Count -eq 0 -and @($series.MixedBuild).Count -eq 0
     $summary = [ordered]@{
         Schema = 1; Mode = $(if ($Visible) { 'visible' } else { 'dry-run' }); Measurement = [bool]$Visible
         RunsRequested = $Runs; RunsCompleted = $completed.Count; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
         WorkloadSha256 = $(if (@($series.Workloads).Count -eq 1) { @($series.Workloads)[0] } else { $null })
         DisplayModes = @($series.Modes); Groups = @($series.Groups)
-        RealInputsSeen = $RealInputs; InjectedInputsSeen = $InjectedInputs; TickMovedFromBaseline = $(if ($Visible) { $TickMoved } else { $null })
+        HarnessSha256 = $HarnessSha256; RealInputsSeen = $RealInputs; InjectedInputsSeen = $InjectedInputs; TickMovedFromBaseline = $(if ($Visible) { $TickMoved } else { $null })
         PooledIntervals = $series.Pooled.Count; Aggregation = 'nearest-rank p95 over the pooled intervals of the completed runs, all alike in the nine comparability fields'
         frame_time_p95_ms = $(if ($publish) { $series.P95 } else { $null })
         frame_time_median_ms = $(if ($publish) { $series.Median } else { $null })
-        dry_run_p95_ms = $(if (-not $Visible -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
+        dry_run_p95_ms = $(if (-not $Visible -and -not $voided -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
         Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }) } })
     }
     if (@($series.MixedBuild).Count -gt 0) { $summary.Error = "the completed runs differ in $(@($series.MixedBuild) -join ', ')" }
+    if ($harnessChanged) { $summary.Error = (@($(if ($summary.Contains('Error')) { $summary.Error }), 'a run''s driver ran other harness bytes than the series started with') | Where-Object { $_ }) -join '; ' }
     $inconclusive = @()
     if (@($series.MixedEnvironment).Count -gt 0) { $inconclusive += "the completed runs differ in $(@($series.MixedEnvironment) -join ', ') ($(@($series.Modes) -join ', ')); each comparability group is reported in Groups and none is pooled" }
     if ($inputSeen) {
@@ -2547,7 +2559,7 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     }
     if ($inconclusive.Count -gt 0) { $summary.Inconclusive = $inconclusive -join '; ' }
     $exitCode = Get-FramePacingExitCode @($Results | ForEach-Object { [string]$_.Status }) $summary.Contains('Error') $summary.Contains('Inconclusive') $completed.Count $Runs
-    if ($inputSeen) {
+    if ($voided) {
         # A series input voided writes pacing.json from an allowlist, not by scrubbing (the lead and Sol on #741, round 9):
         # the schema, the verdict, the exit code, reason codes from a fixed set (no text, no numbers), the input counts,
         # the series' id and the harness's and measurement's identities. Everything else, every message, duration and
@@ -2556,9 +2568,9 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
         $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'diagnostics.json') -Encoding utf8NoBOM
         $voided = [ordered]@{
             Schema = 1; Verdict = 'voided'; ExitCode = $exitCode
-            Reasons = @(Get-FramePacingVoidReasons $Results $RealInputs $TickMoved $TickUnread $inputRuns.Count (@($series.MixedBuild).Count -gt 0) (@($series.MixedEnvironment).Count -gt 0) $completed.Count)
+            Reasons = @(Get-FramePacingVoidReasons $Results $RealInputs $TickMoved $TickUnread $inputRuns.Count (@($series.MixedBuild).Count -gt 0) (@($series.MixedEnvironment).Count -gt 0) $completed.Count $harnessChanged)
             RealInputsSeen = $RealInputs; InjectedInputsSeen = $InjectedInputs; SeriesId = (Split-Path -Leaf $Root)
-            HarnessSha256 = $(if ($PSCommandPath) { Get-Sha256 $PSCommandPath } else { $null }); MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
+            HarnessSha256 = $HarnessSha256; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
         }
         $voided | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     } else {
@@ -2569,15 +2581,15 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     if ($summary.Contains('Inconclusive')) { Write-Host "  $($summary.Inconclusive)" }
     $label = if ($Visible) { if ($null -ne $summary.frame_time_p95_ms) { "frame_time_p95_ms $($summary.frame_time_p95_ms)" } else { 'no measurement published' } }
         elseif ($null -ne $summary.dry_run_p95_ms) { "dry run: dry_run_p95_ms $($summary.dry_run_p95_ms) (not a measurement)" } else { 'dry run: no pooled intervals' }
-    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$(if ($inputSeen) { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" })"
+    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$(if ($voided) { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" })"
     return $exitCode
 }
 
 # The reason codes a voided series' pacing.json may carry (the lead and Sol on #741, round 9): a fixed set, no text and
 # no numbers.
-$script:FramePacingVoidReasons = @('hook-count', 'tick-moved', 'tick-unread', 'watch-not-stopped', 'run-saw-input', 'guard-tripped', 'run-failed', 'run-inconclusive', 'incomplete', 'mixed-build', 'mixed-environment')
+$script:FramePacingVoidReasons = @('hook-count', 'tick-moved', 'tick-unread', 'watch-not-stopped', 'run-saw-input', 'guard-tripped', 'run-failed', 'run-inconclusive', 'incomplete', 'mixed-build', 'mixed-environment', 'harness-changed')
 # A voided series' reasons, each a member of FramePacingVoidReasons. Pure, so the contract tables it.
-function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $TickMoved, [bool] $TickUnread, [int] $InputRuns, [bool] $MixedBuild, [bool] $MixedEnvironment, [int] $Completed) {
+function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $TickMoved, [bool] $TickUnread, [int] $InputRuns, [bool] $MixedBuild, [bool] $MixedEnvironment, [int] $Completed, [bool] $HarnessChanged) {
     $statuses = @($Results | ForEach-Object { [string]$_.Status })
     $reasons = [Collections.Generic.List[string]]::new()
     if ($null -eq $RealInputs) { $reasons.Add('watch-not-stopped') } elseif ([long]$RealInputs -ne 0) { $reasons.Add('hook-count') }
@@ -2589,7 +2601,20 @@ function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $Ti
     if ($Completed -ne $Runs) { $reasons.Add('incomplete') }
     if ($MixedBuild) { $reasons.Add('mixed-build') }
     if ($MixedEnvironment) { $reasons.Add('mixed-environment') }
+    if ($HarnessChanged) { $reasons.Add('harness-changed') }
     return [string[]]$reasons.ToArray()
+}
+
+# Whether any run's driver ran other harness bytes than the series started with (Sol on #741, round 10): a run with a
+# record whose HarnessSha256 is missing or differs. Runs with no record (none was launched, or its job was closed
+# before it wrote one) carry no hash to compare. Pure, so the contract tables it.
+function Test-FramePacingHarnessChanged([object[]] $Results, [string] $SeriesSha256) {
+    foreach ($result in @($Results)) {
+        if ($null -eq $result.Record) { continue }
+        $property = $result.Record.PSObject.Properties['HarnessSha256']
+        if ($null -eq $property -or -not [string]::Equals([string]$property.Value, $SeriesSha256, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
 }
 
 # The series' exit code, by precedence, highest first (Opus and CodeRabbit on #741): 3 a tripped guard; 1 a failed run

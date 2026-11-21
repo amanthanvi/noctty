@@ -44,6 +44,7 @@ try {
     Assert-InteractiveWin11StateGuard $guard
     $receipt = Get-Content -LiteralPath (Join-Path $case.Logs 'state-after.json') -Raw | ConvertFrom-Json
     Assert-Control ($receipt.ClipboardBefore -eq 17 -and $receipt.ClipboardAfter -eq 17) 'No-op receipt lacks clipboard counters.'
+    Assert-Control ($receipt.ClipboardObservable -eq $true -and $guard.ClipboardObservable -eq $true -and $guard.ClipboardAfter -eq 17) 'An observed clipboard reading is not recorded as observable.'
     Assert-Control (Test-Path -LiteralPath (Join-Path $case.Logs 'state-before.json')) 'No-op lacks before receipt.'
     $passed++
 
@@ -73,6 +74,25 @@ try {
     Assert-GuardFails $guard 'Clipboard sequence changed'
     $receipt = Get-Content -LiteralPath (Join-Path $case.Logs 'state-after.json') -Raw | ConvertFrom-Json
     Assert-Control ($receipt.ClipboardBefore -eq 70 -and $receipt.ClipboardAfter -eq 71) 'Changed clipboard counters not retained.'
+    $passed++
+
+    # A clipboard the station cannot read (the lead on #741's follow-up): 0 before and after does not fail the guard,
+    # and the guard, its receipt and its console line say unobservable, never held. The helper's table: equal nonzero
+    # samples are the only observation; 0/0 and a missing sample are none; a change from 0 is still observed. The
+    # interactive runner (interactive-win11-job.ps1, interactive-win11-validate.ps1) reports through this guard.
+    $case = New-Control 'clipboard-unobservable' { [uint32] 0 }
+    $guard = Start-Control $case
+    $unobservableOut = Assert-InteractiveWin11StateGuard $guard 6>&1 | Out-String
+    $receipt = Get-Content -LiteralPath (Join-Path $case.Logs 'state-after.json') -Raw | ConvertFrom-Json
+    Assert-Control ($receipt.ClipboardObservable -eq $false -and $guard.ClipboardObservable -eq $false -and @($receipt.Failures).Count -eq 0) 'A 0/0 clipboard reading is not recorded as unobservable, or it failed the guard.'
+    Assert-Control ($unobservableOut.Contains('clipboard unobservable') -and -not $unobservableOut.Contains('clipboard sequence before=0 after=0')) 'The guard''s console line does not say the clipboard was unobservable.'
+    foreach ($row in @(@(17, 17, $true), @(0, 0, $false), @(0, 5, $true), @(5, $null, $false), @($null, $null, $false))) {
+        Assert-Control ((Test-InteractiveWin11ClipboardObservable $row[0] $row[1]) -eq $row[2]) "The clipboard observability of $($row[0]) then $($row[1]) is wrong."
+    }
+    $guardText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\scripts\interactive-win11-state-guard.ps1') -Raw
+    $observableControl = $guardText.Replace('-and -not ([uint64]$Before -eq 0 -and [uint64]$After -eq 0)', '')
+    Assert-Control (-not [string]::Equals($observableControl, $guardText, [StringComparison]::Ordinal)) 'The clipboard-observability control changed nothing.'
+    & { . ([scriptblock]::Create($observableControl)); Assert-Control (Test-InteractiveWin11ClipboardObservable 0 0) 'The clipboard-observability control did not take 0/0 as observed.' }
     $passed++
 
     $case = New-Control 'created'

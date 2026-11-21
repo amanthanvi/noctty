@@ -899,6 +899,11 @@ jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the
 product jump list, the real `startup-attempts.json` or the clipboard sequence
 fails it, and its receipts go to `flagship/artifacts/interactive-win11/job-state`.
+A clipboard sequence of 0 before and after is no observation
+(`GetClipboardSequenceNumber` returns 0 when the station's clipboard cannot be
+read): it does not fail the guard, its receipt records `ClipboardObservable`
+false and its console line says the clipboard was unobservable, never that it
+held.
 
 When a screen-pixel wait (`Get-StatefulPixel` inside `Wait-InteractiveWin11Until`)
 times out, the harness writes `pixel-diagnostic-*.json` to its sandbox `logs`
@@ -1470,7 +1475,10 @@ entry and trap 6 of the 2026-11-18 SOAK-01 entry). The real startup ledger,
 the product jump list and the clipboard sequence number go through the shared
 state guard (`scripts/interactive-win11-state-guard.ps1`), the PowerShell
 history through `scripts/windows-harness-history.ps1`, and the real
-`session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
+`session-state.json` is compared by metadata. A clipboard sequence of 0 before
+and after is recorded as unobservable (`ClipboardObservable` false in
+`guards.json`, and the console says so), never as held, and does not fail the
+run. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
 ## bench-frame-pacing.ps1
@@ -1585,7 +1593,13 @@ Two modes:
   which its file wait, polled, can take up to 10 s more; the display-power
   reading, at once in practice and at most 2 s; and the bounded foreground
   and keyboard-probe workers, milliseconds in practice and at most 5 s each,
-  which read the tick right before each action. These are per step, and two
+  which read the tick right before each action. A worker that runs past its
+  5 s bound returns "timeout", and an input outcome it reaches after that is
+  not returned, so the run does not latch it from the worker (a residual,
+  recorded): once the unlock or the probe was sent, the moved tick still
+  voids the series at the after-run check, and before it a loss needs the
+  worker's thread starved for about 5 s and input the hooks cannot see that
+  returns the tick to the exact baseline. These are per step, and two
   can run back to back: the keyboard-probe worker (up to 2 s after its
   input) and then a trace request's message call (5 s) make about 7 s. So
   input the hooks cannot see reaches the copy for at most about 7 s, and only
@@ -1743,15 +1757,20 @@ with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
 still at the series' baseline (`TickMovedFromBaseline` false), whose every
 run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. A series that
-input voided writes `pacing.json` from an allowlist, not by scrubbing: the
+higher), and the console says no measurement was published. The harness's
+own bytes are hashed once at series start, and each driver records the hash
+it ran under: a driver that ran other bytes voids the series as
+`harness-changed` (exit 1), in either mode, and the series' start hash is the
+`HarnessSha256` it reports. A series that input or a changed harness voided
+writes `pacing.json` from an allowlist, not by scrubbing: the
 schema, `Verdict` (`voided`), `ExitCode`, `Reasons`, `RealInputsSeen`,
 `InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
 `MeasureHead` and `ExeSHA256`, and nothing else. It carries no number but
 the input counts and the exit code, and no free text: `Reasons` are codes
 from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
 `watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
-`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`).
+`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`,
+`harness-changed`).
 Everything else goes to `diagnostics.json` beside it: every message (the
 staging, lock-shortfall and tick-stop lines among them), every duration,
 each run and each group, and `Inconclusive`, which names what voided the
@@ -1784,7 +1803,10 @@ marked input fails the run, as Windows may have removed it: a count that did
 not move, or the driver's refusal when a hook did not see the unlock or the
 probe. Such a run stays failed whatever input stop follows, and the tick the
 unlock or the probe moved is kept as the harness's own even when the hook
-missed it, so it is never read as a user's input. A
+missed it, so it is never read as a user's input. After a keyboard-hook miss
+the probe was sent, so no line calls it "not sent"; after a mouse-hook miss
+the foreground was never taken and the probe really was not sent, and the
+line says so. A
 `run.json` the job's close cut short reads as no record: a run stopped for
 real input is then inconclusive, any other run failed, and the series still
 writes `pacing.json`. A staging failure is a

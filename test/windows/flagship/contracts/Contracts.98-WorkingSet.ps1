@@ -151,6 +151,11 @@ $workingSetRules = @(
         Mutation = @('ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()', 'ClipboardSequenceAfter = $stateGuard.ClipboardBefore')
     }
     @{
+        Description = 'a clipboard sequence of 0 before and after is recorded and reported as unobservable through the shared guard''s helpers, never as held, and does not fail the run (the lead on #741''s follow-up)'
+        Pattern = '(?s)\$guards\.ClipboardObservable = Test-InteractiveWin11ClipboardObservable \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\s+\$guards \| ConvertTo-Json -Depth 4 \| Set-Content -LiteralPath \(Join-Path \$Run ''guards\.json''\).*?Write-Host \(Format-InteractiveWin11ClipboardReading \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\)'
+        Mutation = @('$guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter', '$guards.ClipboardObservable = $true')
+    }
+    @{
         Description = 'a failed driver fails the run (council round 1, Opus mutation 03)'
         Pattern = '(?s)if \(\$driverExit -eq 3\) \{ \$failed \+= [^\r\n]+\}\s+elseif \(\$null -ne \$driverExit -and \$driverExit -ne 0\) \{ \$failed \+= '
         Mutation = @('elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += ', 'elseif ($false) { $failed += ')

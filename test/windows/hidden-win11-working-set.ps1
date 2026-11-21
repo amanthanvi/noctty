@@ -1288,6 +1288,9 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
         ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
     }
+    # A clipboard sequence of 0 before and after is no observation, never "held" (the shared guard's
+    # Test-InteractiveWin11ClipboardObservable; test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+    $guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
     $failed = @()
     if ($stateFailure) { $failed += $stateFailure }
@@ -1320,7 +1323,7 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
             }
         }
     } elseif ($null -ne $record) { $failed += 'record: no effective directories' }
-    Write-Host "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)"
+    Write-Host (Format-InteractiveWin11ClipboardReading $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter)
     if ($failed.Count -gt 0) { throw ('working-set harness: ' + ($failed -join '; ')) }
     Write-Host "working-set harness: $Workload complete: $Run"
 }
