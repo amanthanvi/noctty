@@ -36,8 +36,15 @@ if ($Metric -eq 'frame-pacing') {
     $pacingParameters = @('Metric', 'Target', 'Runs', 'MeasureRepo', 'RunRoot', 'Visible')
     $foreignParameters = @($PSBoundParameters.Keys | Where-Object { $pacingParameters -notcontains $_ })
     if ($foreignParameters.Count -ne 0) { throw "-Metric frame-pacing takes only -Runs, -MeasureRepo, -RunRoot and -Visible (its workload is fixed), not -$($foreignParameters -join ', -')." }
+    # The harness takes 1 to 50 runs; this script's -Runs allows 100 for the other metrics (CodeRabbit on #741).
+    if ($Runs -gt 50) { throw '-Metric frame-pacing takes -Runs 1 to 50.' }
     $pacingArguments = @{ MeasureRepo = $MeasureRepo; RunRoot = $RunRoot; Runs = $Runs; Visible = $Visible }
-    & (Join-Path $PSScriptRoot 'bench-frame-pacing.ps1') @pacingArguments
+    # A harness that never ran (a binding error, a throw) exits 1, never with an earlier command's code
+    # (CodeRabbit on #741); otherwise its own exit code is this script's.
+    $global:LASTEXITCODE = -1
+    try { & (Join-Path $PSScriptRoot 'bench-frame-pacing.ps1') @pacingArguments -ErrorAction Stop }
+    catch { Write-Host "frame-pacing: $($_.Exception.Message)"; exit 1 }
+    if ($LASTEXITCODE -lt 0) { exit 1 }
     exit $LASTEXITCODE
 }
 if (-not [string]::IsNullOrEmpty($MeasureRepo) -or -not [string]::IsNullOrEmpty($RunRoot) -or $Visible) {

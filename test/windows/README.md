@@ -1496,11 +1496,16 @@ environment adds only `GHOSTTY_LOG`, `NOCTTY_RENDER_TRACE_FILE`,
 
 The workload is the bench's `stream` payload (4 MiB of printable ASCII from
 its own generator, seed 121) and end marker, written by cmd's own `type`. F5
-types `type stream.bin`. The driver waits for the echo to go quiet, then arms
-the render trace for the first swap that presents the end marker
-(`WM_APP + 9` with 0), and F6 sends the carriage return. The samples are the
-trace's intervals between consecutive successful swaps, from the arm through
-that swap, at most 2,048 a run. `frame_time_p95_ms` is their nearest-rank p95,
+types `type stream.bin & echo.>done.flag`. The driver waits for the echo to go
+quiet, then arms the render trace for the first swap that presents the end
+marker (`WM_APP + 9` with 0), and F6 sends the carriage return. Nothing is sent
+to the pane inside the window, because noctty writes a trace snapshot on the
+presenting thread: the driver polls `done.flag` as a file, waits 1 s, then
+requests one snapshot at a time until one shows the end marker's swap. A
+snapshot that still shows the target armed landed inside the window, is
+counted (`SnapshotsInWindow`), and makes the run inconclusive. The samples
+are the trace's intervals between consecutive successful swaps, from the arm
+through that swap, kept in memory by the trace, at most 2,048 a run. `frame_time_p95_ms` is their nearest-rank p95,
 pooled over the completed runs, as the bench aggregates its own. cmd's `type`
 delivers the payload at about 2.4 MB/s, a tenth of the bench's PowerShell
 producer (26 MB/s in the 2026-08-27 table in
@@ -1519,18 +1524,24 @@ Two modes:
   `dry_run_p95_ms`, never as `frame_time_p95_ms`.
 - `-Visible` is the measurement. Run it only while the machine's user is
   away. The copy runs on `Default`, which must be the caller's desktop and the
-  input desktop, composed by DWM, in a local session, with no input for
-  `-MinIdleSeconds` (300 by default) before the series and none since but the
-  harness's own unlocks. Each driver checks that the session's last input is
-  still the tick the series last saw right before its unlock, and still the
-  unlock's own tick right before the measured window and at its end
-  (`Get-FramePacingInputBreak`); any other input makes the run inconclusive.
-  The machine must be under 30% busy
-  (the driver waits up to `-QuietWaitSeconds`). The copy takes the foreground
-  through a bounded call: a zero-motion mouse input unlocks it, never an Alt
-  tap, and the cross-thread calls run on a worker joined within 5 s. A run
-  whose foreground, pane focus or session input changed during the workload is
-  inconclusive, never a sample.
+  input desktop, composed by DWM, in a local session, with the shell accepting
+  notifications (no full-screen app or presentation mode) and the display on.
+  There must be no keyboard or mouse input for 300 s before the series (a
+  pinned constant) and none since but the harness's own unlocks. "Away" means
+  only that: a gamepad, or a video watched without input, is not seen. The
+  series holds the display and the system on.
+- The input gate (`Test-FramePacingInputGate`) requires the session's last
+  input to be the series' tick right before each launch on `Default` and the
+  unlock, and the unlock's own tick right before the measured window and after
+  it. A break before the window throws INCONCLUSIVE, so nothing further
+  starts, takes the foreground or sends input: a user who comes back keeps
+  their desktop. The machine must be under 30% busy (the driver waits up to
+  `-QuietWaitSeconds` and launches nothing when it never was) and again right
+  before the window. The copy takes the foreground through a bounded call: a
+  zero-motion mouse input unlocks it, never an Alt tap; the native worker
+  checks the tick again right before that input, and the cross-thread calls
+  run on a worker joined within 5 s. A run whose foreground, pane focus,
+  display power or session input changed is inconclusive, never a sample.
 
 ```powershell
 pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
@@ -1546,12 +1557,22 @@ config, receipt and ConPTY digests, the transport and renderer the copy's log
 names, the grid, the window's DPI and monitor mode, the busy share and timer
 resolution before and after, every interval and the visible part's facts), the
 copy's log, the driver's log, the copy's last trace snapshot and
-`guards.json`. Runs compare only with the same `WorkloadSha256`, grid,
-transport and ConPTY digests. The summary pools only runs at one display mode
-(the window's monitor's width, height and refresh, read at the start of each
-run and again after its window, where a change makes the run inconclusive). A
-series whose runs differ reports each mode in `ByDisplayMode`, pools none and
-exits 2. Each run keeps the shared state
+`guards.json`. The summary pools only comparable runs: the same
+`WorkloadSha256`, app, renderer, transport and ConPTY digests (a difference
+fails the series, exit 1), and the same display mode (the window's monitor's
+width, height and refresh, read at the start of each run and again after its
+window, where a change makes the run inconclusive), DPI and grid (a difference
+reports each mode in `ByDisplayMode`, pools none and exits 2).
+`frame_time_p95_ms` and its median are published only for a visible series
+whose every run completed and whose runs are comparable; otherwise both are
+null and the console says no measurement was published. A staging failure is a
+failed run before any launch, and the summary still records the runs before
+it. What runs is the run's own copy: its path is checked before any launch
+and its image read back by PID, and the driver runs in the run's own job,
+checked before it resumes and again by the outer half. The shared state guard
+deletes a measurement-identity jump list created during a run, so run one
+measurement workload at a time; the frame-pacing mutex covers only this
+harness. Each run keeps the shared state
 guard, the PowerShell history guard and the real `session-state.json`'s
 metadata, and logs the clipboard sequence number before and after.
 
