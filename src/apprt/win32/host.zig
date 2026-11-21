@@ -12890,6 +12890,7 @@ test "win32 with command-palette-hint = false, a message up when the palette ope
             threadlocal var count: usize = 0;
             threadlocal var previous: WNDPROC = undefined;
             fn proc(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) LRESULT {
+                thread_role.assertWindowProc();
                 if (msg == c.WM_PAINT) count += 1;
                 return sys.CallWindowProcW(previous, h, msg, wp, lp);
             }

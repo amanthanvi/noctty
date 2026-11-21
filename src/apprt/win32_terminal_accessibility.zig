@@ -10,6 +10,7 @@ const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const uia_text = @import("win32_uia/text.zig");
+const thread_role = @import("../sync/thread_role.zig");
 
 const Allocator = std.mem.Allocator;
 const HWND = win32_types.HWND;
@@ -934,6 +935,7 @@ test "PKG71 scroll completes on responsive UI thread before returning without ho
             };
         }
         fn proc(window_handle: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) win32_types.LRESULT {
+            thread_role.assertWindowProc();
             if (msg == message and (wp == 2 or wp == 3)) {
                 const self: *@This() = @ptrFromInt(@as(usize, @bitCast(sys.GetWindowLongPtrW(window_handle, -21))));
                 const session = self.session.?;

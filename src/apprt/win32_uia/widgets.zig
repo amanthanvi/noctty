@@ -24,6 +24,7 @@ const constants = @import("constants.zig");
 const events = @import("events.zig");
 const terminal_text = @import("text.zig");
 const win32_consts = @import("../win32/consts.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 
 /// Private tab-button message. It carries a stable tab ID, never a pointer.
 pub const tab_close_message: u32 = 0x8000 + 16;
@@ -8664,6 +8665,7 @@ test "settings provider behavior invoke dispatch is asynchronous and source pres
             wparam: com.WPARAM,
             lparam: com.LPARAM,
         ) callconv(.winapi) com.LRESULT {
+            thread_role.assertWindowProc();
             if (message == WM_COMMAND) {
                 command_calls += 1;
                 last_wparam = wparam;
@@ -8790,6 +8792,7 @@ test "settings provider behavior selection dispatch is synchronous and postcondi
             wparam: com.WPARAM,
             lparam: com.LPARAM,
         ) callconv(.winapi) com.LRESULT {
+            thread_role.assertWindowProc();
             if (message == WM_COMMAND) {
                 command_calls += 1;
                 last_wparam = wparam;
@@ -8974,6 +8977,7 @@ test "settings provider behavior selection dispatch is bounded for a hung owner 
             wparam: com.WPARAM,
             lparam: com.LPARAM,
         ) callconv(.winapi) com.LRESULT {
+            thread_role.assertWindowProc();
             const self = active orelse return win32.DefWindowProcW(hwnd, message, wparam, lparam);
             if (message == WM_COMMAND) {
                 _ = self.command_calls.fetchAdd(1, .acq_rel);

@@ -636,6 +636,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
             }
 
             pub fn proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) LRESULT {
+                thread_role.assertWindowProc();
                 var shown = false;
                 if (msg == c.WM_WINDOWPOSCHANGED and hwnd == watched and first_show == null) {
                     const pos: *const WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
