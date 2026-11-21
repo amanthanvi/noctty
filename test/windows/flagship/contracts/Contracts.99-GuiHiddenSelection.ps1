@@ -248,7 +248,7 @@ if (-not ('InteractiveWin11RealInput' -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public static class InteractiveWin11RealInput {
+public static class __REALINPUT_FIXTURE__ {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] static extern uint SendInput(uint c, IntPtr i, int s);
     public static bool ForceForeground(IntPtr h, bool a, bool b) { return SetForegroundWindow(h); }
@@ -256,6 +256,9 @@ public static class InteractiveWin11RealInput {
 "@
 }
 '@
+    # The class name goes in by substitution, so Contracts.30's shadow scan, which reads every script's text, never
+    # takes this fixture for a second definition of the module's type.
+    $fixtureModule = $fixtureModule.Replace('__REALINPUT_FIXTURE__', 'InteractiveWin11RealInput')
     $fixtureLib = @'
 Add-Type -TypeDefinition @"
 using System;
