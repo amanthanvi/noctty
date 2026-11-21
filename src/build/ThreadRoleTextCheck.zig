@@ -1,9 +1,12 @@
-//! A build step that fails when an exe built without the runtime thread-role
-//! layer holds its text (`text`, which starts every panic of the layer):
-//! PLAN.md §2.7 acceptance test 14, a ReleaseFast app exe holds none of the
-//! layer's panic strings. build.zig adds it to the install step of an app
-//! exe whose mode builds without the layer (`Config.threadRoles`). Fork-owned,
-//! so the check stays out of upstream's build.zig and Config.zig.
+//! PLAN.md §2.7 acceptance test 14's two checks, fork-owned so they stay out
+//! of upstream's build.zig and Config.zig:
+//! - A build step that fails when an exe built without the runtime
+//!   thread-role layer holds its text (`text`, which starts every panic of
+//!   the layer): a ReleaseFast app exe holds none of the layer's panic
+//!   strings. build.zig adds it to the install step of an app exe whose mode
+//!   builds without the layer (`Config.threadRoles`).
+//! - A test that src/sync imports no src/renderer file (`rendererImport`), so
+//!   lib-vt's search code reaches the mutex wrapper without the renderer.
 const ThreadRoleTextCheck = @This();
 
 const std = @import("std");
@@ -65,6 +68,37 @@ pub fn fileHolds(file: std.fs.File, needle: []const u8, buf: []u8) !bool {
     }
 }
 
+/// The first `@import` in `source`, a file in `dir` (a `/`-separated path
+/// from the build root), of `src/renderer.zig` or a file under
+/// `src/renderer/`, resolved as a relative import resolves and compared
+/// without case, as NTFS opens it; null when there is none. It reads tokens,
+/// so a comment or a string that only mentions an import does not count.
+/// The caller frees the path.
+fn rendererImport(gpa: std.mem.Allocator, dir: []const u8, source: [:0]const u8) !?[]u8 {
+    var tokens: std.zig.Tokenizer = .init(source);
+    while (true) {
+        const token = tokens.next();
+        switch (token.tag) {
+            .eof => return null,
+            .builtin => {},
+            else => continue,
+        }
+        if (!std.mem.eql(u8, source[token.loc.start..token.loc.end], "@import")) continue;
+        if (tokens.next().tag != .l_paren) continue;
+        const literal = tokens.next();
+        if (literal.tag != .string_literal) continue;
+        const name = try std.zig.string_literal.parseAlloc(gpa, source[literal.loc.start..literal.loc.end]);
+        defer gpa.free(name);
+        // A name without `.zig` is a module (`std`, `build_options`).
+        if (!std.ascii.endsWithIgnoreCase(name, ".zig")) continue;
+        std.mem.replaceScalar(u8, name, '\\', '/');
+        const path = try std.fs.path.resolvePosix(gpa, &.{ dir, name });
+        if (std.ascii.eqlIgnoreCase(path, "src/renderer.zig") or
+            std.ascii.startsWithIgnoreCase(path, "src/renderer/")) return path;
+        gpa.free(path);
+    }
+}
+
 test "fileHolds finds the text at every split of the reads, and only it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -88,4 +122,65 @@ test "fileHolds finds the text at every split of the reads, and only it" {
     const file = try tmp.dir.openFile("exe", .{});
     defer file.close();
     try std.testing.expect(!try fileHolds(file, text, &buf));
+}
+
+test "src/sync imports no src/renderer file (acceptance test 14)" {
+    // Read from the checkout the suite runs in (its build root), so a file
+    // added to src/sync is read too.
+    const gpa = std.testing.allocator;
+    var sync = try std.fs.cwd().openDir("src/sync", .{ .iterate = true });
+    defer sync.close();
+    var walker = try sync.walk(gpa);
+    defer walker.deinit();
+    var read_state_mutex = false;
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const source = try entry.dir.readFileAllocOptions(gpa, entry.basename, 16 * 1024 * 1024, null, .of(u8), 0);
+        defer gpa.free(source);
+        var dir: std.ArrayList(u8) = .empty;
+        defer dir.deinit(gpa);
+        try dir.appendSlice(gpa, "src/sync");
+        if (std.fs.path.dirname(entry.path)) |sub| {
+            try dir.append(gpa, '/');
+            try dir.appendSlice(gpa, sub);
+            std.mem.replaceScalar(u8, dir.items, '\\', '/');
+        }
+        if (try rendererImport(gpa, dir.items, source)) |path| {
+            defer gpa.free(path);
+            std.debug.print("src/sync/{s} imports {s}\n", .{ entry.path, path });
+            return error.SyncImportsRenderer;
+        }
+        if (std.mem.eql(u8, entry.path, "state_mutex.zig")) read_state_mutex = true;
+    }
+    // The walk read the layer's own tree.
+    try std.testing.expect(read_state_mutex);
+}
+
+test "rendererImport reads an import by token, resolved as the compiler resolves it" {
+    const gpa = std.testing.allocator;
+    const Case = struct { dir: []const u8, source: [:0]const u8, path: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .dir = "src/sync", .source = "const r = @import(\"../renderer.zig\");", .path = "src/renderer.zig" },
+        .{ .dir = "src/sync", .source = "const s = @import(\"../renderer/State.zig\");", .path = "src/renderer/State.zig" },
+        .{ .dir = "src/sync", .source = "_ = @import( \"./../Renderer/size.zig\" );", .path = "src/Renderer/size.zig" },
+        .{ .dir = "src/sync/deep", .source = "const t = @import(\"../../renderer/Thread.zig\");", .path = "src/renderer/Thread.zig" },
+        .{ .dir = "src/sync", .source = "const t = @import(\"thread_role.zig\");\nconst r = @import(\"../renderer.zig\");", .path = "src/renderer.zig" },
+        // Modules, files elsewhere, and imports that are only mentioned.
+        .{ .dir = "src/sync", .source = "const std = @import(\"std\");\nconst o = @import(\"build_options\");", .path = null },
+        .{ .dir = "src/sync", .source = "const t = @import(\"thread_role.zig\");", .path = null },
+        .{ .dir = "src/sync", .source = "const r = @import(\"renderer/State.zig\");", .path = null },
+        .{ .dir = "src/sync", .source = "const r = @import(\"../renderer_size.zig\");", .path = null },
+        .{ .dir = "src/sync", .source = "const r = @import(\"../os/renderer.zig\");", .path = null },
+        .{ .dir = "src/sync", .source = "// const r = @import(\"../renderer.zig\");", .path = null },
+        .{ .dir = "src/sync", .source = "const s = \"@import(\\\"../renderer.zig\\\")\";", .path = null },
+    };
+    for (cases) |case| {
+        const found = try rendererImport(gpa, case.dir, case.source);
+        defer if (found) |path| gpa.free(path);
+        if (case.path) |expected| {
+            try std.testing.expectEqualStrings(expected, found orelse return error.TestExpectedImport);
+        } else {
+            try std.testing.expect(found == null);
+        }
+    }
 }

@@ -125,7 +125,14 @@ pub fn build(b: *std.Build) !void {
     else
         null;
 
-    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle);
+    if (exe) |app| {
+        // The oracle is not the app exe: its terminal core takes the app's
+        // build options with the runtime thread-role layer off, in every mode
+        // (PLAN.md §2.7's build scope).
+        var app_oracle = oracle;
+        app_oracle.build_options = deps.options;
+        try @import("src/differential_oracle_build.zig").add(b, app.exe, app_oracle);
+    }
 
     // Standalone feasibility spike. This artifact is intentionally absent
     // from the normal build and every product packaging path.
