@@ -1510,7 +1510,7 @@ $ranLedgerProblems = [Collections.Generic.List[string]]::new()
 $ranSeed = Read-RanListLedger -Paths @((Join-Path $repoRoot 'test\windows\ran-list-approved-skips.tsv')) -Kind 'approved skips' -Problems $ranLedgerProblems
 $ranSeedCount = @($ranSeed.Values | ForEach-Object { $_ }).Count
 $ranBadFacts = @($ranSeed.Values | ForEach-Object { $_ } | ForEach-Object { $_.Requires } | Where-Object { $_ } | ForEach-Object { ($_ -split '=', 2)[0] } | Where-Object { $_ -cnotin (Get-RanListFactKeys) -and -not $_.StartsWith('build:') })
-Assert-True ($ranLedgerProblems.Count -eq 0 -and $ranSeedCount -eq 196 -and $ranBadFacts.Count -eq 0) "The seeded approved skips parse (196 entries) and name known facts only ($($ranLedgerProblems -join '; ') $($ranBadFacts -join ', '))."
+Assert-True ($ranLedgerProblems.Count -eq 0 -and $ranSeedCount -eq 198 -and $ranBadFacts.Count -eq 0) "The approved skips parse (198 entries) and name known facts only ($($ranLedgerProblems -join '; ') $($ranBadFacts -join ', '))."
 
 # --- Installer: what Setup asks Restart Manager to close --------------------
 # The native ARM64 build job compiles dist/windows/noctty.iss on a pull request

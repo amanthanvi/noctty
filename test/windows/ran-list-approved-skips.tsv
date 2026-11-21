@@ -13,6 +13,7 @@ ghostty-test	Command.test.Command: posix fork handles execveZ failure	-	POSIX-on
 ghostty-test	Command.test.Command: rt post fork 1	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
 ghostty-test	Command.test.Command: rt pre exec 1	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
 ghostty-test	Command.test.Command: rt pre exec 2	-	POSIX-only; skips on Windows (`builtin.os.tag == .windows`) (fork, exec and their hooks)
+ghostty-test	Surface.test.isolated: the compare names both instantiations of confirmQuitAnswer (acceptance test 10)	build:mode=ReleaseSafe;build:zig=0.15.2	RQ16 (PLAN.md §2.7): Zig 0.15.2's ReleaseSafe attributes noinline functions only, so this thread-role acceptance test 10 child, which checks nothing but recorded function names, skips there (`!symbolise.names_checked`); it runs in Debug on x86_64 and aarch64, and in both modes on 0.17.1
 ghostty-test	apprt.action.Action.Key.test.ghostty.h Action.Key	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
 ghostty-test	apprt.action.CloseTabMode.test.ghostty.h CloseTabMode	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
 ghostty-test	apprt.action.FloatWindow.test.ghostty.h FloatWindow	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
@@ -71,6 +72,7 @@ ghostty-test	os.xdg.test.fallback when xdg env empty and subdir	-	POSIX-only; sk
 ghostty-test	pty_transport_probe.test.Windows ConPTY input transport probe reports key encoding survival	env:NOCTTY_CONPTY_KEY_INPUT_PROBE=unset	Opt-in ConPTY key-input probe: runs only with NOCTTY_CONPTY_KEY_INPUT_PROBE=1
 ghostty-test	pty_transport_probe.test.Windows ConPTY transport probe reports APC and DCS survival	env:NOCTTY_CONPTY_TRANSPORT_PROBE=unset	Opt-in ConPTY graphics probe: runs only with NOCTTY_CONPTY_TRANSPORT_PROBE=1
 ghostty-test	renderer.Health.test.ghostty.h Health	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
+ghostty-test	sync.isolated.test.isolated: the compare names the acquiring function of every site shape (acceptance test 10)	build:mode=ReleaseSafe;build:zig=0.15.2	RQ16 (PLAN.md §2.7): Zig 0.15.2's ReleaseSafe attributes noinline functions only, so this thread-role acceptance test 10 child, which checks nothing but recorded function names, skips there (`!symbolise.names_checked`); it runs in Debug on x86_64 and aarch64, and in both modes on 0.17.1
 ghostty-test	terminal.mouse.Shape.test.ghostty.h MouseShape	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
 ghostty-test	terminal.osc.parsers.iterm2.test.OSC: 1337: test Copy with non-empty value that is invalid base64	-	Upstream skips it: OSC 1337 Copy does not validate base64, for speed
 ghostty-test	terminal.osc.test.ghostty.h Command.ProgressReport.State	-	The fork removed the ghostty.h embedding ABI; `lib.checkGhosttyHEnum` (src/lib/enum.zig) always skips
