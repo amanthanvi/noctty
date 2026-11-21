@@ -1,0 +1,624 @@
+//! Isolated children of the test exe (PLAN.md §2.7 RQ15, §19.3): a test that
+//! expects a panic or an off-table pair runs its body in a child process, the
+//! test exe started again, because a test exe can neither survive nor assert
+//! its own panic, and the run's compare would fail on an off-table pair.
+//!
+//! The dispatch: `src/main.zig`'s first test, an unnamed one that no
+//! `-Dtest-filter` drops, calls `runChildIfRequested`. In a child it finds
+//! the test `child_env` names in `builtin.test_functions`, runs it with
+//! `inChild()` true and ends the process: 0 when the test returned, 1 when it
+//! failed, 2 when the executable holds no such test, 3 when it panicked (Zig's
+//! abort, whose Debug breakpoint the child turns into that exit:
+//! `exitOnBreakpoint`), 4 when it leaked. `builtin.test_functions` lists the
+//! root file's tests first, in declaration order, then the files it reaches
+//! (measured on Zig 0.15.2), so the dispatch runs before any other test, and
+//! the parent starts a child unsharded, with no `--results` or `--listen`, so
+//! it writes no ran-list record (test-harnesses.md, 2026-11-18 RAN-LIST-01).
+//!
+//! An isolated test is one test block, its body in the child and its verdict
+//! in the parent:
+//!
+//!     test "a child that ... panics" {
+//!         if (isolated.inChild()) {
+//!             ... // the body, which panics
+//!             return;
+//!         }
+//!         try isolated.expectPanic(@src(), "the panic text");
+//!     }
+//!
+//! The parent checks `child_env` first, so a child never starts a child, and
+//! names its test from `@src()` (`@src().fn_name` is `test.<name>` in a test
+//! block). It starts the child with no console window, its stdin closed, a
+//! deadline, and either no dump directory or one of its own, never the run's
+//! (`NOCTTY_THREAD_ROLE_DUMP` is replaced or removed, so the run's compare
+//! never reads a child's dump: CHILD-DUMP-IN-RUN). Its verdict follows the
+//! variant: a panic variant asserts the abnormal exit and the panic text
+//! (test 12's also its dump's pairs); an off-table variant asserts a
+//! successful exit and exactly one PAIR-OUTSIDE-TABLE naming the pair. Each
+//! also asserts that the dispatch ran as the child's first test.
+//!
+//! The child's dump is compared here, in the test exe (`compare.zig`), after
+//! `symbolise.zig` names its pairs against this exe's own PDB, with the
+//! reviewed table read at test time: `NOCTTY_THREAD_ROLE_TABLE` if set, else
+//! `ci/lock-inventory-threads.tsv` under this build's source root, which the
+//! PDB's own path for `symbolise.zig` gives, so it is found whatever the
+//! working directory (`tablePath`), in `compare.tree_scope`.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const windows = std.os.windows;
+const thread_role = @import("thread_role.zig");
+const state_mutex = @import("state_mutex.zig");
+const recorder = @import("recorder.zig");
+const dump = @import("dump.zig");
+const symbolise = @import("symbolise.zig");
+const compare = @import("compare.zig");
+
+const Allocator = std.mem.Allocator;
+
+/// The variable that makes the test exe an isolated child: the qualified
+/// name of the test it runs (`sync.isolated.test.<name>`).
+pub const child_env = "NOCTTY_THREAD_ROLE_ISOLATED";
+
+/// The variable that overrides where the in-process compare reads the
+/// reviewed table.
+pub const table_env = "NOCTTY_THREAD_ROLE_TABLE";
+
+/// The table's place under the source root (lead's 1A.2 decision 8).
+pub const table_path = "ci" ++ std.fs.path.sep_str ++ "lock-inventory-threads.tsv";
+
+/// The child's exit codes (a panic exits 3, through Zig's abort).
+pub const exit_passed = 0;
+pub const exit_failed = 1;
+pub const exit_no_test = 2;
+pub const exit_panicked = 3;
+pub const exit_leaked = 4;
+pub const exit_kind_decided = 5;
+
+/// How long a parent waits for its child before it ends it. A panicking
+/// child loads this exe's PDB for its stack trace first.
+pub const child_deadline_ms = 120_000;
+
+/// The marker the dispatch prints before it runs the test: the parent
+/// checks that it follows the runner's header for test 0.
+const dispatch_marker = "isolated child: running ";
+
+var running_child = false;
+
+/// Whether this process is an isolated child running its test's body.
+pub fn inChild() bool {
+    return running_child;
+}
+
+/// The child-mode dispatch, called by `src/main.zig`'s first test. In an
+/// isolated child, runs its test and ends the process; in the symbolise
+/// mode, symbolises and ends the process; otherwise returns at once.
+pub fn runChildIfRequested() void {
+    if (comptime builtin.os.tag != .windows) return;
+    if (std.process.hasEnvVarConstant(symbolise.raw_env)) symbolise.runFromEnvironment();
+    var name_buf: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&name_buf);
+    const name = std.process.getEnvVarOwned(fba.allocator(), child_env) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return,
+        // A child must never fall through to the rest of the suite.
+        else => {
+            std.debug.print("isolated child: its test's name cannot be read: {s}\n", .{@errorName(err)});
+            std.process.exit(exit_no_test);
+        },
+    };
+    for (builtin.test_functions) |test_fn| {
+        if (!std.mem.eql(u8, test_fn.name, name)) continue;
+        std.debug.print(dispatch_marker ++ "{s}\n", .{test_fn.name});
+        // A panic ends in Zig's abort, which in Debug first executes a
+        // breakpoint: with no debugger that is an unhandled exception
+        // (the process exits 0x80000003, which `std.process.Child` reports
+        // truncated as 3), left to Windows' error reporting and any
+        // just-in-time debugger. The child exits 3 itself instead, after the
+        // panic has printed, and asks Windows for no fault dialog.
+        _ = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        _ = windows.kernel32.AddVectoredExceptionHandler(1, exitOnBreakpoint);
+        // Before the first pair, so the dump's header says what it is.
+        recorder.setProcessKind(.child) catch std.process.exit(exit_kind_decided);
+        running_child = true;
+        test_fn.func() catch |err| {
+            std.debug.print("isolated child: the test failed: error.{s}\n", .{@errorName(err)});
+            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            std.process.exit(exit_failed);
+        };
+        if (std.testing.allocator_instance.deinit() == .leak) std.process.exit(exit_leaked);
+        std.debug.print("isolated child: the test returned\n", .{});
+        std.process.exit(exit_passed);
+    }
+    std.debug.print("isolated child: the executable holds no such test\n", .{});
+    std.process.exit(exit_no_test);
+}
+
+const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+const STATUS_BREAKPOINT: u32 = 0x80000003;
+
+extern "kernel32" fn SetErrorMode(mode: u32) callconv(.winapi) u32;
+
+/// An isolated child's end at the breakpoint of Zig's Debug abort: exit 3,
+/// as abort does in the other modes. Every other exception goes on to the
+/// next handler.
+fn exitOnBreakpoint(info: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long {
+    if (info.ExceptionRecord.ExceptionCode != STATUS_BREAKPOINT) return windows.EXCEPTION_CONTINUE_SEARCH;
+    _ = windows.kernel32.TerminateProcess(windows.GetCurrentProcess(), exit_panicked);
+    return windows.EXCEPTION_CONTINUE_SEARCH;
+}
+
+/// A test's name as `builtin.test_functions` holds it, from the `@src()` of
+/// its block: the file under the module root with `.` for each separator
+/// and no `.zig`, then `.test.<name>`.
+pub fn qualifiedName(buf: []u8, src: std.builtin.SourceLocation) error{ NotATestBlock, NoSpace }![]const u8 {
+    if (!std.mem.startsWith(u8, src.fn_name, "test.")) return error.NotATestBlock;
+    if (!std.mem.endsWith(u8, src.file, ".zig")) return error.NotATestBlock;
+    const stem = src.file[0 .. src.file.len - ".zig".len];
+    const out = std.fmt.bufPrint(buf, "{s}.{s}", .{ stem, src.fn_name }) catch return error.NoSpace;
+    for (out[0..stem.len]) |*c| {
+        if (c.* == '\\' or c.* == '/') c.* = '.';
+    }
+    return out;
+}
+
+/// Where the child writes its dump.
+pub const Dumps = enum {
+    /// Nowhere: the variable is removed.
+    none,
+    /// A fresh directory of its own.
+    own,
+};
+
+/// A finished child.
+pub const Child = struct {
+    term: std.process.Child.Term,
+    /// The whole exit code: `term` keeps only its low byte.
+    exit_code: u32,
+    stderr: []u8,
+    timed_out: bool,
+    /// Its dump directory, for `Dumps.own`.
+    dir: ?dump.TestDir,
+
+    pub fn deinit(self: *Child) void {
+        std.testing.allocator.free(self.stderr);
+        if (self.dir) |*d| d.deinit();
+    }
+
+    /// Prints what a failed verdict needs: the exit and the end of stderr.
+    fn explain(self: *const Child, comptime why: []const u8, args: anytype) void {
+        const tail = self.stderr[self.stderr.len -| 4000..];
+        std.debug.print("isolated parent: " ++ why ++ "\n  child exit code: 0x{x} (timed out: {})\n  child stderr (its end):\n{s}\n", args ++ .{
+            self.exit_code, self.timed_out, tail,
+        });
+    }
+};
+
+/// The child's environment: this process's, without the build runner's
+/// progress pipe, the symbolise mode or the run's dump directory, with the
+/// test's name, and with `dump_dir` as its dump directory if one is given.
+pub fn childEnvironment(a: Allocator, qualified: []const u8, dump_dir: ?[]const u8) !std.process.EnvMap {
+    var env = try std.process.getEnvMap(a);
+    errdefer env.deinit();
+    env.remove("ZIG_PROGRESS");
+    env.remove(symbolise.raw_env);
+    env.remove(dump.env_var);
+    try env.put(child_env, qualified);
+    if (dump_dir) |dir| try env.put(dump.env_var, dir);
+    return env;
+}
+
+const Deadline = struct {
+    handle: windows.HANDLE,
+    timed_out: bool = false,
+
+    fn run(self: *Deadline) void {
+        windows.WaitForSingleObject(self.handle, child_deadline_ms) catch {
+            self.timed_out = true;
+            windows.TerminateProcess(self.handle, 124) catch {};
+        };
+    }
+};
+
+/// Starts this exe as the isolated child of the calling test and waits for
+/// it. `src` is the test block's `@src()`.
+pub fn run(src: std.builtin.SourceLocation, dumps: Dumps) !Child {
+    const a = std.testing.allocator;
+    if (running_child or std.process.hasEnvVarConstant(child_env)) return error.IsolatedChildStartsNoChild;
+    var name_buf: [1024]u8 = undefined;
+    const qualified = try qualifiedName(&name_buf, src);
+
+    var dir: ?dump.TestDir = if (dumps == .own) try dump.TestDir.init() else null;
+    errdefer if (dir) |*d| d.deinit();
+    const dir_utf8: ?[]u8 = if (dir) |d| try std.unicode.wtf16LeToWtf8Alloc(a, d.path) else null;
+    defer if (dir_utf8) |d| a.free(d);
+
+    var env = try childEnvironment(a, qualified, dir_utf8);
+    defer env.deinit();
+    const exe = try std.fs.selfExePathAlloc(a);
+    defer a.free(exe);
+
+    var child = std.process.Child.init(&.{exe}, a);
+    child.env_map = &env;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.create_no_window = true;
+    try child.spawn();
+    var waited = false;
+    errdefer if (!waited) {
+        _ = child.kill() catch {};
+    };
+    var deadline: Deadline = .{ .handle = child.id };
+    const watcher = try std.Thread.spawn(.{}, Deadline.run, .{&deadline});
+    var stdout: std.ArrayList(u8) = .empty;
+    defer stdout.deinit(a);
+    var stderr: std.ArrayList(u8) = .empty;
+    defer stderr.deinit(a);
+    const collected = child.collectOutput(a, &stdout, &stderr, 4 << 20);
+    watcher.join();
+    // Read before `wait`, which keeps only the low byte and closes the handle.
+    var exit_code: windows.DWORD = 0;
+    if (windows.kernel32.GetExitCodeProcess(child.id, &exit_code) == 0) exit_code = 0xffff_ffff;
+    const term = try child.wait();
+    waited = true;
+    try collected;
+    return .{
+        .term = term,
+        .exit_code = exit_code,
+        .stderr = try stderr.toOwnedSlice(a),
+        .timed_out = deadline.timed_out,
+        .dir = dir,
+    };
+}
+
+/// Whether the dispatch ran the child's test as its first: the runner's
+/// header for test 0 (`1/<n> main.test_0...`) and then the marker naming it.
+fn dispatchedFirst(stderr: []const u8, qualified: []const u8) bool {
+    if (!std.mem.startsWith(u8, stderr, "1/")) return false;
+    const header_end = std.mem.indexOf(u8, stderr, "...") orelse return false;
+    var rest = stderr[header_end + 3 ..];
+    if (!std.mem.startsWith(u8, rest, dispatch_marker)) return false;
+    rest = rest[dispatch_marker.len..];
+    return std.mem.startsWith(u8, rest, qualified) and rest.len > qualified.len and rest[qualified.len] == '\n';
+}
+
+fn expectDispatched(child: *const Child, src: std.builtin.SourceLocation) !void {
+    var name_buf: [1024]u8 = undefined;
+    const qualified = try qualifiedName(&name_buf, src);
+    if (!dispatchedFirst(child.stderr, qualified)) {
+        child.explain("the dispatch did not run the test as the child's first", .{});
+        return error.IsolatedChildNotDispatched;
+    }
+}
+
+/// A panic variant: the child exits abnormally, with Zig's panic exit code,
+/// and its stderr holds `panic: <text>`.
+pub fn expectPanic(src: std.builtin.SourceLocation, text: []const u8) !void {
+    var child = try run(src, .none);
+    defer child.deinit();
+    try expectPanicked(&child, src, text);
+}
+
+fn expectPanicked(child: *const Child, src: std.builtin.SourceLocation, text: []const u8) !void {
+    try expectDispatched(child, src);
+    const panicked = !child.timed_out and child.exit_code == exit_panicked;
+    if (!panicked) {
+        child.explain("expected the child to panic", .{});
+        return error.IsolatedChildDidNotPanic;
+    }
+    var want_buf: [1024]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "panic: {s}", .{text});
+    if (std.mem.indexOf(u8, child.stderr, want) == null) {
+        child.explain("the child's panic text is not \"{s}\"", .{text});
+        return error.IsolatedChildPanicText;
+    }
+}
+
+/// A (function key, role) pair as the symbolised dump writes it.
+pub const Pair = struct {
+    function: []const u8,
+    role: []const u8,
+};
+
+/// A panic variant that also compares its dump (acceptance test 12): the
+/// child panics with `text`, and the compare of its own directory passes
+/// with exactly `pairs`.
+pub fn expectPanicPairs(src: std.builtin.SourceLocation, text: []const u8, pairs: []const Pair) !void {
+    var child = try run(src, .own);
+    defer child.deinit();
+    try expectPanicked(&child, src, text);
+    var result = try compareChild(&child);
+    defer result.deinit();
+    if (!result.report.passed() or !result.holdsExactly(pairs)) {
+        result.explain(&child, "expected the child's compare to pass with exactly its pairs");
+        return error.IsolatedChildCompare;
+    }
+}
+
+/// An off-table variant (acceptance tests 4 and 8): the child exits
+/// successfully, and the compare of its own directory fails with exactly
+/// one failure, the PAIR-OUTSIDE-TABLE naming `pair`.
+pub fn expectOffTable(src: std.builtin.SourceLocation, pair: Pair) !void {
+    var child = try run(src, .own);
+    defer child.deinit();
+    try expectExited(&child, src);
+    var result = try compareChild(&child);
+    defer result.deinit();
+    var line_buf: [1024]u8 = undefined;
+    const line = try std.fmt.bufPrint(&line_buf, "FAIL PAIR-OUTSIDE-TABLE {s}: ({s}, {s})", .{
+        result.dump_name orelse "?", pair.function, pair.role,
+    });
+    if (result.report.failures.items.len != 1 or !result.report.hasLine(line)) {
+        result.explain(&child, "expected exactly one PAIR-OUTSIDE-TABLE naming the pair");
+        return error.IsolatedChildCompare;
+    }
+}
+
+fn expectExited(child: *const Child, src: std.builtin.SourceLocation) !void {
+    try expectDispatched(child, src);
+    if (child.timed_out or child.exit_code != exit_passed) {
+        child.explain("expected the child to exit successfully", .{});
+        return error.IsolatedChildFailed;
+    }
+}
+
+/// A child's own directory, symbolised and compared.
+pub const Compared = struct {
+    arena: std.heap.ArenaAllocator,
+    report: compare.Report,
+    /// The symbolised dumps.
+    dumps: []compare.Dump,
+    /// The one dump's name, when there is one.
+    dump_name: ?[]const u8,
+
+    pub fn deinit(self: *Compared) void {
+        self.report.deinit();
+        self.arena.deinit();
+    }
+
+    /// Whether the dumps hold exactly these pairs, each once, and no other.
+    pub fn holdsExactly(self: *const Compared, pairs: []const Pair) bool {
+        var lines: usize = 0;
+        for (self.dumps) |d| {
+            var it = std.mem.splitScalar(u8, d.text, '\n');
+            _ = it.next();
+            while (it.next()) |line| lines += @intFromBool(line.len > 0);
+        }
+        if (lines != pairs.len) return false;
+        for (pairs) |pair| {
+            var found: usize = 0;
+            for (self.dumps) |d| {
+                var it = std.mem.splitScalar(u8, d.text, '\n');
+                _ = it.next();
+                while (it.next()) |line| {
+                    const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+                    if (std.mem.eql(u8, line[0..space], pair.function) and std.mem.eql(u8, line[space + 1 ..], pair.role)) found += 1;
+                }
+            }
+            if (found != 1) return false;
+        }
+        return true;
+    }
+
+    fn explain(self: *const Compared, child: *const Child, why: []const u8) void {
+        var buf: [8192]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        self.report.format(&w) catch {};
+        for (self.dumps) |d| w.print("-- {s}\n{s}", .{ d.name, d.text }) catch {};
+        child.explain("{s}\n  compare:\n{s}", .{ why, w.buffered() });
+    }
+};
+
+/// Where the in-process compare reads the reviewed table.
+pub fn tablePathAlloc(a: Allocator, session: *const symbolise.Session) ![]u8 {
+    if (std.process.getEnvVarOwned(a, table_env)) |path| {
+        return path;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+    const root = try session.sourceRoot(a);
+    defer a.free(root);
+    return std.fs.path.join(a, &.{ root, table_path });
+}
+
+/// Symbolises the child's dumps against this exe (the child is this exe, so
+/// its PDB is this process's) and compares them with the reviewed table.
+pub fn compareChild(child: *Child) !Compared {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+    const dir = if (child.dir) |*d| d else return error.IsolatedChildHasNoDumpDirectory;
+
+    var session = try symbolise.Session.openSelf(aa);
+    const own_pdb = (dump.selfModule() orelse return error.NoModule).pdb;
+    const root, const table = setup: {
+        defer session.close();
+        const root = try session.sourceRoot(aa);
+        const path = try tablePathAlloc(aa, &session);
+        const table = std.fs.cwd().readFileAlloc(aa, path, 16 << 20) catch |err| {
+            std.debug.print("isolated parent: the reviewed table cannot be read ({s}); set " ++ table_env ++
+                " or run from a build whose checkout holds " ++ table_path ++ "\n", .{@errorName(err)});
+            return err;
+        };
+        break :setup .{ root, table };
+    };
+
+    var dumps: std.ArrayListUnmanaged(compare.Dump) = .empty;
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = dir.tmp.dir.iterate();
+    while (try it.next()) |entry| try names.append(aa, try aa.dupe(u8, entry.name));
+    for (names.items) |name| {
+        const raw = try dir.tmp.dir.readFileAlloc(aa, name, 16 << 20);
+        if (!std.mem.endsWith(u8, name, dump.extension)) continue;
+        var s = try symbolise.Session.openSelf(aa);
+        defer s.close();
+        const result = try symbolise.symbolise(aa, raw, &s, own_pdb, root);
+        if (result.problem) |problem| {
+            std.debug.print("isolated parent: the child's dump {s} cannot be symbolised: {s}\n", .{ name, @tagName(problem) });
+            return error.IsolatedChildDumpNotSymbolised;
+        }
+        try dumps.append(aa, .{ .name = name, .text = result.text });
+    }
+    const report = try compare.isolated(a, table, compare.tree_scope, dumps.items, .{});
+    return .{
+        .arena = arena,
+        .report = report,
+        .dumps = dumps.items,
+        .dump_name = if (dumps.items.len == 1) dumps.items[0].name else null,
+    };
+}
+
+const testing = std.testing;
+const StateMutex = state_mutex.StateMutex;
+
+test {
+    _ = compare;
+    _ = symbolise;
+}
+
+test "a test's qualified name comes from its block's @src()" {
+    var buf: [256]u8 = undefined;
+    const here = @src();
+    try testing.expectEqualStrings("sync.isolated.test.a test's qualified name comes from its block's @src()", try qualifiedName(&buf, here));
+    // A name in builtin.test_functions, as the dispatch finds it.
+    var found = false;
+    for (builtin.test_functions) |test_fn| found = found or std.mem.eql(u8, test_fn.name, try qualifiedName(&buf, here));
+    try testing.expect(found);
+    var fake = here;
+    fake.file = "a/b\\c.zig";
+    fake.fn_name = "test.x y";
+    try testing.expectEqualStrings("a.b.c.test.x y", try qualifiedName(&buf, fake));
+    fake.fn_name = "helper";
+    try testing.expectError(error.NotATestBlock, qualifiedName(&buf, fake));
+    fake.fn_name = "test.x";
+    try testing.expectError(error.NoSpace, qualifiedName(buf[0..4], fake));
+}
+
+test "a child's environment drops the progress pipe and the run's dump directory and names its test" {
+    const a = testing.allocator;
+    var env = try childEnvironment(a, "sync.isolated.test.x", null);
+    defer env.deinit();
+    try testing.expectEqualStrings("sync.isolated.test.x", env.get(child_env).?);
+    try testing.expect(env.get("ZIG_PROGRESS") == null);
+    try testing.expect(env.get(dump.env_var) == null);
+    try testing.expect(env.get(symbolise.raw_env) == null);
+    var own = try childEnvironment(a, "sync.isolated.test.x", "C:\\child\\own");
+    defer own.deinit();
+    try testing.expectEqualStrings("C:\\child\\own", own.get(dump.env_var).?);
+}
+
+test "the dispatch check reads the runner's header for test 0 and then the marker" {
+    try testing.expect(dispatchedFirst("1/6800 main.test_0..." ++ dispatch_marker ++ "a.test.b\nthread 1 panic: x", "a.test.b"));
+    try testing.expect(!dispatchedFirst("1/6800 main.test_0...OK\n2/6800 main.test_1..." ++ dispatch_marker ++ "a.test.b\n", "a.test.b"));
+    try testing.expect(!dispatchedFirst("1/6800 main.test_0..." ++ dispatch_marker ++ "a.test.bc\n", "a.test.b"));
+    try testing.expect(!dispatchedFirst("", "a.test.b"));
+}
+
+test "isolated: a child starts no child" {
+    if (inChild()) {
+        // In the child, a parent's call is refused before it starts anything.
+        var child = run(@src(), .none) catch |err| {
+            if (err == error.IsolatedChildStartsNoChild) return;
+            return err;
+        };
+        child.deinit();
+        return error.TestUnexpectedResult;
+    }
+    var child = try run(@src(), .none);
+    defer child.deinit();
+    try expectExited(&child, @src());
+}
+
+test "isolated: a 16-slot recorder panics on its 17th distinct pair with PN5's text (acceptance test 12)" {
+    if (inChild()) {
+        var rec: recorder.Recorder(16) = .{ .sink = .{ .target = .none } };
+        for (0..17) |i| rec.record(0x7ff600001000 + i * 0x10, .ui, .lock);
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN5 the pair recorder is full: more than 16 distinct " ++
+        "(acquiring function, role) pairs in one process");
+}
+
+test "isolated: a child that acquires at two sites and then panics keeps both pairs, and its compare passes (acceptance test 12)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const Sites = struct {
+        noinline fn isolatedFirstSite(m: *StateMutex) void {
+            m.lock();
+            m.unlock();
+        }
+
+        noinline fn isolatedSecondSite(m: *StateMutex) void {
+            m.lock();
+            m.unlock();
+        }
+    };
+    if (inChild()) {
+        const scope = thread_role.fixture(.ui);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        Sites.isolatedFirstSite(&m);
+        Sites.isolatedSecondSite(&m);
+        @panic("isolated test 12: a panic after acquiring at two sites");
+    }
+    try expectPanicPairs(@src(), "isolated test 12: a panic after acquiring at two sites", &.{
+        .{ .function = "src/sync/isolated.zig:isolatedFirstSite", .role = "ui" },
+        .{ .function = "src/sync/isolated.zig:isolatedSecondSite", .role = "ui" },
+    });
+}
+
+test "isolated: an off-table child exits successfully and its compare fails one PAIR-OUTSIDE-TABLE naming the pair (acceptance test 8)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const Sites = struct {
+        /// Its row lists `ui`; the child simulates `.termio`.
+        noinline fn isolatedOffTableSite(m: *StateMutex) void {
+            m.lock();
+            m.unlock();
+        }
+    };
+    if (inChild()) {
+        const scope = thread_role.fixture(.termio);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        Sites.isolatedOffTableSite(&m);
+        return;
+    }
+    try expectOffTable(@src(), .{ .function = "src/sync/isolated.zig:isolatedOffTableSite", .role = "termio" });
+}
+
+test "isolated: a child that acquires nothing leaves no dump, and its compare fails MISSING-DUMP (acceptance test 8)" {
+    if (inChild()) return;
+    var child = try run(@src(), .own);
+    defer child.deinit();
+    try expectExited(&child, @src());
+    var result = try compareChild(&child);
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.report.failures.items.len);
+    try testing.expect(result.report.hasLine("FAIL MISSING-DUMP isolated child: no child dump in its directory"));
+}
+
+test "isolated: a fixture scope entered on a thread that has a role panics with PN6 (acceptance test 15)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        const outer = thread_role.enter(.termio);
+        defer outer.exit();
+        const scope = thread_role.fixture(.ui);
+        scope.exit();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN6 a fixture scope for role ui entered on a thread whose role is termio");
+}
+
+test "isolated: a scope exited out of order panics with PN6 (acceptance test 15)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        const outer = thread_role.fixture(.ui);
+        const inner = thread_role.enter(.reader);
+        outer.exit();
+        inner.exit();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN6 a fixture scope exited out of order (its depth 1, the thread's 2)");
+}

@@ -28,6 +28,18 @@ pub const panic = if (build_config.exe_entrypoint == .ghostty)
 else
     std.debug.FullPanic(std.debug.defaultPanic);
 
+// The thread-role layer's isolated-child dispatch (sync/isolated.zig), which
+// must be the executable's first test: builtin.test_functions lists this root
+// file's tests first, in declaration order, so this one runs before any other
+// in a child the test exe starts, and as an unnamed test it survives every
+// -Dtest-filter, so a filtered child still dispatches instead of running its
+// parent's test again. Keep every other test below it.
+test {
+    if (build_config.exe_entrypoint == .ghostty) {
+        @import("sync/isolated.zig").runChildIfRequested();
+    }
+}
+
 // This only verifies the early child-mode hook; transport is covered by the
 // opt-in parent probe in pty_transport_probe.zig.
 test "ConPTY transport probe child dispatch only" {
