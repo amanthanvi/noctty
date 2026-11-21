@@ -396,7 +396,12 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         foreach ($required in @('scripts/dev-windows.cmd', 'scripts/interactive-win11-measure-lib.ps1')) {
             if (@($Plan.buildInputs) -cnotcontains $required) { $found.Add("the plan's buildInputs name $required, which the hosted build preparation reads") }
         }
-        foreach ($buildInput in @($Plan.buildInputs)) { if (-not (Test-Path -LiteralPath (Join-Path $repoRoot ([string]$buildInput).Replace('/', '\')) -PathType Leaf)) { $found.Add("build input $buildInput does not exist") } }
+        foreach ($buildInput in @($Plan.buildInputs)) {
+            # A canonical repo path (slashes, no `.` or `..` segment, no leading separator), the spelling the changed-path
+            # list uses, so the selection's ordinal lookup cannot miss it (CodeRabbit on #740).
+            if ([string]$buildInput -cnotmatch '\A(?!\.{1,2}/)[A-Za-z0-9_-][A-Za-z0-9_.-]*(/(?!\.{1,2}(/|\z))[A-Za-z0-9_.-]+)*\z') { $found.Add("build input $buildInput is a canonical repo path") }
+            elseif (-not (Test-Path -LiteralPath (Join-Path $repoRoot ([string]$buildInput).Replace('/', '\')) -PathType Leaf)) { $found.Add("build input $buildInput does not exist") }
+        }
         $ids = @($Plan.leaves | ForEach-Object { [string]$_.id })
         if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { $found.Add('the plan''s leaf ids are unique') }
         $steps = @($Scenario.steps | ForEach-Object { [string]$_.id })
@@ -417,6 +422,8 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         @{ Name = 'a leaf the scenario does not list'; Change = { param($p) $p.leaves[0].id = 'not-in-the-scenario' } }
         @{ Name = 'buildInputs without dev-windows.cmd'; Change = { param($p) $p.buildInputs = @($p.buildInputs | Where-Object { $_ -cne 'scripts/dev-windows.cmd' }) } }
         @{ Name = 'a missing leaf script'; Change = { param($p) $p.leaves[0].script = 'test/windows/no-such-leaf.ps1' } }
+        @{ Name = 'a build input spelled with ./'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('./scripts/dev-windows.cmd') } }
+        @{ Name = 'a build input spelled with a backslash'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts\dev-windows.cmd') } }
     )
     foreach ($control in $planControls) {
         $mutated = $planText | ConvertFrom-Json
