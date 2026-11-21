@@ -77,7 +77,8 @@ pub const Problem = enum {
     pdb_mismatch,
     /// DbgHelp did not load that PDB for the image.
     pdb_not_loaded,
-    /// No image of the dump's exe name in the images directory.
+    /// No image of the dump's exe name in the images directory, or one that
+    /// cannot be read.
     no_image,
 };
 
@@ -459,8 +460,10 @@ fn write(
             try w.print("?{s}:0x{x:0>16} {s}\n", .{ @tagName(p), pair.site, pair.role });
             continue;
         }
-        // The call instruction, in the session's copy of the image.
-        if (pair.site <= header.base or pair.site - header.base > header.size) {
+        // The call instruction, in the session's copy of the image: inside
+        // both the dump's image and the one the session loaded, which can
+        // differ in size (`openSelf` loads this process's own).
+        if (pair.site <= header.base or pair.site - header.base > @min(header.size, session.size)) {
             result.unresolved += 1;
             try w.print("?outside-image:0x{x:0>16} {s}\n", .{ pair.site, pair.role });
             continue;
@@ -494,7 +497,10 @@ pub fn runFromEnvironment() noreturn {
     std.process.exit(code);
 }
 
-fn envPath(a: Allocator, name: []const u8) !?[]u8 {
+/// An environment variable's path, null when it is unset: a path from the
+/// environment is drive-absolute or refused (error.NotDriveAbsolute), as
+/// the dump directory is (`dump.isDriveAbsolute`).
+pub fn envPath(a: Allocator, name: []const u8) !?[]u8 {
     const value = std.process.getEnvVarOwned(a, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
@@ -579,7 +585,8 @@ fn symboliseFile(a: Allocator, raw: []const u8, images_path: []const u8, root: [
     defer a.free(image_path);
     const image_w = try std.unicode.wtf8ToWtf16LeAllocZ(a, image_path);
     defer a.free(image_w);
-    const image_pdb = imagePdb(image_w) orelse return problemOnly(a, raw, .no_image);
+    const image_pdb = (imagePdb(image_w) catch return problemOnly(a, raw, .no_image)) orelse
+        return problemOnly(a, raw, .no_pdb);
     var session = Session.open(a, image_w, header.base, header.size) catch return problemOnly(a, raw, .no_image);
     defer session.close();
     return symbolise(a, raw, &session, image_pdb, root);
@@ -614,15 +621,17 @@ fn problemOnly(a: Allocator, raw: []const u8, problem: Problem) Allocator.Error!
 }
 
 /// An image file's own CodeView record, read from the file mapped as an
-/// image (nothing of it runs), or null if it cannot be read.
-fn imagePdb(path: [:0]const u16) ?dump.Pdb {
-    const handle = LoadLibraryExW(path.ptr, null, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE) orelse return null;
+/// image (nothing of it runs): null for an image with none (a stripped
+/// build), error.NoImage for a file that cannot be mapped or parsed.
+fn imagePdb(path: [:0]const u16) error{NoImage}!?dump.Pdb {
+    const handle = LoadLibraryExW(path.ptr, null, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE) orelse
+        return error.NoImage;
     defer _ = FreeLibrary(handle);
     // A data-file mapping's handle carries flags in its low bits.
     const base = @intFromPtr(handle) & ~@as(usize, 3);
     const head: [*]const u8 = @ptrFromInt(base);
-    const size = dump.sizeOfImage(head[0..0x1000]) catch return null;
-    const image = dump.parseImage(head[0..size]) catch return null;
+    const size = dump.sizeOfImage(head[0..0x1000]) catch return error.NoImage;
+    const image = dump.parseImage(head[0..size]) catch return error.NoImage;
     const pdb = image.pdb orelse return null;
     // The name points into the mapping, which closes here.
     return .{ .guid = pdb.guid, .age = pdb.age, .name = "" };
@@ -777,6 +786,18 @@ test "symbolise names each site shape's acquiring function in this file" {
     );
     try testing.expectEqualStrings("", lines.next().?);
 
+    // A dump that says its image is bigger than the one the session loaded:
+    // an address past the session's image is refused before DbgHelp sees it.
+    var bigger: std.Io.Writer.Allocating = .init(a);
+    defer bigger.deinit();
+    try bigger.writer.print("# kind=child pid=1 start=2 format=raw-1 exe=ghostty-test.exe base=0x{x:0>16} " ++
+        "size=0x{x:0>8} pdb_guid={s} pdb_age={d} pdb=ghostty-test.pdb\n", .{ own.base, own.size + 0x10000, &dump.formatGuid(pdb.guid), pdb.age });
+    try bigger.writer.writeAll(dump.formatPair(&line, own.base + own.size + 16, .ui, .lock));
+    const past = try symbolise(a, bigger.written(), &session, pdb, root);
+    defer past.deinit(a);
+    try testing.expectEqual(@as(usize, 1), past.unresolved);
+    try testing.expect(std.mem.endsWith(u8, past.text, try std.fmt.bufPrint(&line, "\n?outside-image:0x{x:0>16} ui\n", .{own.base + own.size + 16})));
+
     // Another build's dump: its pairs are refused, not named.
     var other = pdb;
     other.age +%= 1;
@@ -815,8 +836,8 @@ test "the image file's own CodeView record is this process's" {
     var buf: [32768]u16 = undefined;
     const n = windows.kernel32.GetModuleFileNameW(null, &buf, buf.len - 1);
     buf[n] = 0;
-    const file_pdb = imagePdb(buf[0..n :0]) orelse return error.TestUnexpectedResult;
+    const file_pdb = (try imagePdb(buf[0..n :0])) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(pdb.guid, file_pdb.guid);
     try testing.expectEqual(pdb.age, file_pdb.age);
-    try testing.expectEqual(@as(?dump.Pdb, null), imagePdb(std.unicode.utf8ToUtf16LeStringLiteral("C:\\no\\such\\image.exe")));
+    try testing.expectError(error.NoImage, imagePdb(std.unicode.utf8ToUtf16LeStringLiteral("C:\\no\\such\\image.exe")));
 }

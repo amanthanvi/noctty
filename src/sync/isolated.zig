@@ -39,10 +39,12 @@
 //!
 //! The child's dump is compared here, in the test exe (`compare.zig`), after
 //! `symbolise.zig` names its pairs against this exe's own PDB, with the
-//! reviewed table read at test time: `NOCTTY_THREAD_ROLE_TABLE` if set, else
+//! reviewed table read at test time: `NOCTTY_THREAD_ROLE_TABLE` if set (a
+//! drive-absolute path, screened as the dump directory is), else
 //! `ci/lock-inventory-threads.tsv` under this build's source root, which the
 //! PDB's own path for `symbolise.zig` gives, so it is found whatever the
-//! working directory (`tablePath`), in `compare.tree_scope`.
+//! working directory (`tablePathAlloc`), in `compare.tree_scope`, the one
+//! place that names the tree's scope.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -61,7 +63,8 @@ const Allocator = std.mem.Allocator;
 pub const child_env = "NOCTTY_THREAD_ROLE_ISOLATED";
 
 /// The variable that overrides where the in-process compare reads the
-/// reviewed table.
+/// reviewed table: a drive-absolute path, never a share, a device or a
+/// relative path (`dump.isDriveAbsolute`).
 pub const table_env = "NOCTTY_THREAD_ROLE_TABLE";
 
 /// The table's place under the source root (lead's 1A.2 decision 8).
@@ -451,14 +454,11 @@ pub const Compared = struct {
     }
 };
 
-/// Where the in-process compare reads the reviewed table.
+/// Where the in-process compare reads the reviewed table: `table_env`'s
+/// path, which must be drive-absolute (error.NotDriveAbsolute), else the
+/// table under the source root.
 pub fn tablePathAlloc(a: Allocator, session: *const symbolise.Session) ![]u8 {
-    if (std.process.getEnvVarOwned(a, table_env)) |path| {
-        return path;
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
-    }
+    if (try symbolise.envPath(a, table_env)) |path| return path;
     const root = try session.sourceRoot(a);
     defer a.free(root);
     return std.fs.path.join(a, &.{ root, table_path });
@@ -473,9 +473,10 @@ pub fn compareChild(child: *Child) !Compared {
     const aa = arena.allocator();
     const dir = if (child.dir) |*d| d else return error.IsolatedChildHasNoDumpDirectory;
 
-    var session = try symbolise.Session.openSelf(aa);
     const own_pdb = (dump.selfModule() orelse return error.NoModule).pdb;
     const root, const table = setup: {
+        // A session holds DbgHelp's lock until it closes, on every path.
+        var session = try symbolise.Session.openSelf(aa);
         defer session.close();
         const root = try session.sourceRoot(aa);
         const path = try tablePathAlloc(aa, &session);
@@ -550,6 +551,35 @@ test "a child's environment drops the progress pipe and the run's dump directory
     defer own.deinit();
     try testing.expectEqualStrings("C:\\child\\own", own.get(dump.env_var).?);
 }
+
+test "the table variable must name a drive-absolute path" {
+    const a = testing.allocator;
+    const name = std.unicode.utf8ToUtf16LeStringLiteral(table_env);
+    // A run may set it; it is put back as it was.
+    var saved_buf: [32768]u16 = undefined;
+    const saved_len = GetEnvironmentVariableW(name, &saved_buf, saved_buf.len);
+    if (saved_len >= saved_buf.len) return error.SkipZigTest;
+    saved_buf[saved_len] = 0;
+    defer _ = SetEnvironmentVariableW(name, if (saved_len == 0) null else saved_buf[0..saved_len :0].ptr);
+
+    for ([_][:0]const u16{
+        std.unicode.utf8ToUtf16LeStringLiteral("ci\\lock-inventory-threads.tsv"),
+        std.unicode.utf8ToUtf16LeStringLiteral("\\\\server\\share\\t.tsv"),
+        std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\C:\\t.tsv"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:t.tsv"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\t.tsv:stream"),
+    }) |value| {
+        try testing.expect(SetEnvironmentVariableW(name, value.ptr) != 0);
+        try testing.expectError(error.NotDriveAbsolute, symbolise.envPath(a, table_env));
+    }
+    try testing.expect(SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("C:\\ci\\t.tsv").ptr) != 0);
+    const path = (try symbolise.envPath(a, table_env)).?;
+    defer a.free(path);
+    try testing.expectEqualStrings("C:\\ci\\t.tsv", path);
+}
+
+extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buffer: [*]u16, size: u32) callconv(.winapi) u32;
+extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) windows.BOOL;
 
 test "the dispatch check reads the runner's header for test 0 and then the marker" {
     try testing.expect(dispatchedFirst("1/6800 main.test_0..." ++ dispatch_marker ++ "a.test.b\nthread 1 panic: x", "a.test.b"));
