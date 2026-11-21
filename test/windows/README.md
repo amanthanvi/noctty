@@ -727,8 +727,9 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, and the soak,
-`interactive-win11-soak.ps1`, for its desktop, job and driver launch); each dot-sources it and still runs on
+`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, the soak,
+`interactive-win11-soak.ps1`, for its desktop, job and driver launch, and `hidden-win11-working-set.ps1`
+for its desktop and guards); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
 explicit-desktop launches (`Launch` for the driver, `Spawn` for a case),
 `Invoke-LocalHiddenDriver` (the outer half: run the harness again as its driver
@@ -1328,6 +1329,149 @@ probe checks this before it creates anything.
   match). A driver record with any replacement
   leaves the verdicts that read it inconclusive.
 - Readbacks stay in `-Work`, and only their counts reach the record.
+
+## hidden-win11-working-set.ps1
+
+`PLAN.md` §3.5's working-set workloads: one portable copy of the
+receipt-bound measurement build on a private desktop runs one fixed workload,
+and the harness samples it through the handle it holds from `CreateProcess`.
+It launches only the measurement generation of `-MeasureRepo`
+(`Invoke-InteractiveWin11MeasureBuild`): `Assert-InteractiveWin11MeasureBuild`
+admits it and the copied `noctty.exe` and `noctty.com` must match the
+receipt's hashes, so a plain `zig-out` build is refused before anything
+starts. Each run is a fresh copy, private desktop, job and `LOCALAPPDATA`, one
+run at a time (a session-wide mutex refuses a second). The driver re-proves
+its isolation before it starts anything (a job; its own desktop, neither
+`Default` nor the input desktop; `LOCALAPPDATA`, `APPDATA`, `TEMP` and `TMP`
+inside the run; the staged copy, its marker, no `noctty.ico`, the harness's
+config and the receipt's bytes). Every process the harness creates directly
+names the private desktop, and the native launches refuse any other: a child
+only on the driver's own desktop, the driver never on the caller's, `Default`
+or the input desktop. The driver's re-admission runs git through the measure
+library, which names no desktop; per `CreateProcess` such a child inherits its
+parent's desktop, the driver's private one (read, not measured). The staged
+config must be byte for byte the harness's own for the run
+(`New-WorkingSetConfigText`), so an `initial-command` or a second `command`
+cannot change the first pane's shell, and only its settings take effect. The
+copy is launched with exactly the expected argument list (the launch
+helper's arguments, then the harness's, in order and nothing else), among
+them `--config-default-files=false` and `--config-file=<copy>\config.ghostty`:
+the final command line before the launch, and the copy's own command line by
+PID after it, must each split into exactly that list. noctty still reads its
+default config files, then discards their settings because default files are
+off (`Config.loadCliArgs`), so the settings in effect are the command line's
+and the `--config-file` file's; a staged copy holding a legacy
+`ghostty\config` or `winghostty\config.ghostty` is refused as well. The run's
+path appears in the config only as
+`working-directory`: F5 types `.\flood.cmd`, relative to the pane's working
+directory, so a `%USERNAME%`, `^` or `&` in the path never reaches cmd's
+parser. `NOCTTY_CONPTY` must be unset (both
+halves refuse it), the copy's `conpty.dll` and `OpenConsole.exe` must match
+the build's, and the record keeps the transport the copy's own log names
+(`using bundled ConPTY: <copy>\conpty.dll`); a run on any other transport
+fails. The copy starts through
+`Get-InteractiveWin11LaunchArguments` (its own class) after its build mode is
+checked through `+version`, with its config's
+`command = direct:<System32>\cmd.exe /D`, the clipboard denied, no
+`noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process on an
+unhandled exception, the driver and the copy at normal priority. The grid is
+read from the base pane's pseudoconsole before `start` and must be 140 x 43:
+on the measurement machine (144 DPI) the config's `window-width = 140` and
+`window-height = 45` give 43 rows, measured on the 0a build and on this
+harness's, so the harness pins that grid (`$script:GridRows`), not the
+configured 45. The flagship configured-size leaf
+(`interactive-win11-configured-size.ps1`) likewise accepts a configured size
+with a tolerance (its 140 x 45 needs at least 120 x 35).
+
+Each sample holds `private_bytes` (`PrivateUsage`, what Windows calls the
+process's commit charge), `working_set`, `peak_working_set`,
+`private_plus_shared_commit` (`PrivateUsage + SharedCommitUsage`), the pane
+count and whether it is the base pane alone, and the handle, GDI and USER
+counts (null when their query failed). A stage settles once the last 10
+samples, 500 ms apart, hold private bytes within 0.5% and working set within
+1% of their mean (range over mean); its value is its last sample. A stage
+that has not settled after 90 s, or that is not at the base pane alone, fails
+the run. The scrollback workloads' `block-<n>` entries are the exception, by
+design: one immediate sample each, right after its block, not settled and
+exempt from both checks (the comparison uses the settled `after`). The workloads, on the 140 x 43 grid, in blocks of 25,000 lines; a block
+counts once the batch file acknowledged it and the copy's window title shows
+`ws-block-<n>`, which the batch file sets after the block, so the pane parsed
+through its end:
+
+- `fixed`: one block, then 20 cycles of a new tab and its close; `after` 7 s
+  later (undo-timeout prunes closed panes after 5 s) and once the copy is back
+  to its base pane alone.
+- `scrollback-default`: 4 blocks at the default `scrollback-limit`
+  (10,000,000 bytes), about ten times what it retains at this width.
+- `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` holds at 1,120
+  bytes a row (about twice the limit, measured), with that limit. noctty has
+  no maximum; the default, 1 GiB, is the baseline's large scrollback point.
+  Settings' up-down stops at 2,147,483,647, which caps the parameter; that
+  value is not measured (a 2 GiB working set adds nothing the 1 GiB point's
+  growth does not show).
+- `uia-walk`: `scrollback-default`'s output, then a UIA client reads the
+  pane's whole `DocumentRange` and walks it line by line to its end, the pane
+  found from the copy's own window handle. It reads only what UIA exposes at
+  the bottom of the scrollback, 329 lines at 140 columns (measured), not a
+  scrolling walk of the whole scrollback: `accessibleHistoryRows` in
+  `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
+  history rows plus the viewport (285 + 43 rows here), and the window slides
+  only with a scrolled viewport (`snapshotDocumentWindow`), which this
+  workload never scrolls. The walk counts only when the document holds the
+  last block's last line and the walk counted the whole document: the history
+  rows, the viewport and the one line more a walk counts, 329 lines at
+  140 x 43 (`Get-ExpectedUiaLines`); a 285-line document, the history rows
+  alone, fails. Its `after`
+  stage is sampled with the UIA client still connected: about 20 more handles
+  than `start` in every Phase 0a run (595-599 against 575-579).
+- `session-capture`: `scrollback-default`'s output with
+  `window-save-state = always` and `window-save-state-scrollback = 10000`,
+  then 10 checkpoints, each a new tab and its close; a checkpoint counts only
+  when the copy's own `session-state.json` then holds a new snapshot of the
+  base pane with the fixture's lines, its `captured_at_unix_ms` later than
+  both the close (timed right before the close key) and the last snapshot
+  counted, so a display-change or deferred save from before the close does
+  not count, and only a snapshot of exactly the lines its budget gives
+  (`Get-ExpectedSessionLines`, 3,717 at 140 columns), so a halved slice from
+  the formatter's retry (1,858 lines) does not count either; the record keeps
+  each checkpoint's times and line counts. The
+  512 KiB snapshot budget pre-limits a capture to (budget - 96 bytes of
+  snapshot overhead) / (columns + 1) lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
+  reached at this width. This is the only workload that saves session state,
+  an exception to AGENTS.md's `--window-save-state=never`: the file stays in
+  the portable copy, and the real `session-state.json` is guarded.
+- `tab-churn`: 50 cycles of a new tab and its close.
+
+```powershell
+pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
+    -MeasureRepo <checkout with a measurement build> -Run <new dir> -Workload fixed
+```
+
+`-Run` is a new directory outside `-MeasureRepo`, or one git ignores there: a
+run directory inside the checkout would leave untracked files that the
+measurement build's provenance check refuses, so the harness refuses it
+before it creates anything.
+
+A later phase compares its working set with Phase 0a's by running the 0a
+measurement build and the new one interleaved, under the same harness
+version, one copy at a time on a quiet machine, and comparing each workload's
+median `after`; the stored 0a numbers are the reference level, not the
+comparison. Only completed runs count (the outer half checks each
+`workingset.json` with `Get-WorkingSetRecordProblems` before it says
+"complete") with the same `WorkloadSha256` (the workload, its scrollback limit
+and planned blocks, the constants, the output block, the flood batch file and
+the config) and grid, and both arms on the same transport and bundle: the
+bundled ConPTY, with the same `conpty.dll` and `OpenConsole.exe` digests in
+their records. One copy at a time, 9 Phase 0a copies' settled `start`
+levels had IQRs of 0.1-1.6 MiB and their `after` levels up to 2.7 MiB (7.5 MiB
+at the 1 GiB limit), with one unexplained low run, while copies run together
+differed by tens of MiB (test-harnesses.md, the 2026-11-20 WORKING-SET-01
+entry and trap 6 of the 2026-11-18 SOAK-01 entry). The real startup ledger,
+the product jump list and the clipboard sequence number go through the shared
+state guard (`scripts/interactive-win11-state-guard.ps1`), the PowerShell
+history through `scripts/windows-harness-history.ps1`, and the real
+`session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
+harness, its workload and its run-time checks.
 
 ## Style
 
