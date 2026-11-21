@@ -1589,7 +1589,10 @@ Two modes:
   can run back to back: the keyboard-probe worker (up to 2 s after its
   input) and then a trace request's message call (5 s) make about 7 s. So
   input the hooks cannot see reaches the copy for at most about 7 s, and only
-  if the copy stops answering; normally within 100 ms. Before the foreground
+  if the copy stops answering; normally until the next 100 ms poll or the end
+  of the step under way (up to about 1 s at the foreground step: its worker's
+  `WM_NULL` round trip and activation poll, which read only the hooks' event,
+  then the gate). Before the foreground
   step two more calls do not poll: the WMI read of the copy's command line
   right after its launch (`Get-CimInstance`, with no bound of its own) and
   the foreground's `WM_NULL` check before its worker (up to 5 s). Under the
@@ -1619,8 +1622,8 @@ Two modes:
   poll (the copy's launch, a 2 s load reading). Each run records the delay
   from that observation until job accounting shows no active process and
   `StopOwnedJob` has closed the job's handle (its return; `LatchToKillMs` in
-  `guards.json` and `latch_to_kill_ms` in `pacing.json`, from
-  QueryPerformanceCounter). The driver's own process handle can signal a
+  `guards.json` only, from QueryPerformanceCounter: it is guard telemetry, and
+  `pacing.json` carries no duration of a voided series). The driver's own process handle can signal a
   millisecond or so later; its threads have already ended.
   This bound and the per-poll gate apply to input the hooks see; input they
   cannot see is bounded by the driver's tick checks (above). Real input the
@@ -1670,8 +1673,8 @@ Two modes:
   | --- | --- | --- |
   | A launch on `Default` (the driver, `+version`, the copy, the grid probe) | the event, then the tick | A process starts. The copy's window may show, but its own activation is subject to the foreground lock (below); the copy is closed as soon as the outer half observes the input. |
   | The unlock (`SendInput`, `MOUSEEVENTF_MOVE`, dx = dy = 0) | the event, on the worker | None visible: no motion, no button, no key. The session's last-input tick moves. |
-  | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd until the outer half closes the copy on observing the input, or the gate's next poll stops the run, within 100 ms, whichever comes first. |
-  | The keyboard probe (`SendInput`, VK_NONAME down and up) | the copy in front, the tick, then the event, on the worker | If the user clicked elsewhere inside the gap, their app gets an unassigned key down and up, which has no binding and no character. |
+  | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd. Input the hooks see: until the outer half closes the copy on observing it. Input they cannot see: until the driver's next tick check, up to about 1 s here (the worker's `WM_NULL` round trip and activation poll, then the gate), and at most the per-step bounds above (about 7 s back to back) if the copy stops answering. |
+  | The keyboard probe (`SendInput`, VK_NONAME down and up) | the copy in front, the tick, then the event, on the worker | If the user clicked elsewhere inside the gap, their app gets a key down and up for VK_NONAME, an unassigned key with no character. It is measured harmless only for cmd (the dry run); another application could act on any key-down, for example dismiss a press-any-key prompt. That is why the probe goes only to the copy, once it is in front, behind the gate and the worker's checks. |
   | F5, F6 and the dry run's VK_NONAME (`WM_KEYDOWN`/`WM_KEYUP` posted) | the event, then the tick | The key reaches the copy's own window only, never the user's application. |
 
 - What the foreground lock covers, and what it does not. noctty's own first
@@ -1741,11 +1744,19 @@ still at the series' baseline (`TickMovedFromBaseline` false), whose every
 run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
 higher), and the console says no measurement was published. A series that
-input voided writes no timing statistic at all: each group's `p95_ms` and
-`median_ms` and each run's `p95_ms` in `pacing.json` are null too, and its
-`Inconclusive` names what voided it (the hooks' count, a tick that moved or
-could not be read, or a watch that did not stop). Each run's own `run.json`
-keeps its evidence for debugging. The series ends
+input voided writes no timing statistic and no other duration: each group's
+`p95_ms` and `median_ms` and each run's `p95_ms` in `pacing.json` are null
+too, and its `Inconclusive` names what voided it (the hook count, with "tick
+also moved (may be the same input)" when the tick moved too, since one input
+can do both; a tick that moved or could not be read; a watch that did not
+stop; or the runs that saw input). Input seen is a latch for the series:
+every read sets it (a hook count above 0, any tick mismatch at a driver gate,
+a poll, the outer half's checks or the final read, an unread tick, a watch
+that did not stop), each run carries its own to the series, and nothing
+clears it, so a later read that returns the expected tick (`GetLastInputInfo`
+is not incremental) never undoes an earlier mismatch; a poll that reads a
+mismatch stops the step at once and never reads again. Each run's own
+`run.json` keeps its evidence for debugging. The series ends
 in this order: every run has ended and its job, with its copy, is closed;
 the watch stops, which unhooks; the final real-input count and the tick are
 read; then the summary. Input after the unhook reaches no copy. A visible

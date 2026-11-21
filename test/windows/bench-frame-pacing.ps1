@@ -45,18 +45,18 @@ Two modes.
           and the copy then ends at the driver's next tick check: every driver wait polls at 100 ms, and what does
           not poll is bounded per step (a trace request's message call up to 5 s if the copy stops answering, the
           display reading up to 2 s, the bounded foreground and probe workers up to 5 s; about 7 s for two back to
-          back). A series voided by input writes no timing statistic at all. A tick that moved by a run's end,
-          or by the series' end, voids it like hook-seen input; the series reads its final input after the watch
-          stops. The input gate (Test-FramePacingInputGate) reads
+          back). A series voided by input writes no timing statistic and no other duration. A tick that moved by a
+          run's end, or by the series' end, voids it like hook-seen input; the series reads its final input after the
+          watch stops. The input gate (Test-FramePacingInputGate) reads
           that event first and the session's last-input tick second, right before each launch on Default (the
           visible driver's too),
           the unlock, the copy in front, the keyboard probe, each workload key and the measured window, and at each
           100 ms poll of every wait; on real input nothing further starts, takes the foreground or sends input, and
           the copy is ended, by the driver at its next poll or by the outer half, which waits on the hooks' latch and
           the driver together and closes the run's job the moment it observes the latch, with no grace (immediately
-          on observation, plus OS scheduling latency; LatchToKillMs records the observation-to-close delay). Real
-          input at any point in a series makes the series inconclusive and publishes nothing, whatever a driver's
-          own exit says. The copy takes the foreground through a bounded call: a zero-motion mouse input unlocks it,
+          on observation, plus OS scheduling latency; guards.json's LatchToKillMs records the delay). Input seen at
+          any point in a series, by the hooks or the tick at any read, latches: the series is inconclusive and
+          publishes nothing, whatever a driver's exit or a later matching read says. The copy takes the foreground through a bounded call: a zero-motion mouse input unlocks it,
           never an Alt tap (PROBE-ALT-TAP-01), then one SetForegroundWindow, with no AttachThreadInput fallback, no
           BringWindowToTop and no keyboard-state reset; the native worker checks the event right before its input and
           its foreground call, waits for the activation before it reports a refusal, and runs joined within 5 s, a
@@ -1386,10 +1386,24 @@ function Test-FramePacingInputGate($Port, $Ticks, [string] $Before) {
     $now = [long]$Port.LastInputTick()
     $expected = if ($null -ne $Ticks.Unlock) { $Ticks.Unlock } else { $Ticks.Series }
     $Ticks.Checks.Add([ordered]@{ before = $Before; real = $real; tick = $now })
-    if ($real) { return "real (non-injected) keyboard or mouse input came before $Before" }
-    if ($null -eq $expected -or [long]$expected -lt 0) { return "the run has no expected input tick before $Before" }
-    if ($now -ne [long]$expected) { return "the session had input before $Before" }
+    # Any break latches (the lead and Sol on #741, round 8): Broken is set and nothing clears it, so the run and the
+    # series stay voided even if a later read returns the expected tick (GetLastInputInfo is not incremental).
+    if ($real) { $Ticks.Broken = $true; return "real (non-injected) keyboard or mouse input came before $Before" }
+    if ($null -eq $expected -or [long]$expected -lt 0) { $Ticks.Broken = $true; return "the run has no expected input tick before $Before" }
+    if ($now -ne [long]$expected) { $Ticks.Broken = $true; return "the session had input before $Before" }
     return $null
+}
+# A poll's read of the gate (the lead and Sol on #741, round 8): one read of the watch and the tick; a mismatch is
+# recorded, latched and stops the step at once, never read again and accepted. Only a break is recorded, so the
+# 100 ms polls add no entry to the record while the session stays quiet.
+function Assert-FramePacingPollGate($Port, $Ticks, [string] $During) {
+    $real = [bool]$Port.RealInputSeen()
+    $now = [long]$Port.LastInputTick()
+    $expected = if ($null -ne $Ticks.Unlock) { $Ticks.Unlock } else { $Ticks.Series }
+    if (-not $real -and $null -ne $expected -and [long]$expected -ge 0 -and $now -eq [long]$expected) { return }
+    $Ticks.Checks.Add([ordered]@{ before = $During; real = $real; tick = $now })
+    $Ticks.Broken = $true
+    throw "INCONCLUSIVE: $(if ($real) { 'real (non-injected) keyboard or mouse input came' } else { "the session's input tick moved ($expected to $now)" }) during $During."
 }
 function Assert-FramePacingInputGate($Port, $Ticks, [string] $Before) {
     $break = Test-FramePacingInputGate $Port $Ticks $Before
@@ -1402,6 +1416,7 @@ function Invoke-FramePacingForeground($Port, $Ticks, [IntPtr] $HostWindow, [int]
     Assert-FramePacingInputGate $Port $Ticks 'the harness''s unlock'
     $result = $Port.Foreground($HostWindow, $NocttyPid, $script:ForegroundBoundMs, [long]$Ticks.Series)
     if ([long]$result.UnlockTick -ge 0) { $Ticks.Unlock = [long]$result.UnlockTick }
+    if ([string]$result.Outcome -match '^(real-)?input-') { $Ticks.Broken = $true }
     # A mouse hook that never saw the harness's own marked unlock may have been removed (Windows drops a low-level
     # hook that times out, silently), and then nothing sees a returning user's mouse: the run is refused outright,
     # never measured and never merely inconclusive (CodeRabbit and the lead on #741).
@@ -1415,6 +1430,7 @@ function Invoke-FramePacingKeyProbe($Port, $Ticks, [IntPtr] $HostWindow, [int] $
     Assert-FramePacingInputGate $Port $Ticks 'the keyboard probe'
     $result = $Port.KeyProbe($HostWindow, $NocttyPid, $script:ForegroundBoundMs, [long]$Ticks.Unlock)
     if ([long]$result.ProbeTick -ge 0) { $Ticks.Unlock = [long]$result.ProbeTick }
+    if ([string]$result.Outcome -match '^(real-)?input-') { $Ticks.Broken = $true }
     if ([string]::Equals([string]$result.Outcome, 'key-probe-not-seen-by-hook', [StringComparison]::Ordinal)) { throw $script:KeyHookMissed }
     return [string]$result.Outcome
 }
@@ -1539,7 +1555,7 @@ function Invoke-FramePacingDriver {
         LaunchConfigDefaultFiles = $null; LaunchConfigFile = $null; Transport = $null; Renderer = $null
         ConptyDllSHA256 = $null; PrefixConptyDllSHA256 = $null; OpenConsoleSHA256 = $null; PrefixOpenConsoleSHA256 = $null; EffectiveDirs = $null
         VisibleRefusal = $null; Composition = $null; NotificationState = $null; Cloaked = $null; Foreground = $null; ForegroundHeld = $null; FocusHeld = $null
-        InputDuringRun = $null; InputBreak = $null; InputTicks = [ordered]@{ Series = $QuietSinceTick; Unlock = $null; Checks = [Collections.Generic.List[object]]::new() }
+        InputDuringRun = $null; InputBreak = $null; InputTicks = [ordered]@{ Series = $QuietSinceTick; Unlock = $null; Broken = $false; Checks = [Collections.Generic.List[object]]::new() }
         BusyPercentBefore = $null; BusyPercentAtArm = $null; BusyPercentAfter = $null; QuietWaitMs = 0; ProcessorGroups = $null; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null
         DisplayPowerBefore = $null; DisplayPowerAfter = $null; SnapshotsInWindow = $null; PresentAfterDoneMs = $null
         ScreenSaverBeforeUnlock = $null; ScreenSaverAtArm = $null; ForegroundLockTimeoutMs = $null; ForegroundLockTimeoutAtLaunchMs = $null; ForegroundLockNeededMs = $ForegroundLockNeededMs; ForegroundBeforeLaunch = $null; ForegroundBeforeUnlock = $null; ForegroundTakenFromNone = $false
@@ -1640,8 +1656,7 @@ function Invoke-FramePacingDriver {
         # check only when one shows input, which then stops the run at once and the catch ends the copy.
         function Assert-QuietPoll([string] $During) {
             if (-not $Visible) { return }
-            $expected = if ($null -ne $record.InputTicks.Unlock) { $record.InputTicks.Unlock } else { $record.InputTicks.Series }
-            if ($port.RealInputSeen() -or [long]$port.LastInputTick() -ne [long]$expected) { Assert-Quiet $During }
+            Assert-FramePacingPollGate $port $record.InputTicks $During
         }
         # A wait with the gate read at each 100 ms of it (the lead and Sol on #741, round 6: input the hooks cannot see
         # moves only the tick, so every wait reads it): a sleep, a process's end (true when it ended within $Ms), and
@@ -2096,7 +2111,7 @@ function Invoke-FramePacingOuter {
             # one marked key, which the keyboard hook must have.
             if ($Visible) {
                 $silence = Get-FramePacingHookSilence $result.Record $mouseBefore ([FramePacingNative]::MarkedMouseInputs()) $keyBefore ([FramePacingNative]::MarkedKeyInputs()) ([FramePacingNative]::RealInputs())
-                if ($silence) { $result = [pscustomobject]@{ Run = $result.Run; Status = (Get-FramePacingSilencedStatus $result.Status $silence); Failures = @(@($result.Failures) + $silence.Line); Record = $result.Record; LatchToKillMs = $result.LatchToKillMs } }
+                if ($silence) { $result = [pscustomobject]@{ Run = $result.Run; Status = (Get-FramePacingSilencedStatus $result.Status $silence); Failures = @(@($result.Failures) + $silence.Line); Record = $result.Record; InputSeen = $result.InputSeen } }
             }
             $results.Add($result)
             if ($Visible -and $null -ne $result.Record -and $null -ne $result.Record.InputTicks -and $null -ne $result.Record.InputTicks.Unlock) { $quietSince = [long]$result.Record.InputTicks.Unlock }
@@ -2192,6 +2207,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     $pi = $null; $job = [IntPtr]::Zero; $driverExit = $null; $cleanup = $null; $outerError = $null; $ownedProcesses = $null; $notLaunched = $null; $inputStopped = $null
     $state = -1; $latchToKillMs = $null; $observed = [long]0
+    $outerTicks = [ordered]@{ Series = $QuietSince; Unlock = $null; Broken = $false; Checks = [Collections.Generic.List[object]]::new() }
     $frequency = [FramePacingNative]::PerformanceFrequency()
     Write-Host "frame-pacing run: $(if ($Visible) { 'visible' } else { 'dry run' }); evidence=$Run"
     try {
@@ -2207,14 +2223,15 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         # came back while the run was staged gets nothing started on Default.
         if ($Visible -and $stagingClock.ElapsedMilliseconds -gt $script:StagingBoundMs) { $notLaunched = "the run's staging and guard setup took $($stagingClock.ElapsedMilliseconds) ms, over the $($script:StagingBoundMs) ms the foreground-lock bound allows" }
         if ($Visible -and -not $notLaunched) {
-            $notLaunched = Test-FramePacingInputGate (New-FramePacingOuterPort) ([ordered]@{ Series = $QuietSince; Unlock = $null; Checks = [Collections.Generic.List[object]]::new() }) 'the visible driver''s launch'
+            $notLaunched = Test-FramePacingInputGate (New-FramePacingOuterPort) $outerTicks 'the visible driver''s launch'
         }
         if ($notLaunched) { throw "INCONCLUSIVE: $notLaunched." }
         $pi = [FramePacingNative]::LaunchDriver($pwsh, $line, $Run, "WinSta0\$desktopName", $job, [bool]$Visible)
         # The driver runs in this run's own job (Sol on #741), checked again from this side.
         if (-not [FramePacingNative]::InJobOf($pi.process, $job)) { [FramePacingNative]::Terminate($pi.process, 1); throw 'The driver is not in the run''s own job.' }
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
-        $deadline = [DateTime]::UtcNow.AddMilliseconds($script:DriverDeadlineMs)
+        # The deadline on a monotonic clock (CodeRabbit on #741): a wall clock stepped back would stretch it.
+        $driverClock = [Diagnostics.Stopwatch]::StartNew()
         while ($true) {
             [long]$observed = 0; [long]$closed = 0
             $state = [FramePacingNative]::SuperviseDriver($pi.process, $job, 1000, [ref]$observed, [ref]$closed)
@@ -2230,7 +2247,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
             }
             if ($state -eq 0) { break }
             if ($state -ne 0x102) { throw 'The wait on the driver failed.' }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'The driver ran past 30 minutes; the owned job was closed.' }
+            if ($driverClock.ElapsedMilliseconds -ge $script:DriverDeadlineMs) { throw 'The driver ran past 30 minutes; the owned job was closed.' }
         }
         [uint32]$code = 0
         if (-not [HiddenLocal]::GetExitCodeProcess($pi.process, [ref]$code)) { throw 'The driver exit code could not be read.' }
@@ -2245,7 +2262,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     }
     # Real input stops the run whatever the driver's exit says (the lead on #741, round 5): the latch seen during the
     # run, or input the hooks counted by now, after the driver ended.
-    $inputStopped = Get-FramePacingSupervisionStop $state $(if ($Visible) { [FramePacingNative]::RealInputs() } else { [long]0 }) $latchToKillMs
+    $inputStopped = Get-FramePacingSupervisionStop $state $(if ($Visible) { [FramePacingNative]::RealInputs() } else { [long]0 })
     $sessionAfter = Get-Metadata $sessionPath
     $stateFailure = $null
     try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $stateFailure = $_.Exception.Message }
@@ -2300,18 +2317,30 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     $driverError = if ($null -ne $record -and $record.Error) { [string]$record.Error } else { $null }
     $status = Get-FramePacingRunStatus @($guardFailures) @($outerFailures) $driverExit $driverError @($problems)
     $stop = if ($notLaunched) { "the visible driver was not launched: $notLaunched" } elseif ($inputStopped) { $inputStopped } else { $null }
-    $stopFailure = Get-FramePacingInputStop $guardFailures $outerFailures $outerError $stop (Test-FramePacingHookMissed $driverError)
+    $stopFailure = Get-FramePacingInputStop $guardFailures $outerFailures $(if ($notLaunched) { $outerError } else { $null }) $stop (Test-FramePacingHookMissed $driverError)
     if ($stopFailure) { $status = 'inconclusive'; $outerFailures = @($stopFailure); $problems = @() }
-    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $outerFailures + $problems); Record = $record; LatchToKillMs = $latchToKillMs }
+    # The run's own input latch, which the series ORs with its final reads (the lead and Sol on #741, round 8).
+    $inputSeen = Test-FramePacingRunInput ([bool]$inputStopped -or [bool]$outerTicks.Broken) $record
+    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $outerFailures + $problems); Record = $record; InputSeen = $inputSeen }
+}
+
+# Whether a run saw input (the lead and Sol on #741, round 8): the outer half's own stop or gate break, or any break
+# the driver latched in its record (InputTicks.Broken: a gate, a poll or a native worker that saw input). A later
+# read that matched never clears it. Pure, so the contract tables it.
+function Test-FramePacingRunInput([bool] $OuterSaw, $Record) {
+    if ($OuterSaw) { return $true }
+    if ($null -eq $Record -or $null -eq $Record.PSObject.Properties['InputTicks'] -or $null -eq $Record.InputTicks) { return $false }
+    $broken = $Record.InputTicks.PSObject.Properties['Broken']
+    return $null -ne $broken -and [bool]$broken.Value
 }
 
 # Why the outer half stops a run for real input, or null (the lead on #741, round 5). $State is SuperviseDriver's last
-# result: 1 the latch seen and the run's job closed at once (the delay from that observation to the close is said),
+# result: 1 the latch seen and the run's job closed at once (the delay goes to guards.json only, Sol on #741, round 8),
 # 2 the latch seen and the close failed. Otherwise any real input the hooks counted in the series by the time the
 # driver's end was read stops the run too, whatever the driver's exit says: a driver that ended cleanly after the
 # user came back publishes nothing. Pure, so the contract tables it.
-function Get-FramePacingSupervisionStop([int] $State, [long] $RealInputs, $LatchToKillMs) {
-    if ($State -eq 1) { return "real (non-injected) keyboard or mouse input came during the run; the outer half closed the run's job $LatchToKillMs ms after it observed the input" }
+function Get-FramePacingSupervisionStop([int] $State, [long] $RealInputs) {
+    if ($State -eq 1) { return "real (non-injected) keyboard or mouse input came during the run; the outer half closed the run's job when it observed the input (guards.json records the delay)" }
     if ($State -eq 2) { return "real (non-injected) keyboard or mouse input came during the run, and closing the run's job failed" }
     if ($RealInputs -ne 0) { return "real (non-injected) keyboard or mouse input came during the series ($RealInputs events) by the time this run's driver ended; the run stops whatever the driver's exit says" }
     return $null
@@ -2345,6 +2374,9 @@ function Read-FramePacingRunRecord([string] $Path) {
 function Get-FramePacingHookSilence($Record, [long] $MouseBefore, [long] $MouseAfter, [long] $KeyBefore, [long] $KeyAfter, [long] $RealInputs) {
     if ($null -eq $Record) { return $null }
     $field = { param([string] $Name) $property = $Record.PSObject.Properties[$Name]; if ($null -ne $property) { [string]$property.Value } else { '' } }
+    # A driver that refused the run because a hook missed its marked input has already failed it with that reason
+    # (Opus on #741, round 8): no second line calls the run inconclusive or the sent probe "not sent".
+    if (Test-FramePacingHookMissed (& $field 'Error')) { return $null }
     $foregroundTaken = [string]::Equals((& $field 'Foreground'), 'ok', [StringComparison]::Ordinal)
     $probed = [string]::Equals((& $field 'KeyProbe'), 'ok', [StringComparison]::Ordinal)
     if ($foregroundTaken -and $MouseAfter -le $MouseBefore) { return [pscustomobject]@{ Removed = $true; Line = "the input watch's mouse hook did not count the run's own marked unlock (count $MouseBefore, then $MouseAfter), so it may have been removed; the series stops" } }
@@ -2372,11 +2404,13 @@ function Get-FramePacingSilencedStatus([string] $Status, $Silence) {
 # (CodeRabbit on #741): a tripped guard still wins, and an outer failure beside it, such as an owned-job cleanup that
 # failed, keeps the run failed with that failure on record. So does a driver that refused the run because a hook
 # missed the harness's own marked input ($HookMissed, Greptile on #741): input after that is no reason to call a
-# possibly removed hook inconclusive. Returns the run's one failure line, or null when Get-FramePacingRunStatus's
-# status stands. Pure, so the contract tables it.
-function Get-FramePacingInputStop([string[]] $GuardFailures, [string[]] $OuterFailures, [string] $OuterError, [string] $Stop, [bool] $HookMissed) {
+# possibly removed hook inconclusive. The one outer failure that may stand beside a stop is the deliberate no-launch
+# refusal ($NoLaunchRefusal, the outer half's own INCONCLUSIVE throw before any launch): any other outer error, such as
+# the driver's deadline, keeps the run failed even when input came during its cleanup (CodeRabbit on #741). Returns
+# the run's one failure line, or null when Get-FramePacingRunStatus's status stands. Pure, so the contract tables it.
+function Get-FramePacingInputStop([string[]] $GuardFailures, [string[]] $OuterFailures, [string] $NoLaunchRefusal, [string] $Stop, [bool] $HookMissed) {
     if (-not $Stop -or $HookMissed -or @($GuardFailures).Count -gt 0) { return $null }
-    if (@($OuterFailures | Where-Object { -not [string]::Equals($_, $OuterError, [StringComparison]::Ordinal) }).Count -gt 0) { return $null }
+    if (@($OuterFailures | Where-Object { -not [string]::Equals($_, $NoLaunchRefusal, [StringComparison]::Ordinal) }).Count -gt 0) { return $null }
     return "inconclusive: $Stop"
 }
 
@@ -2448,7 +2482,10 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     $series = Get-FramePacingSeries @($completed | ForEach-Object { $_.Record })
     # Real input at any point in a visible series (the lead on #741, round 5) makes it inconclusive and publishes
     # nothing, whatever each run's status says; a count that was not read counts as input.
-    $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved)
+    # Each run's own latch counts too (the lead and Sol on #741, round 8): input any run saw stays seen, whatever the
+    # final reads say.
+    $inputRuns = @($Results | Where-Object { $null -ne $_.PSObject.Properties['InputSeen'] -and [bool]$_.InputSeen } | ForEach-Object { Split-Path -Leaf $_.Run })
+    $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved -or $inputRuns.Count -gt 0)
     # Nor does it write any other timing statistic (Sol on #741, round 7): each group's p95 and median, and each run's
     # p95, are null too. The runs' own run.json keep their evidence.
     if ($inputSeen) { foreach ($group in @($series.Groups)) { $group.p95_ms = $null; $group.median_ms = $null } }
@@ -2463,7 +2500,7 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
         frame_time_p95_ms = $(if ($publish) { $series.P95 } else { $null })
         frame_time_median_ms = $(if ($publish) { $series.Median } else { $null })
         dry_run_p95_ms = $(if (-not $Visible -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
-        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record -and -not $inputSeen) { $_.Record.P95Ms } else { $null }); latch_to_kill_ms = $(if ($_.PSObject.Properties['LatchToKillMs']) { $_.LatchToKillMs } else { $null }) } })
+        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record -and -not $inputSeen) { $_.Record.P95Ms } else { $null }) } })
     }
     if (@($series.MixedBuild).Count -gt 0) { $summary.Error = "the completed runs differ in $(@($series.MixedBuild) -join ', ')" }
     $inconclusive = @()
@@ -2471,10 +2508,15 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     if ($inputSeen) {
         # What voided it, by observation (Sol on #741, round 7).
         $voids = @()
+        $counted = $null -ne $RealInputs -and [long]$RealInputs -ne 0
         if ($null -eq $RealInputs) { $voids += 'the input watch did not stop, so its count could not be read' }
-        elseif ([long]$RealInputs -ne 0) { $voids += "the hooks counted $RealInputs real (non-injected) keyboard or mouse input events" }
+        elseif ($counted) { $voids += "hook count $RealInputs" }
+        # One input can move both the count and the tick, and the harness has no event identity to tell them apart
+        # (Sol on #741, round 8), so a tick beside a count is not claimed as a second source.
         if ($TickUnread) { $voids += 'the session''s last-input tick could not be read' }
-        elseif ($TickMoved) { $voids += 'the session''s last-input tick left the series'' baseline (input the hooks did not count as real)' }
+        elseif ($TickMoved -and $counted) { $voids += 'tick also moved (may be the same input)' }
+        elseif ($TickMoved) { $voids += 'the session''s last-input tick left the series'' baseline with no input the hooks counted as real' }
+        if ($inputRuns.Count -gt 0) { $voids += "input seen during $($inputRuns -join ', ')" }
         $inconclusive += "input voided the series: $($voids -join '; '); no measurement and no timing statistic is published"
     }
     if ($inconclusive.Count -gt 0) { $summary.Inconclusive = $inconclusive -join '; ' }

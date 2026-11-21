@@ -2517,12 +2517,16 @@ test "win32 VK_NONAME, the frame-pacing keyboard probe, writes no character to t
     };
     for (cases) |case| {
         // The key message as dispatchKeyMessage builds it: without Win32 input records while 9001 is off, with them
-        // while it is on.
-        const plain = keyMessage(case.msg, 0xFC, case.lParam, false, null, false, false).?;
-        const recorded = keyMessage(case.msg, 0xFC, case.lParam, false, null, true, false).?;
-        for ([_]Win32KeyMessage{ plain, recorded }) |message| {
+        // while it is on, its translated text bound as dispatch binds it (CodeRabbit on #741: an unbound message
+        // reads the empty placeholder, which would hide a printable character in VK_NONAME's translated text).
+        var plain = keyMessage(case.msg, 0xFC, case.lParam, false, null, false, false).?;
+        plain.bindText();
+        var recorded = keyMessage(case.msg, 0xFC, case.lParam, false, null, true, false).?;
+        recorded.bindText();
+        for ([_]*const Win32KeyMessage{ &plain, &recorded }) |message| {
             try std.testing.expectEqual(case.action, message.event.action);
             try std.testing.expectEqual(input.Key.unidentified, message.event.key);
+            try std.testing.expectEqual(@as(usize, 0), message.text_len);
             try std.testing.expectEqualStrings("", message.event.utf8);
             try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
         }
