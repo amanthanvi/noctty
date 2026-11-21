@@ -81,9 +81,10 @@ function Get-InteractiveWin11HostedArgumentRefusal {
     return $null
 }
 
-# The launcher's per-launch check: null when `FilePath` may start, else why not (design §4.2 "Each launch, cheaply").
+# The launcher's per-launch check: null when `FilePath` may start with `ArgumentList`, else why not (design §4.2
+# "Each launch, cheaply"). -FileOnly checks the staged file alone, for the existence check before any launch.
 function Get-InteractiveWin11HostedLaunchRefusal {
-    param([Parameter(Mandatory)] [string] $FilePath, [AllowEmptyCollection()] [string[]] $ArgumentList = @())
+    param([Parameter(Mandatory)] [string] $FilePath, [AllowEmptyCollection()] [string[]] $ArgumentList = @(), [switch] $FileOnly)
 
     if (-not $env:NOCTTY_GUI_HIDDEN_DESKTOP) { return 'not in hosted mode' }
     if ($env:NOCTTY_INTERACTIVE_MEASURE_AUMID -ne '1') { return 'measurement mode not set' }
@@ -96,6 +97,7 @@ function Get-InteractiveWin11HostedLaunchRefusal {
     if ([IO.File]::Exists((Join-Path $dir 'noctty.ico'))) { return 'carries noctty.ico' }
     $now = [InteractiveWin11HostedLaunch]::Identity($full)
     if (-not $now -or -not [string]::Equals($now, $match[0].Identity, [StringComparison]::Ordinal)) { return 'changed since staging' }
+    if ($FileOnly) { return $null }
     $argumentRefusal = Get-InteractiveWin11HostedArgumentRefusal -Arguments $ArgumentList -Token $script:InteractiveWin11HostedRunToken
     if ($argumentRefusal) { return $argumentRefusal }
     return $null
@@ -1103,7 +1105,7 @@ function Assert-InteractiveWin11ExeExists {
 
     if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
         # The runner validated the raw generation; this is the per-launch check on the staged copy.
-        $refusal = Get-InteractiveWin11HostedLaunchRefusal -FilePath $ExePath
+        $refusal = Get-InteractiveWin11HostedLaunchRefusal -FilePath $ExePath -FileOnly
         if ($refusal) { throw "gui-hidden: the staged copy is refused: $refusal." }
     }
     elseif (Test-InteractiveWin11MeasureMode) {

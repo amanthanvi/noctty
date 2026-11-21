@@ -122,6 +122,9 @@ try {
     $guiAppArgs = @('--single-instance=false', "--class=noctty-interactive-x-$guiToken")
     if (Get-InteractiveWin11HostedLaunchRefusal -FilePath $guiApp -ArgumentList $guiAppArgs) { throw 'The launcher refused the genuine staged app.' }
     if (Get-InteractiveWin11HostedLaunchRefusal -FilePath $guiCli -ArgumentList @('+version')) { throw 'The launcher refused the genuine staged CLI.' }
+    # The existence check before any launch checks the file alone (the first local run of round 1 refused every leaf there).
+    if (Get-InteractiveWin11HostedLaunchRefusal -FilePath $guiApp -FileOnly) { throw 'The existence check refused the genuine staged app.' }
+    if (-not (Get-InteractiveWin11HostedLaunchRefusal -FilePath $guiApp)) { throw 'The launch check admitted an app launch with no arguments.' }
     $guiRefusals = [ordered]@{}
     $guiRefusals['another binary'] = Get-InteractiveWin11HostedLaunchRefusal -FilePath (Join-Path $guiScratch 'staged.json') -ArgumentList $guiAppArgs
     # H1 on #740: an app launch without an explicit single-instance policy, a class without this run's token, and an
