@@ -630,22 +630,9 @@ pub const StreamHandler = struct {
                 }
             },
 
-            .glyph => |*glyph_req| {
-                const resp = self.terminal.glyphProtocol(self.alloc, glyph_req);
-                switch (glyph_req.*) {
-                    .register, .clear => try self.queueRender(),
-                    .support, .query => {},
-                }
-
-                if (resp) |r| {
-                    var buf: [terminal.apc.glyph.Response.max_wire_bytes]u8 = undefined;
-                    var writer: std.Io.Writer = .fixed(&buf);
-                    try r.formatWire(&writer);
-                    const final = writer.buffered();
-                    log.debug("glyph protocol response: {x}", .{final});
-                    self.messageWriter(try termio.Message.writeReq(self.alloc, final));
-                }
-            },
+            // Noctty does not implement the glyph protocol. Discard the
+            // command without executing it or sending a reply.
+            .glyph => {},
         }
     }
 
@@ -2977,4 +2964,19 @@ test "a cancelled or aborted Kitty graphics APC runs nothing" {
     // The same command ended by ST stores the image.
     h.stream.nextSlice("\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AAAA\x1b\\");
     try std.testing.expect(storage.imageById(7) != null);
+}
+
+test "glyph APC gets no reply from the app stream handler" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    // A well-formed glyph query would elicit a reply if dispatched.
+    h.stream.nextSlice("\x1b_25a1;q;cp=E0A0\x1b\\");
+    try std.testing.expect(h.termio_mailbox.spsc.queue.pop() == null);
+
+    // A supported request still reaches the same reply queue.
+    h.stream.nextSlice("\x1b[?6n");
+    try expectIssue149Write(&h.termio_mailbox, "\x1b[?1;1;1R");
 }
