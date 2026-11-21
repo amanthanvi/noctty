@@ -1739,6 +1739,31 @@ test "render update retries a full redraw after OOM" {
     try testing.expectEqual(.full, state.dirty);
 }
 
+test "render update retries rows after OOM" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("x");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+    state.dirty = .false;
+    stream.nextSlice("e\xcc\x81");
+
+    // The next render-state allocation is the grapheme copy.
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, state.update(failing.allocator(), &t));
+    try state.update(alloc, &t);
+
+    const cells = state.row_data.items(.cells)[0].slice();
+    try testing.expectEqualSlices(u21, &.{0x301}, cells.items(.grapheme)[1]);
+}
+
 test "cursor state in viewport" {
     const testing = std.testing;
     const alloc = testing.allocator;
