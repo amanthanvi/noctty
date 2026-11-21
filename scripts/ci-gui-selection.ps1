@@ -11,7 +11,8 @@ that classifier, and test.yml's ten outputs stay what they were: only gui-hidden
 The GUI list is computed, never kept by hand: the closure (scripts/ci-script-closure.ps1) of the runner and of every
 leaf in test/windows/gui-hidden-plan.json, plus the plan, the flagship scenario, the workflow, the helper self-test
 it runs, this script, the walker, the fixtures, the suite's contract fragment and the plan's `buildInputs` (what the
-hosted build preparation reads through edges no walk shows, such as scripts/dev-windows.cmd). On a pull request it
+hosted build preparation and the runner read through edges no walk shows, such as scripts/dev-windows.cmd, the
+ConPTY manifest, and the ConPTY stager with its two libraries). On a pull request it
 is walked over the head tree, the base tip and every merge base of the two, so a member a change deletes or renames
 away still counts: the changed paths are a three-dot diff, from the merge base, which can describe a member neither
 tip has.

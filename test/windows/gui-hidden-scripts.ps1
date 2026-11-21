@@ -566,8 +566,9 @@ foreach ($form in @(
         'Start-Process pwsh -ArgumentList ''-NoProfile -File x.ps1'''
         'Start-Process pwsh -ArgumentList "-NoProfile -File $PSScriptRoot\child.ps1"'
         'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', ''Bypass'', ''-Command'', $testCommand'
-        # Greptile on #740: the element allowlist refuses every other shape: a parenthesized string, a `$( )`, a
-        # concatenation, a -join, a method call, an index, a nested array, and a parenthesized path.
+        # Greptile on #740 (round 9), against the element allowlist round 10 removed: a parenthesized string, a `$( )`,
+        # a concatenation, a -join, a method call, an index, a nested array and a parenthesized path. Each is refused
+        # now as a Start-Process of PowerShell.
         'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', (''Bypass -Command . C:\fixture\child.ps1'')'
         'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', $(''Bypass -Command x'')'
         'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', (''Bypass'' + '' -Command x'')'
@@ -577,8 +578,8 @@ foreach ($form in @(
         'Start-Process pwsh -ArgumentList ''-NoProfile'', @(''-ExecutionPolicy'', ''Bypass -Command x'')'
         'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1'')'
         'Start-Process pwsh -ArgumentList (''-NoProfile'' + '' -File x.ps1'')'
-        # Sol on #740 (round 10), CodeRabbit: a variable element outside -File's value is accepted only as one known
-        # value with no whitespace or quote, not shaped as a parameter.
+        # Sol on #740 (round 10), CodeRabbit: variable elements, which the removed allowlist accepted as one known
+        # value; refused now as a Start-Process of PowerShell.
         '$a = ''Bypass -Command x''; Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', $a'
         'param($Policy) Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', $Policy'
         '$c = ''-Command''; Start-Process pwsh -ArgumentList ''-NoProfile'', $c, ''Get-Date'''
@@ -761,6 +762,12 @@ foreach ($member in $list) {
 }
 foreach ($member in $real.Members) { Assert-True ($list -ccontains $member) "The GUI list must hold closure member $member." }
 foreach ($buildInput in @($plan.buildInputs)) { Assert-True ($list -ccontains (ConvertTo-CiRepoPath ([string]$buildInput))) "The GUI list must hold build input $buildInput." }
+# Named here, not read from the plan, so dropping one from buildInputs fails (Sol on #740, round 11): the ConPTY
+# manifest the runner reads (Get-GuiHiddenConptyPins), and the stager and its two libraries the measurement build runs
+# (src/build/ConptyRedist.zig). Each would also select through Get-CiPathNeeds' zig, so the list is checked directly.
+foreach ($buildInput in @('dist/windows/conpty-redist.json', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1')) {
+    Assert-True ($list -ccontains $buildInput) "The GUI list must hold the build input $buildInput."
+}
 
 # Singletons, independent of the computed list (which cannot show its own omissions): each keeps its own
 # Get-CiPathNeeds result, so test.yml's flags stay what they were, and each selects the suite.
