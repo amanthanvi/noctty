@@ -112,13 +112,16 @@ jobs:
         timeout-minutes: 75
         run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo $env:GITHUB_WORKSPACE -Work (Join-Path $env:RUNNER_TEMP 'gui-hidden-work') -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden') -Build
 
-      # A failed helper self-test stops the job before the suite step, which would leave the upload empty: publish
-      # an error result instead, so the artifact still records the failure (the runner's -PublishError writes only
-      # allowlisted values, and the job still fails).
-      - name: Publish an error result for a failed self-test
-        if: failure() && steps.selftest.outcome == 'failure'
+      # A job that failed without a result (a failed helper self-test, which stops the job before the suite step, or a
+      # suite step that died before it wrote one) would leave the upload empty: publish an error result instead. The
+      # runner's -PublishError loads nothing first, writes only allowlisted values, and leaves a result that already
+      # stands alone; the job still fails.
+      - name: Publish an error result when the job failed without one
+        if: failure()
         shell: pwsh
-        run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError helper-self-test -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
+        env:
+          SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
+        run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError $(if ($env:SELFTEST_OUTCOME -ceq 'failure') { 'helper-self-test' } else { 'suite-no-result' }) -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
 
       # The result and the receipts only (design v7 §4.5's allowlist): no log directory, screen
       # capture, process listing, path, command line or environment value.

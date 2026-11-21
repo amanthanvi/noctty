@@ -84,13 +84,14 @@ $guiHiddenProblems = & {
         }
         # A failed self-test still leaves a record: the next step publishes an error result for it, between the suite
         # step and the upload (the lead on #740: the first hosted failure uploaded nothing).
-        $publish = & $findStep $suite 'Publish an error result for a failed self-test' 'suite'
-        $publishAt = $suite.IndexOf('      - name: Publish an error result for a failed self-test', [StringComparison]::Ordinal)
+        $publish = & $findStep $suite 'Publish an error result when the job failed without one' 'suite'
+        $publishAt = $suite.IndexOf('      - name: Publish an error result when the job failed without one', [StringComparison]::Ordinal)
         $uploadAt = $suite.IndexOf('      - name: Upload the suite''s result and receipts', [StringComparison]::Ordinal)
-        if ($null -eq $publish -or $publish -notmatch "(?m)^        if: failure\(\) && steps\.selftest\.outcome == 'failure'\s*$" -or $publish -notmatch '(?m)^        shell: pwsh\s*$' -or
-            $publish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -PublishError helper-self-test -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
+        if ($null -eq $publish -or $publish -notmatch '(?m)^        if: failure\(\)\s*$' -or $publish -notmatch '(?m)^        shell: pwsh\s*$' -or
+            $publish -notmatch '(?m)^          SELFTEST_OUTCOME: \$\{\{ steps\.selftest\.outcome \}\}\s*$' -or
+            $publish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -PublishError \$\(if \(\$env:SELFTEST_OUTCOME -ceq ''failure''\) \{ ''helper-self-test'' \} else \{ ''suite-no-result'' \}\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
             $publish -match '(?m)^        continue-on-error:' -or $publishAt -lt $runnerAt -or $uploadAt -lt $publishAt) {
-            $found.Add('gui-hidden.yml: after the suite step and before the upload, a failed self-test publishes an error result through the runner''s -PublishError')
+            $found.Add('gui-hidden.yml: after the suite step and before the upload, a job that failed without a result publishes one through the runner''s -PublishError')
         }
         $run = Get-YamlStepBlock -Content $suite -Name 'Hidden-desktop GUI suite' -Source 'gui-hidden.yml :: suite'
         if ($run -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -MeasureRepo \$env:GITHUB_WORKSPACE -Work \(Join-Path \$env:RUNNER_TEMP ''gui-hidden-work''\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\) -Build\s*$' -or
@@ -150,9 +151,10 @@ $guiHiddenProblems = & {
         @{ Name = 'the helper self-test limited to pushes'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        if: github.event_name == 'push'`n" }
         @{ Name = 'the helper self-test allowed to fail'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        continue-on-error: true`n" }
         @{ Name = 'the self-test without the id the error step reads'; Old = "        id: selftest`n"; New = '' }
-        @{ Name = 'no error result for a failed self-test'; Old = "      - name: Publish an error result for a failed self-test`n"; New = "      - name: Publish nothing`n" }
-        @{ Name = 'the error result published on every run'; Old = "        if: failure() && steps.selftest.outcome == 'failure'`n"; New = "        if: always()`n" }
-        @{ Name = 'the error result published from cmd, which does not run its Join-Path'; Old = "        if: failure() && steps.selftest.outcome == 'failure'`n        shell: pwsh`n"; New = "        if: failure() && steps.selftest.outcome == 'failure'`n        shell: cmd`n" }
+        @{ Name = 'no error result for a job that failed without one'; Old = "      - name: Publish an error result when the job failed without one`n"; New = "      - name: Publish nothing`n" }
+        @{ Name = 'the error result published on every run'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: always()`n" }
+        @{ Name = 'the error result published only for a failed self-test (a suite that died without a result left none)'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure() && steps.selftest.outcome == 'failure'`n" }
+        @{ Name = 'the error result published from cmd, which does not run its Join-Path'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n        shell: pwsh`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure()`n        shell: cmd`n" }
     )
     $lfWorkflow = $workflowText.Replace("`r`n", "`n")
     # A validator returns its problems as one array object (`return , $found.ToArray()`), so a mutation's count is

@@ -302,7 +302,8 @@ if (-not ('GuiHiddenRunnerNative' -as [type])) {
 $guiRunnerSource = (Get-CommandParameterArgument -Command @(Get-NamedCommands -Ast $guiRunnerAst -Name 'Add-Type')[0] -Name 'TypeDefinition').Value
 Assert-GuiContractLayout $guiRunnerAst $guiRunnerSource 'GuiHiddenRunnerNative' '$script:GuiHiddenNativeLayout' 'public uint volumeSerial, sizeHigh, sizeLow,' 'public uint volumeSerial, sizeLow, sizeHigh,'
 foreach ($name in @('Get-GuiHiddenHash', 'Get-GuiHiddenBaseConfig', 'New-GuiHiddenCopy', 'Get-GuiHiddenProcessVerdict', 'ConvertTo-GuiHiddenRecordValue',
-        'Write-GuiHiddenRecord', 'Get-GuiHiddenReparsePointCount', 'Test-GuiHiddenLeafReceipt', 'Get-GuiHiddenConfigPolicy')) {
+        'Write-GuiHiddenRecord', 'Get-GuiHiddenReparsePointCount', 'Test-GuiHiddenLeafReceipt', 'Get-GuiHiddenConfigPolicy',
+        'Get-GuiHiddenConptyPins', 'Open-GuiHiddenHeldConpty', 'Get-GuiHiddenBuildBinding', 'Get-GuiHiddenRendererObserved', 'ConvertTo-GuiHiddenStartupFacts')) {
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst $name)))
 }
 foreach ($name in @('Get-InteractiveWin11HostedPolicyConfig', 'Get-InteractiveWin11HostedArgumentRefusal')) {
@@ -350,6 +351,63 @@ try {
         try { New-GuiHiddenCopy -Bin $bin -Copy (Join-Path $guiScratch "copy-without-$missing") -Build $guiBuild } catch { $threw = $true }
         if (-not $threw) { throw "Staging accepted a generation without its $missing." }
     }
+
+    # ---- (5b) the ConPTY pair (Sol H on #740). The binding takes the pair only when it is the package's pinned bytes, so a
+    # prefix whose helper was already replaced when the run bound to it is refused (Sol's measured case); the copy's
+    # pair is then held open with read sharing only, hashed through those handles, and nothing can write, rename or
+    # delete it until the handles are released; a file someone holds for writing cannot be held and refuses the run.
+    $guiPins = Get-GuiHiddenConptyPins
+    if ($guiPins.conptyDllSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $guiPins.openConsoleSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'The package record must pin both ConPTY files.' }
+    $guiReceiptPath = Join-Path $guiScratch 'build.json'
+    [IO.File]::WriteAllText($guiReceiptPath, ([ordered]@{ Head = ('c' * 40); ExeSHA256 = $guiBuild.exeSha256; CliSHA256 = $guiBuild.cliSha256 } | ConvertTo-Json))
+    $guiSyntheticPins = [ordered]@{ conptyDllSha256 = $guiBuild.conptyDllSha256; openConsoleSha256 = $guiBuild.openConsoleSha256 }
+    $guiBound = Get-GuiHiddenBuildBinding $guiReceiptPath $guiBin $guiSyntheticPins
+    if (-not [string]::Equals($guiBound.conptyDllSha256, $guiBuild.conptyDllSha256, [StringComparison]::Ordinal)) { throw 'The binding refused a prefix whose ConPTY pair is the pinned bytes.' }
+    $threw = $false
+    try { [void](Get-GuiHiddenBuildBinding $guiReceiptPath $guiBin $guiPins) } catch { $threw = $true }
+    if (-not $threw) { throw 'The binding accepted a prefix whose ConPTY pair is not the package''s pinned bytes (already replaced when the run bound to it).' }
+    $guiHeld = Open-GuiHiddenHeldConpty -Copy $guiGood -Build $guiBuild
+    try {
+        foreach ($attempt in @(
+                @{ Name = 'a write'; Act = { [IO.File]::WriteAllText((Join-Path $guiGood 'conpty.dll'), 'replaced') } }
+                @{ Name = 'a rename'; Act = { [IO.File]::Move((Join-Path $guiGood 'OpenConsole.exe'), (Join-Path $guiGood 'OpenConsole.old')) } }
+                @{ Name = 'a delete'; Act = { [IO.File]::Delete((Join-Path $guiGood 'conpty.dll')) } }
+            )) {
+            $threw = $false
+            try { & $attempt.Act } catch { $threw = $true }
+            if (-not $threw) { throw "A held ConPTY file allowed $($attempt.Name)." }
+        }
+        # Reading stays allowed: the copy's own load opens the file to read and execute.
+        [void][IO.File]::ReadAllBytes((Join-Path $guiGood 'conpty.dll'))
+    }
+    finally { foreach ($stream in $guiHeld) { $stream.Dispose() } }
+    [IO.File]::WriteAllText((Join-Path $guiGood 'conpty.dll'), 'replaced after release')
+    $threw = $false
+    try { [void](Open-GuiHiddenHeldConpty -Copy $guiGood -Build $guiBuild) } catch { $threw = $true }
+    if (-not $threw) { throw 'The hold accepted a replaced conpty.dll.' }
+    $guiWriter = [IO.File]::Open((Join-Path $guiGood 'OpenConsole.exe'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    try {
+        [IO.File]::WriteAllText((Join-Path $guiGood 'conpty.dll'), [IO.File]::ReadAllText((Join-Path $guiBin 'conpty.dll')))
+        $threw = $false
+        try { [void](Open-GuiHiddenHeldConpty -Copy $guiGood -Build $guiBuild) } catch { $threw = $true }
+        if (-not $threw) { throw 'The hold accepted a ConPTY file another handle holds for writing.' }
+    }
+    finally { $guiWriter.Dispose() }
+
+    # ---- (5c) the renderer that initialized, read from the leaf's noctty logs (Sol on #740), and the startup facts.
+    foreach ($case in @(
+            @{ Logs = @('debug(opengl): loaded OpenGL 4.6'); Want = 'opengl' }
+            @{ Logs = @('loaded OpenGL 1.1', 'warning: OpenGL startup failed err=x could_not_start=true; trying the Direct3D 11 beta'); Want = 'd3d11+opengl' }
+            @{ Logs = @('warning: OpenGL startup failed err=x could_not_start=true; trying the Direct3D 11 beta'); Want = 'd3d11' }
+            @{ Logs = @('warning: OpenGL startup failed err=x could_not_start=true; trying the Direct3D 11 beta warning: d3d11 startup failed err=y'); Want = 'unknown' }
+            @{ Logs = @('info: a CLI log with no renderer'); Want = '' }
+        )) {
+        $observed = (@(Get-GuiHiddenRendererObserved $case.Logs) -join '+')
+        if ($observed -cne $case.Want) { throw "The renderer read-back gave '$observed', not '$($case.Want)'." }
+    }
+    $guiFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $true; Hash = ('a' * 64); Modified = '2026-11-21T05:06:57.1234567Z' }
+    $guiNoFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $false }
+    if (-not $guiFacts.exists -or $guiFacts.sha256 -cne ('a' * 64) -or $guiNoFacts.exists -or $null -ne $guiNoFacts.sha256) { throw 'The startup facts misread a fingerprint.' }
 
     # ---- (6) reparse points: one junction under a root is counted, none is not.
     $guiPlain = Join-Path $guiScratch 'plain'
@@ -471,9 +529,18 @@ try {
     $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-PublishError', 'helper-self-test', '-Out', $guiLoneOut)
     $guiLonePublished = $(if (Test-Path -LiteralPath (Join-Path $guiLoneOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiLoneOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
     if ($guiCode -ne 2 -or $null -eq $guiLonePublished -or $guiLonePublished.status -cne 'error') { throw '-PublishError must publish without the libraries or the plan it would otherwise load.' }
-    # The suite itself cannot run there: the same runner without -PublishError fails before any result.
-    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'lone-work'), '-Out', (Join-Path $guiScratch 'out-lone-suite'))
-    if ($guiCode -eq 0) { throw 'The lone runner control is void: the suite initialized without its libraries.' }
+    # The suite itself cannot initialize there, and still leaves an error result (Sol on #740: a runner whose own
+    # libraries were missing exited 1 and wrote nothing).
+    $guiLoneSuiteOut = Join-Path $guiScratch 'out-lone-suite'
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'lone-work'), '-Out', $guiLoneSuiteOut)
+    $guiLoneSuite = $(if (Test-Path -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
+    if ($guiCode -ne 2 -or $null -eq $guiLoneSuite -or $guiLoneSuite.status -cne 'error' -or [string]$guiLoneSuite.failure.message -cne 'exit 2 (runner-init)') {
+        throw 'A runner that cannot initialize must exit 2 with an error result (runner-init).'
+    }
+    # A second publish into an -Out that already holds a result changes nothing and exits 0.
+    $guiResultBefore = Get-FileHash -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json') -Algorithm SHA256
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-PublishError', 'suite-no-result', '-Out', $guiLoneSuiteOut)
+    if ($guiCode -ne 0 -or (Get-FileHash -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json') -Algorithm SHA256).Hash -cne $guiResultBefore.Hash) { throw '-PublishError must leave a result that already stands alone.' }
     $guiAsciiOut = Join-Path $guiScratch 'out-ascii'
     $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch ('work-caf' + [char]0xE9)), '-Out', $guiAsciiOut)
     if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }
