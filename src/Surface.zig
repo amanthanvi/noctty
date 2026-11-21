@@ -6178,7 +6178,7 @@ pub fn mouseButtonCallback(
 
 /// Requires the renderer state mutex is held.
 fn maybePromptClick(self: *Surface) !bool {
-    assertHeld(self.renderer_state.mutex);
+    self.renderer_state.mutex.assertHeld();
     const t: *terminal.Terminal = self.renderer_state.terminal;
     const screen: *terminal.Screen = t.screens.active;
 
@@ -6370,7 +6370,7 @@ test "Surface: the release of a press reported to a program is not a prompt clic
 /// copy-on-select off.
 const TestMouseSurface = struct {
     alloc: Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: rendererpkg.StateMutex,
     config: configpkg.Config,
     derived: DerivedConfig,
     rt_app: *apprt.runtime.App,
@@ -6886,17 +6886,6 @@ fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
     return final;
 }
 
-/// Asserts in a Debug build that the calling thread holds `mutex`, the
-/// check behind a "requires the renderer state mutex held" precondition.
-/// `std.Thread.Mutex` has no owner query, but its Debug implementation
-/// records the thread that locked it, which this reads; other builds check
-/// nothing. A renderer state mutex that tracks its own owner replaces this
-/// with its own `assertHeld()`.
-fn assertHeld(mutex: *const std.Thread.Mutex) void {
-    if (comptime !@hasField(@TypeOf(mutex.impl), "locking_thread")) return;
-    assert(mutex.impl.locking_thread.load(.unordered) == std.Thread.getCurrentId());
-}
-
 /// A link's target, copied out of the terminal by `linkAtLocked` for
 /// `processLinks` to open once the renderer state mutex is released.
 const OpenLink = struct {
@@ -6914,7 +6903,7 @@ const OpenLink = struct {
 ///
 /// Requires the renderer state mutex held.
 fn linkAtLocked(self: *Surface, pos: apprt.CursorPos) !?OpenLink {
-    assertHeld(self.renderer_state.mutex);
+    self.renderer_state.mutex.assertHeld();
     const link = try self.linkAtPos(pos) orelse return null;
     const target: [:0]const u8 = switch (link.action) {
         .open => try self.io.terminal.screens.active.selectionString(self.alloc, .{
