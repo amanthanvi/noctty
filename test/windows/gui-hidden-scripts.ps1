@@ -196,6 +196,36 @@ $deletedList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $headReader -BaseRe
 Assert-True ($deletedList -ccontains $undoPath) 'A leaf the change deletes must stay in the GUI list through the base tree.'
 Assert-True (Get-CiGuiSelection -ChangedPaths @($undoPath) -GuiList $deletedList) 'Deleting a closure member must select the suite.'
 
+# A prior tree's reader whose undo script also loads a helper that tree alone has. Each helper path is one
+# Get-CiPathNeeds calls `none`, so only the GUI list can select it.
+$undoText = & $workingReader $undoPath
+function New-PriorTreeReader([string] $Helper) {
+    # GetNewClosure keeps this function's own variables, so the script's are copied in first.
+    $target = $undoPath; $text = $undoText + "`n. (Join-Path `$PSScriptRoot '$(Split-Path -Leaf $Helper)')`n"; $inner = $workingReader
+    return {
+        param([string] $RepoPath)
+        if ($RepoPath -ceq $target) { return $text }
+        if ($RepoPath -ceq $Helper) { return '1' }
+        return & $inner $RepoPath
+    }.GetNewClosure()
+}
+# A dependency only a merge base reaches (Sol on #740): main and the pull request both dropped it after the fork, so
+# neither tip has it, while the three-dot diff, which runs from the merge base, lists its deletion.
+$mergeBaseOnly = 'test/windows/interactive-win11-merge-base-only-fixture.ps1'
+Assert-True ((Get-CiPathNeeds $mergeBaseOnly) -ceq 'none') "$mergeBaseOnly must stay a path Get-CiPathNeeds calls none, or the next checks prove nothing."
+$tipsList = Get-CiGuiList -RepoRoot $repoRoot -BaseReader $workingReader
+Assert-True (-not (Get-CiGuiSelection -ChangedPaths @($mergeBaseOnly) -GuiList $tipsList)) 'The merge-base helper must not select the suite from the two tips alone (the next check''s control).'
+$mergeBaseList = Get-CiGuiList -RepoRoot $repoRoot -BaseReader @($workingReader, (New-PriorTreeReader $mergeBaseOnly))
+Assert-True (Get-CiGuiSelection -ChangedPaths @($mergeBaseOnly) -GuiList $mergeBaseList) 'A change to a dependency only a merge base reaches must select the suite.'
+# The pull request's prior trees: the base tip and every merge base with the head, full names, each once.
+$headCommit = [string](& git -C $repoRoot rev-parse --verify HEAD)
+$global:LASTEXITCODE = 0
+$priorRefs = Get-CiGuiPriorRefs -RepoRoot $repoRoot -Base 'HEAD' -Head 'HEAD'
+Assert-True ($priorRefs.Count -eq 1 -and $priorRefs[0] -ceq $headCommit) "The prior trees of HEAD...HEAD must be HEAD's commit once; got [$($priorRefs -join ', ')]."
+$threw = $false
+try { $null = Get-CiGuiPriorRefs -RepoRoot $repoRoot -Base "no-such-ref-$([guid]::NewGuid().ToString('N'))" -Head 'HEAD' } catch { $threw = $true }
+Assert-True $threw 'A base that names no commit must fail the prior trees (the selection then runs the suite).'
+
 # The git tree reader: $null means the tree has no such file, and only that (CodeRabbit on #740). A ref that names no
 # tree, and a file the tree lists that git cannot read, throw, so the selection runs the suite rather than reading a
 # failed read of the base plan as a base without one.

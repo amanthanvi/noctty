@@ -12,7 +12,8 @@ The GUI list is computed, never kept by hand: the closure (scripts/ci-script-clo
 leaf in test/windows/gui-hidden-plan.json, plus the plan, the flagship scenario, the workflow, this script, the
 walker, the fixtures, the suite's contract fragment and the plan's `buildInputs` (what the hosted build preparation
 reads through edges no walk shows, such as scripts/dev-windows.cmd). On a pull request it is walked over the head
-tree and over the base tree, so a member a change deletes or renames away still counts.
+tree, the base tip and every merge base of the two, so a member a change deletes or renames away still counts: the
+changed paths are a three-dot diff, from the merge base, which can describe a member neither tip has.
 
 Push, schedule and manual runs need the suite. So do an empty diff, blank lines only, an unreadable diff and any
 failure to compute the list: deciding is an optimisation, and failing to decide runs the suite.
@@ -64,23 +65,47 @@ function Get-CiGuiPlan {
     return $plan
 }
 
+function Get-CiGuiPriorRefs {
+    <#
+    .SYNOPSIS
+    The prior trees a pull request's list walks, as full commit names, each once: the base tip and every merge base
+    of the base and the head. The changed paths are the three-dot diff (Get-CiChangedPaths), so they run from the
+    merge base, and a member that main and the pull request both removed after the fork is described by that tree
+    alone (Sol on #740); the base tip keeps a member main added since. Throws when git cannot answer.
+    #>
+    param([Parameter(Mandatory)] [string] $RepoRoot, [Parameter(Mandatory)] [string] $Base, [Parameter(Mandatory)] [string] $Head)
+    $tip = @(& git -C $RepoRoot rev-parse --verify --quiet "$Base^{commit}" 2>$null)
+    $tipCode = $LASTEXITCODE
+    $bases = @(& git -C $RepoRoot merge-base --all $Base $Head 2>$null)
+    $basesCode = $LASTEXITCODE
+    # A handled failure must not leave Actions' implicit `exit $LASTEXITCODE` failing the step (PKG-65).
+    $global:LASTEXITCODE = 0
+    if ($tipCode -ne 0 -or $tip.Count -ne 1) { throw "$Base does not name a commit." }
+    if ($basesCode -ne 0 -or $bases.Count -eq 0) { throw "git merge-base $Base $Head failed with exit code $basesCode." }
+    $refs = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in ($tip + $bases)) { if (-not $refs.Contains([string]$name)) { $refs.Add([string]$name) } }
+    return , $refs.ToArray()
+}
+
 function Get-CiGuiList {
     <#
     .SYNOPSIS
-    The computed GUI list: repo-relative paths, sorted. With -BaseRef, the union of the head tree (the working tree)
-    and that ref's tree. Throws when a walk fails, so the caller can run the suite. -HeadReader and -BaseReader
-    (param([string] $RepoPath) returning text or $null) replace the two trees, for the tests.
+    The computed GUI list: repo-relative paths, sorted. The union over the head tree (the working tree) and each
+    prior tree: each -BaseRef's tree (Get-CiGuiPriorRefs names them for a pull request) and each -BaseReader. Throws
+    when a read or a walk fails, so the caller can run the suite. -HeadReader and -BaseReader (param([string]
+    $RepoPath) returning text or $null) replace trees, for the tests.
     #>
     param(
         [Parameter(Mandatory)] [string] $RepoRoot,
-        [string] $BaseRef,
+        [string[]] $BaseRef,
         [scriptblock] $HeadReader,
-        [scriptblock] $BaseReader
+        [scriptblock[]] $BaseReader
     )
     $list = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     foreach ($member in $script:CiGuiFixedMembers) { [void]$list.Add($member) }
-    $trees = @(@{ Ref = $null; Reader = $HeadReader })
-    if (-not [string]::IsNullOrWhiteSpace($BaseRef) -or $BaseReader) { $trees += @{ Ref = $BaseRef; Reader = $BaseReader } }
+    $trees = @(@{ Ref = $null; Reader = $HeadReader; Where = 'in the head tree' })
+    foreach ($ref in @($BaseRef | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) { $trees += @{ Ref = $ref; Reader = $null; Where = "in the base tree $ref" } }
+    foreach ($reader in @($BaseReader | Where-Object { $null -ne $_ })) { $trees += @{ Ref = $null; Reader = $reader; Where = 'in a prior tree' } }
     $plans = @()
     foreach ($tree in $trees) {
         if (-not $tree.Reader) { $tree.Reader = New-CiScriptFileReader -RepoRoot $RepoRoot -Ref $tree.Ref }
@@ -100,10 +125,7 @@ function Get-CiGuiList {
         $present = @($entries | Where-Object { $null -ne (& $tree.Reader $_) })
         if ($present.Count -eq 0) { continue }
         $closure = Get-ScriptClosure -RepoRoot $RepoRoot -Entries $present -Reader $tree.Reader
-        if ($closure.Problems.Count -gt 0) {
-            $where = $(if ([object]::ReferenceEquals($tree, $trees[0])) { 'in the head tree' } else { "in the base tree $($tree.Ref)" })
-            throw "The GUI closure walk failed $where`: $($closure.Problems -join '; ')"
-        }
+        if ($closure.Problems.Count -gt 0) { throw "The GUI closure walk failed $($tree.Where): $($closure.Problems -join '; ')" }
         foreach ($member in $closure.Members) { [void]$list.Add($member) }
     }
     foreach ($entry in $entries) { [void]$list.Add($entry) }
@@ -139,7 +161,8 @@ $gui = $true
 $reason = "event '$EventName' runs the suite"
 try {
     if ($script:CiGuiArguments.PathsGiven) {
-        $list = Get-CiGuiList -RepoRoot $repoRoot -BaseRef $BaseSha
+        $priorRefs = $(if (-not [string]::IsNullOrWhiteSpace($BaseSha) -and -not [string]::IsNullOrWhiteSpace($HeadSha)) { Get-CiGuiPriorRefs -RepoRoot $repoRoot -Base $BaseSha -Head $HeadSha } else { @($BaseSha) })
+        $list = Get-CiGuiList -RepoRoot $repoRoot -BaseRef $priorRefs
         $gui = Get-CiGuiSelection -ChangedPaths $Paths -GuiList $list
         $reason = "$(@($Paths).Count) listed path(s)"
     }
@@ -148,9 +171,10 @@ try {
             throw 'A pull request run needs -BaseSha and -HeadSha.'
         }
         $changed = Get-CiChangedPaths -Base $BaseSha -Head $HeadSha
-        $list = Get-CiGuiList -RepoRoot $repoRoot -BaseRef $BaseSha
+        $priorRefs = Get-CiGuiPriorRefs -RepoRoot $repoRoot -Base $BaseSha -Head $HeadSha
+        $list = Get-CiGuiList -RepoRoot $repoRoot -BaseRef $priorRefs
         $gui = Get-CiGuiSelection -ChangedPaths $changed -GuiList $list
-        $reason = "$($changed.Count) changed path(s) in $BaseSha...$HeadSha, $($list.Count) GUI path(s)"
+        $reason = "$($changed.Count) changed path(s) in $BaseSha...$HeadSha, $($list.Count) GUI path(s) over the head and $($priorRefs.Count) prior tree(s)"
         $summaryLines = @('### Hidden-desktop GUI suite', '', "gui=$($gui.ToString().ToLowerInvariant()) ($reason).", '')
         if ($changed.Count -le 40) {
             $summaryLines += $changed | ForEach-Object {
