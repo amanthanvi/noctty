@@ -244,11 +244,13 @@ $guiHiddenProblems = & {
         return , $found.ToArray()
     }
 
-    # The module contract over a tree: the closure of $Entries, read through $Reader. Returns its problems.
+    # The module contract over a tree: the closure of $Entries, read through $Reader. Returns its problems, the walk's
+    # own first: a helper it could not resolve or find was never scanned, whatever the members say (CodeRabbit on #740).
     function Get-GuiHiddenModuleProblems {
         param([string[]] $Entries, [scriptblock] $Reader, [string] $Module, [string] $Root = $repoRoot, [switch] $RequireModuleInClosure)
         $found = [System.Collections.Generic.List[string]]::new()
         $closure = Get-ScriptClosure -RepoRoot $Root -Entries $Entries -Reader $Reader
+        foreach ($problem in $closure.Problems) { $found.Add("the closure walk: $problem") }
         $members = @($closure.Members)
         foreach ($path in $members) {
             $text = & $Reader $path
@@ -354,6 +356,10 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         @{ Name = 'the module''s tripwire removed'; Refuse = $true; File = 'scripts/interactive-win11-realinput.ps1'; Old = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'The real-input module never loads in hosted mode.' }`n"; New = '' }
         @{ Name = 'a method named SubmitInputs outside the module'; Refuse = $true; File = 'scripts/fixture-lib.ps1'; Old = '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();'; New = '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); public static bool SubmitInputs(int n) { return n > 0; }' }
         @{ Name = 'the module off the loader line'; Refuse = $true; File = 'scripts/fixture-lib.ps1'; Old = " else { . (Join-Path `$PSScriptRoot 'interactive-win11-realinput.ps1') }"; New = '' }
+        # A closure the walk could not finish is no evidence: the module is still in it, but a missing or unresolved
+        # helper was never scanned (CodeRabbit on #740).
+        @{ Name = 'a leaf that loads a helper that does not exist'; Refuse = $true; File = 'test/windows/fixture-leaf.ps1'; Old = '# A comment'; New = ". (Join-Path `$PSScriptRoot 'fixture-missing.ps1')`n# A comment" }
+        @{ Name = 'a leaf that loads a script the walker cannot resolve'; Refuse = $true; File = 'test/windows/fixture-leaf.ps1'; Old = '# A comment'; New = ". `$helperPath`n# A comment" }
         @{ Name = 'a banned name in a PowerShell comment'; Refuse = $false; File = 'test/windows/fixture-leaf.ps1'; Old = '# A comment may name SetForegroundWindow.'; New = '# A comment may name [FixtureWindowNative]::SetForegroundWindow($h) and SendInput.' }
         @{ Name = 'a banned name in a C# comment'; Refuse = $false; File = 'scripts/fixture-lib.ps1'; Old = '// SetForegroundWindow lives in the module now.'; New = '// [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h); /* SendInput( */' }
         @{ Name = 'a banned name in a message string'; Refuse = $false; File = 'test/windows/fixture-leaf.ps1'; Old = "throw 'SendInput failed for the fixture'"; New = "throw 'SendInput failed, then SetForegroundWindow(h) and keybd_event did too'" }
