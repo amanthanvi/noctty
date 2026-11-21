@@ -1904,6 +1904,84 @@ fn confirmQuitAnswer(self: *Surface, comptime wait: bool) ?bool {
     };
 }
 
+/// A core surface that holds only what `hasSelection` and
+/// `confirmQuitAnswer` read, for the thread-role layer's isolated children:
+/// the rest is zeroed, so a read of an unset pointer faults instead of
+/// reading garbage.
+const RoleSiteSurface = struct {
+    surface: *Surface,
+    mutex: rendererpkg.StateMutex = .{},
+
+    fn init(self: *RoleSiteSurface) !void {
+        const alloc = std.testing.allocator;
+        self.surface = try alloc.create(Surface);
+        errdefer alloc.destroy(self.surface);
+        @memset(std.mem.asBytes(self.surface), 0);
+        self.surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
+        self.surface.renderer_state.mutex = &self.mutex;
+        self.surface.renderer_state.terminal = &self.surface.io.terminal;
+    }
+
+    fn deinit(self: *RoleSiteSurface) void {
+        const alloc = std.testing.allocator;
+        self.surface.io.terminal.deinit(alloc);
+        alloc.destroy(self.surface);
+    }
+};
+
+test "isolated: a UI-only site driven from a .termio thread is recorded, and its compare fails one PAIR-OUTSIDE-TABLE (acceptance test 4)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("sync/isolated.zig");
+    if (isolated.inChild()) {
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const TermioThread = struct {
+            selected: bool = true,
+
+            /// The termio thread, which hasSelection's row (UI only) does
+            /// not list, asks a UI-only question.
+            fn askSelection(self: *@This(), surface: *const Surface) void {
+                const role = thread_role.enter(.termio);
+                defer role.exit();
+                self.selected = surface.hasSelection();
+            }
+        };
+        var termio_thread: TermioThread = .{};
+        const thread = try std.Thread.spawn(.{}, TermioThread.askSelection, .{ &termio_thread, fixture.surface });
+        thread.join();
+        try std.testing.expect(!termio_thread.selected);
+        return;
+    }
+    // The site is a production function, so the pair is in its row's file.
+    try isolated.expectOffTable(@src(), .{ .function = "src/Surface.zig:hasSelection", .role = "termio" });
+}
+
+test "isolated: the compare names both instantiations of confirmQuitAnswer (acceptance test 10)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("sync/isolated.zig");
+    // RQ16: names only (see isolated.zig's site-shape test).
+    if (!@import("sync/symbolise.zig").names_checked) return error.SkipZigTest;
+    if (isolated.inChild()) {
+        // The app thread asks whether a close needs confirming.
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        fixture.surface.config.confirm_close_surface = .true;
+        // The waiting form locks; the no-wait form tries, and gets it.
+        _ = fixture.surface.needsConfirmQuit();
+        try std.testing.expect(fixture.surface.needsConfirmQuitNoWait() != null);
+        return;
+    }
+    // Each instantiation is its own symbol (`confirmQuitAnswer__anon_N`),
+    // which the compare matches to the row with the suffix stripped.
+    try isolated.expectShapes(@src(), "src/Surface.zig:", &.{
+        .{ .name = "confirmQuitAnswer", .lines = 2, .instantiated = true },
+    }, "ui");
+}
+
 /// Called from the app thread to handle mailbox messages to our specific
 /// surface.
 pub fn handleMessage(self: *Surface, msg: Message) !void {
