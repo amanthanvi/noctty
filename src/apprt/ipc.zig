@@ -169,6 +169,7 @@ pub const AutomationCommand = union(enum) {
         target: AutomationTarget,
         text: []const u8,
     },
+    toggle_quick_terminal: void,
 };
 
 pub const Action = union(enum) {

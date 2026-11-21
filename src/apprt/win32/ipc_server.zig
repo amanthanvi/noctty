@@ -502,6 +502,17 @@ pub fn sendPerformActionIpc(
     return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
 
+pub fn sendToggleQuickTerminalIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    elevated: bool,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeToggleQuickTerminalRequest(alloc, 0);
+    defer alloc.free(request);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
+}
+
 fn sendAutomationAckRequest(
     alloc: Allocator,
     pipe_name: [:0]const u16,
@@ -1555,6 +1566,10 @@ fn handleIpcClient(app: *App, pipe: win32_ipc.Pipe) !void {
             log.warn("failed to process win32 automation send-text IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
+        .toggle_quick_terminal_timed => handleToggleQuickTerminalIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 quick terminal IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
     }
 }
 
@@ -1679,6 +1694,11 @@ fn handleSendTextIpcClient(app: *App, pipe: win32_ipc.Pipe, timed: bool) !void {
         .target = payload.target,
         .text = payload.text,
     } }, payload.deadline_ms);
+}
+
+fn handleToggleQuickTerminalIpcClient(app: *App, pipe: win32_ipc.Pipe) !void {
+    const deadline_ms = try win32_ipc.decodeToggleQuickTerminalDeadline(pipe);
+    try ackAutomationCommand(app, pipe, .toggle_quick_terminal, deadline_ms);
 }
 
 /// Run an automation command and answer the client: success, the status

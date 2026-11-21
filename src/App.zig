@@ -1820,6 +1820,7 @@ pub const Message = union(enum) {
                     .target = value.target,
                     .text = try alloc.dupe(u8, value.text),
                 } },
+                .toggle_quick_terminal => .toggle_quick_terminal,
             };
             request.* = .{
                 .alloc = alloc,
@@ -1839,7 +1840,7 @@ pub const Message = union(enum) {
                 .new_tab => |value| if (value.working_directory) |cwd| self.alloc.free(cwd),
                 .new_split => |value| if (value.working_directory) |cwd| self.alloc.free(cwd),
                 .send_text => |value| self.alloc.free(value.text),
-                .focus => {},
+                .focus, .toggle_quick_terminal => {},
             }
             self.alloc.destroy(self);
         }
