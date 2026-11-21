@@ -45,8 +45,9 @@ Two modes.
           and the copy then ends at the driver's next tick check: every driver wait polls at 100 ms, and what does
           not poll is bounded per step (a trace request's message call up to 5 s if the copy stops answering, the
           display reading up to 2 s, the bounded foreground and probe workers up to 5 s; about 7 s for two back to
-          back). A series voided by input writes pacing.json from an allowlist (no number but the input counts and the
-          exit code, no free text, reason codes from a fixed set) and the rest to diagnostics.json. A tick that moved
+          back). A series that does not pass (exit 0) writes pacing.json from an allowlist (no number but the input
+          counts and the exit code, no free text, reason codes from a fixed set) and the rest to diagnostics.json.
+          A tick that moved
           by a run's end, or by the series' end, voids it like hook-seen input; the series reads its final input after
           the watch stops. The input gate (Test-FramePacingInputGate) reads
           that event first and the session's last-input tick second, right before each launch on Default (the
@@ -99,15 +100,16 @@ app, renderer, transport and both ConPTY bundle digests match (a difference fail
 (the window's monitor's width, height and refresh, read at each run's start and again after its window, where a
 change makes the run inconclusive), DPI and grid match (a difference makes the series inconclusive). Each group of
 runs alike in all nine fields is reported on its own (Groups), never combined across them. frame_time_p95_ms and its
-median are published only for a visible series whose every run completed and whose runs are comparable; otherwise
-both are null and the console says no measurement was published. The exit code, by precedence: 3 a tripped guard,
-else 1 a failed run or a build or workload difference, else 2 an inconclusive run or an environment difference, else
-0 (Get-FramePacingExitCode).
+median are published only for a visible series that passes (exit 0), every run completed and comparable; a passing dry
+run has both null and gives dry_run_p95_ms, and a series that does not pass has neither field, since its pacing.json
+is the allowlisted verdict (below), and the console says no measurement was published. The exit code, by precedence:
+3 a tripped guard, else 1 a failed run or a build or workload difference, else 2 an inconclusive run or an
+environment difference, else 0 (Get-FramePacingExitCode).
 
 Records in <RunRoot>: pacing.json (the summary: the mode, each run's status and statistics, each comparability group's,
-the pooled p95 over the completed runs, and the real and injected input events a visible series' hooks saw; for a
-series that input or a changed harness voided, only the allowlisted verdict, with the full summary in diagnostics.json
-beside it), and per
+the pooled p95 over the completed runs, and the real and injected input events a visible series' hooks saw; for every
+series but a pass, only the allowlisted verdict, with the full summary in diagnostics.json beside it, written after it),
+and per
 run in run-<n>: run.json (the parameters, the copy's build mode, the SHA-256 of its app, CLI,
 config and receipt, the ConPTY pair beside the build's, the transport and renderer its log names, the grid, the
 window's client size, DPI and monitor mode before and after, the busy share before the launch, before the window and
@@ -2195,7 +2197,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     $copy = Join-Path $Run 'copy'
     $work = Join-Path $Run 'work'
     # Staging. A failure here (CodeRabbit on #741: the build replaced mid-series fails the copy's receipt check) is a
-    # failed run before any launch, so the series still writes its summary with the runs before it.
+    # failed run before any launch, so the series still writes diagnostics.json with the runs before it.
     try {
         [void](New-Item -ItemType Directory -Path $Run)
         foreach ($name in @('localappdata', 'appdata', 'temp', 'work')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
@@ -2565,14 +2567,12 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     # that ran changed text and left no readable record fails its run, and the earlier runs' timing must not stand for
     # the series. A dry run's dry_run_p95_ms is a clean dry run's alone, in either file.
     $withheld = $voided -or $exitCode -ne 0
+    $diagnosticsFailure = $null
     if ($withheld) {
         # A withheld series writes pacing.json from an allowlist, not by scrubbing (the lead and Sol on #741, round 9):
         # the schema, the verdict (voided for input or a changed harness, else the exit's), the exit code, reason codes
         # from a fixed set (no text, no numbers), the input counts, the series' id and the harness's and measurement's
         # identities. Everything else, every message, duration and run, goes to diagnostics.json beside it.
-        $summary.ExitCode = $exitCode
-        $summary.dry_run_p95_ms = $null
-        $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'diagnostics.json') -Encoding utf8NoBOM
         $allowed = [ordered]@{
             Schema = 1; Verdict = $(if ($voided) { 'voided' } elseif ($exitCode -eq 3) { 'guard-tripped' } elseif ($exitCode -eq 2) { 'inconclusive' } else { 'failed' }); ExitCode = $exitCode
             Reasons = @(Get-FramePacingVoidReasons $Results $RealInputs $TickMoved $TickUnread $inputRuns.Count (@($series.MixedBuild).Count -gt 0) (@($series.MixedEnvironment).Count -gt 0) $completed.Count $harnessChanged)
@@ -2580,6 +2580,12 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
             HarnessSha256 = $HarnessSha256; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
         }
         $allowed | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
+        # The verdict first, then its details (Sol on #744, round 3): a diagnostics.json that cannot be written is a
+        # warning on the console line, never a changed verdict or exit code.
+        $summary.ExitCode = $exitCode
+        $summary.dry_run_p95_ms = $null
+        try { $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'diagnostics.json') -Encoding utf8NoBOM -ErrorAction Stop }
+        catch { $diagnosticsFailure = $_.Exception.Message }
     } else {
         $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     }
@@ -2588,7 +2594,8 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     if ($summary.Contains('Inconclusive')) { Write-Host "  $($summary.Inconclusive)" }
     $label = if ($Visible) { if ($null -ne $summary.frame_time_p95_ms) { "frame_time_p95_ms $($summary.frame_time_p95_ms)" } else { 'no measurement published' } }
         elseif ($null -ne $summary.dry_run_p95_ms) { "dry run: dry_run_p95_ms $($summary.dry_run_p95_ms) (not a measurement)" } elseif ($withheld) { 'dry run: no timing published' } else { 'dry run: no pooled intervals' }
-    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$(if ($withheld) { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" })"
+    $details = if (-not $withheld) { '' } elseif ($null -ne $diagnosticsFailure) { "; warning: diagnostics.json could not be written ($diagnosticsFailure); the verdict and exit code stand" } else { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" }
+    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$details"
     return $exitCode
 }
 

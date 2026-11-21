@@ -1740,8 +1740,8 @@ there. The series stops at the first run that does not complete. The exit
 code, by precedence (`Get-FramePacingExitCode`): 3 when a guard tripped, else
 1 when a run failed or the runs differ in build or workload, else 2 when a run
 was inconclusive or the runs differ in environment, else 0. A series that both
-trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` holds each
-run's status and statistics, each comparability group's (`Groups`), the pooled
+trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` of a
+passing series holds each run's status and statistics, each comparability group's (`Groups`), the pooled
 p95 and, in a visible series, how many real and injected input events the
 hooks saw (`RealInputsSeen`, `InjectedInputsSeen`, the latter every injected
 event, the harness's own marked ones and any other program's). Each `run-<n>` holds
@@ -1758,11 +1758,13 @@ window, where a change makes the run inconclusive), DPI and grid (a difference
 pools none and exits 2). Each group of runs alike in all nine of those fields
 is reported on its own in `Groups`, never combined across any of them.
 `frame_time_p95_ms` and its median are published only for a visible series
-with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
-still at the series' baseline (`TickMovedFromBaseline` false), whose every
-run completed and whose runs are comparable; otherwise both are null, input
-makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. The outer half
+that passes (exit 0): no real input the hooks saw (`RealInputsSeen` 0), a
+session tick still at the series' baseline (`TickMovedFromBaseline` false),
+every run completed and the runs comparable. A passing dry run has both null.
+A series that does not pass has neither field, since its `pacing.json` is the
+allowlisted verdict (below); input makes the series inconclusive (exit 2
+unless a guard or a failure ranks higher), and the console says no
+measurement was published. The outer half
 and each driver hash the script text they loaded and are executing, never the
 file on disk: the outer half at series start, each driver as it starts. The
 grid and cursor probes a driver starts run the same file and hash nothing; they
@@ -1785,8 +1787,10 @@ from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
 `watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
 `run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`,
 `harness-changed`).
-Everything else goes to `diagnostics.json` beside it, with no
-`dry_run_p95_ms` (a dry run has one only when it is clean): every message (the
+Everything else goes to `diagnostics.json` beside it, written after
+`pacing.json` so the verdict and exit code stand when it cannot be written (the
+console line then warns that it was not), with no `dry_run_p95_ms` (a dry run
+has one only when it is clean): every message (the
 staging, lock-shortfall and tick-stop lines among them), every duration,
 each run and each group, and `Inconclusive`, which names what voided the
 series (the hook count, with "tick also moved (may be the same input)" when
@@ -1830,8 +1834,8 @@ line says so. A
 `run.json` the job's close cut short reads as no record: a run stopped for
 real input is then inconclusive, any other run failed, and the series still
 writes `pacing.json`. A staging failure is a
-failed run before any launch, and the summary still records the runs before
-it. What runs is the run's own copy: its path is checked before any launch
+failed run before any launch, and the series still writes diagnostics.json
+with the runs before it. What runs is the run's own copy: its path is checked before any launch
 and its image read back by PID, and the driver runs in the run's own job,
 checked before it resumes and again by the outer half. The shared state guard
 owns the measurement-identity jump list by its timestamps: it deletes the file
