@@ -146,14 +146,14 @@ $workingSetRules = @(
         Mutation = @("`$sessionPath = Join-Path `$realLocal 'noctty\session-state.json'", "`$sessionPath = Join-Path `$Run 'session-state.json'")
     }
     @{
-        Description = 'the clipboard sequence number is recorded before and after each run'
-        Pattern = '(?s)ClipboardSequenceBefore = \$stateGuard\.ClipboardBefore; ClipboardSequenceAfter = \[HiddenLocal\]::GetClipboardSequenceNumber\(\)'
-        Mutation = @('ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()', 'ClipboardSequenceAfter = $stateGuard.ClipboardBefore')
+        Description = 'the clipboard sequence numbers recorded before and after each run are the shared guard''s own samples, never a second reading (Sol on #744: a resample as the control)'
+        Pattern = '(?s)ClipboardSequenceBefore = \$stateGuard\.ClipboardBefore; ClipboardSequenceAfter = \$\(if \(\$null -ne \$stateGuard\.PSObject\.Properties\[''ClipboardAfter''\]\) \{ \$stateGuard\.ClipboardAfter \} else \{ \$null \}\)'
+        Mutation = @('ClipboardSequenceAfter = $(if ($null -ne $stateGuard.PSObject.Properties[''ClipboardAfter'']) { $stateGuard.ClipboardAfter } else { $null })', 'ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()')
     }
     @{
-        Description = 'a clipboard sequence of 0 before and after is recorded and reported as unobservable through the shared guard''s helpers, never as held, and does not fail the run (the lead on #741''s follow-up)'
-        Pattern = '(?s)\$guards\.ClipboardObservable = Test-InteractiveWin11ClipboardObservable \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\s+\$guards \| ConvertTo-Json -Depth 4 \| Set-Content -LiteralPath \(Join-Path \$Run ''guards\.json''\).*?Write-Host \(Format-InteractiveWin11ClipboardReading \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\)'
-        Mutation = @('$guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter', '$guards.ClipboardObservable = $true')
+        Description = 'a clipboard sequence of 0 before and after is recorded and reported as unobservable from the shared guard''s own verdict, never as held, and does not fail the run (the lead on #741''s follow-up; Sol on #744)'
+        Pattern = '(?s)ClipboardObservable = \$\(if \(\$null -ne \$stateGuard\.PSObject\.Properties\[''ClipboardObservable''\]\) \{ \[bool\]\$stateGuard\.ClipboardObservable \} else \{ \$false \}\).*?\$guards \| ConvertTo-Json -Depth 4 \| Set-Content -LiteralPath \(Join-Path \$Run ''guards\.json''\).*?Write-Host \(Format-InteractiveWin11ClipboardReading \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\)'
+        Mutation = @('ClipboardObservable = $(if ($null -ne $stateGuard.PSObject.Properties[''ClipboardObservable'']) { [bool]$stateGuard.ClipboardObservable } else { $false })', 'ClipboardObservable = $true')
     }
     @{
         Description = 'a failed driver fails the run (council round 1, Opus mutation 03)'

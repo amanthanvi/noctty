@@ -130,7 +130,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the outer half refuses -Visible off an unlocked, composed, local, idle Default before it creates anything, keeps the tick it saw idle, its idle time and a clock from then, and draws the series'' marker'
-        Pattern = '(?s)\$quietSince = \[long\]-1\s+\$watchEvent = \$null\s+\$lockNeeded = \[long\]-1\s+\$inputMarker = \[long\]0\s+\$admissionIdleMs = \[long\]-1\s+\$seriesClock = \[Diagnostics\.Stopwatch\]::StartNew\(\)\s+\$harnessSha256 = Get-Sha256 \$PSCommandPath\s+if \(\$Visible\) \{\s+\$facts = Get-FramePacingSessionFacts -1 -1 \$null\s+\$lockNeeded = Get-FramePacingLockNeedMs \$facts\.IdleMs \$facts\.MinIdleMs \$Runs\s+\$facts\.ForegroundLockNeededMs = \$lockNeeded\s+Write-Host [^\r\n]+\s+\$refusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$refusal\) \{ throw [^\r\n]+\}\s+\$quietSince = \[long\]\$facts\.LastInputTick\s+\$admissionIdleMs = \[long\]\$facts\.IdleMs\s+\$seriesClock\.Restart\(\)\s+\$watchEvent = [^\r\n]+\s+\$inputMarker = New-FramePacingInputMarker\s+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$root\)'
+        Pattern = '(?s)\$quietSince = \[long\]-1\s+\$watchEvent = \$null\s+\$lockNeeded = \[long\]-1\s+\$inputMarker = \[long\]0\s+\$admissionIdleMs = \[long\]-1\s+\$seriesClock = \[Diagnostics\.Stopwatch\]::StartNew\(\)\s+\$harnessSha256 = Get-FramePacingLoadedHarnessSha256\s+if \(\$Visible\) \{\s+\$facts = Get-FramePacingSessionFacts -1 -1 \$null\s+\$lockNeeded = Get-FramePacingLockNeedMs \$facts\.IdleMs \$facts\.MinIdleMs \$Runs\s+\$facts\.ForegroundLockNeededMs = \$lockNeeded\s+Write-Host [^\r\n]+\s+\$refusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$refusal\) \{ throw [^\r\n]+\}\s+\$quietSince = \[long\]\$facts\.LastInputTick\s+\$admissionIdleMs = \[long\]\$facts\.IdleMs\s+\$seriesClock\.Restart\(\)\s+\$watchEvent = [^\r\n]+\s+\$inputMarker = New-FramePacingInputMarker\s+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$root\)'
         Mutation = @('if ($refusal) { throw', 'if ($false) { throw')
     }
     @{
@@ -239,14 +239,19 @@ $framePacingRules = @(
         Mutation = @("if (`$driverClock.ElapsedMilliseconds -ge `$script:DriverDeadlineMs) { throw 'The driver ran past 30 minutes; the owned job was closed.' }", "if (`$driverClock.ElapsedMilliseconds -ge `$script:DriverDeadlineMs) { throw 'The driver ran past 30 minutes; the owned job was closed.' }`n            Start-Sleep -Milliseconds 900")
     }
     @{
-        Description = 'a clipboard sequence of 0 before and after is recorded as unobservable, never as held (Opus on #741, round 9)'
-        Pattern = '\$guards\.ClipboardObservable = Test-InteractiveWin11ClipboardObservable \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\s+\$guards \| ConvertTo-Json -Depth 4 \| Set-Content -LiteralPath \(Join-Path \$Run ''guards\.json''\)(?s).*?Write-Host \(Format-InteractiveWin11ClipboardReading \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\)'
-        Mutation = @('$guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter', '$guards.ClipboardObservable = $true')
+        Description = 'the clipboard reading is the shared guard''s own samples and verdict, a 0/0 reading unobservable, never held, with no second reading (Opus on #741, round 9; Sol on #744: a resample as the control)'
+        Pattern = '(?s)ClipboardSequenceBefore = \$stateGuard\.ClipboardBefore; ClipboardSequenceAfter = \$\(if \(\$null -ne \$stateGuard\.PSObject\.Properties\[''ClipboardAfter''\]\) \{ \$stateGuard\.ClipboardAfter \} else \{ \$null \}\)\s+ClipboardObservable = \$\(if \(\$null -ne \$stateGuard\.PSObject\.Properties\[''ClipboardObservable''\]\) \{ \[bool\]\$stateGuard\.ClipboardObservable \} else \{ \$false \}\).*?Write-Host \(Format-InteractiveWin11ClipboardReading \$guards\.ClipboardSequenceBefore \$guards\.ClipboardSequenceAfter\)'
+        Mutation = @('ClipboardSequenceAfter = $(if ($null -ne $stateGuard.PSObject.Properties[''ClipboardAfter'']) { $stateGuard.ClipboardAfter } else { $null })', 'ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()')
     }
     @{
         Description = 'each driver records the harness hash it ran under, the outer half hashes the harness once at series start, and the summary compares them instead of hashing at summary time (Sol on #741, round 10)'
-        Pattern = '(?s)\$record = \[ordered\]@\{\s+Schema = 1; Mode = \$mode; HarnessSha256 = \$\(if \(\$PSCommandPath\) \{ Get-Sha256 \$PSCommandPath \} else \{ \$null \}\);.*?\$harnessChanged = -not \[string\]::IsNullOrEmpty\(\$HarnessSha256\) -and \(Test-FramePacingHarnessChanged \$Results \$HarnessSha256\)'
-        Mutation = @('HarnessSha256 = $(if ($PSCommandPath) { Get-Sha256 $PSCommandPath } else { $null });', 'HarnessSha256 = $null;')
+        Pattern = '(?s)\$record = \[ordered\]@\{\s+Schema = 1; Mode = \$mode; HarnessSha256 = \(Get-FramePacingLoadedHarnessSha256\);.*?\$harnessChanged = \[string\]::IsNullOrEmpty\(\$HarnessSha256\) -or \(Test-FramePacingHarnessChanged \$Results \$HarnessSha256\)'
+        Mutation = @('HarnessSha256 = (Get-FramePacingLoadedHarnessSha256);', 'HarnessSha256 = (Get-Sha256 $PSCommandPath);')
+    }
+    @{
+        Description = 'the harness''s identity is the SHA-256 of the script text the process parsed, from its own syntax tree''s root, never the file on disk (Sol on #744: a disk hash as the control)'
+        Pattern = 'function Get-FramePacingLoadedHarnessSha256 \{\s+\$ast = \$\{function:Get-FramePacingLoadedHarnessSha256\}\.Ast\s+while \(\$null -ne \$ast\.Parent\) \{ \$ast = \$ast\.Parent \}\s+return Get-BytesSha256 \(\[Text\.Encoding\]::UTF8\.GetBytes\(\$ast\.Extent\.Text\)\)\s+\}'
+        Mutation = @('return Get-BytesSha256 ([Text.Encoding]::UTF8.GetBytes($ast.Extent.Text))', 'return Get-Sha256 $PSCommandPath')
     }
     @{
         Description = 'the polled sleep reads the gate at each 100 ms of it (Opus on #741, round 7: P1, the poll removed, as the control)'
@@ -713,7 +718,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'frame_time_p95_ms and its median are published only for a visible series with no real input, whose every run completed and whose runs are comparable; real input, an unread count or a tick that left the baseline makes the series inconclusive (the lead on #741, rounds 5 and 6)'
-        Pattern = '(?s)\$inputSeen = \$Visible -and \(\$null -eq \$RealInputs -or \[long\]\$RealInputs -ne 0 -or \$TickMoved -or \$inputRuns\.Count -gt 0\)\s+\$harnessChanged = -not \[string\]::IsNullOrEmpty\(\$HarnessSha256\) -and \(Test-FramePacingHarnessChanged \$Results \$HarnessSha256\)\s+\$voided = \$inputSeen -or \$harnessChanged\s+\$publish = \$Visible -and -not \$voided -and \$completed\.Count -eq \$Runs -and \$series\.Pooled\.Count -gt 0 -and @\(\$series\.MixedEnvironment\)\.Count -eq 0 -and @\(\$series\.MixedBuild\)\.Count -eq 0.*?frame_time_p95_ms = \$\(if \(\$publish\) \{ \$series\.P95 \} else \{ \$null \}\)\s+frame_time_median_ms = \$\(if \(\$publish\) \{ \$series\.Median \} else \{ \$null \}\).*?if \(\$inputSeen\) \{.*?\$inconclusive \+= "input voided the series: [^\r\n]+"\s+\}\s+if \(\$inconclusive\.Count -gt 0\) \{ \$summary\.Inconclusive = \$inconclusive -join ''; '' \}'
+        Pattern = '(?s)\$inputSeen = \$Visible -and \(\$null -eq \$RealInputs -or \[long\]\$RealInputs -ne 0 -or \$TickMoved -or \$inputRuns\.Count -gt 0\)\s+\$harnessChanged = \[string\]::IsNullOrEmpty\(\$HarnessSha256\) -or \(Test-FramePacingHarnessChanged \$Results \$HarnessSha256\)\s+\$voided = \$inputSeen -or \$harnessChanged\s+\$publish = \$Visible -and -not \$voided -and \$completed\.Count -eq \$Runs -and \$series\.Pooled\.Count -gt 0 -and @\(\$series\.MixedEnvironment\)\.Count -eq 0 -and @\(\$series\.MixedBuild\)\.Count -eq 0.*?frame_time_p95_ms = \$\(if \(\$publish\) \{ \$series\.P95 \} else \{ \$null \}\)\s+frame_time_median_ms = \$\(if \(\$publish\) \{ \$series\.Median \} else \{ \$null \}\).*?if \(\$inputSeen\) \{.*?\$inconclusive \+= "input voided the series: [^\r\n]+"\s+\}\s+if \(\$inconclusive\.Count -gt 0\) \{ \$summary\.Inconclusive = \$inconclusive -join ''; '' \}'
         Mutation = @('$publish = $Visible -and -not $voided -and $completed.Count -eq $Runs', '$publish = $Visible -and $completed.Count -eq $Runs')
     }
     @{
@@ -1373,7 +1378,7 @@ try {
         # a test without them passes code the harness throws on).
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
-        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputStop', 'Get-FramePacingSupervisionStop', 'Test-FramePacingHookMissed', 'Assert-FramePacingPollGate', 'Test-FramePacingRunInput', 'Get-FramePacingVoidReasons', 'Test-FramePacingHarnessChanged', 'Get-Sha256', 'Read-FramePacingRunRecord', 'Get-FramePacingTickStop', 'Get-FramePacingFinalInput', 'Complete-FramePacingSeries', 'Get-FramePacingSilencedStatus', 'Get-FramePacingHookSilence', 'Get-FramePacingLockShortfall', 'Invoke-FramePacingKeyProbe', 'Test-FramePacingConsoleTyped', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
+        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputStop', 'Get-FramePacingSupervisionStop', 'Test-FramePacingHookMissed', 'Assert-FramePacingPollGate', 'Test-FramePacingRunInput', 'Get-FramePacingVoidReasons', 'Test-FramePacingHarnessChanged', 'Get-Sha256', 'Get-FramePacingLoadedHarnessSha256', 'Read-FramePacingRunRecord', 'Get-FramePacingTickStop', 'Get-FramePacingFinalInput', 'Complete-FramePacingSeries', 'Get-FramePacingSilencedStatus', 'Get-FramePacingHookSilence', 'Get-FramePacingLockShortfall', 'Invoke-FramePacingKeyProbe', 'Test-FramePacingConsoleTyped', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
             . ([scriptblock]::Create((Get-FramePacingFunctionText $framePacingAst $name 'bench-frame-pacing.ps1')))
         }
         $cases = [Collections.Generic.List[string]]::new()
@@ -1805,9 +1810,31 @@ public static class $sessionStandIn {
             )) {
             if ((Test-FramePacingHarnessChanged $case.Results 'aa') -ne $case.Want) { throw "The harness-change test got $($case.Name) wrong." }
         }
+        # Sol's replay (#744): a script that replaces itself after PowerShell loaded it, before it hashes. The loaded
+        # text's hash is the outer run's A and a driver started from the file afterwards hashes B, so the series reads a
+        # changed harness; hashed from the disk, both read B and a run of A beside drivers of B would publish (the
+        # control). Run in child processes on scratch files only.
+        $tocDir = Join-Path ([IO.Path]::GetTempPath()) ('fp-toc-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        [void][IO.Directory]::CreateDirectory($tocDir)
+        try {
+            $tocDefs = (Get-FramePacingFunctionText $framePacingAst 'Get-BytesSha256' 'bench-frame-pacing.ps1') + "`n" + (Get-FramePacingFunctionText $framePacingAst 'Get-Sha256' 'bench-frame-pacing.ps1') + "`n" + (Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingLoadedHarnessSha256' 'bench-frame-pacing.ps1') + "`n"
+            $tocPath = Join-Path $tocDir 'harness.ps1'
+            $tocB = $tocDefs + "# variant B`n'loaded=' + (Get-FramePacingLoadedHarnessSha256)`n'disk=' + (Get-Sha256 `$PSCommandPath)`n"
+            $tocA = $tocDefs + "# variant A`n[IO.File]::WriteAllText(`$PSCommandPath, [IO.File]::ReadAllText((Join-Path `$PSScriptRoot 'b.txt')))`n'loaded=' + (Get-FramePacingLoadedHarnessSha256)`n'disk=' + (Get-Sha256 `$PSCommandPath)`n"
+            [IO.File]::WriteAllText((Join-Path $tocDir 'b.txt'), $tocB)
+            [IO.File]::WriteAllText($tocPath, $tocA)
+            $pwshExe = (Get-Command pwsh.exe).Source
+            $outerOut = @(& $pwshExe -NoProfile -NonInteractive -File $tocPath)
+            $driverOut = @(& $pwshExe -NoProfile -NonInteractive -File $tocPath)
+            $read = { param([object[]] $Lines, [string] $Kind) (@($Lines | Where-Object { ([string]$_).StartsWith("$Kind=", [StringComparison]::Ordinal) })[0] -split '=', 2)[1] }
+            $outerLoaded = & $read $outerOut 'loaded'; $outerDisk = & $read $outerOut 'disk'; $driverLoaded = & $read $driverOut 'loaded'; $driverDisk = & $read $driverOut 'disk'
+            if (-not $outerLoaded -or -not $driverLoaded -or [string]::Equals($outerLoaded, $driverLoaded, [StringComparison]::OrdinalIgnoreCase)) { throw "Sol's replay: the loaded hashes of A and B ($outerLoaded, $driverLoaded) do not differ." }
+            if (-not (Test-FramePacingHarnessChanged @([pscustomobject]@{ Record = [pscustomobject]@{ HarnessSha256 = $driverLoaded } }) $outerLoaded)) { throw 'Sol''s replay: the loaded hashes did not read as a changed harness.' }
+            if (-not [string]::Equals($outerDisk, $driverDisk, [StringComparison]::OrdinalIgnoreCase) -or (Test-FramePacingHarnessChanged @([pscustomobject]@{ Record = [pscustomobject]@{ HarnessSha256 = $driverDisk } }) $outerDisk)) { throw 'Sol''s replay: the disk-hash control did not show the gap, so it shows nothing.' }
+        } finally { [IO.Directory]::Delete($tocDir, $true) }
         $summaryHashText = Get-FramePacingFunctionText $framePacingAst 'Write-FramePacingSummary' 'bench-frame-pacing.ps1'
         if ($summaryHashText.Contains('Get-Sha256') -or $summaryHashText.Contains('$PSCommandPath')) { throw 'The summary hashes the harness at summary time.' }
-        $cases.Add('harness hash (matching, another, none; the summary hashes nothing at summary time)')
+        $cases.Add('harness hash (matching, another, none; the summary hashes nothing at summary time; Sol''s replay of a script replaced after its load: the loaded text reads A then B, the disk control reads B twice; an empty series hash fails closed, the old check as the control)')
 
         # The dry run's console comparison (Greptile on #741): cmd's console read from the top-left cell through the
         # cursor, as ConsoleTextToCursor reads it, so a prompt that ends at column 130 of a 140-column row and the
@@ -2306,7 +2333,7 @@ public static class $driverStubName {
         # renderers, transports or ConPTY digests never pool either. The control: the series pooled regardless of
         # environment mixes the two refresh rates.
         function New-FramePacingRun([hashtable] $Change) {
-            $r = @{ DisplayMode = '3840x2160@240'; Dpi = 144; GridCols = 140; GridRows = 43; WorkloadSha256 = 'w'; ExeSHA256 = 'e'; Renderer = 'opengl'; Transport = 'bundled'; ConptyDllSHA256 = 'c'; OpenConsoleSHA256 = 'o'; IntervalsMs = [double[]]@(4.1, 4.2, 4.3) }
+            $r = @{ HarnessSha256 = 'h'; DisplayMode = '3840x2160@240'; Dpi = 144; GridCols = 140; GridRows = 43; WorkloadSha256 = 'w'; ExeSHA256 = 'e'; Renderer = 'opengl'; Transport = 'bundled'; ConptyDllSHA256 = 'c'; OpenConsoleSHA256 = 'o'; IntervalsMs = [double[]]@(4.1, 4.2, 4.3) }
             foreach ($k in $Change.Keys) { $r[$k] = $Change[$k] }
             # The fields every real run.json carries that the summary reads (StrictMode refuses a missing one).
             if (-not $r.ContainsKey('IntervalCount')) { $r.IntervalCount = @($r.IntervalsMs).Count }
@@ -2395,7 +2422,7 @@ public static class $driverStubName {
         # StrictMode read .Count of $null as 0). Controls: Sol's late assignment of the metric before serialization, the
         # median published without the visible check, the Error exit removed, and the pool's old `if` assignment, are
         # each caught.
-        function Invoke-FramePacingSummaryCase([bool] $AsVisible, [int] $RunCount, [object[]] $Results, [string] $SummaryText, [string] $SeriesText, $RealInputs, [bool] $TickMoved) {
+        function Invoke-FramePacingSummaryCase([bool] $AsVisible, [int] $RunCount, [object[]] $Results, [string] $SummaryText, [string] $SeriesText, $RealInputs, [bool] $TickMoved, [string] $SeriesSha = 'h') {
             $root = Join-Path ([IO.Path]::GetTempPath()) ('fp-summary-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             [void][IO.Directory]::CreateDirectory($root)
             try {
@@ -2405,7 +2432,7 @@ public static class $driverStubName {
                         $Visible = $AsVisible; $Runs = $RunCount
                         if ($SummaryText) { . ([scriptblock]::Create($SummaryText)) }
                         if ($SeriesText) { . ([scriptblock]::Create($SeriesText)) }
-                        Write-FramePacingSummary $root ([pscustomobject]@{ Head = 'h'; ExeSha256 = 'e' }) $Results $RealInputs $(if ($AsVisible) { 3 } else { $null }) $TickMoved
+                        Write-FramePacingSummary $root ([pscustomobject]@{ Head = 'h'; ExeSha256 = 'e' }) $Results $RealInputs $(if ($AsVisible) { 3 } else { $null }) $TickMoved $false $SeriesSha
                     } 6>&1
                 } catch { return [pscustomobject]@{ Code = "threw: $($_.Exception.Message)"; Json = $null; Console = '' } }
                 $jsonPath = Join-Path $root 'pacing.json'
@@ -2508,7 +2535,7 @@ public static class $driverStubName {
         # Sol's round-7 table: Published is any timing statistic in pacing.json (the headline p95 and median, each
         # group's p95 and median, each run's p95), so a voided series must write none of them; and its Inconclusive
         # names the observation that voided it. The runs carry a p95 of their own (4.4) so the per-run field shows.
-        function Invoke-FramePacingSeriesEnd($Port, [string] $CompleteText, [object[]] $Results, [string] $SeriesSha = $null, [bool] $Dry = $false) {
+        function Invoke-FramePacingSeriesEnd($Port, [string] $CompleteText, [object[]] $Results, [string] $SeriesSha = 'h', [bool] $Dry = $false) {
             $root = Join-Path ([IO.Path]::GetTempPath()) ('fp-end-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             [void][IO.Directory]::CreateDirectory($root)
             try {
@@ -2581,6 +2608,11 @@ public static class $driverStubName {
             # A dry run with a changed harness (Greptile on #744): no watch, so exactly harness-changed, never a watch reason.
             $dryOther = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' (New-FramePacingRun @{ IntervalsMs = [double[]]@(4.0, 4.4); P95Ms = 4.4; HarnessSha256 = 'bb' }))) 'aa' $true
             if ($dryOther.Code -ne 1 -or $dryOther.Published -or -not (Test-FramePacingOrdinal $dryOther.Keys $framePacingVoidedKeys) -or -not (Test-FramePacingOrdinal ($dryOther.Reasons -join ' ') 'harness-changed')) { return "a dry run with a changed harness: exit $($dryOther.Code), keys '$($dryOther.Keys)', reasons '$($dryOther.Reasons -join ' ')'" }
+            # No series hash at all (Opus on #744): fails closed, voided as harness-changed, in either mode.
+            foreach ($empty in @($true, $false)) {
+                $noHash = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' $hashedB)) '' $empty
+                if ($noHash.Code -ne 1 -or $noHash.Published -or -not (Test-FramePacingOrdinal ($noHash.Reasons -join ' ') 'harness-changed')) { return "a series with no hash of its own (dry $empty): exit $($noHash.Code), reasons '$($noHash.Reasons -join ' ')'" }
+            }
             $drySame = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' $hashedB)) 'aa' $true
             if ($drySame.Code -ne 0 -or $drySame.Keys -eq $framePacingVoidedKeys) { return "a dry run with matching hashes: exit $($drySame.Code), keys '$($drySame.Keys)'" }
             return $null
@@ -2610,6 +2642,10 @@ public static class $driverStubName {
         $reasonsDropControl = [regex]::Replace($reasonsText, '(?m)^\s+if \(\$InputRuns -gt 0\) \{ \$reasons\.Add\(''run-saw-input''\) \}\r?\n', '')
         if ([string]::Equals($reasonsDropControl, $reasonsText, [StringComparison]::Ordinal)) { throw 'The run-saw-input control changed nothing.' }
         & { . ([scriptblock]::Create($reasonsDropControl)); if ($null -eq (Get-FramePacingSeriesEndMiss $null)) { throw 'The series-end cases accepted reasons with run-saw-input dropped.' } }
+        # Opus on #744: the old check, which an empty series hash turned off.
+        $failOpen = $summaryTimingText.Replace('$harnessChanged = [string]::IsNullOrEmpty($HarnessSha256) -or (Test-FramePacingHarnessChanged $Results $HarnessSha256)', '$harnessChanged = -not [string]::IsNullOrEmpty($HarnessSha256) -and (Test-FramePacingHarnessChanged $Results $HarnessSha256)')
+        if ([string]::Equals($failOpen, $summaryTimingText, [StringComparison]::Ordinal)) { throw 'The fail-closed control changed nothing.' }
+        if ($null -eq (Get-FramePacingSeriesEndMiss $failOpen)) { throw 'The series-end cases accepted an empty series hash turning the harness check off.' }
         # Greptile on #744: the watch reasons ungated, which gives a dry run with a changed harness watch-not-stopped.
         $reasonsUngated = $reasonsText.Replace('    if ($Visible) {', '    if ($true) {')
         if ([string]::Equals($reasonsUngated, $reasonsText, [StringComparison]::Ordinal)) { throw 'The watch-reason gate control changed nothing.' }
@@ -2811,6 +2847,10 @@ $framePacingTickReadText = Get-FramePacingFunctionText $framePacingAst 'Read-Fra
 # a third wrapper under any variable name, a delegate or a method group counts), and no string or EntryPoint may name it.
 function Get-FramePacingRawTickReads([string] $Text) {
     $powershell = $Text.Replace($framePacingNative[0].Value, '').Replace($framePacingTickReadText, '')
+    # The scan checks the plain forms only (Sol and Opus on #744): a method named by a computed value (`.$name(`,
+    # `::$name(`), reflection whose name is built up (GetMethod or InvokeMember over a concatenation) and, on the native
+    # side, a concatenated EntryPoint or a method that wraps a tick read again all get past it. It guards against an
+    # accidental second read, not a deliberate one.
     return @([regex]::Matches($powershell, '::\s*LastInput(?:Tick|Now)\b|GetLastInputInfo|[''"]LastInput(?:Tick|Now)[''"]') | ForEach-Object { $_.Value })
 }
 function Get-FramePacingNativeTickReadProblems([string] $Text) {

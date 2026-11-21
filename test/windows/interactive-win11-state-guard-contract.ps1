@@ -95,6 +95,37 @@ try {
     & { . ([scriptblock]::Create($observableControl)); Assert-Control (Test-InteractiveWin11ClipboardObservable 0 0) 'The clipboard-observability control did not take 0/0 as observed.' }
     $passed++
 
+    # #738's GUI probe, a fourth caller (Sol on #744): its own record of the guard, run from the probe's source over a
+    # 0/0 guard, says unobservable, never held; an observed reading says held. The control: the probe's old record,
+    # held = $true on any passing guard.
+    $probeText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'gui-hosted-probe.ps1') -Raw
+    $probeMatch = [regex]::Match($probeText, 'try \{ Assert-InteractiveWin11StateGuard -Guard \$stateGuard; (\$record\.stateGuard = \[ordered\]@\{ state = [^\r\n]+\}) \}\r?\n')
+    Assert-Control $probeMatch.Success 'The GUI probe no longer records the shared guard where this contract reads it.'
+    function Get-ProbeGuardRecord([string] $Assignment, [scriptblock] $Reader) {
+        $case = New-Control ('probe-' + [Guid]::NewGuid().ToString('N').Substring(0, 6)) $Reader
+        $stateGuard = Start-Control $case
+        $record = [ordered]@{}
+        Assert-InteractiveWin11StateGuard -Guard $stateGuard 6>$null
+        . ([scriptblock]::Create($Assignment))
+        return $record.stateGuard
+    }
+    $unobserved = Get-ProbeGuardRecord $probeMatch.Groups[1].Value { [uint32] 0 }
+    $observed = Get-ProbeGuardRecord $probeMatch.Groups[1].Value { [uint32] 17 }
+    Assert-Control ($unobserved.state -eq 'unobservable' -and $unobserved.clipboardObservable -eq $false -and -not $unobserved.Contains('held')) "The GUI probe's 0/0 record is not unobservable."
+    Assert-Control ($observed.state -eq 'held' -and $observed.clipboardObservable -eq $true) "The GUI probe's observed record is not held."
+    $oldProbe = Get-ProbeGuardRecord '$record.stateGuard = [ordered]@{ held = $true }' { [uint32] 0 }
+    Assert-Control (-not ($oldProbe.Contains('state') -and $oldProbe.state -eq 'unobservable')) 'The GUI probe''s old-record control shows nothing.'
+    # Every caller of the shared guard (Sol on #744), found by name: none records a verdict of its own that says held
+    # without the guard's clipboard verdict, and none reads the clipboard again for its report.
+    $callers = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | Where-Object { $_.Name -notlike '*contract*' -and (Get-Content -LiteralPath $_.FullName -Raw).Contains('Start-InteractiveWin11StateGuard') } | ForEach-Object { $_.Name } | Sort-Object)
+    Assert-Control (($callers -join ' ') -ceq 'bench-frame-pacing.ps1 gui-hosted-probe.ps1 hidden-win11-tabgap.ps1 hidden-win11-working-set.ps1 interactive-win11-job.ps1 interactive-win11-validate.ps1') "The shared guard's callers changed: $($callers -join ' ')."
+    foreach ($caller in $callers) {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot $caller) -Raw
+        Assert-Control (-not [regex]::IsMatch($text, 'Assert-InteractiveWin11StateGuard[^\r\n]*held\s*=\s*\$true')) "$caller records held = `$true beside the shared guard."
+        Assert-Control (-not [regex]::IsMatch($text, 'ClipboardSequenceAfter\s*=\s*\[\w+\]::GetClipboardSequenceNumber')) "$caller reads the clipboard again for its report."
+    }
+    $passed++
+
     $case = New-Control 'created'
     $unrelated = Join-Path $case.Destinations 'unrelated.customDestinations-ms'
     $guard = Start-Control $case

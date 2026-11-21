@@ -1311,7 +1311,10 @@ probe checks this before it creates anything.
 - `-Part All` refuses to start off a hosted runner, and needs
   `-TestToolsBin`.
 - Locally, the run also:
-  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`);
+  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`),
+    and records it as `stateGuard.state`: `held`, `unobservable` (a passing
+    guard with a clipboard sequence of 0 before and after, which is no
+    observation) or `tripped`, with the guard's own `clipboardObservable`;
   - reads only the measurement identity's toast facts;
   - gives each noctty child a `TEMP` and `TMP` under its run directory;
   - deletes the copies it made under `-Work` once the record is written
@@ -1475,10 +1478,11 @@ entry and trap 6 of the 2026-11-18 SOAK-01 entry). The real startup ledger,
 the product jump list and the clipboard sequence number go through the shared
 state guard (`scripts/interactive-win11-state-guard.ps1`), the PowerShell
 history through `scripts/windows-harness-history.ps1`, and the real
-`session-state.json` is compared by metadata. A clipboard sequence of 0 before
-and after is recorded as unobservable (`ClipboardObservable` false in
-`guards.json`, and the console says so), never as held, and does not fail the
-run. Contracts.98-WorkingSet pins the
+`session-state.json` is compared by metadata. `guards.json` takes the shared
+guard's own clipboard samples and verdict, with no second reading. A clipboard
+sequence of 0 before and after is recorded as unobservable
+(`ClipboardObservable` false in `guards.json`, and the console says so), never
+as held, and does not fail the run. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
 ## bench-frame-pacing.ps1
@@ -1757,11 +1761,15 @@ with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
 still at the series' baseline (`TickMovedFromBaseline` false), whose every
 run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. The harness's
-own bytes are hashed once at series start, and each driver records the hash
-it ran under: a driver that ran other bytes voids the series as
-`harness-changed` (exit 1), in either mode, and the series' start hash is the
-`HarnessSha256` it reports. A series that input or a changed harness voided
+higher), and the console says no measurement was published. Each process
+hashes the script text it loaded and is executing, never the file on disk:
+the outer half at series start, each driver as it starts. A driver whose hash
+differs voids the series as `harness-changed` (exit 1), in either mode, and so
+does a series with no hash of its own (it fails closed); the series' start
+hash is the `HarnessSha256` it reports. The hash covers
+`bench-frame-pacing.ps1` alone, not the scripts it dot-sources: it catches an
+accidental change to `bench-frame-pacing.ps1`, and is not a seal against
+tampering. A series that input or a changed harness voided
 writes `pacing.json` from an allowlist, not by scrubbing: the
 schema, `Verdict` (`voided`), `ExitCode`, `Reasons`, `RealInputsSeen`,
 `InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
@@ -1787,10 +1795,13 @@ and nothing clears it, so a later read that returns the expected tick
 poll that reads a mismatch stops the step at once and never reads again.
 Every PowerShell read of the tick goes through one function
 (`Read-FramePacingInputTick`), which latches a mismatch before it returns,
-and the contract fails on any other. Each run's own `run.json` keeps its
-evidence for debugging. A clipboard sequence of 0 before and after is no
-observation (the clipboard could not be read): `guards.json` records
-`ClipboardObservable` false and the console says the clipboard was
+and the contract fails on any other read in the plain forms it scans for; a
+computed method name, reflection whose name is built up or a concatenated
+native `EntryPoint` gets past that scan. Each run's own `run.json` keeps its
+evidence for debugging. `guards.json` takes the shared guard's own clipboard
+samples and verdict, with no second reading. A clipboard sequence of 0 before
+and after is no observation (the clipboard could not be read): `guards.json`
+records `ClipboardObservable` false and the console says the clipboard was
 unobservable, never that it held. The series ends
 in this order: every run has ended and its job, with its copy, is closed;
 the watch stops, which unhooks; the final real-input count and the tick are

@@ -1285,12 +1285,12 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
         StateGuardPassed = $null -eq $stateFailure
         SessionUnchanged = [string]::Equals($sessionBefore, $sessionAfter, [StringComparison]::Ordinal)
         HistoryUnchanged = $null -eq $historyFailure
-        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
+        # The guard's own samples and verdict, never a second reading (Sol on #744): a 0/0 reading is unobservable,
+        # never held (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardAfter']) { $stateGuard.ClipboardAfter } else { $null })
+        ClipboardObservable = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $false })
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
     }
-    # A clipboard sequence of 0 before and after is no observation, never "held" (the shared guard's
-    # Test-InteractiveWin11ClipboardObservable; test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
-    $guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
     $failed = @()
     if ($stateFailure) { $failed += $stateFailure }

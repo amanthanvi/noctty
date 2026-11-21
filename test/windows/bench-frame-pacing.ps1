@@ -1570,7 +1570,7 @@ function Invoke-FramePacingDriver {
     function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
     $mode = if ($Visible) { 'visible' } else { 'dry-run' }
     $record = [ordered]@{
-        Schema = 1; Mode = $mode; HarnessSha256 = $(if ($PSCommandPath) { Get-Sha256 $PSCommandPath } else { $null }); ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
+        Schema = 1; Mode = $mode; HarnessSha256 = (Get-FramePacingLoadedHarnessSha256); ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
         Cols = $script:Cols; Rows = $script:Rows; GridCols = $null; GridRows = $null; FontFamily = $script:FontFamily; FontSize = $script:FontSize
         Class = $null; ExeSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; ConfigSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
         PayloadBytes = $script:PayloadBytes; PayloadSeed = $script:PayloadSeed; PayloadSha256 = $null; MarkerLength = $null; WorkloadSha256 = $null
@@ -2077,9 +2077,9 @@ function Invoke-FramePacingOuter {
     $inputMarker = [long]0
     $admissionIdleMs = [long]-1
     $seriesClock = [Diagnostics.Stopwatch]::StartNew()
-    # The harness's bytes at series start (Sol on #741, round 10): each driver records the hash it ran under, and a
-    # driver that ran other bytes voids the series as harness-changed.
-    $harnessSha256 = Get-Sha256 $PSCommandPath
+    # The harness this process is executing (Sol on #741, round 10, and on #744): each driver records the same hash
+    # of its own loaded script, and a driver that ran other text voids the series as harness-changed.
+    $harnessSha256 = Get-FramePacingLoadedHarnessSha256
     if ($Visible) {
         $facts = Get-FramePacingSessionFacts -1 -1 $null
         $lockNeeded = Get-FramePacingLockNeedMs $facts.IdleMs $facts.MinIdleMs $Runs
@@ -2300,13 +2300,12 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         StateGuardPassed = $null -eq $stateFailure
         SessionUnchanged = [string]::Equals($sessionBefore, $sessionAfter, [StringComparison]::Ordinal)
         HistoryUnchanged = $null -eq $historyFailure
-        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
+        # The guard's own samples and verdict, never a second reading (Sol on #744): a 0/0 reading is unobservable,
+        # never held (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardAfter']) { $stateGuard.ClipboardAfter } else { $null })
+        ClipboardObservable = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $false })
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit; LatchToKillMs = $latchToKillMs
     }
-    # A clipboard sequence of 0 before and after is no observation (Opus on #741, round 9): GetClipboardSequenceNumber
-    # returns 0 when the station's clipboard cannot be read, so the record says unobservable, never held, through the
-    # shared guard's helper (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
-    $guards.ClipboardObservable = Test-InteractiveWin11ClipboardObservable $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
     Write-Host (Format-InteractiveWin11ClipboardReading $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter)
     $guardFailures = @()
@@ -2521,8 +2520,9 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     # final reads say.
     $inputRuns = @($Results | Where-Object { $null -ne $_.PSObject.Properties['InputSeen'] -and [bool]$_.InputSeen } | ForEach-Object { Split-Path -Leaf $_.Run })
     $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved -or $inputRuns.Count -gt 0)
-    # A driver that ran other bytes than the series started with voids it too, in either mode (Sol on #741, round 10).
-    $harnessChanged = -not [string]::IsNullOrEmpty($HarnessSha256) -and (Test-FramePacingHarnessChanged $Results $HarnessSha256)
+    # A driver that ran other bytes than the series started with voids it too, in either mode (Sol on #741, round 10),
+    # and so does a series with no hash of its own to compare against: it fails closed (Opus on #744).
+    $harnessChanged = [string]::IsNullOrEmpty($HarnessSha256) -or (Test-FramePacingHarnessChanged $Results $HarnessSha256)
     $voided = $inputSeen -or $harnessChanged
     # Nor does its pacing.json carry any other timing statistic or duration (Sol on #741, rounds 7 to 9): a voided
     # series writes pacing.json from the allowlist below, and the full summary, statistics included, to diagnostics.json.
@@ -2607,6 +2607,17 @@ function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $Ti
     if ($MixedEnvironment) { $reasons.Add('mixed-environment') }
     if ($HarnessChanged) { $reasons.Add('harness-changed') }
     return [string[]]$reasons.ToArray()
+}
+
+# The harness's identity: the SHA-256 of the script text this process parsed and is executing (Sol on #744), never
+# the file on disk, which an edit can replace after the load and before a hash of it. The root of any of the script's
+# functions' syntax trees is the whole parsed script, held in memory since the load. It covers this file alone, not
+# the scripts it dot-sources: it catches an accidental change to bench-frame-pacing.ps1 during a series, and is not a
+# seal against tampering.
+function Get-FramePacingLoadedHarnessSha256 {
+    $ast = ${function:Get-FramePacingLoadedHarnessSha256}.Ast
+    while ($null -ne $ast.Parent) { $ast = $ast.Parent }
+    return Get-BytesSha256 ([Text.Encoding]::UTF8.GetBytes($ast.Extent.Text))
 }
 
 # Whether any run's driver ran other harness bytes than the series started with (Sol on #741, round 10): a run with a
