@@ -141,9 +141,12 @@ pub fn StateMutexOf(comptime form: Layer) type {
 /// any policy or the inner lock, so a process that then panics keeps the
 /// pair. The recorder (PLAN.md §19.3) fills it; until then it records nothing.
 inline fn record(site: usize, role: Role, kind: Acquire) void {
-    _ = site;
-    _ = role;
-    _ = kind;
+    // Imported whatever the layer, so the recorder's and the dump's tests
+    // build wherever this hook does; the process recorder, its dump and
+    // their Win32 calls are reached only with the layer on (§2.7: a build
+    // with the layer off has no recorder).
+    const recorder = @import("recorder.zig");
+    if (comptime thread_role.layer == .on) recorder.process.record(site, role, kind);
 }
 
 fn panicReentry(kind: Acquire, role: Role) noreturn {
