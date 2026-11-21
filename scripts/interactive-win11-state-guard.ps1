@@ -62,6 +62,22 @@ function Write-InteractiveWin11StateReceipt {
     [IO.File]::WriteAllText($Path, ($Receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 }
 
+# Whether two clipboard sequence samples observed anything: GetClipboardSequenceNumber returns 0 when the window
+# station's clipboard cannot be read (no WINSTA_ACCESSCLIPBOARD), so 0 before and after, or a missing sample, is no
+# observation and never "held". A change still fails the guard; an unobservable reading does not, and every caller
+# records it as unobservable (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+function Test-InteractiveWin11ClipboardObservable {
+    param($Before, $After)
+    return $null -ne $Before -and $null -ne $After -and -not ([uint64]$Before -eq 0 -and [uint64]$After -eq 0)
+}
+
+# The guard's clipboard reading as a caller reports it: the two samples, or that the clipboard was unobservable.
+function Format-InteractiveWin11ClipboardReading {
+    param($Before, $After)
+    if (Test-InteractiveWin11ClipboardObservable $Before $After) { return "clipboard sequence before=$Before after=$After" }
+    return "clipboard unobservable (sequence before=$($Before) after=$($After): the clipboard could not be read)"
+}
+
 function Start-InteractiveWin11StateGuard {
     param(
         [Parameter(Mandatory)] [string] $Harness,
@@ -115,6 +131,10 @@ function Assert-InteractiveWin11StateGuard {
         $clipboardAfter = [uint32](& $Guard.ClipboardSequenceReader)
         if ($Guard.ClipboardBefore -ne $clipboardAfter) { $failures.Add('Clipboard sequence changed during the batch; report before further launches.') }
     } catch { $failures.Add("Clipboard sequence inspection failed: $($_.Exception.Message)") }
+    # The reading on the guard itself for its caller, and in the receipt: 0 before and after is unobservable.
+    $clipboardObservable = Test-InteractiveWin11ClipboardObservable $Guard.ClipboardBefore $clipboardAfter
+    $Guard | Add-Member -NotePropertyName ClipboardAfter -NotePropertyValue $clipboardAfter -Force
+    $Guard | Add-Member -NotePropertyName ClipboardObservable -NotePropertyValue $clipboardObservable -Force
     $finished = [DateTimeOffset]::UtcNow
     foreach ($name in @('Startup', 'ProductJumpList')) {
         if (-not $after.Contains($name)) { continue }
@@ -153,10 +173,10 @@ function Assert-InteractiveWin11StateGuard {
     $receipt = [ordered]@{
         Harness = $Guard.Harness; StartedAtUtc = $Guard.StartedAtUtc; FinishedAtUtc = $finished.ToString('o')
         Paths = $Guard.Paths; Before = $Guard.Before; After = $after
-        ClipboardBefore = $Guard.ClipboardBefore; ClipboardAfter = $clipboardAfter
+        ClipboardBefore = $Guard.ClipboardBefore; ClipboardAfter = $clipboardAfter; ClipboardObservable = $clipboardObservable
         MeasureCleanup = $cleanup; Failures = @($failures.ToArray())
     }
     Write-InteractiveWin11StateReceipt -Path (Join-Path $Guard.ReceiptDirectory 'state-after.json') -Receipt $receipt
-    Write-Host "$($Guard.Harness) state guard: clipboard sequence before=$($Guard.ClipboardBefore) after=$clipboardAfter; measure cleanup=$cleanup"
+    Write-Host "$($Guard.Harness) state guard: $(Format-InteractiveWin11ClipboardReading $Guard.ClipboardBefore $clipboardAfter); measure cleanup=$cleanup"
     if ($failures.Count) { throw "$($Guard.Harness): $($failures -join ' ')" }
 }

@@ -1285,7 +1285,10 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
         StateGuardPassed = $null -eq $stateFailure
         SessionUnchanged = [string]::Equals($sessionBefore, $sessionAfter, [StringComparison]::Ordinal)
         HistoryUnchanged = $null -eq $historyFailure
-        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
+        # The guard's own samples and verdict, never a second reading (Sol on #744): a 0/0 reading is unobservable,
+        # never held (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardAfter']) { $stateGuard.ClipboardAfter } else { $null })
+        ClipboardObservable = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $false })
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
     }
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
@@ -1320,7 +1323,7 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
             }
         }
     } elseif ($null -ne $record) { $failed += 'record: no effective directories' }
-    Write-Host "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)"
+    Write-Host (Format-InteractiveWin11ClipboardReading $guards.ClipboardSequenceBefore $guards.ClipboardSequenceAfter)
     if ($failed.Count -gt 0) { throw ('working-set harness: ' + ($failed -join '; ')) }
     Write-Host "working-set harness: $Workload complete: $Run"
 }
