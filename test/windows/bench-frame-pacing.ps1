@@ -1,0 +1,1395 @@
+#requires -Version 7.2
+<#
+.SYNOPSIS
+bench-windows.ps1's frame-interval p95 (frame_time_p95_ms) under the per-copy rules: each run a fresh portable copy of
+the receipt-bound measurement build, its shell the config's cmd.exe, timed from the copy's own render trace.
+
+.DESCRIPTION
+Run it through bench-windows.ps1 -Metric frame-pacing, or as
+  pwsh -NoProfile -File test/windows/bench-frame-pacing.ps1 -MeasureRepo <repo with a measurement build>
+       -RunRoot <new directory> [-Runs 5] [-Visible] [-ExpectedBuildMode ReleaseFast]
+with -RunRoot outside -MeasureRepo or in a directory git ignores there. -MeasureRepo is a checkout whose measurement
+generation Invoke-InteractiveWin11MeasureBuild built (scripts/interactive-win11-measure-lib.ps1); only that build is
+launched, admitted as test/windows/hidden-win11-working-set.ps1 admits it (#739's functions, copied byte for byte and
+held identical by the contract: Get-WorkingSetMeasureBuild, Read-WorkingSetPlainFile, Test-WorkingSetCopy and the
+rest). Each run is a fresh copy in <RunRoot>\run-<n>, a fresh LOCALAPPDATA, APPDATA, TEMP and TMP, and (in a dry run)
+a fresh private desktop; runs go one at a time (a session-wide mutex refuses a second harness), and the series stops
+at the first run that does not complete.
+
+Two modes.
+  Dry run (the default): everything on a private desktop. The copy, its config and argv, the workload and the trace
+          run exactly as in a visible run, but the visible part (the foreground and a composed present) is refused:
+          the driver evaluates the visible run's preconditions on its own desktop, records why they fail, and never
+          takes the foreground. Nothing composes a private desktop and SwapBuffers does not wait there (renderer.md,
+          2026-10-14 LAT-01 trap 1), so its intervals are a check of the pipeline, not a measurement: the summary
+          gives them as dry_run_p95_ms, never as frame_time_p95_ms.
+  -Visible: the measurement. The copy runs on Default, which must be the caller's desktop and the input desktop
+          (unlocked), composed by DWM, in a local session, with no input for -MinIdleSeconds (300 by default) before
+          the run; the machine must be under 30% busy (waited for up to -QuietWaitSeconds, 900 by default;
+          test-harnesses.md MEASUREMENT-HARNESS-RERUN-01). The copy takes the foreground through a bounded call (a
+          zero-motion mouse input unlocks it, never an Alt tap: PROBE-ALT-TAP-01; the cross-thread calls run on a
+          worker joined within 5 s: VISIBLE-PACING-CERT-01 trap (1)). A run in which the foreground, the pane's focus
+          or the session's last input changed during the workload is inconclusive, never a sample. Run it only while
+          the machine's user is away (AGENTS.md "Running noctty").
+
+The workload (bench-windows.ps1's `stream` throughput workload, without its PowerShell producer): 4,194,304 bytes of
+printable ASCII from bench-windows.ps1's own generator (WritePayload, seed 121, copied byte for byte and held
+identical by the contract), then the end marker framed as bench-windows.ps1 frames it (SGR reset, CUP 1;1, EL 2, a
+unique token), in work\stream.bin. The copy's config binds F5 to the text `type stream.bin` and F6 to `\r`; the
+driver posts F5, waits for the echo to go quiet, arms the render trace's target (WM_APP + 9 with 0: the first swap
+that presents the end marker) and posts F6, so cmd's own `type` writes the payload. The samples are the trace's
+intervals between consecutive successful SwapBuffers from the arm through that swap (target_swap_interval_qpc_ticks
+over qpc_frequency, at most 2,048 a run, an overflow fails the run); frame_time_p95_ms is their nearest-rank p95,
+pooled over the completed runs, as bench-windows.ps1 aggregates its own. The first interval may hold the gap from the
+newline's echo to the first payload frame. cmd's `type` delivers the payload at about 2.4 MB/s, a tenth of the bench's
+PowerShell producer, so a run's window is about 1.8 s with about 420 intervals, and these numbers are not comparable
+with the bench's own table (test-harnesses.md FRAME-PACING-01). The grid is 140 x 43 (window-width = 140, window-height = 45, Consolas 16,
+renderer = opengl, read through the pane's pseudoconsole before the workload, as #739 reads it). Runs compare only when
+their WorkloadSha256 (these constants, the payload's SHA-256 and the config with the run's directory taken out),
+grid, transport, both ConPTY bundle digests and monitor refresh match.
+
+Records in <RunRoot>: pacing.json (the summary: the mode, each run's status and statistics, and the pooled p95 over the
+completed runs), and per run in run-<n>: run.json (the parameters, the copy's build mode, the SHA-256 of its app, CLI,
+config and receipt, the ConPTY pair beside the build's, the transport and renderer its log names, the grid, the
+window's client size, DPI and monitor mode, the busy share and timer resolution before and after, every interval,
+the visible part's facts, the exit), version.txt, noctty.log (the copy's stderr), driver.log, render-trace.json
+(the copy's last trace snapshot), and guards.json.
+
+Safety (AGENTS.md "Running noctty"; #739's rules). The outer half copies the measurement build without noctty.ico,
+places `noctty.portable` beside the exe, writes the config and the payload, creates the desktop (dry run) and a
+kill-on-close job, and starts this script as the driver at normal priority with LOCALAPPDATA, APPDATA, TEMP and TMP
+inside the run (never for Git Bash or another msys program: nothing here starts one). The driver re-proves its
+isolation before it starts anything: a job; in a dry run its own desktop, neither Default nor the input desktop; in a
+visible run Default, the input desktop; those four variables inside the run; no inherited NOCTTY_ or GHOSTTY_
+variable; and the build, the copy, the config bytes and the payload check out again. The native launches refuse any
+other desktop. The copy is launched with exactly the expected argument list (the launch helper's isolation, its own
+class, --single-instance=false, --window-save-state=never, the clipboard denied, --config-default-files=false and
+--config-file=<copy>\config.ghostty) and nothing that sets the shell, read back from its own command line by PID.
+Its shell is the config's `command = direct:<System32>\cmd.exe /D`, the only command; it starts no PowerShell (and
+the driver checks none runs under the copy at the end). The config denies the clipboard, clears every default
+binding and binds nothing that copies. The copy's environment adds only GHOSTTY_LOG, NOCTTY_RENDER_TRACE_FILE,
+NOCTTY_RENDER_TRACE_LIVE and NOCTTY_BENCH_END_MARKER, never logged. Input is posted, never SendInput, except the
+visible run's one zero-motion unlock. The outer half compares the real startup-attempts.json's, session-state.json's
+and the product jump list's size and time and the PSReadLine history's metadata before and after each run, and
+records the clipboard sequence number before and after. Logs name kinds and sizes, never a command line or an
+environment value.
+#>
+[CmdletBinding()]
+param(
+    [string] $MeasureRepo,
+    [string] $RunRoot,
+    [ValidateRange(1, 50)] [int] $Runs = 5,
+    [switch] $Visible,
+    [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')] [string] $ExpectedBuildMode = 'ReleaseFast',
+    [ValidateRange(60, 3600)] [int] $MinIdleSeconds = 300,
+    [ValidateRange(0, 3600)] [int] $QuietWaitSeconds = 900,
+    # Internal: the driver half and its grid probe.
+    [switch] $Driver,
+    [string] $Run,
+    [string] $Bin,
+    [ValidatePattern('^[a-z0-9][a-z0-9.-]{0,23}$')] [string] $SandboxName,
+    [string] $DesktopName,
+    [int] $GridProbePid = 0
+)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
+. (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
+# The real startup ledger, the product jump list and the clipboard sequence: the shared state guard.
+. (Join-Path $repoRoot 'scripts\interactive-win11-state-guard.ps1')
+$script:Utf8 = [Text.UTF8Encoding]::new($false)
+$script:ResponseBoundMs = 5000
+# The workload's constants. A change to any of them, to the generator or to the config changes WorkloadSha256, and
+# runs with different WorkloadSha256 are not comparable. Cols, Rows, FontFamily and FontSize are bench-windows.ps1's
+# defaults; GridRows is the grid a run must show before the workload (measured on the 0a build).
+$script:Cols = 140
+$script:Rows = 45
+$script:GridRows = 43
+$script:FontFamily = 'Consolas'
+$script:FontSize = 16
+$script:PayloadWorkload = 'stream'
+$script:PayloadBytes = 4194304
+$script:PayloadSeed = 121
+$script:IntervalCapacity = 2048
+$script:QuietMs = 1000
+$script:EchoQuietMs = 500
+$script:QuietBusyPercent = 30
+$script:ForegroundBoundMs = 5000
+# win32/consts.zig WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT and WM_WINHOSTTY_RENDER_TRACE_TARGET (WM_APP + 8 and + 9), as
+# bench-windows.ps1 names them.
+$script:WmRenderTraceSnapshot = [uint32](0x8000 + 8)
+$script:WmRenderTraceTarget = [uint32](0x8000 + 9)
+# processthreadsapi.h STARTUPINFOW and STARTUPINFOEXW, winnt.h JOBOBJECT_EXTENDED_LIMIT_INFORMATION, tlhelp32.h
+# PROCESSENTRY32W, consoleapi2.h CONSOLE_SCREEN_BUFFER_INFO with COORD and SMALL_RECT, winuser.h INPUT with MOUSEINPUT
+# and LASTINPUTINFO, on x64 (AGENTS.md "Win32 FFI"; none of those headers changes the packing). INPUT's union is
+# MOUSEINPUT's 32 bytes, the largest member, after 4 bytes of padding.
+$script:SdkLayout = 'Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16 ProcessEntry=568 processId@8 heapId@16 parentProcessId@32 exeFile@44 ScreenBufferInfo=22 cursor@4 wAttributes@8 window@10 maxWindow@18 Coord=4 SmallRect=8 Input=40 mouse@8 MouseInput=32 mouseFlags@12 LastInput=8'
+
+if (-not ('FramePacingNative' -as [type])) {
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+public static class FramePacingNative {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
+        public int cb; public string reserved,desktop,title;
+        public int x,y,cx,cy,charsX,charsY,fill,flags; public short show,reservedBytes;
+        public IntPtr reservedPointer,input,output,error;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct StartupEx { public Startup info; public IntPtr attributes; }
+    [StructLayout(LayoutKind.Sequential)] public struct ProcessInfo { public IntPtr process,thread; public int pid,tid; }
+    [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public int inherit; }
+    [StructLayout(LayoutKind.Sequential)] struct MouseInput { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
+    [StructLayout(LayoutKind.Sequential)] struct Input { public uint type; public MouseInput mouse; }
+    [StructLayout(LayoutKind.Sequential)] struct LastInput { public uint size, time; }
+    public delegate bool EnumWindow(IntPtr h, IntPtr p);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref StartupEx si, out ProcessInfo pi);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref Startup si, out ProcessInfo pi);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string name, uint access, uint share, ref SecurityAttributes sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] public static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr h, uint code);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+    [DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);
+    [DllImport("kernel32.dll")] public static extern uint GetErrorMode();
+    // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (winnt.h): 144 bytes on x64, pinned by Layout().
+    [StructLayout(LayoutKind.Sequential)] struct BasicLimits {
+        public long processTime, jobTime; public uint flags;
+        public UIntPtr minWorking, maxWorking; public uint activeProcesses;
+        public UIntPtr affinity; public uint priority, scheduling;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IoCounters { public ulong readOps, writeOps, otherOps, readBytes, writeBytes, otherBytes; }
+    [StructLayout(LayoutKind.Sequential)] struct JobLimits {
+        public BasicLimits basic; public IoCounters io;
+        public UIntPtr processMemory, jobMemory, peakProcessMemory, peakJobMemory;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr sa, string name);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int type, ref JobLimits limits, uint size);
+    // The run's job, as #739's: its processes die when the harness closes it (KILL_ON_JOB_CLOSE), and an unhandled
+    // exception ends a process instead of waiting in WER's dialog (DIE_ON_UNHANDLED_EXCEPTION).
+    public static IntPtr CreateRunJob() {
+        var job = CreateJobObjectW(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed: " + Marshal.GetLastWin32Error());
+        var limits = new JobLimits(); limits.basic.flags = 0x2000 | 0x400;
+        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<JobLimits>())) {
+            CloseHandle(job); throw new Exception("SetInformationJobObject failed: " + Marshal.GetLastWin32Error());
+        }
+        return job;
+    }
+    // Whether this process runs inside a job (any job).
+    public static bool InJob() { bool r; return IsProcessInJob(new IntPtr(-1), IntPtr.Zero, out r) && r; }
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow cb, IntPtr p);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumWindow cb, IntPtr p);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out int pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool SetKeyboardState(byte[] state);
+    [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr GetThreadDesktop(uint tid);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool GetUserObjectInformationW(IntPtr h, int index, StringBuilder name, int length, out int needed);
+    [DllImport("shell32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CommandLineToArgvW(string commandLine, out int count);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsHungAppWindow(IntPtr h);
+    [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, Input[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LastInput info);
+    [DllImport("kernel32.dll")] static extern uint GetTickCount();
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    [DllImport("dwmapi.dll")] static extern int DwmIsCompositionEnabled(out bool enabled);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attribute, out int value, int size);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetMonitorInfoW(IntPtr monitor, IntPtr info);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="EnumDisplaySettingsW")] static extern bool EnumDisplaySettingsRaw(string device, int mode, IntPtr devmode);
+    [DllImport("ntdll.dll")] static extern int NtQueryTimerResolution(out uint minimum, out uint maximum, out uint current);
+    [DllImport("kernel32.dll")] static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+
+    public static string Layout() {
+        return string.Join(" ", new string[] {
+            "Startup=" + Marshal.SizeOf<Startup>(), "desktop@" + Marshal.OffsetOf<Startup>("desktop"),
+            "flags@" + Marshal.OffsetOf<Startup>("flags"), "show@" + Marshal.OffsetOf<Startup>("show"),
+            "output@" + Marshal.OffsetOf<Startup>("output"),
+            "error@" + Marshal.OffsetOf<Startup>("error"), "StartupEx=" + Marshal.SizeOf<StartupEx>(),
+            "attributes@" + Marshal.OffsetOf<StartupEx>("attributes"), "JobLimits=" + Marshal.SizeOf<JobLimits>(),
+            "limitFlags@" + Marshal.OffsetOf<BasicLimits>("flags"),
+            "ProcessEntry=" + Marshal.SizeOf<ProcessEntry>(), "processId@" + Marshal.OffsetOf<ProcessEntry>("processId"),
+            "heapId@" + Marshal.OffsetOf<ProcessEntry>("heapId"), "parentProcessId@" + Marshal.OffsetOf<ProcessEntry>("parentProcessId"),
+            "exeFile@" + Marshal.OffsetOf<ProcessEntry>("exeFile"),
+            "ScreenBufferInfo=" + Marshal.SizeOf<ScreenBufferInfo>(), "cursor@" + Marshal.OffsetOf<ScreenBufferInfo>("cursor"),
+            "wAttributes@" + Marshal.OffsetOf<ScreenBufferInfo>("attributes"), "window@" + Marshal.OffsetOf<ScreenBufferInfo>("window"),
+            "maxWindow@" + Marshal.OffsetOf<ScreenBufferInfo>("maxWindow"), "Coord=" + Marshal.SizeOf<Coord>(),
+            "SmallRect=" + Marshal.SizeOf<SmallRect>(), "Input=" + Marshal.SizeOf<Input>(), "mouse@" + Marshal.OffsetOf<Input>("mouse"),
+            "MouseInput=" + Marshal.SizeOf<MouseInput>(), "mouseFlags@" + Marshal.OffsetOf<MouseInput>("flags"),
+            "LastInput=" + Marshal.SizeOf<LastInput>() });
+    }
+    static string NameOf(IntPtr desktop) {
+        var name = new StringBuilder(256); int needed;
+        if (!GetUserObjectInformationW(desktop, 2, name, 512, out needed)) return null;
+        return name.ToString();
+    }
+    public static string CurrentDesktopName() {
+        if (GetDesktopWindow() == IntPtr.Zero) throw new Exception("Current desktop connection failed");
+        var name = NameOf(GetThreadDesktop(GetCurrentThreadId()));
+        if (name == null) throw new Exception("Desktop name query failed");
+        return name;
+    }
+    // A command line split the way the C runtime and CommandLineToArgvW split it, for reading launch values back.
+    public static string[] SplitCommandLine(string commandLine) {
+        int count; IntPtr argv = CommandLineToArgvW(commandLine, out count);
+        if (argv == IntPtr.Zero) throw new Exception("CommandLineToArgvW failed: " + Marshal.GetLastWin32Error());
+        try {
+            var result = new string[count];
+            for (int i = 0; i < count; i++) result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(argv, i * IntPtr.Size));
+            return result;
+        } finally { LocalFree(argv); }
+    }
+    // The input desktop's name, or null when it cannot be opened or read (a locked session's Winlogon desktop).
+    public static string InputDesktopName() {
+        IntPtr h = OpenInputDesktop(0, false, 0x0001); // DESKTOP_READOBJECTS
+        if (h == IntPtr.Zero) return null;
+        try { return NameOf(h); } finally { CloseDesktop(h); }
+    }
+    static bool Same(string a, string b) { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+    // The driver: suspended, assigned to the job before it runs, no console window, normal priority (no priority
+    // flag), its desktop named in STARTUPINFO. A dry run's driver goes onto a private desktop: never the caller's own,
+    // Default or the input desktop (#739's rule). A visible run's goes onto Default only, from Default, while Default is
+    // the input desktop.
+    public static ProcessInfo LaunchDriver(string app, string command, string cwd, string desktop, IntPtr job, bool visible) {
+        if (string.IsNullOrEmpty(desktop)) throw new Exception("A launch must name its desktop");
+        string input = InputDesktopName();
+        string own = "WinSta0\\" + CurrentDesktopName();
+        if (visible) {
+            if (input == null || !Same(desktop, "WinSta0\\Default") || !Same(own, "WinSta0\\Default") || !Same("WinSta0\\" + input, "WinSta0\\Default"))
+                throw new Exception("A visible driver starts only on Default, from Default, while Default is the input desktop");
+        } else if (input == null || Same(desktop, own) || Same(desktop, "WinSta0\\Default") || Same(desktop, "WinSta0\\" + input)) {
+            throw new Exception("The driver must start on a private desktop, not the caller's, Default or the input desktop");
+        }
+        var si = new Startup { cb = Marshal.SizeOf<Startup>(), desktop = desktop, flags = 1, show = 0 }; ProcessInfo pi;
+        if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, false, 0x08000004, IntPtr.Zero, cwd, ref si, out pi))
+            throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
+        if (!AssignProcessToJobObject(job, pi.process) || ResumeThread(pi.thread) == 0xFFFFFFFF) {
+            TerminateProcess(pi.process, 1); CloseHandle(pi.thread); CloseHandle(pi.process);
+            throw new Exception("Assign/resume owned driver failed");
+        }
+        return pi;
+    }
+    // A child of the driver on `desktop`, its standard output and error in `logPath` (the only handle it inherits),
+    // at normal priority (0x20), with no console window (0x08000000) when `noWindow`. No STARTF_USESHOWWINDOW, so a GUI
+    // window shows on its desktop (renderer.md LAT-01 trap 3). Only onto the caller's own desktop; in a dry run never
+    // Default or the input desktop, in a visible run only Default while it is the input desktop.
+    public static ProcessInfo Spawn(string app, string command, string cwd, string desktop, string logPath, bool noWindow, bool visible) {
+        if (string.IsNullOrEmpty(desktop)) throw new Exception("A launch must name its desktop");
+        string own = "WinSta0\\" + CurrentDesktopName();
+        if (!Same(desktop, own)) throw new Exception("A child must start on the caller's own desktop");
+        string input = InputDesktopName();
+        if (visible) {
+            if (input == null || !Same(desktop, "WinSta0\\Default") || !Same("WinSta0\\" + input, "WinSta0\\Default"))
+                throw new Exception("A visible child starts only on Default while Default is the input desktop");
+        } else if (input == null || Same(desktop, "WinSta0\\Default") || Same(desktop, "WinSta0\\" + input)) {
+            throw new Exception("A child must not start on Default or the input desktop");
+        }
+        var sa = new SecurityAttributes { length = Marshal.SizeOf<SecurityAttributes>(), inherit = 1 };
+        IntPtr log = CreateFileW(logPath, 0x40000000, 3, ref sa, 2, 0x80, IntPtr.Zero);
+        if (log == new IntPtr(-1)) throw new Exception("Creating the log file failed: " + Marshal.GetLastWin32Error());
+        IntPtr list = IntPtr.Zero, handles = IntPtr.Zero;
+        try {
+            IntPtr size = IntPtr.Zero;
+            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+            list = Marshal.AllocHGlobal(size);
+            if (!InitializeProcThreadAttributeList(list, 1, 0, ref size)) throw new Exception("InitializeProcThreadAttributeList failed: " + Marshal.GetLastWin32Error());
+            handles = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(handles, log);
+            if (!UpdateProcThreadAttribute(list, 0, new IntPtr(0x20002), handles, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                throw new Exception("UpdateProcThreadAttribute failed: " + Marshal.GetLastWin32Error());
+            var si = new StartupEx();
+            si.info.cb = Marshal.SizeOf<StartupEx>();
+            si.info.desktop = desktop;
+            si.info.flags = 0x100;
+            si.info.output = log; si.info.error = log;
+            si.attributes = list;
+            ProcessInfo pi;
+            if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, true, 0x00080000 | 0x20 | (noWindow ? 0x08000000u : 0u), IntPtr.Zero, cwd, ref si, out pi))
+                throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
+            return pi;
+        } finally {
+            if (list != IntPtr.Zero) { DeleteProcThreadAttributeList(list); Marshal.FreeHGlobal(list); }
+            if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
+            CloseHandle(log);
+        }
+    }
+    public static bool Alive(IntPtr process) { return WaitForSingleObject(process, 0) == 258; }
+    public static long ExitCode(IntPtr process) {
+        uint code; if (!GetExitCodeProcess(process, out code)) throw new Exception("GetExitCodeProcess failed: " + Marshal.GetLastWin32Error());
+        return code;
+    }
+    public static void Terminate(IntPtr process, uint code) { TerminateProcess(process, code); }
+    static string Class(IntPtr h) { var s = new StringBuilder(128); GetClassNameW(h, s, 128); return s.ToString(); }
+    // This copy's host windows (owner pid `pid`).
+    public static IntPtr[] Hosts(int pid) {
+        var list = new List<IntPtr>();
+        EnumWindows((h, p) => { int id; GetWindowThreadProcessId(h, out id);
+            if (id == pid && Class(h) == "noctty.win32.host") list.Add(h); return true; }, IntPtr.Zero);
+        return list.ToArray();
+    }
+    public static IntPtr[] Surfaces(IntPtr host, bool visibleOnly) {
+        var list = new List<IntPtr>();
+        EnumChildWindows(host, (c, p) => { if (Class(c) == "noctty.win32" && (!visibleOnly || IsWindowVisible(c))) list.Add(c); return true; }, IntPtr.Zero);
+        return list.ToArray();
+    }
+    public static int Owner(IntPtr h) { int pid; GetWindowThreadProcessId(h, out pid); return pid; }
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int left, top, right, bottom; }
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out Rect r);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
+    // { client width, client height, DPI } of a window.
+    public static long[] ClientAndDpi(IntPtr h) {
+        Rect r; if (!GetClientRect(h, out r)) return new long[] { -1, -1, GetDpiForWindow(h) };
+        return new long[] { r.right - r.left, r.bottom - r.top, GetDpiForWindow(h) };
+    }
+    public static bool Responsive(IntPtr h, uint ms) {
+        IntPtr result; return SendMessageTimeoutW(h, 0, IntPtr.Zero, IntPtr.Zero, 2, ms, out result) != IntPtr.Zero;
+    }
+    public static bool PostClose(IntPtr h, int pid) { return Owner(h) == pid && PostMessageW(h, 0x10, IntPtr.Zero, IntPtr.Zero); }
+    // A key as a posted WM_KEYDOWN/WM_KEYUP pair to a window of `pid`, after clearing the keyboard state the window's
+    // thread reads (#739's Key; test-harnesses.md, 2026-11-08 trap 7).
+    public static void Key(IntPtr h, int pid, int vk) {
+        int owner; uint tid = GetWindowThreadProcessId(h, out owner); uint me = GetCurrentThreadId();
+        if (tid == 0 || owner != pid) throw new Exception("The window is not this copy's");
+        if (!AttachThreadInput(me, tid, true)) throw new Exception("AttachThreadInput failed: " + Marshal.GetLastWin32Error());
+        try { if (!SetKeyboardState(new byte[256])) throw new Exception("SetKeyboardState failed"); }
+        finally { AttachThreadInput(me, tid, false); }
+        if (!PostMessageW(h, 0x100, new IntPtr(vk), new IntPtr(1))) throw new Exception("Key-down post failed");
+        if (!PostMessageW(h, 0x101, new IntPtr(vk), new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
+    }
+    // A render-trace control message (WM_APP + 8 or + 9) to a pane of `pid`, sent with SMTO_ABORTIFHUNG and a bound;
+    // true when the pane answered.
+    public static bool TraceMessage(IntPtr surface, int pid, uint message, ulong wParam, uint ms) {
+        if (Owner(surface) != pid) throw new Exception("The pane is not this copy's");
+        IntPtr result; return SendMessageTimeoutW(surface, message, new IntPtr((long)wParam), IntPtr.Zero, 2, ms, out result) != IntPtr.Zero;
+    }
+    // The visible run's foreground, bounded (test-harnesses.md VISIBLE-PACING-CERT-01 trap (1): these cross-thread
+    // calls can wait on the target's UI thread with no bound). The window must be this copy's, not hung, and answer
+    // WM_NULL within the bound first; the calls then run on a worker thread joined within the bound, and a timeout is
+    // an environment failure, never retried. The unlock is a zero-motion mouse input, not an Alt tap, which can leave
+    // the window in a menu loop that takes the next key (PROBE-ALT-TAP-01; #738's Foreground). "ok" or why not.
+    public static string Foreground(IntPtr hwnd, int pid, int boundMs) {
+        if (Owner(hwnd) != pid) return "not-this-copy";
+        if (IsHungAppWindow(hwnd) || !Responsive(hwnd, (uint)boundMs)) return "hung";
+        string outcome = null;
+        var worker = new Thread(() => {
+            var nudge = new Input[] { new Input { type = 0 } };
+            nudge[0].mouse.flags = 0x0001; // MOUSEEVENTF_MOVE, dx = dy = 0
+            if (SendInput(1, nudge, Marshal.SizeOf<Input>()) != 1) { outcome = "unlock-not-inserted"; return; }
+            SetForegroundWindow(hwnd);
+            if (GetForegroundWindow() != hwnd) {
+                int owner; uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out owner);
+                uint me = GetCurrentThreadId();
+                bool attached = foregroundThread != 0 && foregroundThread != me && AttachThreadInput(me, foregroundThread, true);
+                try { BringWindowToTop(hwnd); SetForegroundWindow(hwnd); }
+                finally { if (attached) AttachThreadInput(me, foregroundThread, false); }
+            }
+            outcome = GetForegroundWindow() == hwnd ? "ok" : "refused";
+        });
+        worker.IsBackground = true;
+        worker.Start();
+        if (!worker.Join(boundMs)) return "timeout";
+        return outcome ?? "unknown";
+    }
+    public static bool IsForeground(IntPtr hwnd) { return GetForegroundWindow() == hwnd; }
+    // Whether DWM composes the desktop (1, 0, or -1 when the query failed) and whether it cloaks a window (DWMWA_CLOAKED).
+    public static int Composition() { bool on; return DwmIsCompositionEnabled(out on) != 0 ? -1 : (on ? 1 : 0); }
+    public static int Cloaked(IntPtr h) { int v; return DwmGetWindowAttribute(h, 14, out v, 4) != 0 ? -1 : v; }
+    public static bool RemoteSession() { return GetSystemMetrics(0x1000) != 0; } // SM_REMOTESESSION
+    // The session's last input as GetLastInputInfo's tick, and the milliseconds since it (32-bit ticks, wrapping).
+    public static long LastInputTick() { var li = new LastInput { size = (uint)Marshal.SizeOf<LastInput>() }; return GetLastInputInfo(ref li) ? (long)li.time : -1; }
+    public static long IdleMs() { var li = new LastInput { size = (uint)Marshal.SizeOf<LastInput>() }; return GetLastInputInfo(ref li) ? (long)unchecked(GetTickCount() - li.time) : -1; }
+    // The system timer's current resolution in 100 ns units (NtQueryTimerResolution), or -1.
+    public static long TimerResolution() { uint a, b, c; return NtQueryTimerResolution(out a, out b, out c) != 0 ? -1 : (long)c; }
+    // The share of all processors' time not idle over `ms` (GetSystemTimes; kernel time includes idle), percent, or -1.
+    public static double BusyPercent(int ms) {
+        long i0, k0, u0, i1, k1, u1;
+        if (!GetSystemTimes(out i0, out k0, out u0)) return -1;
+        Thread.Sleep(ms);
+        if (!GetSystemTimes(out i1, out k1, out u1)) return -1;
+        double total = (double)((k1 - k0) + (u1 - u0));
+        return total <= 0 ? -1 : 100.0 * (1.0 - (double)(i1 - i0) / total);
+    }
+    // The window's monitor's current mode: { width, height, refresh Hz }, or zeros. MONITORINFOEXW is 104 bytes with
+    // szDevice at 40; DEVMODEW is 220 bytes with dmSize at 68, dmPelsWidth at 172, dmPelsHeight at 176 and
+    // dmDisplayFrequency at 184 (bench-windows.ps1's offsets).
+    public static long[] MonitorMode(IntPtr h) {
+        IntPtr monitor = MonitorFromWindow(h, 2); // MONITOR_DEFAULTTONEAREST
+        if (monitor == IntPtr.Zero) return new long[] { 0, 0, 0 };
+        IntPtr info = Marshal.AllocHGlobal(104), mode = Marshal.AllocHGlobal(220);
+        try {
+            Marshal.Copy(new byte[104], 0, info, 104); Marshal.WriteInt32(info, 0, 104);
+            if (!GetMonitorInfoW(monitor, info)) return new long[] { 0, 0, 0 };
+            string device = Marshal.PtrToStringUni(IntPtr.Add(info, 40));
+            Marshal.Copy(new byte[220], 0, mode, 220); Marshal.WriteInt16(mode, 68, 220);
+            if (!EnumDisplaySettingsRaw(device, -1, mode)) return new long[] { 0, 0, 0 }; // ENUM_CURRENT_SETTINGS
+            return new long[] { Marshal.ReadInt32(mode, 172), Marshal.ReadInt32(mode, 176), Marshal.ReadInt32(mode, 184) };
+        } finally { Marshal.FreeHGlobal(info); Marshal.FreeHGlobal(mode); }
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct ProcessEntry {
+        public uint size, usage, processId; public IntPtr heapId; public uint moduleId, threads, parentProcessId;
+        public int basePriority; public uint flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string exeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+    // The PIDs of `parent`'s children whose executable is `exe` (case-insensitive).
+    public static int[] Children(int parent, string exe) {
+        var list = new List<int>();
+        IntPtr snap = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+        if (snap == new IntPtr(-1)) throw new Exception("CreateToolhelp32Snapshot failed: " + Marshal.GetLastWin32Error());
+        try {
+            var e = new ProcessEntry { size = (uint)Marshal.SizeOf<ProcessEntry>() };
+            for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e)) {
+                if ((int)e.parentProcessId == parent && string.Equals(e.exeFile, exe, StringComparison.OrdinalIgnoreCase)) list.Add((int)e.processId);
+                e.size = (uint)Marshal.SizeOf<ProcessEntry>();
+            }
+        } finally { CloseHandle(snap); }
+        return list.ToArray();
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct Coord { public short x, y; }
+    [StructLayout(LayoutKind.Sequential)] struct SmallRect { public short left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct ScreenBufferInfo { public Coord size, cursor; public ushort attributes; public SmallRect window; public Coord maxWindow; }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetConsoleScreenBufferInfo(IntPtr output, out ScreenBufferInfo info);
+    // The grid of `pid`'s console (a pane's shell, whose console is the pane's pseudoconsole): "columns,rows" from its
+    // screen buffer's window, or an error word. Detaches this process from its own console first.
+    public static string ConsoleGrid(uint pid) {
+        FreeConsole();
+        if (!AttachConsole(pid)) return "attach-failed-" + Marshal.GetLastWin32Error();
+        IntPtr output = CreateFileW("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (output == new IntPtr(-1)) return "conout-failed-" + Marshal.GetLastWin32Error();
+        try {
+            ScreenBufferInfo info;
+            if (!GetConsoleScreenBufferInfo(output, out info)) return "info-failed-" + Marshal.GetLastWin32Error();
+            return (info.window.right - info.window.left + 1) + "," + (info.window.bottom - info.window.top + 1);
+        } finally { CloseHandle(output); FreeConsole(); }
+    }
+}
+'@
+}
+
+# bench-windows.ps1's payload generator (NocttyBenchNative.Next and WritePayload), byte for byte: the contract holds the
+# two copies identical, so this workload's bytes are the bench's.
+if (-not ('FramePacingPayload' -as [type])) {
+Add-Type @'
+using System;
+using System.IO;
+using System.Text;
+public static class FramePacingPayload {
+    private static uint Next(ref uint state) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state;
+    }
+
+    public static void WritePayload(string path, long length, uint seed, string workload, int rows, int cols) {
+        uint state = seed == 0 ? 1u : seed;
+        byte[] buffer = new byte[65536];
+        long written = 0;
+        int column = 0;
+        byte[] pendingAltScreenSequence = null;
+        int pendingAltScreenOffset = 0;
+        bool pendingScrollLineFeed = false;
+        using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, buffer.Length, FileOptions.SequentialScan)) {
+            while (written < length) {
+                int count = (int)Math.Min(buffer.Length, length - written);
+                int offset = 0;
+                while (offset < count) {
+                    uint random = Next(ref state);
+                    if (workload == "alt-screen") {
+                        if (pendingAltScreenSequence == null) {
+                            string sequence = String.Format("\x1b[{0};{1}H{2}", 1 + random % (uint)rows, 1 + (random >> 8) % (uint)cols, (char)(33 + (random >> 16) % 94));
+                            byte[] bytes = Encoding.ASCII.GetBytes(sequence);
+                            long remainingPayload = length - (written + offset);
+                            if (bytes.LongLength > remainingPayload) {
+                                while (offset < count) buffer[offset++] = (byte)' ';
+                                continue;
+                            }
+                            pendingAltScreenSequence = bytes;
+                            pendingAltScreenOffset = 0;
+                        }
+                        int available = Math.Min(pendingAltScreenSequence.Length - pendingAltScreenOffset, count - offset);
+                        Array.Copy(pendingAltScreenSequence, pendingAltScreenOffset, buffer, offset, available);
+                        offset += available;
+                        pendingAltScreenOffset += available;
+                        if (pendingAltScreenOffset == pendingAltScreenSequence.Length) {
+                            pendingAltScreenSequence = null;
+                            pendingAltScreenOffset = 0;
+                        }
+                    }
+                    else if (workload == "scroll" && pendingScrollLineFeed) {
+                        buffer[offset++] = (byte)'\n';
+                        pendingScrollLineFeed = false;
+                        column = 0;
+                    }
+                    else if (workload == "scroll" && column >= cols - 2 && length - (written + offset) >= 2) {
+                        buffer[offset++] = (byte)'\r';
+                        pendingScrollLineFeed = true;
+                    }
+                    else {
+                        buffer[offset++] = (byte)(33 + random % 94);
+                        column++;
+                    }
+                }
+                stream.Write(buffer, 0, count);
+                written += count;
+            }
+        }
+    }
+}
+'@
+}
+
+function Add-Line([string] $Path, [string] $Line) { [IO.File]::AppendAllText($Path, $Line + "`n", $script:Utf8) }
+
+function Get-Metadata([string] $Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return 'absent' }
+    return '{0}:{1}' -f $item.Length, $item.LastWriteTimeUtc.Ticks
+}
+
+function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+# One file's bytes without following a reparse point (Sol, round 5): CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT,
+# the opened handle refused if it is a reparse point or a directory, then the bytes read from that handle.
+function Read-WorkingSetPlainFile([string] $Path) {
+    if (-not ('WorkingSetPlainRead' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class WorkingSetPlainRead {
+    // BY_HANDLE_FILE_INFORMATION (fileapi.h, no pshpack): 13 DWORDs, FILETIMEs as DWORD pairs, 52 bytes.
+    [StructLayout(LayoutKind.Sequential)] public struct ByHandle {
+        public uint attributes, createdLow, createdHigh, accessedLow, accessedHigh, writtenLow, writtenHigh;
+        public uint volume, sizeHigh, sizeLow, links, indexHigh, indexLow;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandle info);
+    // The mirror's size and every field's offset, checked against the SDK's before the first read (AGENTS.md "Win32 FFI").
+    public static string Layout() {
+        return string.Join(" ", new[] { "ByHandle=" + Marshal.SizeOf<ByHandle>(),
+            "attributes@" + Marshal.OffsetOf<ByHandle>("attributes"), "createdLow@" + Marshal.OffsetOf<ByHandle>("createdLow"),
+            "createdHigh@" + Marshal.OffsetOf<ByHandle>("createdHigh"), "accessedLow@" + Marshal.OffsetOf<ByHandle>("accessedLow"),
+            "accessedHigh@" + Marshal.OffsetOf<ByHandle>("accessedHigh"), "writtenLow@" + Marshal.OffsetOf<ByHandle>("writtenLow"),
+            "writtenHigh@" + Marshal.OffsetOf<ByHandle>("writtenHigh"), "volume@" + Marshal.OffsetOf<ByHandle>("volume"),
+            "sizeHigh@" + Marshal.OffsetOf<ByHandle>("sizeHigh"), "sizeLow@" + Marshal.OffsetOf<ByHandle>("sizeLow"),
+            "links@" + Marshal.OffsetOf<ByHandle>("links"), "indexHigh@" + Marshal.OffsetOf<ByHandle>("indexHigh"),
+            "indexLow@" + Marshal.OffsetOf<ByHandle>("indexLow") });
+    }
+    public static byte[] Read(string path) {
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+        using (SafeFileHandle handle = CreateFileW(path, 0x80000000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new IOException("Opening the file failed: " + Marshal.GetLastWin32Error());
+            ByHandle info;
+            if (!GetFileInformationByHandle(handle, out info)) throw new IOException("Reading the opened file's attributes failed: " + Marshal.GetLastWin32Error());
+            if ((info.attributes & 0x400) != 0) throw new IOException("The opened file is a reparse point.");
+            if ((info.attributes & 0x10) != 0) throw new IOException("The opened file is a directory.");
+            using (var stream = new FileStream(handle, FileAccess.Read))
+            using (var bytes = new MemoryStream()) { stream.CopyTo(bytes); return bytes.ToArray(); }
+        }
+    }
+}
+'@
+    }
+    # fileapi.h BY_HANDLE_FILE_INFORMATION on x64 (no pshpack; FILETIME is two DWORDs, low then high).
+    $wantLayout = 'ByHandle=52 attributes@0 createdLow@4 createdHigh@8 accessedLow@12 accessedHigh@16 writtenLow@20 writtenHigh@24 volume@28 sizeHigh@32 sizeLow@36 links@40 indexHigh@44 indexLow@48'
+    if (-not [string]::Equals([WorkingSetPlainRead]::Layout(), $wantLayout, [StringComparison]::Ordinal)) { throw "The no-follow read's struct does not match the SDK's x64 layout: $([WorkingSetPlainRead]::Layout())" }
+    return [WorkingSetPlainRead]::Read($Path)
+}
+function Get-BytesSha256([byte[]] $Bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+# The receipt-bound measurement build of -MeasureRepo, admitted the way Assert-InteractiveWin11MeasureBuild admits it
+# (its generation, receipt, source patch and executable), with the prefix's noctty.exe and noctty.com matching the
+# receipt's hashes. Throws for anything else: a repository with only a plain zig-out build has no generation, so it
+# is refused before anything starts.
+function Get-WorkingSetMeasureBuild([string] $Repo) {
+    if ([string]::IsNullOrWhiteSpace($Repo)) { throw 'Pass -MeasureRepo: only a receipt-bound measurement build is launched.' }
+    $Repo = (Resolve-Path -LiteralPath $Repo).Path
+    $exe = Get-InteractiveWin11MeasureExePath -RepoRoot $Repo
+    $layout = Get-InteractiveWin11MeasureLayout $Repo
+    # One admitted receipt (Sol, round 4; CodeRabbit on #739): its bytes are read once, under the generation's build
+    # lock held across the library's admission (a builder needs that lock exclusively to replace the receipt), and
+    # must still be the receipt on disk when the admission has passed; that second read only compares. The fields,
+    # the hashes checked below and the recorded digest all come from the one read. Before anything opens the receipt,
+    # its path is checked as the library checks it: inside the measure repo, no reparse point anywhere on it; the
+    # read itself does not follow one and re-checks the opened handle (Sol, round 5).
+    Assert-InteractiveWin11MeasurePlainPath $layout.Root
+    Assert-InteractiveWin11MeasurePlainPath (Join-Path $layout.Root 'build.lock')
+    $lock = [IO.File]::Open((Join-Path $layout.Root 'build.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if (-not ([IO.Path]::GetFullPath($layout.Receipt)).StartsWith($layout.Repo.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The measurement receipt is not inside the measure repo.' }
+        Assert-InteractiveWin11MeasurePlainPath $layout.Receipt
+        $receiptBytes = Read-WorkingSetPlainFile $layout.Receipt
+        Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
+        $receiptAfter = Read-WorkingSetPlainFile $layout.Receipt
+    } finally { $lock.Dispose() }
+    if (-not [string]::Equals([Convert]::ToBase64String($receiptBytes), [Convert]::ToBase64String($receiptAfter), [StringComparison]::Ordinal)) { throw 'The measurement receipt changed during admission.' }
+    $receipt = [Text.Encoding]::UTF8.GetString($receiptBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
+    $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
+    if (-not [string]::Equals((Get-Sha256 $exe), [string]$receipt.ExeSHA256, [StringComparison]::Ordinal) -or -not [string]::Equals((Get-Sha256 $cli), [string]$receipt.CliSHA256, [StringComparison]::Ordinal)) {
+        throw 'The measurement build does not match its receipt.'
+    }
+    return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize; ReceiptSha256 = Get-BytesSha256 $receiptBytes }
+}
+
+# Whether a copy's noctty.exe and noctty.com are the admitted build's bytes.
+function Test-WorkingSetCopy([string] $Copy, $Build) {
+    foreach ($pair in @(@('noctty.exe', $Build.ExeSha256), @('noctty.com', $Build.CliSha256))) {
+        $path = Join-Path $Copy $pair[0]
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or -not [string]::Equals((Get-Sha256 $path), [string]$pair[1], [StringComparison]::Ordinal)) { return $false }
+    }
+    return $true
+}
+
+# A -Run inside -MeasureRepo would leave untracked files in the checkout whose clean state the measurement build's
+# provenance needs (the driver's admission would then refuse the run), so it is refused before anything is created,
+# unless git ignores it (CodeRabbit on #739; the rule #738 has for its -Work).
+function Assert-WorkingSetRunPlacement([string] $Run, [string] $Repo) {
+    $Run = $Run.TrimEnd('\'); $Repo = $Repo.TrimEnd('\')
+    if (-not ($Run + '\').StartsWith($Repo + '\', [StringComparison]::OrdinalIgnoreCase)) { return }
+    $relative = if ($Run.Length -gt $Repo.Length) { $Run.Substring($Repo.Length + 1) } else { '.' }
+    & git -C $Repo check-ignore -q --no-index -- $relative 2>$null
+    if ($LASTEXITCODE -ne 0) { throw '-Run is inside -MeasureRepo and git does not ignore it; choose a -Run outside the checkout or in a directory git ignores.' }
+}
+
+# The default config files portable mode would also read under a copy (src/config/file_load.zig: the legacy
+# ghostty/config and the pre-rename winghostty/config.ghostty, rooted at the portable root by src/os/xdg.zig
+# portablePath). The copy reads the default files and then discards their settings (--config-default-files=false),
+# so only the generated file's settings take effect; a staged copy holding either is refused as well (Sol, round 3).
+function Get-WorkingSetStrayConfigs([string] $Copy) {
+    return @(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path $Copy $_) })
+}
+
+# Whether an argv is exactly the expected one: the same arguments, in the same order, compared ordinally.
+function Test-WorkingSetArgv([string[]] $Actual, [string[]] $Expected) {
+    if ($null -eq $Actual -or $Actual.Count -ne $Expected.Count) { return $false }
+    for ($i = 0; $i -lt $Expected.Count; $i++) { if (-not [string]::Equals($Actual[$i], $Expected[$i], [StringComparison]::Ordinal)) { return $false } }
+    return $true
+}
+
+# A file another process may still hold open for writing (the copy's log), read whole; empty when absent.
+function Read-SharedText([string] $Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try { return [IO.StreamReader]::new($stream).ReadToEnd() } finally { $stream.Dispose() }
+}
+
+function Get-BenchMedian {
+    param([Parameter(Mandatory)] [double[]] $Samples)
+    if ($Samples.Count -eq 0) { return $null }
+    $sorted = @($Samples | Sort-Object)
+    $middle = [int] [Math]::Floor($sorted.Count / 2)
+    if (($sorted.Count % 2) -eq 1) { return [double] $sorted[$middle] }
+    return ([double] $sorted[$middle - 1] + [double] $sorted[$middle]) / 2.0
+}
+
+function Get-BenchPercentile {
+    param(
+        [Parameter(Mandatory)] [double[]] $Samples,
+        [ValidateRange(0, 100)] [double] $Percentile
+    )
+    if ($Samples.Count -eq 0) { return $null }
+    $sorted = @($Samples | Sort-Object)
+    if ($Percentile -eq 0) { return [double] $sorted[0] }
+    $rank = [int] [Math]::Ceiling(($Percentile / 100.0) * $sorted.Count)
+    return [double] $sorted[[Math]::Max(0, $rank - 1)]
+}
+
+# The copy's config for a run, exactly: what the outer half writes and what the driver requires byte for byte before
+# its first launch. The shell is System32's cmd.exe run directly with /D (no AutoRun), the only command. F5 types
+# `type stream.bin` and F6 a carriage return, relative to the pane's working directory, so the run's path never
+# reaches cmd's parser (#739's rule). Every binding is bound under each modifier chord, so a modifier the window's
+# thread still holds cannot turn a posted key into another action; nothing else is bound.
+function New-FramePacingConfigText([string] $Run) {
+    $work = Join-Path $Run 'work'
+    $bindings = [ordered]@{ f5 = 'text:type stream.bin'; f6 = 'text:\r' }
+    $chords = @('', 'shift+', 'ctrl+', 'alt+', 'ctrl+shift+', 'alt+shift+', 'ctrl+alt+', 'ctrl+alt+shift+')
+    $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    $lines = @(
+        "command = direct:$cmdPath /D"
+        'auto-update = off'
+        'confirm-close-surface = false'
+        'desktop-notifications = false'
+        'clipboard-read = deny'
+        'clipboard-write = deny'
+        'copy-on-select = false'
+        'renderer = opengl'
+        "window-width = $($script:Cols)"
+        "window-height = $($script:Rows)"
+        "font-family = $($script:FontFamily)"
+        "font-size = $($script:FontSize)"
+        'cursor-style-blink = false'
+        "working-directory = $work"
+        'keybind = clear'
+        foreach ($key in $bindings.Keys) { foreach ($chord in $chords) { "keybind = $chord$key=$($bindings[$key])" } }
+    )
+    return ($lines -join "`n") + "`n"
+}
+
+# Whether a staged config is byte for byte New-FramePacingConfigText's for this run.
+function Test-FramePacingConfigBytes([string] $Path, [string] $Run) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $staged = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path))
+    $expected = [Convert]::ToBase64String($script:Utf8.GetBytes((New-FramePacingConfigText $Run)))
+    return [string]::Equals($staged, $expected, [StringComparison]::Ordinal)
+}
+
+# The copy's exact argv: the launch helper's containment and isolation arguments (scripts/interactive-win11-lib.ps1),
+# then the harness's own, in this order and nothing else; the final command line and the copy's real one by PID must
+# each split into exactly this list (#739's rule), so nothing can set the shell on the command line.
+function Get-FramePacingExpectedArgv([string] $Exe, [string] $Class, [string] $ConfigPath) {
+    return [string[]]@($Exe, '--linux-cgroup=always', '--linux-cgroup-hard-fail=true', '--windows-job-object-kill-on-close=true',
+        '--single-instance=false', "--class=$Class", '--window-save-state=never', '--clipboard-read=deny', '--clipboard-write=deny',
+        '--config-default-files=false', "--config-file=$ConfigPath")
+}
+
+# The end marker's frame, as bench-windows.ps1's stream producer writes it after the payload: SGR reset, CUP 1;1, EL 2,
+# then the token, so the token is committed at the start of the visible top row (src/termio/bench_marker.zig).
+function Get-FramePacingMarkerTail([string] $Marker) {
+    $esc = [char]27
+    return [Text.Encoding]::ASCII.GetBytes("$esc[0m$esc[1;1H$esc[2K$Marker")
+}
+
+# work\stream.bin: the generator's payload, then the marker's frame and token.
+function Write-FramePacingPayload([string] $Path, [string] $Marker) {
+    [FramePacingPayload]::WritePayload($Path, $script:PayloadBytes, $script:PayloadSeed, $script:PayloadWorkload, $script:Rows, $script:Cols)
+    $tail = Get-FramePacingMarkerTail $Marker
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try { $stream.Write($tail, 0, $tail.Length) } finally { $stream.Dispose() }
+}
+
+# The payload's SHA-256 without its marker (the marker is new each run): the first PayloadBytes bytes of stream.bin.
+function Get-FramePacingPayloadSha256([string] $Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $body = [byte[]]::new($script:PayloadBytes)
+        $read = 0
+        while ($read -lt $body.Length) { $n = $stream.Read($body, $read, $body.Length - $read); if ($n -le 0) { break }; $read += $n }
+        if ($read -ne $body.Length) { return $null }
+        return Get-BytesSha256 $body
+    } finally { $stream.Dispose() }
+}
+
+# The workload's identity: SHA-256 over its constants, the payload's SHA-256 and the config with the run's own
+# directory written as <run>. Runs compare only when it matches.
+function Get-FramePacingWorkloadSha256([string] $PayloadSha256, [string] $ConfigPath, [string] $RunRoot) {
+    $root = $RunRoot.TrimEnd('\')
+    $config = ([IO.File]::ReadAllLines($ConfigPath) -join "`n").Replace($root, '<run>')
+    $constants = 'workload={0} bytes={1} seed={2} cols={3} rows={4} grid={3}x{5} font={6}@{7} capacity={8} quiet={9}ms echo={10}ms producer=cmd-type arm=WM_APP+9:0 end=first-marker-swap stat=nearest-rank-p95' -f `
+        $script:PayloadWorkload, $script:PayloadBytes, $script:PayloadSeed, $script:Cols, $script:Rows, $script:GridRows,
+        $script:FontFamily, $script:FontSize, $script:IntervalCapacity, $script:QuietMs, $script:EchoQuietMs
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($script:Utf8.GetBytes("$constants`n$PayloadSha256`n$config"))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+# Why the visible part may not run with these facts about this process's session, or $null when it may: the caller on
+# Default, Default the input desktop (unlocked, nothing else in front), DWM composing it, a local session, and no input
+# for the minimum idle time. Pure, so the contract can run it; the dry run's driver records its answer on its desktop.
+function Get-FramePacingVisibleRefusal($Facts) {
+    if (-not [string]::Equals([string]$Facts.OwnDesktop, 'Default', [StringComparison]::OrdinalIgnoreCase)) { return 'this process is not on Default' }
+    if ($null -eq $Facts.InputDesktop -or -not [string]::Equals([string]$Facts.InputDesktop, 'Default', [StringComparison]::OrdinalIgnoreCase)) { return 'Default is not the input desktop (the session is locked or another desktop is in front)' }
+    if ($Facts.Composition -ne 1) { return 'DWM does not compose the desktop' }
+    if ($Facts.RemoteSession) { return 'the session is remote' }
+    if ($Facts.IdleMs -lt 0 -or $Facts.IdleMs -lt $Facts.MinIdleMs) { return "the session had input $([Math]::Floor([Math]::Max(0, $Facts.IdleMs) / 1000)) s ago, under the $([Math]::Floor($Facts.MinIdleMs / 1000)) s minimum" }
+    return $null
+}
+
+# This process's facts for Get-FramePacingVisibleRefusal.
+function Get-FramePacingSessionFacts([int] $MinIdleSeconds) {
+    return [pscustomobject]@{
+        OwnDesktop = [FramePacingNative]::CurrentDesktopName(); InputDesktop = [FramePacingNative]::InputDesktopName()
+        Composition = [FramePacingNative]::Composition(); RemoteSession = [FramePacingNative]::RemoteSession()
+        IdleMs = [FramePacingNative]::IdleMs(); MinIdleMs = [long]$MinIdleSeconds * 1000
+    }
+}
+
+# The trace's intervals in milliseconds (QPC ticks over the trace's own frequency) and their statistics.
+function Get-FramePacingIntervalStats([object[]] $Ticks, [double] $Frequency) {
+    $ms = [double[]]@($Ticks | ForEach-Object { [double]$_ * 1000.0 / $Frequency })
+    if ($ms.Count -eq 0) { return [pscustomobject]@{ Ms = [double[]]@(); Count = 0; P95 = $null; Median = $null; Max = $null; Sum = 0.0 } }
+    return [pscustomobject]@{
+        Ms = $ms; Count = $ms.Count; P95 = (Get-BenchPercentile -Samples $ms -Percentile 95); Median = (Get-BenchMedian -Samples $ms)
+        Max = ($ms | Measure-Object -Maximum).Maximum; Sum = ($ms | Measure-Object -Sum).Sum
+    }
+}
+
+# What keeps a run's record from counting, as a list (empty: the run counts). Problems of the visible run's
+# environment (the foreground, focus or the session's input changed during the workload, a busy machine) start with
+# "inconclusive:"; the run is then neither a sample nor a product failure. Pure, so the contract can run it.
+function Get-FramePacingRecordProblems($Record) {
+    $problems = [Collections.Generic.List[string]]::new()
+    if ($null -eq $Record) { return @('no record') }
+    if ($Record.Schema -ne 1) { $problems.Add("schema $($Record.Schema)") }
+    if ($Record.Error) { $problems.Add("error: $($Record.Error)") }
+    if ($Record.Exit -ne 0) { $problems.Add("exit $($Record.Exit)") }
+    if ($Record.QuitPosts -lt 1) { $problems.Add('no close post took') }
+    if ($Record.GridCols -ne $script:Cols -or $Record.GridRows -ne $script:GridRows) { $problems.Add("grid $($Record.GridCols)x$($Record.GridRows)") }
+    if (-not [string]::Equals([string]$Record.Transport, 'bundled', [StringComparison]::Ordinal)) { $problems.Add("transport $($Record.Transport)") }
+    if (-not [string]::Equals([string]$Record.Renderer, 'opengl', [StringComparison]::Ordinal)) { $problems.Add("renderer $($Record.Renderer)") }
+    if ($Record.LaunchConfigDefaultFiles -ne $false -or -not $Record.LaunchConfigFile) { $problems.Add('the copy was not launched with only the generated config') }
+    if (-not $Record.ConptyDllSHA256 -or -not [string]::Equals([string]$Record.ConptyDllSHA256, [string]$Record.PrefixConptyDllSHA256, [StringComparison]::Ordinal) -or -not $Record.OpenConsoleSHA256 -or -not [string]::Equals([string]$Record.OpenConsoleSHA256, [string]$Record.PrefixOpenConsoleSHA256, [StringComparison]::Ordinal)) {
+        $problems.Add('the ConPTY pair is not the build''s')
+    }
+    if ($Record.PowerShellUnderCopy -ne 0) { $problems.Add("$($Record.PowerShellUnderCopy) PowerShell processes under the copy") }
+    if (-not $Record.EndMarkerPresented) { $problems.Add('no swap presented the end marker') }
+    $intervals = @($Record.IntervalsMs)
+    if ($Record.IntervalOverflow -ne 0) { $problems.Add("$($Record.IntervalOverflow) intervals past the trace's capacity") }
+    if ($Record.IntervalCount -lt 2 -or $intervals.Count -ne $Record.IntervalCount) { $problems.Add("$($intervals.Count) intervals for a count of $($Record.IntervalCount) (at least 2 needed)") }
+    if (@($intervals | Where-Object { [double]$_ -le 0 }).Count -gt 0) { $problems.Add('a nonpositive interval') }
+    if ([string]::Equals([string]$Record.Mode, 'dry-run', [StringComparison]::Ordinal)) {
+        if (-not $Record.VisibleRefusal) { $problems.Add('the dry run''s desktop passed the visible checks') }
+        if (-not [string]::Equals([string]$Record.Foreground, 'skipped', [StringComparison]::Ordinal)) { $problems.Add("the dry run's foreground was $($Record.Foreground), not skipped") }
+    } elseif ([string]::Equals([string]$Record.Mode, 'visible', [StringComparison]::Ordinal)) {
+        if ($Record.VisibleRefusal) { $problems.Add("visible run refused: $($Record.VisibleRefusal)") }
+        if (-not [string]::Equals([string]$Record.Foreground, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the foreground was $($Record.Foreground)") }
+        if ($Record.Cloaked -ne 0) { $problems.Add("inconclusive: DWM cloaked the window ($($Record.Cloaked))") }
+        if (-not $Record.ForegroundHeld) { $problems.Add('inconclusive: the window lost the foreground during the workload') }
+        if (-not $Record.FocusHeld) { $problems.Add('inconclusive: the pane''s focus changed during the workload') }
+        if ($Record.InputDuringRun) { $problems.Add('inconclusive: the session had input during the workload') }
+        if ($null -eq $Record.BusyPercentBefore -or $Record.BusyPercentBefore -lt 0 -or $Record.BusyPercentBefore -ge $script:QuietBusyPercent) { $problems.Add("inconclusive: the machine was $($Record.BusyPercentBefore)% busy before the workload") }
+        if (-not $Record.RefreshHz -or $Record.RefreshHz -le 1) { $problems.Add("no refresh rate for the window's monitor ($($Record.RefreshHz))") }
+    } else { $problems.Add("mode $($Record.Mode)") }
+    return $problems.ToArray()
+}
+
+# The grid probe: a child of the driver, on its desktop, that attaches to a pane's shell's console (the pane's
+# pseudoconsole) and writes "columns,rows" to -Run's grid.txt.
+if ($GridProbePid -gt 0) {
+    [IO.File]::WriteAllText((Join-Path $Run 'grid.txt'), [FramePacingNative]::ConsoleGrid([uint32]$GridProbePid))
+    exit 0
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# The driver: on its desktop (private in a dry run, Default in a visible one), inside the job, the environment
+# redirected.
+# ---------------------------------------------------------------------------------------------------------
+function Invoke-FramePacingDriver {
+    $driverLog = Join-Path $Run 'driver.log'
+    function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
+    $mode = if ($Visible) { 'visible' } else { 'dry-run' }
+    $record = [ordered]@{
+        Schema = 1; Mode = $mode; ExpectedBuildMode = $ExpectedBuildMode; BuildMode = $null; MeasureHead = $null
+        Cols = $script:Cols; Rows = $script:Rows; GridCols = $null; GridRows = $null; FontFamily = $script:FontFamily; FontSize = $script:FontSize
+        Class = $null; ExeSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; ConfigSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
+        PayloadBytes = $script:PayloadBytes; PayloadSeed = $script:PayloadSeed; PayloadSha256 = $null; MarkerLength = $null; WorkloadSha256 = $null
+        ClientWidth = $null; ClientHeight = $null; Dpi = $null; MonitorWidth = $null; MonitorHeight = $null; RefreshHz = $null
+        LaunchConfigDefaultFiles = $null; LaunchConfigFile = $null; Transport = $null; Renderer = $null
+        ConptyDllSHA256 = $null; PrefixConptyDllSHA256 = $null; OpenConsoleSHA256 = $null; PrefixOpenConsoleSHA256 = $null; EffectiveDirs = $null
+        VisibleRefusal = $null; Composition = $null; Cloaked = $null; Foreground = $null; ForegroundHeld = $null; FocusHeld = $null; InputDuringRun = $null
+        BusyPercentBefore = $null; BusyPercentAfter = $null; QuietWaitMs = 0; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null
+        QpcFrequency = $null; EndMarkerPresented = $false; IntervalCount = 0; IntervalOverflow = $null; IntervalsMs = [double[]]@()
+        P95Ms = $null; MedianMs = $null; MaxMs = $null; WindowMs = $null; SwapsBefore = $null; SwapsAfter = $null
+        ShellsUnderCopy = $null; PowerShellUnderCopy = $null; QuitPosts = 0; Exit = $null; Error = $null
+    }
+    $recordPath = Join-Path $Run 'run.json'
+    $process = [IntPtr]::Zero
+    try {
+        (Get-Process -Id $PID).PriorityClass = 'Normal'
+        $record.DriverPriority = [string](Get-Process -Id $PID).PriorityClass
+        if (-not [string]::Equals([FramePacingNative]::Layout(), $script:SdkLayout, [StringComparison]::Ordinal)) { throw "The mirrored structs do not match the SDK's x64 layout: $([FramePacingNative]::Layout())" }
+        # The driver's own admission, before it starts anything: it takes nothing on trust from its caller.
+        $own = [FramePacingNative]::CurrentDesktopName()
+        $inputDesktop = [FramePacingNative]::InputDesktopName()
+        if (-not [string]::Equals($own, $DesktopName, [StringComparison]::Ordinal)) { throw 'The driver is not on the desktop it was given.' }
+        if ($null -eq $inputDesktop) { throw 'The input desktop is unreadable.' }
+        if ($Visible) {
+            if (-not [string]::Equals($own, 'Default', [StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals($inputDesktop, 'Default', [StringComparison]::OrdinalIgnoreCase)) { throw 'A visible driver must run on Default while Default is the input desktop.' }
+        } else {
+            if (-not $own.StartsWith('noctty-fp-', [StringComparison]::Ordinal)) { throw 'The driver is not on its private desktop.' }
+            if ([string]::Equals($own, 'Default', [StringComparison]::OrdinalIgnoreCase)) { throw 'The driver is on Default.' }
+            if ([string]::Equals($own, $inputDesktop, [StringComparison]::OrdinalIgnoreCase)) { throw 'The driver is on the input desktop.' }
+        }
+        if (-not [FramePacingNative]::InJob()) { throw 'The driver is in no job.' }
+        $runPrefix = [IO.Path]::GetFullPath($Run).TrimEnd('\') + '\'
+        $effective = [ordered]@{}
+        foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {
+            $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+            if ([string]::IsNullOrWhiteSpace($value) -or -not ([IO.Path]::GetFullPath($value).TrimEnd('\') + '\').StartsWith($runPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "$name is not inside the run."
+            }
+            $effective[$name] = [IO.Path]::GetFullPath($value)
+        }
+        $record.EffectiveDirs = $effective
+        # No inherited NOCTTY_ or GHOSTTY_ variable (an inherited NOCTTY_CONPTY would move the copy to another host,
+        # and others change what the copy traces or shows): the copy's only ones are the four this driver sets.
+        $inherited = @([Environment]::GetEnvironmentVariables('Process').Keys | Where-Object { ([string]$_).StartsWith('NOCTTY_', [StringComparison]::OrdinalIgnoreCase) -or ([string]$_).StartsWith('GHOSTTY_', [StringComparison]::OrdinalIgnoreCase) })
+        if ($inherited.Count -ne 0) { throw "The driver inherited $($inherited.Count) NOCTTY_ or GHOSTTY_ variables." }
+        # What it launches is the staged copy: the run's own copy directory, the portable marker, no noctty.ico, the
+        # harness's config byte for byte, and the measurement build's bytes.
+        if (-not [string]::Equals([IO.Path]::GetFullPath($Bin).TrimEnd('\'), (Join-Path $runPrefix 'copy'), [StringComparison]::OrdinalIgnoreCase)) { throw 'The copy is not the run''s own copy directory.' }
+        if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable') -PathType Leaf) -or (Test-Path -LiteralPath (Join-Path $Bin 'noctty.ico'))) { throw 'The copy is not a portable copy without noctty.ico.' }
+        $configPath = Join-Path $Bin 'config.ghostty'
+        if (-not (Test-FramePacingConfigBytes $configPath $Run)) { throw "The copy's config is not byte for byte the harness's for this run." }
+        $configCommands = @([IO.File]::ReadAllLines($configPath) | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
+        $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        if ($configCommands.Count -ne 1 -or -not [string]::Equals($configCommands[0], "command = direct:$cmdPath /D", [StringComparison]::Ordinal)) { throw "The copy's config must set exactly one command, System32's cmd.exe with /D, and no initial-command." }
+        $record.ConfigSHA256 = Get-Sha256 $configPath
+        $stray = @(Get-WorkingSetStrayConfigs $Bin); if ($stray.Count -gt 0) { throw "The copy holds another config file ($($stray -join ', ')), which the app's default search would read." }
+        $build = Get-WorkingSetMeasureBuild $MeasureRepo
+        if (-not (Test-WorkingSetCopy $Bin $build)) { throw "The copy's noctty.exe or noctty.com is not the measurement build's." }
+        $record.MeasureHead = $build.Head
+        $record.CliSHA256 = Get-Sha256 (Join-Path $Bin 'noctty.com')
+        $record.ReceiptSHA256 = $build.ReceiptSha256
+        foreach ($file in @(@('conpty.dll', 'ConptyDllSHA256'), @('OpenConsole.exe', 'OpenConsoleSHA256'))) {
+            $staged = Join-Path $Bin $file[0]; $built = Join-Path $build.Bin $file[0]
+            if (-not (Test-Path -LiteralPath $staged -PathType Leaf) -or -not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "The copy or the build has no $($file[0])." }
+            $record[$file[1]] = Get-Sha256 $staged
+            $record['Prefix' + $file[1]] = Get-Sha256 $built
+            if (-not [string]::Equals([string]$record[$file[1]], [string]$record['Prefix' + $file[1]], [StringComparison]::Ordinal)) { throw "The copy's $($file[0]) is not the measurement build's." }
+        }
+        # The payload: the generator's bytes for these constants, then this run's marker in its frame.
+        $work = Join-Path $Run 'work'
+        $streamPath = Join-Path $work 'stream.bin'
+        $marker = [IO.File]::ReadAllText((Join-Path $work 'marker.txt'))
+        if ($marker -notmatch '\ANB[0-9a-f]{16}\z') { throw 'The run''s marker is not a fresh token.' }
+        $checkPath = Join-Path $Run 'temp\payload-check.bin'
+        Write-FramePacingPayload $checkPath $marker
+        if (-not [string]::Equals((Get-Sha256 $checkPath), (Get-Sha256 $streamPath), [StringComparison]::Ordinal)) { throw 'The staged payload is not the generator''s with this run''s marker.' }
+        Remove-Item -LiteralPath $checkPath
+        $record.PayloadSha256 = Get-FramePacingPayloadSha256 $streamPath
+        $record.MarkerLength = $marker.Length
+
+        $desktopPath = "WinSta0\$DesktopName"
+        $exe = Join-Path $Bin 'noctty.exe'
+        $record.ExeSHA256 = Get-Sha256 $exe
+        $versionPath = Join-Path $Run 'version.txt'
+        $check = [FramePacingNative]::Spawn($exe, ('"{0}" +version' -f $exe), $work, $desktopPath, $versionPath, $false, [bool]$Visible)
+        try {
+            if ([FramePacingNative]::WaitForSingleObject($check.process, 60000) -ne 0) { [FramePacingNative]::Terminate($check.process, 1); throw '+version did not finish in 60 s.' }
+            $versionExit = [FramePacingNative]::ExitCode($check.process)
+        } finally { [void][FramePacingNative]::CloseHandle($check.thread); [void][FramePacingNative]::CloseHandle($check.process) }
+        $modeMatch = [regex]::Match([IO.File]::ReadAllText($versionPath), '(?m)^\s*-\s*build mode\s*:\s*(?:[A-Za-z_.]*\.)?(Debug|ReleaseSafe|ReleaseFast|ReleaseSmall)\s*$')
+        if ($versionExit -ne 0 -or -not $modeMatch.Success) { throw "noctty +version exited $versionExit with no build mode line." }
+        $record.BuildMode = $modeMatch.Groups[1].Value
+        if (-not [string]::Equals([string]$record.BuildMode, $ExpectedBuildMode, [StringComparison]::Ordinal) -or -not [string]::Equals([string]$build.Optimize, $ExpectedBuildMode, [StringComparison]::Ordinal)) { $record.Error = 'BUILD-MODE'; Log "build mode $($record.BuildMode); not launched"; return 3 }
+
+        # A quiet machine (MEASUREMENT-HARNESS-RERUN-01): a visible run waits for under 30% busy, up to
+        # -QuietWaitSeconds; a dry run only records the share.
+        $record.BusyPercentBefore = [Math]::Round([FramePacingNative]::BusyPercent(2000), 1)
+        if ($Visible) {
+            $quietClock = [Diagnostics.Stopwatch]::StartNew()
+            while (($record.BusyPercentBefore -lt 0 -or $record.BusyPercentBefore -ge $script:QuietBusyPercent) -and $quietClock.ElapsedMilliseconds -lt [long]$QuietWaitSeconds * 1000) {
+                Start-Sleep -Seconds 10
+                $record.BusyPercentBefore = [Math]::Round([FramePacingNative]::BusyPercent(2000), 1)
+            }
+            $record.QuietWaitMs = $quietClock.ElapsedMilliseconds
+        }
+        $record.TimerResolutionBefore100ns = [FramePacingNative]::TimerResolution()
+        Log "busy $($record.BusyPercentBefore)% after $($record.QuietWaitMs) ms; timer resolution $($record.TimerResolutionBefore100ns) x 100 ns"
+        # The visible part's preconditions on this driver's own session, after the wait and right before the launch:
+        # in a dry run they must refuse (it never takes the foreground and its intervals are not a measurement); in a
+        # visible run they must hold.
+        $facts = Get-FramePacingSessionFacts $MinIdleSeconds
+        $record.Composition = $facts.Composition
+        $record.VisibleRefusal = Get-FramePacingVisibleRefusal $facts
+        if ($Visible -and $record.VisibleRefusal) { throw "The visible run is refused: $($record.VisibleRefusal)" }
+        if (-not $Visible -and -not $record.VisibleRefusal) { throw 'The dry run''s desktop passed the visible checks.' }
+        Log "visible part: $(if ($record.VisibleRefusal) { "refused ($($record.VisibleRefusal))" } else { 'allowed' })"
+
+        $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $SandboxName
+        $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
+            '--window-save-state=never', '--clipboard-read=deny', '--clipboard-write=deny',
+            '--config-default-files=false', "--config-file=$configPath")
+        $class = @($launchArguments | Where-Object { $_ -like '--class=*' } | ForEach-Object { $_.Substring(8) })
+        if ($class.Count -ne 1) { throw 'The launch helper gave no single --class.' }
+        if (@($launchArguments | Where-Object { $_ -like '--command=*' -or $_ -eq '-e' }).Count -ne 0) { throw 'The command line must not set the shell.' }
+        foreach ($argument in $launchArguments) { if ($argument -match '"' -or $argument.EndsWith('\')) { throw 'A launch argument cannot be quoted.' } }
+        $record.Class = $class[0]
+        $commandLine = ('"{0}" ' -f $exe) + (@($launchArguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
+        $expectedArgv = Get-FramePacingExpectedArgv $exe "noctty-interactive-$($layout.SandboxId)" $configPath
+        if (-not (Test-WorkingSetArgv ([FramePacingNative]::SplitCommandLine($commandLine)) $expectedArgv)) { throw "The copy's command line is not exactly the expected argument list." }
+        $record.LaunchConfigDefaultFiles = $false
+        $record.LaunchConfigFile = $configPath
+        $record.WorkloadSha256 = Get-FramePacingWorkloadSha256 $record.PayloadSha256 $configPath $Run
+        [void][FramePacingNative]::SetErrorMode([FramePacingNative]::GetErrorMode() -bor 2)   # SEM_NOGPFAULTERRORBOX, inherited
+        # The copy's environment: the log on stderr, the live render trace into the run, and this run's end marker.
+        $tracePath = Join-Path $Run 'render-trace.json'
+        $env:GHOSTTY_LOG = 'stderr'
+        $env:NOCTTY_RENDER_TRACE_FILE = $tracePath
+        $env:NOCTTY_RENDER_TRACE_LIVE = '1'
+        $env:NOCTTY_BENCH_END_MARKER = $marker
+        $pi = [FramePacingNative]::Spawn($exe, $commandLine, $work, $desktopPath, (Join-Path $Run 'noctty.log'), $false, [bool]$Visible)
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $process = $pi.process
+        [void][FramePacingNative]::CloseHandle($pi.thread)
+        $nocttyPid = $pi.pid
+        # What the copy really received, from its own command line by PID: exactly the same list, or the run stops.
+        # The command line itself is never logged or recorded.
+        $launchedLine = [string](Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $nocttyPid" -ErrorAction Stop).CommandLine
+        if (-not (Test-WorkingSetArgv ([FramePacingNative]::SplitCommandLine($launchedLine)) $expectedArgv)) { throw 'The copy was not launched with exactly the expected argument list.' }
+        $launchedLine = $null
+        try { $record.NocttyPriority = [string](Get-Process -Id $nocttyPid -ErrorAction Stop).PriorityClass } catch { $record.NocttyPriority = 'unknown' }
+        if (-not [string]::Equals([string]$record.NocttyPriority, 'Normal', [StringComparison]::Ordinal)) { throw "The copy runs at $($record.NocttyPriority) priority, not Normal." }
+        Log "launched ($mode), build mode $($record.BuildMode)"
+
+        function Get-Hosts { return @([FramePacingNative]::Hosts($nocttyPid)) }
+        function Get-AllSurfaces([bool] $VisibleOnly) { $list = @(); foreach ($h in Get-Hosts) { $list += @([FramePacingNative]::Surfaces($h, $VisibleOnly)) }; return $list }
+        function Wait-For([scriptblock] $Predicate, [int] $Ms) {
+            $deadline = $clock.ElapsedMilliseconds + $Ms
+            do {
+                if (& $Predicate) { return $true }
+                if (-not [FramePacingNative]::Alive($process)) { return $false }
+                Start-Sleep -Milliseconds 100
+            } while ($clock.ElapsedMilliseconds -lt $deadline)
+            return [bool](& $Predicate)
+        }
+        if (-not (Wait-For { @(Get-AllSurfaces $true).Count -ge 1 } 90000)) { throw 'The first pane never showed.' }
+        $hosts = @(Get-Hosts)
+        if ($hosts.Count -ne 1) { throw "Expected one window, found $($hosts.Count)." }
+        $hostWindow = $hosts[0]
+        $panes = @(Get-AllSurfaces $false)
+        if ($panes.Count -ne 1) { throw "Expected one pane, found $($panes.Count)." }
+        $pane = $panes[0]
+        $client = [FramePacingNative]::ClientAndDpi($pane)
+        $record.ClientWidth = $client[0]; $record.ClientHeight = $client[1]; $record.Dpi = $client[2]
+        $monitorMode = [FramePacingNative]::MonitorMode($hostWindow)
+        $record.MonitorWidth = $monitorMode[0]; $record.MonitorHeight = $monitorMode[1]; $record.RefreshHz = $monitorMode[2]
+
+        # The grid, before the workload, as #739 reads it: a probe child attaches to the pane's shell's console.
+        [void](Wait-For { $script:fpShells = @([FramePacingNative]::Children($nocttyPid, 'cmd.exe')); $script:fpShells.Count -eq 1 } 30000)
+        $shells = @($script:fpShells)
+        if ($shells.Count -ne 1) { throw "Expected one shell under the copy, found $($shells.Count)." }
+        $pwsh = (Get-Command pwsh.exe).Source
+        $gridFile = Join-Path $Run 'grid.txt'
+        $probe = [FramePacingNative]::Spawn($pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -Run "{2}" -GridProbePid {3}' -f $pwsh, $PSCommandPath, $Run, $shells[0]), $Run, $desktopPath, (Join-Path $Run 'grid-probe.log'), $true, [bool]$Visible)
+        try {
+            if ([FramePacingNative]::WaitForSingleObject($probe.process, 60000) -ne 0) { [FramePacingNative]::Terminate($probe.process, 1); throw 'The grid probe did not finish in 60 s.' }
+            if ([FramePacingNative]::ExitCode($probe.process) -ne 0) { throw 'The grid probe failed.' }
+        } finally { [void][FramePacingNative]::CloseHandle($probe.thread); [void][FramePacingNative]::CloseHandle($probe.process) }
+        $grid = [regex]::Match([IO.File]::ReadAllText($gridFile), '\A(\d+),(\d+)\z')
+        if (-not $grid.Success) { throw "The grid probe read no grid ($([IO.File]::ReadAllText($gridFile)))." }
+        $record.GridCols = [int]$grid.Groups[1].Value; $record.GridRows = [int]$grid.Groups[2].Value
+        if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:GridRows) { throw "The grid is $($record.GridCols)x$($record.GridRows), not $($script:Cols)x$($script:GridRows)." }
+
+        # The render trace: a snapshot the pane writes on request (WM_APP + 8), read once it is newer than the last.
+        $script:fpSequence = [uint64]0
+        function Request-Trace {
+            if (-not [FramePacingNative]::TraceMessage($pane, $nocttyPid, $script:WmRenderTraceSnapshot, 0, $script:ResponseBoundMs)) { throw 'The pane did not answer a render-trace snapshot request within the bound.' }
+            $deadline = $clock.ElapsedMilliseconds + 10000
+            do {
+                $raw = Read-SharedText $tracePath
+                if ($raw) {
+                    $snapshot = $null
+                    try { $snapshot = $raw | ConvertFrom-Json } catch { $snapshot = $null }
+                    if ($null -ne $snapshot -and [uint64]$snapshot.snapshot_sequence -gt $script:fpSequence) { $script:fpSequence = [uint64]$snapshot.snapshot_sequence; return $snapshot }
+                }
+                Start-Sleep -Milliseconds 5
+            } while ($clock.ElapsedMilliseconds -lt $deadline)
+            throw 'No fresh render-trace snapshot within 10 s.'
+        }
+        # Quiet: no swap and no output wake for $QuietMs, within $CapMs.
+        function Wait-Quiet([int] $QuietMs, [int] $CapMs) {
+            $last = Request-Trace
+            $since = $clock.ElapsedMilliseconds; $start = $since
+            while ($clock.ElapsedMilliseconds - $start -lt $CapMs) {
+                Start-Sleep -Milliseconds 100
+                $next = Request-Trace
+                if ([uint64]$next.swap_buffers_count -ne [uint64]$last.swap_buffers_count -or [uint64]$next.io_output_wakeup_count -ne [uint64]$last.io_output_wakeup_count) { $last = $next; $since = $clock.ElapsedMilliseconds; continue }
+                if ($clock.ElapsedMilliseconds - $since -ge $QuietMs) { return $next }
+            }
+            throw "The pane did not go quiet for $QuietMs ms within $CapMs ms."
+        }
+        $settled = Wait-Quiet $script:QuietMs 30000
+        if ([uint64]$settled.swap_buffers_count -lt 1) { throw 'The pane presented no frame before the workload.' }
+
+        # The visible part. A dry run skips it (its preconditions refused above); a visible run takes the foreground
+        # through the bounded call, then reads the window's composition state.
+        if ($Visible) {
+            $record.Foreground = [FramePacingNative]::Foreground($hostWindow, $nocttyPid, $script:ForegroundBoundMs)
+            $record.Cloaked = [FramePacingNative]::Cloaked($hostWindow)
+            if ([FramePacingNative]::IsIconic($hostWindow)) { $record.Foreground = 'minimized' }
+            Log "foreground: $($record.Foreground); cloaked $($record.Cloaked)"
+            if (-not [string]::Equals([string]$record.Foreground, 'ok', [StringComparison]::Ordinal)) { throw "INCONCLUSIVE: the foreground was $($record.Foreground)." }
+            $settled = Wait-Quiet $script:QuietMs 30000
+        } else { $record.Foreground = 'skipped' }
+
+        # The command, then the arm, then Enter: F5 types `type stream.bin` (echoed, then quiet), the target is armed
+        # (WM_APP + 9 with 0: the first swap that presents the end marker), and F6's carriage return runs it.
+        $before = Request-Trace
+        [FramePacingNative]::Key($pane, $nocttyPid, 0x74)
+        if (-not (Wait-For { [uint64](Request-Trace).last_swap_process_output_generation -gt [uint64]$before.last_swap_process_output_generation } 15000)) { throw 'No swap presented the command''s echo within 15 s.' }
+        $echoed = Wait-Quiet $script:EchoQuietMs 15000
+        $focusChanges = [uint64]$echoed.surface_focus_change_count
+        $inputTick = [FramePacingNative]::LastInputTick()
+        $record.SwapsBefore = [uint64]$echoed.swap_buffers_count
+        if (-not [FramePacingNative]::TraceMessage($pane, $nocttyPid, $script:WmRenderTraceTarget, 0, $script:ResponseBoundMs)) { throw 'The pane did not answer the trace''s arm within the bound.' }
+        $armed = Request-Trace
+        if (-not $armed.target_active -or [uint64]$armed.target_process_output_bytes -ne 0 -or [uint64]$armed.first_target_swap_qpc_ticks -ne 0) { throw 'The trace''s target is not armed for the end marker.' }
+        [FramePacingNative]::Key($pane, $nocttyPid, 0x75)
+        $script:fpPresented = $null
+        $presentedInTime = Wait-For { $s = Request-Trace; if ([uint64]$s.first_target_swap_qpc_ticks -gt 0 -and [uint64]$s.first_target_swap_benchmark_end_marker_generation -gt 0) { $script:fpPresented = $s; return $true }; return $false } 120000
+        if (-not $presentedInTime) { throw 'No swap presented the end marker within 120 s.' }
+        $presented = $script:fpPresented
+        $record.EndMarkerPresented = $true
+        $record.SwapsAfter = [uint64]$presented.swap_buffers_count
+        $record.QpcFrequency = [uint64]$presented.qpc_frequency
+        $record.IntervalOverflow = [uint64]$presented.target_swap_interval_overflow_count
+        $stats = Get-FramePacingIntervalStats @($presented.target_swap_interval_qpc_ticks) ([double]$presented.qpc_frequency)
+        $record.IntervalsMs = [double[]]@($stats.Ms | ForEach-Object { [Math]::Round($_, 6) })
+        $record.IntervalCount = $stats.Count
+        if ($stats.Count -gt 0) { $record.P95Ms = [Math]::Round($stats.P95, 6); $record.MedianMs = [Math]::Round($stats.Median, 6); $record.MaxMs = [Math]::Round($stats.Max, 6); $record.WindowMs = [Math]::Round($stats.Sum, 6) }
+        # Held through the workload (a visible run only counts it so): the foreground, the pane's focus, and no input.
+        $record.ForegroundHeld = [FramePacingNative]::IsForeground($hostWindow)
+        $record.FocusHeld = [bool]$presented.surface_focused -and [uint64]$presented.surface_focus_change_count -eq $focusChanges
+        $record.InputDuringRun = [FramePacingNative]::LastInputTick() -ne $inputTick
+        Log ("workload: {0} intervals, p95 {1} ms, median {2} ms, overflow {3}; foreground held {4}, focus held {5}, input {6}" -f $record.IntervalCount, $record.P95Ms, $record.MedianMs, $record.IntervalOverflow, $record.ForegroundHeld, $record.FocusHeld, $record.InputDuringRun)
+
+        # No PowerShell under the copy: its children and its shell's.
+        $record.ShellsUnderCopy = @([FramePacingNative]::Children($nocttyPid, 'cmd.exe')).Count
+        $record.PowerShellUnderCopy = 0
+        foreach ($parent in @($nocttyPid) + @($shells)) { foreach ($name in @('powershell.exe', 'pwsh.exe')) { $record.PowerShellUnderCopy += @([FramePacingNative]::Children($parent, $name)).Count } }
+        $record.BusyPercentAfter = [Math]::Round([FramePacingNative]::BusyPercent(2000), 1)
+        $record.TimerResolutionAfter100ns = [FramePacingNative]::TimerResolution()
+
+        foreach ($h in Get-Hosts) { if ([FramePacingNative]::PostClose($h, $nocttyPid)) { $record.QuitPosts++ } }
+        if ($record.QuitPosts -lt 1) { Log 'quit: no close post took' }
+        if ([FramePacingNative]::WaitForSingleObject($process, 60000) -eq 0) { $record.Exit = [FramePacingNative]::ExitCode($process) }
+        else { [FramePacingNative]::Terminate($process, 1); $record.Exit = 'stuck'; Log 'the copy did not end within 60 s of the quit' }
+        Log "quit: $($record.QuitPosts) posts, exit $($record.Exit)"
+        # The transport and the renderer, from the copy's own log: the bundled ConPTY from its own conpty.dll (src/pty.zig's
+        # startup marker), and OpenGL with no backend fallback (src/renderer/Windows.zig's warnings).
+        $nocttyLog = Read-SharedText (Join-Path $Run 'noctty.log')
+        $record.Transport = if ($nocttyLog.Contains('using the in-box conhost')) { 'inbox' } elseif ($nocttyLog.IndexOf('using bundled ConPTY: ' + (Join-Path $Bin 'conpty.dll'), [StringComparison]::OrdinalIgnoreCase) -ge 0) { 'bundled' } else { 'unknown' }
+        $record.Renderer = if ($nocttyLog.Contains('startup failed') -or $nocttyLog.Contains('Direct3D 11') -or $nocttyLog.Contains('D3D11')) { 'fallback' } else { 'opengl' }
+        $problems = @(Get-FramePacingRecordProblems ([pscustomobject]$record))
+        if ($problems.Count -gt 0 -and -not $record.Error) { $record.Error = $problems -join '; ' }
+        return $(if ($record.Error) { 1 } else { 0 })
+    } catch {
+        $record.Error = $_.Exception.Message
+        Log "error: $($_.Exception.Message)"
+        if ($process -ne [IntPtr]::Zero -and [FramePacingNative]::Alive($process)) { [FramePacingNative]::Terminate($process, 1) }
+        return 1
+    } finally {
+        if ($process -ne [IntPtr]::Zero) { [void][FramePacingNative]::CloseHandle($process) }
+        $record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $recordPath -Encoding utf8NoBOM
+    }
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# The outer half: admission, the copies, the guards and the summary.
+# ---------------------------------------------------------------------------------------------------------
+function Invoke-FramePacingOuter {
+    # Only the receipt-bound measurement build, before anything is created or started.
+    $build = Get-WorkingSetMeasureBuild $MeasureRepo
+    # No NOCTTY_ or GHOSTTY_ variable for the copy to inherit, before anything is created.
+    $inherited = @([Environment]::GetEnvironmentVariables('Process').Keys | Where-Object { ([string]$_).StartsWith('NOCTTY_', [StringComparison]::OrdinalIgnoreCase) -or ([string]$_).StartsWith('GHOSTTY_', [StringComparison]::OrdinalIgnoreCase) })
+    if ($inherited.Count -ne 0) { throw "This environment holds $($inherited.Count) NOCTTY_ or GHOSTTY_ variables, which the copy would inherit; clear them first." }
+    $fonts = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' -ErrorAction Stop
+    if (-not ($fonts.PSObject.Properties.Name -match '^Consolas .*TrueType')) { throw 'The workload''s font, Consolas, is not installed.' }
+    # A visible run only from Default, unlocked, composed, local and idle; a dry run never touches Default.
+    if ($Visible) {
+        $refusal = Get-FramePacingVisibleRefusal (Get-FramePacingSessionFacts $MinIdleSeconds)
+        if ($refusal) { throw "-Visible is refused: $refusal." }
+    }
+    if ([string]::IsNullOrWhiteSpace($RunRoot)) { throw 'Pass -RunRoot, a new directory for the runs.' }
+    $root = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location -PSProvider FileSystem).ProviderPath, $RunRoot))
+    if (Test-Path -LiteralPath $root) { throw 'The run root must be new.' }
+    if (($root + '\').StartsWith($build.Bin.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The run root cannot be inside the build.' }
+    Assert-WorkingSetRunPlacement $root $build.Repo
+    $mutex = [Threading.Mutex]::new($false, 'Local\noctty-bench-frame-pacing')
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'Another frame-pacing run is active in this session.' }
+        [void](New-Item -ItemType Directory -Path $root)
+        $results = [Collections.Generic.List[object]]::new()
+        for ($i = 1; $i -le $Runs; $i++) {
+            $result = Invoke-FramePacingOuterRun $build (Join-Path $root "run-$i")
+            $results.Add($result)
+            Write-Host "frame pacing run $i of $($Runs): $($result.Status)"
+            if (-not [string]::Equals($result.Status, 'complete', [StringComparison]::Ordinal)) { break }
+        }
+        return Write-FramePacingSummary $root $build @($results.ToArray())
+    } finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+# One run: a fresh copy, payload, config, desktop (dry run) and job; the driver; the guards; the record's verdict.
+function Invoke-FramePacingOuterRun($build, [string] $Run) {
+    $source = $build.Bin
+    $copy = Join-Path $Run 'copy'
+    $work = Join-Path $Run 'work'
+    [void](New-Item -ItemType Directory -Path $Run)
+    foreach ($name in @('localappdata', 'appdata', 'temp', 'work')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
+    [void](New-Item -ItemType Directory -Path $copy)
+    Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('noctty.ico', 'crash', 'ghostty') } |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $copy $_.Name) -Recurse }
+    if (-not (Test-Path -LiteralPath (Join-Path $copy 'share')) -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $source) 'share'))) {
+        Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $source) 'share') -Destination (Join-Path $copy 'share') -Recurse
+    }
+    if (Test-Path -LiteralPath (Join-Path $copy 'noctty.ico')) { throw 'The copy must not carry noctty.ico beside its exe.' }
+    if (-not (Test-WorkingSetCopy $copy $build)) { throw 'The copied noctty.exe or noctty.com does not match the receipt.' }
+    [IO.File]::WriteAllText((Join-Path $copy 'noctty.portable'), '')
+    $marker = 'NB' + [guid]::NewGuid().ToString('N').Substring(0, 16)
+    [IO.File]::WriteAllText((Join-Path $work 'marker.txt'), $marker)
+    Write-FramePacingPayload (Join-Path $work 'stream.bin') $marker
+    [IO.File]::WriteAllText((Join-Path $copy 'config.ghostty'), (New-FramePacingConfigText $Run), $script:Utf8)
+
+    $realLocal = [Environment]::GetFolderPath('LocalApplicationData')
+    $realDirs = @($realLocal, [Environment]::GetFolderPath('ApplicationData'), [IO.Path]::GetTempPath()) | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+    $sessionPath = Join-Path $realLocal 'noctty\session-state.json'
+    $sessionBefore = Get-Metadata $sessionPath
+    $stateGuard = Start-InteractiveWin11StateGuard -Harness 'bench-frame-pacing' -ReceiptDirectory $Run
+    $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'bench-frame-pacing.ps1'
+
+    $sandboxName = 'fp-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $desktop = [IntPtr]::Zero
+    if ($Visible) { $desktopName = 'Default' }
+    else {
+        $desktopName = 'noctty-fp-' + [guid]::NewGuid().ToString('N')
+        $desktop = [HiddenLocal]::CreateDesktopW($desktopName, [IntPtr]::Zero, [IntPtr]::Zero, 0, 0x10000000, [IntPtr]::Zero)
+        if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
+    }
+    $saved = @{}
+    foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    $pi = $null; $job = [IntPtr]::Zero; $driverExit = $null; $cleanup = $null; $outerError = $null; $ownedProcesses = $null
+    try {
+        $job = [FramePacingNative]::CreateRunJob()
+        $env:LOCALAPPDATA = Join-Path $Run 'localappdata'; $env:APPDATA = Join-Path $Run 'appdata'
+        $env:TEMP = Join-Path $Run 'temp'; $env:TMP = $env:TEMP
+        $pwsh = (Get-Command pwsh.exe).Source
+        $line = '"{0}" -NoProfile -NonInteractive -File "{1}" -Driver -MeasureRepo "{2}" -Bin "{3}" -Run "{4}" -ExpectedBuildMode {5} -SandboxName {6} -DesktopName {7} -MinIdleSeconds {8} -QuietWaitSeconds {9}' -f `
+            $pwsh, $PSCommandPath, $build.Repo, $copy, $Run, $ExpectedBuildMode, $sandboxName, $desktopName, $MinIdleSeconds, $QuietWaitSeconds
+        if ($Visible) { $line += ' -Visible' }
+        $pi = [FramePacingNative]::LaunchDriver($pwsh, $line, $Run, "WinSta0\$desktopName", $job, [bool]$Visible)
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        Write-Host "frame-pacing driver PID=$($pi.pid); $(if ($Visible) { 'visible' } else { 'dry run' }); evidence=$Run"
+        $deadline = [DateTime]::UtcNow.AddMinutes(30)
+        while ([HiddenLocal]::WaitForSingleObject($pi.process, 1000) -eq 258) {
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'The driver ran past 30 minutes; the owned job was closed.' }
+        }
+        [uint32]$code = 0
+        if (-not [HiddenLocal]::GetExitCodeProcess($pi.process, [ref]$code)) { throw 'The driver exit code could not be read.' }
+        $driverExit = $code
+    } catch {
+        $outerError = $_.Exception.Message
+    } finally {
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        if ($job -ne [IntPtr]::Zero) { try { $ownedProcesses = [HiddenLocal]::StopOwnedJob($job) } catch { $cleanup = $_.Exception.Message } }
+        if ($pi) { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
+        if ($desktop -ne [IntPtr]::Zero) { [void][HiddenLocal]::CloseDesktop($desktop) }
+    }
+    $sessionAfter = Get-Metadata $sessionPath
+    $stateFailure = $null
+    try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $stateFailure = $_.Exception.Message }
+    $historyFailure = $null
+    try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure = $_.Exception.Message }
+    $guards = [ordered]@{
+        StateGuardPassed = $null -eq $stateFailure
+        SessionUnchanged = [string]::Equals($sessionBefore, $sessionAfter, [StringComparison]::Ordinal)
+        HistoryUnchanged = $null -eq $historyFailure
+        ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
+        OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
+    }
+    $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
+    Write-Host "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)"
+    $guardFailures = @()
+    if ($stateFailure) { $guardFailures += $stateFailure }
+    if (-not $guards.SessionUnchanged) { $guardFailures += 'the real session-state.json changed' }
+    if ($historyFailure) { $guardFailures += $historyFailure }
+    $failed = @()
+    if ($cleanup) { $failed += "owned job cleanup: $cleanup" }
+    if ($outerError) { $failed += $outerError }
+    if ($driverExit -eq 3) { $failed += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
+    elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and run.json)" }
+    $recordPath = Join-Path $Run 'run.json'
+    $record = if (Test-Path -LiteralPath $recordPath) { Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } else { $null }
+    $problems = @(Get-FramePacingRecordProblems $record)
+    if ($null -ne $record) {
+        $wantMode = if ($Visible) { 'visible' } else { 'dry-run' }
+        if (-not [string]::Equals([string]$record.Mode, $wantMode, [StringComparison]::Ordinal)) { $problems += "mode $($record.Mode), not $wantMode" }
+        if (-not [string]::Equals([string]$record.LaunchConfigFile, (Join-Path $copy 'config.ghostty'), [StringComparison]::OrdinalIgnoreCase)) { $problems += "the copy's config file was not its own generated one" }
+        if ($null -ne $record.EffectiveDirs) {
+            foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {
+                $dir = [string]$record.EffectiveDirs.$name
+                if (-not $dir -or -not ($dir.TrimEnd('\') + '\').StartsWith($Run.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or @($realDirs | Where-Object { [string]::Equals($_, $dir.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
+                    $problems += "the copy's $name was not the run's own"
+                }
+            }
+        } else { $problems += 'no effective directories' }
+    }
+    # A record whose only problems are the visible run's environment is inconclusive; any other problem fails the run.
+    # The driver's own error carries every problem it saw, so it is not a further problem when those are all
+    # inconclusive.
+    $hard = @($problems | Where-Object { -not ([string]$_).StartsWith('inconclusive:', [StringComparison]::Ordinal) -and -not ([string]$_).StartsWith('error: ', [StringComparison]::Ordinal) })
+    $soft = @($problems | Where-Object { ([string]$_).StartsWith('inconclusive:', [StringComparison]::Ordinal) })
+    $driverError = if ($null -ne $record -and $record.Error) { [string]$record.Error } else { $null }
+    $driverInconclusive = $null -ne $driverError -and ($driverError.StartsWith('INCONCLUSIVE:', [StringComparison]::Ordinal) -or ($soft.Count -gt 0 -and @($driverError -split '; ' | Where-Object { -not $_.StartsWith('inconclusive:', [StringComparison]::Ordinal) }).Count -eq 0))
+    if ($null -ne $driverError -and -not $driverInconclusive) { $hard += "error: $driverError" }
+    $status = if ($guardFailures.Count -gt 0) { 'guard-tripped' }
+        elseif ($failed.Count -gt 0 -or $hard.Count -gt 0) { 'failed' }
+        elseif ($soft.Count -gt 0 -or $driverInconclusive) { 'inconclusive' }
+        else { 'complete' }
+    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $failed + $hard + $soft); Record = $record }
+}
+
+# The summary over the series, pacing.json in the run root: each run's status and statistics, and the pooled
+# nearest-rank p95 over the completed runs (frame_time_p95_ms in a visible series; dry_run_p95_ms, not a
+# measurement, in a dry run). Returns the exit code: 0 every run complete, 2 the series stopped at an inconclusive
+# run, 3 at a tripped guard, 1 at any other failure.
+function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results) {
+    $completed = @($Results | Where-Object { [string]::Equals($_.Status, 'complete', [StringComparison]::Ordinal) })
+    $pooled = [double[]]@($completed | ForEach-Object { @($_.Record.IntervalsMs) } | ForEach-Object { [double]$_ })
+    $p95 = if ($pooled.Count -gt 0) { [Math]::Round((Get-BenchPercentile -Samples $pooled -Percentile 95), 6) } else { $null }
+    $median = if ($pooled.Count -gt 0) { [Math]::Round((Get-BenchMedian -Samples $pooled), 6) } else { $null }
+    $workloads = @($completed | ForEach-Object { [string]$_.Record.WorkloadSha256 } | Select-Object -Unique)
+    $refresh = @($completed | ForEach-Object { $_.Record.RefreshHz } | Select-Object -Unique)
+    $summary = [ordered]@{
+        Schema = 1; Mode = $(if ($Visible) { 'visible' } else { 'dry-run' }); Measurement = [bool]$Visible
+        RunsRequested = $Runs; RunsCompleted = $completed.Count; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
+        WorkloadSha256 = $(if ($workloads.Count -eq 1) { $workloads[0] } else { $null }); RefreshHz = @($refresh)
+        PooledIntervals = $pooled.Count; Aggregation = 'nearest-rank p95 over the pooled intervals of the completed runs'
+        frame_time_p95_ms = $(if ($Visible -and $completed.Count -eq $Runs) { $p95 } else { $null })
+        frame_time_median_ms = $(if ($Visible -and $completed.Count -eq $Runs) { $median } else { $null })
+        dry_run_p95_ms = $(if (-not $Visible) { $p95 } else { $null })
+        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }) } })
+    }
+    if ($completed.Count -gt 1 -and $workloads.Count -ne 1) { $summary.Error = 'the completed runs differ in WorkloadSha256' }
+    $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
+    $last = $Results[$Results.Count - 1]
+    foreach ($failure in @($last.Failures)) { Write-Host "  $failure" }
+    $label = if ($Visible) { "frame_time_p95_ms $p95" } else { "dry run: dry_run_p95_ms $p95 (not a measurement)" }
+    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')"
+    if ($summary.Contains('Error')) { return 1 }
+    if ($completed.Count -eq $Runs) { return 0 }
+    switch ($last.Status) { 'guard-tripped' { return 3 } 'inconclusive' { return 2 } default { return 1 } }
+}
+
+if ($Driver) {
+    $code = Invoke-FramePacingDriver | Select-Object -Last 1
+    exit $code
+}
+exit (Invoke-FramePacingOuter | Select-Object -Last 1)

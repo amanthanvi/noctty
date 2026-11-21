@@ -1473,6 +1473,79 @@ history through `scripts/windows-harness-history.ps1`, and the real
 `session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
+## bench-frame-pacing.ps1
+
+`bench-windows.ps1 -Metric frame-pacing` runs this harness: `frame_time_p95_ms`
+under the per-copy rules (AGENTS.md "Running noctty"). Each run is a fresh
+portable copy of `-MeasureRepo`'s receipt-bound measurement build
+(`noctty.portable` beside it, no `noctty.ico`, its own `LOCALAPPDATA`,
+`APPDATA`, `TEMP` and `TMP`), admitted as `hidden-win11-working-set.ps1`
+admits it. The admission, the no-follow receipt read, the copy check, the run
+placement, the stray-config check and the argv comparison are that harness's
+functions, copied byte for byte; Contracts.99-FramePacing fails if either copy
+changes alone, and holds the bench's statistics and payload generator and the
+native members #739 hardened the same way. The copy's shell is its config's
+`command = direct:<System32>\cmd.exe /D`. Nothing on its command line sets
+one: the final command line and the copy's own, read back by PID, must each
+split into exactly the expected list, `--config-default-files=false` and
+`--config-file=<copy>\config.ghostty` among it. The clipboard is denied, and
+no PowerShell runs under the copy (checked at the end of each run). Its
+environment adds only `GHOSTTY_LOG`, `NOCTTY_RENDER_TRACE_FILE`,
+`NOCTTY_RENDER_TRACE_LIVE` and `NOCTTY_BENCH_END_MARKER`; an inherited
+`NOCTTY_` or `GHOSTTY_` variable is refused.
+
+The workload is the bench's `stream` payload (4 MiB of printable ASCII from
+its own generator, seed 121) and end marker, written by cmd's own `type`. F5
+types `type stream.bin`. The driver waits for the echo to go quiet, then arms
+the render trace for the first swap that presents the end marker
+(`WM_APP + 9` with 0), and F6 sends the carriage return. The samples are the
+trace's intervals between consecutive successful swaps, from the arm through
+that swap, at most 2,048 a run. `frame_time_p95_ms` is their nearest-rank p95,
+pooled over the completed runs, as the bench aggregates its own. cmd's `type`
+delivers the payload at about 2.4 MB/s, a tenth of the bench's PowerShell
+producer (26 MB/s in the 2026-08-27 table in
+`docs/windows-benchmark-methodology.md`), so a run's window is about 1.8 s
+with about 420 intervals, and its numbers are not comparable with that table.
+`copy /b stream.bin con` is fast but loses the end marker (test-harnesses.md,
+FRAME-PACING-01).
+
+Two modes:
+
+- The dry run (the default) runs everything on a fresh private desktop and
+  refuses the visible part: the driver evaluates the visible run's
+  preconditions on its own desktop, records why they fail, and never takes the
+  foreground. Its intervals check the pipeline and are not a measurement, since
+  nothing composes a private desktop. The summary gives their p95 as
+  `dry_run_p95_ms`, never as `frame_time_p95_ms`.
+- `-Visible` is the measurement. Run it only while the machine's user is
+  away. The copy runs on `Default`, which must be the caller's desktop and the
+  input desktop, composed by DWM, in a local session, with no input for
+  `-MinIdleSeconds` (300 by default). The machine must be under 30% busy
+  (the driver waits up to `-QuietWaitSeconds`). The copy takes the foreground
+  through a bounded call: a zero-motion mouse input unlocks it, never an Alt
+  tap, and the cross-thread calls run on a worker joined within 5 s. A run
+  whose foreground, pane focus or session input changed during the workload is
+  inconclusive, never a sample.
+
+```powershell
+pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
+    -MeasureRepo <checkout with a measurement build> -RunRoot <new dir> [-Runs 5] [-Visible]
+```
+
+`-RunRoot` is a new directory outside `-MeasureRepo`, or one git ignores
+there. The series stops at the first run that does not complete. The exit code
+is 0 when every run completed, 2 after an inconclusive visible run, 3 after a
+tripped guard and 1 otherwise. `<RunRoot>\pacing.json` holds each run's status
+and statistics and the pooled p95. Each `run-<n>` holds `run.json` (the build,
+config, receipt and ConPTY digests, the transport and renderer the copy's log
+names, the grid, the window's DPI and monitor mode, the busy share and timer
+resolution before and after, every interval and the visible part's facts), the
+copy's log, the driver's log, the copy's last trace snapshot and
+`guards.json`. Runs compare only with the same `WorkloadSha256`, grid,
+transport, ConPTY digests and monitor refresh. Each run keeps the shared state
+guard, the PowerShell history guard and the real `session-state.json`'s
+metadata, and logs the clipboard sequence number before and after.
+
 ## Style
 
 - Define reusable helpers as `function Verb-Noun { ... }` with a `param(...)`

@@ -640,7 +640,9 @@ that govern each symbol you change, or that none does.
   `test/windows/` harnesses (hidden desktops, the foreground, sandboxes, the
   interactive composite, the flagship contracts, the renderer parity harness
   `test/windows/renderer/Invoke-RendererParity.ps1`, `bench-windows.ps1`'s
-  `ForceForeground` and render-trace snapshots, transient captures (a banner,
+  `ForceForeground` and render-trace snapshots, its per-copy frame-pacing
+  harness (`-Metric frame-pacing`, `test/windows/bench-frame-pacing.ps1`),
+  transient captures (a banner,
   the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
   the measure-AUMID builds an A/B compares
   (`Invoke-InteractiveWin11MeasureBuild` in
