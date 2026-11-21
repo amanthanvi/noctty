@@ -2508,13 +2508,13 @@ public static class $driverStubName {
         # Sol's round-7 table: Published is any timing statistic in pacing.json (the headline p95 and median, each
         # group's p95 and median, each run's p95), so a voided series must write none of them; and its Inconclusive
         # names the observation that voided it. The runs carry a p95 of their own (4.4) so the per-run field shows.
-        function Invoke-FramePacingSeriesEnd($Port, [string] $CompleteText, [object[]] $Results, [string] $SeriesSha = $null) {
+        function Invoke-FramePacingSeriesEnd($Port, [string] $CompleteText, [object[]] $Results, [string] $SeriesSha = $null, [bool] $Dry = $false) {
             $root = Join-Path ([IO.Path]::GetTempPath()) ('fp-end-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             [void][IO.Directory]::CreateDirectory($root)
             try {
                 $out = & {
                     Set-StrictMode -Version Latest
-                    $Visible = $true; $Runs = 2
+                    $Visible = -not $Dry; $Runs = 2
                     if ($CompleteText) { . ([scriptblock]::Create($CompleteText)) }
                     Complete-FramePacingSeries $Port $root ([pscustomobject]@{ Head = 'h'; ExeSha256 = 'e' }) $Results 250 $SeriesSha
                 } 6>$null
@@ -2578,6 +2578,11 @@ public static class $driverStubName {
             if ($sameHarness.Code -ne 0 -or -not $sameHarness.Headline) { return "matching harness hashes: exit $($sameHarness.Code), headline $($sameHarness.Headline)" }
             $otherHarness = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' (New-FramePacingRun @{ IntervalsMs = [double[]]@(4.0, 4.4); P95Ms = 4.4; HarnessSha256 = 'bb' }))) 'aa'
             if ($otherHarness.Code -ne 1 -or $otherHarness.Published -or -not (Test-FramePacingOrdinal $otherHarness.Keys $framePacingVoidedKeys) -or -not (Test-FramePacingOrdinal ($otherHarness.Reasons -join ' ') 'harness-changed')) { return "a driver that ran other harness bytes: exit $($otherHarness.Code), keys '$($otherHarness.Keys)', reasons '$($otherHarness.Reasons -join ' ')'" }
+            # A dry run with a changed harness (Greptile on #744): no watch, so exactly harness-changed, never a watch reason.
+            $dryOther = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' (New-FramePacingRun @{ IntervalsMs = [double[]]@(4.0, 4.4); P95Ms = 4.4; HarnessSha256 = 'bb' }))) 'aa' $true
+            if ($dryOther.Code -ne 1 -or $dryOther.Published -or -not (Test-FramePacingOrdinal $dryOther.Keys $framePacingVoidedKeys) -or -not (Test-FramePacingOrdinal ($dryOther.Reasons -join ' ') 'harness-changed')) { return "a dry run with a changed harness: exit $($dryOther.Code), keys '$($dryOther.Keys)', reasons '$($dryOther.Reasons -join ' ')'" }
+            $drySame = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' $hashedB)) 'aa' $true
+            if ($drySame.Code -ne 0 -or $drySame.Keys -eq $framePacingVoidedKeys) { return "a dry run with matching hashes: exit $($drySame.Code), keys '$($drySame.Keys)'" }
             return $null
         }
         $seriesEndMiss = Get-FramePacingSeriesEndMiss $null
@@ -2605,6 +2610,10 @@ public static class $driverStubName {
         $reasonsDropControl = [regex]::Replace($reasonsText, '(?m)^\s+if \(\$InputRuns -gt 0\) \{ \$reasons\.Add\(''run-saw-input''\) \}\r?\n', '')
         if ([string]::Equals($reasonsDropControl, $reasonsText, [StringComparison]::Ordinal)) { throw 'The run-saw-input control changed nothing.' }
         & { . ([scriptblock]::Create($reasonsDropControl)); if ($null -eq (Get-FramePacingSeriesEndMiss $null)) { throw 'The series-end cases accepted reasons with run-saw-input dropped.' } }
+        # Greptile on #744: the watch reasons ungated, which gives a dry run with a changed harness watch-not-stopped.
+        $reasonsUngated = $reasonsText.Replace('    if ($Visible) {', '    if ($true) {')
+        if ([string]::Equals($reasonsUngated, $reasonsText, [StringComparison]::Ordinal)) { throw 'The watch-reason gate control changed nothing.' }
+        & { . ([scriptblock]::Create($reasonsUngated)); if ($null -eq (Get-FramePacingSeriesEndMiss $null)) { throw 'The series-end cases accepted a dry run''s watch reason.' } }
         $reasonsControl = $reasonsText.Replace("`$reasons.Add('hook-count')", "`$reasons.Add(`"hook count `$RealInputs`")")
         if ([string]::Equals($reasonsControl, $reasonsText, [StringComparison]::Ordinal)) { throw 'The void-reason control changed nothing.' }
         & { . ([scriptblock]::Create($reasonsControl)); if ($null -eq (Get-FramePacingSeriesEndMiss $null)) { throw 'The series-end cases accepted a reason that is text with a number.' } }

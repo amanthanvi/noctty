@@ -2592,8 +2592,12 @@ $script:FramePacingVoidReasons = @('hook-count', 'tick-moved', 'tick-unread', 'w
 function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $TickMoved, [bool] $TickUnread, [int] $InputRuns, [bool] $MixedBuild, [bool] $MixedEnvironment, [int] $Completed, [bool] $HarnessChanged) {
     $statuses = @($Results | ForEach-Object { [string]$_.Status })
     $reasons = [Collections.Generic.List[string]]::new()
-    if ($null -eq $RealInputs) { $reasons.Add('watch-not-stopped') } elseif ([long]$RealInputs -ne 0) { $reasons.Add('hook-count') }
-    if ($TickUnread) { $reasons.Add('tick-unread') } elseif ($TickMoved) { $reasons.Add('tick-moved') }
+    # The watch and the tick are a visible series' alone (Greptile on #744): a dry run passes no count, and has no
+    # watch to have not stopped.
+    if ($Visible) {
+        if ($null -eq $RealInputs) { $reasons.Add('watch-not-stopped') } elseif ([long]$RealInputs -ne 0) { $reasons.Add('hook-count') }
+        if ($TickUnread) { $reasons.Add('tick-unread') } elseif ($TickMoved) { $reasons.Add('tick-moved') }
+    }
     if ($InputRuns -gt 0) { $reasons.Add('run-saw-input') }
     if ($statuses -contains 'guard-tripped') { $reasons.Add('guard-tripped') }
     if ($statuses -contains 'failed') { $reasons.Add('run-failed') }
