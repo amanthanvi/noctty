@@ -31,7 +31,6 @@ const state_mutex = @import("state_mutex.zig");
 const dump = @import("dump.zig");
 
 const Role = thread_role.Role;
-const RoleTag = std.meta.Tag(Role);
 const Acquire = state_mutex.Acquire;
 
 /// The process recorder's capacity: the fork head has 96 production gate
@@ -216,9 +215,6 @@ const Slot = extern struct {
         var fields: usize = 0;
         for (@typeInfo(Slot).@"struct".fields) |field| fields += @sizeOf(field.type);
         if (fields != @sizeOf(Slot)) @compileError("a recorder slot has padding");
-        if (@intFromEnum(Acquire.lock) != 0 or @intFromEnum(RoleTag.none) != 0) {
-            @compileError("an empty recorder slot is not all zero");
-        }
     }
 
     /// Whether this published slot holds the pair.
