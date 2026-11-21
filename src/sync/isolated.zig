@@ -323,14 +323,20 @@ pub const Pair = struct {
 
 /// A panic variant that also compares its dump (acceptance test 12): the
 /// child panics with `text`, and the compare of its own directory passes
-/// with exactly `pairs`.
+/// with exactly `pairs`. Where this build's tests check no names
+/// (`symbolise.names_attributed`, RQ16), the dump holds exactly the pairs'
+/// roles instead, and the compare, which keys pairs by name, is not judged.
 pub fn expectPanicPairs(src: std.builtin.SourceLocation, text: []const u8, pairs: []const Pair) !void {
     var child = try run(src, .own);
     defer child.deinit();
     try expectPanicked(&child, src, text);
     var result = try compareChild(&child);
     defer result.deinit();
-    if (!result.report.passed() or !result.holdsExactly(pairs)) {
+    const held = if (symbolise.names_attributed)
+        result.report.passed() and result.holdsExactly(pairs)
+    else
+        result.holdsRoles(pairs);
+    if (!held) {
         result.explain(&child, "expected the child's compare to pass with exactly its pairs");
         return error.IsolatedChildCompare;
     }
@@ -338,7 +344,8 @@ pub fn expectPanicPairs(src: std.builtin.SourceLocation, text: []const u8, pairs
 
 /// An off-table variant (acceptance tests 4 and 8): the child exits
 /// successfully, and the compare of its own directory fails with exactly
-/// one failure, the PAIR-OUTSIDE-TABLE naming `pair`.
+/// one failure, the PAIR-OUTSIDE-TABLE naming `pair` (its role alone where
+/// this build's tests check no names, RQ16).
 pub fn expectOffTable(src: std.builtin.SourceLocation, pair: Pair) !void {
     var child = try run(src, .own);
     defer child.deinit();
@@ -349,7 +356,14 @@ pub fn expectOffTable(src: std.builtin.SourceLocation, pair: Pair) !void {
     const line = try std.fmt.bufPrint(&line_buf, "FAIL PAIR-OUTSIDE-TABLE {s}: ({s}, {s})", .{
         result.dump_name orelse "?", pair.function, pair.role,
     });
-    if (result.report.failures.items.len != 1 or !result.report.hasLine(line)) {
+    var tail_buf: [256]u8 = undefined;
+    const tail = try std.fmt.bufPrint(&tail_buf, ", {s})", .{pair.role});
+    const named = if (symbolise.names_attributed)
+        result.report.hasLine(line)
+    else
+        result.report.count(.pair_outside_table) == 1 and
+            std.mem.endsWith(u8, result.report.failures.items[0].line, tail);
+    if (result.report.failures.items.len != 1 or !named) {
         result.explain(&child, "expected exactly one PAIR-OUTSIDE-TABLE naming the pair");
         return error.IsolatedChildCompare;
     }
@@ -397,6 +411,33 @@ pub const Compared = struct {
                 }
             }
             if (found != 1) return false;
+        }
+        return true;
+    }
+
+    /// Whether the dumps hold exactly as many pairs as `pairs`, with the
+    /// same roles, whatever their keys (RQ16's role-only check).
+    pub fn holdsRoles(self: *const Compared, pairs: []const Pair) bool {
+        var lines: usize = 0;
+        for (self.dumps) |d| {
+            var it = std.mem.splitScalar(u8, d.text, '\n');
+            _ = it.next();
+            while (it.next()) |line| lines += @intFromBool(line.len > 0);
+        }
+        if (lines != pairs.len) return false;
+        for (pairs) |pair| {
+            var want: usize = 0;
+            for (pairs) |other| want += @intFromBool(std.mem.eql(u8, other.role, pair.role));
+            var found: usize = 0;
+            for (self.dumps) |d| {
+                var it = std.mem.splitScalar(u8, d.text, '\n');
+                _ = it.next();
+                while (it.next()) |line| {
+                    const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+                    found += @intFromBool(std.mem.eql(u8, line[space + 1 ..], pair.role));
+                }
+            }
+            if (found != want) return false;
         }
         return true;
     }
@@ -544,14 +585,21 @@ test "isolated: a 16-slot recorder panics on its 17th distinct pair with PN5's t
 
 test "isolated: a child that acquires at two sites and then panics keeps both pairs, and its compare passes (acceptance test 12)" {
     if (thread_role.layer == .off) return error.SkipZigTest;
+    // Two bodies that differ (each its own store), so no build folds them
+    // into one symbol (identical-code folding in a release mode).
     const Sites = struct {
+        var first: u32 = 0;
+        var second: u64 = 0;
+
         noinline fn isolatedFirstSite(m: *StateMutex) void {
             m.lock();
+            first += 1;
             m.unlock();
         }
 
         noinline fn isolatedSecondSite(m: *StateMutex) void {
             m.lock();
+            second +%= 0x5eed;
             m.unlock();
         }
     };

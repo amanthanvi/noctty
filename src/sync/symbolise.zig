@@ -44,6 +44,15 @@ const Allocator = std.mem.Allocator;
 /// The symbolised format's name, in each header.
 pub const format_name = "sym-1";
 
+/// Whether this build's tests may check a recorded function's name (PLAN.md
+/// §2.7 RQ16). Every attribution probe so far ran on x64, so an aarch64 test
+/// build checks the role and the panic only, until 1A.2 has run the probe
+/// once on the ARM64 runner (the lead's 1A.2 decision 12) and it attributes
+/// there: then this is true on aarch64 too. The one switch for every test
+/// that checks a name (`isolated.expectPanicPairs`, `expectOffTable`, this
+/// file's site-shape test).
+pub const names_attributed = builtin.cpu.arch == .x86_64;
+
 /// The symbolise mode's variables (`runFromEnvironment`): the raw dumps'
 /// directory, the directory the symbolised ones are written to (it must
 /// exist; a file is never overwritten), the directory holding each dump's
@@ -745,23 +754,23 @@ test "symbolise names each site shape's acquiring function in this file" {
     var lines = std.mem.splitScalar(u8, result.text, '\n');
     const header = lines.next().?;
     try testing.expect(std.mem.startsWith(u8, header, "# kind=child pid=1 start=2 format=sym-1 exe=ghostty-test.exe pdb_guid="));
-    try testing.expectEqualStrings("src/sync/symbolise.zig:symbolisePlainSite ui", lines.next().?);
-    try testing.expectEqualStrings("src/sync/symbolise.zig:symboliseMethodSite ui", lines.next().?);
-    try testing.expectEqualStrings("src/sync/symbolise.zig:symboliseNestedSite ui", lines.next().?);
+    try expectShapeLine(lines.next().?, "symbolisePlainSite");
+    try expectShapeLine(lines.next().?, "symboliseMethodSite");
+    try expectShapeLine(lines.next().?, "symboliseNestedSite");
     // Each instantiation is its own symbol, its suffix the compare's to strip.
     const first = lines.next().?;
     const second = lines.next().?;
-    try testing.expect(std.mem.startsWith(u8, first, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
-    try testing.expect(std.mem.startsWith(u8, second, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
-    try testing.expect(!std.mem.eql(u8, first, second));
+    if (names_attributed) {
+        try testing.expect(std.mem.startsWith(u8, first, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
+        try testing.expect(std.mem.startsWith(u8, second, "src/sync/symbolise.zig:symboliseComptimeSite__anon_"));
+        try testing.expect(!std.mem.eql(u8, first, second));
+    } else {
+        try expectShapeLine(first, null);
+        try expectShapeLine(second, null);
+    }
     // 0.15.2 attributes a site in an inline fn to its caller (§19.1).
-    if (builtin.mode == .Debug) {
-        try testing.expectEqualStrings("src/sync/symbolise.zig:symboliseInlineCaller ui", lines.next().?);
-    } else _ = lines.next();
-    try testing.expectEqualStrings(
-        "src/sync/symbolise.zig:test.symbolise names each site shape's acquiring function in this file ui",
-        lines.next().?,
-    );
+    try expectShapeLine(lines.next().?, if (builtin.mode == .Debug) "symboliseInlineCaller" else null);
+    try expectShapeLine(lines.next().?, "test.symbolise names each site shape's acquiring function in this file");
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&line, "?outside-image:0x{x:0>16} termio", .{own.base + own.size + 16}),
         lines.next().?,
@@ -782,6 +791,17 @@ test "symbolise names each site shape's acquiring function in this file" {
     defer headless.deinit(a);
     try testing.expectEqual(@as(?Problem, .bad_header), headless.problem);
     try testing.expectEqualStrings("", headless.text);
+}
+
+/// One symbolised line of the site-shape test: `name`'s key with role `ui`
+/// where this build checks names (RQ16), else, or for a null `name`, the
+/// role and a key that names a file.
+fn expectShapeLine(line: []const u8, comptime name: ?[]const u8) !void {
+    if (names_attributed) {
+        if (name) |n| return testing.expectEqualStrings("src/sync/symbolise.zig:" ++ n ++ " ui", line);
+    }
+    try testing.expect(std.mem.endsWith(u8, line, " ui"));
+    try testing.expect(line[0] != '?' and std.mem.indexOf(u8, line, ".zig:") != null);
 }
 
 /// The test block's own site (a test body is `test.<name>`).
