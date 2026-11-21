@@ -829,11 +829,32 @@ foreach ($mutation in @(
 # `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw }`, or vt-probe's `if ($Runtime -and $env:NOCTTY_GUI_HIDDEN_DESKTOP)
 # { throw }` before its `if ($Runtime)`). A Process start whose FileName is a known program other than noctty and a
 # shell (lib's System32 taskkill) is not one; nor is the hosted launcher's own [InteractiveWin11HostedLaunch]::Start.
+# Its FileName is every `.FileName =` of its variable that can set its object, and a start info built with arguments
+# (a FileName, -Property) is a program the scan does not know.
+# The library files scanned are the walker's closure of the plan's leaves, not a hand list (Opus on #740: the list
+# missed scripts/interactive-win11-measure-lib.ps1, which lib dot-sources). The runner is no leaf's member, and its
+# own libraries (the state guard, hidden-win11-local-lib.ps1) run in the runner, never on a hosted leaf's path; a leaf
+# that loads one makes it a member, and so scanned. A walk with problems would scan too little, so it fails here.
 $guiPlan = Get-Content -LiteralPath $guiPlanPath -Raw | ConvertFrom-Json
-$guiLibraryFiles = @('scripts\interactive-win11-lib.ps1', 'scripts\interactive-win11-window-lib.ps1', 'scripts\interactive-win11-state-guard.ps1',
-    'scripts\windows-harness-history.ps1', 'test\windows\hidden-win11-local-lib.ps1', 'test\windows\interactive-win11-stateful-lib.ps1') |
-    ForEach-Object { Join-Path $repoRoot $_ }
-$guiLeafFiles = @($guiPlan.leaves | ForEach-Object { Join-Path $repoRoot ([string]$_.script) })
+$guiLeafRepoPaths = @($guiPlan.leaves | ForEach-Object { ([string]$_.script).Replace('\', '/') })
+$guiLaunchClosure = & {
+    . (Join-Path $repoRoot 'scripts\ci-script-closure.ps1')
+    Get-ScriptClosure -RepoRoot $repoRoot -Entries $guiLeafRepoPaths
+}
+if ($guiLaunchClosure.Problems.Count -ne 0) {
+    throw "The closure of the plan's leaves does not walk cleanly, so the launch ban would scan too little: $($guiLaunchClosure.Problems -join '; ')"
+}
+foreach ($guiLaunchRequired in @('scripts/interactive-win11-lib.ps1', 'scripts/interactive-win11-measure-lib.ps1', 'test/windows/interactive-win11-stateful-lib.ps1')) {
+    if (@($guiLaunchClosure.Members | Where-Object { [string]::Equals($_, $guiLaunchRequired, [StringComparison]::Ordinal) }).Count -ne 1) {
+        throw "The closure of the plan's leaves no longer reaches $guiLaunchRequired, so the launch ban would not scan it."
+    }
+}
+$guiLeafFiles = @($guiLeafRepoPaths | ForEach-Object { Join-Path $repoRoot $_ })
+$guiLibraryFiles = @($guiLaunchClosure.Members | Where-Object {
+        $guiLaunchMember = $_
+        @($guiLeafRepoPaths | Where-Object { [string]::Equals($_, $guiLaunchMember, [StringComparison]::Ordinal) }).Count -eq 0 -and
+            [IO.Path]::GetExtension($guiLaunchMember).ToLowerInvariant() -in @('.ps1', '.psm1')
+    } | ForEach-Object { Join-Path $repoRoot $_ })
 $guiFirstUseNames = @('Invoke-InteractiveWin11HarnessMain', 'Invoke-InteractiveWin11Bootstrap', 'Initialize-InteractiveWin11Sandbox', 'Start-Process', 'Set-Content', 'New-Item', 'Out-File')
 
 function Get-GuiLaunchFunctionOf($Node) {
@@ -1015,14 +1036,44 @@ function Get-GuiLaunchProblems {
         if ($Value.Kind -eq 'path' -and (Test-CiScriptTargetKind $Value.Value) -ne 'native' -and $Value.Value -match '[\\/]') { return $true }
         return $false
     }
-    # A Process start's program, from its start info's FileName assignments when it is a variable.
+    # Whether a FileName write sets only its own scope's object, never the one a site in $SiteFunction starts: it sits
+    # in another function (or at script level, for a site in a function), outside any scriptblock there, and that
+    # scope's own plain assignment of the variable dominates it (ends before it in a statement list that holds it).
+    # The assignment made the variable that scope's own, and PowerShell finds a caller's variable only from a scope
+    # that has none. Any other write of the name may set the site's object: one before its scope's assignment, one in a
+    # helper with no assignment of its own (called from the site's function, it sets the caller's object), or one in
+    # a scriptblock (invoked where it is passed, it finds that scope's variable). Opus on #740: measure-lib's git and
+    # its build each create and set their own $info, and merging their FileNames over the whole file made the git
+    # launch an unknown program.
+    $setsOwnObject = {
+        param($Write, $SiteFunction)
+        $function = Get-GuiLaunchFunctionOf $Write
+        if ([object]::ReferenceEquals($function, $SiteFunction)) { return $false }
+        for ($walk = $Write.Parent; $null -ne $walk -and -not [object]::ReferenceEquals($walk, $function); $walk = $walk.Parent) {
+            if ($walk -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { return $false }
+        }
+        $name = $Write.Left.Expression.VariablePath.UserPath
+        foreach ($own in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))) {
+            if ($own.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals -or $own.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+                -not $own.Left.VariablePath.IsUnqualified -or -not [string]::Equals($own.Left.VariablePath.UserPath, $name, [StringComparison]::OrdinalIgnoreCase) -or
+                -not [object]::ReferenceEquals((Get-GuiLaunchFunctionOf $own), $function)) { continue }
+            $block = $own.Parent
+            if (($block -is [System.Management.Automation.Language.NamedBlockAst] -or $block -is [System.Management.Automation.Language.StatementBlockAst]) -and
+                $own.Extent.EndOffset -le $Write.Extent.StartOffset -and $Write.Extent.EndOffset -le $block.Extent.EndOffset) { return $true }
+        }
+        return $false
+    }
+    # A Process start's program, from its start info's FileName assignments when it is a variable: every one that can
+    # set the object the site's own scope sees.
     $fileNameOf = {
         param($Node)
         if ($Node -is [System.Management.Automation.Language.VariableExpressionAst]) {
             $name = $Node.VariablePath.UserPath
+            $site = Get-GuiLaunchFunctionOf $Node
             $values = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.MemberExpressionAst] -and
                     $n.Left.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Left.Expression.VariablePath.UserPath -ieq $name -and
                     $n.Left.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.Left.Member.Value -ieq 'FileName' }.GetNewClosure(), $true) |
+                Where-Object { -not (& $setsOwnObject $_ $site) } |
                 ForEach-Object { Resolve-CiScriptValue $_.Right $context })
             if ($values.Count -eq 0) { return @{ Kind = 'unresolved'; Value = $null } }
             return Merge-CiScriptValues $values
@@ -1038,7 +1089,11 @@ function Get-GuiLaunchProblems {
             if ([string]::Equals($name, 'new-object', [StringComparison]::Ordinal) -and $node.Extent.Text -match '(?i)\bDiagnostics\.ProcessStartInfo\b') {
                 $assigned = $node.Parent.Parent
                 $target = $(if ($assigned -is [System.Management.Automation.Language.AssignmentStatementAst] -and $assigned.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $assigned.Left })
-                if ($null -eq $target -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
+                # Built with arguments: anything but the type, alone or as -TypeName's.
+                $rest = @($node.CommandElements | Select-Object -Skip 1)
+                $built = $rest.Count -gt 1 -and -not ($rest.Count -eq 2 -and $rest[0] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $rest[0].ParameterName -ieq 'TypeName' -and $null -eq $rest[0].Argument)
+                if ($null -eq $target -or $built -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
                 continue
             }
             $invoked = $node.InvocationOperator -in @([System.Management.Automation.Language.TokenKind]::Ampersand, [System.Management.Automation.Language.TokenKind]::Dot)
@@ -1060,7 +1115,8 @@ function Get-GuiLaunchProblems {
         } elseif ($type -match '(?i)\A(System\.)?Diagnostics\.ProcessStartInfo\z' -and $method -ieq 'new') {
             $assigned = $node.Parent.Parent
             $target = $(if ($assigned -is [System.Management.Automation.Language.AssignmentStatementAst] -and $assigned.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $assigned.Left })
-            if ($null -eq $target -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
+            # Built with arguments (Arguments is $null for `::new()`, so @() would count one).
+            if ($null -eq $target -or $null -ne $node.Arguments -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
         }
     }
     foreach ($site in $sites) {
@@ -1150,10 +1206,101 @@ foreach ($case in @(
         @{ Name = 'vt-probe''s refused -Runtime children'; Accept = $true; Text = "if (`$Runtime -and `$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'no -Runtime in hosted mode' }`nif (`$Runtime) { & powershell.exe @scriptArgs }" }
         @{ Name = 'a tripwire after the launch'; Accept = $false; Text = "function Invoke-Build { & cmd /c `$devWindowsCmd zig build; if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'too late' } }" }
         @{ Name = 'a callback, git and a script'; Accept = $true; Text = "`$check = { 1 }`n& `$check`n& git status`n& (Get-Command git.exe).Source log`n. (Join-Path `$PSScriptRoot 'helper.ps1')" }
+        # A start info's FileName is what can set its own object: a write another function makes after its own
+        # assignment of the name sets that function's object. A write before that assignment, in a helper with no
+        # assignment of its own, or in a scriptblock, may set the site's.
+        @{ Name = 'two functions, each starting its own start info: git and taskkill'; Accept = $true; Text = "function Invoke-Git { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = (Get-Command git.exe -CommandType Application | Select-Object -First 1).Source; `$p = New-Object Diagnostics.Process; `$p.StartInfo = `$info; [void]`$p.Start() }`nfunction Invoke-Kill { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'; [void][Diagnostics.Process]::Start(`$info) }" }
+        @{ Name = 'a second function starting its own start info for the exe'; Accept = $false; Text = "function Invoke-Git { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = (Get-Command git.exe).Source; [void][Diagnostics.Process]::Start(`$info) }`nfunction Invoke-App { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = `$exe; [void][Diagnostics.Process]::Start(`$info) }" }
+        @{ Name = 'a helper with no start info of its own that sets the caller''s FileName'; Accept = $false; Text = "function Set-Target { `$info.FileName = `$exe }`nfunction Invoke-Kill { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'; Set-Target; [void][Diagnostics.Process]::Start(`$info) }" }
+        @{ Name = 'another function''s FileName write before its own assignment'; Accept = $false; Text = "function Set-Early { `$info.FileName = `$exe; `$info = 1 }`nfunction Invoke-Kill { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'; Set-Early; [void][Diagnostics.Process]::Start(`$info) }" }
+        @{ Name = 'a FileName write in a scriptblock another function returns'; Accept = $false; Text = "function Get-Setter { `$info = 1; return { `$info.FileName = `$exe } }`nfunction Invoke-Kill { `$info = New-Object Diagnostics.ProcessStartInfo; `$info.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'; & (Get-Setter); [void][Diagnostics.Process]::Start(`$info) }" }
+        # A start info built with arguments may hold the program they give, whatever a later FileName says.
+        @{ Name = 'New-Object of a start info with its FileName'; Accept = $false; Text = "`$psi = New-Object Diagnostics.ProcessStartInfo `$exe`nif (`$Kill) { `$psi.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe' }`n[void][Diagnostics.Process]::Start(`$psi)" }
+        @{ Name = '::new of a start info with its FileName'; Accept = $false; Text = "`$psi = [Diagnostics.ProcessStartInfo]::new(`$exe)`nif (`$Kill) { `$psi.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe' }`n[void][Diagnostics.Process]::Start(`$psi)" }
+        @{ Name = 'New-Object -TypeName of a start info for taskkill'; Accept = $true; Text = "`$psi = New-Object -TypeName System.Diagnostics.ProcessStartInfo`n`$psi.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'`n[void][Diagnostics.Process]::Start(`$psi)" }
     )) {
     $launchAst = [System.Management.Automation.Language.Parser]::ParseInput($case.Text, [ref]$null, [ref]$null)
     $launchProblems = Get-GuiLaunchProblems -Ast $launchAst -RepoPath 'test/windows/launch-fixture.ps1'
     if (($launchProblems.Count -eq 0) -ne $case.Accept) { throw "The launch ban misjudged $($case.Name) (expected accept=$($case.Accept)): $($launchProblems -join ' ')" }
+}
+# measure-lib, which the derived list scans, starts two processes, and the ban accepts each by its own rule:
+#   * Invoke-InteractiveWin11MeasureGit starts git, found by Get-Command: a known program, never the copy, accepted
+#     as lib's taskkill is. Its FileName is its own; the build's System32 cmd sets the build's own $info.
+#   * Invoke-InteractiveWin11MeasureBuild starts System32 cmd, a shell that runs the zig build, so only a hosted
+#     tripwire accepts it: `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'gui-hidden: a hosted leaf never builds.' }`
+#     as the function's first statement (added with this list; until that line is in the file, this check fails).
+# Neither runs from a hosted leaf: no leaf calls measure-lib, and lib calls it only outside hosted mode
+# (Get-InteractiveWin11MeasureLayout, Get-InteractiveWin11MeasureExePath and Assert-InteractiveWin11MeasureBuild after
+# lib's hosted branch, Invoke-InteractiveWin11MeasureBuild after Invoke-InteractiveWin11Build's tripwire), and the
+# build's own tripwire throws before anything else in it. Each control below must change the verdict: without the
+# tripwire, with git's program one that can be the copy, or with the build's own $info gone, measure-lib fails, and
+# so does any other launch added to it. Each variant is built on whole lines or the syntax tree and must parse.
+$guiMeasureLibRepoPath = 'scripts/interactive-win11-measure-lib.ps1'
+$guiMeasureLibText = [IO.File]::ReadAllText((Join-Path $repoRoot $guiMeasureLibRepoPath))
+function Get-GuiMeasureLibVariant([string] $Text, [bool] $Tripwire) {
+    # measure-lib's text with Invoke-InteractiveWin11MeasureBuild's first statement the hosted tripwire, or without it.
+    $parsed = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$null)
+    $build = @($parsed.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-InteractiveWin11MeasureBuild' }, $true))
+    if ($build.Count -ne 1) { throw 'measure-lib no longer defines Invoke-InteractiveWin11MeasureBuild once; the launch ban''s controls lost their anchor.' }
+    $first = @($build[0].Body.EndBlock.Statements)[0]
+    $present = $first -is [System.Management.Automation.Language.IfStatementAst] -and $first.Clauses.Count -eq 1 -and $null -eq $first.ElseClause -and
+        [string]::Equals($first.Clauses[0].Item1.Extent.Text, '$env:NOCTTY_GUI_HIDDEN_DESKTOP', [StringComparison]::Ordinal) -and
+        @($first.Clauses[0].Item2.Statements).Count -eq 1 -and @($first.Clauses[0].Item2.Statements)[0] -is [System.Management.Automation.Language.ThrowStatementAst]
+    if ($present -eq $Tripwire) { return $Text }
+    if ($Tripwire) { return $Text.Insert($first.Extent.StartOffset, "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'gui-hidden: a hosted leaf never builds.' }`n    ") }
+    return $Text.Remove($first.Extent.StartOffset, $first.Extent.EndOffset - $first.Extent.StartOffset)
+}
+function Set-GuiMeasureLibLine([string] $Text, [string] $Line, [string] $Replacement) {
+    # One whole line of measure-lib, matched exactly once, replaced.
+    $pattern = '(?m)^' + [regex]::Escape($Line) + '(?=\r?$)'
+    if ([regex]::Matches($Text, $pattern).Count -ne 1) { throw "A measure-lib control lost its anchor line: $Line" }
+    return [regex]::Replace($Text, $pattern, $Replacement.Replace('$', '$$'))
+}
+function Get-GuiMeasureLibVerdict([string] $Text) {
+    # The ban's problems in a variant, and the start-info lines of the git and the build.
+    $errors = $null
+    $parsed = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$null, [ref]$errors)
+    if ($errors.Count -ne 0) { throw "A measure-lib control does not parse: $($errors[0].Message)" }
+    $lines = @{}
+    foreach ($function in @('Invoke-InteractiveWin11MeasureGit', 'Invoke-InteractiveWin11MeasureBuild')) {
+        $definition = @($parsed.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $function }.GetNewClosure(), $true))[0]
+        $create = @($definition.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.Extent.Text -match '\ANew-Object Diagnostics\.ProcessStartInfo\z' }, $true))
+        $lines[$function] = $(if ($create.Count -eq 1) { $create[0].Extent.StartLineNumber } else { 0 })
+    }
+    # Assigned, never wrapped in @(): the ban returns its list as one array (PS-EMPTY-ARRAY-COUNT-01).
+    $problems = Get-GuiLaunchProblems -Ast $parsed -RepoPath $guiMeasureLibRepoPath
+    return [pscustomobject]@{ Problems = $problems; Git = $lines['Invoke-InteractiveWin11MeasureGit']; Build = $lines['Invoke-InteractiveWin11MeasureBuild'] }
+}
+$guiMeasureWith = Get-GuiMeasureLibVariant $guiMeasureLibText $true
+$guiMeasureVerdict = Get-GuiMeasureLibVerdict $guiMeasureWith
+if ($guiMeasureVerdict.Git -eq 0 -or $guiMeasureVerdict.Build -eq 0) { throw 'measure-lib''s git or build no longer creates its start info as the launch ban''s controls expect.' }
+if ($guiMeasureVerdict.Problems.Count -ne 0) { throw "measure-lib with its build's hosted tripwire must pass the launch ban: $($guiMeasureVerdict.Problems -join ' ')" }
+$guiMeasureVerdict = Get-GuiMeasureLibVerdict (Get-GuiMeasureLibVariant $guiMeasureLibText $false)
+if ($guiMeasureVerdict.Problems.Count -ne 1 -or -not $guiMeasureVerdict.Problems[0].Contains("line $($guiMeasureVerdict.Build) ")) {
+    throw "measure-lib without its build's hosted tripwire must fail the launch ban at the build alone: $($guiMeasureVerdict.Problems -join ' ')"
+}
+$guiGitFileName = '    $info.FileName = (Get-Command git.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source'
+$guiBuildStartInfo = '        $info = New-Object Diagnostics.ProcessStartInfo'
+# Each case replaces one line (the git's start info is then the refused site) or puts a launch on its own line just
+# before one (that line, the anchor's own number, is then the refused site).
+foreach ($case in @(
+        @{ Name = 'git''s program made one that can be the copy'; Line = $guiGitFileName; Replace = '    $info.FileName = $RepoRoot' }
+        @{ Name = 'the build''s own $info gone, so its cmd FileName may set the git''s'; Line = $guiBuildStartInfo; Replace = '        # (no start info of its own)' }
+        @{ Name = 'the copy started in the git function'; Line = '    $quoted = foreach ($arg in (@(''-C'', $RepoRoot) + $Arguments)) {'; Inject = '    & (Get-InteractiveWin11MeasureExePath -RepoRoot $RepoRoot) +version' }
+        @{ Name = 'a shell started in Get-InteractiveWin11MeasureHead'; Line = '    $head = [Text.Encoding]::UTF8.GetString((Invoke-InteractiveWin11MeasureGit $RepoRoot @(''rev-parse'', ''--verify'', ''HEAD''))).Trim()'; Inject = '    & cmd /d /c ver' }
+        @{ Name = 'a start info for the CLI in a new function'; Line = 'function Invoke-InteractiveWin11MeasureBuild {'; Inject = 'function Start-GuiFixtureCli { $info = New-Object Diagnostics.ProcessStartInfo; $info.FileName = (Get-InteractiveWin11MeasureLayout -RepoRoot $r).Cli; [void][Diagnostics.Process]::Start($info) }' }
+    )) {
+    if ($case.ContainsKey('Inject')) {
+        $guiMeasureVerdict = Get-GuiMeasureLibVerdict (Set-GuiMeasureLibLine $guiMeasureWith $case.Line ($case.Inject + "`n" + $case.Line))
+        $guiMeasureLine = [regex]::Matches($guiMeasureWith.Substring(0, $guiMeasureWith.IndexOf($case.Line, [StringComparison]::Ordinal)), "`n").Count + 1
+    } else {
+        $guiMeasureVerdict = Get-GuiMeasureLibVerdict (Set-GuiMeasureLibLine $guiMeasureWith $case.Line $case.Replace)
+        $guiMeasureLine = $guiMeasureVerdict.Git
+    }
+    # That line alone (a one-line function's start info and its Process.Start are two sites on it).
+    if ($guiMeasureVerdict.Problems.Count -eq 0 -or @($guiMeasureVerdict.Problems | Where-Object { -not $_.Contains("line $guiMeasureLine ") }).Count -ne 0) {
+        throw "The launch ban must refuse measure-lib with $($case.Name), at line $guiMeasureLine alone: $($guiMeasureVerdict.Problems -join ' ')"
+    }
 }
 # The hosted-switch helper the session check below uses still refuses a bare Start-Process.
 $guiControlAst = [System.Management.Automation.Language.Parser]::ParseInput("`$p = Start-Process -FilePath `$exe -PassThru", [ref]$null, [ref]$null)
