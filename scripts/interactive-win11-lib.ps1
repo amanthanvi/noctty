@@ -1039,49 +1039,6 @@ function Get-InteractiveWin11RequiredJsonFile {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
-function Show-InteractiveWin11Window {
-    param(
-        [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [type] $NativeType,
-        [int] $ShowCode = 9,
-        [switch] $SetForeground
-    )
-
-    [void] $NativeType::ShowWindow($Hwnd, $ShowCode)
-    if ($SetForeground) {
-        [void] $NativeType::SetForegroundWindow($Hwnd)
-    }
-}
-
-function Show-InteractiveWin11ProcessMainWindow {
-    param(
-        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
-        [Parameter(Mandatory)] [type] $NativeType,
-        [int] $ShowCode = 9,
-        [switch] $SetForeground,
-        [int] $ReadyTimeoutSeconds = 5
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $Process.Refresh()
-        if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
-            Show-InteractiveWin11Window `
-                -Hwnd $Process.MainWindowHandle `
-                -NativeType $NativeType `
-                -ShowCode $ShowCode `
-                -SetForeground:$SetForeground
-            return
-        }
-
-        if ($Process.HasExited) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-}
-
 function Wait-InteractiveWin11Until {
     param(
         [Parameter(Mandatory)] [scriptblock] $Condition,
