@@ -4,6 +4,7 @@ const SemanticCommand = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const PageList = @import("PageList.zig");
+const pagepkg = @import("page.zig");
 const point = @import("point.zig");
 const Pin = PageList.Pin;
 
@@ -265,6 +266,9 @@ pub fn abortCommand(self: *SemanticCommand, pages: *PageList) void {
 
 /// Drop retained state whose recovered span overlaps a range about to be
 /// erased, before PageList can relocate those pins onto unrelated rows.
+/// The range is whole rows: `tl` and `bl` are widened to the first and last
+/// column, which is right for an erase or a full-width row move. A move
+/// inside left and right margins uses invalidateMarginShift.
 pub fn invalidateRange(
     self: *SemanticCommand,
     pages: *PageList,
@@ -287,16 +291,93 @@ pub fn invalidateRange(
         if (pin.*.isBetween(top, bottom)) self.clearActive(pages);
     }
     if (self.completed) |command| {
-        const command_end = if (command.output_end) |pin|
-            pin.*
-        else if (pages.highlightSemanticContent(command.prompt.*, .input)) |hl|
-            hl.end
-        else
-            command.prompt.*;
+        const command_end = completedEnd(pages, command);
         if (pinRangesOverlap(command.prompt.*, command_end, top, bottom)) {
             self.clearCompleted(pages);
         }
     }
+}
+
+/// Active-area cells a move inside left and right margins rewrites,
+/// inclusive.
+pub const MarginRegion = struct {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+};
+
+/// Drop the completed command when a move inside left and right margins
+/// changes one of its cells. Such a move (Terminal.deleteLines in a region
+/// narrower than the screen) rewrites each cell of `region` with the cell
+/// `shift` rows below it, or a blank past the region's bottom, clears a
+/// wide character the left margin splits, and keeps every row's metadata
+/// and every tracked pin. The pending and active prompts therefore keep
+/// their rows, and a completed command whose cells neither hold nor
+/// receive anything that a recovered span reads keeps reading what it read.
+pub fn invalidateMarginShift(
+    self: *SemanticCommand,
+    pages: *PageList,
+    region: MarginRegion,
+    shift: usize,
+) void {
+    const command = self.completed orelse return;
+    const span_start = command.prompt.*;
+    const span_end = completedEnd(pages, command);
+
+    var y = region.top;
+    while (y <= region.bottom) : (y += 1) {
+        const row = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse continue;
+        const cells = row.cells(.all);
+        if (cells.len == 0 or region.left >= cells.len) continue;
+        var row_start = row;
+        row_start.x = 0;
+        var row_end = row;
+        row_end.x = @intCast(cells.len - 1);
+        if (row_end.before(span_start) or span_end.before(row_start)) continue;
+
+        // A wide character whose tail is the left margin's cell is cleared
+        // with it (Terminal.rowWillBeShifted), one column outside.
+        var left = region.left;
+        if (left > 0 and cells[left].wide == .spacer_tail) left -= 1;
+        const first: usize = if (sameRow(row, span_start)) span_start.x else 0;
+        const last: usize = if (sameRow(row, span_end)) span_end.x else cells.len - 1;
+        const lo = @max(left, first);
+        const hi = @min(@min(region.right, cells.len - 1), last);
+        if (lo > hi) continue;
+
+        const incoming: []const pagepkg.Cell = incoming: {
+            if (y + shift > region.bottom) break :incoming &.{};
+            const p = pages.pin(.{ .active = .{ .y = @intCast(y + shift) } }) orelse
+                break :incoming &.{};
+            break :incoming p.cells(.all);
+        };
+        for (lo..hi + 1) |x| {
+            if (cellIsRead(cells[x]) or
+                (x < incoming.len and cellIsRead(incoming[x])))
+            {
+                self.clearCompleted(pages);
+                return;
+            }
+        }
+    }
+}
+
+/// The last cell of a completed command's recovered span: its frozen output
+/// end, else the end of its input, else its prompt.
+fn completedEnd(pages: *const PageList, command: Completed) Pin {
+    return if (command.output_end) |pin|
+        pin.*
+    else if (pages.highlightSemanticContent(command.prompt.*, .input)) |hl|
+        hl.end
+    else
+        command.prompt.*;
+}
+
+/// Whether a cell can change what a recovered span reads: text, or a
+/// semantic mark other than the `.output` an unwritten or erased cell has.
+fn cellIsRead(cell: pagepkg.Cell) bool {
+    return cell.hasText() or cell.semantic_content != .output;
 }
 
 fn pinRangesOverlap(a_top: Pin, a_bottom: Pin, b_top: Pin, b_bottom: Pin) bool {

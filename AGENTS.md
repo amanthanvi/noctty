@@ -233,7 +233,9 @@ that govern each symbol you change, or that none does.
   `src/apprt/win32/session.zig` (`captureTerminalScrollbackSnapshotAlloc`,
   `terminalScreenIsUnpainted`), OSC parsers,
   OSC 133 exit codes, prompt typeahead
-  in `semantic_command.zig`, the scrollback search thread and its cached
+  in `semantic_command.zig` and what drops its last command when rows or
+  cells move (`invalidateRange`, `invalidateMarginShift`, from
+  `Terminal.scrollUp`), the scrollback search thread and its cached
   results (`ScreenSearch.pruneHistory`, `LiveNodes`), what a search window
   copies at append (`SlidingWindow.append`, `AppendResult`), the regex,
   whole-word and case matcher and its run-time failure latch

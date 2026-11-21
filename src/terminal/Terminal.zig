@@ -2655,17 +2655,30 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // discarded rows first, as Terminal.index does for a linefeed (f030fa954;
     // terminal-core.md KITTY2 part 2, rule (4)). Before upstream 77190bd02
     // this route went through cursorScrollAbove, which moved the rows into
-    // history with their pins.
+    // history with their pins. Inside left and right margins no row is
+    // discarded: the rows keep their metadata and only the cells between the
+    // margins move, so only a command whose cells that changes is dropped.
     const screen = self.screens.active;
     if (screen.no_scrollback and self.scrolling_region.top == 0) {
         const region_height: usize = @as(usize, self.scrolling_region.bottom) + 1;
         const discarded = @min(count, region_height);
         if (discarded > 0) {
-            screen.semantic_command.invalidateRange(
-                &screen.pages,
-                .{ .active = .{} },
-                .{ .active = .{ .y = @intCast(discarded - 1) } },
-            );
+            if (self.scrolling_region.left == 0 and
+                self.scrolling_region.right == self.cols - 1)
+            {
+                screen.semantic_command.invalidateRange(
+                    &screen.pages,
+                    .{ .active = .{} },
+                    .{ .active = .{ .y = @intCast(discarded - 1) } },
+                );
+            } else {
+                screen.semantic_command.invalidateMarginShift(&screen.pages, .{
+                    .top = self.scrolling_region.top,
+                    .bottom = self.scrolling_region.bottom,
+                    .left = self.scrolling_region.left,
+                    .right = self.scrolling_region.right,
+                }, discarded);
+            }
         }
     }
 
@@ -12448,6 +12461,94 @@ test "Terminal: scrollUp in a partial region without scrollback drops the comman
     // the row that took its place.
     t.setTopAndBottomMargin(1, 3);
     try testing.expect(!t.scrollUpShiftsWindow());
+    try t.scrollUp(1);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+/// The fixture of the test above: "PS> one" completed on row 0 with its
+/// output "out" on row 1, then "two" on row 2, on a 30-column screen.
+fn testCompleteCommandOnTopRows(s: *Screen) !void {
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    s.cursorAbsolute(0, 1);
+    try s.testWriteString("out");
+    try s.semanticPromptEndCommand();
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("two");
+}
+
+test "Terminal: scrollUp in margins beside a command without scrollback keeps the command" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testCompleteCommandOnTopRows(s);
+    const output_before = (try s.lastCommandOutputString(alloc)) orelse
+        return error.TestExpectedCommandOutput;
+    defer alloc.free(output_before);
+
+    // DECLRMM with columns 15-25 and rows 1-3, then SU 1. Inside left and
+    // right margins the move rewrites only those cells, all blank here, and
+    // keeps every row's prompt mark, so the command keeps its prompt, its
+    // text and its coordinates.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, 3);
+    t.setLeftAndRightMargin(15, 25);
+    try testing.expect(!t.scrollUpShiftsWindow());
+    try t.scrollUp(1);
+    {
+        const command = (try s.lastCommandString(alloc)) orelse
+            return error.TestExpectedCommand;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+    {
+        const output = (try s.lastCommandOutputString(alloc)) orelse
+            return error.TestExpectedCommandOutput;
+        defer alloc.free(output);
+        try testing.expectEqualStrings(output_before, output);
+    }
+}
+
+test "Terminal: scrollUp in margins over a command without scrollback drops the command" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testCompleteCommandOnTopRows(s);
+
+    // Columns 1-10 cover "PS> one": SU 1 moves "out" into its place.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, 3);
+    t.setLeftAndRightMargin(1, 10);
+    try testing.expect(!t.scrollUpShiftsWindow());
+    try t.scrollUp(1);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Terminal: scrollUp in margins moving text into a command's output without scrollback drops the command" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testCompleteCommandOnTopRows(s);
+
+    // Row 0's output region runs from column 8 to the end of the row, so
+    // text that SU 1 moves up into columns 15-25 there would read as the
+    // command's output.
+    s.cursorAbsolute(16, 1);
+    try s.testWriteString("zzz");
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, 3);
+    t.setLeftAndRightMargin(15, 25);
     try t.scrollUp(1);
     try testing.expect((try s.lastCommandString(alloc)) == null);
 }
