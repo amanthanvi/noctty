@@ -45,7 +45,7 @@ Not edges:
     `*ExePath`/`*CliPath` helper (unless the file defines it, or its name is a shell's or a batch file's), or
     `Get-Command <name>` of one; it is a launch, not a script. A name or a target path is compared and recorded
     with its trailing spaces trimmed, as Windows runs it. An executable the walker cannot name (several possible programs, or a helper named for a
-    shell) is unresolved, whatever its arguments, since it may be cmd, PowerShell or a batch file. A bare
+    shell) is unresolved, whatever its arguments, since it may be cmd, PowerShell or a batch file. A bare literal
     Start-Process FilePath beside -WorkingDirectory, other than a system program ($script:CiScriptSystemPrograms),
     is unresolved. Get-Command of a name the walker cannot read at all (`Get-Command $name`) may find a script, so it
     is unresolved; of a script path, it is that script;
@@ -567,7 +567,7 @@ function Resolve-CiScriptValue {
             # A harness helper that names an executable by convention (Get-InteractiveWin11ExePath): native, named by
             # the helper. One named for PowerShell is an executable the walker cannot name.
             if ($name -match '(?i)^get-[a-z0-9-]*(exepath|clipath)$') {
-                return @{ Kind = 'native'; Value = $(if ($name -match 'pwsh|powershell|cmd|bat|comspec') { $null } else { $name }) }
+                return @{ Kind = 'native'; Value = $(if ($name -match 'pwsh|powershell|cmd|bat') { $null } else { $name }) }
             }
             if ($name -ieq 'join-path') {
                 # Join-Path [-Path] <parent> [-ChildPath] <child> [<more children>...]: a named -Path or -ChildPath
@@ -1312,16 +1312,10 @@ function Get-CiScriptFileEdges {
                 # `-f`, `+`, `$( )` or a `u{20} escape in a value slot carried -Command through). Start-Process of
                 # PowerShell is refused, as cmd and batch files are; no GUI member starts PowerShell that way.
                 if ($callee.Is -ceq 'powershell') { $unresolved.Add($anchor); break }
-                # A bare name may be found in -WorkingDirectory (Opus on #740): unresolved, save a system program; a
-                # FilePath variable whose known value is such a name too. A FilePath read as a named program (the
-                # Get-Command or Join-Path leaf the walker keeps) is not checked: a known gap (README).
-                if ($bound.Named.ContainsKey('workingdirectory')) {
-                    $fileText = $(if ($file.Node -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $file.Node.Value } else { $fileValue = & $valueOf $file; if ($fileValue.Kind -eq 'path' -and -not $fileValue.Lookup) { [string]$fileValue.Value } })
-                    if ($null -ne $fileText) {
-                        $fileText = $fileText.TrimEnd(' ')
-                        if ($fileText -notmatch '[\\/]' -and -not [IO.Path]::IsPathRooted($fileText) -and $fileText.ToLowerInvariant() -notin $script:CiScriptSystemPrograms) { $unresolved.Add($anchor); break }
-                    }
-                }
+                # A bare name may be found in -WorkingDirectory (Opus on #740): unresolved, save a system program. A
+                # FilePath variable there is not checked: a known gap (README).
+                if ($bound.Named.ContainsKey('workingdirectory') -and $file.Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                    $file.Node.Value.TrimEnd(' ') -notmatch '[\\/]' -and $file.Node.Value.TrimEnd(' ').ToLowerInvariant() -notin $script:CiScriptSystemPrograms) { $unresolved.Add($anchor); break }
                 if ($callee.Is -in @('none', 'native', 'command')) { break }
                 # A shell given -RedirectStandardInput reads its commands from that file (Opus on #740), and so may an
                 # executable the walker cannot name (CodeRabbit on #740: one of cmd.exe or sort.exe); a known

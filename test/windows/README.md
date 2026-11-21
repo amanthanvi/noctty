@@ -1700,12 +1700,14 @@ with a path the walker cannot read, a repo folder added to `$env:PATH`, which
 makes a bare name run a `.ps1` there (the walk reads a bare name as a command
 on PATH), the arguments of a tracked executable other than a shell, which are
 not read (the repository tracks no executable), a command run outside cmd
-and PowerShell by another launcher such as `conhost.exe`, and a `Start-Process`
-FilePath the walker reads as a named program (a `Join-Path` or `Get-Command`
-leaf, such as session-restore's `$cli`, `noctty.com` beside the exe) given
-`-WorkingDirectory`: it is not checked against that directory, while a bare
-name or a variable holding one is unresolved unless it is a listed system
-program. A script a
+and PowerShell by another launcher such as `conhost.exe`, a `*ExePath` or
+`*CliPath` helper named for ComSpec (`Get-ComSpecCliPath`), read as the
+program it names although it may return cmd, and a `Start-Process` FilePath
+given `-WorkingDirectory` that is a variable or a value the walker reads as a
+named program (a `Join-Path` or `Get-Command` leaf, such as session-restore's
+`$cli`, `noctty.com` beside the exe): it is not checked against that
+directory, while a bare literal name is unresolved unless it is a listed
+system program. A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
 a leaf must not run a repo script that way.

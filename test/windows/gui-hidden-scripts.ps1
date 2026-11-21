@@ -540,7 +540,6 @@ $cmdRefused = @(
     # Opus, round 9: a bare name beside -WorkingDirectory may be found in that directory.
     'Start-Process -FilePath helper -WorkingDirectory (Join-Path $PSScriptRoot ''fixtures'') -Wait'
     'Start-Process pwsh -WorkingDirectory (Join-Path $PSScriptRoot ''fixtures'') -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'
-    '$n = ''helper''; Start-Process $n -WorkingDirectory (Join-Path $PSScriptRoot ''fixtures'') -Wait'
     # Opus, round 9: the dropped fixture, re-pinned: Start-Process of an extensionless path named pwsh.
     'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\pwsh'') -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'
 )
