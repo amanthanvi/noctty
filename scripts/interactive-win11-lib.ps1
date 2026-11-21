@@ -332,8 +332,8 @@ public static class InteractiveWin11HostedLaunch {
     # whether the real-input module's type was ever loaded in this process (design §4.3's run-time check). The runner
     # fails a leaf whose receipt is missing or says it was.
     $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -MessageData (Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'leaf-receipt.json') -Action {
-        $loaded = ($null -ne ('InteractiveWin11RealInput' -as [type])) -or
-            (@([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $null -ne $_.GetType('InteractiveWin11RealInput', $false) }).Count -gt 0)
+        # `-as [type]` resolves a type by name across every assembly loaded in the process, Add-Type's included.
+        $loaded = $null -ne ('InteractiveWin11RealInput' -as [type])
         $receipt = [ordered]@{
             schemaVersion = 1
             realInputLoaded = $loaded

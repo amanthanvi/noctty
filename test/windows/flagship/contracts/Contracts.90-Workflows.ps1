@@ -805,7 +805,8 @@ $toastSources = [ordered]@{
     'a reload_config action' = '[''"]reload_config[''"]'
     # A copy raises the clipboard-copy notice (`Surface.copySelectionToClipboards`,
     # `copy_last_command_output`), which `desktop-notifications` does not gate.
-    'a clipboard copy' = '(?i)\bcopy_to_clipboard\b|\bcopy_last_command_output\b|\bcopy-or-paste\b|\bcopy-on-select\b|\bright-click-action\b'
+    # `copy-on-select = false` turns copying off (the hidden-desktop launch policy).
+    'a clipboard copy' = '(?i)\bcopy_to_clipboard\b|\bcopy_last_command_output\b|\bcopy-or-paste\b|\bcopy-on-select\b(?!\s*=\s*false\b)|\bright-click-action\b'
 }
 $settingsSaves = [ordered]@{
     'a Settings Save and close' = "-ActionName\s+'Save and close'"

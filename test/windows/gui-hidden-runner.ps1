@@ -284,7 +284,7 @@ public static class GuiHiddenRunnerNative {
         volatile bool stopping; int cmdCount; int taken;
         public volatile bool Faulted;
         // How many joiners the reader has taken from the port (each gets a row, opened or not).
-        public int Taken { get { return Thread.VolatileRead(ref taken); } }
+        public int Taken { get { return Volatile.Read(ref taken); } }
         public bool Stopped;
         readonly List<JoinedProcess> joined = new List<JoinedProcess>();
         readonly List<JoinedProcess> opened = new List<JoinedProcess>();
