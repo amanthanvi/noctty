@@ -396,25 +396,40 @@ try {
 
     # ---- (5c) the renderer each surface started with, read from the leaf's noctty logs from start lines only (Sol and
     # Opus on #740: a fallback warning alone read as d3d11, a WARP start after a hardware failure as unknown, a direct
-    # hardware start as nothing), and the startup facts. Each case is a list of log files, each a list of lines.
-    $guiGlLoaded = 'debug(opengl): loaded OpenGL 4.6'
-    $guiGlFailed = 'warn(renderer_windows): OpenGL startup failed err=error.OpenGLUnavailable could_not_start=true; trying the Direct3D 11 beta'
+    # hardware start as nothing), and the startup facts.
+    # Each line's prefix is taken from process_shared.zig's test of logPrefix, which logFn writes with and which the Zig
+    # suite checks against std.log.Level.asText (Greptile on #740: the matchers expected `warn(`, and asText writes
+    # `warning`), never typed here.
+    $guiProcessShared = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\process_shared.zig'))
+    $guiPrefixes = @{}
+    foreach ($match in [regex]::Matches($guiProcessShared, 'expectEqualStrings\("(?<text>[a-z_0-9():]+ )", comptime logPrefix\(\.(?<level>[a-z]+), \.(?<scope>[a-z_0-9]+)\)\)', 'None', [TimeSpan]::FromSeconds(5))) {
+        $guiPrefixes["$($match.Groups['level'].Value)/$($match.Groups['scope'].Value)"] = $match.Groups['text'].Value
+    }
+    foreach ($key in @('info/renderer_windows', 'warn/renderer_windows', 'debug/opengl', 'info/d3d11')) {
+        if (-not $guiPrefixes.ContainsKey($key)) { throw "process_shared.zig's logPrefix test names no prefix for $key." }
+    }
+    $guiInfoRw = $guiPrefixes['info/renderer_windows']; $guiWarnRw = $guiPrefixes['warn/renderer_windows']
+    $guiDebugGl = $guiPrefixes['debug/opengl']; $guiInfoD3d = $guiPrefixes['info/d3d11']
+    $guiGlLoaded = $guiDebugGl + 'loaded OpenGL 4.6'
+    $guiGlFailed = $guiWarnRw + 'OpenGL startup failed err=error.OpenGLUnavailable could_not_start=true; trying the Direct3D 11 beta'
     foreach ($case in @(
-            @{ Name = 'an OpenGL start'; Logs = @(, @($guiGlLoaded, 'info(renderer_windows): renderer started backend=opengl')); Observed = 'opengl'; Startups = 'opengl:started' }
+            @{ Name = 'an OpenGL start'; Logs = @(, @($guiGlLoaded, ($guiInfoRw + 'renderer started backend=opengl'))); Observed = 'opengl'; Startups = 'opengl:started' }
             @{ Name = 'a fallback warning alone'; Logs = @(, @($guiGlFailed)); Observed = 'unknown'; Startups = 'opengl:failed unknown' }
-            @{ Name = 'a hardware failure, then a WARP start'; Logs = @(, @($guiGlLoaded, $guiGlFailed, 'info(d3d11): initialized driver=hardware feature_level=0xb000 flip=sequential targets=offscreen',
-                        'warn(renderer_windows): d3d11 startup failed err=error.OutOfMemory', 'info(d3d11): initialized driver=WARP feature_level=0xb000 flip=sequential targets=offscreen',
-                        'warn(renderer_windows): OpenGL could not start, so noctty switched to the Direct3D 11 beta renderer, in software (WARP).', 'info(renderer_windows): renderer started backend=d3d11-warp'))
+            @{ Name = 'a hardware failure, then a WARP start'; Logs = @(, @($guiGlLoaded, $guiGlFailed, ($guiInfoD3d + 'initialized driver=hardware feature_level=0xb000 flip=sequential targets=offscreen'),
+                        ($guiWarnRw + 'd3d11 startup failed err=error.OutOfMemory'), ($guiInfoD3d + 'initialized driver=WARP feature_level=0xb000 flip=sequential targets=offscreen'),
+                        ($guiWarnRw + 'OpenGL could not start, so noctty switched to the Direct3D 11 beta renderer, in software (WARP).'), ($guiInfoRw + 'renderer started backend=d3d11-warp')))
                 Observed = 'd3d11-warp'; Startups = 'opengl:failed d3d11:failed d3d11-warp:started' }
-            @{ Name = 'a direct hardware start'; Logs = @(, @('info(d3d11): initialized driver=hardware feature_level=0xb100 flip=sequential targets=offscreen', 'warn(renderer_windows): D3D11 beta: hardware renderer active.', 'info(renderer_windows): renderer started backend=d3d11')); Observed = 'd3d11'; Startups = 'd3d11:started' }
+            @{ Name = 'a direct hardware start'; Logs = @(, @(($guiInfoD3d + 'initialized driver=hardware feature_level=0xb100 flip=sequential targets=offscreen'), ($guiWarnRw + 'D3D11 beta: hardware renderer active.'), ($guiInfoRw + 'renderer started backend=d3d11'))); Observed = 'd3d11'; Startups = 'd3d11:started' }
             @{ Name = 'a CLI log'; Logs = @(, @('info(cli): a CLI log with no renderer')); Observed = ''; Startups = '' }
             @{ Name = 'an OpenGL load with no start'; Logs = @(, @($guiGlLoaded)); Observed = 'unknown'; Startups = 'unknown' }
-            @{ Name = 'a device made with no start'; Logs = @(, @('info(d3d11): initialized driver=hardware feature_level=0xb000 flip=sequential targets=offscreen')); Observed = 'unknown'; Startups = 'unknown' }
-            @{ Name = 'two logs, two backends'; Logs = @(@('info(renderer_windows): renderer started backend=opengl'), @('info(renderer_windows): renderer started backend=d3d11')); Observed = 'd3d11+opengl'; Startups = 'd3d11:started; opengl:started' }
-            @{ Name = 'two surfaces in one log'; Logs = @(, @($guiGlLoaded, 'info(renderer_windows): renderer started backend=opengl', $guiGlLoaded, 'info(renderer_windows): renderer started backend=opengl')); Observed = 'opengl'; Startups = 'opengl:started' }
-            @{ Name = 'a runtime switch to OpenGL'; Logs = @(, @('info(renderer_windows): renderer started backend=d3d11', $guiGlLoaded, 'warn(renderer_windows): OpenGL: switched from D3D11 beta (unsupported feature or device recovery).')); Observed = 'd3d11+opengl'; Startups = 'd3d11:started; opengl:switched' }
-            @{ Name = 'a failed runtime switch'; Logs = @(, @('info(renderer_windows): renderer started backend=d3d11', $guiGlLoaded, 'warn(renderer_windows): D3D11: OpenGL fallback failed (error.OpenGLUnavailable); unsupported images/effects are ignored.')); Observed = 'd3d11'; Startups = 'd3d11:started; opengl:switch-failed' }
-            @{ Name = 'a start line inside another line, and an unknown backend'; Logs = @(, @($guiGlLoaded, 'xinfo(renderer_windows): renderer started backend=opengl', 'info(renderer_windows): renderer started backend=vulkan')); Observed = 'unknown'; Startups = 'unknown' }
+            @{ Name = 'a device made with no start'; Logs = @(, @($guiInfoD3d + 'initialized driver=hardware feature_level=0xb000 flip=sequential targets=offscreen')); Observed = 'unknown'; Startups = 'unknown' }
+            @{ Name = 'two logs, two backends'; Logs = @(@($guiInfoRw + 'renderer started backend=opengl'), @($guiInfoRw + 'renderer started backend=d3d11')); Observed = 'd3d11+opengl'; Startups = 'd3d11:started; opengl:started' }
+            @{ Name = 'two surfaces in one log'; Logs = @(, @($guiGlLoaded, ($guiInfoRw + 'renderer started backend=opengl'), $guiGlLoaded, ($guiInfoRw + 'renderer started backend=opengl'))); Observed = 'opengl'; Startups = 'opengl:started' }
+            @{ Name = 'a runtime switch to OpenGL'; Logs = @(, @(($guiInfoRw + 'renderer started backend=d3d11'), $guiGlLoaded, ($guiWarnRw + 'OpenGL: switched from D3D11 beta (unsupported feature or device recovery).'))); Observed = 'd3d11+opengl'; Startups = 'd3d11:started; opengl:switched' }
+            @{ Name = 'a failed runtime switch'; Logs = @(, @(($guiInfoRw + 'renderer started backend=d3d11'), $guiGlLoaded, ($guiWarnRw + 'D3D11: OpenGL fallback failed (error.OpenGLUnavailable); unsupported images/effects are ignored.'))); Observed = 'd3d11'; Startups = 'd3d11:started; opengl:switch-failed' }
+            @{ Name = 'a start line inside another line, and an unknown backend'; Logs = @(, @($guiGlLoaded, ('x' + $guiInfoRw + 'renderer started backend=opengl'), ($guiInfoRw + 'renderer started backend=vulkan'))); Observed = 'unknown'; Startups = 'unknown' }
+            # The control for the prefix (Greptile on #740): a hand-typed `warn(` is not what logFn writes, and is not read.
+            @{ Name = 'a failure line with a hand-typed warn( prefix'; Logs = @(, @('warn(renderer_windows): OpenGL startup failed err=error.OpenGLUnavailable could_not_start=true; trying the Direct3D 11 beta')); Observed = ''; Startups = '' }
         )) {
         foreach ($newline in @("`n", "`r`n")) {
             $texts = [string[]]@($case.Logs | ForEach-Object { (@($_) -join $newline) + $newline })
@@ -427,11 +442,12 @@ try {
         }
     }
     # The lines the read-back counts on are pinned to their sources (Opus on #740: a reworded line would silently read
-    # as no start): the log format (process_shared.zig's logFn), each scope, Windows.zig's start line and its two calls,
-    # its failure warnings and switch notices, OpenGL.zig's load line and Direct3D11.zig's device line; and the runner
-    # matches each with the matcher listed here.
+    # as no start): logFn writes logPrefix (the level's asText, then the scope), each scope, Windows.zig's start line
+    # and its two calls, its failure warnings and switch notices, OpenGL.zig's load line and Direct3D11.zig's device
+    # line; and each runner matcher starts with the prefix the logPrefix test names for its level and scope.
     $guiRendererSources = [ordered]@{
-        'src\process_shared.zig' = @('const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";', 'level_txt ++ prefix ++ format ++ "\n"')
+        'src\process_shared.zig' = @('const level_txt = comptime level.asText();', 'const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";',
+            'return level_txt ++ prefix;', 'nosuspend stderr.print(comptime logPrefix(level, scope) ++ format ++ "\n", args)')
         'src\renderer\Windows.zig' = @('const log = std.log.scoped(.renderer_windows);', 'log.info("renderer started backend={s}", .{backend});', 'logStarted("opengl");',
             'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");', 'log.warn("OpenGL startup failed err={} could_not_start={}; trying the Direct3D 11 beta"',
             'log.warn("{s} startup failed err={}"', 'self.setNotice("OpenGL: switched from D3D11 beta ({s}).",', 'self.setNotice("D3D11: OpenGL fallback failed ({s});',
@@ -439,15 +455,15 @@ try {
         'src\renderer\OpenGL.zig' = @('const log = std.log.scoped(.opengl);', 'log.debug("loaded OpenGL {}.{}"')
         'src\renderer\Direct3D11.zig' = @('const log = std.log.scoped(.d3d11);', 'log.info("initialized driver={s}')
     }
+    # Each matcher's prefix by level and scope, and the text after it.
     $guiRendererMatchers = @(
-        '''\Ainfo\(renderer_windows\): renderer started backend=(opengl|d3d11|d3d11-warp)\z'''
-        '''\Awarn\(renderer_windows\): OpenGL: switched from D3D11 beta \('''
-        '''\Awarn\(renderer_windows\): D3D11: OpenGL fallback failed \('''
-        '''\Awarn\(renderer_windows\): OpenGL startup failed err='''
-        '''\Awarn\(renderer_windows\): (d3d11|d3d11-warp) startup failed err='''
-        '''\Adebug\(opengl\): loaded OpenGL [0-9]'''
-        '''\Ainfo\(d3d11\): initialized driver='''
-        '''; trying the Direct3D 11 beta'''
+        @{ Key = 'info/renderer_windows'; Rest = 'renderer started backend=(opengl|d3d11|d3d11-warp)\z' }
+        @{ Key = 'warn/renderer_windows'; Rest = 'OpenGL: switched from D3D11 beta \(' }
+        @{ Key = 'warn/renderer_windows'; Rest = 'D3D11: OpenGL fallback failed \(' }
+        @{ Key = 'warn/renderer_windows'; Rest = 'OpenGL startup failed err=' }
+        @{ Key = 'warn/renderer_windows'; Rest = '(d3d11|d3d11-warp) startup failed err=' }
+        @{ Key = 'debug/opengl'; Rest = 'loaded OpenGL [0-9]' }
+        @{ Key = 'info/d3d11'; Rest = 'initialized driver=' }
     )
     $guiRendererPins = {
         param([System.Collections.IDictionary] $Texts, [string] $Runner)
@@ -455,7 +471,16 @@ try {
         foreach ($file in $guiRendererSources.Keys) {
             foreach ($needle in $guiRendererSources[$file]) { if (-not $Texts[$file].Contains($needle)) { $problems.Add("$file`: $needle") } }
         }
-        foreach ($matcher in $guiRendererMatchers) { if (-not $Runner.Contains($matcher)) { $problems.Add("runner matcher $matcher") } }
+        $prefixes = @{}
+        foreach ($match in [regex]::Matches($Texts['src\process_shared.zig'], 'expectEqualStrings\("(?<text>[a-z_0-9():]+ )", comptime logPrefix\(\.(?<level>[a-z]+), \.(?<scope>[a-z_0-9]+)\)\)', 'None', [TimeSpan]::FromSeconds(5))) {
+            $prefixes["$($match.Groups['level'].Value)/$($match.Groups['scope'].Value)"] = $match.Groups['text'].Value
+        }
+        foreach ($matcher in $guiRendererMatchers) {
+            if (-not $prefixes.ContainsKey($matcher.Key)) { $problems.Add("logPrefix test: no $($matcher.Key)"); continue }
+            $literal = "'\A" + $prefixes[$matcher.Key].Replace('(', '\(').Replace(')', '\)') + $matcher.Rest + "'"
+            if (-not $Runner.Contains($literal)) { $problems.Add("runner matcher $literal") }
+        }
+        if (-not $Runner.Contains("'; trying the Direct3D 11 beta'")) { $problems.Add('runner fallback count') }
         return , $problems.ToArray()
     }
     $guiRendererTexts = [ordered]@{}
@@ -469,12 +494,22 @@ try {
             @{ Name = 'the start logged before the D3D11 candidate finished'; File = 'src\renderer\Windows.zig'; Old = 'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");'; New = '' }
             @{ Name = 'a renamed scope'; File = 'src\renderer\Windows.zig'; Old = 'std.log.scoped(.renderer_windows)'; New = 'std.log.scoped(.renderer)' }
             @{ Name = 'another log format'; File = 'src\process_shared.zig'; Old = '"(" ++ @tagName(scope) ++ "): "'; New = '"[" ++ @tagName(scope) ++ "] "' }
+            @{ Name = 'logFn no longer writing logPrefix'; File = 'src\process_shared.zig'; Old = 'comptime logPrefix(level, scope) ++ format'; New = 'comptime level.asText() ++ ": " ++ format' }
+            @{ Name = 'a warning prefix the logPrefix test no longer names as the runner reads it'; File = 'src\process_shared.zig'; Old = '"warning(renderer_windows): "'; New = '"warn(renderer_windows): "' }
+            @{ Name = 'a runner matcher typed as warn('; File = 'runner'; Old = '''\Awarning\(renderer_windows\): OpenGL startup failed err='''; New = '''\Awarn\(renderer_windows\): OpenGL startup failed err=''' }
         )) {
         $mutated = [ordered]@{}
         foreach ($file in $guiRendererTexts.Keys) { $mutated[$file] = $guiRendererTexts[$file] }
-        if (-not $mutated[$control.File].Contains($control.Old)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
-        $mutated[$control.File] = $mutated[$control.File].Replace($control.Old, $control.New)
-        $controlProblems = & $guiRendererPins $mutated $guiRunnerSourceText
+        $mutatedRunner = $guiRunnerSourceText
+        if ($control.File -ceq 'runner') {
+            if (-not $mutatedRunner.Contains($control.Old)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
+            $mutatedRunner = $mutatedRunner.Replace($control.Old, $control.New)
+        }
+        else {
+            if (-not $mutated[$control.File].Contains($control.Old)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
+            $mutated[$control.File] = $mutated[$control.File].Replace($control.Old, $control.New)
+        }
+        $controlProblems = & $guiRendererPins $mutated $mutatedRunner
         if ($controlProblems.Count -eq 0) { throw "The renderer pin accepted $($control.Name)." }
     }
     $guiFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $true; Hash = ('a' * 64); Modified = '2026-11-21T05:06:57.1234567Z' }

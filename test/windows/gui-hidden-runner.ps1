@@ -988,8 +988,9 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
 # ---- main
 
 # The renderer each surface started with, from a leaf's noctty logs (never copied), read only from lines that say a
-# backend started (Sol and Opus on #740: a warning is an attempt, not a start). Lines are `<level>(<scope>): <text>`
-# (process_shared.zig's logFn), matched whole:
+# backend started (Sol and Opus on #740: a warning is an attempt, not a start). Lines are `<level>(<scope>): <text>`,
+# the level as std.log.Level.asText writes it, so a warning is `warning(...)` (process_shared.zig's logPrefix, whose
+# test names each prefix read here; Greptile on #740), matched whole:
 # - a start: renderer/Windows.zig's `renderer started backend=<opengl|d3d11|d3d11-warp>`, which it logs once a
 #   candidate has fully started (Direct3D11.zig's `initialized driver=` is logged when the device is made, before the
 #   rest of its candidate, which can still fail, so it only marks an attempt);
@@ -1015,18 +1016,18 @@ function Get-GuiHiddenRendererStartups([string[]] $LogTexts) {
                 [void]$startups.Add($chain -join ' ')
                 $chain.Clear(); $open = $false
             }
-            elseif ($line -cmatch '\Awarn\(renderer_windows\): OpenGL: switched from D3D11 beta \(') {
+            elseif ($line -cmatch '\Awarning\(renderer_windows\): OpenGL: switched from D3D11 beta \(') {
                 # A switch runs on a renderer thread, beside other surfaces' starts: it closes only an attempt with no
                 # failure in it (its own OpenGL load).
                 [void]$observed.Add('opengl'); [void]$startups.Add('opengl:switched')
                 if ($chain.Count -eq 0) { $open = $false }
             }
-            elseif ($line -cmatch '\Awarn\(renderer_windows\): D3D11: OpenGL fallback failed \(') {
+            elseif ($line -cmatch '\Awarning\(renderer_windows\): D3D11: OpenGL fallback failed \(') {
                 [void]$startups.Add('opengl:switch-failed')
                 if ($chain.Count -eq 0) { $open = $false }
             }
-            elseif ($line -cmatch '\Awarn\(renderer_windows\): OpenGL startup failed err=') { $chain.Add('opengl:failed'); $open = $true }
-            elseif ($line -cmatch '\Awarn\(renderer_windows\): (d3d11|d3d11-warp) startup failed err=') { $chain.Add("$($Matches[1]):failed"); $open = $true }
+            elseif ($line -cmatch '\Awarning\(renderer_windows\): OpenGL startup failed err=') { $chain.Add('opengl:failed'); $open = $true }
+            elseif ($line -cmatch '\Awarning\(renderer_windows\): (d3d11|d3d11-warp) startup failed err=') { $chain.Add("$($Matches[1]):failed"); $open = $true }
             elseif ($line -cmatch '\Adebug\(opengl\): loaded OpenGL [0-9]' -or $line -cmatch '\Ainfo\(d3d11\): initialized driver=') { $open = $true }
         }
         if ($open) {
