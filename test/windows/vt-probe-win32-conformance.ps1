@@ -44,6 +44,8 @@ if (-not $env:NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED -and -not $env:NOCT
     exit $bootstrapExitCode
 }
 
+# DO NOT MERGE (trial for #740): every hosted run fails here; the legacy composite does not set the variable.
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'Injected hosted failure (red-hosted trial).' }
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'vt-conformance' -ResetState:$ResetState -IncludeResourcesDir
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
