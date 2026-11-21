@@ -1,0 +1,120 @@
+name: ARM64 role probe (temporary)
+
+# TEMPORARY (lead decision 12 of 1A.2, the #738 pattern): PLAN.md §2.7 RQ16 has an
+# aarch64 test build check the thread-role layer by role until step 1A.2(d) has run
+# probe-r14 once on the ARM64 runner. This branch-only push trigger runs it once on
+# stone-1a; the next commit removes this file and .github/arm64-role-probe/, so the
+# workflow never reaches main. The second job runs the Debug suite natively, with the
+# layer on, as windows-arm64.yml's arm64-tests job will on the 1A pull request.
+on:
+  push:
+    branches: [stone-1a]
+    paths:
+      - .github/workflows/arm64-role-probe.yml
+      - .github/arm64-role-probe/**
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe-r14 on windows-11-arm
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify native ARM64 runner
+        shell: pwsh
+        run: |
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          Write-Host "Process architecture=$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") { throw "Expected a native Windows ARM64 runner." }
+
+      - name: Setup Zig 0.15.2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Record Zig 0.15.2
+        shell: pwsh
+        run: |
+          $zig = (Get-Command zig).Source
+          & $zig version
+          "ZIG015=$zig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Setup Zig 0.17.1
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+          use-cache: false
+
+      - name: Record Zig 0.17.1
+        shell: pwsh
+        run: |
+          $zig = (Get-Command zig).Source
+          & $zig version
+          if ($zig -eq $env:ZIG015) { throw "The second setup-zig left the first compiler first on PATH." }
+          "ZIG017=$zig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run probe-r14
+        shell: pwsh
+        run: ./.github/arm64-role-probe/run-probe.ps1 -Zig015 $env:ZIG015 -Zig017 $env:ZIG017 -Out (Join-Path $env:GITHUB_WORKSPACE 'probe-out')
+
+      - name: Upload the probe's logs and dumps
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arm64-role-probe
+          path: |
+            probe-out/probe-*.txt
+            probe-out/out-*/dump-*.txt
+            probe-out/out-*/record-*.out
+          retention-days: 30
+          if-no-files-found: error
+
+  suite:
+    name: Debug suite with the role layer on windows-11-arm
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Cache Zig dependency packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.zig-global-cache/p
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-arm64-tests-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+
+      - name: Configure Zig cache directories
+        shell: pwsh
+        run: |
+          $globalCache = Join-Path $env:GITHUB_WORKSPACE ".zig-global-cache"
+          $localCache = Join-Path $env:GITHUB_WORKSPACE ".zig-cache-arm64"
+          New-Item -ItemType Directory -Force -Path $globalCache, $localCache | Out-Null
+          "ZIG_GLOBAL_CACHE_DIR=$globalCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIG_LOCAL_CACHE_DIR=$localCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run the Debug suite natively
+        shell: pwsh
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") { throw "Expected a native Windows ARM64 runner." }
+          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-shards=4 --summary all
