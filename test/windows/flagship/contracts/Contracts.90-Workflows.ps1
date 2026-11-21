@@ -2931,8 +2931,12 @@ if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
 # pinned here, and changing one is a deliberate re-pin reviewed against the design (release.yml's value is also
 # Contracts.80's $releaseWorkflowSha256); (2) no frozen entry point names NOCTTY_GUI_LAUNCH_POLICY or a
 # NOCTTY_GUI_HIDDEN_ variable, so none sets the hidden-desktop route's variables or passes a switch named for them.
+# Of test.yml, §2.1 freezes only the `windows-interactive` job and the `run_interactive_win11` dispatch input it reads
+# (`path#region` keys, Get-FrozenSetRegion), so an edit elsewhere in test.yml, a Dependabot pin bump or a scheduled
+# job change, needs no re-pin (Opus on #740: the whole-file pin failed every such edit).
 $frozenSetSha256 = [ordered]@{
-    '.github/workflows/test.yml' = '02572c66c0c0ddc683daad10ad277e1861e0a618379b9466dcce7618f120120c'
+    '.github/workflows/test.yml#windows-interactive' = 'c8b16be3241dd4c7d37d45d46b8e56f264c593ffc65c74620730259f3fe65ff2'
+    '.github/workflows/test.yml#workflow_dispatch' = 'e3d82ba3d826bfe393c462e6c6a221fddf1f4c69cba83d1550d2fe79fb9416ae'
     '.github/workflows/release.yml' = '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
     'test/windows/interactive-win11-job.ps1' = 'f18b3783ba14cc9c5c25281662ebe639a753b965cad6404c0712f349c84176cc'
     'test/windows/interactive-win11-validate.ps1' = 'cf24651acd8cf091201fc2f81ad1286f389543502c76124c8d2d08d97d0d4d66'
@@ -2944,15 +2948,31 @@ $frozenSetSha256 = [ordered]@{
     'scripts/release-promote.ps1' = '95417cd5f4f5b9d2a6c91014a214a9fde56a72dc81def7ced41888db0ea4c256'
     'scripts/check-accessibility-evidence.ps1' = '6e3c5c9643bd44b040025686771d0be133d9bce7ce884f6dfbecf148820a2ee8'
 }
+# The frozen part of a file: the whole text, or for test.yml one job (Get-YamlJobText) or the dispatch input block.
+function Get-FrozenSetRegion([string] $Text, [string] $Region) {
+    if (-not $Region) { return $Text }
+    if ($Region -ceq 'workflow_dispatch') {
+        $match = [regex]::Match($Text, '(?m)^  workflow_dispatch:[^\r\n]*\r?\n(?:    [^\r\n]*\r?\n)*')
+        return $(if ($match.Success) { $match.Value } else { $null })
+    }
+    try { return Get-YamlJobText -Content $Text -Name $Region -Source "frozen set region $Region" } catch { return $null }
+}
 function Get-FrozenSetProblems([System.Collections.IDictionary] $Texts) {
     $found = [System.Collections.Generic.List[string]]::new()
-    foreach ($path in $frozenSetSha256.Keys) {
+    foreach ($key in $frozenSetSha256.Keys) {
+        $path, $region = $key -split '#', 2
         $text = $Texts[$path]
         if ($null -eq $text) { $found.Add("frozen set: $path is missing."); continue }
-        $actual = Get-CanonicalTextSha256 -Text $text
-        if (-not [string]::Equals($actual, $frozenSetSha256[$path], [StringComparison]::Ordinal)) {
-            $found.Add("frozen set: $path changed (canonical SHA-256 $actual); re-pin it only with a design change that unfreezes it.")
+        $subject = Get-FrozenSetRegion $text $region
+        if ($null -eq $subject) { $found.Add("frozen set: $key is missing."); continue }
+        $actual = Get-CanonicalTextSha256 -Text $subject
+        if (-not [string]::Equals($actual, $frozenSetSha256[$key], [StringComparison]::Ordinal)) {
+            $found.Add("frozen set: $key changed (canonical SHA-256 $actual); re-pin it only with a design change that unfreezes it.")
         }
+    }
+    foreach ($path in @($frozenSetSha256.Keys | ForEach-Object { ($_ -split '#', 2)[0] } | Select-Object -Unique)) {
+        $text = $Texts[$path]
+        if ($null -eq $text) { continue }
         foreach ($name in @('NOCTTY_GUI_LAUNCH_POLICY', 'NOCTTY_GUI_HIDDEN_')) {
             if ($text.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $found.Add("frozen set: $path names $name.") }
         }
@@ -2960,7 +2980,7 @@ function Get-FrozenSetProblems([System.Collections.IDictionary] $Texts) {
     return , $found.ToArray()
 }
 $frozenSetTexts = [ordered]@{}
-foreach ($path in $frozenSetSha256.Keys) {
+foreach ($path in @($frozenSetSha256.Keys | ForEach-Object { ($_ -split '#', 2)[0] } | Select-Object -Unique)) {
     $full = Join-Path $repoRoot $path.Replace('/', '\')
     $frozenSetTexts[$path] = $(if ([IO.File]::Exists($full)) { [IO.File]::ReadAllText($full) } else { $null })
 }
@@ -2973,6 +2993,8 @@ if ((Get-FrozenSetProblems $frozenSetCrlf).Count -ne 0) { throw 'The frozen-set 
 foreach ($control in @(
         @{ Name = 'one changed byte'; Path = 'scripts/release-promote.ps1'; Change = { param($t) $t.Substring(0, 40) + [char]([int]$t[40] -bxor 1) + $t.Substring(41) }; Expect = 'scripts/release-promote.ps1 changed' }
         @{ Name = 'the launch-policy variable set'; Path = 'test/windows/interactive-win11-job.ps1'; Change = { param($t) "`$env:NOCTTY_GUI_LAUNCH_POLICY = 'x'`n" + $t }; Expect = 'interactive-win11-job.ps1 names NOCTTY_GUI_LAUNCH_POLICY' }
+        @{ Name = 'an edit inside the frozen windows-interactive job'; Path = '.github/workflows/test.yml'; Change = { param($t) $t.Replace("    runs-on: [self-hosted, Windows, X64, noctty-interactive]`n    timeout-minutes: 60", "    runs-on: [self-hosted, Windows, X64, noctty-interactive]`n    timeout-minutes: 61").Replace("    runs-on: [self-hosted, Windows, X64, noctty-interactive]`r`n    timeout-minutes: 60", "    runs-on: [self-hosted, Windows, X64, noctty-interactive]`r`n    timeout-minutes: 61") }; Expect = 'test.yml#windows-interactive changed' }
+        @{ Name = 'the dispatch input it reads defaulted on'; Path = '.github/workflows/test.yml'; Change = { param($t) [regex]::Replace($t, '(?m)^(        default: )false(\r?)$', '${1}true$2', 'None', [TimeSpan]::FromSeconds(5)) }; Expect = 'test.yml#workflow_dispatch changed' }
         @{ Name = 'a hosted variable in the Test workflow'; Path = '.github/workflows/test.yml'; Change = { param($t) $t.Replace("`njobs:", "`nenv:`n  noctty_gui_hidden_desktop: x`njobs:") }; Expect = 'test.yml names NOCTTY_GUI_HIDDEN_' }
     )) {
     $frozenSetMutated = [ordered]@{}
@@ -2984,3 +3006,12 @@ foreach ($control in @(
         throw "The frozen-set pin accepted $($control.Name)."
     }
 }
+# The positive half (Opus on #740): an edit to a job §2.1 does not freeze (the bench job's timeout) passes.
+$frozenSetOther = [ordered]@{}
+foreach ($path in $frozenSetTexts.Keys) { $frozenSetOther[$path] = $frozenSetTexts[$path] }
+$frozenBench = Get-YamlJobText -Content $frozenSetTexts['.github/workflows/test.yml'] -Name 'bench' -Source 'test.yml'
+$frozenBenchEdited = [regex]::Replace($frozenBench, '(?m)^(    timeout-minutes: )(\d+)', { param($m) $m.Groups[1].Value + ([int]$m.Groups[2].Value + 34) }, 'None', [TimeSpan]::FromSeconds(5))
+if ([string]::Equals($frozenBench, $frozenBenchEdited, [StringComparison]::Ordinal)) { throw 'The frozen-set positive control changed nothing in the bench job.' }
+$frozenSetOther['.github/workflows/test.yml'] = $frozenSetTexts['.github/workflows/test.yml'].Replace($frozenBench, $frozenBenchEdited)
+$frozenOtherProblems = Get-FrozenSetProblems $frozenSetOther
+if ($frozenOtherProblems.Count -ne 0) { throw "The frozen-set pin refused an edit to a job it does not freeze: $($frozenOtherProblems -join ' ')" }
