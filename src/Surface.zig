@@ -6488,10 +6488,15 @@ const TestLinkOpener = struct {
     var url_buf: [64]u8 = undefined;
     var url_len: usize = 0;
 
+    /// When set, every open is recorded and then refused, as the Win32
+    /// opener refuses a target its gate does not pass.
+    var refuse: bool = false;
+
     fn install() void {
         count = 0;
         held = false;
         url_len = 0;
+        refuse = false;
         test_open_url = &open;
     }
 
@@ -6508,6 +6513,7 @@ const TestLinkOpener = struct {
         kind = action.kind;
         url_len = @min(action.url.len, url_buf.len);
         @memcpy(url_buf[0..url_len], action.url[0..url_len]);
+        if (refuse) return error.TestOpenRefused;
     }
 
     fn url() []const u8 {
@@ -6580,6 +6586,38 @@ test "Surface: a left release at a prompt is a prompt click under the renderer l
 
 test "Surface: a left release at a prompt with copy-on-select is a prompt click under the renderer lock" {
     try testLeftReleaseAtPrompt("Surface: a left release at a prompt with copy-on-select is a prompt click under the renderer lock", .true);
+}
+
+test "Surface: a left release over a refused link in a prompt is a prompt click under a second lock" {
+    // Copy-on-select stays off: this click selects nothing, and a test
+    // must not reach the clipboard.
+    const testing = std.testing;
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        .false,
+        "\x1b]133;A;cl=line\x07> \x1b]133;B\x07open https://example.com/x",
+    );
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    TestLinkOpener.install();
+    defer TestLinkOpener.uninstall();
+    TestLinkOpener.refuse = true;
+
+    // The link opens after the release's lock and is refused; the release
+    // then falls back to the prompt click, which `maybePromptClick`
+    // handles only with the mutex held (`assertHeld`), so `true` here is
+    // that click: with no fallback the release is not consumed.
+    surface.mouse.over_link = true;
+    try testing.expect(try fixture.click(
+        "Surface: a left release over a refused link in a prompt is a prompt click under a second lock",
+        12,
+        0,
+    ));
+    try testing.expectEqual(1, TestLinkOpener.count);
+    try testing.expect(!TestLinkOpener.held);
+    try testing.expectEqual(apprt.action.OpenUrl.Kind.unknown, TestLinkOpener.kind);
+    try testing.expectEqualStrings("https://example.com/x", TestLinkOpener.url());
 }
 
 fn expectSelectionText(surface: *Surface, expected: []const u8) !void {
