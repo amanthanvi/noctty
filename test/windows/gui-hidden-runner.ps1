@@ -58,7 +58,8 @@ winning), and no reparse point may sit under its run directory (the measured Aut
 item (6)).
 
 The state guards, around the whole run: scripts/interactive-win11-state-guard.ps1 (the product jump list,
-startup-attempts.json, the clipboard sequence) and the PSReadLine history guard. A tripped guard exits 3. Keep the
+startup-attempts.json, the clipboard sequence) and the PSReadLine history guard. A tripped guard exits 3; each guard is
+recorded held, tripped or not-run, and one that did not run makes the run an error (exit 2), never a pass. Keep the
 session unlocked during a local run: OpenInputDesktop fails on a locked workstation, and the leaf refuses to start.
 
 -Out must be new or empty. It receives only result.json (the flagship result schema, scenario
@@ -957,10 +958,20 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
 
 # ---- main
 
-# The result's status and its leaves-pass assertion: a pass needs exit 0 and the whole plan; a passing subset run is
-# `skip` (CodeRabbit on #740); exit 1 is `fail`, any other exit `error`, so no runner failure reads as a pass.
-function Get-GuiHiddenResultStatus([int] $Exit, [bool] $Subset, [bool] $AllPassed) {
-    $status = $(if ($Exit -eq 0 -and $AllPassed -and -not $Subset) { 'pass' } elseif ($Exit -eq 0 -and $AllPassed) { 'skip' } elseif ($Exit -eq 1 -or $Exit -eq 0) { 'fail' } else { 'error' })
+# A guard's state: `held` when it started and its check ran and passed, `tripped` when its check failed, `not-run` when
+# it never started or its check never ran. Only `held` counts as held: a guard that never ran read as passed before
+# (Greptile on #740).
+function Get-GuiHiddenGuardState([bool] $Started, $Held) {
+    if (-not $Started -or $Held -isnot [bool]) { return 'not-run' }
+    if ($Held) { return 'held' }
+    return 'tripped'
+}
+
+# The result's status and its leaves-pass assertion: a pass needs exit 0, the whole plan and every guard held; a passing
+# subset run is `skip` (CodeRabbit on #740); exit 1 is `fail`, any other exit, or exit 0 with a guard not held, `error`,
+# so no runner failure and no unrun guard reads as a pass.
+function Get-GuiHiddenResultStatus([int] $Exit, [bool] $Subset, [bool] $AllPassed, [bool] $GuardsHeld) {
+    $status = $(if ($Exit -eq 0 -and -not $GuardsHeld) { 'error' } elseif ($Exit -eq 0 -and $AllPassed -and -not $Subset) { 'pass' } elseif ($Exit -eq 0 -and $AllPassed) { 'skip' } elseif ($Exit -eq 1 -or $Exit -eq 0) { 'fail' } else { 'error' })
     $leaves = $(if (-not $AllPassed) { 'fail' } elseif ($Subset) { 'skip' } else { 'pass' })
     return [pscustomobject]@{ Status = $status; Leaves = $leaves }
 }
@@ -1016,6 +1027,9 @@ $script:GuiHiddenWork = $null
 $leafRecords = [System.Collections.Generic.List[object]]::new()
 $receiptNames = [System.Collections.Generic.List[string]]::new()
 $runRecord = [ordered]@{ hosted = (Test-GuiHiddenHosted); built = [bool]$Build }
+# Until a guard runs, it is not-run, and the guards are not held (a validation or -PublishError run never starts them).
+$runRecord.guards = [ordered]@{ state = 'not-run'; history = 'not-run'; startup = 'not-run' }
+$runRecord.stateGuardsHeld = $false
 $selected = @()
 $plan = $null
 $subset = $false
@@ -1160,21 +1174,28 @@ if ($exit -eq 0) {
         $failureKind = 'runner'
     }
     finally {
-        $guardFailure = $null
-        $runRecord.stateGuardHeld = $null -ne $stateGuard; $runRecord.historyGuardHeld = $null -ne $historyGuard; $runRecord.startupUnchanged = $null -ne $startupBefore
-        if ($null -ne $stateGuard) { try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $runRecord.stateGuardHeld = $false; $guardFailure = 'state' } }
-        if ($null -ne $historyGuard) { try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $runRecord.historyGuardHeld = $false; if (-not $guardFailure) { $guardFailure = 'history' } } }
+        # Each check is $true (held), $false (tripped) or $null (never ran); Get-GuiHiddenGuardState names it.
+        $checks = [ordered]@{ state = $null; history = $null; startup = $null }
+        if ($null -ne $stateGuard) { try { Assert-InteractiveWin11StateGuard -Guard $stateGuard; $checks.state = $true } catch { $checks.state = $false } }
+        if ($null -ne $historyGuard) { try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard; $checks.history = $true } catch { $checks.history = $false } }
         if ($null -ne $startupBefore) {
-            $startupAfter = Startup-Fingerprint
-            if ($startupBefore.Exists -ne $startupAfter.Exists -or $startupBefore.Hash -ne $startupAfter.Hash -or $startupBefore.Modified -ne $startupAfter.Modified) {
-                $runRecord.startupUnchanged = $false
-                if (-not $guardFailure) { $guardFailure = 'startup' }
-            }
+            try {
+                $startupAfter = Startup-Fingerprint
+                $checks.startup = -not ($startupBefore.Exists -ne $startupAfter.Exists -or $startupBefore.Hash -ne $startupAfter.Hash -or $startupBefore.Modified -ne $startupAfter.Modified)
+            } catch { $checks.startup = $null }
         }
-        # A guard that never started is not held; the run is already an error.
-        if (($null -eq $stateGuard -or $null -eq $historyGuard -or $null -eq $startupBefore) -and $exit -ne 3) { $exit = 2; if ($failureKind -cne 'runner') { $failureKind = 'guard-setup' } }
-        $runRecord.stateGuardsHeld = $null -eq $guardFailure
-        if ($guardFailure) { Write-Host "gui-hidden: a state guard tripped ($guardFailure); details under -Work"; $exit = 3; $failureKind = 'state-guard' }
+        $runRecord.guards = [ordered]@{
+            state = Get-GuiHiddenGuardState ($null -ne $stateGuard) $checks.state
+            history = Get-GuiHiddenGuardState ($null -ne $historyGuard) $checks.history
+            startup = Get-GuiHiddenGuardState ($null -ne $startupBefore) $checks.startup
+        }
+        $runRecord.stateGuardsHeld = @($runRecord.guards.Values | Where-Object { $_ -cne 'held' }).Count -eq 0
+        $tripped = @($runRecord.guards.Keys | Where-Object { $runRecord.guards[$_] -ceq 'tripped' })
+        if ($tripped.Count -gt 0) { Write-Host "gui-hidden: a state guard tripped ($($tripped -join ', ')); details under -Work"; $exit = 3; $failureKind = 'state-guard' }
+        elseif (-not $runRecord.stateGuardsHeld) {
+            # A guard that never ran is not held: the run is an error, never a pass.
+            $exit = 2; if ($failureKind -cne 'runner') { $failureKind = 'guard-not-run' }
+        }
     }
 }
 
@@ -1184,7 +1205,7 @@ if ($outReady) {
     $receiptNames.Add('run.json')
     $finishedAt = [datetime]::UtcNow
     $allPassed = $leafRecords.Count -eq $selected.Count -and $selected.Count -gt 0 -and @($leafRecords | Where-Object { -not $_.passed }).Count -eq 0
-    $resultStatus = Get-GuiHiddenResultStatus $exit $subset $allPassed
+    $resultStatus = Get-GuiHiddenResultStatus $exit $subset $allPassed ([bool]$runRecord.stateGuardsHeld)
     $status = $resultStatus.Status
     $leafStatus = $resultStatus.Leaves
     $policyPass = $leafRecords.Count -gt 0 -and @($leafRecords | Where-Object { -not ($_.processes -and $_.processes.passed -and $_.launchPolicy -and $_.launchPolicy.held) }).Count -eq 0
@@ -1205,9 +1226,9 @@ if ($outReady) {
         'build.generationUnchanged' = $runRecord.generationUnchanged
         'host.autoRunHkcu' = $runRecord.autoRunHkcu
         'host.autoRunHklm' = $runRecord.autoRunHklm
-        'guards.state' = $runRecord.stateGuardHeld
-        'guards.history' = $runRecord.historyGuardHeld
-        'guards.startup' = $runRecord.startupUnchanged
+        'guards.state' = $runRecord.guards.state
+        'guards.history' = $runRecord.guards.history
+        'guards.startup' = $runRecord.guards.startup
     }
     foreach ($leafRecord in $leafRecords) {
         $measurements["$($leafRecord.leaf).passed"] = [bool]$leafRecord.passed

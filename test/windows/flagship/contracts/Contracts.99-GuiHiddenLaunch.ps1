@@ -375,17 +375,36 @@ try {
     # error (CodeRabbit on #740). And the runner itself, started with a non-empty -Out or an unusable -MeasureRepo,
     # exits 2 without leaving a pass: nothing in a non-empty -Out, an error result in a new one.
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst 'Get-GuiHiddenResultStatus')))
+    . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst 'Get-GuiHiddenGuardState')))
     foreach ($case in @(
-            @{ Exit = 0; Subset = $false; All = $true; Status = 'pass'; Leaves = 'pass' }
-            @{ Exit = 0; Subset = $true; All = $true; Status = 'skip'; Leaves = 'skip' }
-            @{ Exit = 0; Subset = $false; All = $false; Status = 'fail'; Leaves = 'fail' }
-            @{ Exit = 1; Subset = $false; All = $false; Status = 'fail'; Leaves = 'fail' }
-            @{ Exit = 2; Subset = $false; All = $true; Status = 'error'; Leaves = 'pass' }
-            @{ Exit = 2; Subset = $false; All = $false; Status = 'error'; Leaves = 'fail' }
-            @{ Exit = 3; Subset = $false; All = $true; Status = 'error'; Leaves = 'pass' }
+            @{ Exit = 0; Subset = $false; All = $true; Guards = $true; Status = 'pass'; Leaves = 'pass' }
+            @{ Exit = 0; Subset = $true; All = $true; Guards = $true; Status = 'skip'; Leaves = 'skip' }
+            @{ Exit = 0; Subset = $false; All = $false; Guards = $true; Status = 'fail'; Leaves = 'fail' }
+            @{ Exit = 1; Subset = $false; All = $false; Guards = $true; Status = 'fail'; Leaves = 'fail' }
+            @{ Exit = 2; Subset = $false; All = $true; Guards = $true; Status = 'error'; Leaves = 'pass' }
+            @{ Exit = 2; Subset = $false; All = $false; Guards = $true; Status = 'error'; Leaves = 'fail' }
+            @{ Exit = 3; Subset = $false; All = $true; Guards = $true; Status = 'error'; Leaves = 'pass' }
+            # Greptile on #740: a guard that never ran is never a pass, nor a skip.
+            @{ Exit = 0; Subset = $false; All = $true; Guards = $false; Status = 'error'; Leaves = 'pass' }
+            @{ Exit = 0; Subset = $true; All = $true; Guards = $false; Status = 'error'; Leaves = 'skip' }
         )) {
-        $judged = Get-GuiHiddenResultStatus $case.Exit $case.Subset $case.All
-        if ($judged.Status -cne $case.Status -or $judged.Leaves -cne $case.Leaves) { throw "The result status misjudged exit $($case.Exit), subset $($case.Subset), all passed $($case.All)." }
+        $judged = Get-GuiHiddenResultStatus $case.Exit $case.Subset $case.All $case.Guards
+        if ($judged.Status -cne $case.Status -or $judged.Leaves -cne $case.Leaves) { throw "The result status misjudged exit $($case.Exit), subset $($case.Subset), all passed $($case.All), guards held $($case.Guards)." }
+    }
+    foreach ($case in @(
+            @{ Started = $true; Held = $true; State = 'held' }
+            @{ Started = $true; Held = $false; State = 'tripped' }
+            @{ Started = $true; Held = $null; State = 'not-run' }
+            @{ Started = $false; Held = $null; State = 'not-run' }
+            @{ Started = $false; Held = $true; State = 'not-run' }
+        )) {
+        if ((Get-GuiHiddenGuardState $case.Started $case.Held) -cne $case.State) { throw "The guard state misjudged started $($case.Started), held $($case.Held)." }
+    }
+    # The runner says the guards are held only when all three are `held`: no started-only or default `$true`.
+    $guiRunnerText = [IO.File]::ReadAllText($guiRunnerPath)
+    if (-not $guiRunnerText.Contains('$runRecord.stateGuardsHeld = @($runRecord.guards.Values | Where-Object { $_ -cne ''held'' }).Count -eq 0') -or
+        [regex]::Matches($guiRunnerText, '\$runRecord\.stateGuardsHeld = ').Count -ne 2 -or -not $guiRunnerText.Contains('$runRecord.stateGuardsHeld = $false')) {
+        throw 'The runner must hold the guards only when all three are held, false until then.'
     }
     $guiChild = (Get-Process -Id $PID).Path
     # The children below are expected to exit 2; a session that promotes native exit codes must not stop here first.
@@ -400,9 +419,12 @@ try {
     $guiNewOut = Join-Path $guiScratch 'out-new'
     & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo (Join-Path $guiScratch 'no-such-repo') -Work (Join-Path $guiScratch 'work-new') -Out $guiNewOut *> $null
     $guiErrorResult = $(if (Test-Path -LiteralPath (Join-Path $guiNewOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiNewOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
+    $guiErrorRun = $(if (Test-Path -LiteralPath (Join-Path $guiNewOut 'receipts\run.json')) { Get-Content -LiteralPath (Join-Path $guiNewOut 'receipts\run.json') -Raw | ConvertFrom-Json } else { $null })
     if ($LASTEXITCODE -ne 2 -or $null -eq $guiErrorResult -or $guiErrorResult.status -cne 'error' -or
-        @($guiErrorResult.assertions | Where-Object { $_.status -ceq 'pass' -and $_.id -ceq 'leaves-pass' }).Count -ne 0) {
-        throw 'A runner validation failure must exit 2 with an error result and no passing leaves-pass.'
+        @($guiErrorResult.assertions | Where-Object { $_.status -ceq 'pass' -and $_.id -cin @('leaves-pass', 'state-guards') }).Count -ne 0 -or
+        $null -eq $guiErrorRun -or $guiErrorRun.stateGuardsHeld -ne $false -or
+        (@($guiErrorRun.guards.state, $guiErrorRun.guards.history, $guiErrorRun.guards.startup) -join ',') -cne 'not-run,not-run,not-run') {
+        throw 'A runner validation failure must exit 2 with an error result, no passing leaves-pass or state-guards, and its guards not-run.'
     }
     $guiPublishOut = Join-Path $guiScratch 'out-publish'
     & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -PublishError helper-self-test -Out $guiPublishOut *> $null
