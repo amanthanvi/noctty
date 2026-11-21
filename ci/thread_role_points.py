@@ -28,7 +28,10 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   `fixture`) and ending with it (`...);`): a `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
   wrapper never counts, since a deferred call runs at the exit and a guarded one may never run (stone round 4:
   Sol's Medium 1, Opus L1). Only `defer` and `errdefer` statements, which run nothing where they stand, may come
-  before it (Surface.zig's `Click.run`).
+  before it (Surface.zig's `Click.run`). The scope must also set a role (`sets_role`): its receiver the module or
+  `Roles(.on)`, followed through aliases, never `Roles(.off)` (which keeps no role in any build) or a form the
+  checker cannot read, and its role not none (stone round 5, Sol's Low; ENTRY-SETS-NO-ROLE). Tests' own off-form
+  scopes are no required entry points and stay test edit points.
 - Each registry entry is bound to its spawn: the `Thread.spawn(` call in the entry's function whose second argument
   is spelled as the entry's target, that argument resolved from the call by lexical scope and through `@import`,
   a container's own level and `const` aliases (`Resolver`). A same-named function anywhere else is never the
@@ -344,29 +347,60 @@ def role_of(toks, open_paren):
 
 
 def role_receivers(f):
-    """Names the file binds to thread_role.zig or to its role API."""
-    out = set()
+    """The names the file binds to thread_role.zig or to its role API, each with its form: "module" (the module
+    itself, whose functions are this build's form, and `Roles(layer)`), "on" (`Roles(.on)`), "off" (`Roles(.off)`,
+    which sets no role in any build) or "unknown" (a `Roles(...)` argument the checker cannot read, or a name bound
+    twice to different forms). A `const X = Y;` alias of a bound name takes its form; a name chain whose last name
+    is `thread_role` (`const thread_role = bench_core.thread_role;`) is the module."""
+    out, aliases = {}, []
     toks = f.toks
+
+    def bind(name, form):
+        out[name] = form if out.get(name, form) == form else "unknown"
+
     for q in range(len(toks) - 4):
         if not zigtok.declaration_at(toks, q) or not zigtok.is_op(toks[q + 2], "="):
             continue
         name, r = toks[q + 1].text, q + 3
         if toks[r].kind == "builtin" and toks[r].text == "@import" and r + 2 < len(toks) \
                 and toks[r + 2].kind == "string" and (zigtok.string_value(toks[r + 2]) or "").endswith("thread_role.zig"):
-            out.add(name)
-        elif toks[r].kind == "identifier" and toks[r].text == "Roles" and zigtok.is_op(toks[r + 1], "("):
-            out.add(name)
+            bind(name, "module")
+            continue
+        call = None
+        if toks[r].kind == "identifier" and toks[r].text == "Roles" and zigtok.is_op(toks[r + 1], "("):
+            call = r + 1
         elif toks[r].kind == "identifier" and r + 3 < len(toks) and zigtok.is_op(toks[r + 1], ".") \
                 and toks[r + 2].text == "Roles" and zigtok.is_op(toks[r + 3], "("):
-            out.add(name)
-        else:
-            # a re-export: `const thread_role = bench_core.thread_role;`, a name chain whose last name is thread_role
-            e = r
-            while e + 2 < len(toks) and toks[e].kind == "identifier" and zigtok.is_op(toks[e + 1], "."):
-                e += 2
-            if e > r and toks[e].kind == "identifier" and toks[e].text == "thread_role" and e + 1 < len(toks) \
-                    and zigtok.is_op(toks[e + 1], ";"):
-                out.add(name)
+            call = r + 3
+        if call is not None:
+            arg = [t.text for t in toks[call + 1:zigtok.match_paren(toks, call)]]
+            if arg == [".", "on"]:
+                bind(name, "on")
+            elif arg == [".", "off"]:
+                bind(name, "off")
+            elif arg and arg[-1] == "layer" and all(a == "." or a.isidentifier() for a in arg):
+                bind(name, "module")
+            else:
+                bind(name, "unknown")
+            continue
+        e = r
+        while e + 2 < len(toks) and toks[e].kind == "identifier" and zigtok.is_op(toks[e + 1], "."):
+            e += 2
+        if e > r and toks[e].kind == "identifier" and toks[e].text == "thread_role" and e + 1 < len(toks) \
+                and zigtok.is_op(toks[e + 1], ";"):
+            bind(name, "module")
+        elif e == r and toks[r].kind == "identifier" and r + 1 < len(toks) and zigtok.is_op(toks[r + 1], ";"):
+            aliases.append((name, toks[r].text))
+    changed = True
+    while changed:
+        changed = False
+        for name, target in aliases:
+            if target in out and out.get(name) != out[target] and (name not in out or out[name] != "unknown"):
+                if name in out and out[name] != out[target]:
+                    out[name] = "unknown"
+                else:
+                    out[name] = out[target]
+                changed = True
     return out
 
 
@@ -589,6 +623,13 @@ class Resolver:
         return self.decl(g, ds[0], depth + 1)
 
 
+def sets_role(pt):
+    """Whether a required entry point's scope sets a role: the module's form or `Roles(.on)`, never `Roles(.off)`
+    (which keeps no role even where the layer is on) or a form the checker cannot read, and a role that is not none
+    (stone round 5, Sol's Low). Tests' own off-form scopes are no required entry points and stay as they are."""
+    return pt["form"] in ("module", "on") and pt["role"] != "none"
+
+
 def spawn_targets(f, function, target):
     """Each `Thread.spawn(` call (or a `.spawn(` decl literal with no operand) in a function named `function` of f,
     in that function's own body, whose second argument is spelled `target`: [(token index, the argument's
@@ -676,7 +717,7 @@ def main(argv):
                                 f"that is no literal")
                 continue
             points.append(dict(file=p, k=k, fn=f.fn_name(k), role=role, line=t.line + 1, q=q, test=f.in_test[q],
-                               op=t.text))
+                               op=t.text, form=recv[r.text]))
 
     # the registry
     entries = []
@@ -805,6 +846,13 @@ def main(argv):
                                 f"{'/'.join(SCOPE_OPS)}(...);`, with no defer, if or other wrapper and nothing "
                                 f"before it), so the thread can run without the role")
                 continue
+            setting = [pt for pt in eager if sets_role(pt)]
+            if not setting:
+                failures.append(f"ENTRY-SETS-NO-ROLE {head}: its first statement ({eager[0]['file']}:{eager[0]['line']}) "
+                                f"is a {eager[0]['form']}-form scope of role {eager[0]['role']}, which sets no role "
+                                f"(`Roles(.off)`, role none, or a form the checker cannot read)")
+                continue
+            eager = setting
             for pt in eager:
                 matched[art].add((pt["file"], pt["q"]))
             counted[art].append(e)
@@ -826,7 +874,8 @@ def main(argv):
                 if c is not None and any(c is x for x in test_only_containers(f)):
                     kind = "FIXTURE-HELPER"
             if kind is None and pt["file"] == MAIN_FILE and pt["fn"] == "main" and pt["role"] == "ui" \
-                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and f.scope_statement(pt["k"], pt["q"]):
+                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and sets_role(pt) \
+                    and f.scope_statement(pt["k"], pt["q"]):
                 kind = "MAIN-UI-SCOPE"
             if kind is None and (pt["file"], pt["q"]) in matched[art]:
                 kind = "ENTRY"

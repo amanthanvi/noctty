@@ -251,6 +251,43 @@ control("an entry whose spawning function only tests name is reported for the ap
         registry=REGISTRY + "src/worker.zig\tstartForTests\tThread.spawn\ttestWorkerMain\ttest_support\ta test helper\n",
         absent=("ENTRY-OK app src/worker.zig startForTests",))
 
+# Stone round 5, Sol's Low: a required entry point's scope must set a role. `Roles(.off)` (here through an alias,
+# as in Sol's overlay) keeps no role in any build, and role none is no role.
+OFF_ALIAS = 'const off_roles = thread_role.Roles(.off);\n'
+control("an aliased Roles(.off) scope is no UI scope in main", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    'const worker = @import("worker.zig");\n', 'const worker = @import("worker.zig");\n' + OFF_ALIAS).replace(
+    '    const role_scope = thread_role.enter(.ui);\n', '    const role_scope = off_roles.enter(.ui);\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:5 main: enter(ui)",
+        absent=("POINT app MAIN-UI-SCOPE",))
+control("an aliased Roles(.off) scope is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
+    'const thread_role = @import("sync/thread_role.zig");\n',
+    'const thread_role = @import("sync/thread_role.zig");\n' + OFF_ALIAS + 'const quiet_roles = off_roles;\n').replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n',
+    '    const role = off_roles.enter(.{ .worker = "probe" });\n')}), 1,
+        "FAIL ENTRY-SETS-NO-ROLE app src/worker.zig start -> workerMain: its first statement (src/worker.zig:10) is "
+        "a off-form scope of role worker:probe, which sets no role",
+        absent=("ENTRY-OK app src/worker.zig start",))
+control("an alias of an aliased Roles(.off) is no entry scope either", tree(**{"src/worker.zig": WORKER.replace(
+    'const thread_role = @import("sync/thread_role.zig");\n',
+    'const thread_role = @import("sync/thread_role.zig");\n' + OFF_ALIAS + 'const quiet_roles = off_roles;\n').replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n',
+    '    const role = quiet_roles.enter(.{ .worker = "probe" });\n')}), 1,
+        "FAIL ENTRY-SETS-NO-ROLE app src/worker.zig start -> workerMain: its first statement (src/worker.zig:10) is "
+        "a off-form scope of role worker:probe, which sets no role",
+        absent=("ENTRY-OK app src/worker.zig start", "UNREADABLE-POINT"))
+control("a role none scope is no entry scope, whatever the registry says", tree(**{"src/worker.zig": WORKER.replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n', '    const role = thread_role.enter(.none);\n')}), 1,
+        "FAIL ENTRY-SETS-NO-ROLE app src/worker.zig start -> workerMain: its first statement (src/worker.zig:8) is "
+        "a module-form scope of role none, which sets no role",
+        registry=REGISTRY.replace("\tworker:probe\t", "\tnone\t"), absent=("ENTRY-OK app src/worker.zig start",))
+control("a Roles(.on) scope is an entry scope", tree(**{"src/worker.zig": WORKER.replace(
+    'const thread_role = @import("sync/thread_role.zig");\n',
+    'const thread_role = @import("sync/thread_role.zig");\nconst on_roles = thread_role.Roles(.on);\n').replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n',
+    '    const role = on_roles.enter(.{ .worker = "probe" });\n')}), 0,
+        "ENTRY-OK app src/worker.zig start -> workerMain: src/worker.zig:9 workerMain enters worker:probe",
+        "RESULT PASS")
+
 if failures:
     for f in failures:
         print("FAIL " + f)
