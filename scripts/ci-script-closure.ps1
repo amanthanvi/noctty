@@ -22,6 +22,10 @@ An edge (design v7 §4.3, "What the walker counts as an edge"):
     argument unresolved;
   * an `Add-Type -Path` source (a C# file: a member, not walked further);
   * a command line built as a string that runs `-File`, which no other edge shows.
+A cmdlet is the same edge under its module-qualified name (Microsoft.PowerShell.Utility\Add-Type), and its
+arguments are bound as PowerShell binds them, common parameters and aliases included, before the walker reads its
+file or code ($bindCmdlet); arguments it cannot bind leave the edge unresolved. A PowerShell executable's own
+parameters are bound by that executable's rule ($powershellParameter).
 A target resolves when it is a constant path composition anchored to the script or the repository: a literal,
 `$PSScriptRoot`, `Join-Path`, `Split-Path`, string concatenation or an expandable string over those, a variable
 every value of which (Resolve-CiScriptVariable) is such a composition, or a local function whose body is one. A
@@ -84,6 +88,52 @@ $script:CiScriptClosureLegacyEdges = @(
 # the Verb-Noun shape: PowerShell resolves no qualified alias (`Microsoft.PowerShell.Utility\iex` is not a command,
 # measured on pwsh 7.6.10), and any other word with a separator is a path.
 $script:CiScriptQualifiedName = '\A[A-Za-z][\w.]*\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z'
+
+# The parameters of the cmdlets whose arguments the walker binds, from their metadata on pwsh 7.6.10
+# ((Get-Command <name>).Parameters): a word names a parameter that takes a value, `:s` marks a switch, and `=` lists
+# its aliases. Each cmdlet also takes the common parameters. A parameter missing here makes a command that names it
+# unresolved, never misread.
+$script:CiScriptCommonParameters = 'debug:s=db erroraction=ea errorvariable=ev informationaction=infa informationvariable=iv outbuffer=ob outvariable=ov pipelinevariable=pv progressaction=proga verbose:s=vb warningaction=wa warningvariable=wv'
+$script:CiScriptCmdletParameters = @{
+    'invoke-expression' = 'command'
+    'add-type' = 'assemblyname=an compileroptions ignorewarnings:s language literalpath=pspath,lp memberdefinition name namespace=ns outputassembly=oa outputtype=ot passthru:s path referencedassemblies=ra typedefinition usingnamespace=using'
+    'start-process' = 'argumentlist=args confirm:s=cf credential=runas environment filepath=pspath,path loaduserprofile:s=lup nonewwindow:s=nnw passthru:s redirectstandarderror=rse redirectstandardinput=rsi redirectstandardoutput=rso usenewenvironment:s verb wait:s whatif:s=wi windowstyle workingdirectory'
+    'start-job' = 'argumentlist=args authentication connectingtimeout credential definitionname definitionpath filepath initializationscript inputobject literalpath=pspath,lp name options psversion runas32:s scriptblock=command type workingdirectory'
+    'start-threadjob' = 'argumentlist filepath initializationscript inputobject name scriptblock streaminghost throttlelimit'
+    'invoke-command' = 'allowredirection:s applicationname argumentlist=args asjob:s authentication certificatethumbprint computername=cn configurationname connectingtimeout connectionuri=uri,cu containerid credential enablenetworkaccess:s filepath=pspath hidecomputername:s=hcn hostname indisconnectedsession:s=disconnected inputobject jobname keyfilepath=identityfilepath nonewscope:s options port remotedebug:s runasadministrator:s scriptblock=command session sessionname sessionoption sshconnection sshtransport:s subsystem throttlelimit username usessl:s vmid=vmguid vmname'
+    'import-module' = 'alias argumentlist=args ascustomobject:s assembly cimnamespace cimresourceuri cimsession cmdlet disablenamechecking:s force:s fullyqualifiedname function global:s maximumversion minimumversion=version moduleinfo name noclobber:s=nooverwrite passthru:s prefix pssession requiredversion scope skipeditioncheck:s usewindowspowershell:s=usewinps variable'
+}
+
+function Get-CiScriptParameterTable {
+    # One cmdlet's parameters from the tables above: @{ Switch = name -> whether it is a switch; Aliases = alias ->
+    # name }, keys without case as PowerShell matches them.
+    param([Parameter(Mandatory)] [string] $Cmdlet)
+    $switches = @{}
+    $aliases = @{}
+    foreach ($word in (($script:CiScriptCmdletParameters[$Cmdlet] + ' ' + $script:CiScriptCommonParameters) -split ' ' | Where-Object { $_ })) {
+        $spec, $aliasList = $word -split '=', 2
+        $name, $kind = $spec -split ':', 2
+        $switches[$name] = $kind -ceq 's'
+        if ($aliasList) { foreach ($alias in $aliasList -split ',') { $aliases[$alias] = $name } }
+    }
+    return @{ Switch = $switches; Aliases = $aliases }
+}
+
+function Resolve-CiScriptParameterName {
+    # The parameter a written name binds, by PowerShell's rule: a name or alias exactly, else a prefix of names and
+    # aliases that all belong to one parameter (`Get-ChildItem -ps` binds -LiteralPath through its alias PSPath, and
+    # Invoke-Expression's `-v` binds -Verbose, though the alias vb also starts with v: measured on pwsh 7.6.10). $null
+    # when none does or the prefix is ambiguous (`-e`: -ErrorAction or -ErrorVariable).
+    param([string] $Given, [Parameter(Mandatory)] [hashtable] $Table)
+    if (-not $Given) { return $null }
+    if ($Table.Switch.ContainsKey($Given)) { return $Given.ToLowerInvariant() }
+    if ($Table.Aliases.ContainsKey($Given)) { return $Table.Aliases[$Given] }
+    $found = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $Table.Switch.Keys) { if ($name.StartsWith($Given, [StringComparison]::OrdinalIgnoreCase)) { [void]$found.Add($name) } }
+    foreach ($alias in $Table.Aliases.Keys) { if ($alias.StartsWith($Given, [StringComparison]::OrdinalIgnoreCase)) { [void]$found.Add($Table.Aliases[$alias]) } }
+    if ($found.Count -eq 1) { return @($found)[0] }
+    return $null
+}
 
 function ConvertTo-CiScriptRepoPath {
     # A Windows or POSIX path, absolute under $RepoRoot or relative to it, as a repo-relative '/' path with `.` and
@@ -765,14 +815,23 @@ function Get-CiScriptFileEdges {
         if ($value.Kind -ne 'path') { return $null }
         return , @($value.Value -split '\s+' | Where-Object { $_ } | ForEach-Object { & $wordEntry $_ })
     }
-    # A PowerShell command-line parameter (pwsh's own matching: a unique prefix): what it does to the walk.
+    # A PowerShell command-line parameter (the executable's own matching: a unique prefix): what it does to the walk.
+    # Checked against each host's own parser (CommandLineParameterParser, called in process on every prefix of every
+    # parameter, pwsh 7.6.10 and Windows PowerShell 5.1.26100): pwsh reads `-in` as -Interactive, so its next word is
+    # the script, and needs `-inp` for -InputFormat, which Windows PowerShell takes from `-in`; -Token and
+    # -UTCTimestamp take a value; and Windows PowerShell, which lacks -ConfigurationFile, -CustomPipeName and
+    # -SettingsFile, runs the rest of its line as code after one of them.
     $powershellParameter = {
         param([string] $Name, [bool] $Pwsh)
         if ($Name -match '\Af(i(l(e)?)?)?\z') { return 'file' }
         if ($Name.Length -gt 'encoded'.Length -and 'encodedarguments'.StartsWith($Name)) { return 'value' }
         if ($Name -ceq 'ea') { return 'value' }
-        foreach ($valued in @(@('configurationname', 6), @('configurationfile', 14), @('custompipename', 3), @('executionpolicy', 2), @('inputformat', 2), @('outputformat', 1),
-                @('settingsfile', 8), @('windowstyle', 1), @('workingdirectory', 2), @('psconsolefile', 3))) {
+        foreach ($pwshOnly in @(@('configurationfile', 14), @('custompipename', 3), @('settingsfile', 8))) {
+            if ($Name.Length -ge $pwshOnly[1] -and $pwshOnly[0].StartsWith($Name)) { return $(if ($Pwsh) { 'value' } else { 'command' }) }
+        }
+        if ($Name.Length -ge $(if ($Pwsh) { 3 } else { 2 }) -and 'inputformat'.StartsWith($Name)) { return 'value' }
+        foreach ($valued in @(@('configurationname', 6), @('executionpolicy', 2), @('outputformat', 1), @('windowstyle', 1), @('workingdirectory', 2), @('psconsolefile', 3),
+                @('token', 2), @('utctimestamp', 3))) {
             if ($Name.Length -ge $valued[1] -and $valued[0].StartsWith($Name)) { return 'value' }
         }
         if ($Name -in @('ep', 'ex', 'if', 'of', 'wd', 'config')) { return 'value' }
@@ -894,37 +953,37 @@ function Get-CiScriptFileEdges {
             'unresolved' { $unresolved.Add($Why) }
         }
     }
-    # A cmdlet's parameter by PowerShell's rule (a unique prefix, or an alias): its class from $Table, or $null.
-    $cmdletParameter = {
-        param([string] $Name, [hashtable] $Table)
-        if ($Table.ContainsKey($Name)) { return $Table[$Name] }
-        $found = @($Table.Keys | Where-Object { $_.StartsWith($Name, [StringComparison]::Ordinal) })
-        if ($found.Count -eq 1) { return $Table[$found[0]] }
-        return $null
-    }
-    # A cmdlet's arguments as @{ Named = name class -> entry; Positional = entries }; $null when one is unknown.
+    # A cmdlet's arguments bound as PowerShell binds them: @{ Named = parameter name -> its argument entry (a switch's
+    # own entry); Positional = entries }. Before the walker picks a file or code it must know which words a parameter
+    # took, common parameters included (CodeRabbit on #740: `Invoke-Expression -ErrorAction Stop -Command <code>`
+    # scanned `Stop` as the code). A switch takes no next word; `--` ends the parameters. $null when the walker cannot
+    # bind them, and the caller then reports the edge unresolved: a splat, a name the cmdlet does not have or that is
+    # ambiguous, a parameter given twice, or one with no argument.
+    $parameterTables = @{}
     $bindCmdlet = {
-        param([object[]] $Entries, [hashtable] $Table)
+        param([object[]] $Entries, [string] $Cmdlet)
+        if (-not $parameterTables.ContainsKey($Cmdlet)) { $parameterTables[$Cmdlet] = Get-CiScriptParameterTable -Cmdlet $Cmdlet }
+        $table = $parameterTables[$Cmdlet]
         $named = @{}
         $positional = [System.Collections.Generic.List[object]]::new()
+        $ended = $false
         for ($i = 0; $i -lt $Entries.Count; $i++) {
             $entry = $Entries[$i]
             if ($entry.Splat) { return $null }
-            if (-not $entry.Param -or $entry.Node -isnot [System.Management.Automation.Language.CommandParameterAst]) { $positional.Add($entry); continue }
-            $class = & $cmdletParameter $entry.Param $Table
-            if ($null -eq $class) { return $null }
-            if ($class -ceq 'switch') { continue }
-            $argument = $(if ($entry.Attached) { $entry.Attached } elseif ($i + 1 -lt $Entries.Count) { $i++; $Entries[$i] })
-            if ($null -eq $argument) { return $null }
-            $named[$class] = $argument
+            if ($ended -or $entry.Node -isnot [System.Management.Automation.Language.CommandParameterAst]) { $positional.Add($entry); continue }
+            if ($entry.Node.ParameterName -ceq '-') { $ended = $true; continue }
+            $name = Resolve-CiScriptParameterName -Given $entry.Param -Table $table
+            if ($null -eq $name -or $named.ContainsKey($name)) { return $null }
+            if ($table.Switch[$name]) { $named[$name] = $entry; continue }
+            $argument = $entry.Attached
+            if ($null -eq $argument) {
+                if ($i + 1 -ge $Entries.Count -or $Entries[$i + 1].Splat -or $Entries[$i + 1].Node -is [System.Management.Automation.Language.CommandParameterAst]) { return $null }
+                $i++
+                $argument = $Entries[$i]
+            }
+            $named[$name] = $argument
         }
         return @{ Named = $named; Positional = $positional }
-    }
-    $startProcessParameters = @{
-        filepath = 'file'; pspath = 'file'; path = 'file'; argumentlist = 'args'; args = 'args'
-        verb = 'other'; workingdirectory = 'other'; credential = 'other'; windowstyle = 'other'; environment = 'other'
-        redirectstandarderror = 'other'; redirectstandardinput = 'other'; redirectstandardoutput = 'other'
-        passthru = 'switch'; wait = 'switch'; nonewwindow = 'switch'; usenewenvironment = 'switch'; loaduserprofile = 'switch'
     }
     # Literal code run as a script (Invoke-Expression, [scriptblock]::Create): its own edges; anything else unresolved.
     $codeEdges = {
@@ -968,19 +1027,22 @@ function Get-CiScriptFileEdges {
         }
         switch ($name) {
             'add-type' {
-                for ($i = 0; $i -lt $entries.Count; $i++) {
-                    if ($entries[$i].Param -notin @('path', 'literalpath')) { continue }
-                    $argument = $(if ($entries[$i].Attached) { $entries[$i].Attached } elseif ($i + 1 -lt $entries.Count) { $entries[$i + 1] })
-                    $value = $(if ($argument) { & $valueOf $argument } else { $unresolvedValue })
+                # -Path or -LiteralPath (its aliases PSPath and LP, or a prefix) names a source file. A positional
+                # argument is source text: it binds -TypeDefinition, the default set's, or -Name.
+                $bound = & $bindCmdlet $entries 'add-type'
+                if ($null -eq $bound) { $unresolved.Add($anchor); break }
+                foreach ($parameter in @('path', 'literalpath')) {
+                    if (-not $bound.Named.ContainsKey($parameter)) { continue }
+                    $value = & $valueOf $bound.Named[$parameter]
                     $repo = $(if ($value.Kind -eq 'path') { ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $value.Value })
                     if ($repo) { $csharp.Add($repo) } else { $unresolved.Add($anchor) }
                 }
             }
             { $_ -in @('start-process', 'saps', 'start') } {
-                $bound = & $bindCmdlet $entries $startProcessParameters
+                $bound = & $bindCmdlet $entries 'start-process'
                 if ($null -eq $bound) { $unresolved.Add($anchor); break }
-                $file = $(if ($bound.Named.ContainsKey('file')) { $bound.Named['file'] } elseif ($bound.Positional.Count -ge 1) { $bound.Positional[0] })
-                $list = $(if ($bound.Named.ContainsKey('args')) { $bound.Named['args'] } elseif ($bound.Positional.Count -ge 2 -and -not $bound.Named.ContainsKey('file')) { $bound.Positional[1] } elseif ($bound.Named.ContainsKey('file') -and $bound.Positional.Count -ge 1) { $bound.Positional[0] })
+                $file = $(if ($bound.Named.ContainsKey('filepath')) { $bound.Named['filepath'] } elseif ($bound.Positional.Count -ge 1) { $bound.Positional[0] })
+                $list = $(if ($bound.Named.ContainsKey('argumentlist')) { $bound.Named['argumentlist'] } elseif ($bound.Positional.Count -ge 2 -and -not $bound.Named.ContainsKey('filepath')) { $bound.Positional[1] } elseif ($bound.Named.ContainsKey('filepath') -and $bound.Positional.Count -ge 1) { $bound.Positional[0] })
                 if ($null -eq $file) { $unresolved.Add($anchor); break }
                 $callee = & $classify (& $valueOf $file)
                 if ($callee.Is -in @('none', 'native', 'command')) { break }
@@ -991,47 +1053,40 @@ function Get-CiScriptFileEdges {
                 & $invoke $callee $listed $anchor
             }
             { $_ -in @('start-job', 'sajb', 'start-threadjob', 'invoke-command', 'icm') } {
-                for ($i = 0; $i -lt $entries.Count; $i++) {
-                    $entry = $entries[$i]
-                    if ($entry.Splat) { $unresolved.Add($anchor); break }
-                    if ($entry.Param -and $entry.Node -is [System.Management.Automation.Language.CommandParameterAst]) {
-                        $isFile = ($entry.Param.Length -ge 1 -and 'filepath'.StartsWith($entry.Param)) -or ($entry.Param.Length -ge 2 -and 'literalpath'.StartsWith($entry.Param)) -or $entry.Param -ceq 'pspath'
-                        if ($isFile) {
-                            $argument = $(if ($entry.Attached) { $entry.Attached } elseif ($i + 1 -lt $entries.Count) { $entries[$i + 1] })
-                            if ($argument) { & $scriptTarget (& $valueOf $argument) $anchor } else { $unresolved.Add($anchor) }
-                            break
-                        }
-                        if (-not $entry.Attached -and $i + 1 -lt $entries.Count -and -not $entries[$i + 1].Param) { $i++ }
-                        continue
-                    }
-                    # Invoke-Command's -FilePath may also come by position, after -ComputerName.
-                    $value = & $valueOf $entry
+                $cmdlet = $(if ($_ -in @('start-job', 'sajb')) { 'start-job' } elseif ($_ -ceq 'start-threadjob') { 'start-threadjob' } else { 'invoke-command' })
+                $bound = & $bindCmdlet $entries $cmdlet
+                if ($null -eq $bound) { $unresolved.Add($anchor); break }
+                $file = $(if ($bound.Named.ContainsKey('filepath')) { $bound.Named['filepath'] } elseif ($bound.Named.ContainsKey('literalpath')) { $bound.Named['literalpath'] })
+                if ($null -ne $file) { & $scriptTarget (& $valueOf $file) $anchor; break }
+                # A -ScriptBlock, named or by position, or Start-Job's -DefinitionName, puts the command in a parameter
+                # set without -FilePath. Otherwise a positional argument may be the -FilePath (Start-Job's and
+                # Start-ThreadJob's first, Invoke-Command's after its -ComputerName, -Session or -ConnectionUri): a
+                # script it names is an edge, one the walker cannot read is unresolved, and another literal (a computer
+                # name) is none.
+                if ($bound.Named.ContainsKey('scriptblock') -or $bound.Named.ContainsKey('definitionname')) { break }
+                $values = @(foreach ($entry in $bound.Positional) { & $valueOf $entry })
+                if (@($values | Where-Object { $_.Kind -eq 'scriptblock' }).Count -gt 0) { break }
+                if (@($values | Where-Object { $_.Kind -eq 'unresolved' }).Count -gt 0) { $unresolved.Add($anchor); break }
+                foreach ($value in $values) {
                     if ($value.Kind -eq 'path' -and (Test-CiScriptTargetKind $value.Value) -in @('script', 'batch')) { & $scriptTarget $value $anchor }
                 }
             }
             { $_ -in @('invoke-expression', 'iex') } {
-                # The code: -Command or the first positional argument. With neither it comes down the pipeline, which
-                # the walker cannot read.
-                $node = $null
-                for ($i = 0; $i -lt $entries.Count; $i++) {
-                    $entry = $entries[$i]
-                    if ($entry.Param -and $entry.Node -is [System.Management.Automation.Language.CommandParameterAst]) {
-                        if ('command'.StartsWith($entry.Param, [StringComparison]::Ordinal)) { $node = $(if ($entry.Attached) { $entry.Attached.Node } elseif ($i + 1 -lt $entries.Count) { $entries[$i + 1].Node }); break }
-                        continue
-                    }
-                    $node = $entry.Node; break
-                }
-                & $codeEdges $node $anchor
+                # The code: -Command or the one positional argument. With neither it comes down the pipeline, which the
+                # walker cannot read; with both, PowerShell refuses the command.
+                $bound = & $bindCmdlet $entries 'invoke-expression'
+                if ($null -eq $bound) { $unresolved.Add($anchor); break }
+                $code = @(@($(if ($bound.Named.ContainsKey('command')) { $bound.Named['command'] })) + @($bound.Positional))
+                & $codeEdges $(if ($code.Count -eq 1) { $code[0].Node }) $anchor
             }
             { $_ -in @('import-module', 'ipmo') } {
+                # The module: -Name or the one positional argument. -FullyQualifiedName (a specification that may hold a
+                # path), -Assembly and -ModuleInfo load what the walker cannot name.
+                $bound = & $bindCmdlet $entries 'import-module'
                 $module = $null
-                for ($i = 0; $i -lt $entries.Count -and $null -eq $module; $i++) {
-                    $entry = $entries[$i]
-                    if ($entry.Splat) { break }
-                    if (-not $entry.Param -or $entry.Node -isnot [System.Management.Automation.Language.CommandParameterAst]) { $module = $entry; break }
-                    if ($entry.Param -in @('name', 'n')) { $module = $(if ($entry.Attached) { $entry.Attached } elseif ($i + 1 -lt $entries.Count) { $entries[$i + 1] }); break }
-                    if ($entry.Param -in @('force', 'global', 'passthru', 'ascustomobject', 'disablenamechecking', 'noclobber', 'skipeditioncheck', 'usewindowspowershell')) { continue }
-                    if (-not $entry.Attached) { $i++ }
+                if ($null -ne $bound -and -not ($bound.Named.ContainsKey('fullyqualifiedname') -or $bound.Named.ContainsKey('assembly') -or $bound.Named.ContainsKey('moduleinfo'))) {
+                    if ($bound.Named.ContainsKey('name')) { if ($bound.Positional.Count -eq 0) { $module = $bound.Named['name'] } }
+                    elseif ($bound.Positional.Count -eq 1) { $module = $bound.Positional[0] }
                 }
                 $value = $(if ($module) { & $valueOf $module } else { $unresolvedValue })
                 if ($value.Kind -eq 'path') {

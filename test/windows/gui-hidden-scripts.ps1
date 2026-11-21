@@ -258,6 +258,63 @@ Assert-True ($qualifiedVariable.Problems.Count -eq 1 -and $qualifiedVariable.Unr
 $qualifiedQuiet = Get-FixtureWalk @{ 'test/windows/entry.ps1' = 'Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $PSScriptRoot -File; Microsoft.PowerShell.Utility\Write-Output (Join-Path $PSScriptRoot ''child.ps1'')' }
 Assert-True ($qualifiedQuiet.Problems.Count -eq 0 -and $qualifiedQuiet.Members.Count -eq 1) "Unrelated module-qualified cmdlets are no edge: $($qualifiedQuiet.Problems -join '; ') [$($qualifiedQuiet.Members -join ', ')]"
 
+# A cmdlet's arguments are bound as PowerShell binds them before the walker picks the code or the file (CodeRabbit on
+# #740: `Invoke-Expression -ErrorAction Stop -Command <code>` scanned `Stop` as the code and never read -Command).
+# PowerShell names a parameter by its name or an alias, exactly or by a prefix that names one parameter, aliases
+# included (`-LP`, `-l` and `-PSPath` are Start-Job's -LiteralPath; `-v` is -Verbose); every cmdlet also takes the
+# common parameters; a switch takes no argument. A name the walker cannot bind leaves the edge unresolved. pwsh's own
+# command line is bound by pwsh's parser: `-in` is -Interactive there (Windows PowerShell's -InputFormat), and
+# Windows PowerShell runs the rest of its line as code after a parameter only pwsh has (-SettingsFile).
+$boundReaches = [ordered]@{
+    'Invoke-Expression -ErrorAction Stop -Command <code>' = @('Invoke-Expression -ErrorAction Stop -Command ''. (Join-Path $PSScriptRoot "child.ps1")''', 'test/windows/child.ps1')
+    'Invoke-Expression with every common parameter before its positional code' = @('Invoke-Expression -WarningAction SilentlyContinue -InformationAction Ignore -ErrorVariable e -OutVariable o -PipelineVariable p -OutBuffer 1 -ProgressAction Ignore -Verbose -Debug:$false ". ''$PSScriptRoot\child.ps1''"', 'test/windows/child.ps1')
+    'Invoke-Expression with abbreviated parameters' = @('Invoke-Expression -ea Stop -pr Ignore -v -c ". ''$PSScriptRoot\child.ps1''"', 'test/windows/child.ps1')
+    'Start-Process with common parameters' = @('Start-Process -ErrorAction Stop -FilePath pwsh -Verbose -ArgumentList ''-File'', "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'Start-Job -LP (an alias of -LiteralPath)' = @('Start-Job -LP "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'Start-Job -l (a prefix of -LiteralPath)' = @('Start-Job -l "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'Start-Job -Verbose, then its positional file' = @('Start-Job -Verbose "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'Invoke-Command -PSPath (an alias of -FilePath)' = @('Invoke-Command -ComputerName localhost -PSPath "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'Import-Module after common parameters' = @('Import-Module -Verbose -ErrorAction Stop (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+    'Add-Type -LP (an alias of -LiteralPath)' = @('Add-Type -LP (Join-Path $PSScriptRoot ''native.cs'')', 'test/windows/native.cs')
+    'Add-Type -PSPath (an alias of -LiteralPath)' = @('Add-Type -ErrorAction Stop -PSPath (Join-Path $PSScriptRoot ''native.cs'')', 'test/windows/native.cs')
+    'pwsh -in (its -Interactive), then the file' = @('pwsh -NoProfile -in (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+    'pwsh -token <value>, then -File' = @('pwsh -NoProfile -token t -File (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+}
+foreach ($form in $boundReaches.Keys) {
+    $text, $target = $boundReaches[$form]
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $text; 'test/windows/child.ps1' = '1'; 'test/windows/native.cs' = 'class X {}' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains $target) "$form must reach $target`: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$boundRefuses = [ordered]@{
+    'Invoke-Expression with an ambiguous parameter (-e: -ErrorAction or -ErrorVariable)' = 'Invoke-Expression -e Stop ". ''$PSScriptRoot\child.ps1''"'
+    'Invoke-Expression with a parameter it does not have' = 'Invoke-Expression -NoSuchParameter x ". ''$PSScriptRoot\child.ps1''"'
+    'Invoke-Expression with a splat' = 'Invoke-Expression @iexArguments'
+    'Invoke-Expression with a value parameter and no value' = 'Invoke-Expression -ErrorAction'
+    'Start-Job of an unresolved positional path' = 'Start-Job $script'
+    'Start-ThreadJob of an unresolved positional path' = 'Start-ThreadJob $script'
+    'Invoke-Command of an unresolved positional path after -ComputerName' = 'Invoke-Command -ComputerName localhost $script'
+    'Add-Type with a splat' = 'Add-Type @typeArguments'
+    'Add-Type -LiteralPath of an unresolved path' = 'Add-Type -LiteralPath $source'
+    'Windows PowerShell after -SettingsFile, which only pwsh has' = 'powershell.exe -NoProfile -SettingsFile (Join-Path $PSScriptRoot ''child.ps1'')'
+}
+foreach ($form in $boundRefuses.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $boundRefuses[$form]; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must leave its edge unresolved: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$boundQuiet = [ordered]@{
+    'Invoke-Expression with common parameters and code with no edge' = 'Invoke-Expression -ErrorAction Stop -Command ''Get-Date'''
+    'Start-Job of a scriptblock after -Verbose' = 'Start-Job -Verbose -ScriptBlock { 1 }'
+    'Start-ThreadJob of a positional scriptblock' = 'Start-ThreadJob { 1 }'
+    'Invoke-Command of a scriptblock on a session' = 'Invoke-Command -Session $session -ScriptBlock { 1 }'
+    'Invoke-Command with a positional scriptblock' = 'Invoke-Command $session { 1 }'
+    'Add-Type of an assembly, with -ErrorAction' = 'Add-Type -AssemblyName System.Drawing -ErrorAction Stop'
+    'Add-Type of source text by position' = 'Add-Type ''public class Fixture {}'''
+}
+foreach ($form in $boundQuiet.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $boundQuiet[$form] }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 
