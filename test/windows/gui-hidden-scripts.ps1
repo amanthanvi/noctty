@@ -493,7 +493,7 @@ $allowFiles = @{
     'test/windows/fixtures/sol-r6-helper.cmd' = '@echo %1'; 'test/windows/fixtures/second.cmd' = '@echo off'; 'test/windows/fixtures/forward.cmd' = '@%*'
     'test/windows/fixtures/cmd.cmd' = '@echo %*'; 'test/windows/fixtures/pwsh.cmd' = '@echo %*'; 'test/windows/fixtures/powershell.cmd' = '@echo %*'
     'test/windows/fixtures/sol-helper.cmd' = '@echo %1'; 'test/windows/fixtures/tools/pwsh.cmd' = '@echo %*'; 'test/windows/child.ps1' = '1'
-    'test/windows/fixtures/powershell.bat' = '@echo %*'
+    'test/windows/fixtures/powershell.bat' = '@echo %*'; 'test/windows/fixtures/pwsh-shim.cmd' = '@pwsh %*'
 }
 $allowRefused = @(
     # Sol, round 7: `call`, a leading redirect, and `/d /c` in one element.
@@ -543,6 +543,16 @@ $allowRefused = @(
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run X.COM'
     'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''run'', ''powershell.exe'', ''-EncodedCommand'', ''ZQBjAGgAbwAgAHgA'' -Wait'
     'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" run PwSh.ExE'
+    # Opus, round 8: a forwarded word holding cmd's operators (a shim running `pwsh %*` reads `x&pwsh` as two commands).
+    '& (Join-Path $PSScriptRoot ''fixtures\pwsh-shim.cmd'') ''x&pwsh'''
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') ''a|b'''
+    # Opus, round 8: cmd reads a switch glued to its command (`/chelper` is `/c helper`).
+    'cmd.exe /d /chelper'
+    'cmd.exe /d /Kecho x'
+    # Opus, round 8: a shell reading its commands from its input.
+    '''echo x'' | cmd.exe /d'
+    '$commands | pwsh -NoProfile'
+    'Start-Process -FilePath cmd.exe -ArgumentList ''/d'' -RedirectStandardInput (Join-Path $PSScriptRoot ''commands.txt'') -Wait'
     # Opus, round 7: cmd expands a forwarded `%var%` or `!var!`.
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') %FIXTURE_SCRIPT%'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') !FIXTURE_SCRIPT!'

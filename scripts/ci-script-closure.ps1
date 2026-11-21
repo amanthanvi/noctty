@@ -1164,7 +1164,8 @@ function Get-CiScriptFileEdges {
             if ($entry.Splat) { return $false }
             if ($entry.Param -and -not $entry.Attached) { continue }
             $text = & $entryText $entry
-            if ($null -eq $text -or $text -match '[\\/"%!$\s]') { return $false }
+            # cmd's operators too: a batch file forwarding `%*` hands `x&pwsh` to cmd as two commands (Opus on #740).
+            if ($null -eq $text -or $text -match '[\\/"%!$\s&|<>^()]') { return $false }
             $word = $text.ToLowerInvariant()
             if ($word -in @('cmd', 'cmd.exe', 'pwsh', 'pwsh.exe', 'powershell', 'powershell.exe')) { return $false }
             $extension = [IO.Path]::GetExtension($word)
@@ -1203,6 +1204,8 @@ function Get-CiScriptFileEdges {
         for ($i = 0; $i -lt $Entries.Count; $i++) {
             if ($Entries[$i].Splat -or -not $Entries[$i].Param) { $unresolved.Add($Why); return }
             if ($Entries[$i].Param -in @('c', 'k', 'r')) { $at = $i; break }
+            # cmd reads `/chelper` as `/c helper` (Opus on #740): a switch glued to its command is unresolved.
+            if ($Entries[$i].Param -match '\A[ckr].') { $unresolved.Add($Why); return }
             if ($Entries[$i].Param -ceq 's') { $stripsQuotes = $true }
         }
         if ($at -lt 0 -or $at + 1 -ge $Entries.Count) { return }
@@ -1354,15 +1357,19 @@ function Get-CiScriptFileEdges {
             -not (Test-CiScriptShippedCmdlet $first.Value)
         if (-not $invoked -and -not $barePath -and (Get-CiScriptCommandName $first) -notin $edgeCommands) { continue }
         $entries = @($elements | Select-Object -Skip 1 | ForEach-Object { & $toEntry $_ })
+        # A shell later in a pipeline reads its commands from its input, which the walk does not read (Opus on #740).
+        $piped = $command.Parent -is [System.Management.Automation.Language.PipelineAst] -and $command.Parent.PipelineElements.IndexOf($command) -gt 0
         if ($invoked -or $barePath) {
             if ($first -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { continue }
             $callee = & $classify (Resolve-CiScriptValue $first $context)
+            if ($piped -and $callee.Is -in @('powershell', 'cmd')) { $unresolved.Add($anchor); continue }
             if ($callee.Is -cne 'command') { & $invoke $callee $entries $anchor; continue }
             $name = $callee.Value
         } else {
             $name = Get-CiScriptCommandName $first
             if (-not $name) { continue }
             $callee = & $classify @{ Kind = 'path'; Value = $name }
+            if ($piped -and $callee.Is -in @('powershell', 'cmd')) { $unresolved.Add($anchor); continue }
             if ($callee.Is -in @('powershell', 'cmd')) { & $invoke $callee $entries $anchor; continue }
         }
         switch ($name) {
@@ -1386,6 +1393,8 @@ function Get-CiScriptFileEdges {
                 if ($null -eq $file) { $unresolved.Add($anchor); break }
                 $callee = & $classify (& $valueOf $file)
                 if ($callee.Is -in @('none', 'native', 'command')) { break }
+                # A shell given -RedirectStandardInput reads its commands from that file (Opus on #740).
+                if ($callee.Is -in @('powershell', 'cmd') -and $bound.Named.ContainsKey('redirectstandardinput')) { $unresolved.Add($anchor); break }
                 # A batch file's argument list is read as its arguments are (`$batchArguments`); another script's is not.
                 $batchFile = $callee.Is -ceq 'script' -and -not $callee.Value.Lookup -and (Test-CiScriptTargetKind $callee.Value.Value) -eq 'batch'
                 if (($callee.Is -ceq 'script' -and -not ($batchFile -and $null -ne $list)) -or $callee.Is -ceq 'unresolved') { & $invoke $callee @() $anchor; break }

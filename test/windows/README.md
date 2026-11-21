@@ -1689,7 +1689,10 @@ command on PATH), a bare `cmd`, `pwsh` or `powershell` in cmd's command line
 shadowed by a same-named batch file in the current directory (cmd looks a bare
 name up there first; `echo` and `exit` are internal and never looked up), and
 the arguments of a tracked executable other than a shell, which must be plain
-words but are not read further (the repository tracks no executable). A script a
+words but are not read further (the repository tracks no executable), a batch
+file's own text, which the walk never reads (`@call "%~dp0%1"` runs whatever
+its argument names), and a command run outside cmd and PowerShell by another
+launcher such as `conhost.exe`. A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
 a leaf must not run a repo script that way.
