@@ -1071,6 +1071,17 @@ function Get-CiScriptFileEdges {
                 # name) is none.
                 if ($bound.Named.ContainsKey('scriptblock') -or $bound.Named.ContainsKey('definitionname')) { break }
                 $values = @(foreach ($entry in $bound.Positional) { & $valueOf $entry })
+                if ($cmdlet -cne 'invoke-command') {
+                    # Start-Job's and Start-ThreadJob's first positional is -FilePath in its parameter set and
+                    # -ScriptBlock in the other; the second is -InitializationScript in both, so a block there hides
+                    # nothing (CodeRabbit on #740: `Start-Job (Join-Path $PSScriptRoot 'child.ps1') { 1 }` runs the
+                    # file). The first decides: a block is an inline job, a script is an edge, anything else at the
+                    # file's position is unresolved.
+                    if ($values.Count -eq 0 -or $values[0].Kind -eq 'scriptblock') { break }
+                    if ($values[0].Kind -eq 'path' -and (Test-CiScriptTargetKind $values[0].Value) -in @('script', 'batch')) { & $scriptTarget $values[0] $anchor }
+                    else { $unresolved.Add($anchor) }
+                    break
+                }
                 if (@($values | Where-Object { $_.Kind -eq 'scriptblock' }).Count -gt 0) { break }
                 if (@($values | Where-Object { $_.Kind -eq 'unresolved' }).Count -gt 0) { $unresolved.Add($anchor); break }
                 foreach ($value in $values) {

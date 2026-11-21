@@ -376,6 +376,18 @@ try {
     # exits 2 without leaving a pass: nothing in a non-empty -Out, an error result in a new one.
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst 'Get-GuiHiddenResultStatus')))
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst 'Get-GuiHiddenGuardState')))
+    . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst 'Get-GuiHiddenAssertionStatus')))
+    foreach ($case in @(
+            @{ Violated = $false; Covered = $true; Subset = $false; Status = 'pass' }
+            @{ Violated = $false; Covered = $true; Subset = $true; Status = 'skip' }
+            @{ Violated = $true; Covered = $true; Subset = $false; Status = 'fail' }
+            @{ Violated = $true; Covered = $true; Subset = $true; Status = 'fail' }
+            # CodeRabbit on #740: records missing for some selected leaves never pass, whatever the others say.
+            @{ Violated = $false; Covered = $false; Subset = $false; Status = 'fail' }
+            @{ Violated = $false; Covered = $false; Subset = $true; Status = 'fail' }
+        )) {
+        if ((Get-GuiHiddenAssertionStatus $case.Violated $case.Covered $case.Subset) -cne $case.Status) { throw "The assertion status misjudged violated $($case.Violated), covered $($case.Covered), subset $($case.Subset)." }
+    }
     foreach ($case in @(
             @{ Exit = 0; Subset = $false; All = $true; Guards = $true; Status = 'pass'; Leaves = 'pass' }
             @{ Exit = 0; Subset = $true; All = $true; Guards = $true; Status = 'skip'; Leaves = 'skip' }
@@ -408,6 +420,8 @@ try {
     }
     $guiChild = (Get-Process -Id $PID).Path
     # The children below are expected to exit 2; a session that promotes native exit codes must not stop here first.
+    # The preference is saved here and restored after the last of them, so later fragments keep the caller's.
+    $guiSavedNativePreference = $PSNativeCommandUseErrorActionPreference
     $PSNativeCommandUseErrorActionPreference = $false
     $guiFullOut = Join-Path $guiScratch 'out-full'
     [void](New-Item -ItemType Directory -Path $guiFullOut)
@@ -434,6 +448,19 @@ try {
     }
     & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -PublishError 'Bad Kind' -Out (Join-Path $guiScratch 'out-badkind') *> $null
     if ($LASTEXITCODE -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'out-badkind'))) { throw '-PublishError must refuse a kind outside its shape before it writes.' }
+    # -PublishError publishes even where the suite cannot initialize (CodeRabbit on #740): the runner alone, with no
+    # library beside it and no plan, still writes its error result.
+    $guiLoneRunner = Join-Path $guiScratch 'lone\test\windows\gui-hidden-runner.ps1'
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $guiLoneRunner))
+    Copy-Item -LiteralPath $guiRunnerPath -Destination $guiLoneRunner
+    $guiLoneOut = Join-Path $guiScratch 'out-lone'
+    & $guiChild -NoProfile -NonInteractive -File $guiLoneRunner -PublishError helper-self-test -Out $guiLoneOut *> $null
+    $guiLonePublished = $(if (Test-Path -LiteralPath (Join-Path $guiLoneOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiLoneOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
+    if ($LASTEXITCODE -ne 2 -or $null -eq $guiLonePublished -or $guiLonePublished.status -cne 'error') { throw '-PublishError must publish without the libraries or the plan it would otherwise load.' }
+    # The suite itself cannot run there: the same runner without -PublishError fails before any result.
+    & $guiChild -NoProfile -NonInteractive -File $guiLoneRunner -MeasureRepo $repoRoot -Work (Join-Path $guiScratch 'lone-work') -Out (Join-Path $guiScratch 'out-lone-suite') *> $null
+    if ($LASTEXITCODE -eq 0) { throw 'The lone runner control is void: the suite initialized without its libraries.' }
+    $PSNativeCommandUseErrorActionPreference = $guiSavedNativePreference
     $guiAsciiOut = Join-Path $guiScratch 'out-ascii'
     & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo $repoRoot -Work (Join-Path $guiScratch ('work-caf' + [char]0xE9)) -Out $guiAsciiOut *> $null
     if ($LASTEXITCODE -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }
@@ -519,6 +546,8 @@ foreach ($bad in @(
         @{ Name = 'a launched app with another run''s class'; Rows = (& $guiReplace 200 (& $guiRow 200 'noctty.exe' 100 20 -Argv @('noctty.exe', '--single-instance=false', '--class=noctty-interactive-x'))); Total = 11; Shells = 1 }
         @{ Name = 'a launched app without --single-instance'; Rows = (& $guiReplace 200 (& $guiRow 200 'noctty.exe' 100 20 -Argv @('noctty.exe', "--class=noctty-interactive-x-$guiVerdictToken"))); Total = 11; Shells = 1 }
         @{ Name = 'an IPC action without a class'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Argv @('noctty.com', '+new-window'))); Total = 11; Shells = 1 }
+        # #738's notSeenInJob: a process the launcher recorded that the job never showed read (PROBE-JOB-WATCH-OPEN-FIRST-01).
+        @{ Name = 'a launcher record the job never showed'; Rows = @($guiGoodRows | Where-Object { $_.Pid -ne 600 -and $_.Pid -ne 700 }); Total = 9; Shells = 1 }
     )) {
     if ((& $guiVerdict $bad.Rows $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
 }
@@ -604,6 +633,7 @@ $guiReceiptAssignment = @($guiLibAst.FindAll({ param($n) $n -is [System.Manageme
 $guiReceiptRegistration = @(Get-NamedCommands -Ast $guiLibAst -Name 'Register-EngineEvent')
 if ($guiReceiptAssignment.Count -ne 1 -or $guiReceiptRegistration.Count -ne 1) { throw 'lib must write the leaf receipt from one PowerShell.Exiting registration.' }
 $guiChildPwsh = (Get-Process -Id $PID).Path
+$guiSavedNativePreference = $PSNativeCommandUseErrorActionPreference
 $PSNativeCommandUseErrorActionPreference = $false
 $guiScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-gui-hidden-runtime-' + [guid]::NewGuid().ToString('N'))
 $guiSavedRun = $env:NOCTTY_GUI_HIDDEN_RUN
@@ -643,6 +673,7 @@ if (`$refused -and `$typeAbsent -and `$callFailed) { exit 0 } else { exit 1 }
 finally {
     $env:NOCTTY_GUI_HIDDEN_RUN = $guiSavedRun
     $env:NOCTTY_GUI_HIDDEN_DESKTOP = $guiSavedDesktop
+    $PSNativeCommandUseErrorActionPreference = $guiSavedNativePreference
     Remove-Item -LiteralPath $guiScratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 

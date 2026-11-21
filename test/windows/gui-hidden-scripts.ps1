@@ -282,6 +282,9 @@ $boundReaches = [ordered]@{
     'Add-Type -PSPath (an alias of -LiteralPath)' = @('Add-Type -ErrorAction Stop -PSPath (Join-Path $PSScriptRoot ''native.cs'')', 'test/windows/native.cs')
     'pwsh -in (its -Interactive), then the file' = @('pwsh -NoProfile -in (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
     'pwsh -token <value>, then -File' = @('pwsh -NoProfile -token t -File (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+    # CodeRabbit on #740: the second positional is -InitializationScript, so a block there must not hide the file.
+    'Start-Job <file> <initialization block>' = @('Start-Job (Join-Path $PSScriptRoot ''child.ps1'') { 1 }', 'test/windows/child.ps1')
+    'Start-ThreadJob <file> <initialization block>' = @('Start-ThreadJob (Join-Path $PSScriptRoot ''child.ps1'') { 1 }', 'test/windows/child.ps1')
 }
 foreach ($form in $boundReaches.Keys) {
     $text, $target = $boundReaches[$form]
@@ -295,6 +298,7 @@ $boundRefuses = [ordered]@{
     'Invoke-Expression with a value parameter and no value' = 'Invoke-Expression -ErrorAction'
     'Start-Job of an unresolved positional path' = 'Start-Job $script'
     'Start-ThreadJob of an unresolved positional path' = 'Start-ThreadJob $script'
+    'Start-Job of an unresolved file before an initialization block' = 'Start-Job $script { 1 }'
     'Invoke-Command of an unresolved positional path after -ComputerName' = 'Invoke-Command -ComputerName localhost $script'
     'Add-Type with a splat' = 'Add-Type @typeArguments'
     'Add-Type -LiteralPath of an unresolved path' = 'Add-Type -LiteralPath $source'
@@ -308,6 +312,7 @@ $boundQuiet = [ordered]@{
     'Invoke-Expression with common parameters and code with no edge' = 'Invoke-Expression -ErrorAction Stop -Command ''Get-Date'''
     'Start-Job of a scriptblock after -Verbose' = 'Start-Job -Verbose -ScriptBlock { 1 }'
     'Start-ThreadJob of a positional scriptblock' = 'Start-ThreadJob { 1 }'
+    'Start-Job <block> <initialization block>' = 'Start-Job { 1 } { 2 }'
     'Invoke-Command of a scriptblock on a session' = 'Invoke-Command -Session $session -ScriptBlock { 1 }'
     'Invoke-Command with a positional scriptblock' = 'Invoke-Command $session { 1 }'
     'Add-Type of an assembly, with -ErrorAction' = 'Add-Type -AssemblyName System.Drawing -ErrorAction Stop'

@@ -87,7 +87,7 @@ $guiHiddenProblems = & {
         $publish = & $findStep $suite 'Publish an error result for a failed self-test' 'suite'
         $publishAt = $suite.IndexOf('      - name: Publish an error result for a failed self-test', [StringComparison]::Ordinal)
         $uploadAt = $suite.IndexOf('      - name: Upload the suite''s result and receipts', [StringComparison]::Ordinal)
-        if ($null -eq $publish -or $publish -notmatch "(?m)^        if: failure\(\) && steps\.selftest\.outcome == 'failure'\s*$" -or
+        if ($null -eq $publish -or $publish -notmatch "(?m)^        if: failure\(\) && steps\.selftest\.outcome == 'failure'\s*$" -or $publish -notmatch '(?m)^        shell: pwsh\s*$' -or
             $publish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -PublishError helper-self-test -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
             $publish -match '(?m)^        continue-on-error:' -or $publishAt -lt $runnerAt -or $uploadAt -lt $publishAt) {
             $found.Add('gui-hidden.yml: after the suite step and before the upload, a failed self-test publishes an error result through the runner''s -PublishError')
@@ -152,6 +152,7 @@ $guiHiddenProblems = & {
         @{ Name = 'the self-test without the id the error step reads'; Old = "        id: selftest`n"; New = '' }
         @{ Name = 'no error result for a failed self-test'; Old = "      - name: Publish an error result for a failed self-test`n"; New = "      - name: Publish nothing`n" }
         @{ Name = 'the error result published on every run'; Old = "        if: failure() && steps.selftest.outcome == 'failure'`n"; New = "        if: always()`n" }
+        @{ Name = 'the error result published from cmd, which does not run its Join-Path'; Old = "        if: failure() && steps.selftest.outcome == 'failure'`n        shell: pwsh`n"; New = "        if: failure() && steps.selftest.outcome == 'failure'`n        shell: cmd`n" }
     )
     $lfWorkflow = $workflowText.Replace("`r`n", "`n")
     # A validator returns its problems as one array object (`return , $found.ToArray()`), so a mutation's count is
@@ -390,6 +391,8 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
     }
 
     # ---- (d) build inputs, (e) the plan and the scenario ----------------------------------------------------------
+    $script:GuiHiddenTrackedPaths = [System.Collections.Generic.HashSet[string]]::new([string[]]@(git -C $repoRoot ls-files), [StringComparer]::Ordinal)
+    if ($script:GuiHiddenTrackedPaths.Count -eq 0) { throw 'git ls-files listed nothing; the build-input check needs the tracked paths.' }
     function Get-GuiHiddenPlanProblems($Plan, $Scenario) {
         $found = [System.Collections.Generic.List[string]]::new()
         if ($Plan.schemaVersion -ne 1 -or $Plan.scenario -cne 'windows.gui-hidden.suite' -or $Scenario.id -cne 'windows.gui-hidden.suite') { $found.Add('the plan is version 1 and names the scenario windows.gui-hidden.suite, which the flagship scenario is') }
@@ -400,7 +403,9 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
             # A canonical repo path (slashes, no `.` or `..` segment, no leading separator), the spelling the changed-path
             # list uses, so the selection's ordinal lookup cannot miss it (CodeRabbit on #740).
             if ([string]$buildInput -cnotmatch '\A(?!\.{1,2}/)[A-Za-z0-9_-][A-Za-z0-9_.-]*(/(?!\.{1,2}(/|\z))[A-Za-z0-9_.-]+)*\z') { $found.Add("build input $buildInput is a canonical repo path") }
-            elseif (-not (Test-Path -LiteralPath (Join-Path $repoRoot ([string]$buildInput).Replace('/', '\')) -PathType Leaf)) { $found.Add("build input $buildInput does not exist") }
+            # Spelled as Git tracks it, ordinally: a case-only variant exists on a case-insensitive checkout but misses the
+            # changed-path list's ordinal lookup (CodeRabbit on #740).
+            elseif (-not $script:GuiHiddenTrackedPaths.Contains([string]$buildInput)) { $found.Add("build input $buildInput is a tracked path, spelled as Git tracks it") }
         }
         $ids = @($Plan.leaves | ForEach-Object { [string]$_.id })
         if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { $found.Add('the plan''s leaf ids are unique') }
@@ -424,6 +429,7 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         @{ Name = 'a missing leaf script'; Change = { param($p) $p.leaves[0].script = 'test/windows/no-such-leaf.ps1' } }
         @{ Name = 'a build input spelled with ./'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('./scripts/dev-windows.cmd') } }
         @{ Name = 'a build input spelled with a backslash'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts\dev-windows.cmd') } }
+        @{ Name = 'a build input differing from the tracked path in case only'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts/Dev-windows.cmd') } }
     )
     foreach ($control in $planControls) {
         $mutated = $planText | ConvertFrom-Json

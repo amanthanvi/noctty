@@ -84,6 +84,47 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# -PublishError runs before anything else loads (CodeRabbit on #740): the workflow calls it after a failed helper self-
+# test, which may have failed because a library does not load or the plan does not parse, so it loads no library,
+# compiles nothing and reads no plan. It writes an `error` result and run.json of fixed values and its checked kind, and
+# exits 2.
+if ($PublishError) {
+    $usage = 'Usage: -PublishError <kind: lowercase letters, digits and hyphens> -Out <empty or new directory>, alone.'
+    if ($PublishError -cnotmatch '\A[a-z][a-z0-9-]{0,39}\z' -or -not $Out -or $MeasureRepo -or $Work -or $Build -or $Leaves.Count -gt 0) {
+        Write-Host "gui-hidden: validation failed: $usage"; exit 2
+    }
+    $Out = [IO.Path]::GetFullPath($Out)
+    if ((Test-Path -LiteralPath $Out) -and (-not (Test-Path -LiteralPath $Out -PathType Container) -or @(Get-ChildItem -LiteralPath $Out -Force).Count -gt 0)) {
+        Write-Host 'gui-hidden: validation failed: The output directory must be new or empty.'; exit 2
+    }
+    [void](New-Item -ItemType Directory -Force -Path (Join-Path $Out 'receipts'))
+    $now = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $hostedRun = $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
+    $published = [ordered]@{
+        hosted = $hostedRun; publishedError = $PublishError
+        guards = [ordered]@{ state = 'not-run'; history = 'not-run'; startup = 'not-run' }; stateGuardsHeld = $false; exit = 2
+    }
+    $publishedRun = Join-Path $Out 'receipts\run.json'
+    [IO.File]::WriteAllText($publishedRun, ($published | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+    $publishedResult = [ordered]@{
+        schema_version = 'noctty.verification.result.v1'
+        scenario_id = 'windows.gui-hidden.suite'
+        status = 'error'
+        started_at = $now; finished_at = $now; duration_ms = 0
+        baseline_commit = $null; implementation_commit = $null
+        workflow_run_id = $(if ($env:GITHUB_RUN_ID -match '\A[0-9]+\z') { $env:GITHUB_RUN_ID } else { $null })
+        workflow_run_attempt = $(if ($env:GITHUB_RUN_ATTEMPT -match '\A[0-9]+\z') { [int]$env:GITHUB_RUN_ATTEMPT } else { $null })
+        environment = [ordered]@{ os = 'Windows'; architecture = 'x86_64'; hosted = $hostedRun; desktop = 'private' }
+        measurements = [ordered]@{ 'suite.publishedError' = $PublishError }
+        assertions = @(foreach ($id in @('leaves-pass', 'launch-policy', 'real-input-absent', 'state-guards')) { [ordered]@{ id = $id; status = 'fail'; message = $null } })
+        artifacts = @([ordered]@{ kind = 'other'; path = 'receipts/run.json'; sha256 = (Get-FileHash -LiteralPath $publishedRun -Algorithm SHA256).Hash.ToLowerInvariant() })
+        failure = [ordered]@{ message = "exit 2 ($PublishError)"; type = 'error' }
+    }
+    [IO.File]::WriteAllText((Join-Path $Out 'result.json'), ($publishedResult | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    Write-Host "gui-hidden: published an error result ($PublishError)"
+    exit 2
+}
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
@@ -695,6 +736,9 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         if ($row.InCopy -and ($recorded -or $viaShell -or $forwarded)) { $accounted[$row.Pid] = $true }
     }
     $unaccounted = $nocttyRows.Count - $accounted.Count
+    # Every process the launcher recorded must be a joiner the reader read, by PID and creation time: one the job never
+    # reported, or reported unread, fails the leaf (#738's notSeenInJob; PROBE-JOB-WATCH-OPEN-FIRST-01).
+    $launcherNotSeen = @($Launcher.Keys | Where-Object { -not ($byPid.ContainsKey($_) -and $byPid[$_].Creation -eq $Launcher[$_]) }).Count
     $cmdPassing = @($cmds | Where-Object { $_.CmdRead -and $_.CmdSystem -and $_.CmdAutoRunOff }).Count
     $verdict = [ordered]@{
         jobTotalProcesses = $TotalProcesses
@@ -714,9 +758,10 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         nocttyOutsideCopy = $outsideCopy
         nocttyArgvUnread = $argvUnread
         nocttyArgumentRefused = $argumentRefused
+        launcherNotSeen = $launcherNotSeen
     }
     $verdict.passed = $TotalProcesses -eq $Rows.Count -and $read -eq $Rows.Count -and $cmdPassing -eq $cmds.Count -and
-        $cmds.Count -ge $ExpectedShells -and $unaccounted -eq 0 -and $outsideCopy -eq 0 -and $argvUnread -eq 0 -and $argumentRefused -eq 0
+        $cmds.Count -ge $ExpectedShells -and $unaccounted -eq 0 -and $outsideCopy -eq 0 -and $argvUnread -eq 0 -and $argumentRefused -eq 0 -and $launcherNotSeen -eq 0
     return $verdict
 }
 
@@ -793,9 +838,10 @@ function Get-GuiHiddenConfigPolicy([string] $Path) {
 # receipt says how many there were and whether the leaf ended in a PowerShell exception. Nothing reaches the console
 # (Sol L8 on #740).
 function Get-GuiHiddenLogDigest([string] $Path) {
-    $digest = [ordered]@{ lines = 0; exceptionLines = 0 }
+    $digest = [ordered]@{ lines = 0; exceptionLines = 0; unavailable = $false }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $digest }
-    $lines = @([IO.File]::ReadAllLines($Path))
+    # Best-effort (CodeRabbit on #740): a log another process holds must not cost the failed leaf its receipt.
+    try { $lines = @([IO.File]::ReadAllLines($Path)) } catch { $digest.unavailable = $true; return $digest }
     $digest.lines = $lines.Count
     $digest.exceptionLines = @($lines | Where-Object { $_ -match 'Exception:' }).Count
     return $digest
@@ -967,6 +1013,15 @@ function Get-GuiHiddenGuardState([bool] $Started, $Held) {
     return 'tripped'
 }
 
+# A whole-plan assertion's status (launch-policy, real-input-absent): an observed violation fails it; without a record
+# for every selected leaf it fails too, however clean the records it has (CodeRabbit on #740: a suite that stopped
+# after one leaf passed both from that leaf alone); a complete subset is skip; only the complete plan passes.
+function Get-GuiHiddenAssertionStatus([bool] $Violated, [bool] $Covered, [bool] $Subset) {
+    if ($Violated -or -not $Covered) { return 'fail' }
+    if ($Subset) { return 'skip' }
+    return 'pass'
+}
+
 # The result's status and its leaves-pass assertion: a pass needs exit 0, the whole plan and every guard held; a passing
 # subset run is `skip` (CodeRabbit on #740); exit 1 is `fail`, any other exit, or exit 0 with a guard not held, `error`,
 # so no runner failure and no unrun guard reads as a pass.
@@ -1037,13 +1092,7 @@ $failureKind = $null
 
 # Validation: any failure here exits 2, with a result when -Out could be opened (CodeRabbit on #740).
 try {
-    if ($PublishError) {
-        # A kind from a fixed shape only: it reaches the result.
-        if ($PublishError -cnotmatch '\A[a-z][a-z0-9-]{0,39}\z' -or -not $Out -or $MeasureRepo -or $Work -or $Build -or $Leaves.Count -gt 0) {
-            throw 'Usage: -PublishError <kind: lowercase letters, digits and hyphens> -Out <empty or new directory>, alone.'
-        }
-    }
-    elseif (-not $MeasureRepo -or -not $Work -or -not $Out) { throw 'Usage: -MeasureRepo <repo> -Work <new directory> -Out <empty or new directory> [-Build] [-Leaves id,...]' }
+    if (-not $MeasureRepo -or -not $Work -or -not $Out) { throw 'Usage: -MeasureRepo <repo> -Work <new directory> -Out <empty or new directory> [-Build] [-Leaves id,...]' }
     $Out = [IO.Path]::GetFullPath($Out)
     # -Out holds this run's files only: new or empty, so no earlier receipt can be listed as this run's (Sol and
     # CodeRabbit on #740). Nothing in it is ever deleted.
@@ -1053,7 +1102,6 @@ try {
     }
     [void](New-Item -ItemType Directory -Force -Path (Join-Path $Out 'receipts'))
     $outReady = $true
-    if ($PublishError) { throw [System.OperationCanceledException]::new('publish-error') }
     if ($Build -and -not (Test-GuiHiddenHosted)) { throw '-Build runs only on a GitHub-hosted runner; locally, prepare the measurement build beforehand with Invoke-InteractiveWin11MeasureBuild.' }
     $resolvedRepo = Resolve-Path -LiteralPath $MeasureRepo -ErrorAction SilentlyContinue
     if ($null -eq $resolvedRepo) { throw 'The measurement repository does not resolve.' }
@@ -1076,14 +1124,6 @@ try {
     if ($Leaves.Count -gt 0 -and $selected.Count -ne $Leaves.Count) { throw 'An -Leaves id is not in the plan.' }
     # A subset run is for diagnosis: its result never passes the full scenario (CodeRabbit on #740).
     $subset = $selected.Count -lt @($plan.leaves).Count
-}
-catch [System.OperationCanceledException] {
-    # -PublishError: no suite runs; the result below records the named failure.
-    Write-Host "gui-hidden: publishing an error result ($PublishError)"
-    $runRecord.publishedError = $PublishError
-    $plan = Get-GuiHiddenPlan
-    $exit = 2
-    $failureKind = $PublishError
 }
 catch {
     Write-Host "gui-hidden: validation failed: $($_.Exception.Message)"
@@ -1208,8 +1248,9 @@ if ($outReady) {
     $resultStatus = Get-GuiHiddenResultStatus $exit $subset $allPassed ([bool]$runRecord.stateGuardsHeld)
     $status = $resultStatus.Status
     $leafStatus = $resultStatus.Leaves
-    $policyPass = $leafRecords.Count -gt 0 -and @($leafRecords | Where-Object { -not ($_.processes -and $_.processes.passed -and $_.launchPolicy -and $_.launchPolicy.held) }).Count -eq 0
-    $inputPass = $leafRecords.Count -gt 0 -and @($leafRecords | Where-Object { -not ($_.receipt -and $_.receipt.valid -and $_.receipt.realInputLoaded -eq $false) }).Count -eq 0
+    $covered = $selected.Count -gt 0 -and $leafRecords.Count -eq $selected.Count
+    $policyViolated = @($leafRecords | Where-Object { -not ($_.processes -and $_.processes.passed -and $_.launchPolicy -and $_.launchPolicy.held) }).Count -gt 0
+    $inputViolated = @($leafRecords | Where-Object { -not ($_.receipt -and $_.receipt.valid -and $_.receipt.realInputLoaded -eq $false) }).Count -gt 0
     $commit = $(if ($runRecord.head -match '\A[0-9a-f]{40}\z') { [string]$runRecord.head } else { $null })
     $runId = $(if ($env:GITHUB_RUN_ID -match '\A[0-9]+\z') { $env:GITHUB_RUN_ID } else { $null })
     $runAttempt = $(if ($env:GITHUB_RUN_ATTEMPT -match '\A[0-9]+\z') { [int]$env:GITHUB_RUN_ATTEMPT } else { $null })
@@ -1258,8 +1299,8 @@ if ($outReady) {
         measurements = $measurements
         assertions = @(
             [ordered]@{ id = 'leaves-pass'; status = $leafStatus; message = $(if ($subset) { "subset run: $($selected.Count) of $($runRecord.leavesPlanned) leaves" } else { $null }) }
-            [ordered]@{ id = 'launch-policy'; status = $(if (-not $policyPass) { 'fail' } elseif ($subset) { 'skip' } else { 'pass' }); message = $null }
-            [ordered]@{ id = 'real-input-absent'; status = $(if (-not $inputPass) { 'fail' } elseif ($subset) { 'skip' } else { 'pass' }); message = $null }
+            [ordered]@{ id = 'launch-policy'; status = (Get-GuiHiddenAssertionStatus $policyViolated $covered $subset); message = $null }
+            [ordered]@{ id = 'real-input-absent'; status = (Get-GuiHiddenAssertionStatus $inputViolated $covered $subset); message = $null }
             [ordered]@{ id = 'state-guards'; status = $(if ($runRecord.stateGuardsHeld) { 'pass' } else { 'fail' }); message = $null }
         )
         artifacts = $receipts
