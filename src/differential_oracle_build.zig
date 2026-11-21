@@ -100,7 +100,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, config: Conf
     const compiler = std.mem.trim(u8, b.run(&.{ b.graph.zig_exe, "version" }), " \r\n");
     const modern = (try std.SemanticVersion.parse(compiler)).minor >= 17;
     if (modern and (api == .fork or api == .stone or api == .stone_flag or corpus)) {
-        step.dependOn(&b.addFail("oracle: legacy API/generator selected on a modern compiler; at 1B.3/1B.5 delete both legacy files and change CI -Dvt-api=fork to v140_fork (or v140 for structured resize)").step);
+        step.dependOn(&b.addFail("oracle: legacy API/generator selected on a modern compiler; at 1B.3/1B.5 delete both legacy files and change CI -Dvt-api=stone_flag to v140 (structured resize; v140_fork only if the flag API returns)").step);
         return;
     }
     const core = b.createModule(.{
