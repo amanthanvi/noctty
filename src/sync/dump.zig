@@ -2,10 +2,26 @@
 //! §19.3): one file per process, opened at the process's first pair in the
 //! directory `NOCTTY_THREAD_ROLE_DUMP` names, as
 //! `<dir>\<exe stem>-<pid>-<start>.pairs`, with each new pair appended at
-//! once by one unbuffered `WriteFile` on a `FILE_APPEND_DATA` handle. A
-//! process that panics, crashes or is killed keeps every line it wrote:
-//! nothing is buffered in the process. Without the variable nothing is
-//! written. `recorder.zig` decides what is new; this file only writes.
+//! once by one unbuffered `WriteFile` at the end of the file (the
+//! end-of-file offset, which `WriteFile` documents as `FILE_APPEND_DATA`'s
+//! append). A process that panics, crashes or is killed keeps every line it
+//! wrote: nothing is buffered in the process. Without the variable nothing
+//! is written. `recorder.zig` decides what is new; this file only writes.
+//!
+//! A pair it fails to write must not leave a dump that reads as complete:
+//! a valid prefix with a pair missing passes the compare (stone round 3's
+//! Sol M2: `tools\role_compare3.py` exited 0 on a header and its first
+//! pair). So `append` says whether the pair is in the dump (the recorder
+//! then keeps it unwritten, to be tried again), and the first failure marks
+//! the dump failed: it overwrites the header's first byte, `#`, with `!` in
+//! place, which needs no disk space, so the mark lands even where a full
+//! disk stopped the pair, then appends `! append-failed win32=<error>` if
+//! it can. A marked dump has no header `parseHeader` or a compare reads
+//! (the symboliser reads it with `parseFailedHeader` and writes it as
+//! `problem=append_failed`), so no collector passes it. A mark that cannot
+//! be written panics, since the dump would read as complete. A failure of
+//! the process dump is also logged as an error, which fails the running
+//! test in the test exe.
 //!
 //! The dump is raw: it holds return addresses, not names. The compare reads
 //! names (`<file>:<bare symbol> <role>`, `tools\role_compare3.py`), so a
@@ -18,8 +34,10 @@
 //!       format=raw-1 exe=<name> base=0x<16 hex> size=0x<8 hex>
 //!       pdb_guid=<GUID|none> pdb_age=<decimal> pdb=<name|none>
 //!     0x<16 hex return address> <acquire> <role>
+//!     ! append-failed win32=<decimal>
 //!
-//! (the header is one line; it is wrapped here). The header begins as the
+//! (the header is one line; it is wrapped here; a failed dump's header
+//! begins `! kind=`, and it may hold the `!` line). The header begins as the
 //! compare's dump header does (`# kind= pid= start=`), so a symboliser keeps
 //! its first three fields. `start` is the process creation time from
 //! `GetProcessTimes`, in 100 ns units since 1601 UTC, the value a launcher
@@ -137,18 +155,75 @@ pub const Dump = struct {
     win32_error: u32 = 0,
     /// Appends that may be using `handle`: `close` waits for none.
     appending: std.atomic.Value(u32) = .init(0),
+    /// Pairs the open dump failed to write; the first marks it failed.
+    lost: std.atomic.Value(u32) = .init(0),
+    /// Set once the failure mark is on disk; a later failure waits for it.
+    marked: std.atomic.Value(bool) = .init(false),
+    /// The Win32 error of the first pair it failed to write.
+    append_error: u32 = 0,
+    /// A test's writer fault (`Fault`); nothing outside the test exe.
+    fault: if (builtin.is_test) ?*Fault else void = if (builtin.is_test) null else {},
 
     const State = enum(u8) { closed, open, off };
 
     /// Appends one pair, opening the dump first if this is the first.
-    pub fn append(self: *Dump, site: usize, role: Role, acquire: Acquire) void {
+    /// False only when the dump is open and the pair is not in it: the
+    /// write failed, and the dump is marked failed. A dump that writes
+    /// nothing (no directory, off, closed) has nothing to keep: true.
+    pub fn append(self: *Dump, site: usize, role: Role, acquire: Acquire) bool {
         // Counted before it reads the state, so a `close` that turns the
         // dump off either is seen here or sees this append (both seq_cst).
         _ = self.appending.fetchAdd(1, .seq_cst);
         defer _ = self.appending.fetchSub(1, .release);
-        const handle = self.opened() orelse return;
+        const handle = self.opened() orelse return true;
         var buf: [pair_line_max]u8 = undefined;
-        _ = writeAll(handle, formatPair(&buf, site, role, acquire));
+        const line = formatPair(&buf, site, role, acquire);
+        const failed = if (self.injected(.pair)) injected_error else writeAt(handle, line, end_of_file);
+        const err = failed orelse return true;
+        self.markFailed(handle, err);
+        return false;
+    }
+
+    /// How many pairs this dump failed to write.
+    pub fn failedAppends(self: *const Dump) u32 {
+        return self.lost.load(.acquire);
+    }
+
+    /// Marks the dump failed at its first lost pair: the header's `#`
+    /// becomes `!` in place (no disk space needed), then the `!` line, if
+    /// it can be appended. A later failure waits until the mark is on disk,
+    /// so no thread goes on (and perhaps panics) while the dump on disk
+    /// still reads as complete.
+    fn markFailed(self: *Dump, handle: windows.HANDLE, err: u32) void {
+        @branchHint(.cold);
+        if (self.lost.fetchAdd(1, .acq_rel) != 0) {
+            var spins: u32 = 0;
+            while (!self.marked.load(.acquire)) {
+                spins +%= 1;
+                if (spins % 64 == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            }
+            return;
+        }
+        self.append_error = err;
+        if (writeAt(handle, &.{failed_mark}, 0)) |mark_err| panicUnmarked(err, mark_err);
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{c} append-failed win32={d}\n", .{ failed_mark, err }) catch unreachable;
+        if (!self.injected(.marker)) _ = writeAt(handle, line, end_of_file);
+        self.marked.store(true, .release);
+        if (self.target == .environment) {
+            log.err("thread-role layer: the pairs dump failed to write a pair (Win32 error {d}); " ++
+                "it is marked failed, and no compare passes it", .{err});
+        }
+    }
+
+    /// Whether a test's fault fails this write.
+    fn injected(self: *Dump, what: enum { pair, marker }) bool {
+        if (!builtin.is_test) return false;
+        const fault = self.fault orelse return false;
+        return switch (what) {
+            .pair => fault.pairs.fetchAdd(1, .acq_rel) >= fault.pairs_before,
+            .marker => fault.marker_fails,
+        };
     }
 
     /// Sets the header's kind. It fails once the dump has been opened or
@@ -217,9 +292,12 @@ pub const Dump = struct {
             break :handle result;
         };
         // Logged after the lock, and only for the process dump: a test reads
-        // `off` itself. An unset variable is the normal case.
+        // `off` itself. An unset variable is the normal case. A set one that
+        // cannot be used leaves no file to mark, and a run's other processes
+        // may still meet its group, so it is an error, which fails the
+        // running test in the test exe.
         if (handle == null and self.target == .environment and self.off.? != .unset) {
-            log.warn(
+            log.err(
                 "thread-role layer: the pairs dump is off ({s}, Win32 error {d}; " ++
                     "its directory is {d} UTF-16 units); this process writes no pairs",
                 .{ @tagName(self.off.?), self.win32_error, dir_len },
@@ -266,9 +344,12 @@ pub const Dump = struct {
         if (len >= path_buf.len) return self.fail(.too_long, 0);
         path_buf[len] = 0;
 
+        // Write access, not append access alone: a failure overwrites the
+        // header's first byte (`markFailed`); every line is written at the
+        // end-of-file offset.
         const handle = windows.kernel32.CreateFileW(
             path_buf[0..len :0].ptr,
-            windows.FILE_APPEND_DATA,
+            windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA,
             windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE,
             null, // not inheritable
             windows.CREATE_NEW,
@@ -288,7 +369,7 @@ pub const Dump = struct {
             .size = module.size,
             .pdb = module.pdb,
         }, exe);
-        if (writeAll(handle, header)) |err| {
+        if (writeAt(handle, header, end_of_file)) |err| {
             windows.CloseHandle(handle);
             return self.fail(.header_failed, err);
         }
@@ -313,16 +394,54 @@ const header_max = 8192;
 /// parse or to match a table row.
 pub const pair_line_max = 256;
 
-/// Writes `bytes` with one `WriteFile`: on a `FILE_APPEND_DATA` handle it
-/// lands whole at the end of the file. The Win32 error, or null.
-fn writeAll(handle: windows.HANDLE, bytes: []const u8) ?u32 {
+/// The first byte of a failed dump's header, and of the line it appends
+/// (`Dump.markFailed`).
+pub const failed_mark: u8 = '!';
+
+/// The end-of-file offset: `WriteFile` with both halves of the offset
+/// 0xFFFFFFFF writes at the end of the file, which it documents as the same
+/// as a `FILE_APPEND_DATA` handle's write, so lines from many threads land
+/// whole, one after another.
+const end_of_file: u64 = std.math.maxInt(u64);
+
+/// The failed pair write a test injects (`Fault`): a full disk's.
+const injected_error: ?u32 = @intFromEnum(windows.Win32Error.DISK_FULL);
+
+/// A test's writer fault: the first `pairs_before` pairs are written and
+/// every later one fails as a full disk fails it, writing nothing; with
+/// `marker_fails` the `!` line fails too. The in-place mark is never
+/// injected: when it fails, the process panics.
+pub const Fault = struct {
+    pairs_before: u32,
+    marker_fails: bool = false,
+    pairs: std.atomic.Value(u32) = .init(0),
+};
+
+/// Writes `bytes` with one `WriteFile` at `offset` (`end_of_file` to
+/// append). The Win32 error, or null; a short write is `WRITE_FAULT`.
+fn writeAt(handle: windows.HANDLE, bytes: []const u8, offset: u64) ?u32 {
     var written: windows.DWORD = 0;
     const len: windows.DWORD = @intCast(bytes.len);
-    if (windows.kernel32.WriteFile(handle, bytes.ptr, len, &written, null) == 0) {
+    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME = .{
+        .Offset = @truncate(offset),
+        .OffsetHigh = @truncate(offset >> 32),
+    };
+    // The handle is synchronous: the call returns once the write is done.
+    if (windows.kernel32.WriteFile(handle, bytes.ptr, len, &written, &overlapped) == 0) {
         return @intFromEnum(windows.GetLastError());
     }
     if (written != len) return @intFromEnum(windows.Win32Error.WRITE_FAULT);
     return null;
+}
+
+fn panicUnmarked(append_error: u32, mark_error: u32) noreturn {
+    @branchHint(.cold);
+    std.debug.panic(
+        "thread-role layer: the pairs dump failed to write a pair (Win32 error {d}) and to " ++
+            "mark itself failed (Win32 error {d}); it would read as complete without the pair",
+        .{ append_error, mark_error },
+    );
 }
 
 fn appendUnits(buf: []u16, len: usize, units: []const u16) ?usize {
@@ -693,8 +812,25 @@ fn decimal(comptime T: type, value: []const u8) ParseError!T {
 /// Reads a raw dump's header line (with or without its LF): every field, in
 /// order, and nothing more.
 pub fn parseHeader(line: []const u8) ParseError!Header {
+    return parseHeaderMarked(line, "#");
+}
+
+/// Reads the header of a dump whose writer failed (`Dump.markFailed`): the
+/// same fields, after `!` in place of `#`. `parseHeader` refuses it, so a
+/// reader that does not ask for it takes the dump for one with no header.
+pub fn parseFailedHeader(line: []const u8) ParseError!Header {
+    return parseHeaderMarked(line, &.{failed_mark});
+}
+
+/// Whether a line after the header is a failed dump's own (`! ...`), not a
+/// pair.
+pub fn isFailedLine(line: []const u8) bool {
+    return line.len > 0 and line[0] == failed_mark;
+}
+
+fn parseHeaderMarked(line: []const u8, mark: []const u8) ParseError!Header {
     var it = std.mem.splitScalar(u8, trimLine(line), ' ');
-    if (!std.mem.eql(u8, it.next() orelse "", "#")) return error.BadLine;
+    if (!std.mem.eql(u8, it.next() orelse "", mark)) return error.BadLine;
     const kind = ProcessKind.parse(try field(&it, "kind")) orelse return error.BadLine;
     const pid = try decimal(u32, try field(&it, "pid"));
     const start = try decimal(u64, try field(&it, "start"));
@@ -1006,7 +1142,7 @@ test "processIdentity is this process's ID and creation time" {
 
 test "a dump with no target, or an unset variable, writes nothing" {
     var none: Dump = .{ .target = .none };
-    none.append(0x10, .ui, .lock);
+    try testing.expect(none.append(0x10, .ui, .lock));
     try testing.expect(!none.isOpen());
     try testing.expectEqual(Off.unset, none.off.?);
     try testing.expectError(error.AlreadyDecided, none.setKind(.child));
@@ -1014,15 +1150,15 @@ test "a dump with no target, or an unset variable, writes nothing" {
     // A variable no process sets.
     var unset: Dump = .{ .target = .{ .environment = L("NOCTTY_THREAD_ROLE_DUMP_UNSET_BY_TEST_7c1e") } };
     try unset.setKind(.child);
-    unset.append(0x10, .ui, .lock);
+    try testing.expect(unset.append(0x10, .ui, .lock));
     try testing.expect(!unset.isOpen());
     try testing.expectEqual(Off.unset, unset.off.?);
 
     var relative: Dump = .{ .target = .{ .directory = L("relative\\dump") } };
-    relative.append(0x10, .ui, .lock);
+    try testing.expect(relative.append(0x10, .ui, .lock));
     try testing.expectEqual(Off.not_drive_absolute, relative.off.?);
     var share: Dump = .{ .target = .{ .directory = L("\\\\server\\share") } };
-    share.append(0x10, .ui, .lock);
+    try testing.expect(share.append(0x10, .ui, .lock));
     try testing.expectEqual(Off.not_drive_absolute, share.off.?);
 }
 
@@ -1078,7 +1214,7 @@ test "a dump opens at its first pair, appends each at once and is readable while
     try d.setKind(.child);
     try testing.expectEqual(@as(usize, 0), try dir.count());
 
-    d.append(0x7ff600001000, .ui, .lock);
+    try testing.expect(d.append(0x7ff600001000, .ui, .lock));
     try testing.expect(d.isOpen());
     try testing.expectError(error.AlreadyDecided, d.setKind(.gui));
 
@@ -1113,7 +1249,7 @@ test "a dump opens at its first pair, appends each at once and is readable while
     try testing.expect(std.mem.endsWith(u8, file_name, tail));
     try testing.expectEqualStrings(header.exe[0 .. header.exe.len - 4], file_name[0 .. file_name.len - tail.len]);
 
-    d.append(0x7ff600002000, .{ .worker = "update-check" }, .demand);
+    try testing.expect(d.append(0x7ff600002000, .{ .worker = "update-check" }, .demand));
     const second = try dir.read();
     defer testing.allocator.free(second);
     try testing.expect(std.mem.startsWith(u8, second, first));
@@ -1125,8 +1261,8 @@ test "a dump never truncates or appends to an existing file, and it reads back a
     defer dir.deinit();
     var a: Dump = .{ .target = .{ .directory = dir.path } };
     defer a.close();
-    a.append(0x1000, .termio, .lock);
-    a.append(0x2000, .reader, .try_lock);
+    try testing.expect(a.append(0x1000, .termio, .lock));
+    try testing.expect(a.append(0x2000, .reader, .try_lock));
     a.close();
     try testing.expect(!a.isOpen());
     const before = try dir.read();
@@ -1135,7 +1271,7 @@ test "a dump never truncates or appends to an existing file, and it reads back a
 
     // A second dump of this process in that directory has the same name.
     var b: Dump = .{ .target = .{ .directory = dir.path } };
-    b.append(0x3000, .search, .lock);
+    try testing.expect(b.append(0x3000, .search, .lock));
     try testing.expect(!b.isOpen());
     try testing.expectEqual(Off.exists, b.off.?);
     try testing.expectEqual(@intFromEnum(windows.Win32Error.FILE_EXISTS), b.win32_error);
@@ -1154,12 +1290,12 @@ test "a close while threads append leaves whole lines, and nothing is written af
     defer dir.deinit();
     var d: Dump = .{ .target = .{ .directory = dir.path } };
     defer d.close();
-    d.append(0x1000, .ui, .lock);
+    try testing.expect(d.append(0x1000, .ui, .lock));
 
     const Appender = struct {
         fn run(dump: *Dump, t: usize, go: *std.atomic.Value(bool)) void {
             while (!go.load(.acquire)) std.atomic.spinLoopHint();
-            for (0..200) |i| dump.append(0x10000 + t * 0x1000 + i, .termio, .lock);
+            for (0..200) |i| _ = dump.append(0x10000 + t * 0x1000 + i, .termio, .lock);
         }
     };
     var go: std.atomic.Value(bool) = .init(false);
@@ -1169,7 +1305,7 @@ test "a close while threads append leaves whole lines, and nothing is written af
     d.close();
     for (threads) |thread| thread.join();
     try testing.expect(!d.isOpen());
-    d.append(0x2000, .ui, .lock);
+    try testing.expect(d.append(0x2000, .ui, .lock));
 
     const text = try dir.read();
     defer testing.allocator.free(text);
@@ -1185,13 +1321,118 @@ test "a close while threads append leaves whole lines, and nothing is written af
     try testing.expectEqual(@as(?[]const u8, null), lines.next());
 }
 
+test "a pair the dump fails to write marks it failed in place, and no reader takes it for complete" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var fault: Fault = .{ .pairs_before = 1 };
+    var d: Dump = .{ .target = .{ .directory = dir.path }, .kind = .child, .fault = &fault };
+    defer d.close();
+    try testing.expect(d.append(0x1000, .ui, .lock));
+    const before = try dir.read();
+    defer testing.allocator.free(before);
+    _ = try parseHeader(std.mem.sliceTo(before, '\n'));
+
+    // A full disk: nothing of the pair is written, and append says so.
+    try testing.expect(!d.append(0x2000, .termio, .lock));
+    try testing.expectEqual(@as(u32, 1), d.failedAppends());
+    try testing.expectEqual(@intFromEnum(windows.Win32Error.DISK_FULL), d.append_error);
+    const after = try dir.read();
+    defer testing.allocator.free(after);
+    // The header's first byte is `!`, overwritten in place; the rest is as
+    // it was, and the failure's line follows.
+    try testing.expectEqual(@as(u8, '!'), after[0]);
+    try testing.expectEqualStrings(before[1..], after[1..before.len]);
+    try testing.expectEqualStrings("! append-failed win32=112\n", after[before.len..]);
+    var lines = std.mem.splitScalar(u8, after, '\n');
+    const first = lines.next().?;
+    try testing.expectError(error.BadLine, parseHeader(first));
+    const header = try parseFailedHeader(first);
+    try testing.expectEqual(ProcessKind.child, header.kind);
+    try testing.expectEqual(processIdentity().pid, header.pid);
+    try testing.expectEqual(@as(u64, 0x1000), (try parsePair(lines.next().?)).site);
+    const mark = lines.next().?;
+    try testing.expect(isFailedLine(mark));
+    try testing.expectError(error.BadLine, parsePair(mark));
+    try testing.expectEqualStrings("", lines.next().?);
+    try testing.expectError(error.BadLine, parseFailedHeader(std.mem.sliceTo(before, '\n')));
+
+    // A second failure is counted; the mark is written once.
+    try testing.expect(!d.append(0x3000, .ui, .lock));
+    try testing.expectEqual(@as(u32, 2), d.failedAppends());
+    const again = try dir.read();
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(after, again);
+
+    // Writes that work again append after the mark; the dump stays failed.
+    fault.pairs_before = std.math.maxInt(u32);
+    try testing.expect(d.append(0x2000, .termio, .lock));
+    const last = try dir.read();
+    defer testing.allocator.free(last);
+    try testing.expect(std.mem.startsWith(u8, last, after));
+    try testing.expectEqualStrings("0x0000000000002000 lock termio\n", last[after.len..]);
+}
+
+test "a full disk that also stops the failure's line still leaves the header marked" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var fault: Fault = .{ .pairs_before = 1, .marker_fails = true };
+    var d: Dump = .{ .target = .{ .directory = dir.path }, .fault = &fault };
+    defer d.close();
+    try testing.expect(d.append(0x1000, .ui, .lock));
+    const before = try dir.read();
+    defer testing.allocator.free(before);
+    try testing.expect(!d.append(0x2000, .termio, .lock));
+    const after = try dir.read();
+    defer testing.allocator.free(after);
+    try testing.expectEqual(before.len, after.len);
+    try testing.expectEqual(@as(u8, '!'), after[0]);
+    try testing.expectEqualStrings(before[1..], after[1..]);
+    try testing.expectError(error.BadLine, parseHeader(std.mem.sliceTo(after, '\n')));
+    _ = try parseFailedHeader(std.mem.sliceTo(after, '\n'));
+}
+
+test "threads that lose pairs at once wait for one mark" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var fault: Fault = .{ .pairs_before = 0 };
+    var d: Dump = .{ .target = .{ .directory = dir.path }, .fault = &fault };
+    defer d.close();
+
+    const Loser = struct {
+        fn run(dump: *Dump, t: usize, go: *std.atomic.Value(bool), written: *std.atomic.Value(u32)) void {
+            while (!go.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..8) |i| {
+                if (dump.append(0x10000 + t * 0x100 + i, .reader, .lock)) _ = written.fetchAdd(1, .monotonic);
+                // Each failed append returns only once the mark is on disk.
+                if (!dump.marked.load(.acquire)) _ = written.fetchAdd(1000, .monotonic);
+            }
+        }
+    };
+    var go: std.atomic.Value(bool) = .init(false);
+    var written: std.atomic.Value(u32) = .init(0);
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, t| thread.* = try std.Thread.spawn(.{}, Loser.run, .{ &d, t, &go, &written });
+    go.store(true, .release);
+    for (threads) |thread| thread.join();
+    try testing.expectEqual(@as(u32, 0), written.load(.monotonic));
+    try testing.expectEqual(@as(u32, 32), d.failedAppends());
+
+    const text = try dir.read();
+    defer testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = try parseFailedHeader(lines.next().?);
+    try testing.expectEqualStrings("! append-failed win32=112", lines.next().?);
+    try testing.expectEqualStrings("", lines.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), lines.next());
+}
+
 test "a missing directory leaves the dump off with its Win32 error" {
     var dir = try TestDir.init();
     defer dir.deinit();
     const missing = try std.mem.concatWithSentinel(testing.allocator, u16, &.{ dir.path, L("\\missing") }, 0);
     defer testing.allocator.free(missing);
     var d: Dump = .{ .target = .{ .directory = missing } };
-    d.append(0x1000, .ui, .lock);
+    try testing.expect(d.append(0x1000, .ui, .lock));
     try testing.expectEqual(Off.create_failed, d.off.?);
     try testing.expectEqual(@intFromEnum(windows.Win32Error.PATH_NOT_FOUND), d.win32_error);
     try testing.expectEqual(@as(usize, 0), try dir.count());

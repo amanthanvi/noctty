@@ -14,8 +14,10 @@
 //! to the dump and marks it `.written`; a thread that finds a slot being
 //! written waits for it, and one that finds its own pair waits until it is
 //! in the dump before it goes on, so no thread acts on a pair (and perhaps
-//! panics) that the dump might not hold. A worker role matches by its
-//! name's bytes. The capacity is a comptime parameter: the process's is
+//! panics) that the dump might not hold. A pair the dump failed to write is
+//! marked `.unwritten`, never `.written` (the dump marks itself failed:
+//! `dump.Dump.append`), and the next thread that sees the pair writes it
+//! again. A worker role matches by its name's bytes. The capacity is a comptime parameter: the process's is
 //! `process_capacity`, and tests build small ones (acceptance test 12). A
 //! full table is PN5, after the pair that found it full is written to the
 //! dump.
@@ -88,12 +90,12 @@ pub fn Recorder(comptime capacity: usize) type {
         pub fn record(self: *Self, site: usize, role: Role, acquire: Acquire) void {
             switch (self.claim(site, role, acquire)) {
                 .seen => {},
-                .new => |slot| {
-                    self.sink.append(site, role, acquire);
-                    slot.state.store(.written, .release);
+                .new, .retry => |slot| {
+                    const written = self.sink.append(site, role, acquire);
+                    slot.state.store(if (written) .written else .unwritten, .release);
                 },
                 .full => {
-                    self.sink.append(site, role, acquire);
+                    _ = self.sink.append(site, role, acquire);
                     panicFull(capacity);
                 },
             }
@@ -108,15 +110,22 @@ pub fn Recorder(comptime capacity: usize) type {
                     slot.state.store(.written, .release);
                     break :new .new;
                 },
+                .retry => |slot| retry: {
+                    slot.state.store(.written, .release);
+                    break :retry .seen;
+                },
                 .seen => .seen,
                 .full => .full,
             };
         }
 
-        const Claim = union(Outcome) {
+        const Claim = union(enum) {
             /// The slot this thread published, `.ready`: its caller marks
-            /// it `.written` once the pair is in the dump.
+            /// it `.written` once the pair is in the dump, or `.unwritten`.
             new: *Slot,
+            /// A pair the dump failed to write, `.ready` again: this thread
+            /// writes it, as for `.new`.
+            retry: *Slot,
             seen,
             full,
         };
@@ -145,11 +154,16 @@ pub fn Recorder(comptime capacity: usize) type {
                 // stores, unless that thread is preempted.
                 state = waitWhile(slot, state, .writing);
                 if (slot.matches(site, role)) {
-                    // Its claimer is appending it to the dump (RQ12: the
-                    // dump keeps every pair a thread saw, and this thread
-                    // may panic next). One write, the first time only.
-                    _ = waitWhile(slot, state, .ready);
-                    return .seen;
+                    while (true) {
+                        // Its claimer is appending it to the dump (RQ12: the
+                        // dump keeps every pair a thread saw, and this
+                        // thread may panic next). One write, unless it fails.
+                        state = waitWhile(slot, state, .ready);
+                        if (state != .unwritten) return .seen;
+                        // The write failed: this thread writes it again.
+                        state = slot.state.cmpxchgStrong(.unwritten, .ready, .acquire, .acquire) orelse
+                            return .{ .retry = slot };
+                    }
                 }
             }
             return .full;
@@ -163,7 +177,7 @@ pub fn Recorder(comptime capacity: usize) type {
                 switch (slot.state.load(.acquire)) {
                     .empty => return false,
                     .writing => continue,
-                    .ready, .written => if (slot.matches(site, role)) return true,
+                    .ready, .written, .unwritten => if (slot.matches(site, role)) return true,
                 }
             }
             return false;
@@ -175,7 +189,7 @@ pub fn Recorder(comptime capacity: usize) type {
             for (self.slots) |*slot| {
                 switch (slot.state.load(.acquire)) {
                     .empty, .writing => {},
-                    .ready, .written => n += 1,
+                    .ready, .written, .unwritten => n += 1,
                 }
             }
             return n;
@@ -208,8 +222,10 @@ const Slot = extern struct {
     tag: u8 = 0,
     reserved: [@sizeOf(usize) - 3]u8 = @splat(0),
 
-    /// `.ready`: published, its fields readable; `.written`: in the dump.
-    const State = enum(u8) { empty, writing, ready, written };
+    /// `.ready`: published, its fields readable, being written to the dump;
+    /// `.written`: in the dump; `.unwritten`: published, but its write
+    /// failed, so the next thread that sees it writes it again.
+    const State = enum(u8) { empty, writing, ready, written, unwritten };
 
     comptime {
         var fields: usize = 0;
@@ -364,6 +380,90 @@ test "a thread that finds its pair published waits until the pair is written" {
     try testing.expect(other.done.load(.acquire));
     try testing.expectEqual(Outcome.seen, other.outcome);
     try testing.expectEqual(@as(usize, 2), rec.count());
+}
+
+/// The state of the slot that holds a pair, if any.
+fn stateOf(slots: []const Slot, site: usize, role: Role) ?Slot.State {
+    for (slots) |*slot| {
+        const state = slot.state.load(.acquire);
+        if (state != .empty and state != .writing and slot.matches(site, role)) return state;
+    }
+    return null;
+}
+
+test "a pair the dump fails to write is not marked written, and its next record writes it" {
+    var dir = try dump.TestDir.init();
+    defer dir.deinit();
+    var fault: dump.Fault = .{ .pairs_before = 1 };
+    var slots = Recorder(16).empty;
+    var rec: Recorder(16) = .{ .slots = &slots, .sink = .{ .target = .{ .directory = dir.path }, .fault = &fault } };
+    defer rec.sink.close();
+    const kept = 0x7ff600001000;
+    const lost = 0x7ff600002000;
+
+    rec.record(kept, .ui, .lock);
+    rec.record(lost, .termio, .lock);
+    try testing.expectEqual(@as(?Slot.State, .written), stateOf(&slots, kept, .ui));
+    try testing.expectEqual(@as(?Slot.State, .unwritten), stateOf(&slots, lost, .termio));
+    try testing.expect(rec.contains(lost, .termio));
+    try testing.expectEqual(@as(usize, 2), rec.count());
+
+    // While writes fail, each record of the lost pair tries it again; a
+    // written pair is not written again.
+    rec.record(lost, .termio, .lock);
+    rec.record(kept, .ui, .lock);
+    try testing.expectEqual(@as(u32, 2), rec.sink.failedAppends());
+    try testing.expectEqual(@as(?Slot.State, .unwritten), stateOf(&slots, lost, .termio));
+
+    // Once writes work, the next record writes it, once.
+    fault.pairs_before = std.math.maxInt(u32);
+    rec.record(lost, .termio, .lock);
+    try testing.expectEqual(@as(?Slot.State, .written), stateOf(&slots, lost, .termio));
+    rec.record(lost, .termio, .lock);
+    try testing.expectEqual(Outcome.seen, rec.insert(lost, .termio, .lock));
+
+    const text = try dir.read();
+    defer testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = try dump.parseFailedHeader(lines.next().?);
+    try testing.expectEqualStrings("0x00007ff600001000 lock ui", lines.next().?);
+    try testing.expectEqualStrings("! append-failed win32=112", lines.next().?);
+    try testing.expectEqualStrings("0x00007ff600002000 lock termio", lines.next().?);
+    try testing.expectEqualStrings("", lines.next().?);
+    try testing.expectEqual(@as(?[]const u8, null), lines.next());
+}
+
+test "a thread waiting on a pair whose write fails writes it itself" {
+    var slots = Recorder(8).empty;
+    var rec: Recorder(8) = .{ .slots = &slots, .sink = .{ .target = .none } };
+    const slot = switch (rec.claim(0x10, .ui, .lock)) {
+        .new => |s| s,
+        else => return error.TestUnexpectedResult,
+    };
+    const Other = struct {
+        rec: *Recorder(8),
+        claimed: ?*Slot = null,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            switch (self.rec.claim(0x10, .ui, .try_lock)) {
+                .retry => |s| self.claimed = s,
+                else => {},
+            }
+            self.done.store(true, .release);
+        }
+    };
+    var other: Other = .{ .rec = &rec };
+    const thread = try std.Thread.spawn(.{}, Other.run, .{&other});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try testing.expect(!other.done.load(.acquire));
+    // This thread's write failed: the waiter takes the pair to write.
+    slot.state.store(.unwritten, .release);
+    thread.join();
+    try testing.expectEqual(@as(?*Slot, slot), other.claimed);
+    try testing.expectEqual(Slot.State.ready, slot.state.load(.acquire));
+    slot.state.store(.written, .release);
+    try testing.expectEqual(@as(usize, 1), rec.count());
 }
 
 const Concurrent = struct {

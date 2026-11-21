@@ -32,7 +32,13 @@
 //! which the compare joins on. A pair that cannot be named is written
 //! `?<why>:0x<address> <role>`, a key with no file, which fails the compare
 //! as UNQUALIFIED-KEY, and so is every pair of a dump whose identity does
-//! not match (`problem=`): a bad dump can never pass.
+//! not match (`problem=`): a bad dump can never pass. A dump whose writer
+//! failed to write a pair (its raw header begins `!`: `dump.Dump.append`)
+//! is `problem=append_failed`, every pair of it written so, and its first
+//! line after the header is `lost_line`, `?append_failed:pairs-lost none`,
+//! so it fails `tools\role_compare3.py` as UNQUALIFIED-KEY even when it
+//! holds no pair, or only pairs the table holds; `compare.zig` fails a
+//! `problem=` header as BAD-DUMP.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -93,7 +99,22 @@ pub const Problem = enum {
     /// No image of the dump's exe name in the images directory, or one that
     /// cannot be read.
     no_image,
+    /// The dump's writer failed to write a pair (its header's `!`): the
+    /// pairs it holds are a prefix, and a lost one may be off the table.
+    append_failed,
 };
+
+/// The line a dump whose writer failed gets after its header, whatever
+/// pairs it holds: a key with no file, which no compare passes.
+pub const lost_line = "?append_failed:pairs-lost none\n";
+
+/// A raw dump's header line: a complete dump's, or one whose writer failed
+/// (`dump.parseFailedHeader`).
+fn readHeader(line: []const u8) ?struct { header: dump.Header, failed: bool } {
+    if (dump.parseHeader(line)) |header| return .{ .header = header, .failed = false } else |_| {}
+    if (dump.parseFailedHeader(line)) |header| return .{ .header = header, .failed = true } else |_| {}
+    return null;
+}
 
 // DbgHelp, as `DbgHelp.h` declares it (inside `pshpack8.h`, which changes no
 // x64 layout here; the sizes and offsets are pinned in a test).
@@ -439,12 +460,14 @@ fn write(
     result: *Result,
 ) (std.Io.Writer.Error || Allocator.Error)!void {
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const header = dump.parseHeader(lines.first()) catch {
+    const read = readHeader(lines.first()) orelse {
         // No header: the compare fails it as BAD-DUMP.
         result.problem = .bad_header;
         return;
     };
+    const header = read.header;
     result.problem = problem: {
+        if (read.failed) break :problem .append_failed;
         const dump_pdb = header.pdb orelse break :problem .no_pdb;
         const own = image_pdb orelse break :problem .no_pdb;
         if (!std.mem.eql(u8, &dump_pdb.guid, &own.guid) or dump_pdb.age != own.age) break :problem .pdb_mismatch;
@@ -462,9 +485,14 @@ fn write(
     }
     if (result.problem) |p| try w.print(" problem={s}", .{@tagName(p)});
     try w.writeByte('\n');
+    if (read.failed) {
+        result.unresolved += 1;
+        try w.writeAll(lost_line);
+    }
 
     while (lines.next()) |line| {
         if (std.mem.trim(u8, line, " \r").len == 0) continue;
+        if (read.failed and dump.isFailedLine(line)) continue;
         result.pairs += 1;
         const pair = dump.parsePair(line) catch {
             result.unresolved += 1;
@@ -593,7 +621,10 @@ fn runDirectories(a: Allocator) !u8 {
 /// One raw dump, symbolised against its image in `images_path`.
 fn symboliseFile(a: Allocator, raw: []const u8, images_path: []const u8, root: []const u8) !Result {
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const header = dump.parseHeader(lines.first()) catch return .{ .text = try a.dupe(u8, ""), .problem = .bad_header };
+    const read = readHeader(lines.first()) orelse return .{ .text = try a.dupe(u8, ""), .problem = .bad_header };
+    // A failed dump is refused whatever its image, so none is looked for.
+    if (read.failed) return problemOnly(a, raw, .append_failed);
+    const header = read.header;
     var exe_buf: [512]u8 = undefined;
     const exe = dump.unescape(&exe_buf, header.exe) catch "";
     if (!plainFileName(exe)) return problemOnly(a, raw, .no_image);
@@ -614,16 +645,21 @@ fn problemOnly(a: Allocator, raw: []const u8, problem: Problem) Allocator.Error!
     errdefer out.deinit();
     var result: Result = .{ .text = undefined, .problem = problem };
     var lines = std.mem.splitScalar(u8, raw, '\n');
-    const header_line = lines.first();
+    const read = readHeader(lines.first());
+    const failed = if (read) |r| r.failed else false;
     const w = &out.writer;
-    blk: {
-        const header = dump.parseHeader(header_line) catch break :blk;
+    if (read) |r| {
         w.print("# kind={s} pid={d} start={d} format=" ++ format_name ++ " exe={s} problem={s}\n", .{
-            header.kind.text(), header.pid, header.start, header.exe, @tagName(problem),
+            r.header.kind.text(), r.header.pid, r.header.start, r.header.exe, @tagName(problem),
         }) catch return error.OutOfMemory;
+    }
+    if (problem == .append_failed) {
+        result.unresolved += 1;
+        w.writeAll(lost_line) catch return error.OutOfMemory;
     }
     while (lines.next()) |line| {
         if (std.mem.trim(u8, line, " \r").len == 0) continue;
+        if (failed and dump.isFailedLine(line)) continue;
         result.pairs += 1;
         result.unresolved += 1;
         const pair = dump.parsePair(line) catch {
@@ -856,4 +892,159 @@ test "the image file's own CodeView record is this process's" {
     try testing.expectEqual(pdb.guid, file_pdb.guid);
     try testing.expectEqual(pdb.age, file_pdb.age);
     try testing.expectError(error.NoImage, imagePdb(std.unicode.utf8ToUtf16LeStringLiteral("C:\\no\\such\\image.exe")));
+}
+
+/// The writer-failure control's one site (stone round 3's Sol M2): it
+/// records the address its call resumes at, as `StateMutex`'s acquire does.
+const LostPairSite = struct {
+    var site: usize = 0;
+
+    inline fn record() void {
+        @call(.never_tail, recordImpl, .{});
+    }
+
+    noinline fn recordImpl() void {
+        site = @returnAddress();
+    }
+
+    noinline fn symboliseLostPairSite() void {
+        record();
+    }
+};
+
+const recorder = @import("recorder.zig");
+const compare = @import("compare.zig");
+
+/// The control's recorders, each with a test's directory as its dump.
+const ControlRecorder = recorder.Recorder(8);
+
+test "a dump whose writer failed after one pair fails the compare, though that pair is in the table" {
+    const a = testing.allocator;
+    LostPairSite.symboliseLostPairSite();
+    const site = LostPairSite.site;
+    var session = try Session.openSelf(a);
+    defer session.close();
+    const pdb = (dump.selfModule().?).pdb orelse return error.SkipZigTest; // a stripped build has no PDB
+    const root = try session.sourceRoot(a);
+    defer a.free(root);
+
+    // The writer writes the child's first pair, an allowed one, and loses
+    // its second, the off-table one, as a full disk loses it.
+    var dir = try dump.TestDir.init();
+    defer dir.deinit();
+    var fault: dump.Fault = .{ .pairs_before = 1 };
+    var slots = ControlRecorder.empty;
+    var rec: ControlRecorder = .{ .slots = &slots, .sink = .{
+        .target = .{ .directory = dir.path },
+        .kind = .child,
+        .fault = &fault,
+    } };
+    defer rec.sink.close();
+    rec.record(site, .ui, .lock);
+    rec.record(site, .termio, .lock);
+    try testing.expectEqual(@as(u32, 1), rec.sink.failedAppends());
+    const raw = try dir.read();
+    defer a.free(raw);
+
+    // What the writer left before the fix: the same header, unmarked, and
+    // the kept pair. It names the table's one row and passes, as Sol
+    // measured with role_compare3.py on test 13's dump.
+    var raw_lines = std.mem.splitScalar(u8, raw, '\n');
+    const marked_header = raw_lines.next().?;
+    try testing.expectEqual(@as(u8, dump.failed_mark), marked_header[0]);
+    const kept_line = raw_lines.next().?;
+    const prefix = try std.fmt.allocPrint(a, "#{s}\n{s}\n", .{ marked_header[1..], kept_line });
+    defer a.free(prefix);
+    const named = try symbolise(a, prefix, &session, pdb, root);
+    defer named.deinit(a);
+    try testing.expectEqual(@as(?Problem, null), named.problem);
+    var named_lines = std.mem.splitScalar(u8, named.text, '\n');
+    _ = named_lines.next();
+    const kept = named_lines.next().?;
+    const space = std.mem.lastIndexOfScalar(u8, kept, ' ').?;
+    try testing.expectEqualStrings("ui", kept[space + 1 ..]);
+    if (!compare.qualified(kept[0..space])) {
+        // This build names no site (RQ16); the compare has nothing to key.
+        if (!names_checked) return error.SkipZigTest;
+        return error.TestUnexpectedResult;
+    }
+    const table = try std.fmt.allocPrint(a, "{s}\tui\n", .{kept[0..space]});
+    defer a.free(table);
+    var hazard = try compare.isolated(a, table, null, &.{.{ .name = "c.pairs", .text = named.text }}, .{});
+    defer hazard.deinit();
+    try testing.expect(hazard.passed());
+
+    // The lost pair is the off-table one: a dump that kept both fails one
+    // PAIR-OUTSIDE-TABLE naming it.
+    var whole_dir = try dump.TestDir.init();
+    defer whole_dir.deinit();
+    var whole_slots = ControlRecorder.empty;
+    var whole: ControlRecorder = .{ .slots = &whole_slots, .sink = .{ .target = .{ .directory = whole_dir.path }, .kind = .child } };
+    defer whole.sink.close();
+    whole.record(site, .ui, .lock);
+    whole.record(site, .termio, .lock);
+    const whole_raw = try whole_dir.read();
+    defer a.free(whole_raw);
+    const whole_named = try symbolise(a, whole_raw, &session, pdb, root);
+    defer whole_named.deinit(a);
+    var off = try compare.isolated(a, table, null, &.{.{ .name = "c.pairs", .text = whole_named.text }}, .{});
+    defer off.deinit();
+    try testing.expectEqual(@as(usize, 1), off.failures.items.len);
+    try testing.expectEqual(@as(usize, 1), off.count(.pair_outside_table));
+    var line_buf: [512]u8 = undefined;
+    try testing.expect(off.hasLine(try std.fmt.bufPrint(&line_buf, "FAIL PAIR-OUTSIDE-TABLE c.pairs: ({s}, termio)", .{kept[0..space]})));
+
+    // The marked dump: the symboliser refuses it, and the compare fails it.
+    const refused = try symbolise(a, raw, &session, pdb, root);
+    defer refused.deinit(a);
+    try testing.expectEqual(@as(?Problem, .append_failed), refused.problem);
+    try testing.expectEqual(@as(usize, 1), refused.pairs);
+    try testing.expectEqual(@as(usize, 2), refused.unresolved);
+    var refused_lines = std.mem.splitScalar(u8, refused.text, '\n');
+    const refused_header = refused_lines.next().?;
+    try testing.expect(std.mem.startsWith(u8, refused_header, "# kind=child pid="));
+    try testing.expect(std.mem.endsWith(u8, refused_header, " problem=append_failed"));
+    try testing.expectEqualStrings(lost_line, try std.fmt.bufPrint(&line_buf, "{s}\n", .{refused_lines.next().?}));
+    try testing.expectEqualStrings(
+        try std.fmt.bufPrint(&line_buf, "?append_failed:0x{x:0>16} ui", .{site}),
+        refused_lines.next().?,
+    );
+    try testing.expectEqualStrings("", refused_lines.next().?);
+    var failed = try compare.isolated(a, table, null, &.{.{ .name = "c.pairs", .text = refused.text }}, .{});
+    defer failed.deinit();
+    try testing.expect(!failed.passed());
+    try testing.expectEqual(@as(usize, 1), failed.count(.bad_dump));
+    // The prototype reads only a header's first three fields: without the
+    // problem field the same dump still fails, on the lost line's key.
+    const unflagged = try std.mem.replaceOwned(u8, a, refused.text, " problem=append_failed", "");
+    defer a.free(unflagged);
+    var prototype = try compare.isolated(a, table, null, &.{.{ .name = "c.pairs", .text = unflagged }}, .{});
+    defer prototype.deinit();
+    try testing.expectEqual(@as(usize, 2), prototype.count(.unqualified_key));
+    try testing.expect(prototype.hasLine("FAIL UNQUALIFIED-KEY c.pairs: (?append_failed:pairs-lost, none) names no .zig file"));
+
+    // Once writes work again the lost pair is written on its next record;
+    // the dump stays failed, and is still refused.
+    fault.pairs_before = std.math.maxInt(u32);
+    rec.record(site, .termio, .lock);
+    const later = try dir.read();
+    defer a.free(later);
+    const still = try symbolise(a, later, &session, pdb, root);
+    defer still.deinit(a);
+    try testing.expectEqual(@as(?Problem, .append_failed), still.problem);
+    try testing.expectEqual(@as(usize, 2), still.pairs);
+}
+
+test "a failed dump is refused without its image, and with no pair still fails" {
+    const a = testing.allocator;
+    // The writer lost the process's first pair: the header alone, marked.
+    const raw = "! kind=test-exe pid=7 start=8 format=raw-1 exe=ghostty-test.exe base=0x0000000000010000 " ++
+        "size=0x00001000 pdb_guid=none pdb_age=0 pdb=none\n! append-failed win32=112\n";
+    const result = try symboliseFile(a, raw, "C:\\no\\such\\images", "C:\\src\\");
+    defer result.deinit(a);
+    try testing.expectEqual(@as(?Problem, .append_failed), result.problem);
+    try testing.expectEqual(@as(usize, 0), result.pairs);
+    try testing.expectEqual(@as(usize, 1), result.unresolved);
+    try testing.expectEqualStrings("# kind=test-exe pid=7 start=8 format=sym-1 exe=ghostty-test.exe problem=append_failed\n" ++
+        lost_line, result.text);
 }

@@ -9,6 +9,13 @@
 //! - every dump in the directory is a child's (`kind=child`), else
 //!   NOT-CHILD-DUMP; at least one exists, else MISSING-DUMP; each holds a
 //!   pair, else EMPTY-DUMP; a dump without a header is BAD-DUMP;
+//! - a header with a `problem=` field is BAD-DUMP too, its pairs not
+//!   compared: the symboliser could not name them, or the child's writer
+//!   failed to write one (`problem=append_failed`, `dump.Dump.append`), so
+//!   the dump is a prefix whose lost pair could be off the table. This rule
+//!   is this file's, not the prototype's: `role_compare3.py` reads only a
+//!   header's first three fields and fails such a dump through the
+//!   symboliser's unqualified keys (`symbolise.lost_line`) instead;
 //! - each pair `<function key> <role>` is compared with the table: a key
 //!   that names no `.zig` file is UNQUALIFIED-KEY, a pair the table does not
 //!   hold PAIR-OUTSIDE-TABLE;
@@ -199,6 +206,12 @@ pub fn isolated(
             continue;
         }
         report.child_dumps += 1;
+        if (headerProblem(first)) |problem| {
+            try report.fail(.bad_dump, "{s}: the symboliser found a problem ({s}); its pairs are not compared", .{
+                d.name, problem,
+            });
+            continue;
+        }
         var pairs: usize = 0;
         var rest = lines;
         while (rest.next()) |_| pairs += 1;
@@ -455,6 +468,16 @@ fn parseHeader(line: []const u8) ?Header {
     return .{ .kind = kind, .pid = pid, .start = start };
 }
 
+/// The value of a header's `problem=` field, which the symboliser writes
+/// when it could not name a dump's pairs.
+fn headerProblem(line: []const u8) ?[]const u8 {
+    var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+    while (fields.next()) |f| {
+        if (std.mem.startsWith(u8, f, "problem=")) return f["problem=".len..];
+    }
+    return null;
+}
+
 /// `prefix` then one or more non-space bytes.
 fn headerField(rest: *[]const u8, prefix: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, rest.*, prefix)) return null;
@@ -556,6 +579,33 @@ test "control 70: a child dump with no pair fails EMPTY-DUMP" {
     }, cmp_table, null, &.{.{ .empty_dump, 1 }});
     defer report.deinit();
     try testing.expect(report.hasLine("FAIL EMPTY-DUMP child-902.pairs: the isolated child (pid 902) recorded no pair"));
+}
+
+test "a dump the symboliser found a problem in fails BAD-DUMP, its pairs not compared" {
+    // A child's writer failed after one pair the table holds: the
+    // symbolised dump keeps that pair, and must not pass.
+    const failed = "# kind=child pid=903 start=134070000000000903 format=sym-1 exe=ghostty-test.exe " ++
+        "pdb_guid=none pdb_age=0 problem=append_failed\n" ++
+        "?append_failed:pairs-lost none\n" ++
+        "?append_failed:0x00007ff600001000 ui\n";
+    var report = try expectReport(&.{.{ .name = "child-903.pairs", .text = failed }}, cmp_table, null, &.{
+        .{ .bad_dump, 1 },
+    });
+    defer report.deinit();
+    try testing.expect(report.hasLine("FAIL BAD-DUMP child-903.pairs: the symboliser found a problem " ++
+        "(append_failed); its pairs are not compared"));
+    try testing.expectEqual(@as(usize, 1), report.child_dumps);
+    // The same dump's pairs, had they been named and the header kept its
+    // problem: still BAD-DUMP, whatever its pairs.
+    const named = "# kind=child pid=901 start=134070000000000901 problem=pdb_mismatch\n" ++
+        "src/Surface.zig:keyCallback ui\n";
+    var other = try expectReport(&.{.{ .name = "child-901.pairs", .text = named }}, cmp_table, null, &.{
+        .{ .bad_dump, 1 },
+    });
+    defer other.deinit();
+    // A problem field anywhere in the header, not in a pair.
+    try testing.expectEqualStrings("append_failed", headerProblem("# kind=child pid=1 start=2 problem=append_failed").?);
+    try testing.expectEqual(@as(?[]const u8, null), headerProblem("# kind=child pid=1 start=2 format=sym-1"));
 }
 
 test "the pair rules: suffix stripping, test keys, another file's same name, a key without its file, no header" {
