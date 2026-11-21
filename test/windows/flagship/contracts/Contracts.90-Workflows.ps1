@@ -2924,3 +2924,63 @@ if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
     $arrayRoot.GetType() -eq [System.Management.Automation.PSCustomObject]) {
     throw 'PowerShell JSON root-kind preservation does not satisfy the evidence contract.'
 }
+
+# Design v7 §2.1 checks 1 and 2 (interactive offload; Opus on #740): the frozen set. Until the visible core's
+# readers switch (offload PRs 2-6), the visible composite, its evidence readers and the workflows that run them stay
+# as they are: (1) each file's canonical-text SHA-256 (Get-CanonicalTextSha256, so CRLF and LF checkouts agree) is
+# pinned here, and changing one is a deliberate re-pin reviewed against the design (release.yml's value is also
+# Contracts.80's $releaseWorkflowSha256); (2) no frozen entry point names NOCTTY_GUI_LAUNCH_POLICY or a
+# NOCTTY_GUI_HIDDEN_ variable, so none sets the hidden-desktop route's variables or passes a switch named for them.
+$frozenSetSha256 = [ordered]@{
+    '.github/workflows/test.yml' = '02572c66c0c0ddc683daad10ad277e1861e0a618379b9466dcce7618f120120c'
+    '.github/workflows/release.yml' = '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
+    'test/windows/interactive-win11-job.ps1' = 'f18b3783ba14cc9c5c25281662ebe639a753b965cad6404c0712f349c84176cc'
+    'test/windows/interactive-win11-validate.ps1' = 'cf24651acd8cf091201fc2f81ad1286f389543502c76124c8d2d08d97d0d4d66'
+    'test/windows/flagship/Invoke-InteractiveWin11.ps1' = '189560bc3bc0f67fd26937fd31084176dafe60352703505e26eea5f39459e7ff'
+    'test/windows/flagship/scenarios/interactive-win11.json' = '7c0ffbf3a98781a96d2ff0b4e158f0d0aaebd5bb58adfa8fec9418a8766a214a'
+    'scripts/release-evidence.ps1' = 'd978e56b0388ed0597e647645856e67e428a53ecd7bb5a0d660c7ee8bfaab777'
+    'scripts/release-manifest.ps1' = 'fbb3e079169990b20b77fd5737c7aad10473572523f9b3aeb1daddae2e355bd9'
+    'scripts/release-write-manifest.ps1' = '02e8e8c95be91ac55234b97bee212ecf660e44fad9b89586e7648417362b1e41'
+    'scripts/release-promote.ps1' = '95417cd5f4f5b9d2a6c91014a214a9fde56a72dc81def7ced41888db0ea4c256'
+    'scripts/check-accessibility-evidence.ps1' = '6e3c5c9643bd44b040025686771d0be133d9bce7ce884f6dfbecf148820a2ee8'
+}
+function Get-FrozenSetProblems([System.Collections.IDictionary] $Texts) {
+    $found = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $frozenSetSha256.Keys) {
+        $text = $Texts[$path]
+        if ($null -eq $text) { $found.Add("frozen set: $path is missing."); continue }
+        $actual = Get-CanonicalTextSha256 -Text $text
+        if (-not [string]::Equals($actual, $frozenSetSha256[$path], [StringComparison]::Ordinal)) {
+            $found.Add("frozen set: $path changed (canonical SHA-256 $actual); re-pin it only with a design change that unfreezes it.")
+        }
+        foreach ($name in @('NOCTTY_GUI_LAUNCH_POLICY', 'NOCTTY_GUI_HIDDEN_')) {
+            if ($text.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $found.Add("frozen set: $path names $name.") }
+        }
+    }
+    return , $found.ToArray()
+}
+$frozenSetTexts = [ordered]@{}
+foreach ($path in $frozenSetSha256.Keys) {
+    $full = Join-Path $repoRoot $path.Replace('/', '\')
+    $frozenSetTexts[$path] = $(if ([IO.File]::Exists($full)) { [IO.File]::ReadAllText($full) } else { $null })
+}
+$frozenSetProblems = Get-FrozenSetProblems $frozenSetTexts
+if ($frozenSetProblems.Count -ne 0) { throw ($frozenSetProblems -join ' ') }
+# Controls: a CRLF checkout passes; one changed byte fails (1); an injected variable or switch fails (2) by name.
+$frozenSetCrlf = [ordered]@{}
+foreach ($path in $frozenSetTexts.Keys) { $frozenSetCrlf[$path] = $frozenSetTexts[$path].Replace("`r`n", "`n").Replace("`n", "`r`n") }
+if ((Get-FrozenSetProblems $frozenSetCrlf).Count -ne 0) { throw 'The frozen-set pin refused a CRLF checkout of the same files.' }
+foreach ($control in @(
+        @{ Name = 'one changed byte'; Path = 'scripts/release-promote.ps1'; Change = { param($t) $t.Substring(0, 40) + [char]([int]$t[40] -bxor 1) + $t.Substring(41) }; Expect = 'scripts/release-promote.ps1 changed' }
+        @{ Name = 'the launch-policy variable set'; Path = 'test/windows/interactive-win11-job.ps1'; Change = { param($t) "`$env:NOCTTY_GUI_LAUNCH_POLICY = 'x'`n" + $t }; Expect = 'interactive-win11-job.ps1 names NOCTTY_GUI_LAUNCH_POLICY' }
+        @{ Name = 'a hosted variable in the Test workflow'; Path = '.github/workflows/test.yml'; Change = { param($t) $t.Replace("`njobs:", "`nenv:`n  noctty_gui_hidden_desktop: x`njobs:") }; Expect = 'test.yml names NOCTTY_GUI_HIDDEN_' }
+    )) {
+    $frozenSetMutated = [ordered]@{}
+    foreach ($path in $frozenSetTexts.Keys) { $frozenSetMutated[$path] = $frozenSetTexts[$path] }
+    $frozenSetMutated[$control.Path] = & $control.Change $frozenSetTexts[$control.Path]
+    $frozenSetControlProblems = Get-FrozenSetProblems $frozenSetMutated
+    if ([string]::Equals($frozenSetMutated[$control.Path], $frozenSetTexts[$control.Path], [StringComparison]::Ordinal) -or
+        @($frozenSetControlProblems | Where-Object { $_.Contains($control.Expect) }).Count -eq 0) {
+        throw "The frozen-set pin accepted $($control.Name)."
+    }
+}
