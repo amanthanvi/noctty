@@ -689,6 +689,11 @@ try {
             $rejected = Write-GuiHiddenRecord $leafRecord (Join-Path $Out "receipts\$($leaf.id).json")
             if ($rejected -gt 0) { $leafRecord.passed = $false }
             Write-Host ("gui-hidden: {0} {1}" -f $leaf.id, $(if ($leafRecord.passed) { 'PASS' } else { 'FAIL' }))
+            if (-not $leafRecord.passed) {
+                # The leaf's own messages (never noctty's logs, which stay under -Work), to diagnose a failure.
+                $leafLog = Join-Path $runRoot "$($leaf.id)\leaf.log"
+                if (Test-Path -LiteralPath $leafLog) { Get-Content -LiteralPath $leafLog -Tail 40 | ForEach-Object { Write-Host "  | $_" } }
+            }
             if (-not $leafRecord.passed -and $exit -eq 0) { $exit = 1 }
         }
         try { Assert-InteractiveWin11MeasureBuild -RepoRoot $MeasureRepo -ExePath $rawExe; $runRecord.generationUnchanged = $true }

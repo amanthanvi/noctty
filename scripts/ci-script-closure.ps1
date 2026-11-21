@@ -58,6 +58,11 @@ $script:CiScriptClosureLegacyEdges = @(
         Anchor = '-NoProfile -NonInteractive -File "{1}"'
         Guard = 'Invoke-LocalHiddenDriver runs its caller''s own -Script again as the driver. Its target is the caller, which is already an entry of the walk.'
     }
+    [pscustomobject]@{
+        File = 'test/windows/gui-hidden-runner.ps1'
+        Anchor = '-NoProfile -NonInteractive -File "{1}"'
+        Guard = 'The runner starts each plan leaf as its own pwsh, a command line built as a string for CreateProcessW. Every plan leaf is an entry of the walk.'
+    }
 )
 
 function ConvertTo-CiScriptRepoPath {
