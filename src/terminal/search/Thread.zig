@@ -15,6 +15,7 @@ const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const StateMutex = @import("../../sync/state_mutex.zig").StateMutex;
+const thread_role = @import("../../sync/thread_role.zig");
 const xev = @import("../../global.zig").xev;
 const internal_os = @import("../../os/main.zig");
 const BlockingQueue = @import("../../datastruct/main.zig").BlockingQueue;
@@ -155,6 +156,11 @@ pub fn deinit(self: *Thread) void {
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread) void {
+    // The search thread's role, for the renderer-state mutex its
+    // QuerySearch takes (PLAN.md §2.7 RQ5).
+    const role = thread_role.enter(.search);
+    defer role.exit();
+
     // Call child function so we can use errors...
     self.threadMain_() catch |err| {
         // In the future, we should expose this on the thread struct.
@@ -522,7 +528,13 @@ const TestUserData = struct {
     }
 };
 
-test {
+test "the search thread reports a query's matches, then completes" {
+    // The test thread owns the search thread as the app thread does: its
+    // deinit stops the QuerySearch, which locks. The worker's threadMain
+    // enters .search itself.
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
@@ -624,7 +636,10 @@ test "search refresh timer requires active visible focused search" {
     try testing.expect(!shouldRunRefreshTimer(.busy, false, true));
     try testing.expect(!shouldRunRefreshTimer(.busy, true, false));
 
-    // A step that leaves no search stops the polling.
+    // A step that leaves no search stops the polling. The test thread
+    // applies the steps as the search thread does.
+    const role = thread_role.fixture(.search);
+    defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
@@ -657,6 +672,9 @@ const OrderUserData = struct {
 };
 
 test "a clear sends the total first and the selection last" {
+    // The test thread applies the queries as the search thread does.
+    const role = thread_role.fixture(.search);
+    defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
@@ -687,6 +705,9 @@ test "a clear sends the total first and the selection last" {
 }
 
 test "a query that runs out of memory does not stop the mailbox drain" {
+    // The test thread drains the mailbox as the search thread does.
+    const role = thread_role.fixture(.search);
+    defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });

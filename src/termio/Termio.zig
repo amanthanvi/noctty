@@ -17,6 +17,7 @@ const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
 const xev = @import("../global.zig").xev;
 const renderer = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const apprt = @import("../apprt.zig");
 const internal_os = @import("../os/main.zig");
 const windows = internal_os.windows;
@@ -1669,6 +1670,10 @@ test "issue149 config change writes exactly one color scheme report" {
     // not ask for mode 2031.
     const testing = std.testing;
     const alloc = testing.allocator;
+
+    // `changeConfig` runs on the IO thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.termio);
+    defer role.exit();
 
     var config = try configpkg.Config.default(alloc);
     defer config.deinit();

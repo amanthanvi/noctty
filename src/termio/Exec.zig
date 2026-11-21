@@ -17,6 +17,7 @@ const crash = @import("../crash/main.zig");
 const fastmem = @import("../fastmem.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const shell_integration = @import("shell_integration.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
@@ -1841,6 +1842,13 @@ pub const ReadThread = struct {
         bufs: [buffer_count][buffer_capacity]u8 = undefined,
     };
 
+    /// How the reader calls `Termio.processOutput`: inlined, except in Debug,
+    /// where a real call keeps the renderer-state lock it takes recorded as
+    /// processOutput's own. Zig 0.15.2 names the caller for a site inlined
+    /// into it (PLAN.md §2.7 RQ11, §19.1).
+    const process_output_modifier: std.builtin.CallModifier =
+        if (builtin.mode == .Debug) .auto else .always_inline;
+
     fn threadMainPosix(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
         defer posix.close(quit);
@@ -2216,6 +2224,11 @@ pub const ReadThread = struct {
         adopted_client_process: ?windows.HANDLE,
         process_start: std.time.Instant,
     ) void {
+        // The pty reader's role, for the renderer-state mutex it takes in
+        // processOutput (PLAN.md §2.7 RQ5).
+        const role = thread_role.enter(.reader);
+        defer role.exit();
+
         // Always close our end of the pipe when we exit. This reader stops
         // on `io.stopping` instead; only the POSIX reader polls the pipe.
         defer posix.close(quit);
@@ -2249,7 +2262,7 @@ pub const ReadThread = struct {
         fn output(self: WindowsOutput, data: []const u8, read_ns: u64) void {
             self.io.noteWindowsPtyRead(data.len, WINDOWS_READ_BUF_SIZE, read_ns);
             const process_started = traceInstant(self.trace);
-            @call(.always_inline, termio.Termio.processOutput, .{ self.io, data });
+            @call(process_output_modifier, termio.Termio.processOutput, .{ self.io, data });
             self.io.noteWindowsProcessOutput(traceElapsedNs(process_started));
         }
     };

@@ -11,6 +11,7 @@ const render_dirty = @import("../terminal/render_dirty.zig");
 const inputpkg = @import("../input.zig");
 const monotonic = @import("../os/monotonic.zig");
 const StateMutex = @import("../sync/state_mutex.zig").StateMutex;
+const thread_role = @import("../sync/thread_role.zig");
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
@@ -244,6 +245,9 @@ pub fn outputProgress(self: *const @This()) OutputProgress {
 }
 
 test "renderer state records PTY output progress" {
+    // The pty reader notes its output (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
     var mutex: StateMutex = .{};
     var state: @This() = .{
         .mutex = &mutex,
@@ -581,6 +585,9 @@ test "preedit clone keeps the caret" {
 }
 
 test "renderer state accumulates wake sources until taken" {
+    // The renderer takes the wake sources (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.renderer);
+    defer role.exit();
     var mutex: StateMutex = .{};
     var state: @This() = .{
         .mutex = &mutex,

@@ -19,6 +19,7 @@ const crash = @import("../crash/main.zig");
 const internal_os = @import("../os/main.zig");
 const termio = @import("../termio.zig");
 const renderer = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.io_thread);
@@ -183,6 +184,11 @@ fn writeCommandError(
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread, io: *termio.Termio) void {
+    // The IO thread's role, for its mailbox handlers and the error screen
+    // below, which take the renderer-state mutex (PLAN.md §2.7 RQ5).
+    const role = thread_role.enter(.termio);
+    defer role.exit();
+
     // Call child function so we can use errors...
     self.threadMain_(io) catch |err| {
         log.warn("error in io thread err={}", .{err});

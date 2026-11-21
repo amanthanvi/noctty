@@ -26,6 +26,7 @@ const oni = @import("oniguruma");
 const crash = @import("crash/main.zig");
 const unicode = @import("unicode/main.zig");
 const rendererpkg = @import("renderer.zig");
+const thread_role = @import("sync/thread_role.zig");
 const termio = @import("termio.zig");
 const font = @import("font/main.zig");
 const Command = @import("Command.zig");
@@ -318,6 +319,11 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // The test thread is the app thread that owns the search (PLAN.md §2.7
+    // RQ8); the search thread's threadMain enters .search itself.
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
@@ -377,6 +383,10 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     // End the search on another thread, as the app thread would.
     const Ender = struct {
         fn run(search: *Search, done: *std.Thread.ResetEvent) void {
+            // As the app thread: the search's deinit stops its QuerySearch,
+            // which locks (PLAN.md §2.7 RQ9, §19.5).
+            const app_thread = thread_role.enter(.ui);
+            defer app_thread.exit();
             search.deinit();
             done.set();
         }
@@ -3524,6 +3534,10 @@ test "Surface: typing redraws only what it changed on screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // Typing runs on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     // Only what dropping the selection, scrolling, a mods change and queueing
     // a render read is set; the rest is zeroed so that a new read of an unset
     // pointer faults instead of reading garbage.
@@ -6319,6 +6333,10 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // A click runs on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
@@ -6468,6 +6486,11 @@ const TestMouseSurface = struct {
 
         fn run(job: *Click) void {
             defer job.done.set();
+            // As the app thread: a click's callbacks take the renderer
+            // state mutex, and the stand-in opener tries it (PLAN.md §2.7
+            // RQ9, §19.5).
+            const app_thread = thread_role.enter(.ui);
+            defer app_thread.exit();
             const surface = job.surface;
             if (surface.mouseButtonCallback(.press, .left, surface.mouse.mods)) |_| {} else |err| {
                 job.result = err;
@@ -6630,6 +6653,11 @@ fn expectSelectionText(surface: *Surface, expected: []const u8) !void {
 
 test "Surface: a Ctrl+triple-click picks the output and a drag extends it by line" {
     const testing = std.testing;
+
+    // Clicks and drags run on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     const fixture = try TestMouseSurface.create(
         testing.allocator,
         .false,

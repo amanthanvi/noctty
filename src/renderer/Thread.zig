@@ -8,6 +8,7 @@ const xev = @import("../global.zig").xev;
 const crash = @import("../crash/main.zig");
 const internal_os = @import("../os/main.zig");
 const rendererpkg = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
 const terminalpkg = @import("../terminal/main.zig");
@@ -262,6 +263,12 @@ pub fn deinit(self: *Thread) void {
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread) void {
+    // The renderer's role, for every renderer-state acquisition this thread
+    // makes (PLAN.md §2.7 RQ5; PN3 holds it to the demand acquire and
+    // tryLock).
+    const role = thread_role.enter(.renderer);
+    defer role.exit();
+
     // Call child function so we can use errors...
     self.threadMain_() catch |err| {
         // In the future, we should expose this on the thread struct.

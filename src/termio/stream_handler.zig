@@ -8,6 +8,7 @@ const build_config = @import("../build_config.zig");
 const configpkg = @import("../config.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
@@ -135,7 +136,9 @@ pub const StreamHandler = struct {
         // sending to it here would deadlock if the mailbox were full.
     }
 
-    inline fn surfaceMessageWriter(
+    /// Not an `inline fn`: Zig 0.15.2 would record the relock below as its
+    /// caller's (PLAN.md §2.7 RQ11, §19.1).
+    fn surfaceMessageWriter(
         self: *StreamHandler,
         msg: apprt.surface.Message,
     ) void {
@@ -1770,6 +1773,10 @@ pub const StreamHandler = struct {
 };
 
 test "semantic output capture follows real stream handler parser" {
+    // The pty reader feeds the stream (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -1996,6 +2003,11 @@ test "issue149 config change queues no color scheme report, even into a full mai
     // the termio mailbox, and then writes the mode 2031 report itself. A
     // report queued here would arrive twice, and with the mailbox full the
     // send would wait for the IO thread, which is this thread, forever.
+    // So the test thread is the IO thread (PLAN.md §2.7 RQ8): a send it
+    // made with the renderer mutex would be recorded as .termio.
+    const role = thread_role.fixture(.termio);
+    defer role.exit();
+
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -2068,6 +2080,10 @@ test "issue149 config change queues no color scheme report, even into a full mai
 }
 
 test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
+    // The pty reader feeds the stream (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -2153,6 +2169,10 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         done: std.Thread.ResetEvent = .{},
 
         fn run(self: *@This()) void {
+            // As the pty reader, on a helper thread or nested in the test
+            // thread's TestStream fixture (PLAN.md §2.7 RQ9, §19.5).
+            const role = thread_role.enter(.reader);
+            defer role.exit();
             self.mutex.lock();
             defer self.mutex.unlock();
             self.stream.nextSlice(self.input);
@@ -2255,6 +2275,10 @@ test "PKG16 integrated cmd prompt clears stale keyboard modes" {
 test "cmd OSC 9;9 URI updates terminal pwd" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
+    // The pty reader feeds the stream (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
     const alloc = std.testing.allocator;
     var term = try terminal.Terminal.init(alloc, .{
         .cols = 80,
@@ -2343,6 +2367,10 @@ const TestStream = struct {
     rt_app: apprt.App,
     app_queue: *AppMailbox.Queue,
     stream: StreamHandler.Stream,
+    /// The fixture's role: a test feeds the stream as the pty reader does
+    /// (PLAN.md §2.7 RQ8). Entered last in `init`, exited last in `deinit`,
+    /// so a test that holds a TestStream enters no fixture of its own.
+    role: thread_role.Scope,
 
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
 
@@ -2396,6 +2424,7 @@ const TestStream = struct {
             .clipboard_write = .allow,
         });
         self.stream.handler.seen_title = options.seen_title;
+        self.role = thread_role.fixture(.reader);
     }
 
     fn deinit(self: *TestStream, alloc: Allocator) void {
@@ -2407,6 +2436,7 @@ const TestStream = struct {
         self.app_queue.destroy(alloc);
         self.termio_mailbox.deinit(alloc);
         self.term.deinit(alloc);
+        self.role.exit();
     }
 
     /// The next surface message, or null when none is left. Skips the mouse
