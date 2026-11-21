@@ -4344,7 +4344,7 @@ pub const Surface = struct {
 
     test "win32 pointer leave clears core link and renderer positions" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
-        var mutex: std.Thread.Mutex = .{};
+        var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
         surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
         defer surface.core_surface.io.terminal.deinit(std.testing.allocator);

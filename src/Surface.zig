@@ -325,7 +325,7 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
         defer stream.deinit();
         stream.nextSlice("needle\r\nneedle\r\nneedle");
     }
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: rendererpkg.StateMutex = .{};
 
     // Only the fields that starting a search, its event callback and the
     // app wakeup read are set; the rest is zeroed so that a new read of an
@@ -1032,7 +1032,7 @@ pub fn init(
     }
 
     // The mutex used to protect our renderer state.
-    const mutex = try alloc.create(std.Thread.Mutex);
+    const mutex = try alloc.create(rendererpkg.StateMutex);
     mutex.* = .{};
     errdefer alloc.destroy(mutex);
 
@@ -3541,7 +3541,7 @@ test "Surface: typing redraws only what it changed on screen" {
     defer surface.renderer_thread.wakeup.deinit();
     surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
     defer surface.io.terminal.deinit(alloc);
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: rendererpkg.StateMutex = .{};
     surface.renderer_state.mutex = &mutex;
     surface.renderer_state.terminal = &surface.io.terminal;
     const t = &surface.io.terminal;
@@ -6326,7 +6326,7 @@ test "Surface: the release of a press reported to a program is not a prompt clic
         defer stream.deinit();
         stream.nextSlice("\x1b]133;A;cl=line\x07> \x1b]133;B\x07hello");
     }
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: rendererpkg.StateMutex = .{};
 
     // Only the fields a prompt click reads are set; the rest is zeroed.
     const rt_surface = try alloc.create(apprt.runtime.Surface);

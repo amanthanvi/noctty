@@ -15288,7 +15288,7 @@ const ClipboardReplyFixture = struct {
     host: Host = undefined,
     surface: Surface = undefined,
     session: TestSession = .{},
-    mutex: std.Thread.Mutex = .{},
+    mutex: rendererpkg.StateMutex = .{},
 
     fn init(self: *ClipboardReplyFixture) !void {
         try self.session.init(.{
@@ -25001,7 +25001,7 @@ test "win32 a Restart Manager query agrees only when a quit would ask nothing, a
     // A terminal whose renderer lock is held counts as busy, and the query
     // does not wait for it: the holder can be this thread, below the sent
     // message. The lock is held here, so the core is read no further.
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: rendererpkg.StateMutex = .{};
     other.core_surface.renderer_state.mutex = &renderer_mutex;
     other.core_surface.config.confirm_close_surface = .true;
     other.core_surface.child_exited = false;

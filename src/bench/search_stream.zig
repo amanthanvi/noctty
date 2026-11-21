@@ -39,6 +39,7 @@ const terminal = bench_core.terminal;
 const Terminal = terminal.Terminal;
 const SearchThread = terminal.search.Thread;
 const QuerySearch = terminal.search.QuerySearch;
+const StateMutex = terminal.search.StateMutex;
 const stats = @import("stats.zig");
 
 pub const std_options: std.Options = .{ .log_level = .err };
@@ -240,7 +241,7 @@ fn runFeed(
 
         var sink: Sink = .{ .alloc = alloc };
         // Single-threaded: nothing else contends for the lock here.
-        var mutex: std.Thread.Mutex = .{};
+        var mutex: StateMutex = .{};
         var search: QuerySearch = .init(alloc, .{ .terminal = &t, .mutex = &mutex });
         defer search.deinit();
 
@@ -423,7 +424,7 @@ fn streamLocked(
     streamed: []const u8,
     sink: ?*Sink,
 ) !StreamResult {
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var t = try initTerminal(alloc, args);
     defer t.deinit(alloc);
     writeAll(&t, history);

@@ -34,6 +34,7 @@ const CoreApp = @import("../../App.zig");
 const LPCWSTR = win32_types.LPCWSTR;
 const MONITORINFO = sys.MONITORINFO;
 const ShellProjectionSteps = win32.ShellProjectionSteps;
+const StateMutex = @import("../../renderer.zig").StateMutex;
 const SurfaceInitOptions = win32.SurfaceInitOptions;
 const TestSession = win32.test_support.TestSession;
 const UINT_PTR = win32_types.UINT_PTR;
@@ -1947,7 +1948,7 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     app.registry.hosts = .empty;
     defer app.registry.hosts.deinit(std.testing.allocator);
 
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: StateMutex = .{};
     var secure_surface: Surface = .{ .app = &app };
     secure_surface.core_surface.renderer_state = .{
         .mutex = &renderer_mutex,

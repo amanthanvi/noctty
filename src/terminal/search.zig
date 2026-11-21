@@ -5,6 +5,10 @@ pub const options = @import("terminal_options");
 pub const Query = @import("search/query_options.zig").Query;
 pub const QueryOptions = @import("search/query_options.zig").QueryOptions;
 pub const QuerySearch = @import("search/query_search.zig").QuerySearch;
+/// The type of `QuerySearch.Term.mutex` and the search thread's
+/// `Options.mutex`, the renderer-state mutex. With the thread-role layer off,
+/// as in every lib-vt build, it has `std.Thread.Mutex`'s size and methods.
+pub const StateMutex = @import("../sync/state_mutex.zig").StateMutex;
 
 pub const Active = @import("search/active.zig").ActiveSearch;
 pub const PageList = @import("search/pagelist.zig").PageListSearch;

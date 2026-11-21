@@ -14,7 +14,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
+const StateMutex = @import("../../sync/state_mutex.zig").StateMutex;
 const xev = @import("../../global.zig").xev;
 const internal_os = @import("../../os/main.zig");
 const BlockingQueue = @import("../../datastruct/main.zig").BlockingQueue;
@@ -395,7 +395,7 @@ fn refreshCallback(
 
 pub const Options = struct {
     /// Mutex that must be held while reading/writing the terminal.
-    mutex: *Mutex,
+    mutex: *StateMutex,
 
     /// The terminal data to search.
     terminal: *Terminal,
@@ -524,7 +524,7 @@ const TestUserData = struct {
 
 test {
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -626,7 +626,7 @@ test "search refresh timer requires active visible focused search" {
 
     // A step that leaves no search stops the polling.
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -658,7 +658,7 @@ const OrderUserData = struct {
 
 test "a clear sends the total first and the selection last" {
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -688,7 +688,7 @@ test "a clear sends the total first and the selection last" {
 
 test "a query that runs out of memory does not stop the mailbox drain" {
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 

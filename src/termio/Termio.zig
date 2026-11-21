@@ -1682,7 +1682,7 @@ test "issue149 config change writes exactly one color scheme report" {
     io.terminal = try terminalpkg.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
     defer io.terminal.deinit(alloc);
 
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &io.terminal;

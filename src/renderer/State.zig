@@ -10,12 +10,15 @@ const terminalpkg = @import("../terminal/main.zig");
 const render_dirty = @import("../terminal/render_dirty.zig");
 const inputpkg = @import("../input.zig");
 const monotonic = @import("../os/monotonic.zig");
+const StateMutex = @import("../sync/state_mutex.zig").StateMutex;
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
 /// by the mutex and is NOT thread-safe, only the members values of the
-/// state (i.e. the terminal, devmode, etc. values).
-mutex: *std.Thread.Mutex,
+/// state (i.e. the terminal, devmode, etc. values). Every pointer that
+/// carries it is a `*StateMutex`, so a relock through one keeps the
+/// thread-role layer's owner.
+mutex: *StateMutex,
 
 /// The terminal data.
 terminal: *terminalpkg.Terminal,
@@ -241,7 +244,7 @@ pub fn outputProgress(self: *const @This()) OutputProgress {
 }
 
 test "renderer state records PTY output progress" {
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var state: @This() = .{
         .mutex = &mutex,
         .terminal = undefined,
@@ -578,7 +581,7 @@ test "preedit clone keeps the caret" {
 }
 
 test "renderer state accumulates wake sources until taken" {
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var state: @This() = .{
         .mutex = &mutex,
         .terminal = undefined,

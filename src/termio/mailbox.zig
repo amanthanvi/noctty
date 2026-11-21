@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const xev = @import("../global.zig").xev;
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const Message = @import("message.zig").Message;
+const renderer = @import("../renderer.zig");
 
 const log = std.log.scoped(.io_writer);
 
@@ -55,7 +56,7 @@ pub const Mailbox = union(enum) {
     pub fn send(
         self: *Mailbox,
         msg: Message,
-        mutex: ?*std.Thread.Mutex,
+        mutex: ?*renderer.StateMutex,
         stop: ?*const std.atomic.Value(bool),
     ) void {
         switch (self.*) {

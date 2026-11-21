@@ -1778,7 +1778,7 @@ test "semantic output capture follows real stream handler parser" {
 
     var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
     defer termio_mailbox.deinit(std.testing.allocator);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2010,7 +2010,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
 
     var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
     defer termio_mailbox.deinit(std.testing.allocator);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2082,7 +2082,7 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
 
     var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
     defer termio_mailbox.deinit(std.testing.allocator);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2148,7 +2148,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     // Feeds output with the renderer mutex held, as the reader does.
     const Feed = struct {
         stream: *StreamHandler.Stream,
-        mutex: *std.Thread.Mutex,
+        mutex: *renderer.StateMutex,
         input: []const u8,
         done: std.Thread.ResetEvent = .{},
 
@@ -2264,7 +2264,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
 
     var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
     defer termio_mailbox.deinit(alloc);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2338,7 +2338,7 @@ test "OSC 7 pwd refuses network and device paths" {
 const TestStream = struct {
     term: terminal.Terminal,
     termio_mailbox: termio.Mailbox,
-    renderer_mutex: std.Thread.Mutex,
+    renderer_mutex: renderer.StateMutex,
     renderer_state: renderer.State,
     rt_app: apprt.App,
     app_queue: *AppMailbox.Queue,
