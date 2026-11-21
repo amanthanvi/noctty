@@ -128,8 +128,8 @@ $framePacingRules = @(
     }
     @{
         Description = 'only a visible run takes the foreground; a dry run records it as skipped'
-        Pattern = '(?s)if \(\$Visible\) \{\s+\$record\.Foreground = \[FramePacingNative\]::Foreground\(\$hostWindow, \$nocttyPid, \$script:ForegroundBoundMs\).*?\} else \{ \$record\.Foreground = ''skipped'' \}'
-        Mutation = @("} else { `$record.Foreground = 'skipped' }", "} else { `$record.Foreground = [FramePacingNative]::Foreground(`$hostWindow, `$nocttyPid, `$script:ForegroundBoundMs) }")
+        Pattern = '(?s)if \(\$Visible\) \{\s+\$record\.InputTicks\.Series = \$QuietSinceTick.*?\$record\.Foreground = \[FramePacingNative\]::Foreground\(\$hostWindow, \$nocttyPid, \$script:ForegroundBoundMs, \[ref\]\$unlockTick\).*?\} else \{ \$record\.Foreground = ''skipped'' \}'
+        Mutation = @("} else { `$record.Foreground = 'skipped' }", "} else { `$record.Foreground = [FramePacingNative]::Foreground(`$hostWindow, `$nocttyPid, `$script:ForegroundBoundMs, [ref]`$unlockTick) }")
     }
     @{
         Description = 'a visible run whose foreground did not take is not measured'
@@ -138,12 +138,12 @@ $framePacingRules = @(
     }
     @{
         Description = 'the foreground call is bounded: the window must be this copy''s, not hung and answer WM_NULL first, and the calls run on a worker joined within the bound (VISIBLE-PACING-CERT-01 trap 1)'
-        Pattern = '(?s)public static string Foreground\(IntPtr hwnd, int pid, int boundMs\) \{\s+if \(Owner\(hwnd\) != pid\) return "not-this-copy";\s+if \(IsHungAppWindow\(hwnd\) \|\| !Responsive\(hwnd, \(uint\)boundMs\)\) return "hung";.*?worker\.IsBackground = true;\s+worker\.Start\(\);\s+if \(!worker\.Join\(boundMs\)\) return "timeout";'
+        Pattern = '(?s)public static string Foreground\(IntPtr hwnd, int pid, int boundMs, out long unlockTick\) \{\s+unlockTick = -1;\s+if \(Owner\(hwnd\) != pid\) return "not-this-copy";\s+if \(IsHungAppWindow\(hwnd\) \|\| !Responsive\(hwnd, \(uint\)boundMs\)\) return "hung";.*?worker\.IsBackground = true;\s+worker\.Start\(\);\s+if \(!worker\.Join\(boundMs\)\) return "timeout";'
         Mutation = @('if (!worker.Join(boundMs)) return "timeout";', 'worker.Join();')
     }
     @{
         Description = 'the foreground call refuses a hung or unresponsive window before any cross-thread call'
-        Pattern = '(?s)public static string Foreground\(IntPtr hwnd, int pid, int boundMs\) \{\s+if \(Owner\(hwnd\) != pid\) return "not-this-copy";\s+if \(IsHungAppWindow\(hwnd\) \|\| !Responsive\(hwnd, \(uint\)boundMs\)\) return "hung";'
+        Pattern = '(?s)public static string Foreground\(IntPtr hwnd, int pid, int boundMs, out long unlockTick\) \{\s+unlockTick = -1;\s+if \(Owner\(hwnd\) != pid\) return "not-this-copy";\s+if \(IsHungAppWindow\(hwnd\) \|\| !Responsive\(hwnd, \(uint\)boundMs\)\) return "hung";'
         Mutation = @('if (IsHungAppWindow(hwnd) || !Responsive(hwnd, (uint)boundMs)) return "hung";', '')
     }
     @{
@@ -152,9 +152,34 @@ $framePacingRules = @(
         Mutation = @('new Input { type = 0 }', 'new Input { type = 1 }')
     }
     @{
-        Description = 'a visible run counts only with the foreground, the pane''s focus and the session''s last input unchanged from the arm to the end marker''s swap'
-        Pattern = '(?s)\$focusChanges = \[uint64\]\$echoed\.surface_focus_change_count\s+\$inputTick = \[FramePacingNative\]::LastInputTick\(\).*?\$record\.ForegroundHeld = \[FramePacingNative\]::IsForeground\(\$hostWindow\)\s+\$record\.FocusHeld = \[bool\]\$presented\.surface_focused -and \[uint64\]\$presented\.surface_focus_change_count -eq \$focusChanges\s+\$record\.InputDuringRun = \[FramePacingNative\]::LastInputTick\(\) -ne \$inputTick'
-        Mutation = @('$record.InputDuringRun = [FramePacingNative]::LastInputTick() -ne $inputTick', '$record.InputDuringRun = $false')
+        Description = 'a visible run counts only with the foreground and the pane''s focus unchanged from the arm to the end marker''s swap'
+        Pattern = '(?s)\$focusChanges = \[uint64\]\$echoed\.surface_focus_change_count.*?\$record\.ForegroundHeld = \[FramePacingNative\]::IsForeground\(\$hostWindow\)\s+\$record\.FocusHeld = \[bool\]\$presented\.surface_focused -and \[uint64\]\$presented\.surface_focus_change_count -eq \$focusChanges'
+        Mutation = @('-and [uint64]$presented.surface_focus_change_count -eq $focusChanges', '')
+    }
+    @{
+        Description = 'the input chain''s first link: before anything takes the foreground, the session''s last input must still be the series'' tick (Greptile on #741)'
+        Pattern = '(?s)if \(\$Visible\) \{\s+\$record\.InputTicks\.Series = \$QuietSinceTick\s+\$record\.InputTicks\.BeforeUnlock = \[FramePacingNative\]::LastInputTick\(\)\s+\$break = Get-FramePacingInputBreak \$record\.InputTicks\s+if \(\$break\) \{ throw "INCONCLUSIVE: \$break\." \}\s+\$unlockTick = \[long\]-1\s+\$record\.Foreground = \[FramePacingNative\]::Foreground\(\$hostWindow, \$nocttyPid, \$script:ForegroundBoundMs, \[ref\]\$unlockTick\)\s+\$record\.InputTicks\.Unlock = \$unlockTick'
+        Mutation = @('$record.InputTicks.BeforeUnlock = [FramePacingNative]::LastInputTick()', '$record.InputTicks.BeforeUnlock = $QuietSinceTick')
+    }
+    @{
+        Description = 'the input chain''s second link, immediately before the measured window: still the unlock''s own tick, never a baseline read after the setup (Greptile on #741)'
+        Pattern = '(?s)\$focusChanges = \[uint64\]\$echoed\.surface_focus_change_count\s+if \(\$Visible\) \{\s+\$record\.InputTicks\.BeforeArm = \[FramePacingNative\]::LastInputTick\(\)\s+\$break = Get-FramePacingInputBreak \$record\.InputTicks\s+if \(\$break\) \{ throw "INCONCLUSIVE: \$break\." \}\s+\$inputTick = \[long\]\$record\.InputTicks\.Unlock\s+\} else \{ \$inputTick = \[FramePacingNative\]::LastInputTick\(\) \}\s+\$record\.InputTick = \$inputTick\s+\$record\.SwapsBefore = [^\r\n]+\s+if \(-not \[FramePacingNative\]::TraceMessage\(\$pane, \$nocttyPid, \$script:WmRenderTraceTarget'
+        Mutation = @('$record.InputTicks.BeforeArm = [FramePacingNative]::LastInputTick()', '$record.InputTicks.BeforeArm = $record.InputTicks.Unlock')
+    }
+    @{
+        Description = 'the input chain''s last link, after the end marker''s swap: still the unlock''s own tick, or the run is inconclusive'
+        Pattern = '(?s)if \(\$Visible\) \{\s+\$record\.InputTicks\.AfterWindow = \[FramePacingNative\]::LastInputTick\(\)\s+\$record\.InputBreak = Get-FramePacingInputBreak \$record\.InputTicks\s+\$record\.InputDuringRun = \$null -ne \$record\.InputBreak\s+\}'
+        Mutation = @('$record.InputDuringRun = $null -ne $record.InputBreak', '$record.InputDuringRun = $false')
+    }
+    @{
+        Description = 'the unlock''s tick is the one the unlock itself left: read after SendInput, waited for while it is still the tick before, and taken on the worker before any foreground call'
+        Pattern = '(?s)long before = LastInputTick\(\);\s+var nudge = .*?if \(SendInput\(1, nudge, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+var waited = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+long now = LastInputTick\(\);\s+while \(now == before && waited\.ElapsedMilliseconds < 1000\) \{ Thread\.Sleep\(5\); now = LastInputTick\(\); \}\s+tick = now;\s+SetForegroundWindow\(hwnd\);.*?if \(!worker\.Join\(boundMs\)\) return "timeout";\s+unlockTick = tick;'
+        Mutation = @('unlockTick = tick;', 'unlockTick = LastInputTick();')
+    }
+    @{
+        Description = 'each run reads its window''s display mode at the start and again after the window, and a change is inconclusive (Greptile on #741)'
+        Pattern = '(?s)\$record\.DisplayMode = ''\{0\}x\{1\}@\{2\}'' -f \$monitorMode\[0\], \$monitorMode\[1\], \$monitorMode\[2\].*?\$modeAfter = \[FramePacingNative\]::MonitorMode\(\$hostWindow\)\s+\$record\.DisplayModeAfter = ''\{0\}x\{1\}@\{2\}'' -f \$modeAfter\[0\], \$modeAfter\[1\], \$modeAfter\[2\]'
+        Mutation = @("`$record.DisplayModeAfter = '{0}x{1}@{2}' -f `$modeAfter[0], `$modeAfter[1], `$modeAfter[2]", '$record.DisplayModeAfter = $record.DisplayMode')
     }
     # --- the copy's launch
     @{
@@ -280,14 +305,19 @@ $framePacingRules = @(
         Mutation = @("'complete', [StringComparison]::Ordinal)) { break }", "'complete', [StringComparison]::Ordinal)) { }")
     }
     @{
-        Description = 'frame_time_p95_ms is published only for a visible series whose every run completed; a dry run''s p95 is dry_run_p95_ms'
-        Pattern = 'frame_time_p95_ms = \$\(if \(\$Visible -and \$completed\.Count -eq \$Runs\) \{ \$p95 \} else \{ \$null \}\)'
-        Mutation = @('if ($Visible -and $completed.Count -eq $Runs) { $p95 }', 'if ($completed.Count -eq $Runs) { $p95 }')
+        Description = 'frame_time_p95_ms is published only for a visible series whose every run completed at one display mode and workload; a dry run''s p95 is dry_run_p95_ms'
+        Pattern = '(?s)\$publish = \$completed\.Count -eq \$Runs -and \$series\.Pooled\.Count -gt 0.*?frame_time_p95_ms = \$\(if \(\$Visible -and \$publish\) \{ \$series\.P95 \} else \{ \$null \}\)'
+        Mutation = @('frame_time_p95_ms = $(if ($Visible -and $publish) { $series.P95 }', 'frame_time_p95_ms = $(if ($publish) { $series.P95 }')
     }
     @{
         Description = 'the pooled samples come only from completed runs'
-        Pattern = '\$pooled = \[double\[\]\]@\(\$completed \| ForEach-Object \{ @\(\$_\.Record\.IntervalsMs\) \}'
-        Mutation = @('$pooled = [double[]]@($completed | ForEach-Object', '$pooled = [double[]]@($Results | ForEach-Object')
+        Pattern = '\$series = Get-FramePacingSeries @\(\$completed \| ForEach-Object \{ \$_\.Record \}\)'
+        Mutation = @('$series = Get-FramePacingSeries @($completed | ForEach-Object', '$series = Get-FramePacingSeries @($Results | ForEach-Object')
+    }
+    @{
+        Description = 'runs at different display modes are never pooled: each mode is reported alone and the series is inconclusive, exit 2 (Greptile on #741)'
+        Pattern = '(?s)\$pooled = if \(\$modes\.Count -eq 1 -and \$workloads\.Count -eq 1\) \{ .*?if \(\$series\.Mixed\) \{ \$summary\.Inconclusive = .*?if \(\$summary\.Contains\(''Inconclusive''\)\) \{ return 2 \}'
+        Mutation = @("if (`$summary.Contains('Inconclusive')) { return 2 }", '')
     }
     @{
         Description = 'the exit code says why the series stopped: 3 a tripped guard, 2 an inconclusive visible run, 1 any other failure'
@@ -296,8 +326,8 @@ $framePacingRules = @(
     }
     @{
         Description = 'completed runs that differ in WorkloadSha256 fail the summary'
-        Pattern = 'if \(\$completed\.Count -gt 1 -and \$workloads\.Count -ne 1\) \{ \$summary\.Error = '
-        Mutation = @('if ($completed.Count -gt 1 -and $workloads.Count -ne 1) { $summary.Error =', 'if ($false) { $summary.Error =')
+        Pattern = 'if \(@\(\$series\.Workloads\)\.Count -gt 1\) \{ \$summary\.Error = '
+        Mutation = @('if (@($series.Workloads).Count -gt 1) { $summary.Error =', 'if ($false) { $summary.Error =')
     }
 )
 
@@ -463,7 +493,7 @@ try {
     $framePacingActual = ($framePacingConstantNames | ForEach-Object { "$_=$((Get-Variable -Scope Script -Name $_).Value)" }) -join ' '
     if (-not (Test-FramePacingOrdinal $framePacingActual $framePacingPinned)) { throw "The frame-pacing workload's constants changed ($framePacingActual); runs before and after the change are not comparable." }
     $framePacingCases = & {
-        foreach ($name in @('New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
+        foreach ($name in @('New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputBreak', 'Get-FramePacingSeries', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
             . ([scriptblock]::Create((Get-FramePacingFunctionText $framePacingAst $name 'bench-frame-pacing.ps1')))
         }
         $cases = [Collections.Generic.List[string]]::new()
@@ -561,7 +591,8 @@ try {
         $base = @{ Schema = 1; Mode = 'dry-run'; Error = $null; Exit = 0; QuitPosts = 1; GridCols = 140; GridRows = 43; Transport = 'bundled'; Renderer = 'opengl'
             LaunchConfigDefaultFiles = $false; LaunchConfigFile = 'C:\c\config.ghostty'; ConptyDllSHA256 = 'aa'; PrefixConptyDllSHA256 = 'aa'; OpenConsoleSHA256 = 'bb'; PrefixOpenConsoleSHA256 = 'bb'
             PowerShellUnderCopy = 0; EndMarkerPresented = $true; IntervalOverflow = 0; IntervalCount = 3; IntervalsMs = $intervals
-            VisibleRefusal = 'this process is not on Default'; Foreground = 'skipped'; Cloaked = $null; ForegroundHeld = $false; FocusHeld = $true; InputDuringRun = $false; BusyPercentBefore = 50.0; RefreshHz = 240 }
+            VisibleRefusal = 'this process is not on Default'; Foreground = 'skipped'; Cloaked = $null; ForegroundHeld = $false; FocusHeld = $true; InputDuringRun = $false; BusyPercentBefore = 50.0; RefreshHz = 240
+            DisplayMode = '3840x2160@240'; DisplayModeAfter = '3840x2160@240' }
         function Join-FramePacingChange([hashtable] $A, [hashtable] $B) { $r = $A.Clone(); foreach ($k in $B.Keys) { $r[$k] = $B[$k] }; return $r }
         function New-FramePacingRecord([hashtable] $Change) { return [pscustomobject](Join-FramePacingChange $base $Change) }
         $visibleOk = @{ Mode = 'visible'; VisibleRefusal = $null; Foreground = 'ok'; Cloaked = 0; ForegroundHeld = $true; FocusHeld = $true; InputDuringRun = $false; BusyPercentBefore = 10.0 }
@@ -583,6 +614,7 @@ try {
             @{ Name = 'a dry run that took the foreground'; Change = @{ Foreground = 'ok' } }
             @{ Name = 'an unknown mode'; Change = @{ Mode = 'Visible' } }
             @{ Name = 'a visible run with no refresh rate'; Change = (Join-FramePacingChange $visibleOk @{ RefreshHz = 0 }) }
+            @{ Name = 'no display mode'; Change = @{ DisplayMode = '0x0@0'; DisplayModeAfter = '0x0@0' } }
         )
         foreach ($case in $hardCases) {
             $problems = @(Get-FramePacingRecordProblems (New-FramePacingRecord $case.Change))
@@ -596,6 +628,7 @@ try {
             @{ Name = 'a cloaked window'; Change = @{ Cloaked = 2 } }
             @{ Name = 'a refused foreground'; Change = @{ Foreground = 'timeout' } }
             @{ Name = 'a refused visible run'; Change = @{ VisibleRefusal = 'the session is remote' } }
+            @{ Name = 'a display mode that changed during the run'; Change = @{ DisplayModeAfter = '3840x2160@60' } }
         )
         foreach ($case in $softCases) {
             $problems = @(Get-FramePacingRecordProblems (New-FramePacingRecord (Join-FramePacingChange $visibleOk $case.Change)))
@@ -634,6 +667,54 @@ try {
         if ([string]::Equals($statusControl, $statusText, [StringComparison]::Ordinal)) { throw 'The run-status control changed nothing.' }
         & { . ([scriptblock]::Create($statusControl)); if ((Get-FramePacingRunStatus @('clipboard changed') @() 2 'INCONCLUSIVE: x' @()) -ne 'inconclusive') { throw 'The run-status control did not hide the tripped guard.' } }
         $cases.Add("run status ($($statusCases.Count) cases; guard-first control)")
+
+        # The input chain (Greptile on #741, r4650090021): no break with only the series' tick and the harness's own
+        # unlock; a break for input during the setup, between the unlock and the arm (the finding's case: a baseline
+        # read after the setup took that input in), in the window, or with no tick. The control: the chain without the
+        # check of the unlock's tick at the arm accepts the finding's case.
+        $breakCases = @(
+            @{ Want = $false; Name = 'the first link alone'; Ticks = @{ Series = 100; BeforeUnlock = 100 } }
+            @{ Want = $false; Name = 'the unlock''s own tick at the arm'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = 200; BeforeArm = 200 } }
+            @{ Want = $false; Name = 'the whole chain'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = 200; BeforeArm = 200; AfterWindow = 200 } }
+            @{ Want = $false; Name = 'an unlock that left no new tick'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = 100; BeforeArm = 100; AfterWindow = 100 } }
+            @{ Want = $true; Name = 'input during the setup'; Ticks = @{ Series = 100; BeforeUnlock = 150 } }
+            @{ Want = $true; Name = 'input between the unlock and the arm'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = 200; BeforeArm = 250 } }
+            @{ Want = $true; Name = 'input in the window'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = 200; BeforeArm = 200; AfterWindow = 300 } }
+            @{ Want = $true; Name = 'an unlock with no tick'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = -1; BeforeArm = 100 } }
+            @{ Want = $true; Name = 'no series tick'; Ticks = @{ Series = -1; BeforeUnlock = 100 } }
+            @{ Want = $true; Name = 'a window end with no arm tick'; Ticks = @{ Series = 100; BeforeUnlock = 100; Unlock = 200; AfterWindow = 200 } }
+        )
+        foreach ($case in $breakCases) {
+            $ticks = [ordered]@{ Series = $null; BeforeUnlock = $null; Unlock = $null; BeforeArm = $null; AfterWindow = $null }
+            foreach ($key in $case.Ticks.Keys) { $ticks[$key] = [long]$case.Ticks[$key] }
+            $got = $null -ne (Get-FramePacingInputBreak $ticks)
+            if ($got -ne $case.Want) { throw "The input chain $(if ($case.Want) { 'accepted' } else { 'broke on' }) $($case.Name)." }
+        }
+        $breakText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingInputBreak' 'bench-frame-pacing.ps1'
+        $breakControl = $breakText.Replace('if ($null -eq $Ticks.BeforeArm -or $Ticks.BeforeArm -ne $Ticks.Unlock)', 'if ($null -eq $Ticks.BeforeArm)')
+        if ([string]::Equals($breakControl, $breakText, [StringComparison]::Ordinal)) { throw 'The input-chain control changed nothing.' }
+        & { . ([scriptblock]::Create($breakControl)); if ($null -ne (Get-FramePacingInputBreak ([ordered]@{ Series = 100; BeforeUnlock = 100; Unlock = 200; BeforeArm = 250; AfterWindow = $null }))) { throw 'The input-chain control did not accept input between the unlock and the arm.' } }
+        $cases.Add("input chain ($($breakCases.Count) cases; the finding's case as the control)")
+
+        # One display mode per pool (Greptile on #741, r4650090031): runs at one mode pool; runs at 240 Hz and 60 Hz
+        # are reported per mode, never pooled; runs at two workloads never pool either. The control: the series pooled
+        # regardless of mode mixes the two refresh rates.
+        $at240 = [pscustomobject]@{ DisplayMode = '3840x2160@240'; WorkloadSha256 = 'w'; IntervalsMs = [double[]]@(4.1, 4.2, 4.3) }
+        $at240b = [pscustomobject]@{ DisplayMode = '3840x2160@240'; WorkloadSha256 = 'w'; IntervalsMs = [double[]]@(4.0, 4.4) }
+        $at60 = [pscustomobject]@{ DisplayMode = '3840x2160@60'; WorkloadSha256 = 'w'; IntervalsMs = [double[]]@(16.6, 16.7) }
+        $same = Get-FramePacingSeries @($at240, $at240b)
+        if ($same.Mixed -or $same.Pooled.Count -ne 5 -or $same.P95 -ne 4.4 -or @($same.ByMode).Count -ne 1) { throw "Two runs at one display mode did not pool (pooled $($same.Pooled.Count), p95 $($same.P95))." }
+        $mixed = Get-FramePacingSeries @($at240, $at60)
+        if (-not $mixed.Mixed -or $mixed.Pooled.Count -ne 0 -or $null -ne $mixed.P95 -or @($mixed.ByMode).Count -ne 2) { throw "Runs at 240 Hz and 60 Hz were pooled (pooled $($mixed.Pooled.Count), p95 $($mixed.P95))." }
+        $by60 = @($mixed.ByMode | Where-Object { Test-FramePacingOrdinal $_.display_mode '3840x2160@60' })
+        if ($by60.Count -ne 1 -or $by60[0].p95_ms -ne 16.7 -or $by60[0].intervals -ne 2) { throw 'The 60 Hz runs were not reported on their own.' }
+        $twoWorkloads = Get-FramePacingSeries @($at240, [pscustomobject]@{ DisplayMode = '3840x2160@240'; WorkloadSha256 = 'v'; IntervalsMs = [double[]]@(4.0) })
+        if ($twoWorkloads.Pooled.Count -ne 0) { throw 'Runs at two workloads were pooled.' }
+        $seriesText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingSeries' 'bench-frame-pacing.ps1'
+        $seriesControl = $seriesText.Replace('$pooled = if ($modes.Count -eq 1 -and $workloads.Count -eq 1) {', '$pooled = if ($workloads.Count -eq 1) {')
+        if ([string]::Equals($seriesControl, $seriesText, [StringComparison]::Ordinal)) { throw 'The display-mode control changed nothing.' }
+        & { . ([scriptblock]::Create($seriesControl)); if ((Get-FramePacingSeries @($at240, $at60)).Pooled.Count -ne 5) { throw 'The display-mode control did not pool the two refresh rates.' } }
+        $cases.Add('display modes (one mode pools; 240 Hz with 60 Hz reported per mode; two workloads; a mode-blind pool as the control)')
 
         # The statistics: QPC ticks over the trace's frequency in ms; nearest-rank p95 and the median.
         $stats = Get-FramePacingIntervalStats @(10000, 20000, 30000) 10000000.0

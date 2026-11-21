@@ -29,9 +29,11 @@ Two modes.
           is still the tick the series last saw); the machine must be under 30% busy (waited for up to -QuietWaitSeconds, 900 by default;
           test-harnesses.md MEASUREMENT-HARNESS-RERUN-01). The copy takes the foreground through a bounded call (a
           zero-motion mouse input unlocks it, never an Alt tap: PROBE-ALT-TAP-01; the cross-thread calls run on a
-          worker joined within 5 s: VISIBLE-PACING-CERT-01 trap (1)). A run in which the foreground, the pane's focus
-          or the session's last input changed during the workload is inconclusive, never a sample. Run it only while
-          the machine's user is away (AGENTS.md "Running noctty").
+          worker joined within 5 s: VISIBLE-PACING-CERT-01 trap (1)). The session's last input must be the series'
+          tick right before the unlock, the unlock's own tick right before the measured window, and still that one
+          at its end (Get-FramePacingInputBreak). A run in which any other input came, or the foreground or the
+          pane's focus changed, is inconclusive, never a sample. Run it only while the machine's user is away
+          (AGENTS.md "Running noctty").
 
 The workload (bench-windows.ps1's `stream` throughput workload, without its PowerShell producer): 4,194,304 bytes of
 printable ASCII from bench-windows.ps1's own generator (WritePayload, seed 121, copied byte for byte and held
@@ -47,7 +49,9 @@ PowerShell producer, so a run's window is about 1.8 s with about 420 intervals, 
 with the bench's own table (test-harnesses.md FRAME-PACING-01). The grid is 140 x 43 (window-width = 140, window-height = 45, Consolas 16,
 renderer = opengl, read through the pane's pseudoconsole before the workload, as #739 reads it). Runs compare only when
 their WorkloadSha256 (these constants, the payload's SHA-256 and the config with the run's directory taken out),
-grid, transport, both ConPTY bundle digests and monitor refresh match.
+grid, transport and both ConPTY bundle digests match; the summary pools only runs at one display mode (the window's
+monitor's width, height and refresh, read at each run's start and again after its window, where a change makes the
+run inconclusive), and a series whose runs differ reports each mode on its own and is inconclusive.
 
 Records in <RunRoot>: pacing.json (the summary: the mode, each run's status and statistics, and the pooled p95 over the
 completed runs), and per run in run-<n>: run.json (the parameters, the copy's build mode, the SHA-256 of its app, CLI,
@@ -391,15 +395,25 @@ public static class FramePacingNative {
     // calls can wait on the target's UI thread with no bound). The window must be this copy's, not hung, and answer
     // WM_NULL within the bound first; the calls then run on a worker thread joined within the bound, and a timeout is
     // an environment failure, never retried. The unlock is a zero-motion mouse input, not an Alt tap, which can leave
-    // the window in a menu loop that takes the next key (PROBE-ALT-TAP-01; #738's Foreground). "ok" or why not.
-    public static string Foreground(IntPtr hwnd, int pid, int boundMs) {
+    // the window in a menu loop that takes the next key (PROBE-ALT-TAP-01; #738's Foreground). "ok" or why not;
+    // `unlockTick` is the session's last-input tick the unlock itself left (Greptile on #741): the first tick read
+    // after it that differs from the one read just before it, waited for up to 1 s because the raw input thread
+    // records the input after SendInput returns, else that one before (-1 when the unlock was not sent).
+    public static string Foreground(IntPtr hwnd, int pid, int boundMs, out long unlockTick) {
+        unlockTick = -1;
         if (Owner(hwnd) != pid) return "not-this-copy";
         if (IsHungAppWindow(hwnd) || !Responsive(hwnd, (uint)boundMs)) return "hung";
         string outcome = null;
+        long tick = -1;
         var worker = new Thread(() => {
+            long before = LastInputTick();
             var nudge = new Input[] { new Input { type = 0 } };
             nudge[0].mouse.flags = 0x0001; // MOUSEEVENTF_MOVE, dx = dy = 0
             if (SendInput(1, nudge, Marshal.SizeOf<Input>()) != 1) { outcome = "unlock-not-inserted"; return; }
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            long now = LastInputTick();
+            while (now == before && waited.ElapsedMilliseconds < 1000) { Thread.Sleep(5); now = LastInputTick(); }
+            tick = now;
             SetForegroundWindow(hwnd);
             if (GetForegroundWindow() != hwnd) {
                 int owner; uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out owner);
@@ -413,6 +427,7 @@ public static class FramePacingNative {
         worker.IsBackground = true;
         worker.Start();
         if (!worker.Join(boundMs)) return "timeout";
+        unlockTick = tick;
         return outcome ?? "unknown";
     }
     public static bool IsForeground(IntPtr hwnd) { return GetForegroundWindow() == hwnd; }
@@ -843,6 +858,23 @@ function Get-FramePacingSessionFacts([int] $MinIdleSeconds, [long] $QuietSinceTi
     }
 }
 
+# Why the session's input breaks a visible run, or $null (Greptile on #741). The input chain runs from the series'
+# tick (the tick the outer half saw idle, or the last run's own unlock) through the measured window: the session's
+# last input must still be the series' tick right before this run's unlock, the unlock's own tick right before the
+# arm, and still that one at the window's end. Each check runs on the ticks read so far (a field not yet read is
+# null), so any input but the harness's own unlocks, during the setup, between the unlock and the arm or in the
+# window, breaks the run. Pure, so the contract can run it.
+function Get-FramePacingInputBreak($Ticks) {
+    if ($null -eq $Ticks.Series -or $Ticks.Series -lt 0) { return 'the series has no idle tick' }
+    if ($null -ne $Ticks.BeforeUnlock -and $Ticks.BeforeUnlock -ne $Ticks.Series) { return 'the session had input during the run''s setup, before the harness''s unlock' }
+    if ($null -ne $Ticks.BeforeArm -or $null -ne $Ticks.AfterWindow) {
+        if ($null -eq $Ticks.Unlock -or $Ticks.Unlock -lt 0) { return 'the harness''s unlock has no tick' }
+        if ($null -eq $Ticks.BeforeArm -or $Ticks.BeforeArm -ne $Ticks.Unlock) { return 'the session had input after the harness''s unlock, before the measured window' }
+    }
+    if ($null -ne $Ticks.AfterWindow -and $Ticks.AfterWindow -ne $Ticks.Unlock) { return 'the session had input during the measured window' }
+    return $null
+}
+
 # The trace's intervals in milliseconds (QPC ticks over the trace's own frequency) and their statistics.
 function Get-FramePacingIntervalStats([object[]] $Ticks, [double] $Frequency) {
     $ms = [double[]]@($Ticks | ForEach-Object { [double]$_ * 1000.0 / $Frequency })
@@ -876,6 +908,8 @@ function Get-FramePacingRecordProblems($Record) {
     if ($Record.IntervalOverflow -ne 0) { $problems.Add("$($Record.IntervalOverflow) intervals past the trace's capacity") }
     if ($Record.IntervalCount -lt 2 -or $intervals.Count -ne $Record.IntervalCount) { $problems.Add("$($intervals.Count) intervals for a count of $($Record.IntervalCount) (at least 2 needed)") }
     if (@($intervals | Where-Object { [double]$_ -le 0 }).Count -gt 0) { $problems.Add('a nonpositive interval') }
+    if (-not $Record.DisplayMode -or $Record.DisplayMode -notmatch '\A[1-9]\d*x[1-9]\d*@[1-9]\d*\z') { $problems.Add("no display mode for the window's monitor ($($Record.DisplayMode))") }
+    elseif (-not [string]::Equals([string]$Record.DisplayMode, [string]$Record.DisplayModeAfter, [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the window's display mode changed during the run ($($Record.DisplayMode) to $($Record.DisplayModeAfter))") }
     if ([string]::Equals([string]$Record.Mode, 'dry-run', [StringComparison]::Ordinal)) {
         if (-not $Record.VisibleRefusal) { $problems.Add('the dry run''s desktop passed the visible checks') }
         if (-not [string]::Equals([string]$Record.Foreground, 'skipped', [StringComparison]::Ordinal)) { $problems.Add("the dry run's foreground was $($Record.Foreground), not skipped") }
@@ -912,11 +946,12 @@ function Invoke-FramePacingDriver {
         Cols = $script:Cols; Rows = $script:Rows; GridCols = $null; GridRows = $null; FontFamily = $script:FontFamily; FontSize = $script:FontSize
         Class = $null; ExeSHA256 = $null; CliSHA256 = $null; ReceiptSHA256 = $null; ConfigSHA256 = $null; DriverPriority = $null; NocttyPriority = $null
         PayloadBytes = $script:PayloadBytes; PayloadSeed = $script:PayloadSeed; PayloadSha256 = $null; MarkerLength = $null; WorkloadSha256 = $null
-        ClientWidth = $null; ClientHeight = $null; Dpi = $null; MonitorWidth = $null; MonitorHeight = $null; RefreshHz = $null
+        ClientWidth = $null; ClientHeight = $null; Dpi = $null; MonitorWidth = $null; MonitorHeight = $null; RefreshHz = $null; DisplayMode = $null; DisplayModeAfter = $null
         LaunchConfigDefaultFiles = $null; LaunchConfigFile = $null; Transport = $null; Renderer = $null
         ConptyDllSHA256 = $null; PrefixConptyDllSHA256 = $null; OpenConsoleSHA256 = $null; PrefixOpenConsoleSHA256 = $null; EffectiveDirs = $null
         VisibleRefusal = $null; Composition = $null; Cloaked = $null; Foreground = $null; ForegroundHeld = $null; FocusHeld = $null; InputDuringRun = $null
         BusyPercentBefore = $null; BusyPercentAfter = $null; QuietWaitMs = 0; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null; InputTick = $null
+        InputTicks = [ordered]@{ Series = $null; BeforeUnlock = $null; Unlock = $null; BeforeArm = $null; AfterWindow = $null }; InputBreak = $null
         QpcFrequency = $null; EndMarkerPresented = $false; IntervalCount = 0; IntervalOverflow = $null; IntervalsMs = [double[]]@()
         P95Ms = $null; MedianMs = $null; MaxMs = $null; WindowMs = $null; SwapsBefore = $null; SwapsAfter = $null
         ShellsUnderCopy = $null; PowerShellUnderCopy = $null; QuitPosts = 0; Exit = $null; Error = $null
@@ -1084,6 +1119,7 @@ function Invoke-FramePacingDriver {
         $record.ClientWidth = $client[0]; $record.ClientHeight = $client[1]; $record.Dpi = $client[2]
         $monitorMode = [FramePacingNative]::MonitorMode($hostWindow)
         $record.MonitorWidth = $monitorMode[0]; $record.MonitorHeight = $monitorMode[1]; $record.RefreshHz = $monitorMode[2]
+        $record.DisplayMode = '{0}x{1}@{2}' -f $monitorMode[0], $monitorMode[1], $monitorMode[2]
 
         # The grid, before the workload, as #739 reads it: a probe child attaches to the pane's shell's console.
         [void](Wait-For { $script:fpShells = @([FramePacingNative]::Children($nocttyPid, 'cmd.exe')); $script:fpShells.Count -eq 1 } 30000)
@@ -1135,7 +1171,14 @@ function Invoke-FramePacingDriver {
         # The visible part. A dry run skips it (its preconditions refused above); a visible run takes the foreground
         # through the bounded call, then reads the window's composition state.
         if ($Visible) {
-            $record.Foreground = [FramePacingNative]::Foreground($hostWindow, $nocttyPid, $script:ForegroundBoundMs)
+            # The input chain's first link, before anything takes the foreground from a user who came back.
+            $record.InputTicks.Series = $QuietSinceTick
+            $record.InputTicks.BeforeUnlock = [FramePacingNative]::LastInputTick()
+            $break = Get-FramePacingInputBreak $record.InputTicks
+            if ($break) { throw "INCONCLUSIVE: $break." }
+            $unlockTick = [long]-1
+            $record.Foreground = [FramePacingNative]::Foreground($hostWindow, $nocttyPid, $script:ForegroundBoundMs, [ref]$unlockTick)
+            $record.InputTicks.Unlock = $unlockTick
             $record.Cloaked = [FramePacingNative]::Cloaked($hostWindow)
             if ([FramePacingNative]::IsIconic($hostWindow)) { $record.Foreground = 'minimized' }
             Log "foreground: $($record.Foreground); cloaked $($record.Cloaked)"
@@ -1150,7 +1193,14 @@ function Invoke-FramePacingDriver {
         if (-not (Wait-For { [uint64](Request-Trace).last_swap_process_output_generation -gt [uint64]$before.last_swap_process_output_generation } 15000)) { throw 'No swap presented the command''s echo within 15 s.' }
         $echoed = Wait-Quiet $script:EchoQuietMs 15000
         $focusChanges = [uint64]$echoed.surface_focus_change_count
-        $inputTick = [FramePacingNative]::LastInputTick()
+        # The chain's second link, immediately before the measured window: still the unlock's own tick. A dry run has
+        # no unlock and only records the tick.
+        if ($Visible) {
+            $record.InputTicks.BeforeArm = [FramePacingNative]::LastInputTick()
+            $break = Get-FramePacingInputBreak $record.InputTicks
+            if ($break) { throw "INCONCLUSIVE: $break." }
+            $inputTick = [long]$record.InputTicks.Unlock
+        } else { $inputTick = [FramePacingNative]::LastInputTick() }
         $record.InputTick = $inputTick
         $record.SwapsBefore = [uint64]$echoed.swap_buffers_count
         if (-not [FramePacingNative]::TraceMessage($pane, $nocttyPid, $script:WmRenderTraceTarget, 0, $script:ResponseBoundMs)) { throw 'The pane did not answer the trace''s arm within the bound.' }
@@ -1169,10 +1219,17 @@ function Invoke-FramePacingDriver {
         $record.IntervalsMs = [double[]]@($stats.Ms | ForEach-Object { [Math]::Round($_, 6) })
         $record.IntervalCount = $stats.Count
         if ($stats.Count -gt 0) { $record.P95Ms = [Math]::Round($stats.P95, 6); $record.MedianMs = [Math]::Round($stats.Median, 6); $record.MaxMs = [Math]::Round($stats.Max, 6); $record.WindowMs = [Math]::Round($stats.Sum, 6) }
-        # Held through the workload (a visible run only counts it so): the foreground, the pane's focus, and no input.
+        # Held through the workload (a visible run only counts it so): the foreground, the pane's focus, and no input;
+        # and the window's display mode (Greptile on #741), read again now.
+        $modeAfter = [FramePacingNative]::MonitorMode($hostWindow)
+        $record.DisplayModeAfter = '{0}x{1}@{2}' -f $modeAfter[0], $modeAfter[1], $modeAfter[2]
         $record.ForegroundHeld = [FramePacingNative]::IsForeground($hostWindow)
         $record.FocusHeld = [bool]$presented.surface_focused -and [uint64]$presented.surface_focus_change_count -eq $focusChanges
-        $record.InputDuringRun = [FramePacingNative]::LastInputTick() -ne $inputTick
+        if ($Visible) {
+            $record.InputTicks.AfterWindow = [FramePacingNative]::LastInputTick()
+            $record.InputBreak = Get-FramePacingInputBreak $record.InputTicks
+            $record.InputDuringRun = $null -ne $record.InputBreak
+        } else { $record.InputDuringRun = [FramePacingNative]::LastInputTick() -ne $inputTick }
         Log ("workload: {0} intervals, p95 {1} ms, median {2} ms, overflow {3}; foreground held {4}, focus held {5}, input {6}" -f $record.IntervalCount, $record.P95Ms, $record.MedianMs, $record.IntervalOverflow, $record.ForegroundHeld, $record.FocusHeld, $record.InputDuringRun)
 
         # No PowerShell under the copy: its children and its shell's.
@@ -1381,36 +1438,59 @@ function Get-FramePacingRunStatus([string[]] $GuardFailures, [string[]] $OuterFa
     return 'complete'
 }
 
-# The summary over the series, pacing.json in the run root: each run's status and statistics, and the pooled
-# nearest-rank p95 over the completed runs (frame_time_p95_ms in a visible series; dry_run_p95_ms, not a
-# measurement, in a dry run). Returns the exit code: 0 every run complete, 2 the series stopped at an inconclusive
-# run, 3 at a tripped guard, 1 at any other failure.
+# The completed runs' statistics (Greptile on #741): each display mode's own intervals, p95 and median, and one pool
+# only when every run shares one display mode (the window's monitor's width, height and refresh) and one
+# WorkloadSha256; otherwise nothing is pooled. Pure, so the contract can run it.
+function Get-FramePacingSeries([object[]] $Records) {
+    $modes = @($Records | ForEach-Object { [string]$_.DisplayMode } | Select-Object -Unique)
+    $workloads = @($Records | ForEach-Object { [string]$_.WorkloadSha256 } | Select-Object -Unique)
+    $byMode = @(foreach ($mode in $modes) {
+            $runs = @($Records | Where-Object { [string]::Equals([string]$_.DisplayMode, $mode, [StringComparison]::Ordinal) })
+            $intervals = [double[]]@($runs | ForEach-Object { @($_.IntervalsMs) } | ForEach-Object { [double]$_ })
+            [ordered]@{ display_mode = $mode; runs = $runs.Count; intervals = $intervals.Count
+                p95_ms = $(if ($intervals.Count -gt 0) { [Math]::Round((Get-BenchPercentile -Samples $intervals -Percentile 95), 6) } else { $null })
+                median_ms = $(if ($intervals.Count -gt 0) { [Math]::Round((Get-BenchMedian -Samples $intervals), 6) } else { $null }) }
+        })
+    $pooled = if ($modes.Count -eq 1 -and $workloads.Count -eq 1) { [double[]]@($Records | ForEach-Object { @($_.IntervalsMs) } | ForEach-Object { [double]$_ }) } else { [double[]]@() }
+    return [pscustomobject]@{
+        Modes = $modes; Workloads = $workloads; ByMode = $byMode; Pooled = $pooled; Mixed = $modes.Count -gt 1
+        P95 = $(if ($pooled.Count -gt 0) { [Math]::Round((Get-BenchPercentile -Samples $pooled -Percentile 95), 6) } else { $null })
+        Median = $(if ($pooled.Count -gt 0) { [Math]::Round((Get-BenchMedian -Samples $pooled), 6) } else { $null })
+    }
+}
+
+# The summary over the series, pacing.json in the run root: each run's status and statistics, each display mode's,
+# and the pooled nearest-rank p95 over the completed runs when they share one display mode and workload
+# (frame_time_p95_ms in a visible series whose every run completed; dry_run_p95_ms, not a measurement, in a dry run).
+# Returns the exit code: 0 every run complete at one display mode, 2 the series stopped at an inconclusive run or its
+# runs differ in display mode, 3 it stopped at a tripped guard, 1 any other failure.
 function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results) {
     $completed = @($Results | Where-Object { [string]::Equals($_.Status, 'complete', [StringComparison]::Ordinal) })
-    $pooled = [double[]]@($completed | ForEach-Object { @($_.Record.IntervalsMs) } | ForEach-Object { [double]$_ })
-    $p95 = if ($pooled.Count -gt 0) { [Math]::Round((Get-BenchPercentile -Samples $pooled -Percentile 95), 6) } else { $null }
-    $median = if ($pooled.Count -gt 0) { [Math]::Round((Get-BenchMedian -Samples $pooled), 6) } else { $null }
-    $workloads = @($completed | ForEach-Object { [string]$_.Record.WorkloadSha256 } | Select-Object -Unique)
-    $refresh = @($completed | ForEach-Object { $_.Record.RefreshHz } | Select-Object -Unique)
+    $series = Get-FramePacingSeries @($completed | ForEach-Object { $_.Record })
+    $publish = $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0
     $summary = [ordered]@{
         Schema = 1; Mode = $(if ($Visible) { 'visible' } else { 'dry-run' }); Measurement = [bool]$Visible
         RunsRequested = $Runs; RunsCompleted = $completed.Count; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
-        WorkloadSha256 = $(if ($workloads.Count -eq 1) { $workloads[0] } else { $null }); RefreshHz = @($refresh)
-        PooledIntervals = $pooled.Count; Aggregation = 'nearest-rank p95 over the pooled intervals of the completed runs'
-        frame_time_p95_ms = $(if ($Visible -and $completed.Count -eq $Runs) { $p95 } else { $null })
-        frame_time_median_ms = $(if ($Visible -and $completed.Count -eq $Runs) { $median } else { $null })
-        dry_run_p95_ms = $(if (-not $Visible) { $p95 } else { $null })
-        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }) } })
+        WorkloadSha256 = $(if (@($series.Workloads).Count -eq 1) { @($series.Workloads)[0] } else { $null })
+        DisplayModes = @($series.Modes); ByDisplayMode = @($series.ByMode)
+        PooledIntervals = $series.Pooled.Count; Aggregation = 'nearest-rank p95 over the pooled intervals of the completed runs, at one display mode and one workload'
+        frame_time_p95_ms = $(if ($Visible -and $publish) { $series.P95 } else { $null })
+        frame_time_median_ms = $(if ($Visible -and $publish) { $series.Median } else { $null })
+        dry_run_p95_ms = $(if (-not $Visible -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
+        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }) } })
     }
-    if ($completed.Count -gt 1 -and $workloads.Count -ne 1) { $summary.Error = 'the completed runs differ in WorkloadSha256' }
+    if (@($series.Workloads).Count -gt 1) { $summary.Error = 'the completed runs differ in WorkloadSha256' }
+    if ($series.Mixed) { $summary.Inconclusive = "the completed runs differ in display mode ($(@($series.Modes) -join ', ')); each mode is reported in ByDisplayMode and none is pooled" }
     $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     $last = $Results[$Results.Count - 1]
     foreach ($failure in @($last.Failures)) { Write-Host "  $failure" }
-    $label = if ($Visible) { "frame_time_p95_ms $p95" } else { "dry run: dry_run_p95_ms $p95 (not a measurement)" }
+    if ($summary.Contains('Inconclusive')) { Write-Host "  $($summary.Inconclusive)" }
+    $label = if ($Visible) { "frame_time_p95_ms $($summary.frame_time_p95_ms)" } else { "dry run: dry_run_p95_ms $($summary.dry_run_p95_ms) (not a measurement)" }
     Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')"
     if ($summary.Contains('Error')) { return 1 }
-    if ($completed.Count -eq $Runs) { return 0 }
-    switch ($last.Status) { 'guard-tripped' { return 3 } 'inconclusive' { return 2 } default { return 1 } }
+    if ($completed.Count -ne $Runs) { switch ($last.Status) { 'guard-tripped' { return 3 } 'inconclusive' { return 2 } default { return 1 } } }
+    if ($summary.Contains('Inconclusive')) { return 2 }
+    return 0
 }
 
 if ($Driver) {

@@ -1521,8 +1521,11 @@ Two modes:
   away. The copy runs on `Default`, which must be the caller's desktop and the
   input desktop, composed by DWM, in a local session, with no input for
   `-MinIdleSeconds` (300 by default) before the series and none since but the
-  harness's own unlocks: each driver checks that the session's last input is
-  still the tick the series last saw. The machine must be under 30% busy
+  harness's own unlocks. Each driver checks that the session's last input is
+  still the tick the series last saw right before its unlock, and still the
+  unlock's own tick right before the measured window and at its end
+  (`Get-FramePacingInputBreak`); any other input makes the run inconclusive.
+  The machine must be under 30% busy
   (the driver waits up to `-QuietWaitSeconds`). The copy takes the foreground
   through a bounded call: a zero-motion mouse input unlocks it, never an Alt
   tap, and the cross-thread calls run on a worker joined within 5 s. A run
@@ -1544,7 +1547,11 @@ names, the grid, the window's DPI and monitor mode, the busy share and timer
 resolution before and after, every interval and the visible part's facts), the
 copy's log, the driver's log, the copy's last trace snapshot and
 `guards.json`. Runs compare only with the same `WorkloadSha256`, grid,
-transport, ConPTY digests and monitor refresh. Each run keeps the shared state
+transport and ConPTY digests. The summary pools only runs at one display mode
+(the window's monitor's width, height and refresh, read at the start of each
+run and again after its window, where a change makes the run inconclusive). A
+series whose runs differ reports each mode in `ByDisplayMode`, pools none and
+exits 2. Each run keeps the shared state
 guard, the PowerShell history guard and the real `session-state.json`'s
 metadata, and logs the clipboard sequence number before and after.
 
