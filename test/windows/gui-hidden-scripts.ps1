@@ -165,6 +165,62 @@ foreach ($anchored in @('. (Join-Path (Split-Path -Parent $MyInvocation.MyComman
 $functionInvocation = Get-FixtureWalk -Files @{ 'test/windows/entry.ps1' = 'function Load { . (Join-Path (Split-Path $MyInvocation.MyCommand.Path) ''helper.ps1'') }'; 'test/windows/helper.ps1' = '1' }
 Assert-True ($functionInvocation.Problems.Count -eq 1) "`$MyInvocation.MyCommand.Path in a function names the function, not the file, and must be unresolved: $($functionInvocation.Problems -join '; ')"
 
+# The ways a script runs another (Sol, CodeRabbit and Opus on #740): each form must reach its child, or leave the
+# edge unresolved; none may drop it. A PowerShell reached through a variable or Get-Command is PowerShell; an
+# executable the walker cannot name is unresolved when its arguments may run a script.
+$fixtureChild = 'C:\gui-hidden-fixture\test\windows\child.ps1'
+$reaches = [ordered]@{
+    'pwsh from Get-Command .Source through a variable, -File' = '$pwsh = (Get-Command pwsh.exe).Source' + "`n" + '& $pwsh -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    'Windows PowerShell from Get-Command through a variable, -File' = '$ps = Get-Command powershell.exe -CommandType Application; & $ps -ExecutionPolicy Bypass -File "$PSScriptRoot\child.ps1"'
+    'pwsh joined to an unknown directory, -File:' = '$pwsh = Join-Path $PSHOME ''pwsh.exe''; & $pwsh -NoLogo -File:"$PSScriptRoot\child.ps1"'
+    'pwsh''s first positional argument' = 'pwsh -NoProfile -ExecutionPolicy Bypass (Join-Path $PSScriptRoot ''child.ps1'') -Arg 1'
+    'a bare absolute path' = "$fixtureChild -Arg 1"
+    'Start-Process pwsh.exe -ArgumentList @(...)' = 'Start-Process -FilePath pwsh.exe -ArgumentList @(''-NoProfile'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1'')) -Wait'
+    'Start-Process powershell.exe with a comma list' = 'Start-Process powershell.exe -ArgumentList ''-NoProfile'', ''-File'', "$PSScriptRoot\child.ps1"'
+    'Start-Job -FilePath' = 'Start-Job -FilePath (Join-Path $PSScriptRoot ''child.ps1'') | Receive-Job -Wait'
+    'Invoke-Command -FilePath' = 'Invoke-Command -ComputerName localhost -FilePath "$PSScriptRoot\child.ps1"'
+    'Invoke-Expression of a literal' = 'Invoke-Expression ". ''$PSScriptRoot\child.ps1''"'
+    'a local function returning the path' = 'function Get-ChildPath { Join-Path $PSScriptRoot ''child.ps1'' }' + "`n" + '& (Get-ChildPath)'
+    'cmd /c pwsh -File' = 'cmd.exe /d /c pwsh -NoProfile -File "$PSScriptRoot\child.ps1"'
+    'Import-Module of a script path' = 'Import-Module (Join-Path $PSScriptRoot ''child.ps1'') -Force'
+}
+foreach ($form in $reaches.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $reaches[$form]; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/child.ps1') "$form must reach the child: $($formWalk.Problems -join '; ')"
+}
+$refuses = [ordered]@{
+    'an executable Get-Command cannot name, -File' = '$exe = (Get-Command $toolName).Source; & $exe -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    'a local Get-*ExePath whose body is more than one value' = 'function Get-FixtureExePath { if ($env:X) { return ''C:\x\noctty.exe'' }; return (Join-Path $PSScriptRoot ''child.ps1'') }' + "`n" + '& (Get-FixtureExePath)'
+    'a pwsh from Get-Command with -Command' = '$pwsh = Get-Command pwsh; & $pwsh -NoProfile -Command ". ./child.ps1"'
+    'Windows PowerShell''s first positional argument (its -Command)' = 'powershell.exe -NoProfile (Join-Path $PSScriptRoot ''child.ps1'')'
+    'Start-Process pwsh with an argument list in a variable' = 'Start-Process -FilePath pwsh.exe -ArgumentList $argv'
+    'Start-Process pwsh with -Command' = 'Start-Process pwsh -ArgumentList ''-Command'', ''Get-Date'''
+    'Start-Process of an executable it cannot resolve' = 'Start-Process -FilePath $unknown -PassThru'
+    'Start-Job -FilePath of an unresolved path' = 'Start-Job -FilePath $script'
+    'Invoke-Expression of file content' = 'Invoke-Expression (Get-Content -Raw (Join-Path $PSScriptRoot ''child.ps1''))'
+    'Invoke-Expression from the pipeline' = 'Get-Content (Join-Path $PSScriptRoot ''child.ps1'') | Invoke-Expression'
+    '[scriptblock]::Create of a variable' = '$block = [scriptblock]::Create($text); & $block'
+    'Import-Module of an unresolved path' = 'Import-Module $modulePath'
+    'a bare relative path' = '.\child.ps1'
+}
+foreach ($form in $refuses.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $refuses[$form]; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must leave its edge unresolved: [$($formWalk.Members -join ', ')]"
+}
+$quiet = [ordered]@{
+    'a helper-named executable with an argument list' = '$exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot; Start-Process -FilePath $exe -ArgumentList $argv -PassThru'
+    'a module-qualified cmdlet' = 'Microsoft.PowerShell.Utility\Write-Host x'
+    'Invoke-Expression of code with no edge' = 'Invoke-Expression ''Get-Date'''
+    'Import-Module by name' = 'Import-Module Microsoft.PowerShell.Utility'
+    'a function named like Invoke-Command' = 'Invoke-CommandPaletteAction -Action 1'
+    'git found by Get-Command' = '$git = (Get-Command git.exe -CommandType Application | Select-Object -First 1).Source; & $git status'
+    'Start-Process of a known executable' = 'Start-Process -FilePath (Join-Path $PSScriptRoot ''tool.exe'') -ArgumentList ''-File'', ''x.ps1'''
+}
+foreach ($form in $quiet.Keys) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $quiet[$form] }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 
