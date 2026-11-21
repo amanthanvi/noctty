@@ -1575,12 +1575,25 @@ Two modes:
   flag. Both still move the session's last-input tick, which the gate checks
   second, except within a few milliseconds of the harness's own injected
   input (the unlock and the keyboard probe). For that input the outer half
-  never wakes: the copy ends at the driver's next tick check. That is within
-  100 ms in every wait the driver polls (the end marker's loop included),
-  and up to about 2 s in the readings that do not poll: the load reading
-  right before the window, the display-power reading right after it, and the
-  load reading before the quit. Input the gate finds after the window, or
-  right before the quit, ends the copy at once.
+  never wakes: the copy ends at the driver's next tick check. Every wait the
+  driver makes reads the gate at each 100 ms: the waits on the copy's
+  window, its quiet and its quit, on `+version` and the probes, the quiet
+  machine wait, the load readings (sampled around the polls) and a
+  render-trace snapshot's wait for its file. What does not poll, with its
+  worst case: a render-trace request's window-message call (each snapshot and
+  the arm), up to 5 s (`ResponseBoundMs`) if the copy stops answering, after
+  which its file wait, polled, can take up to 10 s more; the display-power
+  reading, at once in practice and at most 2 s; and the bounded foreground
+  and keyboard-probe workers, milliseconds in practice and at most 5 s each,
+  which read the tick right before each action. So input the hooks cannot
+  see reaches the copy for at most about 5 s, and only if the copy stops
+  answering a trace request; normally within 100 ms. Input the gate finds
+  after the window, or right before the quit, ends the copy at once. After
+  each run the outer half reads the tick against the last tick the harness's
+  own marked input left (the probe's, else the unlock's, else the series'):
+  a moved tick makes the run inconclusive like hook-seen input, and at the
+  series' end the same reading against the series' baseline voids the
+  series (below).
 - The input gate (`Test-FramePacingInputGate`) reads that event first. The
   session's last-input tick is the second line: it must be the series' tick
   until the unlock and the harness's own latest tick after it. The gate runs
@@ -1597,8 +1610,9 @@ Two modes:
   call and with no grace: immediately on observation, plus OS scheduling
   latency. That holds even while the driver is busy in a step that does not
   poll (the copy's launch, a 2 s load reading). Each run records the delay
-  from that observation to the job's close (`LatchToKillMs` in `guards.json`
-  and `latch_to_kill_ms` in `pacing.json`, from QueryPerformanceCounter).
+  from that observation until the job has no process left and its handle is
+  closed (`StopOwnedJob`'s return; `LatchToKillMs` in `guards.json` and
+  `latch_to_kill_ms` in `pacing.json`, from QueryPerformanceCounter).
   This bound and the per-poll gate apply to input the hooks see; input they
   cannot see is bounded by the driver's tick checks (above). Real input the
   hooks see at any point in a series makes the series inconclusive and
@@ -1713,12 +1727,19 @@ window, where a change makes the run inconclusive), DPI and grid (a difference
 pools none and exits 2). Each group of runs alike in all nine of those fields
 is reported on its own in `Groups`, never combined across any of them.
 `frame_time_p95_ms` and its median are published only for a visible series
-with no real input the hooks saw (`RealInputsSeen` 0), whose every run
-completed and whose runs are comparable; otherwise both are null, real input
+with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
+still at the series' baseline (`TickMovedFromBaseline` false), whose every
+run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. A visible run is
-never complete without the keyboard probe's "ok", and a run whose foreground
-was taken without one stops the series unless real input stopped it first. A
+higher), and the console says no measurement was published. The series ends
+in this order: every run has ended and its job, with its copy, is closed;
+the watch stops, which unhooks; the final real-input count and the tick are
+read; then the summary. Input after the unhook reaches no copy. A visible
+run is never complete without the keyboard probe's "ok": a run whose
+foreground was taken without one stops the series as inconclusive, never
+failed, and its line names the cause the driver recorded (a refusal, or
+input the hooks did not see). Only a hook count that did not move, which may
+mean Windows removed the hook, fails the run. A
 `run.json` the job's close cut short reads as no record: a run stopped for
 real input is then inconclusive, any other run failed, and the series still
 writes `pacing.json`. A staging failure is a
