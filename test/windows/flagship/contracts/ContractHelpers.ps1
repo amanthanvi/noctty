@@ -1857,3 +1857,16 @@ function Invoke-ContractScriptWithDeadline {
     }
     finally { $shell.Dispose() }
 }
+
+# The text of a script without its comments, so a comment cannot satisfy or trip a pattern. Comments are found by
+# the PowerShell tokenizer, never by a regular expression, so a `#` inside a string stays.
+function Remove-PowerShellComments([string] $Text) {
+    $tokens = $null; $errors = $null
+    [void][Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'A script does not parse.' }
+    $builder = [Text.StringBuilder]::new($Text)
+    foreach ($token in @($tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)) {
+        [void]$builder.Remove($token.Extent.StartOffset, $token.Extent.EndOffset - $token.Extent.StartOffset)
+    }
+    return $builder.ToString()
+}
