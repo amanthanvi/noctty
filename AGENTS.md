@@ -74,12 +74,13 @@ reading step under [Self-Correction Log](#self-correction-log).
   `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
   which window-lib loads only outside hosted mode and which throws if loaded
   there; a hosted leaf ends by checking that its type was never loaded.
-  Outside hosted closures, `bench-windows.ps1` and
-  `interactive-win11-hints.ps1` keep their own declarations, as do the
-  leaf-local types until later offload PRs move them. Screen capture stays
-  behind `Save-StatefulScreenCapture` (test-harnesses.md: 2026-10-25
-  EVIDENCE-SCREENSHOT-PRIVACY-01). A hidden-desktop suite run, local or
-  hosted, starts only a fresh portable copy, without `noctty.ico`, of the
+  Outside hosted closures, `bench-windows.ps1`, `bench-frame-pacing.ps1`,
+  `gui-hosted-probe.ps1` and `interactive-win11-hints.ps1` keep their own
+  declarations, as do the leaf-local types until later offload PRs move
+  them. Screen capture stays behind `Save-StatefulScreenCapture`
+  (test-harnesses.md: 2026-10-25 EVIDENCE-SCREENSHOT-PRIVACY-01). A
+  hidden-desktop suite run, local or hosted, starts only a fresh portable
+  copy, without `noctty.ico`, of the
   receipt-bound measurement build, with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`.
   Other local GUI runs start either the raw measurement build
   (test-harnesses.md: 2026-10-20 STANDALONE-LEAF-AUMID-01) or a portable copy

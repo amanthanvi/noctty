@@ -260,6 +260,8 @@ Assert-True ($emptyMissing.Problems.Count -eq 1 -and $emptyMissing.Missing -ccon
 $qualifiedReaches = [ordered]@{
     'a module-qualified Add-Type -Path' = @('Microsoft.PowerShell.Utility\Add-Type -Path (Join-Path $PSScriptRoot ''native.cs'')', 'test/windows/native.cs')
     'a module-qualified Import-Module' = @('Microsoft.PowerShell.Core\Import-Module (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+    # Opus on #740 (round 11): a qualified Start-Process of a script still lists it; of PowerShell it is refused.
+    'a module-qualified Start-Process' = @('Microsoft.PowerShell.Management\Start-Process (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
     'a module-qualified Start-Job' = @('Microsoft.PowerShell.Core\Start-Job -FilePath "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
     'a module-qualified Invoke-Expression' = @('Microsoft.PowerShell.Utility\Invoke-Expression ". ''$PSScriptRoot\child.ps1''"', 'test/windows/child.ps1')
     'a module-qualified Start-ThreadJob' = @('Microsoft.PowerShell.ThreadJob\Start-ThreadJob -FilePath "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
