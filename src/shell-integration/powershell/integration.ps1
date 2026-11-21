@@ -441,7 +441,7 @@ if ((__ghostty_has_feature_prefix 'ssh-') -and
         $invocation = __ghostty_build_ssh_invocation `
             -Arguments $Arguments `
             -ConfigLines $ssh_config `
-            -CacheProbe { param([string]$Target) __ghostty_ssh_cache "--host=$Target" }
+            -CacheProbe { param([string]$Target) __ghostty_ssh_cache $Target }
 
         $had_term = Test-Path Env:TERM
         $had_colorterm = Test-Path Env:COLORTERM
