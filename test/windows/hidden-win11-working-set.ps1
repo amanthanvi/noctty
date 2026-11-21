@@ -486,6 +486,17 @@ public static class WorkingSetPlainRead {
     }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandle info);
+    // The mirror's size and every field's offset, checked against the SDK's before the first read (AGENTS.md "Win32 FFI").
+    public static string Layout() {
+        return string.Join(" ", new[] { "ByHandle=" + Marshal.SizeOf<ByHandle>(),
+            "attributes@" + Marshal.OffsetOf<ByHandle>("attributes"), "createdLow@" + Marshal.OffsetOf<ByHandle>("createdLow"),
+            "createdHigh@" + Marshal.OffsetOf<ByHandle>("createdHigh"), "accessedLow@" + Marshal.OffsetOf<ByHandle>("accessedLow"),
+            "accessedHigh@" + Marshal.OffsetOf<ByHandle>("accessedHigh"), "writtenLow@" + Marshal.OffsetOf<ByHandle>("writtenLow"),
+            "writtenHigh@" + Marshal.OffsetOf<ByHandle>("writtenHigh"), "volume@" + Marshal.OffsetOf<ByHandle>("volume"),
+            "sizeHigh@" + Marshal.OffsetOf<ByHandle>("sizeHigh"), "sizeLow@" + Marshal.OffsetOf<ByHandle>("sizeLow"),
+            "links@" + Marshal.OffsetOf<ByHandle>("links"), "indexHigh@" + Marshal.OffsetOf<ByHandle>("indexHigh"),
+            "indexLow@" + Marshal.OffsetOf<ByHandle>("indexLow") });
+    }
     public static byte[] Read(string path) {
         // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
         using (SafeFileHandle handle = CreateFileW(path, 0x80000000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
@@ -501,6 +512,9 @@ public static class WorkingSetPlainRead {
 }
 '@
     }
+    # fileapi.h BY_HANDLE_FILE_INFORMATION on x64 (no pshpack; FILETIME is two DWORDs, low then high).
+    $wantLayout = 'ByHandle=52 attributes@0 createdLow@4 createdHigh@8 accessedLow@12 accessedHigh@16 writtenLow@20 writtenHigh@24 volume@28 sizeHigh@32 sizeLow@36 links@40 indexHigh@44 indexLow@48'
+    if (-not [string]::Equals([WorkingSetPlainRead]::Layout(), $wantLayout, [StringComparison]::Ordinal)) { throw "The no-follow read's struct does not match the SDK's x64 layout: $([WorkingSetPlainRead]::Layout())" }
     return [WorkingSetPlainRead]::Read($Path)
 }
 function Get-BytesSha256([byte[]] $Bytes) {

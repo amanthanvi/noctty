@@ -463,6 +463,11 @@ $workingSetRules = @(
         Pattern = '(?s)\A(?=.*?\$commandLine\b\s*=(?!=))(?=.*?\$expectedArgv\b\s*=(?!=))(?!(?:.*?\$commandLine\b\s*[-+*/]?=(?!=)){2})(?!(?:.*?\$expectedArgv\b\s*[-+*/]?=(?!=)){2})'
         Mutation = @('[void][WorkingSetNative]::SetErrorMode(', '$commandLine += '' --initial-command=x''; $expectedArgv = [string[]][WorkingSetNative]::SplitCommandLine($commandLine); [void][WorkingSetNative]::SetErrorMode(')
     }
+    @{
+        Description = 'the no-follow read checks BY_HANDLE_FILE_INFORMATION''s size and every field offset against the SDK''s before it reads (Greptile on #739)'
+        Pattern = 'if \(-not \[string\]::Equals\(\[WorkingSetPlainRead\]::Layout\(\), \$wantLayout, \[StringComparison\]::Ordinal\)\) \{ throw [^\r\n]+\}\s+return \[WorkingSetPlainRead\]::Read\(\$Path\)'
+        Mutation = @('if (-not [string]::Equals([WorkingSetPlainRead]::Layout(), $wantLayout, [StringComparison]::Ordinal)) { throw', 'if ($false) { throw')
+    }
     # --- the native layer
     @{
         Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI")'
@@ -797,7 +802,7 @@ try {
         $linkTarget = Join-Path $hashDir 'receipt-target.json'
         [IO.File]::WriteAllText($linkTarget, $admittedReceiptJson)
         [IO.File]::Delete($layout.Receipt)
-        $script:wsReceiptLinkCase = 'receipt link (refused at the path check before any read; the no-follow read refuses the link; control)'
+        $script:wsReceiptLinkCase = 'receipt link (refused at the path check before any read; the no-follow read refuses the link; control; BY_HANDLE_FILE_INFORMATION''s 13 offsets, with a swapped-field control)'
         try { [void](New-Item -ItemType SymbolicLink -Path $layout.Receipt -Target $linkTarget -ErrorAction Stop) } catch { $script:wsReceiptLinkCase = 'receipt link skipped (no symlink privilege here)' }
         if (Test-Path -LiteralPath $layout.Receipt) {
             $hold = [IO.File]::Open($linkTarget, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
@@ -817,8 +822,20 @@ try {
             [IO.File]::Delete($layout.Receipt)
         }
         [IO.File]::WriteAllText($layout.Receipt, $admittedReceiptJson)
-        # The no-follow read's struct is the SDK's (fileapi.h BY_HANDLE_FILE_INFORMATION, 52 bytes on x64).
-        if ([Runtime.InteropServices.Marshal]::SizeOf([type]'WorkingSetPlainRead+ByHandle') -ne 52) { throw 'BY_HANDLE_FILE_INFORMATION is not 52 bytes.' }
+        # The no-follow read's struct is the SDK's (fileapi.h BY_HANDLE_FILE_INFORMATION on x64, no pshpack, FILETIME
+        # as two DWORDs): its size and every field's offset, and the harness's run-time literal is this one (Greptile on
+        # #739). The control, the same source with two fields swapped, compiled under another name, must give another
+        # layout.
+        $plainLayoutWanted = 'ByHandle=52 attributes@0 createdLow@4 createdHigh@8 accessedLow@12 accessedHigh@16 writtenLow@20 writtenHigh@24 volume@28 sizeHigh@32 sizeLow@36 links@40 indexHigh@44 indexLow@48'
+        if (-not (Test-WorkingSetOrdinal ([WorkingSetPlainRead]::Layout()) $plainLayoutWanted)) { throw "BY_HANDLE_FILE_INFORMATION's mirror is $([WorkingSetPlainRead]::Layout()), not the SDK's." }
+        $plainReadText = Get-WorkingSetFunction 'Read-WorkingSetPlainFile'
+        if (-not $plainReadText.Contains("`$wantLayout = '$plainLayoutWanted'")) { throw 'The harness''s run-time BY_HANDLE_FILE_INFORMATION layout is not the pinned one.' }
+        $plainSource = [regex]::Match($plainReadText, "(?s)@'\r?\n(.*?)\r?\n'@").Groups[1].Value
+        $plainControl = $plainSource.Replace('public uint volume, sizeHigh, sizeLow,', 'public uint volume, sizeLow, sizeHigh,')
+        if ([string]::Equals($plainControl, $plainSource, [StringComparison]::Ordinal)) { throw 'The BY_HANDLE_FILE_INFORMATION control changed nothing.' }
+        $plainControlClass = 'WorkingSetPlainReadControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        Add-Type -TypeDefinition ($plainControl.Replace('public static class WorkingSetPlainRead', "public static class $plainControlClass"))
+        if (Test-WorkingSetOrdinal (($plainControlClass -as [type])::Layout()) $plainLayoutWanted) { throw 'The BY_HANDLE_FILE_INFORMATION layout check accepted two swapped fields.' }
 
         [IO.File]::WriteAllText($layout.Exe, 'another app')
         $tampered = $null
