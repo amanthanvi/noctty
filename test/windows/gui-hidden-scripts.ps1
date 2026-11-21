@@ -199,7 +199,7 @@ $reaches = [ordered]@{
     'pwsh joined to an unknown directory, -File:' = '$pwsh = Join-Path $PSHOME ''pwsh.exe''; & $pwsh -NoLogo -File:"$PSScriptRoot\child.ps1"'
     'pwsh''s first positional argument' = 'pwsh -NoProfile -ExecutionPolicy Bypass (Join-Path $PSScriptRoot ''child.ps1'') -Arg 1'
     'a bare absolute path' = "$fixtureChild -Arg 1"
-    'Start-Process pwsh.exe -ArgumentList @(...)' = 'Start-Process -FilePath pwsh.exe -ArgumentList @(''-NoProfile'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1'')) -Wait'
+    'Start-Process pwsh.exe -ArgumentList @(...)' = '$child = Join-Path $PSScriptRoot ''child.ps1''; Start-Process -FilePath pwsh.exe -ArgumentList @(''-NoProfile'', ''-File'', $child) -Wait'
     'Start-Process powershell.exe with a comma list' = 'Start-Process powershell.exe -ArgumentList ''-NoProfile'', ''-File'', "$PSScriptRoot\child.ps1"'
     'Start-Job -FilePath' = 'Start-Job -FilePath (Join-Path $PSScriptRoot ''child.ps1'') | Receive-Job -Wait'
     'Invoke-Command -FilePath' = 'Invoke-Command -ComputerName localhost -FilePath "$PSScriptRoot\child.ps1"'
@@ -564,6 +564,17 @@ foreach ($form in @(
         'Start-Process pwsh -ArgumentList ''-NoProfile -File x.ps1'''
         'Start-Process pwsh -ArgumentList "-NoProfile -File $PSScriptRoot\child.ps1"'
         'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', ''Bypass'', ''-Command'', $testCommand'
+        # Greptile on #740: the element allowlist refuses every other shape: a parenthesized string, a `$( )`, a
+        # concatenation, a -join, a method call, an index, a nested array, and a parenthesized path.
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', (''Bypass -Command . C:\fixture\child.ps1'')'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', $(''Bypass -Command x'')'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', (''Bypass'' + '' -Command x'')'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', ((''Bypass'', ''-Command'', ''x'') -join '' '')'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', ''Bypass''.Insert(6, '' -Command x'')'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', $policies[0]'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', @(''-ExecutionPolicy'', ''Bypass -Command x'')'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1'')'
+        'Start-Process pwsh -ArgumentList (''-NoProfile'' + '' -File x.ps1'')'
     )) {
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/child.ps1' = '1' }
     Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must be unresolved (Start-Process re-joins a shell's elements): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
@@ -580,7 +591,7 @@ Assert-True ($systemProgram.Problems.Count -eq 0 -and $systemProgram.Members.Cou
 $sortInput = Get-FixtureWalk @{ 'test/windows/entry.ps1' = 'Start-Process -FilePath sort.exe -RedirectStandardInput (Join-Path $PSScriptRoot ''input.txt'') -Wait' }
 Assert-True ($sortInput.Problems.Count -eq 0 -and $sortInput.Members.Count -eq 1) "A known non-shell executable given -RedirectStandardInput is no edge: $($sortInput.Problems -join '; ')"
 # The PowerShell readers stay: a bare or rooted pwsh or powershell reads its -File child.
-foreach ($form in @('pwsh -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')', '& C:\Tools\powershell.exe -File "$PSScriptRoot\child.ps1"', 'Start-Process -FilePath pwsh.exe -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait')) {
+foreach ($form in @('pwsh -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')', '& C:\Tools\powershell.exe -File "$PSScriptRoot\child.ps1"', '$child = Join-Path $PSScriptRoot ''child.ps1''; Start-Process -FilePath pwsh.exe -ArgumentList ''-File'', $child -Wait')) {
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/child.ps1' = '1' }
     Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/child.ps1') "$form must still read its child: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }

@@ -1667,7 +1667,12 @@ reading cmd's language or a batch file's forwarding (`%*`, a helper named by a
 plain word, a switch glued to `/C`), and no GUI member runs a resolvable cmd or
 batch line;
 only the anchored legacy-only lines (`$script:CiScriptClosureLegacyEdges`) are
-exempt. The PowerShell readers stay.
+exempt. The PowerShell readers stay. `Start-Process` joins a shell's
+`-ArgumentList` elements with spaces and the shell splits them again, so for a
+`pwsh` or `powershell` FilePath each element must be a string with no
+whitespace or quote, an expandable string whose template has none, or a bare
+variable or member access; any other element shape, and a single-string list,
+is unresolved.
 
 An unresolved edge ends in one of two ways. In a fixture or a changed path the
 walk cannot read, the selector falls back (`gui=true`, "selection

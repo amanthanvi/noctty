@@ -1295,9 +1295,12 @@ function Get-CiScriptFileEdges {
                 if ($null -eq $list) { & $invoke $callee @() $anchor; break }
                 # Start-Process joins a shell's -ArgumentList elements with spaces and the shell tokenizes them again, so
                 # the element boundaries are not its words (Sol on #740: `'-ExecutionPolicy', "Bypass -Command $c"`
-                # read as one value, and the child saw -Command). For a PowerShell FilePath, an element whose literal
-                # text (a string, or an expandable string's template outside its expressions) holds whitespace or a
-                # quote, and a single string, are unresolved; a variable or a path-valued element is read as a value.
+                # read as one value, and the child saw -Command; Greptile on #740: the same through a parenthesized
+                # string). For a PowerShell FilePath the list is read only in an allowlist of shapes: an array (a comma
+                # list or `@(...)` of expressions), or a bare variable or member access read as a value; and each array
+                # element (a) a string with no whitespace or quote, (b) an expandable string whose template, outside its
+                # expressions, has none, or (c) a bare variable or member access. Any other shape is unresolved: a single
+                # string, a parenthesized or `$( )` expression, an operator, a method call, an index, a nested array.
                 if ($callee.Is -ceq 'powershell') {
                     $listNode = $list.Node
                     while ($listNode -is [System.Management.Automation.Language.ParenExpressionAst] -or
@@ -1305,24 +1308,42 @@ function Get-CiScriptFileEdges {
                         $listNode -is [System.Management.Automation.Language.CommandExpressionAst]) {
                         $listNode = $(if ($listNode -is [System.Management.Automation.Language.ParenExpressionAst]) { $listNode.Pipeline } elseif ($listNode -is [System.Management.Automation.Language.PipelineAst]) { $listNode.PipelineElements[0] } else { $listNode.Expression })
                     }
-                    $single = -not $list.Node -or $listNode -is [System.Management.Automation.Language.StringConstantExpressionAst] -or $listNode -is [System.Management.Automation.Language.ExpandableStringExpressionAst]
-                    $packed = $false
-                    if (-not $single -and ($listNode -is [System.Management.Automation.Language.ArrayLiteralAst] -or $listNode -is [System.Management.Automation.Language.ArrayExpressionAst])) {
-                        foreach ($element in @(& $listEntries $list.Node | ForEach-Object { $_.Node })) {
-                            $literal = $null
-                            if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $literal = $element.Value }
-                            elseif ($element -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
-                                $literal = $element.Extent.Text
-                                foreach ($inner in @($element.NestedExpressions | Sort-Object { $_.Extent.StartOffset } -Descending)) {
-                                    $at = $inner.Extent.StartOffset - $element.Extent.StartOffset
-                                    $literal = $literal.Remove($at, $inner.Extent.Text.Length)
-                                }
-                                if ($element.StringConstantType -ne [System.Management.Automation.Language.StringConstantType]::BareWord -and $literal.Length -ge 2) { $literal = $literal.Substring(1, $literal.Length - 2) }
-                            }
-                            if ($null -ne $literal -and $literal -match '[\s"'']') { $packed = $true }
+                    $valueShape = {
+                        param($Node)
+                        ($Node -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $Node.Splatted) -or
+                        ($Node -is [System.Management.Automation.Language.MemberExpressionAst] -and $Node -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst])
+                    }
+                    $elements = $null
+                    if ($listNode -is [System.Management.Automation.Language.ArrayLiteralAst]) { $elements = @($listNode.Elements) }
+                    elseif ($listNode -is [System.Management.Automation.Language.ArrayExpressionAst]) {
+                        $elements = [System.Collections.Generic.List[object]]::new()
+                        foreach ($statement in $listNode.SubExpression.Statements) {
+                            if ($statement -isnot [System.Management.Automation.Language.PipelineAst] -or $statement.PipelineElements.Count -ne 1 -or
+                                $statement.PipelineElements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) { $elements = $null; break }
+                            $expression = $statement.PipelineElements[0].Expression
+                            if ($expression -is [System.Management.Automation.Language.ArrayLiteralAst]) { foreach ($element in $expression.Elements) { $elements.Add($element) } }
+                            else { $elements.Add($expression) }
                         }
                     }
-                    if ($single -or $packed) { $unresolved.Add($anchor); break }
+                    elseif ($list.Node -and (& $valueShape $listNode)) { $elements = @() }
+                    if ($null -eq $elements) { $unresolved.Add($anchor); break }
+                    $accepted = $true
+                    foreach ($element in $elements) {
+                        $literal = $null
+                        if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $literal = $element.Value }
+                        elseif ($element -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
+                            $literal = $element.Extent.Text
+                            foreach ($inner in @($element.NestedExpressions | Sort-Object { $_.Extent.StartOffset } -Descending)) {
+                                $at = $inner.Extent.StartOffset - $element.Extent.StartOffset
+                                $literal = $literal.Remove($at, $inner.Extent.Text.Length)
+                            }
+                            if ($element.StringConstantType -ne [System.Management.Automation.Language.StringConstantType]::BareWord -and $literal.Length -ge 2) { $literal = $literal.Substring(1, $literal.Length - 2) }
+                        }
+                        elseif (& $valueShape $element) { continue }
+                        else { $accepted = $false; break }
+                        if ($literal -match '[\s"'']') { $accepted = $false; break }
+                    }
+                    if (-not $accepted) { $unresolved.Add($anchor); break }
                 }
                 $listed = $(if ($list.Node) { & $listEntries $list.Node } elseif ($list.Value) { , @($list.Value.Value -split '\s+' | Where-Object { $_ } | ForEach-Object { & $wordEntry $_ }) })
                 if ($null -eq $listed) { $unresolved.Add($anchor); break }
