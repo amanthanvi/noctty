@@ -1,6 +1,8 @@
 . (Join-Path $PSScriptRoot 'interactive-win11-measure-lib.ps1')
 
-# ---- Hosted mode: the hidden-desktop GUI suite (test/windows/gui-hidden-runner.ps1, interactive offload PR 1).
+# ---- Hosted mode: the hidden-desktop GUI suite (its runner is gui-hidden-runner.ps1 beside the leaves; interactive
+# offload PR 1). The runner is named without its path on purpose: ci-scripts.ps1 follows any path-shaped name in a
+# file, and this library is read by jobs (the portable smoke) that never run the runner.
 # NOCTTY_GUI_HIDDEN_DESKTOP selects it. The runner sets it to the private desktop it created for this leaf,
 # `<station>\<desktop>`, with NOCTTY_GUI_HIDDEN_EXE (the leaf's portable copy of the receipt-bound measurement build)
 # and NOCTTY_GUI_HIDDEN_RUN (the leaf's run directory). On the default route nothing below compiles or runs.
@@ -90,7 +92,7 @@ function Get-InteractiveWin11HostedLaunchRefusal {
     if ($env:NOCTTY_INTERACTIVE_MEASURE_AUMID -ne '1') { return 'measurement mode not set' }
     if ($null -eq $script:InteractiveWin11HostedIdentity) { return 'no staged identity' }
     $full = [IO.Path]::GetFullPath($FilePath)
-    $match = @($script:InteractiveWin11HostedIdentity.Values | Where-Object { [string]::Equals($_.Path, $full, [StringComparison]::OrdinalIgnoreCase) })
+    $match = @($script:InteractiveWin11HostedIdentity.Values | Where-Object { Test-InteractiveWin11SamePath $_.Path $full })
     if ($match.Count -ne 1) { return 'not the staged app or CLI' }
     $dir = Split-Path -Parent $full
     if (-not [IO.File]::Exists((Join-Path $dir 'noctty.portable'))) { return 'not a portable copy' }
@@ -323,6 +325,24 @@ public static class InteractiveWin11HostedLaunch {
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr file, out FileInfo info);
+    // Every struct this type mirrors, as its marshalled size and each field's offset (AGENTS.md "Win32 FFI"): the
+    // library refuses hosted mode unless this equals its pinned literal ($script:InteractiveWin11HostedLaunchLayout).
+    static string LayoutOf(Type type, params string[] fields) {
+        var parts = new System.Collections.Generic.List<string> { type.Name + "=" + Marshal.SizeOf(type) };
+        foreach (string field in fields) parts.Add(field + "@" + Marshal.OffsetOf(type, field));
+        return string.Join(" ", parts);
+    }
+    public static string Layout() {
+        return string.Join("; ", new[] {
+            LayoutOf(typeof(FileInfo), "attributes", "created", "accessed", "written", "volumeSerial", "sizeHigh", "sizeLow", "links", "indexHigh", "indexLow"),
+            LayoutOf(typeof(FileTime), "low", "high"),
+            LayoutOf(typeof(Startup), "cb", "reserved", "desktop", "title", "x", "y", "cx", "cy", "charsX", "charsY", "fill", "flags",
+                "show", "reservedBytes", "reservedPointer", "input", "output", "error"),
+            LayoutOf(typeof(StartupEx), "info", "attributes"),
+            LayoutOf(typeof(ProcessInfo), "process", "thread", "pid", "tid"),
+            LayoutOf(typeof(SecurityAttributes), "length", "descriptor", "inherit") });
+    }
+
     public delegate bool EnumWindow(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out int pid);
@@ -443,6 +463,14 @@ public static class InteractiveWin11HostedLaunch {
     }
 }
 '@
+    }
+    # The launcher's structs as the x64 SDK lays them out (BY_HANDLE_FILE_INFORMATION with FILETIMEs of two DWORDs, 52
+    # bytes; STARTUPINFOW 104, STARTUPINFOEXW 112, PROCESS_INFORMATION 24, SECURITY_ATTRIBUTES 24).
+    $script:InteractiveWin11HostedLaunchLayout = 'FileInfo=52 attributes@0 created@4 accessed@12 written@20 volumeSerial@28 sizeHigh@32 sizeLow@36 links@40 indexHigh@44 indexLow@48; ' +
+        'FileTime=8 low@0 high@4; Startup=104 cb@0 reserved@8 desktop@16 title@24 x@32 y@36 cx@40 cy@44 charsX@48 charsY@52 fill@56 flags@60 show@64 reservedBytes@66 reservedPointer@72 input@80 output@88 error@96; ' +
+        'StartupEx=112 info@0 attributes@104; ProcessInfo=24 process@0 thread@8 pid@16 tid@20; SecurityAttributes=24 length@0 descriptor@8 inherit@16'
+    if (-not [string]::Equals([InteractiveWin11HostedLaunch]::Layout(), $script:InteractiveWin11HostedLaunchLayout, [StringComparison]::Ordinal)) {
+        throw 'gui-hidden: the hosted launcher''s structs are not laid out as the SDK''s.'
     }
     [InteractiveWin11HostedDesktop]::Assert($env:NOCTTY_GUI_HIDDEN_DESKTOP)
     $script:InteractiveWin11HostedIdentity = Initialize-InteractiveWin11HostedIdentity

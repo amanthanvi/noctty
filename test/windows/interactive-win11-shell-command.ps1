@@ -131,7 +131,8 @@ if ($launchAction -eq 'build') {
 Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 $exeDir = Split-Path -Parent $exePath
-$expectedCommandPath = Join-Path $exeDir 'noctty.com'
+# Canonical (Test-InteractiveWin11SamePath): an 8.3 spelling of the copy's directory must not change the verdict.
+$expectedCommandPath = Get-InteractiveWin11CanonicalPath (Join-Path $exeDir 'noctty.com')
 
 $cmdResolvedPath = Join-Path $layout.Temp 'cmd-resolved.txt'
 $cmdHelpPath = Join-Path $layout.Temp 'cmd-help.txt'
@@ -166,6 +167,8 @@ if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
 $cmdResolutionGuard = @()
 if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
     if ($expectedCommandPath -match '[%^&|<>"!]') { throw 'The staged CLI''s path holds a character cmd would interpret.' }
+    # cmd compares text only: `where` prints the PATH entry noctty put first (the copy's directory, as the launcher
+    # started noctty from its canonical path), so a different spelling there refuses; it never admits.
     $cmdResolutionGuard = @(
         "set /p gui_hidden_first=<`"$cmdResolvedPath`""
         "if /i not `"%gui_hidden_first%`"==`"$expectedCommandPath`" exit /b 3"
@@ -195,7 +198,7 @@ $cmdResolved = @(Get-Content -LiteralPath $cmdResolvedPath | Where-Object { -not
 if ($cmdResolved.Count -lt 1) {
     throw "cmd run produced no command resolution output ($cmdResolvedPath)"
 }
-if (-not $cmdResolved[0].Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not (Test-InteractiveWin11SamePath $cmdResolved[0] $expectedCommandPath)) {
     throw "cmd resolved unexpected first noctty command: $($cmdResolved[0])"
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'cmd +help'
@@ -225,7 +228,7 @@ Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psKeybin
 $psResolutionGuard = @()
 if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
     $psExpectedLiteral = Get-EscapedPowerShellLiteralPath -Path $expectedCommandPath
-    $psResolutionGuard = @("if (-not [string]::Equals([string]`$resolved, '$psExpectedLiteral', [StringComparison]::OrdinalIgnoreCase)) { exit 3 }")
+    $psResolutionGuard = @("if (-not `$resolved -or -not [string]::Equals([IO.Path]::GetFullPath([string]`$resolved), '$psExpectedLiteral', [StringComparison]::OrdinalIgnoreCase)) { exit 3 }")
 }
 @(
     '$resolved = (Get-Command noctty).Source'
@@ -255,7 +258,7 @@ $null = Invoke-AppShellRun `
     -StderrPath $psStderrPath
 
 $psResolved = (Get-RequiredTextFile -Path $psResolvedPath).Trim()
-if (-not $psResolved.Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not (Test-InteractiveWin11SamePath $psResolved $expectedCommandPath)) {
     throw "PowerShell resolved unexpected noctty command: $psResolved"
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $psHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'PowerShell +help'

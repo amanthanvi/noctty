@@ -77,10 +77,20 @@ $guiHiddenProblems = & {
         $selfTest = & $findStep $suite 'Interactive harness helper self-test' 'suite'
         $selfTestAt = $suite.IndexOf('      - name: Interactive harness helper self-test', [StringComparison]::Ordinal)
         $runnerAt = $suite.IndexOf('      - name: Hidden-desktop GUI suite', [StringComparison]::Ordinal)
-        if ($null -eq $selfTest -or $selfTest -notmatch '(?m)^        shell: pwsh\s*$' -or
+        if ($null -eq $selfTest -or $selfTest -notmatch '(?m)^        shell: pwsh\s*$' -or $selfTest -notmatch '(?m)^        id: selftest\s*$' -or
             $selfTest -notmatch '(?m)^        run: pwsh -NoProfile -NonInteractive -File test/windows/interactive-win11\.ps1\s*$' -or
             $selfTest -match '(?m)^        (?:if|continue-on-error):' -or $selfTestAt -lt 0 -or $runnerAt -lt 0 -or $selfTestAt -gt $runnerAt) {
             $found.Add('gui-hidden.yml: the suite job runs test/windows/interactive-win11.ps1 (the helper self-test) unconditionally, before the suite step')
+        }
+        # A failed self-test still leaves a record: the next step publishes an error result for it, between the suite
+        # step and the upload (the lead on #740: the first hosted failure uploaded nothing).
+        $publish = & $findStep $suite 'Publish an error result for a failed self-test' 'suite'
+        $publishAt = $suite.IndexOf('      - name: Publish an error result for a failed self-test', [StringComparison]::Ordinal)
+        $uploadAt = $suite.IndexOf('      - name: Upload the suite''s result and receipts', [StringComparison]::Ordinal)
+        if ($null -eq $publish -or $publish -notmatch "(?m)^        if: failure\(\) && steps\.selftest\.outcome == 'failure'\s*$" -or
+            $publish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -PublishError helper-self-test -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
+            $publish -match '(?m)^        continue-on-error:' -or $publishAt -lt $runnerAt -or $uploadAt -lt $publishAt) {
+            $found.Add('gui-hidden.yml: after the suite step and before the upload, a failed self-test publishes an error result through the runner''s -PublishError')
         }
         $run = Get-YamlStepBlock -Content $suite -Name 'Hidden-desktop GUI suite' -Source 'gui-hidden.yml :: suite'
         if ($run -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -MeasureRepo \$env:GITHUB_WORKSPACE -Work \(Join-Path \$env:RUNNER_TEMP ''gui-hidden-work''\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\) -Build\s*$' -or
@@ -136,9 +146,12 @@ $guiHiddenProblems = & {
         @{ Name = 'an extra upload path after a blank line'; Old = "            `${{ runner.temp }}/gui-hidden/receipts/**`n"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n`n            `${{ runner.temp }}/gui-hidden-work/**`n" }
         @{ Name = 'the verdict step limited to manual runs'; Old = "      - name: Every needed job succeeded and every skipped job was not needed`n"; New = "      - name: Every needed job succeeded and every skipped job was not needed`n        if: github.event_name == 'workflow_dispatch'`n" }
         @{ Name = 'the verdict step allowed to fail'; Old = "      - name: Every needed job succeeded and every skipped job was not needed`n"; New = "      - name: Every needed job succeeded and every skipped job was not needed`n        continue-on-error: true`n" }
-        @{ Name = 'the helper self-test dropped'; Old = "      - name: Interactive harness helper self-test`n        shell: pwsh`n        run: pwsh -NoProfile -NonInteractive -File test/windows/interactive-win11.ps1`n"; New = '' }
+        @{ Name = 'the helper self-test dropped'; Old = "      - name: Interactive harness helper self-test`n        id: selftest`n        shell: pwsh`n        run: pwsh -NoProfile -NonInteractive -File test/windows/interactive-win11.ps1`n"; New = '' }
         @{ Name = 'the helper self-test limited to pushes'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        if: github.event_name == 'push'`n" }
         @{ Name = 'the helper self-test allowed to fail'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        continue-on-error: true`n" }
+        @{ Name = 'the self-test without the id the error step reads'; Old = "        id: selftest`n"; New = '' }
+        @{ Name = 'no error result for a failed self-test'; Old = "      - name: Publish an error result for a failed self-test`n"; New = "      - name: Publish nothing`n" }
+        @{ Name = 'the error result published on every run'; Old = "        if: failure() && steps.selftest.outcome == 'failure'`n"; New = "        if: always()`n" }
     )
     $lfWorkflow = $workflowText.Replace("`r`n", "`n")
     # A validator returns its problems as one array object (`return , $found.ToArray()`), so a mutation's count is

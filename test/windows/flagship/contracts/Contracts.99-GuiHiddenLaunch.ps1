@@ -34,6 +34,10 @@ function Test-GuiContractInsideHostedSwitch($Node, [switch] $ElseBranch) {
     return $false
 }
 $guiLibAst = Get-GuiContractAst $guiLibPath
+$guiMeasureLibAst = Get-GuiContractAst (Join-Path $repoRoot 'scripts\interactive-win11-measure-lib.ps1')
+foreach ($name in @('Get-InteractiveWin11CanonicalPath', 'Test-InteractiveWin11SamePath')) {
+    . ([scriptblock]::Create((Get-GuiContractFunctionText $guiMeasureLibAst $name)))
+}
 $guiRunnerAst = Get-GuiContractAst $guiRunnerPath
 
 # ---- (1) lib's hosted block: compiled and run only inside `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)`, at the library's
@@ -153,7 +157,7 @@ try {
         [pscustomobject]@{ Token = $token; Layout = (Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'smoke') }
     }
     foreach ($entry in $guiLayouts) {
-        if (-not [string]::Equals($entry.Layout.SandboxRoot, (Join-Path $guiScratch "sandbox-$($entry.Token)"), [StringComparison]::OrdinalIgnoreCase) -or
+        if (-not (Test-InteractiveWin11SamePath $entry.Layout.SandboxRoot (Join-Path $guiScratch "sandbox-$($entry.Token)")) -or
             -not $entry.Layout.SandboxId.EndsWith("-$($entry.Token)", [StringComparison]::Ordinal)) {
             throw 'A hosted sandbox must sit under its run directory, named and suffixed by its run token.'
         }

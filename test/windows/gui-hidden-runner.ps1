@@ -9,6 +9,10 @@ job gained a noctty process the launcher did not start, that left a reparse poin
 .DESCRIPTION
   pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new directory>
        -Out <new or empty directory> [-Build] [-Leaves <id>,...] [-KeepFailedCopies]
+  pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError <kind> -Out <new or empty directory>
+
+-PublishError writes only an `error` result (and run.json) for a step that failed before the suite could run, such
+as the workflow's helper self-test, so the uploaded artifact still records the failure; it exits 2.
 
 The build (design §4.2). Every leaf starts only a fresh portable copy of the measurement build that
 Invoke-InteractiveWin11MeasureBuild (scripts/interactive-win11-measure-lib.ps1) made for -MeasureRepo's HEAD, with
@@ -74,7 +78,8 @@ param(
     [string] $Out,
     [switch] $Build,
     [string[]] $Leaves = @(),
-    [switch] $KeepFailedCopies
+    [switch] $KeepFailedCopies,
+    [string] $PublishError
 )
 $ErrorActionPreference = 'Stop'
 
@@ -84,6 +89,16 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-state-guard.ps1')
 
 if ([IntPtr]::Size -ne 8) { throw 'The runner reads x64 process structures; run it in 64-bit PowerShell.' }
+
+# Every struct GuiHiddenRunnerNative mirrors, as the x64 SDK lays it out (fileapi.h, processthreadsapi.h, winbase.h,
+# winnt.h, winternl.h; none under a pshpack): checked after the type compiles, before anything reads through it.
+$script:GuiHiddenNativeLayout = 'FileInfo=52 attributes@0 createdLow@4 createdHigh@8 accessedLow@12 accessedHigh@16 writtenLow@20 writtenHigh@24 volumeSerial@28 sizeHigh@32 sizeLow@36 links@40 indexHigh@44 indexLow@48; ' +
+    'Startup=104 cb@0 reserved@8 desktop@16 title@24 x@32 y@36 cx@40 cy@44 charsX@48 charsY@52 fill@56 flags@60 show@64 reservedBytes@66 reservedPointer@72 input@80 output@88 error@96; ' +
+    'StartupEx=112 info@0 attributes@104; ProcessInfo=24 process@0 thread@8 pid@16 tid@20; SecurityAttributes=24 length@0 descriptor@8 inherit@16; ' +
+    'BasicLimits=64 processTime@0 jobTime@8 flags@16 minWorking@24 maxWorking@32 activeProcesses@40 affinity@48 priority@56 scheduling@60; ' +
+    'IoCounters=48 readOps@0 writeOps@8 otherOps@16 readBytes@24 writeBytes@32 otherBytes@40; ' +
+    'JobLimits=144 basic@0 io@64 processMemory@112 jobMemory@120 peakProcessMemory@128 peakJobMemory@136; JobPort=16 key@0 port@8; ' +
+    'ProcessBasic=48 exitStatus@0 peb@8 affinity@16 basePriority@24 pid@32 parentPid@40'
 
 if (-not ('GuiHiddenRunnerNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -150,11 +165,54 @@ public static class GuiHiddenRunnerNative {
     [DllImport("user32.dll", SetLastError = true)] static extern bool EnumDesktopWindows(IntPtr desktop, EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out int pid);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    // BY_HANDLE_FILE_INFORMATION (fileapi.h, no pshpack): 13 DWORDs, each FILETIME as two DWORDs, 52 bytes. A `long`
+    // FILETIME would be 8-aligned on x64 and push every later field 4 bytes (Greptile on #740); Layout() pins it.
     [StructLayout(LayoutKind.Sequential)] struct FileInfo {
-        public uint attributes; public long created, accessed, written;
+        public uint attributes, createdLow, createdHigh, accessedLow, accessedHigh, writtenLow, writtenHigh;
         public uint volumeSerial, sizeHigh, sizeLow, links, indexHigh, indexLow;
     }
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr file, out FileInfo info);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern uint GetFinalPathNameByHandleW(IntPtr file, StringBuilder path, uint length, uint flags);
+
+    // Every struct this type mirrors, as its marshalled size and each field's offset (AGENTS.md "Win32 FFI"): the
+    // runner refuses to run unless this equals its pinned literal, and Contracts.99-GuiHiddenLaunch pins the literal.
+    static string LayoutOf(Type type, params string[] fields) {
+        var parts = new List<string> { type.Name + "=" + Marshal.SizeOf(type) };
+        foreach (string field in fields) parts.Add(field + "@" + Marshal.OffsetOf(type, field));
+        return string.Join(" ", parts);
+    }
+    public static string Layout() {
+        return string.Join("; ", new[] {
+            LayoutOf(typeof(FileInfo), "attributes", "createdLow", "createdHigh", "accessedLow", "accessedHigh", "writtenLow", "writtenHigh",
+                "volumeSerial", "sizeHigh", "sizeLow", "links", "indexHigh", "indexLow"),
+            LayoutOf(typeof(Startup), "cb", "reserved", "desktop", "title", "x", "y", "cx", "cy", "charsX", "charsY", "fill", "flags",
+                "show", "reservedBytes", "reservedPointer", "input", "output", "error"),
+            LayoutOf(typeof(StartupEx), "info", "attributes"),
+            LayoutOf(typeof(ProcessInfo), "process", "thread", "pid", "tid"),
+            LayoutOf(typeof(SecurityAttributes), "length", "descriptor", "inherit"),
+            LayoutOf(typeof(BasicLimits), "processTime", "jobTime", "flags", "minWorking", "maxWorking", "activeProcesses", "affinity", "priority", "scheduling"),
+            LayoutOf(typeof(IoCounters), "readOps", "writeOps", "otherOps", "readBytes", "writeBytes", "otherBytes"),
+            LayoutOf(typeof(JobLimits), "basic", "io", "processMemory", "jobMemory", "peakProcessMemory", "peakJobMemory"),
+            LayoutOf(typeof(JobPort), "key", "port"),
+            LayoutOf(typeof(ProcessBasic), "exitStatus", "peb", "affinity", "basePriority", "pid", "parentPid") });
+    }
+
+    // A path's canonical spelling, read through an opened handle (GetFinalPathNameByHandleW, VOLUME_NAME_DOS): an 8.3
+    // short name, a different case or `.` and `..` all give the same answer for the same file. Null when unreadable.
+    public static string FinalPath(string path) {
+        if (string.IsNullOrEmpty(path)) return null;
+        IntPtr file = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero); // FILE_READ_ATTRIBUTES, share all, OPEN_EXISTING, BACKUP_SEMANTICS
+        if (file == new IntPtr(-1)) return null;
+        try {
+            var name = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandleW(file, name, (uint)name.Capacity, 0);
+            if (length == 0 || length >= name.Capacity) return null;
+            string text = name.ToString();
+            if (text.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) return @"\\" + text.Substring(8);
+            if (text.StartsWith(@"\\?\", StringComparison.Ordinal)) return text.Substring(4);
+            return text;
+        } finally { CloseHandle(file); }
+    }
     [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern IntPtr CommandLineToArgvW(string line, out int count);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
 
@@ -171,11 +229,14 @@ public static class GuiHiddenRunnerNative {
         } finally { CloseHandle(file); }
     }
 
-    // Whether `imagePath` is `expectedPath`, by full path and by identity: the loaded image, not the command line's
-    // claim (a process's command line need not name its image; CodeRabbit on #740).
+    // Whether `imagePath` is `expectedPath`, by canonical path and by identity: the loaded image, not the command line's
+    // claim (a process's command line need not name its image; CodeRabbit on #740). Both paths are canonicalized through
+    // an opened handle first, so an 8.3 spelling on either side neither refuses nor admits on a string difference
+    // (the hosted runner's TEMP is C:\Users\RUNNER~1\...; #740's first hosted run).
     public static bool SameImage(string imagePath, string expectedPath, string expectedId) {
         if (string.IsNullOrEmpty(imagePath) || string.IsNullOrEmpty(expectedPath) || string.IsNullOrEmpty(expectedId)) return false;
-        if (!string.Equals(imagePath, expectedPath, StringComparison.OrdinalIgnoreCase)) return false;
+        string image = FinalPath(imagePath), expected = FinalPath(expectedPath);
+        if (image == null || expected == null || !string.Equals(image, expected, StringComparison.OrdinalIgnoreCase)) return false;
         return string.Equals(FileId(imagePath), expectedId, StringComparison.Ordinal);
     }
 
@@ -299,7 +360,9 @@ public static class GuiHiddenRunnerNative {
             int space = text.IndexOf(' ');
             exe = space < 0 ? text : text.Substring(0, space); rest = space < 0 ? "" : text.Substring(space);
         }
-        try { system = Path.IsPathRooted(exe) && string.Equals(Path.GetFullPath(exe), systemCmd, StringComparison.OrdinalIgnoreCase); }
+        // Both sides canonical (GetFullPath expands an existing 8.3 component; measured on pwsh 7.6 and Windows PowerShell
+        // 5.1), compared without regard to case. The loaded image is checked by handle separately (SameImage).
+        try { system = Path.IsPathRooted(exe) && string.Equals(Path.GetFullPath(exe), Path.GetFullPath(systemCmd), StringComparison.OrdinalIgnoreCase); }
         catch (Exception) { system = false; }
         foreach (string token in rest.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
             if (!token.StartsWith("/")) break;
@@ -443,6 +506,9 @@ public static class GuiHiddenRunnerNative {
     }
 }
 '@
+}
+if (-not [string]::Equals([GuiHiddenRunnerNative]::Layout(), $script:GuiHiddenNativeLayout, [StringComparison]::Ordinal)) {
+    throw 'GuiHiddenRunnerNative''s structs are not laid out as the SDK''s; refusing to read through them.'
 }
 
 # ---- the record: values only (gui-hosted-probe.ps1's allowlist, #738)
@@ -953,7 +1019,13 @@ $failureKind = $null
 
 # Validation: any failure here exits 2, with a result when -Out could be opened (CodeRabbit on #740).
 try {
-    if (-not $MeasureRepo -or -not $Work -or -not $Out) { throw 'Usage: -MeasureRepo <repo> -Work <new directory> -Out <empty or new directory> [-Build] [-Leaves id,...]' }
+    if ($PublishError) {
+        # A kind from a fixed shape only: it reaches the result.
+        if ($PublishError -cnotmatch '\A[a-z][a-z0-9-]{0,39}\z' -or -not $Out -or $MeasureRepo -or $Work -or $Build -or $Leaves.Count -gt 0) {
+            throw 'Usage: -PublishError <kind: lowercase letters, digits and hyphens> -Out <empty or new directory>, alone.'
+        }
+    }
+    elseif (-not $MeasureRepo -or -not $Work -or -not $Out) { throw 'Usage: -MeasureRepo <repo> -Work <new directory> -Out <empty or new directory> [-Build] [-Leaves id,...]' }
     $Out = [IO.Path]::GetFullPath($Out)
     # -Out holds this run's files only: new or empty, so no earlier receipt can be listed as this run's (Sol and
     # CodeRabbit on #740). Nothing in it is ever deleted.
@@ -963,6 +1035,7 @@ try {
     }
     [void](New-Item -ItemType Directory -Force -Path (Join-Path $Out 'receipts'))
     $outReady = $true
+    if ($PublishError) { throw [System.OperationCanceledException]::new('publish-error') }
     if ($Build -and -not (Test-GuiHiddenHosted)) { throw '-Build runs only on a GitHub-hosted runner; locally, prepare the measurement build beforehand with Invoke-InteractiveWin11MeasureBuild.' }
     $MeasureRepo = (Resolve-Path -LiteralPath $MeasureRepo).Path
     $Work = [IO.Path]::GetFullPath($Work)
@@ -980,6 +1053,14 @@ try {
     if ($Leaves.Count -gt 0 -and $selected.Count -ne $Leaves.Count) { throw 'An -Leaves id is not in the plan.' }
     # A subset run is for diagnosis: its result never passes the full scenario (CodeRabbit on #740).
     $subset = $selected.Count -lt @($plan.leaves).Count
+}
+catch [System.OperationCanceledException] {
+    # -PublishError: no suite runs; the result below records the named failure.
+    Write-Host "gui-hidden: publishing an error result ($PublishError)"
+    $runRecord.publishedError = $PublishError
+    $plan = Get-GuiHiddenPlan
+    $exit = 2
+    $failureKind = $PublishError
 }
 catch {
     Write-Host "gui-hidden: validation failed: $($_.Exception.Message)"
