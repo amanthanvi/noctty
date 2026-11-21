@@ -201,7 +201,9 @@ that govern each symbol you change, or that none does.
   versus the bundled `conpty.dll`/`OpenConsole.exe`
   (`scripts/stage-conpty-redist.ps1`), what ConPTY's buffer holds after a
   resize, minimize, clear or undo and the column reflow that has to match it
-  (`Screen.resize`, the replay tests in `src/terminal/resize_replay.zig`, the
+  (`Screen.resize` and where its prompt redraw starts clearing,
+  `promptRedrawStart` and `clearPromptForRedraw`, the replay tests in
+  `src/terminal/resize_replay.zig`, the
   sync harness `test/windows/interactive-win11-conpty-sync.ps1`), which
   terminal replies reach a console program through ConPTY's input and in what
   shape (the reply-path harness

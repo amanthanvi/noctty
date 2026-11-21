@@ -2106,6 +2106,7 @@ fn unmarkBlankRowsBelowCursor(self: *Screen) void {
 
 const resize_tw = tripwire.module(enum {
     saved_cursor_pin,
+    redraw_pin,
     pages,
 }, resize);
 
@@ -2150,6 +2151,23 @@ pub inline fn resize(
         break :saved_cursor try self.pages.trackPin(pin);
     };
     defer if (saved_cursor_pin) |p| self.pages.untrackPin(p);
+
+    // A prompt redraw clears the prompt after the fallible resize
+    // (clearPromptForRedraw), but where the clear starts is read here, from
+    // the rows as the prompt wrote them. The reflow copies a row's prompt
+    // mark onto every row it wraps that row into (PageList's
+    // ReflowCursor.copyRowMetadata), so afterwards a wrapped piece reads as
+    // a prompt start of its own, and a widening can move this prompt's start
+    // into the middle of a row that an earlier prompt's line begins. A
+    // tracked pin follows the start through the resize. Track it before
+    // changing any state since tracking the pin can fail.
+    const redraw_pin: ?*Pin = redraw: {
+        const start = self.promptRedrawStart(opts.prompt_redraw) orelse
+            break :redraw null;
+        try tw.check(.redraw_pin);
+        break :redraw try self.pages.trackPin(start);
+    };
+    defer if (redraw_pin) |p| self.pages.untrackPin(p);
 
     // A pty without scrollback (conhost) reflows its buffer only down to the
     // cursor's row or its last character that is not a space, so the empty
@@ -2286,7 +2304,10 @@ pub inline fn resize(
     // Clear any redrawable prompt after the fallible resize but before
     // restoring the cursor style and hyperlink, so cleared cells retain the
     // same default styling they had with the previous ordering.
-    self.clearPromptForRedraw(opts.prompt_redraw);
+    self.clearPromptForRedraw(
+        opts.prompt_redraw,
+        if (redraw_pin) |p| p.* else null,
+    );
 
     // Restore the cursor style.
     self.cursor.style = cursor_style;
@@ -2383,9 +2404,46 @@ pub inline fn resize(
     }
 }
 
+/// Where a prompt redraw starts clearing, read before a resize changes the
+/// rows: for `.true`, the first row of the cursor's prompt; for `.last`, the
+/// first row of the cursor's line, over its soft wraps but never above the
+/// first row of the cursor's prompt, so neither walks into an earlier
+/// prompt. Null when the redraw clears nothing, or, for `.true`, when no
+/// prompt mark is found.
+fn promptRedrawStart(
+    self: *const Screen,
+    redraw: osc.semantic_prompt.Redraw,
+) ?Pin {
+    if (redraw == .false or self.cursor.semantic_content == .output) return null;
+
+    const cursor = self.cursor.page_pin.*;
+    const prompt_start: ?Pin = prompt: {
+        var it = cursor.promptIterator(.left_up, null);
+        break :prompt it.next();
+    };
+
+    switch (redraw) {
+        .false => unreachable,
+        .true => return prompt_start,
+        .last => {
+            var start = cursor.left(cursor.x);
+            while (start.rowAndCell().row.wrap_continuation) {
+                if (prompt_start) |p| {
+                    if (p.node == start.node and p.y == start.y) break;
+                }
+                const above = start.up(1) orelse break;
+                if (!above.rowAndCell().row.wrap) break;
+                start = above;
+            }
+            return start;
+        },
+    }
+}
+
 fn clearPromptForRedraw(
     self: *Screen,
     redraw: osc.semantic_prompt.Redraw,
+    start_: ?Pin,
 ) void {
     // If our cursor is on a prompt or input line, clear it so the shell can
     // redraw it. This works with OSC 133 semantic prompts. We do this after
@@ -2398,63 +2456,39 @@ fn clearPromptForRedraw(
     // would miss them. By checking semantic_content, we assume that if the
     // cursor is on anything other than command output, we're at a prompt/input
     // line and should clear from there.
-    if (redraw != .false and
-        self.cursor.semantic_content != .output)
-    prompt: {
-        switch (redraw) {
-            .false => unreachable,
+    //
+    // `start_` is promptRedrawStart's pin as the resize left it. For `.true`
+    // we clear all prompt lines from there down; for `.last`, the cursor's
+    // line from there to its last row (after a narrowing the reflow can wrap
+    // it past the cursor's row).
+    if (redraw == .false or self.cursor.semantic_content == .output) return;
+    const start = start_ orelse {
+        // This should never happen because promptIterator should always
+        // find a prompt if we already verified our row is some kind of
+        // prompt.
+        log.warn("cursor on prompt line but promptIterator found no prompt", .{});
+        return;
+    };
 
-            // For `.last`, only clear the current line where the cursor is.
-            // For `.true`, clear all prompt lines starting from the beginning.
-            .last => {
-                const page = self.cursor.page_pin.node.page();
-                const row = self.cursor.page_row;
-                const cells = page.getCells(row);
-                self.clearCells(page, row, cells);
-            },
+    // Clear cells from our start down. We replace it with spaces, and do not
+    // physically erase the rows (eraseRows) because the shell is going to
+    // expect this space to be available.
+    const cursor = self.cursor.page_pin.*;
+    var reached_cursor = false;
+    var it = start.rowIterator(.right_down, null);
+    while (it.next()) |pin| {
+        const page = pin.node.page();
+        const row = pin.rowAndCell().row;
+        const cells = page.getCells(row);
 
-            .true => {
-                var start: Pin = start: {
-                    var it = self.cursor.page_pin.promptIterator(
-                        .left_up,
-                        null,
-                    );
-                    break :start it.next() orelse {
-                        // This should never happen because promptIterator should always
-                        // find a prompt if we already verified our row is some kind of
-                        // prompt.
-                        log.warn("cursor on prompt line but promptIterator found no prompt", .{});
-                        break :prompt;
-                    };
-                };
+        // A widening can join the start onto a row that an earlier line
+        // begins; that line's cells before it stay.
+        var from: usize = if (pin.node == start.node and pin.y == start.y) start.x else 0;
+        if (from > 0 and cells[from].wide == .spacer_tail) from -= 1;
+        self.clearCells(page, row, cells[from..]);
 
-                // This runs after the reflow, which copies a row's prompt
-                // mark onto every row it wraps that row into (PageList's
-                // ReflowCursor.copyRowMetadata). After a narrowing the
-                // cursor can sit on such a piece, which then reads as a
-                // prompt start of its own, and clearing from there would
-                // leave the rest of the prompt's first line. The prompt
-                // starts where that line does, as it did when this clear
-                // ran before the reflow.
-                while (start.rowAndCell().row.wrap_continuation) {
-                    const above = start.up(1) orelse break;
-                    const above_row = above.rowAndCell().row;
-                    if (!above_row.wrap or above_row.semantic_prompt != .prompt) break;
-                    start = above;
-                }
-
-                // Clear cells from our start down. We replace it with spaces,
-                // and do not physically erase the rows (eraseRows) because the
-                // shell is going to expect this space to be available.
-                var it = start.rowIterator(.right_down, null);
-                while (it.next()) |pin| {
-                    const page = pin.node.page();
-                    const row = pin.rowAndCell().row;
-                    const cells = page.getCells(row);
-                    self.clearCells(page, row, cells);
-                }
-            },
-        }
+        if (pin.node == cursor.node and pin.y == cursor.y) reached_cursor = true;
+        if (redraw == .last and reached_cursor and !row.wrap) break;
     }
 }
 
@@ -8090,6 +8124,102 @@ test "Screen: resize less cols with prompt redraw clears a prompt line the reflo
         const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
         defer alloc.free(contents);
         try testing.expectEqualStrings("0\n1", contents);
+    }
+}
+
+test "Screen: resize with prompt redraw keeps an earlier prompt the current one wraps from" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Case = struct {
+        cols: size.CellCountInt,
+        redraw: osc.semantic_prompt.Redraw,
+        pull_scrollback: bool,
+    };
+    var cases: [8]Case = undefined;
+    var n: usize = 0;
+    // 6 columns changes only the row count, so nothing reflows; 12 columns
+    // unwraps the line, so the current prompt starts mid-row.
+    for ([_]size.CellCountInt{ 6, 12 }) |cols| {
+        for ([_]osc.semantic_prompt.Redraw{ .true, .last }) |redraw| {
+            for ([_]bool{ false, true }) |pull_scrollback| {
+                cases[n] = .{ .cols = cols, .redraw = redraw, .pull_scrollback = pull_scrollback };
+                n += 1;
+            }
+        }
+    }
+
+    for (cases) |case| {
+        var s = try init(alloc, .{ .cols = 6, .rows = 4, .max_scrollback = 10 });
+        defer s.deinit();
+
+        // A prompt and a line that wraps onto row 1. Its command ends (OSC
+        // 133 D) and the next prompt starts (OSC 133 P, k=i) on the
+        // continuation row, with no fresh line between them.
+        s.cursorSetSemanticContent(.{ .prompt = .initial });
+        try s.testWriteString("abcdefg");
+        s.cursorSetSemanticContent(.output);
+        s.cursorSetSemanticContent(.{ .prompt = .initial });
+        try s.testWriteString("> ");
+        s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+        try s.testWriteString("ls");
+        {
+            const row0 = s.pages.pin(.{ .active = .{ .y = 0 } }).?.rowAndCell().row;
+            const row1 = s.pages.pin(.{ .active = .{ .y = 1 } }).?.rowAndCell().row;
+            try testing.expect(row0.wrap and row0.semantic_prompt == .prompt);
+            try testing.expect(row1.wrap_continuation and row1.semantic_prompt == .prompt);
+        }
+
+        // The redraw clears the current prompt, which starts on row 1, and
+        // leaves the earlier one on row 0, whatever the resize does to the
+        // rows between them.
+        try s.resize(.{
+            .cols = case.cols,
+            .rows = 6,
+            .prompt_redraw = case.redraw,
+            .pull_scrollback = case.pull_scrollback,
+        });
+        if (case.cols == 6) {
+            try testing.expectEqual(@as(size.CellCountInt, 5), s.cursor.x);
+            try testing.expectEqual(@as(size.CellCountInt, 1), s.cursor.y);
+        }
+        {
+            const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
+            defer alloc.free(contents);
+            try testing.expectEqualStrings("abcdef", contents);
+        }
+    }
+}
+
+test "Screen: resize less cols with prompt redraw last clears the whole line the reflow wraps" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]bool{ false, true }) |pull_scrollback| {
+        var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10 });
+        defer s.deinit();
+        try s.testWriteString("0\n1\n");
+        s.cursorSetSemanticContent(.{ .prompt = .initial });
+        try s.testWriteString("> ");
+        s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+        try s.testWriteString("abcdefg");
+
+        // bash marks its prompt redraw=last. The reflow wraps the cursor's
+        // line at 6 columns; the shell redraws all of it, not only the row
+        // the cursor ends on.
+        try s.resize(.{
+            .cols = 6,
+            .rows = 5,
+            .prompt_redraw = .last,
+            .pull_scrollback = pull_scrollback,
+        });
+        try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.x);
+        try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.y);
+        {
+            const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
+            defer alloc.free(contents);
+            try testing.expectEqualStrings("0\n1", contents);
+        }
     }
 }
 
