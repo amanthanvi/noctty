@@ -9,15 +9,15 @@ gives `zig`, which includes every path its table does not name) or is in the GUI
 that classifier, and test.yml's ten outputs stay what they were: only gui-hidden.yml calls it (design v7 §4.5).
 
 The GUI list is computed, never kept by hand: the closure (scripts/ci-script-closure.ps1) of the runner and of every
-leaf in test/windows/gui-hidden-plan.json, plus the plan, the flagship scenario, the workflow, the helper self-test
-it runs, this script, the walker, the fixtures, the suite's contract fragment and the plan's `buildInputs` (what the
-hosted build preparation and the runner read through edges no walk shows: the measurement build's whole input set,
-src/**, pkg/**, vendor/**, include/**, dist/windows/**, build.zig and build.zig.zon, with scripts/dev-windows.cmd and
-the ConPTY stager and its two libraries; a `<dir>/**` entry is every file under that directory in each tree walked).
-On a pull request it
-is walked over the head tree, the base tip and every merge base of the two, so a member a change deletes or renames
-away still counts: the changed paths are a three-dot diff, from the merge base, which can describe a member neither
-tip has.
+leaf in test/windows/gui-hidden-plan.json, plus the fixed members (the plan, the flagship scenario, the workflow, the
+helper self-test it runs, this script, the walker, the fixtures, the suite's contract fragment, and the git policy the
+measurement preparation's provenance checks run under, .gitignore and .gitattributes) and the plan's `buildInputs`
+(what the hosted build preparation and the runner read through edges no walk shows: the measurement build's whole
+input set, src/**, pkg/**, vendor/**, include/**, dist/windows/**, build.zig and build.zig.zon, with
+scripts/dev-windows.cmd and the ConPTY stager and its two libraries; a `<dir>/**` entry is every tracked file under
+that directory in each tree walked). On a pull request it is walked over the head tree, the base tip and every merge
+base of the two, so a member a change deletes or renames away still counts: the changed paths are a three-dot diff,
+from the merge base, which can describe a member neither tip has.
 
 Push, schedule and manual runs need the suite. So do an empty diff, blank lines only, an unreadable diff and any
 failure to compute the list: deciding is an optimisation, and failing to decide runs the suite.
@@ -66,6 +66,11 @@ $script:CiGuiFixedMembers = @(
     # Get-CiPathNeeds), and the gate's verdict is ci-gate.ps1.
     'scripts/ci-changed-paths.ps1'
     'scripts/ci-gate.ps1'
+    # The git policy the measurement preparation's provenance checks run under (Sol and Opus on #740, round 13): the
+    # clean-checkout status reads .gitignore (it keeps the restored cache and .sandbox/ out), and the checkout bytes it
+    # compares with their blobs, and `git archive`, follow .gitattributes. .gitignore alone selected nothing before.
+    '.gitignore'
+    '.gitattributes'
     'test/windows/gui-hidden-scripts.ps1'
     'test/windows/flagship/contracts/Contracts.99-GuiHiddenSelection.ps1'
 )
@@ -105,23 +110,20 @@ function Get-CiGuiPriorRefs {
 function Get-CiGuiTreeFiles {
     <#
     .SYNOPSIS
-    The repo paths of every file under -Directory (a repo directory, '/'-separated) in -Ref's tree, or in the working
-    tree when -Ref is empty: what a `<dir>/**` build input names. The measurement build reads its whole input set, so
+    The repo paths of every tracked file under -Directory (a repo directory, '/'-separated) in -Ref's tree, or in the
+    index when -Ref is empty: what a `<dir>/**` build input names. The measurement build reads its whole input set, so
     the plan lists it by tree, not file by file (Sol on #740, rounds 11 and 12: the ConPTY manifest, then the two
-    sources measure-lib reads for provenance, were each missing from a hand-kept list). Throws when git cannot list.
+    sources measure-lib reads for provenance, were each missing from a hand-kept list). The working-tree route lists
+    the index, not the directory, so an ignored or untracked local file is no member, as on the ref route (Sol, round
+    13). Throws when git cannot list.
     #>
     param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Ref, [Parameter(Mandatory)] [string] $Directory)
-    if ([string]::IsNullOrWhiteSpace($Ref)) {
-        $full = Join-Path $RepoRoot ($Directory.Replace('/', '\'))
-        if (-not [IO.Directory]::Exists($full)) { return , [string[]]@() }
-        $cut = $RepoRoot.TrimEnd('\', '/').Length + 1
-        return , [string[]]@([IO.Directory]::EnumerateFiles($full, '*', [IO.SearchOption]::AllDirectories) | ForEach-Object { $_.Substring($cut).Replace('\', '/') })
-    }
-    $output = & git -C $RepoRoot ls-tree -r -z --name-only --full-tree $Ref -- "$Directory/" 2>$null
+    $arguments = $(if ([string]::IsNullOrWhiteSpace($Ref)) { @('ls-files', '-z', '--full-name', '--', "$Directory/") } else { @('ls-tree', '-r', '-z', '--name-only', '--full-tree', $Ref, '--', "$Directory/") })
+    $output = & git -C $RepoRoot @arguments 2>$null
     $code = $LASTEXITCODE
     # A handled failure must not leave Actions' implicit `exit $LASTEXITCODE` failing the step (PKG-65).
     $global:LASTEXITCODE = 0
-    if ($code -ne 0) { throw "git ls-tree for $Ref failed with exit code $code." }
+    if ($code -ne 0) { throw "git $($arguments[0]) for $(if ($Ref) { $Ref } else { 'the index' }) failed with exit code $code." }
     return , [string[]]@((@($output) -join "`n").Split([char]0) | Where-Object { $_ })
 }
 
@@ -132,7 +134,7 @@ function Get-CiGuiList {
     prior tree: each -BaseRef's tree (Get-CiGuiPriorRefs names them for a pull request) and each -BaseReader. Throws
     when a read or a walk fails, so the caller can run the suite. -HeadReader and -BaseReader (param([string]
     $RepoPath) returning text or $null) replace trees, for the tests; a `<dir>/**` build input is listed from the
-    working tree for them.
+    index for them.
     #>
     param(
         [Parameter(Mandatory)] [string] $RepoRoot,

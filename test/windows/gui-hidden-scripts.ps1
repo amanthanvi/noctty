@@ -768,22 +768,45 @@ foreach ($buildInput in @($plan.buildInputs | Where-Object { -not ([string]$_).E
 # ConPTY manifest the runner reads (Get-GuiHiddenConptyPins), the stager and its two libraries the measurement build
 # runs (src/build/ConptyRedist.zig), and the two sources measure-lib reads for provenance. Each would also select
 # through Get-CiPathNeeds' zig, so the list is checked directly.
-foreach ($buildInput in @('dist/windows/conpty-redist.json', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1', 'src/apprt/win32_aumid.zig', 'src/apprt/win32/app.zig')) {
+foreach ($buildInput in @('dist/windows/conpty-redist.json', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1', 'src/apprt/win32_aumid.zig', 'src/apprt/win32/app.zig', '.gitignore', '.gitattributes')) {
     Assert-True ($list -ccontains $buildInput) "The GUI list must hold the build input $buildInput."
 }
-# A `<dir>/**` build input is every tracked file under it, in the working tree and in a ref's tree alike, and nothing
-# else; the plan names the measurement build's whole input set that way (Sol on #740, round 12).
+# A `<dir>/**` build input is every tracked file under it, from the index on the working-tree route and from the
+# ref's tree on a ref route, and nothing else; the plan names the measurement build's whole input set that way (Sol on
+# #740, round 12). Each route is compared with its own tracked set, so an ignored or untracked local file, or a staged
+# change, cannot fail this (Greptile on #740).
 foreach ($buildTree in @('src', 'pkg', 'vendor', 'include', 'dist/windows')) {
     Assert-True (@($plan.buildInputs) -ccontains "$buildTree/**") "The plan's buildInputs must name $buildTree/**."
-    $tracked = [string[]]@(git -C $repoRoot ls-files -- "$buildTree/" | Sort-Object)
+    $inIndex = [string[]]@(git -C $repoRoot ls-files -- "$buildTree/" | Sort-Object)
+    $inHead = [string[]]@(git -C $repoRoot ls-tree -r --name-only --full-tree HEAD -- "$buildTree/" | Sort-Object)
     # Assigned before sorting: the function returns its paths as one array object.
     $working = Get-CiGuiTreeFiles -RepoRoot $repoRoot -Directory $buildTree
     $working = [string[]]@($working | Sort-Object)
     $atHead = Get-CiGuiTreeFiles -RepoRoot $repoRoot -Ref 'HEAD' -Directory $buildTree
     $atHead = [string[]]@($atHead | Sort-Object)
-    Assert-True ($tracked.Count -gt 0 -and ($working -join '|') -ceq ($tracked -join '|') -and ($atHead -join '|') -ceq ($tracked -join '|')) "$buildTree/** must expand to its tracked files, from the working tree ($($working.Count)) and from HEAD ($($atHead.Count)), not $($tracked.Count)."
-    foreach ($file in $tracked) { if (-not ($list -ccontains $file)) { Assert-True $false "The GUI list must hold $file, under $buildTree/**." ; break } }
+    Assert-True ($inIndex.Count -gt 0 -and ($working -join '|') -ceq ($inIndex -join '|') -and ($atHead -join '|') -ceq ($inHead -join '|')) "$buildTree/** must expand to its tracked files: the index ($($working.Count) of $($inIndex.Count)) and HEAD ($($atHead.Count) of $($inHead.Count))."
+    foreach ($file in $inIndex) { if (-not ($list -ccontains $file)) { Assert-True $false "The GUI list must hold $file, under $buildTree/**." ; break } }
 }
+# Sol on #740 (round 13): an ignored file under a build tree is no member on either route, on a small git tree.
+$ignoredRoot = Join-Path ([IO.Path]::GetTempPath()) ("noctty-gui-build-tree-$([guid]::NewGuid().ToString('N'))")
+try {
+    [void](New-Item -ItemType Directory -Path (Join-Path $ignoredRoot 'src\.zig-cache'))
+    [IO.File]::WriteAllText((Join-Path $ignoredRoot '.gitignore'), ".zig-cache/`n*.orig`n")
+    [IO.File]::WriteAllText((Join-Path $ignoredRoot 'src\main.zig'), 'pub fn main() void {}')
+    & git -C $ignoredRoot init -q 2>$null | Out-Null
+    & git -C $ignoredRoot add -A 2>$null | Out-Null
+    & git -C $ignoredRoot -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -q -m fixture 2>$null | Out-Null
+    $global:LASTEXITCODE = 0
+    [IO.File]::WriteAllText((Join-Path $ignoredRoot 'src\.zig-cache\scratch.txt'), 'ignored')
+    [IO.File]::WriteAllText((Join-Path $ignoredRoot 'src\main.zig.orig'), 'ignored')
+    $ignoredCheck = @(& git -C $ignoredRoot check-ignore -- 'src/.zig-cache/scratch.txt' 'src/main.zig.orig' 2>$null)
+    $global:LASTEXITCODE = 0
+    Assert-True ($ignoredCheck.Count -eq 2) "The ignored-file fixture's two files must be ignored by its .gitignore (the precondition): $($ignoredCheck -join ', ')"
+    $ignoredWorking = Get-CiGuiTreeFiles -RepoRoot $ignoredRoot -Directory 'src'
+    $ignoredHead = Get-CiGuiTreeFiles -RepoRoot $ignoredRoot -Ref 'HEAD' -Directory 'src'
+    Assert-True (($ignoredWorking -join '|') -ceq 'src/main.zig' -and ($ignoredHead -join '|') -ceq 'src/main.zig') "An ignored file under src/ must not be listed: the index gave [$($ignoredWorking -join ', ')], HEAD gave [$($ignoredHead -join ', ')]."
+}
+finally { Remove-Item -LiteralPath $ignoredRoot -Recurse -Force -ErrorAction SilentlyContinue }
 foreach ($file in @('build.zig', 'build.zig.zon')) { Assert-True ($list -ccontains $file) "The GUI list must hold the build input $file." }
 # The control: a plan without src/** lists no src/ file the closure does not reach.
 $noSrcReader = {
@@ -812,6 +835,10 @@ $singletons = [ordered]@{
     # The error publisher the suite job runs when it fails, and the schema it checks a result against (Sol on #740).
     'test/windows/gui-hidden-publish-error.ps1' = 'zig'
     'test/windows/flagship/result.schema.json' = 'package'
+    # The git policy the measurement preparation's provenance checks run under (Sol on #740, round 13): .gitignore
+    # alone selected nothing before it was a build input.
+    '.gitignore' = 'none'
+    '.gitattributes' = 'zig'
 }
 foreach ($path in $singletons.Keys) {
     Assert-True ((Get-CiPathNeeds $path) -ceq $singletons[$path]) "$path must keep Get-CiPathNeeds '$($singletons[$path])'."

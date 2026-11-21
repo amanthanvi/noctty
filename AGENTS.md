@@ -81,12 +81,12 @@ reading step under [Self-Correction Log](#self-correction-log).
   (test-harnesses.md: 2026-10-25 EVIDENCE-SCREENSHOT-PRIVACY-01). A
   hidden-desktop suite run, local or hosted, starts only a fresh portable
   copy, without `noctty.ico`, of the receipt-bound measurement build, with
-  `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`.
-  Other local GUI runs start either the raw measurement build
-  (test-harnesses.md: 2026-10-20 STANDALONE-LEAF-AUMID-01) or a portable copy
-  without `noctty.ico` (app-lifecycle.md: 2026-10-16 "A portable copy"),
-  never a non-portable `zig-out` build, which writes the product AUMID's
-  jump list and registration.
+  `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`. Other local GUI runs start either
+  the raw measurement build (test-harnesses.md: 2026-10-20
+  STANDALONE-LEAF-AUMID-01) or a portable copy without `noctty.ico`
+  (app-lifecycle.md: 2026-10-16 "A portable copy"), never a non-portable
+  `zig-out` build, which writes the product AUMID's jump list and
+  registration.
 - A GUI check runs in the lowest tier that can make its assertion: (1) a
   private desktop in hosted CI, the default; (2) a private desktop on a local
   machine with a GPU, for OpenGL and custom-shader rendering read back
