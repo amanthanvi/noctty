@@ -19,6 +19,15 @@ function Get-GuiContractFunctionText($Ast, [string] $Name) {
     if ($found.Count -ne 1) { throw "Expected one function $Name, found $($found.Count)." }
     return $found[0].Extent.Text
 }
+# Runs a child PowerShell the contract expects may exit nonzero, and returns its exit code. The caller's
+# $PSNativeCommandUseErrorActionPreference is turned off in this function's scope only, so it holds for exactly this
+# call and ends with it: a save and restore around a group of children restored it before the last expected failure
+# (Greptile on #740), and an enabled preference turned that child's exit 2 into an error.
+function Invoke-GuiContractChild([string] $Exe, [string[]] $Arguments) {
+    $PSNativeCommandUseErrorActionPreference = $false
+    & $Exe @Arguments *> $null
+    return $LASTEXITCODE
+}
 function Test-GuiContractInsideHostedSwitch($Node, [switch] $ElseBranch) {
     # True when `Node` sits in the then-branch of an `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)`, or, with -ElseBranch, in
     # the else-branch of one with no other clause.
@@ -419,51 +428,55 @@ try {
         throw 'The runner must hold the guards only when all three are held, false until then.'
     }
     $guiChild = (Get-Process -Id $PID).Path
-    # The children below are expected to exit 2; a session that promotes native exit codes must not stop here first.
-    # The preference is saved here and restored after the last of them, so later fragments keep the caller's.
-    $guiSavedNativePreference = $PSNativeCommandUseErrorActionPreference
-    $PSNativeCommandUseErrorActionPreference = $false
+    # The children below are expected to exit 2: each runs through Invoke-GuiContractChild, which scopes the caller's
+    # native-error preference off for that call alone. The control: with the preference on, an expected exit 2 is
+    # returned, not raised, and the caller's preference is unchanged afterwards.
+    $guiPreferenceControl = & {
+        $PSNativeCommandUseErrorActionPreference = $true
+        $code = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-Command', 'exit 2')
+        [pscustomobject]@{ Code = $code; After = $PSNativeCommandUseErrorActionPreference }
+    }
+    if ($guiPreferenceControl.Code -ne 2 -or $guiPreferenceControl.After -ne $true) { throw 'An expected child exit must be returned under an enabled native-error preference, which stays enabled.' }
     $guiFullOut = Join-Path $guiScratch 'out-full'
     [void](New-Item -ItemType Directory -Path $guiFullOut)
     [IO.File]::WriteAllText((Join-Path $guiFullOut 'earlier.json'), '{}')
-    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo $repoRoot -Work (Join-Path $guiScratch 'work-full') -Out $guiFullOut *> $null
-    if ($LASTEXITCODE -ne 2 -or @(Get-ChildItem -LiteralPath $guiFullOut -Force).Count -ne 1 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'work-full'))) {
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'work-full'), '-Out', $guiFullOut)
+    if ($guiCode -ne 2 -or @(Get-ChildItem -LiteralPath $guiFullOut -Force).Count -ne 1 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'work-full'))) {
         throw 'The runner must refuse a non-empty -Out with exit 2 and write nothing.'
     }
     $guiNewOut = Join-Path $guiScratch 'out-new'
-    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo (Join-Path $guiScratch 'no-such-repo') -Work (Join-Path $guiScratch 'work-new') -Out $guiNewOut *> $null
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-MeasureRepo', (Join-Path $guiScratch 'no-such-repo'), '-Work', (Join-Path $guiScratch 'work-new'), '-Out', $guiNewOut)
     $guiErrorResult = $(if (Test-Path -LiteralPath (Join-Path $guiNewOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiNewOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
     $guiErrorRun = $(if (Test-Path -LiteralPath (Join-Path $guiNewOut 'receipts\run.json')) { Get-Content -LiteralPath (Join-Path $guiNewOut 'receipts\run.json') -Raw | ConvertFrom-Json } else { $null })
-    if ($LASTEXITCODE -ne 2 -or $null -eq $guiErrorResult -or $guiErrorResult.status -cne 'error' -or
+    if ($guiCode -ne 2 -or $null -eq $guiErrorResult -or $guiErrorResult.status -cne 'error' -or
         @($guiErrorResult.assertions | Where-Object { $_.status -ceq 'pass' -and $_.id -cin @('leaves-pass', 'state-guards') }).Count -ne 0 -or
         $null -eq $guiErrorRun -or $guiErrorRun.stateGuardsHeld -ne $false -or
         (@($guiErrorRun.guards.state, $guiErrorRun.guards.history, $guiErrorRun.guards.startup) -join ',') -cne 'not-run,not-run,not-run') {
         throw 'A runner validation failure must exit 2 with an error result, no passing leaves-pass or state-guards, and its guards not-run.'
     }
     $guiPublishOut = Join-Path $guiScratch 'out-publish'
-    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -PublishError helper-self-test -Out $guiPublishOut *> $null
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-PublishError', 'helper-self-test', '-Out', $guiPublishOut)
     $guiPublished = $(if (Test-Path -LiteralPath (Join-Path $guiPublishOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiPublishOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
-    if ($LASTEXITCODE -ne 2 -or $null -eq $guiPublished -or $guiPublished.status -cne 'error' -or [string]$guiPublished.failure.message -cne 'exit 2 (helper-self-test)') {
+    if ($guiCode -ne 2 -or $null -eq $guiPublished -or $guiPublished.status -cne 'error' -or [string]$guiPublished.failure.message -cne 'exit 2 (helper-self-test)') {
         throw '-PublishError must exit 2 with an error result naming its kind.'
     }
-    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -PublishError 'Bad Kind' -Out (Join-Path $guiScratch 'out-badkind') *> $null
-    if ($LASTEXITCODE -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'out-badkind'))) { throw '-PublishError must refuse a kind outside its shape before it writes.' }
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-PublishError', 'Bad Kind', '-Out', (Join-Path $guiScratch 'out-badkind'))
+    if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'out-badkind'))) { throw '-PublishError must refuse a kind outside its shape before it writes.' }
     # -PublishError publishes even where the suite cannot initialize (CodeRabbit on #740): the runner alone, with no
     # library beside it and no plan, still writes its error result.
     $guiLoneRunner = Join-Path $guiScratch 'lone\test\windows\gui-hidden-runner.ps1'
     [void](New-Item -ItemType Directory -Path (Split-Path -Parent $guiLoneRunner))
     Copy-Item -LiteralPath $guiRunnerPath -Destination $guiLoneRunner
     $guiLoneOut = Join-Path $guiScratch 'out-lone'
-    & $guiChild -NoProfile -NonInteractive -File $guiLoneRunner -PublishError helper-self-test -Out $guiLoneOut *> $null
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-PublishError', 'helper-self-test', '-Out', $guiLoneOut)
     $guiLonePublished = $(if (Test-Path -LiteralPath (Join-Path $guiLoneOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiLoneOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
-    if ($LASTEXITCODE -ne 2 -or $null -eq $guiLonePublished -or $guiLonePublished.status -cne 'error') { throw '-PublishError must publish without the libraries or the plan it would otherwise load.' }
+    if ($guiCode -ne 2 -or $null -eq $guiLonePublished -or $guiLonePublished.status -cne 'error') { throw '-PublishError must publish without the libraries or the plan it would otherwise load.' }
     # The suite itself cannot run there: the same runner without -PublishError fails before any result.
-    & $guiChild -NoProfile -NonInteractive -File $guiLoneRunner -MeasureRepo $repoRoot -Work (Join-Path $guiScratch 'lone-work') -Out (Join-Path $guiScratch 'out-lone-suite') *> $null
-    if ($LASTEXITCODE -eq 0) { throw 'The lone runner control is void: the suite initialized without its libraries.' }
-    $PSNativeCommandUseErrorActionPreference = $guiSavedNativePreference
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'lone-work'), '-Out', (Join-Path $guiScratch 'out-lone-suite'))
+    if ($guiCode -eq 0) { throw 'The lone runner control is void: the suite initialized without its libraries.' }
     $guiAsciiOut = Join-Path $guiScratch 'out-ascii'
-    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo $repoRoot -Work (Join-Path $guiScratch ('work-caf' + [char]0xE9)) -Out $guiAsciiOut *> $null
-    if ($LASTEXITCODE -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch ('work-caf' + [char]0xE9)), '-Out', $guiAsciiOut)
+    if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }
     $guiImage = [IO.Path]::GetFullPath($guiRunnerPath)
     $guiShortDir = (New-Object -ComObject Scripting.FileSystemObject).GetFolder((Split-Path -Parent $guiImage)).ShortPath
     if (-not [GuiHiddenRunnerNative]::SameImage((Join-Path $guiShortDir (Split-Path -Leaf $guiImage)), $guiImage, [GuiHiddenRunnerNative]::FileId($guiImage))) { throw 'SameImage refused one file spelled two ways.' }
@@ -633,8 +646,6 @@ $guiReceiptAssignment = @($guiLibAst.FindAll({ param($n) $n -is [System.Manageme
 $guiReceiptRegistration = @(Get-NamedCommands -Ast $guiLibAst -Name 'Register-EngineEvent')
 if ($guiReceiptAssignment.Count -ne 1 -or $guiReceiptRegistration.Count -ne 1) { throw 'lib must write the leaf receipt from one PowerShell.Exiting registration.' }
 $guiChildPwsh = (Get-Process -Id $PID).Path
-$guiSavedNativePreference = $PSNativeCommandUseErrorActionPreference
-$PSNativeCommandUseErrorActionPreference = $false
 $guiScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-gui-hidden-runtime-' + [guid]::NewGuid().ToString('N'))
 $guiSavedRun = $env:NOCTTY_GUI_HIDDEN_RUN
 $guiSavedDesktop = $env:NOCTTY_GUI_HIDDEN_DESKTOP
@@ -651,7 +662,7 @@ try {
         $load = $(if ($case.Load) { "Add-Type -TypeDefinition 'public static class InteractiveWin11RealInput { }'" } else { '' })
         [IO.File]::WriteAllText($script, ($guiReceiptAssignment[0].Extent.Text, $guiReceiptRegistration[0].Extent.Text, $load, $case.End -join "`n"))
         $env:NOCTTY_GUI_HIDDEN_RUN = $run
-        & $guiChildPwsh -NoProfile -NonInteractive -File $script *> $null
+        $guiCode = Invoke-GuiContractChild $guiChildPwsh @('-NoProfile', '-NonInteractive', '-File', $script)
         $judged = Test-GuiHiddenLeafReceipt (Join-Path $run 'leaf-receipt.json')
         if (-not $judged.valid -or $judged.realInputLoaded -ne $case.Loaded) { throw "lib's receipt block misreported the module ($($case.Name))." }
     }
@@ -667,13 +678,12 @@ try { . '$($module.Replace("'", "''"))' } catch { `$refused = `$true }
 try { [void][InteractiveWin11RealInput]::ForceForeground([IntPtr]::Zero) } catch { `$callFailed = `$true }
 if (`$refused -and `$typeAbsent -and `$callFailed) { exit 0 } else { exit 1 }
 "@)
-    & $guiChildPwsh -NoProfile -NonInteractive -File $probe *> $null
-    if ($LASTEXITCODE -ne 0) { throw 'With NOCTTY_GUI_HIDDEN_DESKTOP set, the real-input module must refuse to load and a call to its type must fail.' }
+    $guiCode = Invoke-GuiContractChild $guiChildPwsh @('-NoProfile', '-NonInteractive', '-File', $probe)
+    if ($guiCode -ne 0) { throw 'With NOCTTY_GUI_HIDDEN_DESKTOP set, the real-input module must refuse to load and a call to its type must fail.' }
 }
 finally {
     $env:NOCTTY_GUI_HIDDEN_RUN = $guiSavedRun
     $env:NOCTTY_GUI_HIDDEN_DESKTOP = $guiSavedDesktop
-    $PSNativeCommandUseErrorActionPreference = $guiSavedNativePreference
     Remove-Item -LiteralPath $guiScratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 
