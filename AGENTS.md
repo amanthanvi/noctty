@@ -52,9 +52,11 @@ reading step under [Self-Correction Log](#self-correction-log).
 ## Running noctty
 
 - Run noctty on a private desktop (`CreateDesktopW`), and pass
-  `lpDesktop = WinSta0\<desktop>` to every process you start: a driver on a
-  private desktop that passes a null one puts the child on the user's
-  desktop, and noctty takes the foreground. Drive it with posted messages
+  `lpDesktop = WinSta0\<desktop>` to every process you start. A process
+  created on a private desktop by name passes it to the children it starts
+  with a null one, but a driver moved there with `SetThreadDesktop` does not:
+  its children land on the user's desktop, and noctty takes the foreground
+  (test-harnesses.md: 2026-11-20 GUI-HIDDEN-DEFAULT-01). Drive it with posted messages
   (`SendInput` types into whatever window is in front): a key as a posted
   `WM_KEYDOWN`/`WM_KEYUP` pair, since a posted triple types it twice and a
   bare posted `WM_CHAR` types nothing. A posted Alt never reaches
@@ -66,7 +68,37 @@ reading step under [Self-Correction Log](#self-correction-log).
   show (a D3D11 present, which needs a composed, visible desktop; real input)
   needs a visible run, and a visible run starts only once the user is away.
   (search-scrollbar.md: 2026-10-16 D3D11-IFLIP-01; window-frame.md:
-  2026-10-16 real DPI drag, last trap.)
+  2026-10-16 real DPI drag, last trap.) In a hosted closure (the
+  hidden-desktop suite, `test/windows/gui-hidden-runner.ps1`), real-input and
+  foreground calls are reached only through
+  `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
+  which window-lib loads only outside hosted mode and which throws if loaded
+  there; a hosted leaf ends by checking that its type was never loaded.
+  Outside hosted closures, `bench-windows.ps1` and
+  `interactive-win11-hints.ps1` keep their own declarations, as do the
+  leaf-local types until later offload PRs move them. Screen capture stays
+  behind `Save-StatefulScreenCapture` (test-harnesses.md: 2026-10-25
+  EVIDENCE-SCREENSHOT-PRIVACY-01). A hidden-desktop suite run, local or
+  hosted, starts only a fresh portable copy, without `noctty.ico`, of the
+  receipt-bound measurement build, with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`.
+  Other local GUI runs start either the raw measurement build
+  (test-harnesses.md: 2026-10-20 STANDALONE-LEAF-AUMID-01) or a portable copy
+  without `noctty.ico` (app-lifecycle.md: 2026-10-16 "A portable copy"),
+  never a non-portable `zig-out` build, which writes the product AUMID's
+  jump list and registration.
+- A GUI check runs in the lowest tier that can make its assertion: (1) a
+  private desktop in hosted CI, the default; (2) a private desktop on a local
+  machine with a GPU, for OpenGL and custom-shader rendering read back
+  offscreen with the test-tools build, and GL-side traces; (3) a visible run,
+  for real `SendInput` through the message loop, foreground acquisition,
+  pixels as DWM composes them on screen (`CopyFromScreen`, a D3D11 present),
+  the production OpenGL path into the window's framebuffer, and any present
+  paced by vblank. Tier 2's readback never sees the production framebuffer,
+  and a hidden `SwapBuffers` is never vblank-paced (renderer.md: 2026-10-19
+  #408 trap (4), 2026-10-14 LAT-01 trap (1)). Every gating GUI check, in any
+  tier, has a positive oracle and a negative control that fails it. Until
+  the gate switches, the interactive composite remains the release evidence.
+  (test-harnesses.md: 2026-11-20 GUI-HIDDEN-DEFAULT-01.)
 - Run a scratch portable copy (`noctty.portable` beside the exe) with
   `--window-save-state=never` and `LOCALAPPDATA` redirected for that noctty;
   that isolates session and startup state. If a `zig build` runs under the
@@ -83,9 +115,17 @@ reading step under [Self-Correction Log](#self-correction-log).
   `-Command`, which turns off automatic injection: dot-source
   `integration.ps1` as `buildCommandValue` does). Separately, a `-e` fixture
   sets only `initial-command`, so later tabs and splits start `command`, a
-  PowerShell by default (pwsh, else Windows PowerShell): pin
-  `--command=cmd.exe` unless the fixture tests a
-  configured `command`, and guard the run with
+  PowerShell by default (pwsh, else Windows PowerShell): set it with a
+  `command = direct:<absolute System32 cmd.exe> /D` line in the config file
+  the launched copy reads, unless the fixture tests a configured `command`.
+  A bare `cmd.exe` runs the user's AutoRun (conpty.md: 2026-11-18
+  REPLY-PATH-01 item (6)), and `Start-Process -ArgumentList` joins elements
+  with spaces and quotes nothing, so a spaced `--command=… /D` in argv loses
+  `/D`; only a harness that builds its own quoted command line (the soak, the
+  reply-path harness) may pass it there. Give each `-e` stimulus that starts
+  cmd the absolute path and `/D` as separate arguments. Until the interactive
+  composite is retired, the shared helper's default route keeps
+  `--command=cmd.exe` for it alone. Guard the run with
   `scripts/windows-harness-history.ps1`, which only detects a change to the
   real history's size or mtime. (test-harnesses.md: 2026-10-11 PKG-13,
   2026-10-17 PKG-76, 2026-10-19 HARNESS-PWSH-HISTORY-01.)
@@ -662,7 +702,19 @@ that govern each symbol you change, or that none does.
   `Contracts.90-Workflows.ps1`), the soak
   (`test/windows/interactive-win11-soak.ps1`, its judge `ci/soak_judge.py`
   with `ci/test_soak_judge.py`, and the slope thresholds
-  `ci/soak-thresholds.tsv`), CI test steps (the raw
+  `ci/soak-thresholds.tsv`), the hidden-desktop GUI suite
+  (`test/windows/gui-hidden-runner.ps1`, its plan
+  `test/windows/gui-hidden-plan.json`, `.github/workflows/gui-hidden.yml`
+  and its selection `scripts/ci-gui-selection.ps1` with the script walker
+  `scripts/ci-script-closure.ps1` and the fixtures
+  `test/windows/gui-hidden-scripts.ps1`, the interactive library's hosted
+  mode (`InteractiveWin11HostedDesktop`,
+  `Start-InteractiveWin11HostedProcess`,
+  `Write-InteractiveWin11HostedConfig`), the real-input module
+  `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
+  the measurement record
+  `test/windows/flagship/measurements/gui-measurements.json` and the
+  contracts `Contracts.99-GuiHidden*.ps1`), CI test steps (the raw
   `zig test src/apprt/win32_compositor_native.zig` step, which confines
   `win32/sys.zig`'s imports to `src/apprt`), the Zig test runner and its
   shards (`src/test_runner.zig`, `src/test_shard.zig`, `-Dtest-shards`,

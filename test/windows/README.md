@@ -1473,6 +1473,112 @@ history through `scripts/windows-harness-history.ps1`, and the real
 `session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
+## gui-hidden-runner.ps1 (the hidden-desktop GUI suite)
+
+The interactive offload's hosted lane (design §4; test-harnesses.md
+GUI-HIDDEN-DEFAULT-01). It runs each leaf in `gui-hidden-plan.json` on a
+private desktop of its own, against a fresh portable copy of the receipt-bound
+measurement build, on every pull request and push through
+`.github/workflows/gui-hidden.yml`, and locally:
+
+```text
+pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <dir> [-Leaves smoke,undo]
+```
+
+Until the gate switches, the interactive composite remains the release
+evidence; this lane runs beside it.
+
+**Where a GUI check runs.** In the lowest tier that can make its assertion:
+
+1. a private desktop in hosted CI, the default (this suite);
+2. a private desktop on a local machine with a GPU, for OpenGL and
+   custom-shader rendering read back offscreen with the test-tools build, and
+   GL-side traces;
+3. a visible run, for real `SendInput` through the message loop, foreground
+   acquisition, pixels as DWM composes them on screen (`CopyFromScreen`, a
+   D3D11 present), the production OpenGL path into the window's framebuffer,
+   and any present paced by vblank.
+
+Every gating GUI check, in any tier, has a positive oracle and a negative
+control that fails it.
+
+**The build.** Locally, prepare the measurement build first, outside any run
+and redirect, with `Invoke-InteractiveWin11MeasureBuild`
+(`scripts/interactive-win11-measure-lib.ps1`), and commit first: a generation
+is keyed by a clean HEAD. Never use a plain `zig build`: that is the
+product-AUMID `zig-out` build, which writes the real jump list
+(STANDALONE-LEAF-AUMID-01). `-Build` builds the generation and runs only on a
+GitHub-hosted runner. The runner validates the raw generation before staging
+and at the end, and stages one copy per leaf: everything but `noctty.ico`,
+`crash`, `ghostty` and the PDBs, plus `share`, with `noctty.portable` beside
+the exe. Both the app and the CLI are hashed against the receipt. A passing
+leaf's copy is deleted at once, a failing one's at the end unless
+`-KeepFailedCopies`. The runner stops with 20 GB or less free.
+
+**A leaf in hosted mode.** The runner starts each leaf as
+`pwsh -NoProfile -NonInteractive -File <leaf>`, suspended, on its desktop
+(`WinSta0\noctty-gh-<32 hex>`, named in `lpDesktop`), in a job that permits no
+breakaway and kills on close and on an unhandled exception. It sets
+`NOCTTY_GUI_HIDDEN_DESKTOP`, `NOCTTY_GUI_HIDDEN_EXE` and
+`NOCTTY_GUI_HIDDEN_RUN`, which select the interactive library's hosted mode:
+
+- at load, `InteractiveWin11HostedDesktop.Assert` refuses any other station or
+  desktop, and the input desktop. An unreadable input desktop refuses too: keep
+  the session unlocked during a local run;
+- the leaf never bootstraps or builds;
+- it starts noctty and the CLI only through
+  `Start-InteractiveWin11HostedProcess`, which checks the staged file's
+  identity, builds its own quoted command line, refuses `--command`, and
+  records each PID before it runs. `Start-Process` stays only in each leaf's
+  default branch;
+- its config goes into the copy's `config.ghostty`
+  (`Write-InteractiveWin11HostedConfig`): its own lines, then
+  `command = direct:<System32>\cmd.exe /D`, the clipboard read and write
+  denied, `copy-on-select = false`, `auto-update = off`,
+  `desktop-notifications = false`, and `window-save-state = never` unless the
+  leaf sets it;
+- a one-shot `/c` stimulus waits on `shell-read-<k>.flag` so the runner reads
+  its command line before it exits;
+- at exit it writes `leaf-receipt.json`, which says whether the real-input
+  module's type was ever loaded.
+
+**What the runner fails a leaf on.** A nonzero exit or a timeout. A joiner of
+its job left unread (the job's own `TotalProcesses` against the processes
+read). A `cmd.exe` that is not System32's or has no `/D` before `/C` or `/K`,
+or fewer shells than the plan's `expectedShells`. A `noctty.exe` or
+`noctty.com` the launcher did not start, unless a launched `noctty.com`
+forwarded it or a shell inside the terminal started it. A window of its job on
+Default. A reparse point under its sandbox or run directory. A missing receipt,
+or one that says the module loaded. A staged file changed.
+
+**The real-input module.** `scripts/interactive-win11-realinput.ps1`
+(`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib
+loads it only outside hosted mode, and it throws if loaded there. Screen
+capture stays behind `Save-StatefulScreenCapture`. In hosted mode, use posted
+`WM_KEYDOWN`/`WM_KEYUP` pairs (or sent `WM_KEYDOWN`/`WM_CHAR`/`WM_KEYUP`
+triples, never a posted triple), with `AttachThreadInput` and
+`SetKeyboardState` for modifiers, `SetFocus` and `GetGUIThreadInfo` for focus,
+and the foreground-free `WM_COMMAND` hooks 1901, 1904, 1907 and 1908.
+
+**What it uploads.** `-Out` holds only `result.json` (the flagship result
+schema, scenario `windows.gui-hidden.suite`) and `receipts/`, one JSON object
+per leaf plus `run.json`, of allowlisted values only: booleans, numbers and
+short strings without a path separator, quote or bracket. No path, command
+line, window title, environment value, screen capture or process listing.
+The logs, the state guard's receipts and the copies stay under `-Work`.
+
+**Guards and exit codes.** The state guard (the product jump list,
+`startup-attempts.json`, the clipboard sequence) and the PSReadLine history
+guard span the run; a tripped one exits 3. A local run on `WinSta0` shares the
+user's clipboard, so the clipboard guard can trip on the user's own copy;
+don't copy during a run. 0 pass, 1 a leaf failed, 2 a staging or validation
+failure.
+
+`gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
+and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1
+pin the rest. `flagship/measurements/gui-measurements.json` records the
+measurement outcomes later lanes depend on (Q0 and #738's P1-P5).
+
 ## Style
 
 - Define reusable helpers as `function Verb-Noun { ... }` with a `param(...)`

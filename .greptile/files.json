@@ -408,7 +408,9 @@
         "ci/soak_judge.py",
         "ci/test_soak_judge.py",
         "ci/soak-thresholds.tsv",
-        "scripts/package-windows.ps1"
+        "scripts/package-windows.ps1",
+        "scripts/ci-gui-selection.ps1",
+        "scripts/ci-script-closure.ps1"
       ]
     },
     {
