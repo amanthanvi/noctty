@@ -12553,6 +12553,68 @@ test "Terminal: scrollUp in margins moving text into a command's output without 
     try testing.expect((try s.lastCommandString(alloc)) == null);
 }
 
+/// The fixture above with a wide output glyph written at column `x` (zero
+/// based) of row `y` after the command completed, then DECLRMM margins at
+/// columns 15-25 and rows 1-3 and SU 1. Returns whether the last command
+/// survived with the same text and output.
+fn testScrollUpMarginsWideGlyph(x: size.CellCountInt, y: size.CellCountInt) !bool {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testCompleteCommandOnTopRows(s);
+    s.cursorAbsolute(x, y);
+    try s.testWriteString("中");
+    {
+        const head = s.pages.getCell(.{ .active = .{ .x = x, .y = y } }).?;
+        try testing.expectEqual(Cell.Wide.wide, head.cell.wide);
+    }
+    const output_before = (try s.lastCommandOutputString(alloc)) orelse
+        return error.TestExpectedCommandOutput;
+    defer alloc.free(output_before);
+
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, 3);
+    t.setLeftAndRightMargin(15, 25);
+    try t.scrollUp(1);
+
+    const command = (try s.lastCommandString(alloc)) orelse return false;
+    defer alloc.free(command);
+    try testing.expectEqualStrings("one", command);
+    const output = (try s.lastCommandOutputString(alloc)) orelse
+        return error.TestExpectedCommandOutput;
+    defer alloc.free(output);
+    try testing.expectEqualStrings(output_before, output);
+    return true;
+}
+
+test "Terminal: scrollUp in margins keeps a command when the right margin splits a wide glyph on the row below" {
+    // Row 1's glyph at columns 25-26 straddles the right margin: the move
+    // clears it before it would reach row 0's output region, and row 1's
+    // own change is outside the command.
+    try testing.expect(try testScrollUpMarginsWideGlyph(24, 1));
+}
+
+test "Terminal: scrollUp in margins drops a command when the right margin splits a wide glyph in its output" {
+    // Row 0's glyph at columns 25-26 lies in the command's output region,
+    // and the move clears it.
+    try testing.expect(!try testScrollUpMarginsWideGlyph(24, 0));
+}
+
+test "Terminal: scrollUp in margins keeps a command when the left margin splits a wide glyph on the row below" {
+    // Row 1's glyph at columns 14-15 straddles the left margin: the move
+    // clears its head outside the command, and only a blank arrives in
+    // row 0.
+    try testing.expect(try testScrollUpMarginsWideGlyph(13, 1));
+}
+
+test "Terminal: scrollUp in margins drops a command when the left margin splits a wide glyph in its output" {
+    // Row 0's glyph at columns 14-15 lies in the command's output region,
+    // and the move clears its head, one column left of the margin.
+    try testing.expect(!try testScrollUpMarginsWideGlyph(13, 0));
+}
+
 test "Terminal: alt screen scroll up recycled row has default metadata" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 5, .rows = 3 });

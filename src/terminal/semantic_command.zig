@@ -309,12 +309,17 @@ pub const MarginRegion = struct {
 
 /// Drop the completed command when a move inside left and right margins
 /// changes one of its cells. Such a move (Terminal.deleteLines in a region
-/// narrower than the screen) rewrites each cell of `region` with the cell
-/// `shift` rows below it, or a blank past the region's bottom, clears a
-/// wide character the left margin splits, and keeps every row's metadata
-/// and every tracked pin. The pending and active prompts therefore keep
-/// their rows, and a completed command whose cells neither hold nor
-/// receive anything that a recovered span reads keeps reading what it read.
+/// narrower than the screen) first normalises every row of `region` the way
+/// Terminal.rowWillBeShifted does: a wide character the left margin splits
+/// loses its head (one column outside the region) and its tail, one the
+/// right margin splits loses its head and its spill (one column outside),
+/// and a spacer head that ends the row becomes a plain cell when the region
+/// reaches the last column or the first two. It then rewrites each cell of
+/// `region` with the normalised cell `shift` rows below it, or a blank past
+/// the region's bottom, and keeps every row's metadata and every tracked
+/// pin. So the pending and active prompts keep their rows, and a completed
+/// command keeps reading what it read unless one of those cells, as the
+/// move leaves it, falls in its recovered span.
 pub fn invalidateMarginShift(
     self: *SemanticCommand,
     pages: *PageList,
@@ -329,23 +334,48 @@ pub fn invalidateMarginShift(
     while (y <= region.bottom) : (y += 1) {
         const row = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse continue;
         const cells = row.cells(.all);
-        if (cells.len == 0 or region.left >= cells.len) continue;
+        if (region.right >= cells.len or region.left > region.right) continue;
         var row_start = row;
         row_start.x = 0;
         var row_end = row;
         row_end.x = @intCast(cells.len - 1);
         if (row_end.before(span_start) or span_end.before(row_start)) continue;
 
-        // A wide character whose tail is the left margin's cell is cleared
-        // with it (Terminal.rowWillBeShifted), one column outside.
-        var left = region.left;
-        if (left > 0 and cells[left].wide == .spacer_tail) left -= 1;
+        // The part of this row the recovered span covers.
         const first: usize = if (sameRow(row, span_start)) span_start.x else 0;
         const last: usize = if (sameRow(row, span_end)) span_end.x else cells.len - 1;
-        const lo = @max(left, first);
-        const hi = @min(@min(region.right, cells.len - 1), last);
-        if (lo > hi) continue;
+        const inSpan = struct {
+            fn f(x: usize, lo: usize, hi: usize) bool {
+                return x >= lo and x <= hi;
+            }
+        }.f;
 
+        // The normalisation's own changes to this row.
+        if (region.left > 0 and cells[region.left].wide == .spacer_tail and
+            (inSpan(region.left - 1, first, last) or inSpan(region.left, first, last)))
+        {
+            self.clearCompleted(pages);
+            return;
+        }
+        if (cells[region.right].wide == .wide and region.right + 1 < cells.len and
+            (inSpan(region.right, first, last) or inSpan(region.right + 1, first, last)))
+        {
+            self.clearCompleted(pages);
+            return;
+        }
+        if ((region.right == cells.len - 1 or region.left < 2) and
+            cells[cells.len - 1].wide == .spacer_head and
+            inSpan(cells.len - 1, first, last))
+        {
+            self.clearCompleted(pages);
+            return;
+        }
+
+        // The move: each cell between the margins is overwritten by the
+        // normalised cell `shift` rows below it.
+        const lo = @max(region.left, first);
+        const hi = @min(region.right, last);
+        if (lo > hi) continue;
         const incoming: []const pagepkg.Cell = incoming: {
             if (y + shift > region.bottom) break :incoming &.{};
             const p = pages.pin(.{ .active = .{ .y = @intCast(y + shift) } }) orelse
@@ -354,13 +384,28 @@ pub fn invalidateMarginShift(
         };
         for (lo..hi + 1) |x| {
             if (cellIsRead(cells[x]) or
-                (x < incoming.len and cellIsRead(incoming[x])))
+                (x < incoming.len and incomingIsRead(incoming, x, region)))
             {
                 self.clearCompleted(pages);
                 return;
             }
         }
     }
+}
+
+/// Whether the cell a margin move brings into column `x` is read by a
+/// recovered span, as the move's normalisation leaves it: the head of a wide
+/// character the right margin splits arrives with its text cleared.
+fn incomingIsRead(
+    src: []const pagepkg.Cell,
+    x: usize,
+    region: MarginRegion,
+) bool {
+    const cell = src[x];
+    if (x == region.right and cell.wide == .wide and x + 1 < src.len) {
+        return cell.semantic_content != .output;
+    }
+    return cellIsRead(cell);
 }
 
 /// The last cell of a completed command's recovered span: its frozen output
