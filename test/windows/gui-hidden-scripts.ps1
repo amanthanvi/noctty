@@ -196,6 +196,37 @@ $deletedList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $headReader -BaseRe
 Assert-True ($deletedList -ccontains $undoPath) 'A leaf the change deletes must stay in the GUI list through the base tree.'
 Assert-True (Get-CiGuiSelection -ChangedPaths @($undoPath) -GuiList $deletedList) 'Deleting a closure member must select the suite.'
 
+# The git tree reader: $null means the tree has no such file, and only that (CodeRabbit on #740). A ref that names no
+# tree, and a file the tree lists that git cannot read, throw, so the selection runs the suite rather than reading a
+# failed read of the base plan as a base without one.
+$gitReader = New-CiScriptFileReader -RepoRoot $repoRoot -Ref 'HEAD'
+Assert-True ([string](& $gitReader 'scripts/ci-script-closure.ps1')).Contains('function Get-ScriptClosure') 'The git reader must read a file the tree holds.'
+Assert-True ($null -eq (& $gitReader 'scripts/no-such-file.ps1')) 'The git reader must give $null for a path the tree does not hold.'
+Assert-True ($null -eq (& $gitReader 'scripts')) 'The git reader must give $null for a directory.'
+$threw = $false
+try { $null = New-CiScriptFileReader -RepoRoot $repoRoot -Ref "no-such-ref-$([guid]::NewGuid().ToString('N'))" } catch { $threw = $true }
+Assert-True $threw 'A ref that names no tree must throw, not read as a tree without files.'
+$global:LASTEXITCODE = 0
+# A stand-in git whose tree lists the plan but whose object read fails (a missing object, a blobless clone offline).
+$unreadableGit = {
+    param([string[]] $GitArguments)
+    $global:LASTEXITCODE = 0
+    switch ($GitArguments[2]) {
+        'rev-parse' { return ('a' * 40) }
+        'ls-tree' { return "100644 blob $('b' * 40)`ttest/windows/gui-hidden-plan.json$([char]0)" }
+        default { $global:LASTEXITCODE = 128; return $null }
+    }
+}
+$unreadable = New-CiScriptFileReader -RepoRoot $repoRoot -Ref 'base' -Git $unreadableGit
+$threw = $false
+try { $null = & $unreadable 'test/windows/gui-hidden-plan.json' } catch { $threw = $true }
+Assert-True $threw 'A file the tree lists that git cannot read must throw, not read as absent.'
+Assert-True ($null -eq (& $unreadable 'test/windows/interactive-win11-smoke.ps1')) 'A path the stand-in tree does not list must still read as absent.'
+$threw = $false
+try { $null = Get-CiGuiList -RepoRoot $repoRoot -BaseReader $unreadable } catch { $threw = $true }
+Assert-True $threw 'A base tree whose plan git cannot read must fail the GUI list (the selection then runs the suite), not drop the base side.'
+Assert-True ($LASTEXITCODE -eq 0) 'A handled git failure must leave $LASTEXITCODE at 0 (PKG-65).'
+
 # The CLI: events that always run the suite, and an unreadable diff.
 $outputFile = Join-Path ([IO.Path]::GetTempPath()) ("noctty-gui-selection-$([guid]::NewGuid().ToString('N')).txt")
 $savedOutput = $env:GITHUB_OUTPUT

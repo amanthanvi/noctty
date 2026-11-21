@@ -87,9 +87,15 @@ function ConvertTo-CiScriptRepoPath {
 }
 
 function New-CiScriptFileReader {
-    # A reader: param([string] $RepoPath) returns the file's text, or $null when it does not exist. With -Ref it reads
-    # `git show <ref>:<path>` in $RepoRoot; otherwise the working tree.
-    param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Ref)
+    # A reader: param([string] $RepoPath) returns the file's text, or $null when the tree has no such file. With -Ref
+    # it reads that ref's tree in $RepoRoot; otherwise the working tree.
+    # Absent and unreadable are different answers, and only absence may let selection skip a side: a failed read taken
+    # for "no file here" would let a base tree whose plan git could not read look like one without a plan (CodeRabbit
+    # on #740). So a ref that does not name a readable tree throws here, the tree's listing decides absence, and a file
+    # the tree lists that git cannot read (a missing object, a blobless clone offline) throws when it is read.
+    # -Git replaces the git executable for the tests: param([string[]] $GitArguments), output on the pipeline, and it
+    # sets $LASTEXITCODE.
+    param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Ref, [scriptblock] $Git)
     if ([string]::IsNullOrWhiteSpace($Ref)) {
         return {
             param([string] $RepoPath)
@@ -98,13 +104,42 @@ function New-CiScriptFileReader {
             return [IO.File]::ReadAllText($full)
         }.GetNewClosure()
     }
+    if (-not $Git) { $Git = { param([string[]] $GitArguments) & git @GitArguments 2>$null } }
+    $runGit = {
+        param([string[]] $GitArguments)
+        $output = & $Git (@('-C', $RepoRoot) + $GitArguments)
+        $code = $LASTEXITCODE
+        # A handled failure must not leave Actions' implicit `exit $LASTEXITCODE` failing the step (PKG-65).
+        $global:LASTEXITCODE = 0
+        if ($code -ne 0) { throw "git $($GitArguments[0]) for $Ref failed with exit code $code." }
+        return , @($output)
+    }.GetNewClosure()
+    # Assigned, never wrapped in @(): $runGit returns its output as one array object.
+    $tree = & $runGit @('rev-parse', '--verify', '--quiet', "$Ref^{tree}")
+    if ($tree.Count -ne 1 -or [string]$tree[0] -cnotmatch '\A[0-9a-f]{40,64}\z') { throw "$Ref does not name a tree." }
+    $treeId = [string]$tree[0]
+    # The whole tree, listed once: path -> mode, type and object. -z keeps unusual names unquoted.
+    $entries = [System.Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
+    $listing = & $runGit @('ls-tree', '-r', '-z', '--full-tree', $treeId)
+    foreach ($record in (($listing -join "`n").Split([char]0))) {
+        if ($record.Length -eq 0) { continue }
+        $tab = $record.IndexOf([char]"`t")
+        $meta = $(if ($tab -gt 0) { $record.Substring(0, $tab).Split(' ') } else { @() })
+        if ($meta.Count -ne 3) { throw "git ls-tree for $Ref wrote a record it does not document." }
+        $entries[$record.Substring($tab + 1)] = $meta
+    }
+    $texts = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
     return {
         param([string] $RepoPath)
-        $lines = & git -C $RepoRoot show "${Ref}:$RepoPath" 2>$null
-        $code = $LASTEXITCODE
-        $global:LASTEXITCODE = 0
-        if ($code -ne 0) { return $null }
-        return (@($lines) -join "`n")
+        $entry = $null
+        if (-not $entries.TryGetValue($RepoPath, [ref]$entry) -or $entry[1] -cne 'blob') { return $null }
+        if ($entry[0] -ceq '120000') { throw "$RepoPath is a symbolic link in $Ref." }
+        $text = $null
+        if (-not $texts.TryGetValue($RepoPath, [ref]$text)) {
+            $text = (& $runGit @('cat-file', 'blob', $entry[2])) -join "`n"
+            $texts[$RepoPath] = $text
+        }
+        return $text
     }.GetNewClosure()
 }
 
