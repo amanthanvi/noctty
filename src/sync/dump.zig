@@ -1404,7 +1404,10 @@ test "isolated: a full disk that stops both a pair and the in-place mark panics 
     // the dump on disk is a valid header and an allowed prefix that every
     // collector would pass, so the process panics and the run ends
     // abnormally. The child writes into the directory its parent made
-    // (`Dumps.own`), and the parent reads what survived.
+    // (`Dumps.own`), and the parent reads what survived. A build without
+    // the layer (lib-vt's tests) has no isolated children: the skip comes
+    // first, so isolated.zig is never analysed there.
+    if (thread_role.layer == .off) return error.SkipZigTest;
     const isolated = @import("isolated.zig");
     if (isolated.inChild()) {
         const dir_utf8 = try std.process.getEnvVarOwned(testing.allocator, env_var);
