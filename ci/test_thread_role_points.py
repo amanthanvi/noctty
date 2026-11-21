@@ -288,6 +288,18 @@ control("a Roles(.on) scope is an entry scope", tree(**{"src/worker.zig": WORKER
         "ENTRY-OK app src/worker.zig start -> workerMain: src/worker.zig:9 workerMain enters worker:probe",
         "RESULT PASS")
 
+# Stone round 5, Opus L1 (G1): an `if (builtin.is_test)` branch whose braceless body is a block statement (here a
+# `for`) reaches no `;`, `,` or `else` first, so nothing of it is test-gated, and the production scope after it is
+# no test edit point.
+control("G1: a production scope after a braceless block in an is_test branch is not test-gated", tree(**{
+    "src/worker.zig": WORKER + (
+        'const builtin = @import("builtin");\n'
+        'pub fn stray(xs: []const u8) void {\n    if (builtin.is_test) for (xs) |x| {\n        _ = x;\n    }\n'
+        '    const role = thread_role.enter(.renderer);\n    defer role.exit();\n}\n')}), 1,
+        "FAIL UNREGISTERED-POINT app src/worker.zig:26 stray: enter(renderer)",
+        "FAIL UNREGISTERED-POINT test src/worker.zig:26 stray: enter(renderer)",
+        absent=("TEST-EDIT-POINT src/worker.zig:26",))
+
 if failures:
     for f in failures:
         print("FAIL " + f)

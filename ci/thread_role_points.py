@@ -226,8 +226,9 @@ class File:
 
     def mark_test_gated(self):
         """Marks as test code what `if (builtin.is_test)` (or `@import("builtin").is_test`) compiles only in a test
-        build: its then-branch, a block or an expression up to its `else` (`pub const test_support = if
-        (builtin.is_test) @import(...) else struct {};`)."""
+        build: its then-branch, exactly a braced block, or a braceless body that reaches its `;`, `,` or `else`
+        first (`pub const test_support = if (builtin.is_test) @import(...) else struct {};`); any other braceless
+        body is not gated."""
         toks, n = self.toks, len(self.toks)
         for q in range(n - 5):
             if not (toks[q].kind == "keyword" and toks[q].text == "if" and zigtok.is_op(toks[q + 1], "(")):
@@ -240,7 +241,12 @@ class File:
             if r < n and zigtok.is_op(toks[r], "{"):
                 end = zigtok.match_paren(toks, r)
             else:
-                end, d = r, 0
+                # A braceless body is gated only when it reaches `;`, `,` or `else` at its own level first. A
+                # closer of an outer block, or a block that closes back to the body's level with anything but
+                # `else`, `;`, `,`, `.` or `)` after it (a braceless `for (xs) |x| {...}`, `while`, labelled block
+                # or `switch` statement, whose next statement is not the branch's), comes first: then nothing is
+                # gated, and the region stays production code (stone round 5, Opus L1, the lead's strict form).
+                end, d, gated = r, 0, False
                 while end < n:
                     t = toks[end]
                     if zigtok.is_op(t, "(", "[", "{"):
@@ -249,9 +255,16 @@ class File:
                         if d == 0:
                             break
                         d -= 1
+                        if d == 0 and zigtok.is_op(t, "}") and not (
+                                end + 1 < n and (zigtok.is_op(toks[end + 1], ";", ",", ".", ")")
+                                                 or (toks[end + 1].kind == "keyword" and toks[end + 1].text == "else"))):
+                            break
                     elif d == 0 and (zigtok.is_op(t, ";", ",") or (t.kind == "keyword" and t.text == "else")):
+                        gated = True
                         break
                     end += 1
+                if not gated:
+                    continue
                 end -= 1
             for p in range(r, min(end, n - 1) + 1):
                 self.in_test[p] = True
