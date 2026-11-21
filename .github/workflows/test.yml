@@ -584,7 +584,7 @@ jobs:
         run: zig build test-lib-vt -Demit-lib-vt=true --summary all
 
       - name: Build app-profile differential oracle (no capture)
-        run: zig build oracle -Dvt-api=fork -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
+        run: zig build oracle -Dvt-api=stone_flag -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
 
   windows-conpty-probes:
     name: Windows ConPTY Probes (experimental)
