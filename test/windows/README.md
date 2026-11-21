@@ -1473,6 +1473,336 @@ history through `scripts/windows-harness-history.ps1`, and the real
 `session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
+## bench-frame-pacing.ps1
+
+`bench-windows.ps1 -Metric frame-pacing` runs this harness: `frame_time_p95_ms`
+under the per-copy rules (AGENTS.md "Running noctty"). Each run is a fresh
+portable copy of `-MeasureRepo`'s receipt-bound measurement build
+(`noctty.portable` beside it, no `noctty.ico`, its own `LOCALAPPDATA`,
+`APPDATA`, `TEMP` and `TMP`), admitted as `hidden-win11-working-set.ps1`
+admits it. The admission, the no-follow receipt read, the copy check, the run
+placement, the stray-config check and the argv comparison are that harness's
+functions, copied byte for byte; Contracts.99-FramePacing fails if either copy
+changes alone, and holds the bench's statistics and payload generator and the
+native members #739 hardened the same way. The copy's shell is its config's
+`command = direct:<System32>\cmd.exe /D`. Nothing on its command line sets
+one: the final command line and the copy's own, read back by PID, must each
+split into exactly the expected list, `--config-default-files=false` and
+`--config-file=<copy>\config.ghostty` among it. The clipboard is denied, and
+no PowerShell runs under the copy (checked at the end of each run). Its
+environment adds only `GHOSTTY_LOG`, `NOCTTY_RENDER_TRACE_FILE`,
+`NOCTTY_RENDER_TRACE_LIVE` and `NOCTTY_BENCH_END_MARKER`; an inherited
+`NOCTTY_` or `GHOSTTY_` variable is refused.
+
+The workload is the bench's `stream` payload (4 MiB of printable ASCII from
+its own generator, seed 121) and end marker, written by cmd's own `type`. F5
+types `type stream.bin & echo.>done.flag`. The driver waits for the echo to go
+quiet, then arms the render trace for the first swap that presents the end
+marker (`WM_APP + 9` with 0), and F6 sends the carriage return. Nothing is sent
+to the pane inside the window, because noctty writes a trace snapshot on the
+presenting thread: the driver polls `done.flag` as a file, waits 1 s, then
+requests one snapshot at a time until one shows the end marker's swap. A
+snapshot that still shows the target armed landed inside the window, is
+counted (`SnapshotsInWindow`), and makes the run inconclusive. The samples
+are the trace's intervals between consecutive successful swaps, from the arm
+through that swap, kept in memory by the trace, at most 2,048 a run. `frame_time_p95_ms` is their nearest-rank p95,
+pooled over the completed runs, as the bench aggregates its own. cmd's `type`
+delivers the payload at about 2.4 MB/s, a tenth of the bench's PowerShell
+producer (26 MB/s in the 2026-08-27 table in
+`docs/windows-benchmark-methodology.md`), so a run's window is about 1.8 s
+with about 420 intervals, and its numbers are not comparable with that table.
+`copy /b stream.bin con` is fast but loses the end marker (test-harnesses.md,
+FRAME-PACING-01).
+
+Two modes:
+
+- The dry run (the default) runs everything on a fresh private desktop and
+  refuses the visible part: the driver evaluates the visible run's
+  preconditions on its own desktop, records why they fail, and never takes the
+  foreground. Its intervals check the pipeline and are not a measurement, since
+  nothing composes a private desktop. The summary gives their p95 as
+  `dry_run_p95_ms`, never as `frame_time_p95_ms`.
+- `-Visible` is the measurement. Run it only while the machine's user is
+  away. The copy runs on `Default`, which must be the caller's desktop and the
+  input desktop, composed by DWM, in a local session, with the shell accepting
+  notifications (no full-screen app or presentation mode), the display on, no
+  screen saver running, and Windows' foreground lock
+  (`SPI_GETFOREGROUNDLOCKTIMEOUT`) longer than the series needs. There must be
+  no keyboard or mouse input for 300 s before the series (a pinned constant).
+  The lock counts from the user's last input, so it must outlast the idle
+  time seen at admission (at least 300 s) plus every run's longest duration
+  (`Get-FramePacingLockNeedMs`: 2,100,000 ms a run, the driver's 30 min
+  deadline plus 5 min for staging and the guards). With the default
+  200,000 ms the lock has expired before the first copy starts, so
+  `-Visible` is refused. The admission prints both values, and each run
+  records them (`ForegroundLockTimeoutMs`, `ForegroundLockNeededMs`). The lock
+  is read again before each run's driver starts and right before each copy's
+  launch, after `+version`'s wait (`ForegroundLockTimeoutAtLaunchMs`), so a
+  setting changed during the series stops it.
+  "Away" means only that: a gamepad, or a video watched without input, is not
+  seen. The series holds the display and the system on.
+- Real input is detected by the injected flag, not inferred from ticks.
+  `GetLastInputInfo` cannot tell the harness's own unlock from the user's
+  input. From admission to the series' end the outer half holds low-level
+  keyboard and mouse hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`) on a thread with
+  its own message loop. Any event without `LLKHF_INJECTED` or `LLMHF_INJECTED`
+  is real input and sets the series' event, which every driver opens. The
+  callbacks read two words of each event, its flags and its extra info, never
+  a key code or a position; they keep counts, set an event and pass the event
+  on. Hooks that do not install refuse `-Visible`; there is no fallback to the
+  tick alone. Contracts.99-FramePacing pins the callbacks, the watch's start,
+  stop and wait, and both workers by the SHA-256 of their text.
+- Each hook's proof of life is the harness's own input of its kind. Windows
+  removes a low-level hook whose callback runs past `LowLevelHooksTimeout`
+  without notice, and a removed hook would leave the real-input event clear
+  for good. The callbacks are trivial, so a timeout needs a long pause of the
+  outer half. The harness's own injected input carries a random marker drawn
+  for the series in its extra info, and only an event carrying it counts as
+  proof: another program's injected event (a jiggler, a script, a KVM) is
+  counted and proves nothing. The mouse hook's proof is the unlock: the worker
+  waits for the marked mouse event before it takes the foreground. The
+  keyboard hook's proof is the keyboard probe below: the probe's worker waits
+  for the marked key. The outer half also checks that each kind's marked count
+  moved after each run. Any miss refuses the run, and the series stops. The
+  keyboard proof comes after the foreground step, so until then a
+  keyboard-only return is caught by the tick, apart from the millisecond race
+  at the unlock. Between one run's proofs and the next nothing is injected, so
+  the later gates rely on them.
+- What the injected flag cannot see (read from Microsoft's documentation,
+  not measured): keystrokes into an elevated window, which a non-elevated
+  low-level hook does not get, and input that a software KVM or a
+  remote-input tool delivers through `SendInput`, which carries the injected
+  flag. Both still move the session's last-input tick, which the gate checks
+  second, except within a few milliseconds of the harness's own injected
+  input (the unlock and the keyboard probe). For that input the outer half
+  never wakes: the copy ends at the driver's next tick check. Every wait the
+  driver makes reads the gate at each 100 ms: the waits on the copy's
+  window, its quiet and its quit, on `+version` and the probes, the quiet
+  machine wait, the load readings (sampled around the polls) and a
+  render-trace snapshot's wait for its file. What does not poll, with its
+  worst case: a render-trace request's window-message call (each snapshot and
+  the arm), up to 5 s (`ResponseBoundMs`) if the copy stops answering, after
+  which its file wait, polled, can take up to 10 s more; the display-power
+  reading, at once in practice and at most 2 s; and the bounded foreground
+  and keyboard-probe workers, milliseconds in practice and at most 5 s each,
+  which read the tick right before each action. These are per step, and two
+  can run back to back: the keyboard-probe worker (up to 2 s after its
+  input) and then a trace request's message call (5 s) make about 7 s. So
+  input the hooks cannot see reaches the copy for at most about 7 s, and only
+  if the copy stops answering; normally until the next 100 ms poll or the end
+  of the step under way (up to about 1 s at the foreground step: its worker's
+  `WM_NULL` round trip and activation poll, which read only the hooks' event,
+  then the gate). Before the foreground
+  step two more calls do not poll: the WMI read of the copy's command line
+  right after its launch (`Get-CimInstance`, with no bound of its own) and
+  the foreground's `WM_NULL` check before its worker (up to 5 s). Under the
+  foreground lock the copy is not in front then, so they matter only on the
+  startup-activation path below. Input the gate finds
+  after the window, or right before the quit, ends the copy at once. After
+  each run the outer half reads the tick against the last tick the harness's
+  own marked input left (the probe's, else the unlock's, else the series'):
+  a moved tick makes the run inconclusive like hook-seen input, and at the
+  series' end the same reading against the series' baseline voids the
+  series (below).
+- The input gate (`Test-FramePacingInputGate`) reads that event first. The
+  session's last-input tick is the second line: it must be the series' tick
+  until the unlock and the harness's own latest tick after it. The gate runs
+  right before each launch on `Default` (the visible driver's included), the
+  unlock, right after the copy is in front, the keyboard probe, each workload
+  key (F5 and F6) and the measured window, and at each 100 ms poll of every
+  wait the driver makes, inside the window and before it. On real input the
+  run stops at once: nothing further starts, takes the foreground or sends
+  input, the catch ends the copy, and input inside the window makes the run
+  inconclusive, never a timeout's failure. The outer half waits on the
+  hooks' real-input latch and the driver together (the latch first, so input
+  that arrives as the driver ends still counts) and closes the run's job, and
+  with it the copy, the moment it observes the latch, inside the same native
+  call and with no grace: immediately on observation, plus OS scheduling
+  latency. That holds even while the driver is busy in a step that does not
+  poll (the copy's launch, a 2 s load reading). Each run records the delay
+  from that observation until job accounting shows no active process and
+  `StopOwnedJob` has closed the job's handle (its return; `LatchToKillMs` in
+  `guards.json` only, from QueryPerformanceCounter: it is guard telemetry, and
+  `pacing.json` carries no duration of a voided series). The driver's own process handle can signal a
+  millisecond or so later; its threads have already ended.
+  This bound and the per-poll gate apply to input the hooks see; input they
+  cannot see is bounded by the driver's tick checks (above). Real input the
+  hooks see at any point in a series makes the series inconclusive and
+  publishes no metric, whatever any driver's own exit says. The machine must be
+  under 30% busy (the driver waits up to `-QuietWaitSeconds` and launches
+  nothing when it never was) and again right before the window, with no
+  screen saver then either; each reading is acted on at once.
+- The foreground: a zero-motion mouse input unlocks it, never an Alt tap,
+  then one `SetForegroundWindow`, which Windows allows the process that sent
+  the last input. There is no `AttachThreadInput` fallback, no
+  `BringWindowToTop` and no keyboard-state reset anywhere: attaching to the
+  user's foreground thread resets its key state and could clear a modifier a
+  returning user holds. The native worker checks the event right before its
+  input, refuses the unlock unless a valid tick moved and the mouse hook saw
+  it, reads the tick again and checks the event right before the foreground
+  call, then lets the copy's queue take the activation (a bounded `WM_NULL`
+  round trip and up to 500 ms of polling, reading the event each time) before
+  it reports "refused". It works on its own copies of the event handles and
+  runs joined within 5 s; a timeout cancels any step it has not taken. A run
+  whose foreground, pane focus, display power or session input changed is
+  inconclusive, never a sample.
+- The keyboard probe: once the copy is in front and the gate has run again,
+  one `SendInput` of VK_NONAME (0xFC) down and up, marked, behind the same
+  stop check; the copy must still be in front, and the keyboard hook must see
+  the marked key. It reaches only the copy's own pseudoconsole. What noctty
+  writes for it, from the test in `src/apprt/win32/input.zig` that runs it
+  through noctty's key message builder and encoder:
+
+  | Win32 input mode (9001) | Key down writes | Key up writes |
+  | --- | --- | --- |
+  | Off | nothing | nothing |
+  | On | `ESC[252;0;0;1;0;1_` | `ESC[252;0;0;0;0;1_` |
+
+  Each record is a `KEY_EVENT_RECORD` with virtual key 252, scan code 0 and
+  no character. That cmd ignores it is measured in every dry run: the driver
+  posts the same down and up to the copy's pane before F5, reads cmd's console
+  through the pseudoconsole before and after, from its top-left cell through
+  the cursor so a prompt or command that wraps is read whole, and requires it
+  unchanged (`DryProbePromptUnchanged`), then requires it to be exactly the
+  console before plus F5's command (`DryProbeCommandIntact`).
+- A check cannot be closed against the action right after it: input can land
+  in the sub-millisecond gap between them. What each guarded action can do to
+  a user whose input lands in that gap:
+
+  | Action | Checked right before | Worst case for a user who returns in the gap |
+  | --- | --- | --- |
+  | A launch on `Default` (the driver, `+version`, the copy, the grid probe) | the event, then the tick | A process starts. The copy's window may show, but its own activation is subject to the foreground lock (below); the copy is closed as soon as the outer half observes the input. |
+  | The unlock (`SendInput`, `MOUSEEVENTF_MOVE`, dx = dy = 0) | the event, on the worker | None visible: no motion, no button, no key. The session's last-input tick moves. |
+  | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd. Input the hooks see: until the outer half closes the copy on observing it. Input they cannot see: until the driver's next tick check, up to about 1 s here (the worker's `WM_NULL` round trip and activation poll, then the gate), and at most the per-step bounds above (about 7 s back to back) if the copy stops answering. |
+  | The keyboard probe (`SendInput`, VK_NONAME down and up) | the copy in front, the tick, then the event, on the worker | If the user clicked elsewhere inside the gap, their app gets a key down and up for VK_NONAME, an unassigned key with no character. It is measured harmless only for cmd (the dry run); another application could act on any key-down, for example dismiss a press-any-key prompt. That is why the probe goes only to the copy, once it is in front, behind the gate and the worker's checks. |
+  | F5, F6 and the dry run's VK_NONAME (`WM_KEYDOWN`/`WM_KEYUP` posted) | the event, then the tick | The key reaches the copy's own window only, never the user's application. |
+
+- What the foreground lock covers, and what it does not. noctty's own first
+  show (`Host.present`: `ShowWindow`, then `SetForegroundWindow`) is not the
+  harness's call, and only a default-terminal handoff reads a launch's show
+  state: the harness cannot stop that call. It relies on the lock to keep the
+  call from taking the foreground, and closes the copy as soon as it observes
+  any real input. Under Microsoft's documented rules a background process that is
+  not in front, was not started by the foreground process and did not receive
+  the last input cannot take the foreground until the lock's timeout has
+  passed since the last input. That leaves three paths uncovered: no window
+  holds the foreground at all (each run closes its own copy, and Windows may
+  activate nothing after it), the returning user's first input lands on the
+  copy's newly shown window, and a foreground right passed down the launch
+  chain (outer pwsh, driver, copy), which the documentation does not address.
+  The first path includes this interleaving: the user's foreground window
+  disappears while the copy is starting (the user closes it, or it closes
+  itself), and the user's real input arrives during that startup. With no
+  foreground window when the copy first shows, its activation can take the
+  foreground despite the lock. The harness accepts this as a residual, with no
+  mechanism of its own: the hooks' latch is set by that input and the outer
+  half closes the copy immediately on observing it, which bounds how long the
+  copy holds the foreground. All of this is inferred from the documentation,
+  not measured with a returning user. Each visible run records whether a window held the
+  foreground right before the copy's launch (`ForegroundBeforeLaunch`) and
+  whether the copy held it right before the harness's unlock
+  (`ForegroundBeforeUnlock`). A copy in front after no window was is recorded
+  (`ForegroundTakenFromNone`) and allowed, since that path is harmless while
+  the user is away; a copy that took the foreground from another window
+  contradicts the lock claim, so the run is inconclusive and the series
+  stops. That check tests the lock only while the lock is in force: before
+  each launch the harness requires the lock to outlast the idle time since
+  the user's last input plus the remaining runs' budget, and a visible run's
+  staging and guard setup that ran past their 300,000 ms bound launches no
+  driver; either way the series stops inconclusive.
+
+```powershell
+pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
+    -MeasureRepo <checkout with a measurement build> -RunRoot <new dir> [-Runs 5] [-Visible]
+```
+
+`-RunRoot` is a new directory outside `-MeasureRepo`, or one git ignores
+there. The series stops at the first run that does not complete. The exit
+code, by precedence (`Get-FramePacingExitCode`): 3 when a guard tripped, else
+1 when a run failed or the runs differ in build or workload, else 2 when a run
+was inconclusive or the runs differ in environment, else 0. A series that both
+trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` holds each
+run's status and statistics, each comparability group's (`Groups`), the pooled
+p95 and, in a visible series, how many real and injected input events the
+hooks saw (`RealInputsSeen`, `InjectedInputsSeen`, the latter every injected
+event, the harness's own marked ones and any other program's). Each `run-<n>` holds
+`run.json` (the build,
+config, receipt and ConPTY digests, the transport and renderer the copy's log
+names, the grid, the window's DPI and monitor mode, the busy share and timer
+resolution before and after, every interval and the visible part's facts), the
+copy's log, the driver's log, the copy's last trace snapshot and
+`guards.json`. The summary pools only comparable runs: the same
+`WorkloadSha256`, app, renderer, transport and ConPTY digests (a difference
+fails the series, exit 1), and the same display mode (the window's monitor's
+width, height and refresh, read at the start of each run and again after its
+window, where a change makes the run inconclusive), DPI and grid (a difference
+pools none and exits 2). Each group of runs alike in all nine of those fields
+is reported on its own in `Groups`, never combined across any of them.
+`frame_time_p95_ms` and its median are published only for a visible series
+with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
+still at the series' baseline (`TickMovedFromBaseline` false), whose every
+run completed and whose runs are comparable; otherwise both are null, input
+makes the series inconclusive (exit 2 unless a guard or a failure ranks
+higher), and the console says no measurement was published. A series that
+input voided writes `pacing.json` from an allowlist, not by scrubbing: the
+schema, `Verdict` (`voided`), `ExitCode`, `Reasons`, `RealInputsSeen`,
+`InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
+`MeasureHead` and `ExeSHA256`, and nothing else. It carries no number but
+the input counts and the exit code, and no free text: `Reasons` are codes
+from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
+`watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
+`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`).
+Everything else goes to `diagnostics.json` beside it: every message (the
+staging, lock-shortfall and tick-stop lines among them), every duration,
+each run and each group, and `Inconclusive`, which names what voided the
+series (the hook count, with "tick also moved (may be the same input)" when
+the tick moved too, since one input can do both; a tick that moved or could
+not be read; a watch that did not stop; or the runs that saw input). A
+series input did not void keeps the full `pacing.json` and writes no
+`diagnostics.json`. Input seen is a latch for the series: every read sets it
+(a hook count above 0, any tick mismatch at a driver gate, a poll, the
+driver's session facts, the outer half's checks or the final read, an unread
+tick, a watch that did not stop), each run carries its own to the series,
+and nothing clears it, so a later read that returns the expected tick
+(`GetLastInputInfo` is not incremental) never undoes an earlier mismatch; a
+poll that reads a mismatch stops the step at once and never reads again.
+Every PowerShell read of the tick goes through one function
+(`Read-FramePacingInputTick`), which latches a mismatch before it returns,
+and the contract fails on any other. Each run's own `run.json` keeps its
+evidence for debugging. A clipboard sequence of 0 before and after is no
+observation (the clipboard could not be read): `guards.json` records
+`ClipboardObservable` false and the console says the clipboard was
+unobservable, never that it held. The series ends
+in this order: every run has ended and its job, with its copy, is closed;
+the watch stops, which unhooks; the final real-input count and the tick are
+read; then the summary. Input after the unhook reaches no copy. A visible
+run is never complete without the keyboard probe's "ok": a run whose
+foreground was taken without one stops the series as inconclusive, never
+failed, and its line names the cause the driver recorded (a refusal, or
+input the hooks did not see). Only a hook that missed the harness's own
+marked input fails the run, as Windows may have removed it: a count that did
+not move, or the driver's refusal when a hook did not see the unlock or the
+probe. Such a run stays failed whatever input stop follows, and the tick the
+unlock or the probe moved is kept as the harness's own even when the hook
+missed it, so it is never read as a user's input. A
+`run.json` the job's close cut short reads as no record: a run stopped for
+real input is then inconclusive, any other run failed, and the series still
+writes `pacing.json`. A staging failure is a
+failed run before any launch, and the summary still records the runs before
+it. What runs is the run's own copy: its path is checked before any launch
+and its image read back by PID, and the driver runs in the run's own job,
+checked before it resumes and again by the outer half. The shared state guard
+owns the measurement-identity jump list by its timestamps: it deletes the file
+only when it did not exist before the run and both its creation and last-write
+times fall inside the run. It keeps one that existed before, and keeps one
+whose times fall outside the run (NTFS tunnelling can keep an old creation
+time) and reports that as a failure. Another measurement workload's jump list
+written during a run would pass that test and be deleted, so run one
+measurement workload at a time; the frame-pacing mutex covers only this
+harness. Each run keeps the shared state
+guard, the PowerShell history guard and the real `session-state.json`'s
+metadata, and logs the clipboard sequence number before and after.
+
 ## Style
 
 - Define reusable helpers as `function Verb-Noun { ... }` with a `param(...)`
