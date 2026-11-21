@@ -232,7 +232,7 @@ if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
 }
 @(
     '$resolved = (Get-Command noctty).Source'
-    "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding ASCII"
+    "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding UTF8"
     $psResolutionGuard
     '$help = noctty +help | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
@@ -249,7 +249,11 @@ if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
     '$themes = noctty +list-themes | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psThemesLiteral' -Value `$themes -Encoding UTF8"
-) | Set-Content -LiteralPath $psPayloadPath -Encoding UTF8
+) | ForEach-Object -Begin { $psPayloadLines = [System.Collections.Generic.List[string]]::new() } -Process { $psPayloadLines.Add($_) } -End {
+    # UTF-8 with a BOM: the payload runs under Windows PowerShell, which reads a BOM-less file in the ANSI code page,
+    # so a non-ASCII path in it would change (CodeRabbit on #740). The resolution it writes is UTF-8 for the same reason.
+    [IO.File]::WriteAllText($psPayloadPath, (($psPayloadLines -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($true))
+}
 
 $null = Invoke-AppShellRun `
     -Name 'powershell' `

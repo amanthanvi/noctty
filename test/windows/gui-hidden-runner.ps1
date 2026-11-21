@@ -65,8 +65,8 @@ session unlocked during a local run: OpenInputDesktop fails on a locked workstat
 windows.gui-hidden.suite) and receipts/: one JSON object per leaf run now and run.json (the build's hashes and head,
 the hosted image's name and version, the two AutoRun booleans, the guards), of allowlisted values: booleans, numbers
 and short strings without a path separator, quote or bracket (Write-GuiHiddenRecord, from gui-hosted-probe.ps1's record
-writer, #738). No path, command line, window title or environment value enters either; a failed leaf's log reaches its
-receipt only as the lines that rule admits. The console gets leaf ids and failure kinds; everything else (logs, the
+writer, #738). No path, command line, window title or environment value enters either; a failed leaf's receipt carries
+its failure kinds and its log's line counts, never a line. The console gets leaf ids and failure kinds; everything else (logs, the
 runner's errors, the guard's receipts, copies) stays under -Work. A run of some leaves (-Leaves) is for diagnosis: its
 result is `skip` when they pass, never `pass`. Exit codes: 0 pass, 1 a leaf failed, 2 a validation, staging, generation
 or runner failure (with a result when -Out could be opened), 3 a tripped state guard.
@@ -726,7 +726,11 @@ function Test-GuiHiddenLeafReceipt([string] $Path) {
     $result = [ordered]@{ present = $false; valid = $false; realInputLoaded = $null; psEdition = $null; psVersion = $null }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $result }
     $result.present = $true
-    try { $receipt = [IO.File]::ReadAllText($Path) | ConvertFrom-Json -ErrorAction Stop } catch { return $result }
+    $text = [IO.File]::ReadAllText($Path)
+    # The root must be an object: ConvertFrom-Json unwraps a one-element array to its element (CodeRabbit on #740,
+    # measured on pwsh 7.6), so `[{...}]` would otherwise pass as the receipt it holds.
+    if ($text.TrimStart([char]0xFEFF, ' ', "`t", "`r", "`n").StartsWith('{', [StringComparison]::Ordinal) -eq $false) { return $result }
+    try { $receipt = $text | ConvertFrom-Json -ErrorAction Stop } catch { return $result }
     if ($receipt -isnot [System.Management.Automation.PSCustomObject]) { return $result }
     $names = @($receipt.PSObject.Properties.Name)
     foreach ($name in @('schemaVersion', 'realInputLoaded', 'psEdition', 'psVersion')) { if ($name -cnotin $names) { return $result } }
@@ -783,19 +787,16 @@ function Get-GuiHiddenConfigPolicy([string] $Path) {
     return $policy
 }
 
-# A failed leaf's own log, for the uploaded receipt: its line count, and only the lines the record's string rule
-# admits (no path, quote or bracket; at most 80 characters), the rest counted as withheld. Nothing reaches the
-# console (Sol L8 on #740: an app's diagnostics can sit in a leaf's exception text).
+# A failed leaf's own log, for the uploaded receipt: counts only, never a line. A character filter cannot tell a
+# window title or an environment value from a diagnostic (CodeRabbit on #740), so the lines stay under -Work and the
+# receipt says how many there were and whether the leaf ended in a PowerShell exception. Nothing reaches the console
+# (Sol L8 on #740).
 function Get-GuiHiddenLogDigest([string] $Path) {
-    $digest = [ordered]@{ lines = 0; withheld = 0; kept = @() }
+    $digest = [ordered]@{ lines = 0; exceptionLines = 0 }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $digest }
     $lines = @([IO.File]::ReadAllLines($Path))
     $digest.lines = $lines.Count
-    $kept = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in @($lines | Select-Object -Last 40)) {
-        if ($line.Length -le 80 -and $line -cmatch '\A[A-Za-z0-9 ._:+#=\-]*\z') { $kept.Add($line) } else { $digest.withheld++ }
-    }
-    $digest.kept = $kept.ToArray()
+    $digest.exceptionLines = @($lines | Where-Object { $_ -match 'Exception:' }).Count
     return $digest
 }
 
@@ -919,7 +920,7 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         $policy.measurementMode = $true
         $policy.held = $policy.held -and $policy.autoRunOffObserved -and $policy.portable -and $policy.iconAbsent
         $record.launchPolicy = $policy
-        # The renderer the copies used: the configured backend, and how many of the leaf's noctty logs report the
+        # The renderer the copies used: the configured backend, and the number of the leaf's noctty log files that hold the
         # OpenGL-to-D3D11 fallback (renderer/Windows.zig's warning; counted, never copied).
         $logs = Join-Path $run "sandbox-$token\logs"
         $record.rendererFallbackLogs = @(Get-ChildItem -LiteralPath $logs -Filter '*.log' -File -ErrorAction SilentlyContinue |
@@ -946,7 +947,10 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         if ($pi) { [void][GuiHiddenRunnerNative]::CloseHandle($pi.thread); [void][GuiHiddenRunnerNative]::CloseHandle($pi.process) }
         if ($desktop -ne [IntPtr]::Zero) { [void][GuiHiddenRunnerNative]::CloseDesktop($desktop) }
     }
-    if (-not $record.passed) { $record.failureLog = Get-GuiHiddenLogDigest (Join-Path $run 'leaf.log') }
+    if (-not $record.passed) {
+        $record.failureLog = Get-GuiHiddenLogDigest (Join-Path $run 'leaf.log')
+        $record.failureKinds = @(Get-GuiHiddenFailureKinds $record)
+    }
     if ($record.passed -and (Test-Path -LiteralPath $copy)) { Remove-Item -LiteralPath $copy -Recurse -Force }
     return $record
 }
@@ -1037,14 +1041,19 @@ try {
     $outReady = $true
     if ($PublishError) { throw [System.OperationCanceledException]::new('publish-error') }
     if ($Build -and -not (Test-GuiHiddenHosted)) { throw '-Build runs only on a GitHub-hosted runner; locally, prepare the measurement build beforehand with Invoke-InteractiveWin11MeasureBuild.' }
-    $MeasureRepo = (Resolve-Path -LiteralPath $MeasureRepo).Path
+    $resolvedRepo = Resolve-Path -LiteralPath $MeasureRepo -ErrorAction SilentlyContinue
+    if ($null -eq $resolvedRepo) { throw 'The measurement repository does not resolve.' }
+    $MeasureRepo = $resolvedRepo.Path
     $Work = [IO.Path]::GetFullPath($Work)
+    # The leaves write -Work's paths into ASCII fixtures (shell-command's cmd payload, which `where` and cmd read in the
+    # console code page), so a non-ASCII path would fail a leaf obscurely; it is refused here instead (CodeRabbit on #740).
+    if ($Work -cnotmatch '\A[\x20-\x7E]+\z') { throw 'The work directory''s path must be printable ASCII.' }
     if (Test-Path -LiteralPath $Work) { throw 'The work directory must be new.' }
     [void](New-Item -ItemType Directory -Path $Work)
     $script:GuiHiddenWork = $Work
     foreach ($drive in @(([IO.Path]::GetPathRoot($Work)), ([IO.Path]::GetPathRoot([Environment]::GetFolderPath('System'))))) {
         $free = ([IO.DriveInfo]::new($drive)).AvailableFreeSpace
-        if ($free -le 20GB) { throw "The runner stops with 20 GB or less free on $drive." }
+        if ($free -le 20GB) { throw 'The runner stops with 20 GB or less free on the work or the system drive.' }
     }
     $plan = Get-GuiHiddenPlan
     # `pwsh -File` passes `-Leaves a,b` as one string: split it.
@@ -1077,12 +1086,17 @@ $runRecord.autoRunHklm = Test-GuiHiddenAutoRunPresent 'HKLM:'
 
 if ($exit -eq 0) {
     $env:NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
-    $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'gui-hidden-runner.ps1'
-    $guardDirectory = Join-Path $Work 'state-guard'
-    [void](New-Item -ItemType Directory -Path $guardDirectory)
-    $stateGuard = Start-InteractiveWin11StateGuard -Harness 'gui-hidden-runner.ps1' -ReceiptDirectory $guardDirectory
-    $startupBefore = Startup-Fingerprint
+    $historyGuard = $null; $stateGuard = $null; $startupBefore = $null
     try {
+        # The guards' setup is inside the error path (CodeRabbit on #740): a failure here is an error result, and the
+        # finally block asserts only the guards that started. The state guard's own setup line names its receipt
+        # directory, so it goes to the information stream's void and a fixed line replaces it (CodeRabbit on #740).
+        $historyGuard = Start-WindowsHarnessHistoryGuard -Harness 'gui-hidden-runner.ps1'
+        $guardDirectory = Join-Path $Work 'state-guard'
+        [void](New-Item -ItemType Directory -Path $guardDirectory)
+        $stateGuard = Start-InteractiveWin11StateGuard -Harness 'gui-hidden-runner.ps1' -ReceiptDirectory $guardDirectory 6> $null
+        Write-Host ("gui-hidden: the state guards started (clipboard sequence {0})" -f [int64]$stateGuard.ClipboardBefore)
+        $startupBefore = Startup-Fingerprint
         try {
             if ($Build) { Invoke-InteractiveWin11MeasureBuild -RepoRoot $MeasureRepo }
             $measureLayout = Get-InteractiveWin11MeasureLayout $MeasureRepo
@@ -1116,7 +1130,10 @@ if ($exit -eq 0) {
                     # Kinds only; the leaf's log stays under -Work, its allowlisted tail in the receipt (Sol L8 on #740).
                     Write-Host ("gui-hidden: {0} FAIL ({1})" -f $leaf.id, ((Get-GuiHiddenFailureKinds $leafRecord) -join ', '))
                 }
-                if (-not $leafRecord.passed -and $exit -eq 0) { $exit = 1; $failureKind = 'leaf' }
+                # A leaf that never ran (its copy could not be staged) is a staging failure, exit 2; a leaf that ran and
+                # failed is exit 1 (CodeRabbit on #740).
+                if (-not $leafRecord.passed -and $leafRecord.stage -ceq 'staging') { $exit = 2; $failureKind = 'staging' }
+                elseif (-not $leafRecord.passed -and $exit -eq 0) { $exit = 1; $failureKind = 'leaf' }
             }
             # The generation at the end: still valid, and still the one the copies were staged from.
             try {
@@ -1144,14 +1161,18 @@ if ($exit -eq 0) {
     }
     finally {
         $guardFailure = $null
-        $runRecord.stateGuardHeld = $true; $runRecord.historyGuardHeld = $true; $runRecord.startupUnchanged = $true
-        try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $runRecord.stateGuardHeld = $false; $guardFailure = 'state' }
-        try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $runRecord.historyGuardHeld = $false; if (-not $guardFailure) { $guardFailure = 'history' } }
-        $startupAfter = Startup-Fingerprint
-        if ($startupBefore.Exists -ne $startupAfter.Exists -or $startupBefore.Hash -ne $startupAfter.Hash -or $startupBefore.Modified -ne $startupAfter.Modified) {
-            $runRecord.startupUnchanged = $false
-            if (-not $guardFailure) { $guardFailure = 'startup' }
+        $runRecord.stateGuardHeld = $null -ne $stateGuard; $runRecord.historyGuardHeld = $null -ne $historyGuard; $runRecord.startupUnchanged = $null -ne $startupBefore
+        if ($null -ne $stateGuard) { try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $runRecord.stateGuardHeld = $false; $guardFailure = 'state' } }
+        if ($null -ne $historyGuard) { try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $runRecord.historyGuardHeld = $false; if (-not $guardFailure) { $guardFailure = 'history' } } }
+        if ($null -ne $startupBefore) {
+            $startupAfter = Startup-Fingerprint
+            if ($startupBefore.Exists -ne $startupAfter.Exists -or $startupBefore.Hash -ne $startupAfter.Hash -or $startupBefore.Modified -ne $startupAfter.Modified) {
+                $runRecord.startupUnchanged = $false
+                if (-not $guardFailure) { $guardFailure = 'startup' }
+            }
         }
+        # A guard that never started is not held; the run is already an error.
+        if (($null -eq $stateGuard -or $null -eq $historyGuard -or $null -eq $startupBefore) -and $exit -ne 3) { $exit = 2; if ($failureKind -cne 'runner') { $failureKind = 'guard-setup' } }
         $runRecord.stateGuardsHeld = $null -eq $guardFailure
         if ($guardFailure) { Write-Host "gui-hidden: a state guard tripped ($guardFailure); details under -Work"; $exit = 3; $failureKind = 'state-guard' }
     }
@@ -1216,8 +1237,8 @@ if ($outReady) {
         measurements = $measurements
         assertions = @(
             [ordered]@{ id = 'leaves-pass'; status = $leafStatus; message = $(if ($subset) { "subset run: $($selected.Count) of $($runRecord.leavesPlanned) leaves" } else { $null }) }
-            [ordered]@{ id = 'launch-policy'; status = $(if ($policyPass) { 'pass' } else { 'fail' }); message = $null }
-            [ordered]@{ id = 'real-input-absent'; status = $(if ($inputPass) { 'pass' } else { 'fail' }); message = $null }
+            [ordered]@{ id = 'launch-policy'; status = $(if (-not $policyPass) { 'fail' } elseif ($subset) { 'skip' } else { 'pass' }); message = $null }
+            [ordered]@{ id = 'real-input-absent'; status = $(if (-not $inputPass) { 'fail' } elseif ($subset) { 'skip' } else { 'pass' }); message = $null }
             [ordered]@{ id = 'state-guards'; status = $(if ($runRecord.stateGuardsHeld) { 'pass' } else { 'fail' }); message = $null }
         )
         artifacts = $receipts

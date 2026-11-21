@@ -714,7 +714,10 @@ that govern each symbol you change, or that none does.
   `Start-InteractiveWin11HostedProcess`,
   `Write-InteractiveWin11HostedConfig`, the argument rule
   `Get-InteractiveWin11HostedArgumentRefusal` and the run token
-  `Get-InteractiveWin11HostedRunToken`), the real-input module
+  `Get-InteractiveWin11HostedRunToken`; the harness's path comparison
+  `Test-InteractiveWin11SamePath` and `Get-InteractiveWin11CanonicalPath` in
+  `scripts/interactive-win11-measure-lib.ps1`; the struct layout pins,
+  `Layout()`, and the runner's `-PublishError`), the real-input module
   `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
   the measurement record
   `test/windows/flagship/measurements/gui-measurements.json` and the

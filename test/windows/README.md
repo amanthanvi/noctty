@@ -1489,8 +1489,11 @@ and the gate still passes.
 pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <new or empty dir> [-Leaves smoke,undo]
 ```
 
-A run with `-Leaves` is for diagnosis: its result is `skip` when the leaves
-pass, never `pass`, because `leaves-pass` is the whole plan's.
+A run that selects fewer than all the plan's leaves (`-Leaves smoke,undo`) is for
+diagnosis: when they pass, its result and its whole-plan assertions
+(`leaves-pass`, `launch-policy`, `real-input-absent`) are `skip`, never
+`pass`. Naming all six leaves is a full run. `-Work` must be a printable ASCII
+path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
 
 Until the gate switches, the interactive composite remains the release
 evidence; this lane runs beside it.
@@ -1545,8 +1548,10 @@ breakaway and kills on close and on an unhandled exception. It sets
   identity, builds its own quoted command line, refuses `--command`, applies
   the argument rule (`Get-InteractiveWin11HostedArgumentRefusal`: every
   `--class` ends in the token; an app launch states `--single-instance`, and
-  `true` only in the IPC leaves; every action but `+help`, `+version`,
-  `+list-*` and `+vt-probe` names the class; no `--config-file`), reads the
+  `true` only in the IPC leaves; every action names the class except the
+  local ones, `+help`, `+version`, `+list-keybinds`, `+list-colors`,
+  `+list-themes` and `+vt-probe` (so `+list-windows` needs it); no
+  `--config-file`), reads the
   started process's command line back and compares it, and records each PID
   before it runs. `Start-Process` stays only in each leaf's default branch;
 - its config goes into the copy's `config.ghostty`
@@ -1596,8 +1601,8 @@ version in their known shapes, whether an HKCU or HKLM `Command
 Processor\AutoRun` value exists, never the value, and each guard's result).
 All are allowlisted values only: booleans, numbers and short strings without a
 path separator, quote or bracket. No path, command line, window title,
-environment value, screen capture or process listing; a failed leaf's log
-reaches its receipt only as the lines that rule admits, the rest counted. The
+environment value, screen capture or process listing; a failed leaf's receipt
+carries its failure kinds and its log's line counts, never a line. The
 console gets leaf ids and failure kinds. The logs, the runner's errors, the
 state guard's receipts and the copies stay under `-Work`.
 

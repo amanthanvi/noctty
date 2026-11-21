@@ -34,6 +34,24 @@ function Test-GuiContractInsideHostedSwitch($Node, [switch] $ElseBranch) {
     return $false
 }
 $guiLibAst = Get-GuiContractAst $guiLibPath
+# Pins a mirror of SDK structs (AGENTS.md "Win32 FFI"; Greptile on #740): `Type`'s Layout() must equal the literal its
+# source file assigns to `LiteralName`, and the same source with two fields of one struct swapped, compiled under
+# another class name, must not.
+function Assert-GuiContractLayout($FileAst, [string] $Source, [string] $ClassName, [string] $LiteralName, [string] $SwapFrom, [string] $SwapTo) {
+    $assignment = @($FileAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq $LiteralName }, $true))
+    if ($assignment.Count -ne 1) { throw "Expected one $LiteralName." }
+    $pinned = [scriptblock]::Create('return ' + $assignment[0].Right.Extent.Text).Invoke()[0]
+    $actual = ($ClassName -as [type])::Layout()
+    if (-not [string]::Equals($actual, $pinned, [StringComparison]::Ordinal)) { throw "$ClassName's structs are $actual, not the pinned SDK layout." }
+    $swapped = $Source.Replace($SwapFrom, $SwapTo)
+    if ([string]::Equals($swapped, $Source, [StringComparison]::Ordinal)) { throw "The $ClassName layout control changed nothing." }
+    # Every class in the source gets the same new suffix, so the control compiles beside the real types.
+    $suffix = 'Swapped' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $controlClass = $ClassName + $suffix
+    $swapped = [regex]::Replace($swapped, 'public static class (\w+)', ('public static class $1' + $suffix))
+    Add-Type -TypeDefinition $swapped
+    if ([string]::Equals(($controlClass -as [type])::Layout(), $pinned, [StringComparison]::Ordinal)) { throw "The $ClassName layout check accepted two swapped fields." }
+}
 $guiMeasureLibAst = Get-GuiContractAst (Join-Path $repoRoot 'scripts\interactive-win11-measure-lib.ps1')
 foreach ($name in @('Get-InteractiveWin11CanonicalPath', 'Test-InteractiveWin11SamePath')) {
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiMeasureLibAst $name)))
@@ -76,6 +94,8 @@ if (-not ('InteractiveWin11HostedDesktop' -as [type])) {
     if ($guiTypeDefinition -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { throw 'The hosted types must be one literal Add-Type.' }
     Add-Type -TypeDefinition $guiTypeDefinition.Value
 }
+$guiHostedSource = (Get-CommandParameterArgument -Command $guiHostedAddTypes[0] -Name 'TypeDefinition').Value
+Assert-GuiContractLayout $guiLibAst $guiHostedSource 'InteractiveWin11HostedLaunch' '$script:InteractiveWin11HostedLaunchLayout' 'public uint volumeSerial, sizeHigh, sizeLow,' 'public uint volumeSerial, sizeLow, sizeHigh,'
 $guiExpected = 'WinSta0\noctty-gh-' + ('a' * 32)
 $guiOwn = 'noctty-gh-' + ('a' * 32)
 foreach ($case in @(
@@ -189,14 +209,20 @@ try {
         Add-Type -TypeDefinition @'
 public static class GuiHiddenContractLaunch {
     public struct Pi { public System.IntPtr process, thread; public int pid, tid; }
-    public static int Starts, Terminates;
+    public static int Starts, Terminates, Resumes;
     public static string[] NextArgv;
+    public static string RecordPath;
+    public static bool RecordedBeforeResume;
     public static Pi Start(string app, string command, string cwd, string desktop, string stdout, string stderr) {
         Starts++; return new Pi { pid = System.Diagnostics.Process.GetCurrentProcess().Id };
     }
     public static string[] Argv(System.IntPtr process) { return NextArgv; }
     public static long CreationTime(System.IntPtr process) { return 1; }
-    public static uint ResumeThread(System.IntPtr thread) { return 0; }
+    public static uint ResumeThread(System.IntPtr thread) {
+        Resumes++;
+        RecordedBeforeResume = RecordPath != null && System.IO.File.Exists(RecordPath) && System.IO.File.ReadAllText(RecordPath).Length > 0;
+        return 0;
+    }
     public static bool TerminateProcess(System.IntPtr process, uint code) { Terminates++; return true; }
     public static bool CloseHandle(System.IntPtr handle) { return true; }
     public static void Assert(string expected) { }
@@ -212,6 +238,7 @@ public static class GuiHiddenContractLaunch {
     & $guiStage (& $guiHashOf $guiApp) (& $guiHashOf $guiCli)
     $script:InteractiveWin11HostedIdentity = Initialize-InteractiveWin11HostedIdentity
     $guiPidRecord = Join-Path $guiScratch 'launcher-pids.txt'
+    [GuiHiddenContractLaunch]::RecordPath = $guiPidRecord
     foreach ($refused in @(
             @{ Name = 'another binary'; File = (Join-Path $guiScratch 'staged.json'); Arguments = $guiAppArgs }
             @{ Name = '--command in argv'; File = $guiApp; Arguments = @($guiAppArgs) + @('--command=cmd.exe') }
@@ -229,17 +256,25 @@ public static class GuiHiddenContractLaunch {
             @{ Name = 'another class'; Argv = @($guiApp, '--single-instance=false', '--class=noctty-interactive-x') }
             @{ Name = 'an unreadable command line'; Argv = $null }
         )) {
-        [GuiHiddenContractLaunch]::Starts = 0; [GuiHiddenContractLaunch]::Terminates = 0
+        [GuiHiddenContractLaunch]::Starts = 0; [GuiHiddenContractLaunch]::Terminates = 0; [GuiHiddenContractLaunch]::Resumes = 0
         [GuiHiddenContractLaunch]::NextArgv = $readBack.Argv
         $threw = $false
         try { [void](Start-InteractiveWin11HostedProcess -FilePath $guiApp -ArgumentList $guiAppArgs -WorkingDirectory $guiScratch) } catch { $threw = $true }
-        if (-not $threw -or [GuiHiddenContractLaunch]::Terminates -ne 1 -or (Test-Path -LiteralPath $guiPidRecord)) { throw "The launcher kept a process whose command line read back with $($readBack.Name)." }
+        if (-not $threw -or [GuiHiddenContractLaunch]::Terminates -ne 1 -or [GuiHiddenContractLaunch]::Resumes -ne 0 -or (Test-Path -LiteralPath $guiPidRecord)) {
+            throw "The launcher ran or kept a process whose command line read back with $($readBack.Name)."
+        }
     }
-    [GuiHiddenContractLaunch]::Starts = 0; [GuiHiddenContractLaunch]::Terminates = 0
+    [GuiHiddenContractLaunch]::Starts = 0; [GuiHiddenContractLaunch]::Terminates = 0; [GuiHiddenContractLaunch]::Resumes = 0
     [GuiHiddenContractLaunch]::NextArgv = @($guiApp) + @($guiAppArgs)
     $guiStarted = Start-InteractiveWin11HostedProcess -FilePath $guiApp -ArgumentList $guiAppArgs -WorkingDirectory $guiScratch
-    if ([GuiHiddenContractLaunch]::Starts -ne 1 -or [GuiHiddenContractLaunch]::Terminates -ne 0 -or $null -eq $guiStarted -or
-        @([IO.File]::ReadAllLines($guiPidRecord)).Count -ne 1) { throw 'The launcher stand-in never saw the admitted start and its record (the control''s positive half).' }
+    if ([GuiHiddenContractLaunch]::Starts -ne 1 -or [GuiHiddenContractLaunch]::Terminates -ne 0 -or [GuiHiddenContractLaunch]::Resumes -ne 1 -or
+        -not [GuiHiddenContractLaunch]::RecordedBeforeResume -or $null -eq $guiStarted -or @([IO.File]::ReadAllLines($guiPidRecord)).Count -ne 1) {
+        throw 'The launcher stand-in never saw the admitted start, resumed only after its PID record (the control''s positive half).'
+    }
+    # An 8.3 spelling of the staged app is the same file (#740's first hosted run: TEMP is C:\Users\RUNNER~1\... there).
+    $guiShortCopy = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($guiCopy).ShortPath
+    if ([string]::Equals($guiShortCopy, $guiCopy, [StringComparison]::OrdinalIgnoreCase)) { Write-Host 'Contracts.99-GuiHiddenLaunch short-name control: SKIPPED (this volume keeps no 8.3 names)' }
+    elseif (Get-InteractiveWin11HostedLaunchRefusal -FilePath (Join-Path $guiShortCopy 'noctty.exe') -FileOnly) { throw 'The launcher refused the staged app spelled with an 8.3 name.' }
 }
 finally {
     foreach ($entry in $guiSavedEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
@@ -255,6 +290,8 @@ if (-not ('GuiHiddenRunnerNative' -as [type])) {
     if ($guiRunnerType -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { throw 'The runner''s native surface must be one literal Add-Type.' }
     Add-Type -TypeDefinition $guiRunnerType.Value
 }
+$guiRunnerSource = (Get-CommandParameterArgument -Command @(Get-NamedCommands -Ast $guiRunnerAst -Name 'Add-Type')[0] -Name 'TypeDefinition').Value
+Assert-GuiContractLayout $guiRunnerAst $guiRunnerSource 'GuiHiddenRunnerNative' '$script:GuiHiddenNativeLayout' 'public uint volumeSerial, sizeHigh, sizeLow,' 'public uint volumeSerial, sizeLow, sizeHigh,'
 foreach ($name in @('Get-GuiHiddenHash', 'Get-GuiHiddenBaseConfig', 'New-GuiHiddenCopy', 'Get-GuiHiddenProcessVerdict', 'ConvertTo-GuiHiddenRecordValue',
         'Write-GuiHiddenRecord', 'Get-GuiHiddenReparsePointCount', 'Test-GuiHiddenLeafReceipt', 'Get-GuiHiddenConfigPolicy')) {
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst $name)))
@@ -351,6 +388,8 @@ try {
         if ($judged.Status -cne $case.Status -or $judged.Leaves -cne $case.Leaves) { throw "The result status misjudged exit $($case.Exit), subset $($case.Subset), all passed $($case.All)." }
     }
     $guiChild = (Get-Process -Id $PID).Path
+    # The children below are expected to exit 2; a session that promotes native exit codes must not stop here first.
+    $PSNativeCommandUseErrorActionPreference = $false
     $guiFullOut = Join-Path $guiScratch 'out-full'
     [void](New-Item -ItemType Directory -Path $guiFullOut)
     [IO.File]::WriteAllText((Join-Path $guiFullOut 'earlier.json'), '{}')
@@ -365,6 +404,21 @@ try {
         @($guiErrorResult.assertions | Where-Object { $_.status -ceq 'pass' -and $_.id -ceq 'leaves-pass' }).Count -ne 0) {
         throw 'A runner validation failure must exit 2 with an error result and no passing leaves-pass.'
     }
+    $guiPublishOut = Join-Path $guiScratch 'out-publish'
+    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -PublishError helper-self-test -Out $guiPublishOut *> $null
+    $guiPublished = $(if (Test-Path -LiteralPath (Join-Path $guiPublishOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiPublishOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
+    if ($LASTEXITCODE -ne 2 -or $null -eq $guiPublished -or $guiPublished.status -cne 'error' -or [string]$guiPublished.failure.message -cne 'exit 2 (helper-self-test)') {
+        throw '-PublishError must exit 2 with an error result naming its kind.'
+    }
+    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -PublishError 'Bad Kind' -Out (Join-Path $guiScratch 'out-badkind') *> $null
+    if ($LASTEXITCODE -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'out-badkind'))) { throw '-PublishError must refuse a kind outside its shape before it writes.' }
+    $guiAsciiOut = Join-Path $guiScratch 'out-ascii'
+    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo $repoRoot -Work (Join-Path $guiScratch ('work-caf' + [char]0xE9)) -Out $guiAsciiOut *> $null
+    if ($LASTEXITCODE -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }
+    $guiImage = [IO.Path]::GetFullPath($guiRunnerPath)
+    $guiShortDir = (New-Object -ComObject Scripting.FileSystemObject).GetFolder((Split-Path -Parent $guiImage)).ShortPath
+    if (-not [GuiHiddenRunnerNative]::SameImage((Join-Path $guiShortDir (Split-Path -Leaf $guiImage)), $guiImage, [GuiHiddenRunnerNative]::FileId($guiImage))) { throw 'SameImage refused one file spelled two ways.' }
+    if ([GuiHiddenRunnerNative]::SameImage($guiLibPath, $guiImage, [GuiHiddenRunnerNative]::FileId($guiImage))) { throw 'SameImage accepted another file.' }
 }
 finally { Remove-Item -LiteralPath $guiScratch -Recurse -Force -ErrorAction SilentlyContinue }
 
@@ -466,6 +520,7 @@ try {
             @{ Name = 'another schema'; Text = '{"schemaVersion":2,"realInputLoaded":false,"psEdition":"Core","psVersion":"7.6"}' }
             @{ Name = 'no psVersion'; Text = '{"schemaVersion":1,"realInputLoaded":false,"psEdition":"Core"}' }
             @{ Name = 'an array'; Text = '[]' }
+            @{ Name = 'a one-element array holding a valid receipt'; Text = '[{"schemaVersion":1,"realInputLoaded":false,"psEdition":"Core","psVersion":"7.6"}]' }
             @{ Name = 'unparsable text'; Text = '{"schemaVersion":1,' }
         )) {
         if ((& $guiReceipt $bad.Text).valid) { throw "The receipt judge accepted $($bad.Name)." }
@@ -527,6 +582,7 @@ $guiReceiptAssignment = @($guiLibAst.FindAll({ param($n) $n -is [System.Manageme
 $guiReceiptRegistration = @(Get-NamedCommands -Ast $guiLibAst -Name 'Register-EngineEvent')
 if ($guiReceiptAssignment.Count -ne 1 -or $guiReceiptRegistration.Count -ne 1) { throw 'lib must write the leaf receipt from one PowerShell.Exiting registration.' }
 $guiChildPwsh = (Get-Process -Id $PID).Path
+$PSNativeCommandUseErrorActionPreference = $false
 $guiScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-gui-hidden-runtime-' + [guid]::NewGuid().ToString('N'))
 $guiSavedRun = $env:NOCTTY_GUI_HIDDEN_RUN
 $guiSavedDesktop = $env:NOCTTY_GUI_HIDDEN_DESKTOP
@@ -583,7 +639,9 @@ $guiDestinationProblems = {
                 }
                 if ([string]$destination.kind -cne 'disposition' -and @($destination.owner | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) { $problems.Add("$($measurement.id) owner") }
                 if ([string]$measurement.id -ceq 'Q0' -and [string]$destination.kind -ceq 'hosted' -and
-                    ((@($destination.owner) -join ',') -cne ($LeafIds -join ',') -or [string]$destination.workflow -cne 'gui-hidden.yml')) { $problems.Add('Q0 owners') }
+                    ($destination.owner -isnot [array] -or @($destination.owner).Count -ne $LeafIds.Count -or
+                     @(for ($i = 0; $i -lt $LeafIds.Count; $i++) { if ([string]$destination.owner[$i] -cne $LeafIds[$i]) { $i } }).Count -ne 0 -or
+                     [string]$destination.workflow -cne 'gui-hidden.yml')) { $problems.Add('Q0 owners') }
             }
         }
     }
@@ -598,6 +656,7 @@ foreach ($mutation in @(
         @{ Name = 'a provisional destination without its receipt variant'; Edit = { param($m) $m.measurements[1].governs[0].destinations[0].receipt = '' } }
         @{ Name = 'a destination without an owner'; Edit = { param($m) $m.measurements[2].governs[0].destinations[0].owner = $null } }
         @{ Name = 'Q0 owned by the plan file, not its leaves'; Edit = { param($m) $m.measurements[0].governs[0].destinations[0].owner = 'test/windows/gui-hidden-plan.json' } }
+        @{ Name = 'Q0 owned by one comma-joined string'; Edit = { param($m) $m.measurements[0].governs[0].destinations[0].owner = 'vt-probe,smoke,shell-command,cli-automation,undo,session-restore' } }
     )) {
     $mutated = $guiMeasurementText | ConvertFrom-Json
     & $mutation.Edit $mutated
