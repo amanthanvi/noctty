@@ -56,10 +56,10 @@ reading step under [Self-Correction Log](#self-correction-log).
   created on a private desktop by name passes it to the children it starts
   with a null one, but a driver moved there with `SetThreadDesktop` does not:
   its children land on the user's desktop, and noctty takes the foreground
-  (test-harnesses.md: 2026-11-20 GUI-HIDDEN-DEFAULT-01). Drive it with posted messages
-  (`SendInput` types into whatever window is in front): a key as a posted
-  `WM_KEYDOWN`/`WM_KEYUP` pair, since a posted triple types it twice and a
-  bare posted `WM_CHAR` types nothing. A posted Alt never reaches
+  (test-harnesses.md: 2026-11-20 GUI-HIDDEN-DEFAULT-01). Drive it with
+  posted messages (`SendInput` types into whatever window is in front): a
+  key as a posted `WM_KEYDOWN`/`WM_KEYUP` pair, since a posted triple types
+  it twice and a bare posted `WM_CHAR` types nothing. A posted Alt never reaches
   `GetKeyboardState`, and a pass from posted input is not a pass for real
   input. (window-frame.md: 2026-09-24 `window-decoration = none` trap 1,
   2026-09-23 "Item (b) of the #262 entry" harness notes, 2026-10-16 #285
