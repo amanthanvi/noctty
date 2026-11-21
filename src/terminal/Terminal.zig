@@ -2656,8 +2656,10 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // terminal-core.md KITTY2 part 2, rule (4)). Before upstream 77190bd02
     // this route went through cursorScrollAbove, which moved the rows into
     // history with their pins. Inside left and right margins no row is
-    // discarded: the rows keep their metadata and only the cells between the
-    // margins move, so only a command whose cells that changes is dropped.
+    // discarded: on one page only the cells between the margins move and
+    // every row keeps its metadata, so only a command whose cells that
+    // changes is dropped. Across a page boundary the move copies whole rows,
+    // metadata included, and deleteLines drops the record before it.
     const screen = self.screens.active;
     if (screen.no_scrollback and self.scrolling_region.top == 0) {
         const region_height: usize = @as(usize, self.scrolling_region.bottom) + 1;
@@ -2671,7 +2673,10 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
                     .{ .active = .{} },
                     .{ .active = .{ .y = @intCast(discarded - 1) } },
                 );
-            } else {
+            } else if (!self.lineMoveCrossesPage(
+                self.scrolling_region.top,
+                self.scrolling_region.bottom,
+            )) {
                 screen.semantic_command.invalidateMarginShift(&screen.pages, .{
                     .top = self.scrolling_region.top,
                     .bottom = self.scrolling_region.bottom,
@@ -2685,6 +2690,31 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // Move to the top of the scroll region
     screen.cursorAbsolute(self.scrolling_region.left, self.scrolling_region.top);
     self.deleteLines(count);
+}
+
+/// Whether the active rows `top` to `bottom` of a line move lie on more than
+/// one page. Inside left and right margins such a move copies the source
+/// row onto the destination through Page.clonePartialRowFrom, metadata and
+/// all, where within one page moveCells moves only the cells between the
+/// margins and leaves each row's prompt mark.
+fn lineMoveCrossesPage(self: *const Terminal, top: usize, bottom: usize) bool {
+    const pages = &self.screens.active.pages;
+    const first = pages.pin(.{ .active = .{ .y = @intCast(top) } }) orelse return false;
+    const last = pages.pin(.{ .active = .{ .y = @intCast(bottom) } }) orelse return false;
+    return first.node != last.node;
+}
+
+/// Drop the last-command record before a left/right-margin line move that
+/// crosses a page boundary (lineMoveCrossesPage): the move copies whole rows,
+/// prompt marks included, which the record's checks do not model, so it
+/// fails closed. A move within one page, or a full-width one, is left to the
+/// callers' own rules.
+fn dropCommandBeforeCrossPageMarginMove(self: *Terminal, top: usize, bottom: usize) void {
+    if (self.scrolling_region.left == 0 and
+        self.scrolling_region.right == self.cols - 1) return;
+    if (!self.lineMoveCrossesPage(top, bottom)) return;
+    const screen = self.screens.active;
+    screen.semantic_command.dropCompleted(&screen.pages);
 }
 
 /// Whether scrollUp moves the scrolled-out rows into scrollback, shifting
@@ -2948,6 +2978,13 @@ pub fn insertLines(self: *Terminal, count: usize) void {
     const left_right = self.scrolling_region.left > 0 or
         self.scrolling_region.right < self.cols - 1;
 
+    // Across a page boundary that path copies whole rows, prompt marks
+    // included, so the last-command record fails closed before it.
+    self.dropCommandBeforeCrossPageMarginMove(
+        self.screens.active.cursor.y,
+        self.scrolling_region.bottom,
+    );
+
     // Remaining rows from our cursor to the bottom of the scroll region.
     const rem = self.scrolling_region.bottom - self.screens.active.cursor.y + 1;
 
@@ -3122,6 +3159,13 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
     // We have a slower path if we have left or right scroll margins.
     const left_right = self.scrolling_region.left > 0 or
         self.scrolling_region.right < self.cols - 1;
+
+    // Across a page boundary that path copies whole rows, prompt marks
+    // included, so the last-command record fails closed before it.
+    self.dropCommandBeforeCrossPageMarginMove(
+        self.screens.active.cursor.y,
+        self.scrolling_region.bottom,
+    );
 
     // Remaining rows from our cursor to the bottom of the scroll region.
     const rem = self.scrolling_region.bottom - self.screens.active.cursor.y + 1;
@@ -12613,6 +12657,135 @@ test "Terminal: scrollUp in margins drops a command when the left margin splits 
     // Row 0's glyph at columns 14-15 lies in the command's output region,
     // and the move clears its head, one column left of the margin.
     try testing.expect(!try testScrollUpMarginsWideGlyph(13, 0));
+}
+
+/// "PS> one" completed with no output on active row `y` of a 480x135 screen
+/// without scrollback, whose first page ends before its last row (the row
+/// count of that page is returned). DECLRMM margins at columns 8-21 and
+/// DECSTBM 1 to the second page's first row are set afterwards.
+fn testCrossPageNoOutputCommand(t: *Terminal, y: usize) !usize {
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+    const k: usize = s.pages.pages.first.?.rows();
+    s.cursorAbsolute(0, @intCast(y));
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+    {
+        const command = (try s.lastCommandString(testing.allocator)) orelse
+            return error.TestExpectedCommand;
+        defer testing.allocator.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, k + 1);
+    t.setLeftAndRightMargin(8, 21);
+    return k;
+}
+
+test "Terminal: a margin scrollUp across pages drops a command without output, so a scroll-again cannot crash" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 480, .rows = 135, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    const k: usize = s.pages.pages.first.?.rows();
+    _ = try testCrossPageNoOutputCommand(&t, k - 1);
+
+    // The region (rows 0 to k) crosses the page boundary under the command's
+    // prompt row, so the move copies row k's unmarked row onto it. The
+    // record is dropped first, and the second scroll, which once read the
+    // unmarked row as a prompt (an assert in highlightSemanticContent), has
+    // nothing to check.
+    try t.scrollUp(1);
+    try t.scrollUp(1);
+    try testing.expect(s.semantic_command.completed == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Terminal: a page-crossing margin insert or delete drops a command without output, so an erase cannot crash" {
+    const alloc = testing.allocator;
+    for ([_]bool{ false, true }) |insert| {
+        var t = try init(alloc, .{ .cols = 480, .rows = 135, .max_scrollback = 0 });
+        defer t.deinit(alloc);
+        const s = t.screens.active;
+        const k: usize = s.pages.pages.first.?.rows();
+
+        // DL at row k-1 copies row k (the second page) onto the command's
+        // prompt row k-1; IL at row k-1 copies row k-1 onto its prompt row
+        // k. Either leaves the prompt row unmarked, and the erase after it
+        // once looked for the record's span from there.
+        _ = try testCrossPageNoOutputCommand(&t, if (insert) k else k - 1);
+        s.cursorAbsolute(7, @intCast(k - 1));
+        if (insert) t.insertLines(1) else t.deleteLines(1);
+        t.eraseDisplay(.below, false);
+        try testing.expect(s.semantic_command.completed == null);
+        try testing.expect((try s.lastCommandString(alloc)) == null);
+    }
+}
+
+test "Terminal: a margin scrollUp with a page boundary in the region drops a command it would have kept" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 480, .rows = 135, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    const k: usize = s.pages.pages.first.?.rows();
+
+    // "PS> one" with no output on row 0 and the next prompt on row k, the
+    // second page's first row. Inside the margins nothing in the command's
+    // span moves, but across the boundary the move copies row k's prompt
+    // mark onto row k-1, which the checks do not model, so the record is
+    // dropped rather than judged.
+    _ = try testCrossPageNoOutputCommand(&t, 0);
+    s.cursorAbsolute(0, @intCast(k));
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS C:/src> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("two");
+    {
+        const command = (try s.lastCommandString(alloc)) orelse
+            return error.TestExpectedCommand;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+    try t.scrollUp(1);
+    try testing.expect(s.semantic_command.completed == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Terminal: an erase after a full-width insert leaves a command's prompt row unmarked drops the command without crashing" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 6, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+
+    // "PS> one" with no output on row 2. A full-width IL at row 1 shifts the
+    // rows under the record's pin, which stays on row 2, now unmarked. The
+    // erase then drops the unreadable record instead of looking for its
+    // span from an unmarked row (an assert in highlightSemanticContent).
+    s.cursorAbsolute(0, 2);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+    s.cursorAbsolute(0, 1);
+    t.insertLines(1);
+    {
+        const row2 = s.pages.pin(.{ .active = .{ .y = 2 } }).?.rowAndCell().row;
+        try testing.expectEqual(.none, row2.semantic_prompt);
+    }
+    t.eraseDisplay(.below, false);
+    try testing.expect(s.semantic_command.completed == null);
 }
 
 test "Terminal: alt screen scroll up recycled row has default metadata" {

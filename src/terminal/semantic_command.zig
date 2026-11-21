@@ -275,6 +275,9 @@ pub fn invalidateRange(
     tl: point.Point,
     bl: ?point.Point,
 ) void {
+    // Checked before the span below is looked for: see dropUnreadable.
+    self.dropUnreadable(pages);
+
     var top = pages.pin(tl) orelse return;
     top.x = 0;
 
@@ -316,16 +319,22 @@ pub const MarginRegion = struct {
 /// and a spacer head that ends the row becomes a plain cell when the region
 /// reaches the last column or the first two. It then rewrites each cell of
 /// `region` with the normalised cell `shift` rows below it, or a blank past
-/// the region's bottom, and keeps every row's metadata and every tracked
-/// pin. So the pending and active prompts keep their rows, and a completed
-/// command keeps reading what it read unless one of those cells, as the
-/// move leaves it, falls in its recovered span.
+/// the region's bottom, and keeps every tracked pin and, on one page, every
+/// row's metadata. So the pending and active prompts keep their rows, and a
+/// completed command keeps reading what it read unless one of those cells,
+/// as the move leaves it, falls in its recovered span.
+///
+/// Only for a move within one page. Across a page boundary the move copies
+/// whole rows, prompt marks included (Page.clonePartialRowFrom), which this
+/// does not model: Terminal.deleteLines and insertLines drop the record
+/// before such a move instead (dropCompleted).
 pub fn invalidateMarginShift(
     self: *SemanticCommand,
     pages: *PageList,
     region: MarginRegion,
     shift: usize,
 ) void {
+    self.dropUnreadable(pages);
     const command = self.completed orelse return;
     const span_start = command.prompt.*;
     const span_end = completedEnd(pages, command);
@@ -406,6 +415,26 @@ fn incomingIsRead(
         return cell.semantic_content != .output;
     }
     return cellIsRead(cell);
+}
+
+/// Drop the completed command. Terminal calls this before a left/right
+/// margin line move that crosses a page boundary, which copies whole rows,
+/// prompt marks included (Page.clonePartialRowFrom): the record's checks
+/// model a move within one page only, so that case fails closed.
+pub fn dropCompleted(self: *SemanticCommand, pages: *PageList) void {
+    self.clearCompleted(pages);
+}
+
+/// Drop a completed command that can no longer be read: its prompt row lost
+/// its prompt mark (or its pin is garbage), so lastCompleted refuses it, and
+/// its span cannot be found either, since highlightSemanticContent asserts
+/// that it starts on a prompt row. A move this file does not model leaves
+/// such a record: a full-width insertLines or deleteLines shifts rows under
+/// a pin that stays put, and a margin move across a page boundary copies
+/// another row's mark onto the prompt row.
+fn dropUnreadable(self: *SemanticCommand, pages: *PageList) void {
+    const command = self.completed orelse return;
+    if (!pinIsValid(command.prompt)) self.clearCompleted(pages);
 }
 
 /// The last cell of a completed command's recovered span: its frozen output
