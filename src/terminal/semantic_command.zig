@@ -333,7 +333,9 @@ pub fn invalidateMarginShift(
     // A command that printed nothing ends its span where its input ends, a
     // point every read finds again (inputRegion), so a move that lengthens
     // the input changes the command as well.
-    if (command.output_end == null and inputRunGrows(pages, region, shift, span_end)) {
+    if (command.output_end == null and
+        inputRunGrows(pages, region, shift, span_end, command.prompt.*))
+    {
         self.clearCompleted(pages);
         return;
     }
@@ -401,37 +403,61 @@ pub fn invalidateMarginShift(
     }
 }
 
-/// Whether a margin move lengthens the input that ends at `input_end`. The
-/// input highlight (PageList.highlightSemanticContent) runs on through
-/// `.prompt` cells and stops at the first `.output` one, within the rows up
-/// to the next prompt, so the run grows when the move makes the first cell
-/// past those prompt cells an `.input` one.
+/// Whether a margin move lengthens the input that ends at `input_end`, of
+/// the prompt at `prompt`. The input highlight
+/// (PageList.highlightSemanticContent) runs on through `.prompt` cells and
+/// stops at the first `.output` one, within the cells up to its zone's end
+/// (promptZoneEnd), so the run grows when the move makes the first cell past
+/// those prompt cells, inside the zone, an `.input` one. The zone, and so the
+/// bound, is read the same way after the move: a margin move keeps every
+/// row's prompt mark.
 fn inputRunGrows(
     pages: *PageList,
     region: MarginRegion,
     shift: usize,
     input_end: Pin,
+    prompt: Pin,
 ) bool {
     const end_pt = pages.pointFromPin(.active, input_end) orelse return false;
+    const zone_end = promptZoneEnd(pages, prompt) orelse return false;
+    const zone_pt = pages.pointFromPin(.active, zone_end) orelse return false;
     var y: usize = end_pt.active.y;
     var x: usize = @as(usize, end_pt.active.x) + 1;
-    while (true) {
+    while (y <= zone_pt.active.y) : ({
+        y += 1;
+        x = 0;
+    }) {
         const row = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
         const cells = row.cells(.all);
-        while (x < cells.len) : (x += 1) {
+        const row_last: usize = if (y == zone_pt.active.y)
+            @min(@as(usize, zone_pt.active.x), cells.len - 1)
+        else
+            cells.len - 1;
+        while (x <= row_last) : (x += 1) {
             switch (movedSemanticContent(pages, region, shift, y, x, cells[x])) {
                 .prompt => {},
                 .input => return true,
                 .output => return false,
             }
         }
-
-        // The highlight's rows end before the next prompt row.
-        y += 1;
-        x = 0;
-        const next = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
-        if (next.rowAndCell().row.semantic_prompt == .prompt) return false;
     }
+    return false;
+}
+
+/// The last cell PageList.highlightSemanticContent reads for the prompt at
+/// `prompt`: the end of the row before the next prompt PromptIterator finds
+/// (a separated continuation row is one), else the screen's bottom right.
+fn promptZoneEnd(pages: *const PageList, prompt: Pin) ?Pin {
+    var it = prompt.promptIterator(.right_down, null);
+    _ = it.next();
+    if (it.next()) |next| {
+        if (next.up(1)) |prev| {
+            var p = prev;
+            p.x = p.node.cols() - 1;
+            return p;
+        }
+    }
+    return pages.getBottomRight(.screen);
 }
 
 /// The semantic content of active cell (`x`, `y`) once a margin move has

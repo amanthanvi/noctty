@@ -12673,6 +12673,68 @@ test "Terminal: scrollUp in margins moving output past a command without output 
     try testing.expect(try testScrollUpMarginsPastNoOutput("longer-output", false));
 }
 
+test "Terminal: scrollUp in margins keeps a command without output whose input zone ends before a separated continuation" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+
+    // Row 0: "PS> one" completed with no output, the rest of the row
+    // prompt cells.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString(" " ** 23);
+    s.cursor.pending_wrap = false;
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+
+    // Row 1: prompt cells on an unmarked row. Row 2: a separated prompt
+    // continuation row with an input cell first. Row 3: a later prompt,
+    // outside the region.
+    s.cursorAbsolute(0, 1);
+    s.cursor.semantic_content = .prompt;
+    try s.testWriteString(" " ** 30);
+    s.cursor.pending_wrap = false;
+    s.cursorAbsolute(0, 2);
+    s.cursorSetSemanticContent(.{ .prompt = .continuation });
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.testWriteString("x");
+    s.cursorSetSemanticContent(.{ .prompt = .continuation });
+    try s.testWriteString(" " ** 29);
+    s.cursor.pending_wrap = false;
+    s.cursorAbsolute(0, 3);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    {
+        const row1 = s.pages.pin(.{ .active = .{ .y = 1 } }).?.rowAndCell().row;
+        const row2 = s.pages.pin(.{ .active = .{ .y = 2 } }).?.rowAndCell().row;
+        try testing.expectEqual(.none, row1.semantic_prompt);
+        try testing.expectEqual(.prompt_continuation, row2.semantic_prompt);
+        const command = (try s.lastCommandString(alloc)) orelse
+            return error.TestExpectedCommand;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+
+    // The input reader's zone ends with row 1, before the continuation row
+    // PromptIterator takes for the next prompt, so the input cell on row 2
+    // never joins "one", before or after SU 1 moves prompt cells in.
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, 3);
+    t.setLeftAndRightMargin(8, 21);
+    try t.scrollUp(1);
+    const command = (try s.lastCommandString(alloc)) orelse
+        return error.TestExpectedCommand;
+    defer alloc.free(command);
+    try testing.expectEqualStrings("one", command);
+}
+
 test "Terminal: alt screen scroll up recycled row has default metadata" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 5, .rows = 3 });
