@@ -174,9 +174,14 @@ pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
 /// `initialized driver=` (Direct3D11.zig) is logged when the device is made,
 /// before the rest of the candidate, which can still fail after it. The
 /// hidden-desktop GUI suite reads this line (gui-hidden-runner.ps1,
-/// Get-GuiHiddenRendererStartups), and its contract pins the text.
+/// Get-GuiHiddenRendererStartups), and its contract pins the text. It has a
+/// scope of its own: `renderer_windows` holds only notices and warnings, and
+/// #738's hosted probe counts that scope's lines (gui-hosted-probe.ps1,
+/// Test-WarpOnlyLog takes exactly one, the WARP notice).
+const start_log = std.log.scoped(.renderer_start);
+
 fn logStarted(backend: []const u8) void {
-    log.info("renderer started backend={s}", .{backend});
+    start_log.info("renderer started backend={s}", .{backend});
 }
 
 fn setNotice(self: *Windows, comptime fmt: []const u8, args: anytype) void {

@@ -352,6 +352,10 @@ $namedReaches = [ordered]@{
     '[PowerShell]::Create().AddCommand of a script' = '[PowerShell]::Create().AddCommand((Join-Path $PSScriptRoot ''child.ps1'')).Invoke()'
     'AddCommand of a Get-Command script' = '$ps = [PowerShell]::Create(); $ps.AddCommand((Get-Command (Join-Path $PSScriptRoot ''child.ps1''))).Invoke()'
     '[System.Management.Automation.PowerShell] AddScript of literal code' = '$ps = [System.Management.Automation.PowerShell]::Create(); [void]$ps.AddScript(". ''$PSScriptRoot\child.ps1''"); $ps.Invoke()'
+    # Opus on #740: PowerShell takes an extensionless path to its .ps1 (measured on pwsh 7.6 and Windows PowerShell 5.1).
+    'Get-Command of an extensionless script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''child''); & $c'
+    'Get-Command of an extensionless expandable path, called at once' = '& (Get-Command "$PSScriptRoot\child")'
+    '& of an extensionless joined path' = '& (Join-Path $PSScriptRoot ''child'')'
 }
 foreach ($form in $namedReaches.Keys) {
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $namedReaches[$form]; 'test/windows/child.ps1' = '1' }
@@ -361,9 +365,6 @@ $namedRefuses = [ordered]@{
     'Get-Command of a name it cannot read, then &' = '$c = Get-Command $name; & $c'
     'Get-Command of a wildcard script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''chil?.ps1''); & $c'
     'Get-Command of a bare script name (a PATH lookup), then &' = '$c = Get-Command child.ps1; & $c'
-    # Opus on #740: PowerShell takes an extensionless path to its .ps1 (measured on pwsh 7.6 and Windows PowerShell 5.1).
-    'Get-Command of an extensionless script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''child''); & $c'
-    'Get-Command of an extensionless expandable path, called at once' = '& (Get-Command "$PSScriptRoot\child")'
     # Sol on #740: a wildcard ExternalScript lookup with no extension.
     'Get-Command -CommandType ExternalScript of an extensionless wildcard path, then &' = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''chil*'') -CommandType ExternalScript; & $p'
     'Get-Command of a bare wildcard name, then &' = '$c = Get-Command chil*; & $c'
@@ -385,6 +386,40 @@ $namedRefuses = [ordered]@{
 foreach ($form in $namedRefuses.Keys) {
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $namedRefuses[$form]; 'test/windows/child.ps1' = '1' }
     Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1 -and $formWalk.Members -cnotcontains 'test/windows/child.ps1') "$form must leave its edge unresolved, the child not taken: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+# Sol on #740: a path whose leaf is a native command's name is still a path lookup, so `<dir>\cmd` and `<dir>\pwsh`
+# run the `.ps1` beside them (measured: ExternalScript, and `& $p` ran the child). Each reaches that script; with no
+# script there, the walk fails (a missing member), and a relative one is unresolved; none is read as cmd or pwsh.
+foreach ($leafName in @('cmd', 'pwsh', 'powershell')) {
+    $lookupTarget = "test/windows/fixtures/$leafName.ps1"
+    foreach ($form in @(
+            "`$p = Get-Command -Name (Join-Path `$PSScriptRoot 'fixtures\$leafName') -CommandType ExternalScript; & `$p"
+            "& (Join-Path `$PSScriptRoot 'fixtures\$leafName')"
+            "`$c = Get-Command `"`$PSScriptRoot\fixtures\$leafName`"; & `$c -NoProfile -File (Join-Path `$PSScriptRoot 'child.ps1')"
+        )) {
+        $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; $lookupTarget = '1'; 'test/windows/child.ps1' = '1' }
+        Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains $lookupTarget -and $formWalk.Members -cnotcontains 'test/windows/child.ps1') "$form must reach $lookupTarget, never read as $leafName`: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+        $absentWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/child.ps1' = '1' }
+        Assert-True ($absentWalk.Problems.Count -ge 1 -and $absentWalk.Members -cnotcontains 'test/windows/child.ps1') "$form with no $lookupTarget must fail the walk: $($absentWalk.Problems -join '; ') [$($absentWalk.Members -join ', ')]"
+    }
+    $relativeWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = "`$c = Get-Command fixtures\$leafName; & `$c"; $lookupTarget = '1' }
+    Assert-True ($relativeWalk.Problems.Count -ge 1 -and $relativeWalk.Unresolved.Count -ge 1) "A relative Get-Command fixtures\$leafName must be unresolved: $($relativeWalk.Problems -join '; ')"
+}
+# Opus on #740: a `<word>\<Verb-Noun>` name is a path lookup unless its module is one PowerShell ships, in every form
+# (pwsh 7.6.10 and 5.1 each ran `sub\Run-Child.ps1` for `sub\Run-Child`, `& 'sub\Run-Child'`, `. 'sub\Run-Child'` and
+# `& (Get-Command 'sub\Run-Child')`). A relative one is unresolved; one anchored on the script reaches the script.
+$qualifiedTarget = 'test/windows/sub/Run-Child.ps1'
+foreach ($form in @('sub\Run-Child', "& 'sub\Run-Child'", ". 'sub\Run-Child'", "& (Get-Command 'sub\Run-Child')", "`$c = Get-Command sub\Run-Child; & `$c")) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; $qualifiedTarget = '1' }
+    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1 -and $formWalk.Members -cnotcontains $qualifiedTarget) "$form must be unresolved, not a module-qualified cmdlet: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+foreach ($form in @("& (Join-Path `$PSScriptRoot 'sub\Run-Child')", ". `"`$PSScriptRoot\sub\Run-Child`"", "& (Get-Command `"`$PSScriptRoot\sub\Run-Child`")")) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; $qualifiedTarget = '1' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains $qualifiedTarget) "$form must reach $qualifiedTarget`: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+foreach ($form in @('Microsoft.PowerShell.Utility\Write-Host x', '& Microsoft.PowerShell.Utility\Get-Date', '$d = Get-Command Microsoft.PowerShell.Management\Get-Item; & $d .')) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form (a cmdlet of a module PowerShell ships) is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
 $namedQuiet = [ordered]@{
     'Get-Command of a joined native path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''tool.exe''); & $c'
@@ -547,6 +582,21 @@ $wildScriptSelected = & {
     try { $l = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $wildScriptReader -BaseReader $workingReader; Get-CiGuiSelection -ChangedPaths @($wildScriptChild) -GuiList $l } catch { $true }
 }
 Assert-True ($wildScriptSelected -eq $true) 'A change only to the child an extensionless wildcard lookup runs must select the GUI suite (through the selection''s fallback).'
+
+# Sol's round-4 form: an extensionless ExternalScript lookup of `fixtures\cmd` from a leaf. The child is a member of
+# the list itself, so a change to it alone selects the suite without the fallback.
+foreach ($leafName in @('cmd', 'pwsh')) {
+    $lookupChild = "test/windows/fixtures/$leafName.ps1"
+    $lookupReader = {
+        param([string] $RepoPath)
+        if ($RepoPath -ceq 'test/windows/interactive-win11-smoke.ps1') { return (& $workingReader $RepoPath) + "`n" + "`$p = Get-Command -Name (Join-Path `$PSScriptRoot 'fixtures\$leafName') -CommandType ExternalScript; & `$p" + "`n" }
+        if ($RepoPath -ceq $lookupChild) { return '1' }
+        return & $workingReader $RepoPath
+    }.GetNewClosure()
+    $lookupList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $lookupReader -BaseReader $workingReader
+    Assert-True ($lookupList -ccontains $lookupChild) "The GUI list must hold $lookupChild, which a leaf's Get-Command <dir>\$leafName runs."
+    Assert-True (Get-CiGuiSelection -ChangedPaths @($lookupChild) -GuiList $lookupList) "A change only to $lookupChild must select the GUI suite."
+}
 
 # A build input the plan spells with backslashes (the plan contract takes any path that exists) selects the suite
 # under either spelling of a change, since git reports '/' (CodeRabbit on #740: the list kept the backslash form, the

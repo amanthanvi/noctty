@@ -67,6 +67,24 @@ $guiHiddenProblems = & {
         if ($filter -notmatch '(?m)^        id: filter\s*$' -or $filter -notmatch '(?m)^        run: \./scripts/ci-gui-selection\.ps1 -EventName \$env:EVENT_NAME -BaseSha \$env:BASE_SHA -HeadSha \$env:HEAD_SHA\s*$') { $found.Add('gui-hidden.yml: the filter step runs scripts/ci-gui-selection.ps1 with the event, base and head') }
         $tests = Get-YamlStepBlock -Content $changes -Name 'GUI selection tests (walker, selection)' -Source 'gui-hidden.yml :: changes'
         if ($tests -notmatch '(?m)^        run: \./test/windows/gui-hidden-scripts\.ps1\s*$' -or $tests -match '(?m)^        (?:if|continue-on-error):') { $found.Add('gui-hidden.yml: changes runs test/windows/gui-hidden-scripts.ps1 unconditionally') }
+        # A failed changes job keeps the suite from starting, so changes publishes and uploads the error result itself,
+        # after its tests, through the standalone publisher (Sol on #740: a runner that did not parse failed the walk,
+        # and nothing was uploaded).
+        $changesPublish = & $findStep $changes 'Publish an error result when the selection failed' 'changes'
+        $changesUpload = & $findStep $changes 'Upload the selection''s error result' 'changes'
+        $changesTestsAt = $changes.IndexOf('      - name: GUI selection tests (walker, selection)', [StringComparison]::Ordinal)
+        $changesPublishAt = $changes.IndexOf('      - name: Publish an error result when the selection failed', [StringComparison]::Ordinal)
+        $changesUploadAt = $changes.IndexOf('      - name: Upload the selection''s error result', [StringComparison]::Ordinal)
+        if ($null -eq $changesPublish -or $changesPublish -notmatch '(?m)^        if: failure\(\)\s*$' -or $changesPublish -notmatch '(?m)^        shell: pwsh\s*$' -or
+            $changesPublish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error\.ps1 -Kind gui-selection -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
+            $null -eq $changesUpload -or $changesUpload -notmatch '(?m)^        if: failure\(\)\s*$' -or
+            $changesUpload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
+            ((@([regex]::Matches($changesUpload, '(?m)^            \S[^\r\n]*') | ForEach-Object { $_.Value.Trim() })) -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**' -or
+            $changesUpload -notmatch '(?m)^          retention-days: 90\s*$' -or
+            $changesPublish -match '(?m)^        continue-on-error:' -or $changesUpload -match '(?m)^        continue-on-error:' -or
+            $changesTestsAt -lt 0 -or $changesPublishAt -lt $changesTestsAt -or $changesUploadAt -lt $changesPublishAt) {
+            $found.Add('gui-hidden.yml: when changes fails, it publishes an error result through test/windows/gui-hidden-publish-error.ps1 and uploads only the result, its hash and the receipts, after its tests')
+        }
         if ($suite -notmatch '(?m)^    name: Windows Server 2025 Hidden-Desktop GUI\s*$' -or $suite -notmatch '(?m)^    needs: changes\s*$' -or
             [regex]::Matches($suite, '(?m)^    if:').Count -ne 1 -or $suite -notmatch "(?m)^    if: needs\.changes\.outputs\.gui == 'true'\s*$" -or
             $suite -notmatch '(?m)^    runs-on: windows-2025\s*$' -or $suite -match '(?m)^    continue-on-error:') {
@@ -113,7 +131,8 @@ $guiHiddenProblems = & {
         if (($paths -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**') { $found.Add('gui-hidden.yml: the upload holds exactly the result, its hash and the receipts (design §4.5 allowlist), no log directory') }
         if ($upload -notmatch '(?m)^        if: always\(\)\s*$' -or $upload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
             $upload -notmatch '(?m)^          if-no-files-found: warn\s*$') { $found.Add('gui-hidden.yml: the upload runs always, is named per run and attempt, and warns on no files') }
-        if ([regex]::Matches($upload, '(?m)^          retention-days: 90\s*$').Count -ne 1 -or [regex]::Matches($Text, 'retention-days:').Count -ne 1) { $found.Add('gui-hidden.yml: the upload is kept 90 days (PLAN §8.1)') }
+        if ([regex]::Matches($upload, '(?m)^          retention-days: 90\s*$').Count -ne 1 -or [regex]::Matches($Text, 'retention-days:').Count -ne 2 -or
+            [regex]::Matches($Text, '(?m)^          retention-days: 90\s*$').Count -ne 2) { $found.Add('gui-hidden.yml: both uploads are kept 90 days (PLAN §8.1)') }
         # The gate's verdict is its named step, and that step runs whenever the job does (CodeRabbit on #740: a verdict
         # step limited to manual runs let a pull request's gate pass on checkout alone).
         $verdict = & $findStep $gate 'Every needed job succeeded and every skipped job was not needed' 'gui-hidden-gate'
@@ -157,6 +176,10 @@ $guiHiddenProblems = & {
         @{ Name = 'the error result published from cmd, which does not run its Join-Path'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n        shell: pwsh`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure()`n        shell: cmd`n" }
         @{ Name = 'the error result published through the runner, which a runner that does not parse cannot do'; Old = 'run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind '; New = 'run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError ' }
         @{ Name = 'the result''s hash left out of the upload'; Old = "            `${{ runner.temp }}/gui-hidden/result.json.sha256`n"; New = '' }
+        @{ Name = 'no error result when the selection failed'; Old = "      - name: Publish an error result when the selection failed`n"; New = "      - name: Publish nothing when the selection failed`n" }
+        @{ Name = 'the selection''s error result published through the runner'; Old = 'run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind gui-selection'; New = 'run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError gui-selection' }
+        @{ Name = 'the selection''s upload run on every run'; Old = "      - name: Upload the selection's error result`n        if: failure()`n"; New = "      - name: Upload the selection's error result`n        if: always()`n" }
+        @{ Name = 'a log directory in the selection''s upload'; Old = "            `${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n            `${{ runner.temp }}/gui-hidden-work/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:" }
     )
     $lfWorkflow = $workflowText.Replace("`r`n", "`n")
     # A validator returns its problems as one array object (`return , $found.ToArray()`), so a mutation's count is

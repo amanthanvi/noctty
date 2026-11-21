@@ -405,10 +405,10 @@ try {
     foreach ($match in [regex]::Matches($guiProcessShared, 'expectEqualStrings\("(?<text>[a-z_0-9():]+ )", comptime logPrefix\(\.(?<level>[a-z]+), \.(?<scope>[a-z_0-9]+)\)\)', 'None', [TimeSpan]::FromSeconds(5))) {
         $guiPrefixes["$($match.Groups['level'].Value)/$($match.Groups['scope'].Value)"] = $match.Groups['text'].Value
     }
-    foreach ($key in @('info/renderer_windows', 'warn/renderer_windows', 'debug/opengl', 'info/d3d11')) {
+    foreach ($key in @('info/renderer_start', 'warn/renderer_windows', 'debug/opengl', 'info/d3d11', 'info/win32')) {
         if (-not $guiPrefixes.ContainsKey($key)) { throw "process_shared.zig's logPrefix test names no prefix for $key." }
     }
-    $guiInfoRw = $guiPrefixes['info/renderer_windows']; $guiWarnRw = $guiPrefixes['warn/renderer_windows']
+    $guiInfoRw = $guiPrefixes['info/renderer_start']; $guiWarnRw = $guiPrefixes['warn/renderer_windows']
     $guiDebugGl = $guiPrefixes['debug/opengl']; $guiInfoD3d = $guiPrefixes['info/d3d11']
     $guiGlLoaded = $guiDebugGl + 'loaded OpenGL 4.6'
     $guiGlFailed = $guiWarnRw + 'OpenGL startup failed err=error.OpenGLUnavailable could_not_start=true; trying the Direct3D 11 beta'
@@ -448,7 +448,8 @@ try {
     $guiRendererSources = [ordered]@{
         'src\process_shared.zig' = @('const level_txt = comptime level.asText();', 'const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";',
             'return level_txt ++ prefix;', 'nosuspend stderr.print(comptime logPrefix(level, scope) ++ format ++ "\n", args)')
-        'src\renderer\Windows.zig' = @('const log = std.log.scoped(.renderer_windows);', 'log.info("renderer started backend={s}", .{backend});', 'logStarted("opengl");',
+        'src\renderer\Windows.zig' = @('const log = std.log.scoped(.renderer_windows);', 'const start_log = std.log.scoped(.renderer_start);',
+            'start_log.info("renderer started backend={s}", .{backend});', 'logStarted("opengl");',
             'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");', 'log.warn("OpenGL startup failed err={} could_not_start={}; trying the Direct3D 11 beta"',
             'log.warn("{s} startup failed err={}"', 'self.setNotice("OpenGL: switched from D3D11 beta ({s}).",', 'self.setNotice("D3D11: OpenGL fallback failed ({s});',
             'fn setNotice(self: *Windows, comptime fmt: []const u8, args: anytype) void {', 'log.warn("{s}", .{message});')
@@ -457,7 +458,7 @@ try {
     }
     # Each matcher's prefix by level and scope, and the text after it.
     $guiRendererMatchers = @(
-        @{ Key = 'info/renderer_windows'; Rest = 'renderer started backend=(opengl|d3d11|d3d11-warp)\z' }
+        @{ Key = 'info/renderer_start'; Rest = 'renderer started backend=(opengl|d3d11|d3d11-warp)\z' }
         @{ Key = 'warn/renderer_windows'; Rest = 'OpenGL: switched from D3D11 beta \(' }
         @{ Key = 'warn/renderer_windows'; Rest = 'D3D11: OpenGL fallback failed \(' }
         @{ Key = 'warn/renderer_windows'; Rest = 'OpenGL startup failed err=' }
@@ -481,6 +482,13 @@ try {
             if (-not $Runner.Contains($literal)) { $problems.Add("runner matcher $literal") }
         }
         if (-not $Runner.Contains("'; trying the Direct3D 11 beta'")) { $problems.Add('runner fallback count') }
+        # Each start is logged where its candidate has fully started, right before that branch returns (Sol on #740: a
+        # call moved earlier in the D3D11 branch passed a text-only pin): two calls, each followed by `return result;`,
+        # the D3D11 one after the OpenGL failure is cleared.
+        $windows = $Texts['src\renderer\Windows.zig'].Replace("`r`n", "`n")
+        if ([regex]::Matches($windows, 'logStarted\(').Count -ne 3) { $problems.Add('Windows.zig: logStarted defined once and called twice') }
+        if ($windows -notmatch 'logStarted\("opengl"\);\n\s*return result;') { $problems.Add('Windows.zig: the OpenGL start right before its return') }
+        if ($windows -notmatch 'clearOpenGLStartupFailure\(\);\n\s*logStarted\(if \(result\.last_warp\) "d3d11-warp" else "d3d11"\);\n\s*return result;') { $problems.Add('Windows.zig: the D3D11 start right before its return') }
         return , $problems.ToArray()
     }
     $guiRendererTexts = [ordered]@{}
@@ -491,8 +499,11 @@ try {
     foreach ($control in @(
             @{ Name = 'a reworded fallback warning'; File = 'src\renderer\Windows.zig'; Old = '; trying the Direct3D 11 beta'; New = '; trying Direct3D 11' }
             @{ Name = 'a reworded start line'; File = 'src\renderer\Windows.zig'; Old = 'renderer started backend='; New = 'renderer ready backend=' }
-            @{ Name = 'the start logged before the D3D11 candidate finished'; File = 'src\renderer\Windows.zig'; Old = 'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");'; New = '' }
+            @{ Name = 'the D3D11 start call removed'; File = 'src\renderer\Windows.zig'; Old = 'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");'; New = '' }
+            @{ Name = 'the D3D11 start moved before its candidate finished'; File = 'src\renderer\Windows.zig'; Move = 'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");'; Before = 'result.active = .{ .d3d11 = value };' }
+            @{ Name = 'the OpenGL start moved before its notice'; File = 'src\renderer\Windows.zig'; Move = 'logStarted("opengl");'; Before = 'if (requested != .opengl) {' }
             @{ Name = 'a renamed scope'; File = 'src\renderer\Windows.zig'; Old = 'std.log.scoped(.renderer_windows)'; New = 'std.log.scoped(.renderer)' }
+            @{ Name = 'the start line back in the renderer_windows scope'; File = 'src\renderer\Windows.zig'; Old = 'start_log.info("renderer started'; New = 'log.info("renderer started' }
             @{ Name = 'another log format'; File = 'src\process_shared.zig'; Old = '"(" ++ @tagName(scope) ++ "): "'; New = '"[" ++ @tagName(scope) ++ "] "' }
             @{ Name = 'logFn no longer writing logPrefix'; File = 'src\process_shared.zig'; Old = 'comptime logPrefix(level, scope) ++ format'; New = 'comptime level.asText() ++ ": " ++ format' }
             @{ Name = 'a warning prefix the logPrefix test no longer names as the runner reads it'; File = 'src\process_shared.zig'; Old = '"warning(renderer_windows): "'; New = '"warn(renderer_windows): "' }
@@ -505,6 +516,15 @@ try {
             if (-not $mutatedRunner.Contains($control.Old)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
             $mutatedRunner = $mutatedRunner.Replace($control.Old, $control.New)
         }
+        elseif ($control.Move) {
+            # The call cut from its line and put, unchanged, before another statement of the same branch.
+            $text = $mutated[$control.File]
+            $line = [regex]::Match($text, '(?m)^[ \t]*' + [regex]::Escape($control.Move) + '\r?\n')
+            if (-not $line.Success -or -not $text.Contains($control.Before)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
+            $text = $text.Remove($line.Index, $line.Length)
+            $at = $text.IndexOf($control.Before, [StringComparison]::Ordinal)
+            $mutated[$control.File] = $text.Insert($at, $control.Move + ' ')
+        }
         else {
             if (-not $mutated[$control.File].Contains($control.Old)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
             $mutated[$control.File] = $mutated[$control.File].Replace($control.Old, $control.New)
@@ -512,6 +532,31 @@ try {
         $controlProblems = & $guiRendererPins $mutated $mutatedRunner
         if ($controlProblems.Count -eq 0) { throw "The renderer pin accepted $($control.Name)." }
     }
+    # #738's hosted probe counts every renderer_windows line and its WARP-only check takes exactly one, the WARP notice
+    # (Opus M2 on #740: a start line in that scope made a true WARP-only run read false). Its own functions, taken from
+    # its syntax tree, read a WARP-only log in the real format with the start line, and must still say WARP-only; with
+    # the start line put back in renderer_windows, they must not (the control).
+    $guiProbePath = Join-Path $repoRoot 'test\windows\gui-hosted-probe.ps1'
+    $guiProbeErrors = $null
+    $guiProbeAst = [System.Management.Automation.Language.Parser]::ParseFile($guiProbePath, [ref]$null, [ref]$guiProbeErrors)
+    if ($guiProbeErrors.Count -ne 0) { throw 'gui-hosted-probe.ps1 does not parse.' }
+    $guiSwitchAssignment = @($guiProbeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$script:BackendSwitchPattern' }, $true))
+    if ($guiSwitchAssignment.Count -ne 1) { throw 'gui-hosted-probe.ps1 must set $script:BackendSwitchPattern once.' }
+    $guiProbeScope = & {
+        . ([scriptblock]::Create($guiSwitchAssignment[0].Extent.Text))
+        foreach ($name in @('Read-ProbeLog', 'Test-WarpOnlyLog')) { . ([scriptblock]::Create((Get-GuiContractFunctionText $guiProbeAst $name))) }
+        $warpLog = @(($guiPrefixes['info/win32'] + 'win32 os_build=26100'), ($guiInfoD3d + 'initialized driver=WARP feature_level=0xb000 flip=sequential targets=offscreen'),
+            ($guiWarnRw + 'D3D11 WARP (software): hardware unavailable or software requested; HRESULT 0x0.'))
+        $results = @{}
+        foreach ($arm in @(@{ Name = 'start'; Line = ($guiInfoRw + 'renderer started backend=d3d11-warp') }, @{ Name = 'control'; Line = ('info(renderer_windows): renderer started backend=d3d11-warp') })) {
+            $logPath = Join-Path $guiScratch "probe-warp-$($arm.Name).log"
+            [IO.File]::WriteAllText($logPath, ((@($warpLog) + $arm.Line) -join "`n") + "`n")
+            $results[$arm.Name] = Test-WarpOnlyLog (Read-ProbeLog $logPath)
+        }
+        $results
+    }
+    if ($guiProbeScope['start'] -ne $true) { throw '#738''s WARP-only check must still pass a WARP-only log that holds the renderer start line.' }
+    if ($guiProbeScope['control'] -ne $false) { throw '#738''s WARP-only check control (the start line in renderer_windows) must fail, or the case proves nothing.' }
     $guiFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $true; Hash = ('a' * 64); Modified = '2026-11-21T05:06:57.1234567Z' }
     $guiNoFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $false }
     if (-not $guiFacts.exists -or $guiFacts.sha256 -cne ('a' * 64) -or $guiNoFacts.exists -or $null -ne $guiNoFacts.sha256) { throw 'The startup facts misread a fingerprint.' }

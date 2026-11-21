@@ -89,10 +89,23 @@ $script:CiScriptClosureLegacyEdges = @(
     }
 )
 
-# A module-qualified cmdlet name (Microsoft.PowerShell.Core\Import-Module) and, in `name`, the cmdlet it calls. Only
-# the Verb-Noun shape: PowerShell resolves no qualified alias (`Microsoft.PowerShell.Utility\iex` is not a command,
-# measured on pwsh 7.6.10), and any other word with a separator is a path.
-$script:CiScriptQualifiedName = '\A[A-Za-z][\w.]*\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z'
+# A cmdlet qualified by a module PowerShell ships (Microsoft.PowerShell.Core\Import-Module) and, in `name`, the
+# cmdlet it calls. Only the Verb-Noun shape: PowerShell resolves no qualified alias
+# (`Microsoft.PowerShell.Utility\iex` is not a command, measured on pwsh 7.6.10). Any other word with a separator,
+# `<word>\<Verb-Noun>` included, is a path, which PowerShell looks up as one when no module matches (Sol and Opus on
+# #740: `fixtures\cmd` ran `fixtures\cmd.ps1`, `sub\Run-Child` ran `sub\Run-Child.ps1`).
+$script:CiScriptBuiltinQualifiedName = '\AMicrosoft\.PowerShell\.[A-Za-z.]+\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z'
+
+# The script a path with no extension runs. PowerShell looks such a path up with `.ps1` first (then PATHEXT's
+# extensions), measured on pwsh 7.6 and Windows PowerShell 5.1 by both council seats on #740: `<dir>\child`,
+# `<dir>\cmd` and `<dir>\pwsh` each ran the `.ps1` beside them. So it is that `.ps1`: a member when it exists, and a
+# missing member, which fails the walk, when it does not (then PowerShell would try other extensions, which the walk
+# does not guess). A path with another unknown extension is $null (unresolved). Native names are no exception.
+function Get-CiScriptPathLookup {
+    param([string] $Path)
+    if ([IO.Path]::GetExtension($Path).Length -ne 0) { return $null }
+    return $Path + '.ps1'
+}
 
 # The parameters of the cmdlets whose arguments the walker binds, from their metadata on pwsh 7.6.10
 # ((Get-Command <name>).Parameters): a word names a parameter that takes a value, `:s` marks a switch, and `=` lists
@@ -246,9 +259,11 @@ function Get-CiScriptCommandName {
     # The name a command element calls by, lower-case, for a bare word; $null otherwise. A module-qualified cmdlet runs
     # what its bare name runs, so its module goes (CodeRabbit on #740: a qualified Add-Type -Path was skipped, its C#
     # file left the closure, and a qualified Set-Variable was no write).
+    # Only a module PowerShell ships qualifies a cmdlet here: any other `<word>\<Verb-Noun>` may be a relative path,
+    # which PowerShell runs as a script when one is there (Opus on #740: `sub\Run-Child` ran `sub\Run-Child.ps1`).
     param($Element)
     if ($Element -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
-    if ($Element.Value -match $script:CiScriptQualifiedName) { return $Matches['name'].ToLowerInvariant() }
+    if ($Element.Value -match $script:CiScriptBuiltinQualifiedName) { return $Matches['name'].ToLowerInvariant() }
     return $Element.Value.ToLowerInvariant()
 }
 
@@ -421,13 +436,16 @@ function Resolve-CiScriptValue {
                 # which Get-Command looks up on PATH, and a relative one, found from the current location, do not.
                 $kind = Test-CiScriptTargetKind $target
                 if ($kind -in @('script', 'batch')) { return @{ Kind = 'path'; Value = $target } }
-                # A path with no script, batch or native extension is looked up as PowerShell looks it up, which takes
-                # `<dir>\child` to `<dir>\child.ps1` (Opus on #740, measured on pwsh 7.6 and Windows PowerShell 5.1),
-                # so it is unresolved, as a direct `& <dir>\child` is. PowerShell and cmd by path stay those programs,
-                # and so does a module-qualified cmdlet; a bare name is a command on PATH.
+                # A name with a separator is a path lookup, not a command name (Sol and Opus on #740): an executable
+                # by its extension, a cmdlet qualified by a module PowerShell ships, else the script
+                # Get-CiScriptPathLookup names (`<dir>\cmd` and `<dir>\pwsh` included), or unresolved. A bare name is
+                # a command on PATH.
                 $leaf = ($target -split '[\\/]')[-1].ToLowerInvariant()
-                if ($kind -ne 'native' -and $target -match '[\\/]' -and -not (Test-CiScriptPowerShellName $leaf) -and
-                    $leaf -notin @('cmd', 'cmd.exe') -and $target -notmatch $script:CiScriptQualifiedName) { return $unresolved }
+                if ($target -match '[\\/]' -and $kind -ne 'native' -and $target -notmatch $script:CiScriptBuiltinQualifiedName) {
+                    $lookup = Get-CiScriptPathLookup $target
+                    if ($null -eq $lookup) { return $unresolved }
+                    return @{ Kind = 'path'; Value = $lookup }
+                }
                 return @{ Kind = 'native'; Value = $leaf }
             }
             # A harness helper that names an executable by convention (Get-InteractiveWin11ExePath): native, named by
@@ -984,13 +1002,19 @@ function Get-CiScriptFileEdges {
                 $kind = Test-CiScriptTargetKind $Value.Value
                 if ($kind -in @('script', 'batch')) { return @{ Is = 'script'; Value = $Value } }
                 $leaf = ($Value.Value -split '[\\/]')[-1].ToLowerInvariant()
+                # A path with no extension runs the script Get-CiScriptPathLookup names, whatever its leaf (Sol on
+                # #740: `& (Join-Path $PSScriptRoot 'fixtures\cmd')` ran `fixtures\cmd.ps1`, not cmd).
+                if ($Value.Value -match '[\\/]' -and $kind -ne 'native' -and $Value.Value -notmatch $script:CiScriptBuiltinQualifiedName) {
+                    $lookup = Get-CiScriptPathLookup $Value.Value
+                    if ($null -ne $lookup) { return @{ Is = 'script'; Value = @{ Kind = 'path'; Value = $lookup } } }
+                }
                 if (Test-CiScriptPowerShellName $leaf) { return @{ Is = 'powershell'; Pwsh = $leaf.StartsWith('pwsh') } }
                 if ($leaf -in @('cmd', 'cmd.exe')) { return @{ Is = 'cmd' } }
                 if ($kind -eq 'native') { return @{ Is = 'native' } }
-                # A bare word names a command, and so does a module-qualified cmdlet (`& Module\Verb-Noun`); a path
-                # with no script, batch or native extension may still run a script (PowerShell resolves one).
+                # A bare word names a command, and so does a cmdlet qualified by a module PowerShell ships; any other
+                # path with an extension the walk does not know is unresolved.
                 if ($Value.Value -notmatch '[\\/]') { return @{ Is = 'command'; Value = $leaf } }
-                if ($Value.Value -match $script:CiScriptQualifiedName) { return @{ Is = 'command'; Value = $Matches['name'].ToLowerInvariant() } }
+                if ($Value.Value -match $script:CiScriptBuiltinQualifiedName) { return @{ Is = 'command'; Value = $Matches['name'].ToLowerInvariant() } }
                 return @{ Is = 'unresolved' }
             }
         }
@@ -1104,12 +1128,13 @@ function Get-CiScriptFileEdges {
         $operator = $command.InvocationOperator
         $first = $elements[0]
         $invoked = $operator -eq [System.Management.Automation.Language.TokenKind]::Dot -or $operator -eq [System.Management.Automation.Language.TokenKind]::Ampersand
-        # A bare path called without `&` is PowerShell's implicit `&` (Opus on #740); a module-qualified command
-        # (Microsoft.PowerShell.Utility\Write-Host) is not a path, and Get-CiScriptCommandName names its cmdlet.
+        # A bare path called without `&` is PowerShell's implicit `&` (Opus on #740); a cmdlet qualified by a module
+        # PowerShell ships (Microsoft.PowerShell.Utility\Write-Host) is not a path, and Get-CiScriptCommandName names
+        # its cmdlet. Any other name with a separator (`sub\Run-Child`) is a path lookup.
         $barePath = -not $invoked -and $first -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
             $first.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::BareWord -and
             ($first.Value -match '[\\/]' -or (Test-CiScriptTargetKind $first.Value) -ne 'other') -and
-            $first.Value -notmatch $script:CiScriptQualifiedName
+            $first.Value -notmatch $script:CiScriptBuiltinQualifiedName
         if (-not $invoked -and -not $barePath -and (Get-CiScriptCommandName $first) -notin $edgeCommands) { continue }
         $entries = @($elements | Select-Object -Skip 1 | ForEach-Object { & $toEntry $_ })
         if ($invoked -or $barePath) {

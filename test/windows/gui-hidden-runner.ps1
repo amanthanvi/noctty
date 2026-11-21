@@ -991,9 +991,10 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
 # backend started (Sol and Opus on #740: a warning is an attempt, not a start). Lines are `<level>(<scope>): <text>`,
 # the level as std.log.Level.asText writes it, so a warning is `warning(...)` (process_shared.zig's logPrefix, whose
 # test names each prefix read here; Greptile on #740), matched whole:
-# - a start: renderer/Windows.zig's `renderer started backend=<opengl|d3d11|d3d11-warp>`, which it logs once a
-#   candidate has fully started (Direct3D11.zig's `initialized driver=` is logged when the device is made, before the
-#   rest of its candidate, which can still fail, so it only marks an attempt);
+# - a start: renderer/Windows.zig's `renderer started backend=<opengl|d3d11|d3d11-warp>`, in its own scope
+#   (`renderer_start`), which it logs once a candidate has fully started (Direct3D11.zig's `initialized driver=` is
+#   logged when the device is made, before the rest of its candidate, which can still fail, so it only marks an
+#   attempt);
 # - a failed candidate: Windows.zig's `OpenGL startup failed err=` and `<d3d11|d3d11-warp> startup failed err=`;
 # - a runtime switch to OpenGL, and a failed one: Windows.zig's `OpenGL: switched from D3D11 beta (` and
 #   `D3D11: OpenGL fallback failed (`;
@@ -1010,7 +1011,7 @@ function Get-GuiHiddenRendererStartups([string[]] $LogTexts) {
         $open = $false
         foreach ($line in $text.Split("`n")) {
             $line = $line.TrimEnd("`r")
-            if ($line -cmatch '\Ainfo\(renderer_windows\): renderer started backend=(opengl|d3d11|d3d11-warp)\z') {
+            if ($line -cmatch '\Ainfo\(renderer_start\): renderer started backend=(opengl|d3d11|d3d11-warp)\z') {
                 $chain.Add("$($Matches[1]):started")
                 [void]$observed.Add($Matches[1])
                 [void]$startups.Add($chain -join ' ')

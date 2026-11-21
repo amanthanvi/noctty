@@ -64,6 +64,26 @@ jobs:
         shell: pwsh
         run: ./test/windows/gui-hidden-scripts.ps1
 
+      # A failed selection or walker step (a runner that does not parse fails the walk) keeps the
+      # suite job from starting, so its publisher never runs: publish the error result here, with
+      # the same standalone publisher and artifact name (Sol on #740). The job and the gate still fail.
+      - name: Publish an error result when the selection failed
+        if: failure()
+        shell: pwsh
+        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind gui-selection -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
+
+      - name: Upload the selection's error result
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gui-hidden-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gui-hidden/result.json
+            ${{ runner.temp }}/gui-hidden/result.json.sha256
+            ${{ runner.temp }}/gui-hidden/receipts/**
+          retention-days: 90
+          if-no-files-found: warn
+
   suite:
     name: Windows Server 2025 Hidden-Desktop GUI
     needs: changes

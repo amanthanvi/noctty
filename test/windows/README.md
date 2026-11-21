@@ -1611,8 +1611,12 @@ startup fingerprint (exists, SHA-256, last write) before and after. Each leaf
 records the renderer its copy's config names, and from its noctty logs the
 backends that started and the attempts before each. A start is
 `renderer/Windows.zig`'s `renderer started backend=<opengl|d3d11|d3d11-warp>`,
-logged once a candidate has fully started; a failed candidate's
-`startup failed` warning is an attempt, and so is `Direct3D11.zig`'s
+in a scope of its own (`renderer_start`, so the `renderer_windows` lines #738's
+hosted probe counts are unchanged), logged once a candidate has fully started;
+a failed candidate's `startup failed` warning is an attempt (a `warning(...)`
+line: logFn writes the level as `std.log.Level.asText` spells it, and the
+contract takes each prefix from `process_shared.zig`'s `logPrefix` test), and
+so is `Direct3D11.zig`'s
 `initialized driver=`, logged when the device is made but before the rest of
 the candidate, which can still fail. So a hardware D3D11 failure followed by a
 WARP start reads `opengl:failed d3d11:failed d3d11-warp:started`, and the
@@ -1638,17 +1642,26 @@ result when `-Out` could be opened, the runner's own initialization included),
 self-test, or a suite step that died or did not parse first), the workflow's
 last step runs `test/windows/gui-hidden-publish-error.ps1`, a script of its
 own that loads nothing of the runner (the runner also runs it when its own
-initialization fails). It leaves a complete result alone: one that parses,
+initialization fails). A failed `changes` job (a runner that does not parse
+fails the walk) keeps the suite job from starting, so `changes` runs the same
+publisher and uploads the same artifact itself. It leaves a complete result alone: one that parses,
 matches the result schema, names this scenario, and has a matching
 `result.json.sha256`. Anything else, a truncated `result.json` included, it
 keeps as `result.incomplete.json` and replaces with an `error` result.
 
 The script walk's edge definition (design §4.3) covers the ways it lists to run
-a script, not every way PowerShell has. Known gaps, which no GUI member uses
-with a script target today: `[Diagnostics.Process]::Start` and `Invoke-Item` of
-a script or batch file, a runspace's `CreatePipeline` or `Pipeline.Commands`,
-`.ScriptBlock.Invoke()` of a `Get-Command` result, and an alias made through
-`New-Item` on the `alias:` drive with a path the walker cannot read. A script a
+a script, not every way PowerShell has. A name with a path separator, other
+than a cmdlet of a module PowerShell ships (`Microsoft.PowerShell.*\Verb-Noun`),
+is a path lookup in every form (`&`, `.`, a bare word, `Get-Command`), whatever
+its leaf: with no extension it is the `.ps1` beside it, as PowerShell looks it
+up first, and a missing one fails the walk; a relative one is unresolved.
+Known gaps, which no GUI member uses with a script target today:
+`[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
+runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
+a `Get-Command` result, an alias made through `New-Item` on the `alias:` drive
+with a path the walker cannot read, and a repo folder added to `$env:PATH`,
+which makes a bare name run a `.ps1` there (the walk reads a bare name as a
+command on PATH). A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
 a leaf must not run a repo script that way.

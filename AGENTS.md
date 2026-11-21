@@ -305,7 +305,9 @@ that govern each symbol you change, or that none does.
   `build.zig.zon`), repaint during live resize
   (`win32/surface_presentation.zig`), the line a surface logs once its
   renderer has started, which the hidden-desktop suite reads (`logStarted`
-  in `src/renderer/Windows.zig`), and which DLLs a CLI action or the D3D11
+  and its scope `renderer_start` in `src/renderer/Windows.zig`; a new line in
+  the `renderer_windows` scope changes the count #738's hosted probe takes),
+  and which DLLs a CLI action or the D3D11
   backend loads (the OpenGL32 static import).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
@@ -719,8 +721,10 @@ that govern each symbol you change, or that none does.
   `Get-InteractiveWin11HostedRunToken`; the harness's path comparison
   `Test-InteractiveWin11SamePath` and `Get-InteractiveWin11CanonicalPath` in
   `scripts/interactive-win11-measure-lib.ps1`; the struct layout pins,
-  `Layout()`, and the error publisher
-  `test/windows/gui-hidden-publish-error.ps1`), the real-input module
+  `Layout()`, the error publisher
+  `test/windows/gui-hidden-publish-error.ps1`, and the log prefixes the
+  runner reads, `logPrefix` and its test in `src/process_shared.zig`), the
+  real-input module
   `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
   the measurement record
   `test/windows/flagship/measurements/gui-measurements.json` and the

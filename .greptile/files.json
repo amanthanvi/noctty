@@ -388,6 +388,7 @@
       "description": "Self-Correction Log: writing or running test/windows harnesses, CI test steps, and test counts that contradict the code.",
       "scope": [
         "test/**",
+        "src/process_shared.zig",
         "scripts/dev-windows.cmd",
         "scripts/interactive-win11*",
         ".github/workflows/**",

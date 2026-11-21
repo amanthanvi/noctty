@@ -241,14 +241,17 @@ fn logFn(
 }
 
 // The prefixes of the renderer lines the hidden-desktop GUI suite reads
-// (gui-hidden-runner.ps1, Get-GuiHiddenRendererStartups); Contracts.99-
-// GuiHiddenLaunch.ps1 takes each from this test and checks the runner's
-// matchers start with it. A warning is `warning(...)`, not `warn(...)`.
+// (gui-hidden-runner.ps1, Get-GuiHiddenRendererStartups), and the start line
+// #738's hosted probe reads for its log control (gui-hosted-probe.ps1);
+// Contracts.99-GuiHiddenLaunch.ps1 takes each from this test, checks the
+// runner's matchers start with it, and builds its log fixtures from them. A
+// warning is `warning(...)`, not `warn(...)`.
 test "log prefixes the hidden-desktop suite reads" {
-    try std.testing.expectEqualStrings("info(renderer_windows): ", comptime logPrefix(.info, .renderer_windows));
+    try std.testing.expectEqualStrings("info(renderer_start): ", comptime logPrefix(.info, .renderer_start));
     try std.testing.expectEqualStrings("warning(renderer_windows): ", comptime logPrefix(.warn, .renderer_windows));
     try std.testing.expectEqualStrings("debug(opengl): ", comptime logPrefix(.debug, .opengl));
     try std.testing.expectEqualStrings("info(d3d11): ", comptime logPrefix(.info, .d3d11));
+    try std.testing.expectEqualStrings("info(win32): ", comptime logPrefix(.info, .win32));
 }
 
 pub const std_options: std.Options = .{
