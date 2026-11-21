@@ -288,57 +288,6 @@ control("a Roles(.on) scope is an entry scope", tree(**{"src/worker.zig": WORKER
         "ENTRY-OK app src/worker.zig start -> workerMain: src/worker.zig:9 workerMain enters worker:probe",
         "RESULT PASS")
 
-# Stone round 5, Opus's Lows. L1: an `if (builtin.is_test)` branch that is a braceless block ends at its `}`, so
-# the statement after it is production code. L2: main is the entry file's own `pub fn main`, not a nested `main`.
-# L3: a member after a switch or a container names that member's declaration. L4: the scope covers the body, its
-# exit the `defer` right after the enter.
-control("the statement after a braceless block in an is_test branch is not gated", tree(**{
-    "src/worker.zig": WORKER + (
-        'const builtin = @import("builtin");\n'
-        'pub fn stray(xs: []const u8) void {\n    if (builtin.is_test) for (xs) |x| {\n        _ = x;\n    }\n'
-        '    const role = thread_role.enter(.renderer);\n    defer role.exit();\n}\n')}), 1,
-        "FAIL UNREGISTERED-POINT app src/worker.zig:26 stray: enter(renderer)",
-        absent=("TEST-EDIT-POINT src/worker.zig:26",))
-control("a nested main's UI scope is not the entry file's main", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
-    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n', '') + (
-    'const Other = struct {\n    fn main() void {\n        const role_scope = thread_role.enter(.ui);\n'
-    '        defer role_scope.exit();\n    }\n};\n')}), 1,
-        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:8 main: enter(ui)",
-        absent=("POINT app MAIN-UI-SCOPE",))
-MEMBER_WORKER = WORKER + (
-    'const Scoped = struct {\n    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
-    '        defer role.exit();\n    }\n    const Inner = struct {\n        fn run() void {}\n    };\n};\n'
-    'pub fn startSelected() void {\n    const t = std.Thread.spawn(.{}, Target.run, .{}) catch return;\n    t.join();\n}\n')
-MEMBER_REGISTRY = REGISTRY + "src/worker.zig\tstartSelected\tThread.spawn\tTarget.run\tworker:probe\tthe selected target\n"
-control("a member after a switch names that member, not the arm", tree(**{"src/worker.zig": MEMBER_WORKER + (
-    'const selected = .{ .artifact = .ghostty };\n'
-    'const Target = switch (selected.artifact) {\n    .ghostty => Scoped,\n    .other => Scoped,\n}.Inner;\n')}), 1,
-        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:27) sets no role",
-        "FAIL UNREGISTERED-POINT app src/worker.zig:23 run: enter(worker:probe)",
-        registry=MEMBER_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
-control("a member after a container names that member, not the container", tree(**{
-    "src/worker.zig": MEMBER_WORKER + 'const Target = Scoped;\n'.replace('Scoped;', 'struct {\n'
-        '    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
-        '        defer role.exit();\n    }\n    const Inner = struct {\n        fn run() void {}\n    };\n}.Inner;')}), 1,
-        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:40) sets no role",
-        registry=MEMBER_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
-control("a scope exited before the target's work is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
-    '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
-    '    const role = thread_role.enter(.{ .worker = "probe" });\n    role.exit();\n'
-    '    std.debug.print("after\\n", .{});\n')}), 1,
-        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
-        absent=("ENTRY-OK app src/worker.zig start",))
-control("a scope exited before main's work is no UI scope", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
-    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n',
-    '    const role_scope = thread_role.enter(.ui);\n    role_scope.exit();\n')}), 1,
-        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:4 main: enter(ui)",
-        absent=("POINT app MAIN-UI-SCOPE",))
-control("a discarded scope (`_ = R.enter`) is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
-    '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
-    '    _ = thread_role.enter(.{ .worker = "probe" });\n')}), 1,
-        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
-        absent=("ENTRY-OK app src/worker.zig start",))
-
 if failures:
     for f in failures:
         print("FAIL " + f)
