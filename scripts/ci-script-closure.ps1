@@ -86,6 +86,28 @@ function ConvertTo-CiScriptRepoPath {
     return ($parts -join '/')
 }
 
+function ConvertTo-CiScriptTargetPath {
+    # The repo path a resolved edge target names, or $null. Only a rooted value counts. A relative one (`./helper.ps1`,
+    # `..\x.ps1`, a bare `helper.ps1`) resolves at run time against the current location, for `.` and `&`, a child's
+    # -File, cmd /c and Add-Type -Path alike, not beside the script, and no walk can know that location, so it stays
+    # unresolved (CodeRabbit on #740: with a helper.ps1 both beside the script and in the working directory, the walk
+    # took the wrong one). $PSScriptRoot, $PSCommandPath and a script-level $MyInvocation.MyCommand.Path anchor a value
+    # to the script's own directory, and a harness layout's RepoRoot to the repository.
+    param([Parameter(Mandatory)] [string] $RepoRoot, [Parameter(Mandatory)] [string] $Value)
+    if (-not [IO.Path]::IsPathRooted($Value)) { return $null }
+    return ConvertTo-CiScriptRepoPath -RepoRoot $RepoRoot -Path $Value
+}
+
+function Test-CiScriptAtScriptLevel {
+    # True when a node runs in the script's own scope: inside no function and no scriptblock.
+    param($Node)
+    for ($walk = $Node.Parent; $null -ne $walk; $walk = $walk.Parent) {
+        if ($walk -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
+            ($walk -is [System.Management.Automation.Language.ScriptBlockAst] -and $null -ne $walk.Parent)) { return $false }
+    }
+    return $true
+}
+
 function New-CiScriptFileReader {
     # A reader: param([string] $RepoPath) returns the file's text, or $null when the tree has no such file. With -Ref
     # it reads that ref's tree in $RepoRoot; otherwise the working tree.
@@ -220,6 +242,15 @@ function Resolve-CiScriptValue {
         { $_ -is [System.Management.Automation.Language.MemberExpressionAst] } {
             if ($_.Static -or $_.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $unresolved }
             $member = $_.Member.Value
+            # $MyInvocation.MyCommand.Path in the script's own scope: this file (in a function or a scriptblock it
+            # names that command instead).
+            $inner = $_.Expression
+            if ($member -in @('Path', 'Definition', 'Source') -and $inner -is [System.Management.Automation.Language.MemberExpressionAst] -and
+                -not $inner.Static -and $inner.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $inner.Member.Value -ieq 'MyCommand' -and
+                $inner.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and $inner.Expression.VariablePath.UserPath -ieq 'MyInvocation') {
+                if (Test-CiScriptAtScriptLevel $_) { return @{ Kind = 'path'; Value = $Context.FilePath } }
+                return $unresolved
+            }
             # (Get-Command pwsh.exe).Source and the like: a native executable.
             if ($member -ieq 'Source' -and $_.Expression.Extent.Text -match '(?i)Get-Command') { return @{ Kind = 'native'; Value = $null } }
             # The harness libraries' normalized repository root (Initialize-InteractiveWin11Sandbox's .RepoRoot, a
@@ -296,11 +327,11 @@ function Resolve-CiScriptValue {
                 return @{ Kind = 'path'; Value = $joined }
             }
             if ($name -ieq 'split-path') {
-                $parent = $false; $target = $null
+                $target = $null
                 for ($i = 1; $i -lt $elements.Count; $i++) {
                     $element = $elements[$i]
                     if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
-                        if ($element.ParameterName -ieq 'Parent') { $parent = $true; continue }
+                        if ($element.ParameterName -ieq 'Parent') { continue }
                         if ($element.ParameterName -in @('Path', 'LiteralPath')) {
                             $target = $(if ($element.Argument) { $element.Argument } elseif ($i + 1 -lt $elements.Count) { $i++; $elements[$i] })
                             continue
@@ -309,7 +340,8 @@ function Resolve-CiScriptValue {
                     }
                     $target = $element
                 }
-                if (-not $parent -or $null -eq $target) { return $unresolved }
+                # Without a switch, Split-Path gives the parent, as -Parent does.
+                if ($null -eq $target) { return $unresolved }
                 $value = Resolve-CiScriptValue $target $Context ($Depth + 1)
                 if ($value.Kind -ne 'path') { return $unresolved }
                 $trimmed = $value.Value.TrimEnd('\', '/')
@@ -454,7 +486,7 @@ function Get-CiScriptFileEdges {
             # native extension may still run a script (PowerShell resolves one), so it stays unresolved below.
             if ($kind -eq 'other' -and $value.Value -notmatch '[\\/]') { return }
             if ($kind -eq 'script' -or $kind -eq 'batch') {
-                $repo = ConvertTo-CiScriptRepoPath -RepoRoot $RepoRoot -Path $(if ([IO.Path]::IsPathRooted($value.Value)) { $value.Value } else { Join-Path $context.Directory $value.Value })
+                $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $value.Value
                 if ($repo) { $targets.Add($repo); return }
             }
         }
@@ -492,7 +524,7 @@ function Get-CiScriptFileEdges {
                 if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and $element.ParameterName -in @('Path', 'LiteralPath')) {
                     $argument = $(if ($element.Argument) { $element.Argument } elseif ($i + 1 -lt $elements.Count) { $elements[$i + 1] })
                     $value = Resolve-CiScriptValue $argument $context
-                    $repo = $(if ($value.Kind -eq 'path') { ConvertTo-CiScriptRepoPath -RepoRoot $RepoRoot -Path $(if ([IO.Path]::IsPathRooted($value.Value)) { $value.Value } else { Join-Path $context.Directory $value.Value }) })
+                    $repo = $(if ($value.Kind -eq 'path') { ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $value.Value })
                     if ($repo) { $csharp.Add($repo) } else { $unresolved.Add($anchor) }
                 }
             }

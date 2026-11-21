@@ -111,6 +111,26 @@ foreach ($form in $joinForms.Keys) {
 $joinResolve = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '. (Join-Path -Resolve $PSScriptRoot ''join-*.ps1'')' }
 Assert-True ($joinResolve.Problems.Count -eq 1 -and $joinResolve.Unresolved.Count -eq 1) "Join-Path -Resolve (wildcards) must be unresolved: $($joinResolve.Problems -join '; ')"
 
+# A relative target resolves at run time against the current location, not beside the script (CodeRabbit on #740):
+# with a helper.ps1 both beside the nested script and at the repository root (the runner's working directory), the
+# walk must take neither, and fail. Each relative form is refused; $MyInvocation.MyCommand.Path anchors like
+# $PSScriptRoot.
+$relativeFiles = @{ 'test/windows/nested/helper.ps1' = '1'; 'helper.ps1' = '2'; 'test/windows/nested/x.cs' = 'class X {}' }
+foreach ($relative in @('. ./helper.ps1', '. .\helper.ps1', '& .\helper.ps1', '. helper.ps1', '. ..\nested\helper.ps1', 'pwsh -NoProfile -File ./helper.ps1', 'cmd /c helper.cmd', 'Add-Type -Path x.cs', '$h = ''./helper.ps1''; . $h')) {
+    $files = $relativeFiles.Clone()
+    $files['test/windows/nested/entry.ps1'] = $relative
+    $relativeWalk = Get-FixtureWalk -Files $files -Entries @('test/windows/nested/entry.ps1')
+    Assert-True ($relativeWalk.Problems.Count -eq 1 -and $relativeWalk.Unresolved.Count -eq 1 -and $relativeWalk.Members -cnotcontains 'test/windows/nested/helper.ps1' -and $relativeWalk.Members -cnotcontains 'helper.ps1') "The relative target in '$relative' must be unresolved, neither helper taken: $($relativeWalk.Problems -join '; ') [$($relativeWalk.Members -join ', ')]"
+}
+foreach ($anchored in @('. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) ''helper.ps1'')', '. (Join-Path (Split-Path $MyInvocation.MyCommand.Path) ''helper.ps1'')', '. "$PSScriptRoot\helper.ps1"')) {
+    $files = $relativeFiles.Clone()
+    $files['test/windows/nested/entry.ps1'] = $anchored
+    $anchoredWalk = Get-FixtureWalk -Files $files -Entries @('test/windows/nested/entry.ps1')
+    Assert-True ($anchoredWalk.Problems.Count -eq 0 -and $anchoredWalk.Members -ccontains 'test/windows/nested/helper.ps1' -and $anchoredWalk.Members -cnotcontains 'helper.ps1') "The anchored target in '$anchored' must reach the helper beside the script: $($anchoredWalk.Problems -join '; ')"
+}
+$functionInvocation = Get-FixtureWalk -Files @{ 'test/windows/entry.ps1' = 'function Load { . (Join-Path (Split-Path $MyInvocation.MyCommand.Path) ''helper.ps1'') }'; 'test/windows/helper.ps1' = '1' }
+Assert-True ($functionInvocation.Problems.Count -eq 1) "`$MyInvocation.MyCommand.Path in a function names the function, not the file, and must be unresolved: $($functionInvocation.Problems -join '; ')"
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 
