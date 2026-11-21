@@ -434,10 +434,12 @@ try {
         foreach ($newline in @("`n", "`r`n")) {
             $texts = [string[]]@($case.Logs | ForEach-Object { (@($_) -join $newline) + $newline })
             $read = Get-GuiHiddenRendererStartups $texts
-            $observed = @($read.observed) -join '+'
-            $startups = @($read.startups) -join '; '
-            if ($observed -cne $case.Observed -or $startups -cne $case.Startups) {
-                throw "The renderer read-back gave '$observed' ($startups) for $($case.Name), not '$($case.Observed)' ($($case.Startups))."
+            # Names of their own: the runner dot-sources every fragment into one scope, and Contracts.99-FramePacing
+            # (#741) leaves `[long]$observed` there, which refuses a string.
+            $rendererObserved = @($read.observed) -join '+'
+            $rendererStartups = @($read.startups) -join '; '
+            if ($rendererObserved -cne $case.Observed -or $rendererStartups -cne $case.Startups) {
+                throw "The renderer read-back gave '$rendererObserved' ($rendererStartups) for $($case.Name), not '$($case.Observed)' ($($case.Startups))."
             }
         }
     }
