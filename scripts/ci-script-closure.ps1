@@ -282,9 +282,11 @@ function Get-CiScriptFunctionOf {
 
 function Resolve-CiScriptVariable {
     # The value a variable holds where it is read ($Use). Flow-sensitive, as far as a straight-line harness needs:
-    #   * in the same function as the read (or at script level for a script-level read), the last assignment before
-    #     the read decides; a parameter of that function, typed [scriptblock] or with a default, decides when no
-    #     assignment precedes the read;
+    #   * in the same function as the read (or at script level for a script-level read), every assignment before the
+    #     read must agree, and then decides; when they differ the read is unresolved (fails closed). Taking only the
+    #     last would drop a script that another branch (if/else, switch, try/catch) loads, and the closure would miss
+    #     it: selection and the module contract would then fail open (Greptile on #740). A parameter of that
+    #     function, typed [scriptblock] or with a default, decides when no assignment precedes the read;
     #   * a read in a function that assigns nothing before it sees the script-level variable: every script-level
     #     assignment must agree;
     #   * a foreach variable is unresolved.
@@ -320,7 +322,16 @@ function Resolve-CiScriptVariable {
         }
         $preceding = @($assignments | Where-Object { $_.Node.Extent.EndOffset -le $useOffset -and (& $sameScope $_.Node) } |
             Sort-Object { $_.Node.Extent.StartOffset })
-        if ($preceding.Count -gt 0) { return & $valueOf $preceding[-1] }
+        if ($preceding.Count -gt 0) {
+            $values = @($preceding | ForEach-Object { & $valueOf $_ })
+            foreach ($value in $values) {
+                if ($value.Kind -cne $values[0].Kind -or $value.Kind -ceq 'unresolved' -or
+                    -not [string]::Equals([string]$value.Value, [string]$values[0].Value, [StringComparison]::OrdinalIgnoreCase)) {
+                    return $unresolved
+                }
+            }
+            return $values[-1]
+        }
         # A parameter of the read's own function (or of the script).
         $owner = $(if ($useFunction) { $useFunction } else { $Context.Ast })
         foreach ($parameter in @($owner.FindAll({ param($n) $n -is [System.Management.Automation.Language.ParameterAst] }, $true))) {

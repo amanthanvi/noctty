@@ -64,6 +64,30 @@ foreach ($member in @('scripts/lib.ps1', 'test/windows/helper.ps1', 'test/window
     Assert-True ($walk.Members -ccontains $member) "The walk must reach $member."
 }
 
+# A variable feeding a load that branches assign differently: the walk must not keep only the last branch's script
+# (that would drop the other from the closure and fail open). It refuses the edge instead; an assignment repeated with
+# the same value still resolves.
+$branched = Get-FixtureWalk @{
+    'test/windows/entry.ps1' = @'
+if ($env:FIXTURE_BRANCH) { $loaded = Join-Path $PSScriptRoot 'branch-a.ps1' }
+else { $loaded = Join-Path $PSScriptRoot 'branch-b.ps1' }
+. $loaded
+'@
+    'test/windows/branch-a.ps1' = '1'
+    'test/windows/branch-b.ps1' = '2'
+}
+Assert-True (@($branched.Unresolved | Where-Object { $_.Anchor -ceq '. $loaded' }).Count -eq 1 -and $branched.Problems.Count -ge 1) "A load whose variable two branches assign differently must fail the walk: $($branched.Problems -join '; ')"
+Assert-True ($branched.Members -cnotcontains 'test/windows/branch-b.ps1' -or $branched.Members -ccontains 'test/windows/branch-a.ps1') 'The walk must never keep one branch''s script and drop the other''s.'
+$repeated = Get-FixtureWalk @{
+    'test/windows/entry.ps1' = @'
+$loaded = Join-Path $PSScriptRoot 'same.ps1'
+if ($env:FIXTURE_BRANCH) { $loaded = Join-Path $PSScriptRoot 'same.ps1' }
+. $loaded
+'@
+    'test/windows/same.ps1' = '1'
+}
+Assert-True ($repeated.Problems.Count -eq 0 -and $repeated.Members -ccontains 'test/windows/same.ps1') "Assignments that agree must still resolve: $($repeated.Problems -join '; ')"
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 

@@ -453,18 +453,29 @@ function New-GuiHiddenCopy([string] $Bin, [string] $Copy, [string] $ExeSha256, [
     if (-not [string]::Equals((Get-GuiHiddenHash (Join-Path $Copy 'noctty.com')), $CliSha256, [StringComparison]::Ordinal)) { throw 'The staged noctty.com is not the receipt''s.' }
 }
 
-# Every reparse point under `Roots`, counted without following any (.NET's enumeration does not recurse into one).
-function Get-GuiHiddenReparsePointCount([string[]] $Roots) {
+# Every reparse point under `Roots`, counted and never entered: the walk lists one directory at a time, without
+# recursion of its own, and descends only into plain directories, so a junction's target (which could be anywhere,
+# the user's real profile included) is never read (Greptile on #740). `Visited`, when given, receives every path the
+# walk listed, for its control.
+function Get-GuiHiddenReparsePointCount([string[]] $Roots, [System.Collections.Generic.List[string]] $Visited = $null) {
     $count = 0
+    $options = [IO.EnumerationOptions]::new()
+    $options.RecurseSubdirectories = $false
+    $options.AttributesToSkip = [IO.FileAttributes]::None
+    $options.IgnoreInaccessible = $false
     foreach ($root in $Roots) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
-        $options = [IO.EnumerationOptions]::new()
-        $options.RecurseSubdirectories = $true
-        $options.AttributesToSkip = [IO.FileAttributes]::None
-        $options.IgnoreInaccessible = $false
         if (([IO.File]::GetAttributes($root) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $count++; continue }
-        foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($root, '*', $options)) {
-            if (([IO.File]::GetAttributes($entry) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $count++ }
+        $pending = [System.Collections.Generic.Stack[string]]::new()
+        $pending.Push($root)
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Pop()
+            foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($directory, '*', $options)) {
+                if ($null -ne $Visited) { $Visited.Add($entry) }
+                $attributes = [IO.File]::GetAttributes($entry)
+                if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $count++ }
+                elseif (($attributes -band [IO.FileAttributes]::Directory) -ne 0) { $pending.Push($entry) }
+            }
         }
     }
     return $count
@@ -485,9 +496,12 @@ function Get-GuiHiddenLauncherRecords([string] $Path) {
 # before its payload, at least `ExpectedShells` of them; every noctty.exe or noctty.com started by the launcher, or
 # forwarded by a noctty it started, or started from a shell inside the terminal.
 function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalProcesses, [int] $ExpectedShells) {
+    # A joiner counts as read only with its image too: one whose image could not be read (opened and pinned, but
+    # QueryFullProcessImageName failed) could be a cmd or a noctty, so it is unreadable, and the verdict fails.
+    $isRead = { param($Row) -not $Row.OpenFailed -and -not $Row.Unpinned -and -not [string]::IsNullOrEmpty($Row.Image) }
     $byPid = @{}
-    foreach ($row in $Rows) { if (-not $row.OpenFailed -and -not $row.Unpinned) { $byPid[$row.Pid] = $row } }
-    $read = @($Rows | Where-Object { -not $_.OpenFailed -and -not $_.Unpinned }).Count
+    foreach ($row in $Rows) { if (& $isRead $row) { $byPid[$row.Pid] = $row } }
+    $read = @($Rows | Where-Object { & $isRead $_ }).Count
     $cmds = @($Rows | Where-Object { $_.IsCmd })
     $nocttyRows = @($Rows | Where-Object { $_.Image -and ($_.Image -ieq 'noctty.exe' -or $_.Image -ieq 'noctty.com') })
     # A noctty process is accounted for when the launcher recorded it (PID and creation time), when a shell inside the
@@ -511,6 +525,7 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         processesRead = $read
         unopened = @($Rows | Where-Object { $_.OpenFailed }).Count
         unpinned = @($Rows | Where-Object { $_.Unpinned }).Count
+        imageUnread = @($Rows | Where-Object { -not $_.OpenFailed -and -not $_.Unpinned -and [string]::IsNullOrEmpty($_.Image) }).Count
         shellsExpected = $ExpectedShells
         shellsObserved = $cmds.Count
         shellsPassing = $cmdPassing

@@ -220,8 +220,17 @@ try {
     $guiPlain = Join-Path $guiScratch 'plain'
     [void](New-Item -ItemType Directory -Path (Join-Path $guiPlain 'a\b'))
     if ((Get-GuiHiddenReparsePointCount @($guiPlain)) -ne 0) { throw 'The reparse scan counted a plain tree.' }
-    [void](New-Item -ItemType Junction -Path (Join-Path $guiPlain 'a\link') -Target (Join-Path $guiPlain 'a\b'))
-    if ((Get-GuiHiddenReparsePointCount @($guiPlain)) -ne 1) { throw 'The reparse scan missed a junction (the AutoRun symptom).' }
+    # The junction points outside the scanned root, at a directory holding a sentinel: the scan counts the junction
+    # and never lists anything through it.
+    $guiOutside = Join-Path $guiScratch 'outside'
+    [void](New-Item -ItemType Directory -Path $guiOutside)
+    [IO.File]::WriteAllText((Join-Path $guiOutside 'sentinel.txt'), 'never read')
+    [void](New-Item -ItemType Junction -Path (Join-Path $guiPlain 'a\link') -Target $guiOutside)
+    $guiVisited = [System.Collections.Generic.List[string]]::new()
+    if ((Get-GuiHiddenReparsePointCount @($guiPlain) $guiVisited) -ne 1) { throw 'The reparse scan missed a junction (the AutoRun symptom).' }
+    if (@($guiVisited | Where-Object { $_.EndsWith('sentinel.txt', [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) {
+        throw 'The reparse scan followed a junction to its target.'
+    }
 
     # ---- (7) the record writer: a path, a command line or an odd key never reaches the file.
     $guiRecordPath = Join-Path $guiScratch 'record.json'
@@ -275,6 +284,7 @@ foreach ($bad in @(
         @{ Name = 'fewer shells than declared'; Rows = $guiGoodRows; Total = 8; Shells = 2 }
         @{ Name = 'a joiner the reader never took'; Rows = $guiGoodRows; Total = 9; Shells = 1 }
         @{ Name = 'a joiner that could not be opened'; Rows = @($guiGoodRows) + @((& $guiRow 800 $null 0 0 $false $false $false $false $true)); Total = 9; Shells = 1 }
+        @{ Name = 'a joiner opened and pinned whose image could not be read'; Rows = @($guiGoodRows) + @((& $guiRow 810 $null 100 81)); Total = 9; Shells = 1 }
         @{ Name = 'a noctty the leaf started itself'; Rows = @($guiGoodRows) + @((& $guiRow 900 'noctty.exe' 100 90)); Total = 9; Shells = 1 }
         @{ Name = 'a noctty with a reused launcher PID'; Rows = @($guiGoodRows[0]) + @((& $guiRow 200 'noctty.exe' 100 21)) + @($guiGoodRows[2..7]); Total = 8; Shells = 1 }
         @{ Name = 'a noctty forwarded by a noctty the leaf started itself'; Rows = @($guiGoodRows) + @((& $guiRow 900 'noctty.com' 100 90)) + @((& $guiRow 910 'noctty.exe' 900 91)); Total = 10; Shells = 1 }
