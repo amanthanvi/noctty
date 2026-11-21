@@ -161,10 +161,21 @@ if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
         ':gui_hidden_go'
     )
 }
+# Hosted mode: the payload refuses to run `noctty` unless its first PATH match is the staged copy's CLI, so a wrong
+# resolution stops before anything runs (H2 on #740), not after the driver reads the resolution file.
+$cmdResolutionGuard = @()
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    if ($expectedCommandPath -match '[%^&|<>"!]') { throw 'The staged CLI''s path holds a character cmd would interpret.' }
+    $cmdResolutionGuard = @(
+        "set /p gui_hidden_first=<`"$cmdResolvedPath`""
+        "if /i not `"%gui_hidden_first%`"==`"$expectedCommandPath`" exit /b 3"
+    )
+}
 @(
     '@echo off'
     $cmdBarrier
     "where noctty > `"$cmdResolvedPath`" || exit /b 1"
+    $cmdResolutionGuard
     "noctty +help > `"$cmdHelpPath`" || exit /b 1"
     "noctty +version > `"$cmdVersionPath`" || exit /b 1"
     "noctty +list-keybinds > `"$cmdKeybindsPath`" || exit /b 1"
@@ -211,9 +222,15 @@ $psThemesLiteral = Get-EscapedPowerShellLiteralPath -Path $psThemesPath
 
 Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psKeybindsPath, $psColorsPath, $psThemesPath, $psPayloadPath, $psStdoutPath, $psStderrPath -ErrorAction SilentlyContinue
 
+$psResolutionGuard = @()
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    $psExpectedLiteral = Get-EscapedPowerShellLiteralPath -Path $expectedCommandPath
+    $psResolutionGuard = @("if (-not [string]::Equals([string]`$resolved, '$psExpectedLiteral', [StringComparison]::OrdinalIgnoreCase)) { exit 3 }")
+}
 @(
     '$resolved = (Get-Command noctty).Source'
     "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding ASCII"
+    $psResolutionGuard
     '$help = noctty +help | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psHelpLiteral' -Value `$help -Encoding UTF8"
