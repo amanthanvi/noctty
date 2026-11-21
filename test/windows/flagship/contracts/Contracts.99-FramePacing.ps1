@@ -269,9 +269,9 @@ $framePacingRules = @(
         Mutation = @('-Name StopWatch -Value { [FramePacingNative]::StopWatch() }', '-Name StopWatch -Value { $true }')
     }
     @{
-        Description = 'a series voided by input or a changed harness writes pacing.json from the allowlist, with the hash the series started with, and everything else to diagnostics.json (the lead and Sol on #741, rounds 9 and 10)'
-        Pattern = '(?s)if \(\$voided\) \{\s+\$summary\.ExitCode = \$exitCode\s+\$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''diagnostics\.json''\) -Encoding utf8NoBOM\s+\$voided = \[ordered\]@\{\s+Schema = 1; Verdict = ''voided''; ExitCode = \$exitCode\s+Reasons = @\(Get-FramePacingVoidReasons [^\r\n]+\)\s+RealInputsSeen = \$RealInputs; InjectedInputsSeen = \$InjectedInputs; SeriesId = \(Split-Path -Leaf \$Root\)\s+HarnessSha256 = \$HarnessSha256; MeasureHead = \$Build\.Head; ExeSHA256 = \$Build\.ExeSha256\s+\}\s+\$voided \| ConvertTo-Json -Depth 3 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+\} else \{\s+\$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+\}'
-        Mutation = @('$voided | ConvertTo-Json -Depth 3 | Set-Content', '$summary | ConvertTo-Json -Depth 3 | Set-Content')
+        Description = 'a series whose verdict is not a pass (exit 0), input and a changed harness among them, writes pacing.json from the allowlist, with the hash the series started with, and everything else, with no dry_run_p95_ms, to diagnostics.json (the lead and Sol on #741, rounds 9 and 10, and on #744, round 2)'
+        Pattern = '(?s)\$withheld = \$voided -or \$exitCode -ne 0\s+if \(\$withheld\) \{.*?\$summary\.ExitCode = \$exitCode\s+\$summary\.dry_run_p95_ms = \$null\s+\$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''diagnostics\.json''\) -Encoding utf8NoBOM\s+\$allowed = \[ordered\]@\{\s+Schema = 1; Verdict = \$\(if \(\$voided\) \{ ''voided'' \} elseif \(\$exitCode -eq 3\) \{ ''guard-tripped'' \} elseif \(\$exitCode -eq 2\) \{ ''inconclusive'' \} else \{ ''failed'' \}\); ExitCode = \$exitCode\s+Reasons = @\(Get-FramePacingVoidReasons [^\r\n]+\)\s+RealInputsSeen = \$RealInputs; InjectedInputsSeen = \$InjectedInputs; SeriesId = \(Split-Path -Leaf \$Root\)\s+HarnessSha256 = \$HarnessSha256; MeasureHead = \$Build\.Head; ExeSHA256 = \$Build\.ExeSha256\s+\}\s+\$allowed \| ConvertTo-Json -Depth 3 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+\} else \{\s+\$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+\}'
+        Mutation = @('$withheld = $voided -or $exitCode -ne 0', '$withheld = $voided')
     }
     @{
         Description = 'the driver''s session facts read the tick through the run''s ticks, so a moved tick latches the run (the lead and Sol on #741, round 9)'
@@ -2449,11 +2449,12 @@ public static class $driverStubName {
             @{ Name = 'a complete dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $runB)); Code = 0; Published = $false; Dry = $true; Console = 'dry run: dry_run_p95_ms' }
             @{ Name = 'a partial visible series'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'inconclusive' $null)); Code = 2; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a mixed-display-mode series (two refresh rates)'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $at60)); Code = 2; Published = $false; Dry = $false; Console = 'no measurement published' }
-            @{ Name = 'a mixed-display-mode dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $at60)); Code = 2; Published = $false; Dry = $false; Console = 'dry run: no pooled intervals' }
+            @{ Name = 'a mixed-display-mode dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' $at60)); Code = 2; Published = $false; Dry = $false; Console = 'dry run: no timing published' }
             @{ Name = 'a visible series at two workloads'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' (New-FramePacingRun @{ WorkloadSha256 = 'v' }))); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a mixed-build series (another app)'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' (New-FramePacingRun @{ ExeSHA256 = 'f' }))); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a failed first run'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
-            @{ Name = 'a failed first dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'dry run: no pooled intervals' }
+            @{ Name = 'a failed first dry run'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'dry run: no timing published' }
+            @{ Name = 'a dry run stopped by a failed run after a complete one (Sol on #744, round 2)'; Visible = $false; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'dry run: no timing published' }
             @{ Name = 'a visible series stopped by a failed run'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'failed' $null)); Code = 1; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a visible series stopped by a tripped guard'; Visible = $true; Runs = 2; Results = @((New-FramePacingResult 'guard-tripped' $null)); Code = 3; Published = $false; Dry = $false; Console = 'no measurement published' }
             @{ Name = 'a mixed-build series stopped by a tripped guard (Opus on #741)'; Visible = $true; Runs = 3; Results = @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult 'complete' (New-FramePacingRun @{ ExeSHA256 = 'f' })), (New-FramePacingResult 'guard-tripped' $null)); Code = 3; Published = $false; Dry = $false; Console = 'no measurement published' }
@@ -2469,16 +2470,22 @@ public static class $driverStubName {
                 $tick = $case.ContainsKey('Tick') -and [bool]$case.Tick
                 $got = Invoke-FramePacingSummaryCase $case.Visible $case.Runs $case.Results $SummaryText $SeriesText $real $tick
                 if ($null -eq $got.Json) { return "$($case.Name): $($got.Code)" }
-                # A series input voided (the lead and Sol on #741, round 9): pacing.json is exactly the allowlist, its
-                # reasons from the fixed set, its exit the one returned; the wording is in diagnostics.json.
-                if ($case.Visible -and ($null -eq $real -or $real -ne 0 -or $tick)) {
+                # Every verdict but a pass (the lead and Sol on #741, round 9, and on #744, round 2): pacing.json is
+                # exactly the allowlist, its verdict voided for input, else the exit's, its reasons from the fixed set,
+                # its exit the one returned; the wording and every statistic are in diagnostics.json, with no
+                # dry_run_p95_ms there either.
+                $inputVoided = $case.Visible -and ($null -eq $real -or $real -ne 0 -or $tick)
+                if ($got.Code -ne 0) {
                     $keys = @($got.Json.PSObject.Properties | ForEach-Object { $_.Name }) -join ' '
-                    if (-not (Test-FramePacingOrdinal $keys $framePacingVoidedKeys)) { return "$($case.Name): voided pacing.json keys '$keys'" }
-                    if ($got.Json.Verdict -ne 'voided' -or $got.Json.ExitCode -ne $got.Code -or $got.Code -ne $case.Code -or @($got.Json.Reasons | Where-Object { $script:FramePacingVoidReasons -notcontains $_ }).Count -ne 0 -or $got.Json.RealInputsSeen -ne $real -or $got.Json.InjectedInputsSeen -ne 3) { return "$($case.Name): voided pacing.json exit $($got.Code), reasons '$(@($got.Json.Reasons) -join ' ')'" }
-                    if ($null -eq $got.Diag -or -not $got.Diag.PSObject.Properties['Inconclusive'] -or -not ([string]$got.Diag.Inconclusive).Contains('input voided the series') -or -not $got.Console.Contains($case.Console)) { return "$($case.Name): diagnostics.json does not say what voided it" }
+                    if (-not (Test-FramePacingOrdinal $keys $framePacingVoidedKeys)) { return "$($case.Name): exit $($got.Code) pacing.json keys '$keys'" }
+                    $verdict = if ($inputVoided) { 'voided' } else { @{ 1 = 'failed'; 2 = 'inconclusive'; 3 = 'guard-tripped' }[[int]$case.Code] }
+                    if ($got.Json.Verdict -ne $verdict -or $got.Json.ExitCode -ne $got.Code -or $got.Code -ne $case.Code -or @($got.Json.Reasons | Where-Object { $script:FramePacingVoidReasons -notcontains $_ }).Count -ne 0 -or @($got.Json.Reasons).Count -eq 0 -or $got.Json.RealInputsSeen -ne $real -or ($case.Visible -and $got.Json.InjectedInputsSeen -ne 3) -or (-not $case.Visible -and $null -ne $got.Json.InjectedInputsSeen)) { return "$($case.Name): withheld pacing.json exit $($got.Code), verdict $($got.Json.Verdict), reasons '$(@($got.Json.Reasons) -join ' ')'" }
+                    if ($null -eq $got.Diag -or $null -ne $got.Diag.dry_run_p95_ms -or -not $got.Console.Contains($case.Console)) { return "$($case.Name): diagnostics.json missing or with a dry p95, or console '$($got.Console)'" }
+                    if ($inputVoided -and (-not $got.Diag.PSObject.Properties['Inconclusive'] -or -not ([string]$got.Diag.Inconclusive).Contains('input voided the series'))) { return "$($case.Name): diagnostics.json does not say what voided it" }
                     continue
                 }
-                if ($null -ne $got.Diag) { return "$($case.Name): a series input did not void wrote diagnostics.json" }
+                if ($inputVoided) { return "$($case.Name): input did not withhold the series (exit 0)" }
+                if ($null -ne $got.Diag) { return "$($case.Name): a passing series wrote diagnostics.json" }
                 $published = $null -ne $got.Json.frame_time_p95_ms -or $null -ne $got.Json.frame_time_median_ms
                 if ($got.Code -ne $case.Code -or $published -ne $case.Published -or ($null -ne $got.Json.dry_run_p95_ms) -ne $case.Dry -or -not $got.Console.Contains($case.Console)) {
                     return "$($case.Name): exit $($got.Code), published $published, dry $($null -ne $got.Json.dry_run_p95_ms), console '$($got.Console)'"
@@ -2503,7 +2510,9 @@ public static class $driverStubName {
                 @{ Name = 'Opus''s M17, the Error exit removed'; Old = "`$summary.Contains('Error') `$summary.Contains('Inconclusive')"; New = "`$false `$summary.Contains('Inconclusive')" }
                 @{ Name = 'CodeRabbit''s null input count'; Old = 'RealInputsSeen = $RealInputs'; New = 'RealInputsSeen = $null' }
                 @{ Name = 'a null injected count'; Old = 'InjectedInputsSeen = $InjectedInputs'; New = 'InjectedInputsSeen = $null' }
-                @{ Name = 'an extra field in a voided pacing.json (the lead and Sol on #741, round 9)'; Old = "Schema = 1; Verdict = 'voided'; ExitCode = `$exitCode"; New = "Schema = 1; Verdict = 'voided'; ExitCode = `$exitCode; Runs = @(`$summary.Runs)" }
+                @{ Name = 'an extra field in a voided pacing.json (the lead and Sol on #741, round 9)'; Old = "{ 'failed' }); ExitCode = `$exitCode"; New = "{ 'failed' }); ExitCode = `$exitCode; Runs = @(`$summary.Runs)" }
+                @{ Name = 'the old branch, timing withheld only for input or a changed harness (Sol on #744, round 2)'; Old = '$withheld = $voided -or $exitCode -ne 0'; New = '$withheld = $voided' }
+                @{ Name = 'a failed dry run''s dry_run_p95_ms kept in diagnostics.json'; Old = "        `$summary.dry_run_p95_ms = `$null`n"; New = '' }
                 @{ Name = 'real input ignored (the lead on #741, round 5)'; Old = '$inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved -or $inputRuns.Count -gt 0)'; New = '$inputSeen = $false' }
                 @{ Name = 'an unread input count read as none'; Old = '($null -eq $RealInputs -or [long]$RealInputs -ne 0 -or $TickMoved -or'; New = '($null -ne $RealInputs -and [long]$RealInputs -ne 0 -or $TickMoved -or' }
                 @{ Name = 'a moved tick ignored (the lead and Sol on #741, round 6)'; Old = '[long]$RealInputs -ne 0 -or $TickMoved -or $inputRuns.Count -gt 0)'; New = '[long]$RealInputs -ne 0 -or $inputRuns.Count -gt 0)' }
@@ -2518,7 +2527,7 @@ public static class $driverStubName {
         $seriesUnwrap = $seriesFunctionText.Replace($seriesNew, $seriesOld)
         if ([string]::Equals($seriesUnwrap, $seriesFunctionText, [StringComparison]::Ordinal)) { throw 'The pool-unwrap control changed nothing.' }
         if ($null -eq (Test-FramePacingSummaryCases $null $seriesUnwrap)) { throw 'The summary cases accepted the pool''s old if assignment, which unwraps an empty pool to $null.' }
-        $cases.Add("summary output ($($summaryCases.Count) cases under StrictMode, pacing.json, the JSON, the console and the exit; real input or an unread count publishes nothing; Sol's late assignment, Opus's M13 and M17, real input ignored, an unread count read as none, and the pool's old if assignment as controls)")
+        $cases.Add("summary output ($($summaryCases.Count) cases under StrictMode, pacing.json, the JSON, the console and the exit; every exit but 0 writes the allowlist with its verdict and no timing, and real input or an unread count publishes nothing; Sol's late assignment, Opus's M13 and M17, real input ignored, an unread count read as none, the old voided-only branch, a failed dry run's p95 kept and the pool's old if assignment as controls)")
 
         # The series' end (the lead, Sol and Opus on #741, round 6), with Sol's stand-in: a watch whose count moves as
         # the hooks come out (an event delivered during the unhook, the last one the hooks can count) voids the
@@ -2555,7 +2564,9 @@ public static class $driverStubName {
                 $durations = [Collections.Generic.List[object]]::new()
                 $walk = { param($Node) if ($Node -is [Management.Automation.PSCustomObject]) { foreach ($property in $Node.PSObject.Properties) { if ($property.Name -match '(?i)ms$' -and $null -ne $property.Value) { $durations.Add($property.Value) }; & $walk $property.Value } } elseif ($Node -is [Array]) { foreach ($item in $Node) { & $walk $item } } }
                 & $walk $json
-                return [pscustomobject]@{ Code = @($out | Where-Object { $_ -is [int] })[-1]; Published = $durations.Count -gt 0 -or $raw.Contains('0.087') -or $raw.Contains('301234'); Headline = $null -ne $json.PSObject.Properties['frame_time_p95_ms'] -and $null -ne $json.frame_time_p95_ms; Real = $json.RealInputsSeen; Why = $why; Keys = (@($json.PSObject.Properties | ForEach-Object { $_.Name }) -join ' '); Reasons = @($(if ($json.PSObject.Properties['Reasons']) { $json.Reasons } else { @() })) }
+                return [pscustomobject]@{ Code = @($out | Where-Object { $_ -is [int] })[-1]; Published = $durations.Count -gt 0 -or $raw.Contains('0.087') -or $raw.Contains('301234'); Headline = $null -ne $json.PSObject.Properties['frame_time_p95_ms'] -and $null -ne $json.frame_time_p95_ms; Real = $json.RealInputsSeen; Why = $why; Keys = (@($json.PSObject.Properties | ForEach-Object { $_.Name }) -join ' '); Reasons = @($(if ($json.PSObject.Properties['Reasons']) { $json.Reasons } else { @() }))
+                    Verdict = $(if ($json.PSObject.Properties['Verdict']) { $json.Verdict } else { $null }); Dry = $(if ($json.PSObject.Properties['dry_run_p95_ms']) { $json.dry_run_p95_ms } else { $null }); HasDiag = $null -ne $diag
+                    DiagDry = $(if ($null -ne $diag -and $diag.PSObject.Properties['dry_run_p95_ms']) { $diag.dry_run_p95_ms } else { $null }); DiagTimed = $null -ne $diag -and @($diag.Runs | Where-Object { $null -ne $_.p95_ms }).Count -gt 0 }
             } finally { [IO.Directory]::Delete($root, $true) }
         }
         function Get-FramePacingSeriesEndMiss([string] $CompleteText) {
@@ -2614,7 +2625,30 @@ public static class $driverStubName {
                 if ($noHash.Code -ne 1 -or $noHash.Published -or -not (Test-FramePacingOrdinal ($noHash.Reasons -join ' ') 'harness-changed')) { return "a series with no hash of its own (dry $empty): exit $($noHash.Code), reasons '$($noHash.Reasons -join ' ')'" }
             }
             $drySame = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), (New-FramePacingResult 'complete' $hashedB)) 'aa' $true
-            if ($drySame.Code -ne 0 -or $drySame.Keys -eq $framePacingVoidedKeys) { return "a dry run with matching hashes: exit $($drySame.Code), keys '$($drySame.Keys)'" }
+            if ($drySame.Code -ne 0 -or $drySame.Keys -eq $framePacingVoidedKeys -or -not $drySame.Published -or $null -eq $drySame.Dry -or $drySame.HasDiag) { return "a clean dry run with matching hashes: exit $($drySame.Code), keys '$($drySame.Keys)', dry $($drySame.Dry), diagnostics $($drySame.HasDiag)" }
+            # Sol's replay (#744, round 2): the first driver completes under A; the second loads changed text whose
+            # writer names another file, so the outer half finds no run.json. That run reads as no record (the real
+            # Read-FramePacingRunRecord over a scratch run directory holding only runs.json, B's record) and fails
+            # (the real Get-FramePacingRunStatus over the real record problems), and the series, in either mode,
+            # exits 1 with no timing statistic in pacing.json; the earlier run's timing stays in diagnostics.json. A
+            # plain driver failure after a good run is the same.
+            $replayDir = Join-Path ([IO.Path]::GetTempPath()) ('fp-r2-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            [void][IO.Directory]::CreateDirectory($replayDir)
+            try {
+                [IO.File]::WriteAllText((Join-Path $replayDir 'runs.json'), ((New-FramePacingRun @{ P95Ms = 4.4; HarnessSha256 = 'bb' }) | ConvertTo-Json -Depth 4))
+                $missing = Read-FramePacingRunRecord (Join-Path $replayDir 'run.json')
+                if ($null -ne $missing.Record) { return "Sol's replay: run.json read as a record" }
+                $missingStatus = Get-FramePacingRunStatus @() @() 0 $null @(Get-FramePacingRecordProblems $missing.Record)
+                if ($missingStatus -ne 'failed') { return "Sol's replay: a run with no readable record is $missingStatus, not failed" }
+            } finally { [IO.Directory]::Delete($replayDir, $true) }
+            $noRecord = [pscustomobject]@{ Run = 'C:\fp\run-2'; Status = $missingStatus; Failures = @('no record'); Record = $null; InputSeen = $false }
+            $plainFailure = [pscustomobject]@{ Run = 'C:\fp\run-2'; Status = 'failed'; Failures = @('driver exit 1'); Record = $hashedB; InputSeen = $false }
+            foreach ($failCase in @(@{ Name = 'Sol''s replay, a changed driver with no readable record'; Result = $noRecord }, @{ Name = 'a plain driver failure after a good run'; Result = $plainFailure })) {
+                foreach ($dry in @($true, $false)) {
+                    $failed = Invoke-FramePacingSeriesEnd (New-FramePacingSeriesStandIn 0 250 $true) $CompleteText @((New-FramePacingResult 'complete' $hashed), $failCase.Result) 'aa' $dry
+                    if ($failed.Code -ne 1 -or $failed.Published -or $failed.Verdict -ne 'failed' -or -not (Test-FramePacingOrdinal $failed.Keys $framePacingVoidedKeys) -or -not (Test-FramePacingOrdinal ($failed.Reasons -join ' ') 'run-failed incomplete') -or -not $failed.HasDiag -or $null -ne $failed.DiagDry -or -not $failed.DiagTimed) { return "$($failCase.Name) (dry $dry): exit $($failed.Code), timing written $($failed.Published), verdict $($failed.Verdict), keys '$($failed.Keys)', reasons '$($failed.Reasons -join ' ')', diagnostics $($failed.HasDiag), its dry p95 $($failed.DiagDry)" }
+                }
+            }
             return $null
         }
         $seriesEndMiss = Get-FramePacingSeriesEndMiss $null
@@ -2630,8 +2664,10 @@ public static class $driverStubName {
         foreach ($control in @(
                 @{ Name = 'the runs'' own input latches ignored (the lead and Sol on #741, round 8)'; Old = ' -or $TickMoved -or $inputRuns.Count -gt 0)'; New = ' -or $TickMoved)' }
                 @{ Name = 'a tick beside a count claimed as a second source'; Old = "        elseif (`$TickMoved -and `$counted) { `$voids += 'tick also moved (may be the same input)' }`n"; New = '' }
-                @{ Name = 'an extra field in a voided pacing.json (the lead and Sol on #741, round 9)'; Old = "Schema = 1; Verdict = 'voided'; ExitCode = `$exitCode"; New = "Schema = 1; Verdict = 'voided'; ExitCode = `$exitCode; Runs = @(`$summary.Runs)" }
-                @{ Name = 'the full summary written as a voided pacing.json'; Old = '$voided | ConvertTo-Json -Depth 3 | Set-Content'; New = '$summary | ConvertTo-Json -Depth 3 | Set-Content' }
+                @{ Name = 'an extra field in a voided pacing.json (the lead and Sol on #741, round 9)'; Old = "{ 'failed' }); ExitCode = `$exitCode"; New = "{ 'failed' }); ExitCode = `$exitCode; Runs = @(`$summary.Runs)" }
+                @{ Name = 'the full summary written as a voided pacing.json'; Old = '$allowed | ConvertTo-Json -Depth 3 | Set-Content'; New = '$summary | ConvertTo-Json -Depth 3 | Set-Content' }
+                @{ Name = 'Sol''s round-2 shape, timing withheld only for input or a changed harness'; Old = '$withheld = $voided -or $exitCode -ne 0'; New = '$withheld = $voided' }
+                @{ Name = 'a failed dry run''s dry_run_p95_ms kept in diagnostics.json'; Old = "        `$summary.dry_run_p95_ms = `$null`n"; New = '' }
             )) {
             $timingControl = $summaryTimingText.Replace($control.Old, $control.New)
             if ([string]::Equals($timingControl, $summaryTimingText, [StringComparison]::Ordinal)) { throw "The timing control changed nothing: $($control.Name)." }
@@ -2653,7 +2689,7 @@ public static class $driverStubName {
         $reasonsControl = $reasonsText.Replace("`$reasons.Add('hook-count')", "`$reasons.Add(`"hook count `$RealInputs`")")
         if ([string]::Equals($reasonsControl, $reasonsText, [StringComparison]::Ordinal)) { throw 'The void-reason control changed nothing.' }
         & { . ([scriptblock]::Create($reasonsControl)); if ($null -eq (Get-FramePacingSeriesEndMiss $null)) { throw 'The series-end cases accepted a reason that is text with a number.' } }
-        $cases.Add("series end (Sol's stand-ins: quiet publishes; an event as the hooks come out, a moved or unread tick, a watch that did not stop, tick-only input after an inconclusive run, a count with the tick moved too, Sol's moved-and-returned tick at the final read and at a poll, a hook stop with its delay, Sol's slow staging beside a hook event and Sol's session-facts read each void the series with pacing.json exactly the allowlist, each case's own reasons and no duration anywhere, and name what voided it; the count read before the unhook, the groups' or the runs' statistics kept, the runs' latches ignored, round 7's latch_to_kill_ms and a second source claimed as the controls)")
+        $cases.Add("series end (Sol's stand-ins: quiet publishes, and a clean dry run keeps its full output; Sol's round-2 replay of a changed driver with no readable record, through the real record reader and run status, and a plain driver failure after a good run, each exit 1 in both modes with no timing in pacing.json, verdict failed, and the good run's timing in diagnostics.json alone; an event as the hooks come out, a moved or unread tick, a watch that did not stop, tick-only input after an inconclusive run, a count with the tick moved too, Sol's moved-and-returned tick at the final read and at a poll, a hook stop with its delay, Sol's slow staging beside a hook event and Sol's session-facts read each void the series with pacing.json exactly the allowlist, each case's own reasons and no duration anywhere, and name what voided it; the count read before the unhook, the groups' or the runs' statistics kept, the runs' latches ignored, round 7's latch_to_kill_ms and a second source claimed as the controls)")
 
         # The statistics: QPC ticks over the trace's frequency in ms; nearest-rank p95 and the median.
         $stats = Get-FramePacingIntervalStats @(10000, 20000, 30000) 10000000.0

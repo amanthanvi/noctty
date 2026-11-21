@@ -1533,7 +1533,8 @@ Two modes:
   preconditions on its own desktop, records why they fail, and never takes the
   foreground. Its intervals check the pipeline and are not a measurement, since
   nothing composes a private desktop. The summary gives their p95 as
-  `dry_run_p95_ms`, never as `frame_time_p95_ms`.
+  `dry_run_p95_ms`, never as `frame_time_p95_ms`, and only for a clean dry
+  run (exit 0).
 - `-Visible` is the measurement. Run it only while the machine's user is
   away. The copy runs on `Default`, which must be the caller's desktop and the
   input desktop, composed by DWM, in a local session, with the shell accepting
@@ -1761,17 +1762,22 @@ with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
 still at the series' baseline (`TickMovedFromBaseline` false), whose every
 run completed and whose runs are comparable; otherwise both are null, input
 makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. Each process
-hashes the script text it loaded and is executing, never the file on disk:
-the outer half at series start, each driver as it starts. A driver whose hash
+higher), and the console says no measurement was published. The outer half
+and each driver hash the script text they loaded and are executing, never the
+file on disk: the outer half at series start, each driver as it starts. The
+grid and cursor probes a driver starts run the same file and hash nothing; they
+produce no timing. A driver whose hash
 differs voids the series as `harness-changed` (exit 1), in either mode, and so
 does a series with no hash of its own (it fails closed); the series' start
 hash is the `HarnessSha256` it reports. The hash covers
 `bench-frame-pacing.ps1` alone, not the scripts it dot-sources: it catches an
 accidental change to `bench-frame-pacing.ps1`, and is not a seal against
-tampering. A series that input or a changed harness voided
-writes `pacing.json` from an allowlist, not by scrubbing: the
-schema, `Verdict` (`voided`), `ExitCode`, `Reasons`, `RealInputsSeen`,
+tampering. A series writes a timing statistic only when its verdict is a
+pass (exit 0). Every other verdict, a failure (exit 1, a changed harness
+among them), an inconclusive series (exit 2, input among them) or a tripped
+guard (exit 3), writes `pacing.json` from an allowlist, not by scrubbing: the
+schema, `Verdict` (`voided` for input or a changed harness, otherwise
+`failed`, `inconclusive` or `guard-tripped`), `ExitCode`, `Reasons`, `RealInputsSeen`,
 `InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
 `MeasureHead` and `ExeSHA256`, and nothing else. It carries no number but
 the input counts and the exit code, and no free text: `Reasons` are codes
@@ -1779,13 +1785,16 @@ from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
 `watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
 `run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`,
 `harness-changed`).
-Everything else goes to `diagnostics.json` beside it: every message (the
+Everything else goes to `diagnostics.json` beside it, with no
+`dry_run_p95_ms` (a dry run has one only when it is clean): every message (the
 staging, lock-shortfall and tick-stop lines among them), every duration,
 each run and each group, and `Inconclusive`, which names what voided the
 series (the hook count, with "tick also moved (may be the same input)" when
 the tick moved too, since one input can do both; a tick that moved or could
-not be read; a watch that did not stop; or the runs that saw input). A
-series input did not void keeps the full `pacing.json` and writes no
+not be read; a watch that did not stop; or the runs that saw input). So a
+series whose last driver failed after a good run, even one that ran changed
+text and left no readable `run.json`, publishes none of the good run's timing.
+A passing series keeps the full `pacing.json` and writes no
 `diagnostics.json`. Input seen is a latch for the series: every read sets it
 (a hook count above 0, any tick mismatch at a driver gate, a poll, the
 driver's session facts, the outer half's checks or the final read, an unread

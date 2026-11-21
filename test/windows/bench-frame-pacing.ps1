@@ -2510,7 +2510,8 @@ function Get-FramePacingSeries([object[]] $Records) {
 # in a dry run).
 # frame_time_p95_ms and its median are published only for a visible series whose every run completed and whose runs
 # are comparable; otherwise they are null in the JSON and the console says no measurement was published (Sol and
-# CodeRabbit on #741). A dry run gives dry_run_p95_ms, not a measurement. Returns Get-FramePacingExitCode's code.
+# CodeRabbit on #741). A dry run gives dry_run_p95_ms, not a measurement. Any timing statistic is written only when the
+# series' verdict is a pass, exit 0 (the lead and Sol on #744, round 2). Returns Get-FramePacingExitCode's code.
 function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $RealInputs, $InjectedInputs, [bool] $TickMoved, [bool] $TickUnread, [string] $HarnessSha256) {
     $completed = @($Results | Where-Object { [string]::Equals($_.Status, 'complete', [StringComparison]::Ordinal) })
     $series = Get-FramePacingSeries @($completed | ForEach-Object { $_.Record })
@@ -2559,20 +2560,26 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     }
     if ($inconclusive.Count -gt 0) { $summary.Inconclusive = $inconclusive -join '; ' }
     $exitCode = Get-FramePacingExitCode @($Results | ForEach-Object { [string]$_.Status }) $summary.Contains('Error') $summary.Contains('Inconclusive') $completed.Count $Runs
-    if ($voided) {
-        # A series input voided writes pacing.json from an allowlist, not by scrubbing (the lead and Sol on #741, round 9):
-        # the schema, the verdict, the exit code, reason codes from a fixed set (no text, no numbers), the input counts,
-        # the series' id and the harness's and measurement's identities. Everything else, every message, duration and
-        # run, goes to diagnostics.json beside it.
+    # Timing only for a pass (the lead and Sol on #744, round 2): a failure (exit 1), an inconclusive series (2) or a
+    # tripped guard (3) withholds every timing statistic, like a series input or a changed harness voided. A driver
+    # that ran changed text and left no readable record fails its run, and the earlier runs' timing must not stand for
+    # the series. A dry run's dry_run_p95_ms is a clean dry run's alone, in either file.
+    $withheld = $voided -or $exitCode -ne 0
+    if ($withheld) {
+        # A withheld series writes pacing.json from an allowlist, not by scrubbing (the lead and Sol on #741, round 9):
+        # the schema, the verdict (voided for input or a changed harness, else the exit's), the exit code, reason codes
+        # from a fixed set (no text, no numbers), the input counts, the series' id and the harness's and measurement's
+        # identities. Everything else, every message, duration and run, goes to diagnostics.json beside it.
         $summary.ExitCode = $exitCode
+        $summary.dry_run_p95_ms = $null
         $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'diagnostics.json') -Encoding utf8NoBOM
-        $voided = [ordered]@{
-            Schema = 1; Verdict = 'voided'; ExitCode = $exitCode
+        $allowed = [ordered]@{
+            Schema = 1; Verdict = $(if ($voided) { 'voided' } elseif ($exitCode -eq 3) { 'guard-tripped' } elseif ($exitCode -eq 2) { 'inconclusive' } else { 'failed' }); ExitCode = $exitCode
             Reasons = @(Get-FramePacingVoidReasons $Results $RealInputs $TickMoved $TickUnread $inputRuns.Count (@($series.MixedBuild).Count -gt 0) (@($series.MixedEnvironment).Count -gt 0) $completed.Count $harnessChanged)
             RealInputsSeen = $RealInputs; InjectedInputsSeen = $InjectedInputs; SeriesId = (Split-Path -Leaf $Root)
             HarnessSha256 = $HarnessSha256; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
         }
-        $voided | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
+        $allowed | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     } else {
         $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     }
@@ -2580,15 +2587,17 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
     foreach ($failure in @($last.Failures)) { Write-Host "  $failure" }
     if ($summary.Contains('Inconclusive')) { Write-Host "  $($summary.Inconclusive)" }
     $label = if ($Visible) { if ($null -ne $summary.frame_time_p95_ms) { "frame_time_p95_ms $($summary.frame_time_p95_ms)" } else { 'no measurement published' } }
-        elseif ($null -ne $summary.dry_run_p95_ms) { "dry run: dry_run_p95_ms $($summary.dry_run_p95_ms) (not a measurement)" } else { 'dry run: no pooled intervals' }
-    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$(if ($voided) { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" })"
+        elseif ($null -ne $summary.dry_run_p95_ms) { "dry run: dry_run_p95_ms $($summary.dry_run_p95_ms) (not a measurement)" } elseif ($withheld) { 'dry run: no timing published' } else { 'dry run: no pooled intervals' }
+    Write-Host "frame pacing: $($completed.Count) of $Runs runs complete; $label; summary=$(Join-Path $Root 'pacing.json')$(if ($withheld) { "; diagnostics=$(Join-Path $Root 'diagnostics.json')" })"
     return $exitCode
 }
 
-# The reason codes a voided series' pacing.json may carry (the lead and Sol on #741, round 9): a fixed set, no text and
-# no numbers.
+# The reason codes a withheld series' pacing.json may carry (the lead and Sol on #741, round 9; every verdict but a pass
+# since #744, round 2): a fixed set, no text and no numbers.
 $script:FramePacingVoidReasons = @('hook-count', 'tick-moved', 'tick-unread', 'watch-not-stopped', 'run-saw-input', 'guard-tripped', 'run-failed', 'run-inconclusive', 'incomplete', 'mixed-build', 'mixed-environment', 'harness-changed')
-# A voided series' reasons, each a member of FramePacingVoidReasons. Pure, so the contract tables it.
+# A withheld series' reasons, each a member of FramePacingVoidReasons. Not pure: it reads the caller's $Visible (the
+# series' mode, which gates the watch and tick reasons); otherwise it reads only its arguments, so the contract tables
+# it with $Visible set in the calling scope.
 function Get-FramePacingVoidReasons([object[]] $Results, $RealInputs, [bool] $TickMoved, [bool] $TickUnread, [int] $InputRuns, [bool] $MixedBuild, [bool] $MixedEnvironment, [int] $Completed, [bool] $HarnessChanged) {
     $statuses = @($Results | ForEach-Object { [string]$_.Status })
     $reasons = [Collections.Generic.List[string]]::new()
