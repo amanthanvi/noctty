@@ -602,9 +602,10 @@ const Frame = struct {
     }
 
     /// Takes State.mutex once, through the demand acquire, the renderer's
-    /// way in (PLAN.md §2.7 PN3).
+    /// way in (PLAN.md §2.7 PN3), as a read: through a `*const State`, so
+    /// without the frame snapshot's demand handoff (State.lockDemand).
     pub fn screen(f: Frame) Pacer.Screen {
-        const state = f.t.state;
+        const state: *const rendererpkg.State = f.t.state;
         state.lockDemand();
         defer state.unlockDemand();
         return .{
@@ -619,7 +620,8 @@ const Frame = struct {
     /// Reads only the mode, so a blink decision does not walk the rows
     /// `needsFrame` checks on a clean terminal.
     pub fn cursorBlinking(f: Frame) bool {
-        const state = f.t.state;
+        // A read, as in `screen`.
+        const state: *const rendererpkg.State = f.t.state;
         state.lockDemand();
         defer state.unlockDemand();
         return state.terminal.modes.get(.cursor_blinking);
@@ -1043,6 +1045,126 @@ test "send wakes the renderer before waiting on a full mailbox" {
     try testing.expect(delivered != null);
     try testing.expect(std.meta.activeTag(delivered.?) == .focus);
     try testing.expect(mailbox.pop() == null);
+}
+
+/// The renderer's state for a `Frame` whose reads a test calls: `screen` and
+/// `cursorBlinking` read only `t.state`.
+const FrameReadTest = struct {
+    term: terminalpkg.Terminal,
+    renderer_mutex: rendererpkg.StateMutex = .{},
+    state: rendererpkg.State,
+    t: Thread,
+
+    fn init(self: *FrameReadTest) !void {
+        self.* = .{ .term = undefined, .state = undefined, .t = undefined };
+        self.term = try terminalpkg.Terminal.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+        self.state = .{ .mutex = &self.renderer_mutex, .terminal = &self.term };
+        self.t.state = &self.state;
+    }
+
+    fn deinit(self: *FrameReadTest) void {
+        self.term.deinit(std.testing.allocator);
+    }
+
+    fn frame(self: *FrameReadTest) Frame {
+        return .{ .t = &self.t };
+    }
+};
+
+test "the Pacer's reads take the mutex without the frame snapshot's demand handoff" {
+    // Frame.screen and Frame.cursorBlinking read through a *const State,
+    // which State.lockDemand tells apart by its type, not by the layer, so
+    // this holds in every build: with the layer off their demand acquire is
+    // the plain inner lock, as before the layer. They run on the renderer
+    // thread (PLAN.md §2.7 RQ8).
+    const testing = std.testing;
+    const role = thread_role.fixture(.renderer);
+    defer role.exit();
+    var reads: FrameReadTest = undefined;
+    try reads.init();
+    defer reads.deinit();
+    const state = &reads.state;
+
+    _ = reads.frame().screen();
+    try testing.expectEqual(reads.term.modes.get(.cursor_blinking), reads.frame().cursorBlinking());
+    // Neither read counted demand or bumped the handoff generation, and so
+    // neither woke a loop parked in yieldToDemand: unlockDemand's wake is in
+    // the one branch with the bump.
+    try testing.expectEqual(@as(u32, 0), state.demand.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), state.handoff_gen.load(.monotonic));
+
+    // The positive control: the frame snapshot's receiver, a *State, hands
+    // off. Its lock also shows both reads released the mutex: a read that
+    // kept it would make this a re-entry (PN1).
+    state.lockDemand();
+    try testing.expectEqual(@as(u32, 0), state.demand.load(.monotonic));
+    state.unlockDemand();
+    try testing.expectEqual(@as(u32, 1), state.handoff_gen.load(.monotonic));
+}
+
+test "isolated: the Pacer's reads record the demand acquire with the renderer role" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const testing = std.testing;
+    const isolated = @import("../sync/isolated.zig");
+    const symbolise = @import("../sync/symbolise.zig");
+    if (isolated.inChild()) {
+        // On the renderer thread a plain lock panics (PN3).
+        const role = thread_role.fixture(.renderer);
+        defer role.exit();
+        var reads: FrameReadTest = undefined;
+        try reads.init();
+        defer reads.deinit();
+        _ = reads.frame().screen();
+        _ = reads.frame().cursorBlinking();
+        return;
+    }
+    var child = try isolated.run(@src(), .own);
+    defer child.deinit();
+    if (child.timed_out or child.exit_code != isolated.exit_passed) {
+        std.debug.print("isolated parent: expected the child to exit successfully; exit code 0x{x}, its stderr's end:\n{s}\n", .{
+            child.exit_code, child.stderr[child.stderr.len -| 4000..],
+        });
+        return error.IsolatedChildFailed;
+    }
+
+    // The raw dump keeps each pair's acquire kind: exactly two pairs, both
+    // the demand acquire from the renderer.
+    const raw = try child.dir.?.read();
+    defer testing.allocator.free(raw);
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    _ = lines.next();
+    var pairs: usize = 0;
+    var demand_pairs: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        pairs += 1;
+        demand_pairs += @intFromBool(std.mem.endsWith(u8, line, " demand renderer"));
+    }
+    if (pairs != 2 or demand_pairs != 2) {
+        std.debug.print("isolated parent: expected two demand renderer pairs; the child's dump:\n{s}\n", .{raw});
+        return error.IsolatedChildCompare;
+    }
+
+    // And they name the two reads, each a row of the table (RQ16: their
+    // roles alone where this build checks no names).
+    var result = try isolated.compareChild(&child);
+    defer result.deinit();
+    const want: []const isolated.Pair = &.{
+        .{ .function = "src/renderer/Thread.zig:screen", .role = "renderer" },
+        .{ .function = "src/renderer/Thread.zig:cursorBlinking", .role = "renderer" },
+    };
+    const held = if (symbolise.names_checked)
+        result.report.passed() and result.holdsExactly(want)
+    else
+        result.holdsRoles(want);
+    if (!held) {
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        result.report.format(&w) catch {};
+        for (result.dumps) |d| w.print("-- {s}\n{s}", .{ d.name, d.text }) catch {};
+        std.debug.print("isolated parent: expected the compare to pass with the two reads\n{s}\n", .{w.buffered()});
+        return error.IsolatedChildCompare;
+    }
 }
 
 /// Schedules incremental terminal compression after renderer activity stops.

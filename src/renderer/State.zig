@@ -116,20 +116,47 @@ const handoff_timeout_ns = 1 * std.time.ns_per_ms;
 /// function whose code takes the demand acquire's return address, which
 /// inlined here is this forwarder's caller, the frame snapshot; the thread
 /// gate fails FORWARDER-NOT-INLINE otherwise.
-pub inline fn lockDemand(self: *State) void {
-    _ = self.demand.fetchAdd(1, .monotonic);
+///
+/// Only a `*State` caller, the frame snapshot, signals demand. A caller
+/// that only reads passes a `*const State` (the Pacer's reads,
+/// `Thread.Frame.screen` and `cursorBlinking`): it takes the demand acquire
+/// alone, with no demand count, no handoff generation and no wake, since
+/// those write State's own counters. With the layer off the demand acquire
+/// is the plain inner lock (`StateMutexOf(.off)`), so such a read is the
+/// plain lock it was before the layer; with the layer on it keeps PN3's
+/// demand kind and its caller's attribution. `unlockDemand` takes the same
+/// receiver.
+pub inline fn lockDemand(self: anytype) void {
+    const handoff = comptime signalsDemand(@TypeOf(self));
+    if (handoff) _ = self.demand.fetchAdd(1, .monotonic);
     self.mutex.demand();
-    const prev = self.demand.fetchSub(1, .monotonic);
-    assert(prev > 0);
+    if (handoff) {
+        const prev = self.demand.fetchSub(1, .monotonic);
+        assert(prev > 0);
+    }
 }
 
 /// Release `mutex` acquired via `lockDemand` (through the wrapper's
-/// `unlock`) and notify hot loops parked in `yieldToDemand` that the
-/// demanding waiter had its turn.
-pub fn unlockDemand(self: *State) void {
+/// `unlock`), with the receiver `lockDemand` took. A `*State` then notifies
+/// hot loops parked in `yieldToDemand` that the demanding waiter had its
+/// turn; a `*const State` read only unlocks.
+pub fn unlockDemand(self: anytype) void {
     self.mutex.unlock();
-    _ = self.handoff_gen.fetchAdd(1, .monotonic);
-    std.Thread.Futex.wake(&self.handoff_gen, 1);
+    if (comptime signalsDemand(@TypeOf(self))) {
+        _ = self.handoff_gen.fetchAdd(1, .monotonic);
+        std.Thread.Futex.wake(&self.handoff_gen, 1);
+    }
+}
+
+/// Whether a `lockDemand` receiver signals demand: a `*State` does (the
+/// frame snapshot), a `*const State` does not (a read).
+fn signalsDemand(comptime Receiver: type) bool {
+    return switch (Receiver) {
+        *State => true,
+        *const State => false,
+        else => @compileError("lockDemand and unlockDemand take a *State (the frame snapshot, " ++
+            "with the demand handoff) or a *const State (a read, without it), not " ++ @typeName(Receiver)),
+    };
 }
 
 /// Called by hot lock/unlock loops between critical sections, with
