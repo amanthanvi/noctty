@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 7.2
 <#
 .SYNOPSIS
 PLAN.md §3.5's working-set workloads: one portable copy of the receipt-bound measurement build on a private desktop

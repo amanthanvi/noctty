@@ -467,6 +467,12 @@ $workingSetRules = @(
         Mutation = @('? (long)handles : -1;', '? (long)handles : 0;')
     }
 )
+# The harness's floor is PowerShell 7.2 (.NET 6): its native layer calls Marshal.SetLastPInvokeError and
+# GetLastPInvokeError, which older .NET lacks (Greptile on #739). `#requires` is a comment token, which the rules'
+# comment-stripped text leaves out, so this reads the file's first line.
+$workingSetFirstLine = Get-Content -LiteralPath $workingSetScript -TotalCount 1
+if ($workingSetFirstLine -cne '#requires -Version 7.2') { throw "The working-set harness must require PowerShell 7.2 (.NET 6) for its native layer, not '$workingSetFirstLine'." }
+if (-not $workingSetText.Contains('Marshal.SetLastPInvokeError')) { throw 'The 7.2 floor is for Marshal.SetLastPInvokeError; update this check if the native layer no longer calls it.' }
 $workingSetMutations = 0
 foreach ($rule in $workingSetRules) {
     Assert-TextContract -Content $workingSetText -Pattern $rule.Pattern -Description $rule.Description -Context $workingSetScript
