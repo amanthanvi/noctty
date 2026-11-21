@@ -46,12 +46,13 @@ pub const Scope = enum {
 };
 
 /// The scope the test exe's own compares read the table in, and the one
-/// place this code names its tree. This is the control branch at the fork
-/// head, where the table was approved. A port of the layer to `stone-1a`
-/// sets `.@"1a"` here, and the 1B branch `.@"1b"`: nothing fails if a port
-/// forgets, since the isolated children's rows are `test` rows, which apply
-/// in every scope (test-harnesses.md, 2026-11-20 ISOLATED-CHILD-01).
-pub const tree_scope: Scope = .fork;
+/// place this code names its tree. This is phase 1A's merged tree
+/// (`stone-1a`), whose table is approved in scope 1a; the fork-head
+/// control branch read `.fork` here, and the 1B branch sets `.@"1b"`.
+/// Nothing fails if a port forgets, since the isolated children's rows are
+/// `test` rows, which apply in every scope (test-harnesses.md, 2026-11-20
+/// ISOLATED-CHILD-01).
+pub const tree_scope: Scope = .@"1a";
 
 pub const Kind = enum {
     bad_table,
