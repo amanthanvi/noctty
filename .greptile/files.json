@@ -92,7 +92,14 @@
         "src/sync/state_mutex.zig",
         "src/sync/thread_role.zig",
         "src/sync/recorder.zig",
-        "src/sync/dump.zig"
+        "src/sync/dump.zig",
+        "src/apprt/win32_settings.zig",
+        "src/apprt/win32/window_state.zig",
+        "src/apprt/win32/search_controls.zig",
+        "src/apprt/win32/palette_controller.zig",
+        "src/apprt/win32/test_support.zig",
+        "src/apprt/win32_terminal_accessibility.zig",
+        "src/apprt/win32_uia/widgets.zig"
       ]
     },
     {

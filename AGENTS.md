@@ -279,7 +279,8 @@ that govern each symbol you change, or that none does.
   with its runtime thread-role layer (`src/sync/state_mutex.zig`:
   `StateMutex`, the types of its carriers, `assertHeld`, the demand acquire
   `State.lockDemand` forwards to, the panics PN1 to PN7; the roles in
-  `src/sync/thread_role.zig`: `enter`, `fixture`, `assertWindowProc`; the
+  `src/sync/thread_role.zig`: `enter`, `fixture`, and `assertWindowProc`,
+  which every fork window and subclass procedure calls first; the
   pair recorder `src/sync/recorder.zig` and its dump `src/sync/dump.zig`;
   and a site it keys by build mode, `stream_handler.surfaceMessageWriter`'s
   calling convention).
