@@ -14144,6 +14144,11 @@ const dialog_test = struct {
     const WA_ACTIVE: usize = 1;
 
     fn run(desktop: *anyopaque, result: *anyerror!void, body: *const fn () anyerror!void) void {
+        // This desktop's UI thread from its first statement (test 9 wants an
+        // entry's role scope first): the Settings window is made and
+        // dispatched here, as the app's is on its main thread.
+        const role_scope = thread_role.enter(.ui);
+        defer role_scope.exit();
         if (SetThreadDesktop(desktop) == 0) {
             result.* = error.SkipZigTest;
             return;
@@ -14168,10 +14173,6 @@ const dialog_test = struct {
             keyboard = null;
             pinned.release();
         }
-        // This desktop's UI thread: the Settings window is made and
-        // dispatched here, as the app's is on its main thread.
-        const role_scope = thread_role.enter(.ui);
-        defer role_scope.exit();
         body() catch |err| {
             if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
             result.* = err;

@@ -176,6 +176,11 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
 
                 fn run(desktop: *anyopaque, result: *anyerror!void) void {
+                    // This desktop's UI thread from its first statement (test 9 wants an
+                    // entry's role scope first): the body's windows are made and
+                    // dispatched here, as the app's are on its main thread.
+                    const role_scope = thread_role.enter(.ui);
+                    defer role_scope.exit();
                     if (SetThreadDesktop(desktop) == 0) {
                         result.* = lastError();
                         return;
@@ -186,10 +191,6 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     // running the suite holds.
                     const keyboard = win32_input.TestingKeyboard.pinNone();
                     defer keyboard.release();
-                    // This desktop's UI thread: the body's windows are made
-                    // and dispatched here, as the app's are on its main thread.
-                    const role_scope = thread_role.enter(.ui);
-                    defer role_scope.exit();
                     body() catch |err| {
                         // The test fails at `return result` on the runner's thread;
                         // this trace shows which check failed.
