@@ -205,6 +205,11 @@ $script:DrainMs = 1000
 # 200,000 ms lock has already expired after the 300 s the series waits for).
 $script:DriverDeadlineMs = 1800000
 $script:StagingBoundMs = 300000
+# A hook that did not see the harness's own marked input may have been removed (Windows drops a low-level hook that
+# times out, without notice): the driver refuses the run with one of these, and the outer half keeps such a run failed
+# whatever input stop follows (Greptile on #741).
+$script:MouseHookMissed = 'The input watch''s mouse hook did not see the harness''s own unlock, so it may have been removed; the run is refused.'
+$script:KeyHookMissed = 'The input watch''s keyboard hook did not see the harness''s own key probe, so it may have been removed; the run is refused.'
 $script:RunBoundMs = 2100000
 # win32/consts.zig WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT and WM_WINHOSTTY_RENDER_TRACE_TARGET (WM_APP + 8 and + 9), as
 # bench-windows.ps1 names them.
@@ -748,9 +753,10 @@ public static class FramePacingNative {
                 if ((outcome = Halt(cancel, real, "real-input-before-unlock")) != null) return;
                 if (SendInput(1, UnlockInput(marker), Marshal.SizeOf<Input>()) != 1) { outcome = "unlock-not-inserted"; return; }
                 long now = WaitTickMove(before, 1000);
+                // The unlock's tick is the harness's own even when the hook missed it (Greptile on #741, as the probe).
+                if (now >= 0 && now != before) tick = now;
                 bool hookSaw = WaitForSingleObject(mouse, 1000) == 0;
                 if ((outcome = ProbeSeen("unlock", before, now, hookSaw)) != null) return;
-                tick = now;
                 if (LastInputTick() != now) { outcome = "input-before-foreground"; return; }
                 if ((outcome = Halt(cancel, real, "real-input-before-foreground")) != null) return;
                 SetForegroundWindow(hwnd);
@@ -795,9 +801,11 @@ public static class FramePacingNative {
                 if ((outcome = Halt(cancel, real, "real-input-before-key-probe")) != null) return;
                 if (SendInput(2, KeyProbeInput(marker), Marshal.SizeOf<KeyInput>()) != 2) { outcome = "key-probe-not-inserted"; return; }
                 long now = WaitTickMove(before, 1000);
+                // The tick the probe moved is the harness's own even when the hook missed it (Greptile on #741), so
+                // the outer half never reads it as a user's input and a dead hook stays a failure.
+                if (now >= 0 && now != before) tick = now;
                 bool hookSaw = WaitForSingleObject(key, 1000) == 0;
                 if ((outcome = ProbeSeen("key-probe", before, now, hookSaw)) != null) return;
-                tick = now;
                 outcome = "ok";
             } finally { CloseOwn(real); CloseOwn(key); }
         });
@@ -1396,7 +1404,7 @@ function Invoke-FramePacingForeground($Port, $Ticks, [IntPtr] $HostWindow, [int]
     # A mouse hook that never saw the harness's own marked unlock may have been removed (Windows drops a low-level
     # hook that times out, silently), and then nothing sees a returning user's mouse: the run is refused outright,
     # never measured and never merely inconclusive (CodeRabbit and the lead on #741).
-    if ([string]::Equals([string]$result.Outcome, 'unlock-not-seen-by-hook', [StringComparison]::Ordinal)) { throw 'The input watch''s mouse hook did not see the harness''s own unlock, so it may have been removed; the run is refused.' }
+    if ([string]::Equals([string]$result.Outcome, 'unlock-not-seen-by-hook', [StringComparison]::Ordinal)) { throw $script:MouseHookMissed }
     return [string]$result.Outcome
 }
 # The keyboard hook's proof of life, once the copy is in front (the lead on #741): the gate first, then the bounded
@@ -1406,7 +1414,7 @@ function Invoke-FramePacingKeyProbe($Port, $Ticks, [IntPtr] $HostWindow, [int] $
     Assert-FramePacingInputGate $Port $Ticks 'the keyboard probe'
     $result = $Port.KeyProbe($HostWindow, $NocttyPid, $script:ForegroundBoundMs, [long]$Ticks.Unlock)
     if ([long]$result.ProbeTick -ge 0) { $Ticks.Unlock = [long]$result.ProbeTick }
-    if ([string]::Equals([string]$result.Outcome, 'key-probe-not-seen-by-hook', [StringComparison]::Ordinal)) { throw 'The input watch''s keyboard hook did not see the harness''s own key probe, so it may have been removed; the run is refused.' }
+    if ([string]::Equals([string]$result.Outcome, 'key-probe-not-seen-by-hook', [StringComparison]::Ordinal)) { throw $script:KeyHookMissed }
     return [string]$result.Outcome
 }
 # The production ports: a driver's reads the series' watch through its event handles ($Watch, $MouseWatch and
@@ -2291,7 +2299,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     $driverError = if ($null -ne $record -and $record.Error) { [string]$record.Error } else { $null }
     $status = Get-FramePacingRunStatus @($guardFailures) @($outerFailures) $driverExit $driverError @($problems)
     $stop = if ($notLaunched) { "the visible driver was not launched: $notLaunched" } elseif ($inputStopped) { $inputStopped } else { $null }
-    $stopFailure = Get-FramePacingInputStop $guardFailures $outerFailures $outerError $stop
+    $stopFailure = Get-FramePacingInputStop $guardFailures $outerFailures $outerError $stop (Test-FramePacingHookMissed $driverError)
     if ($stopFailure) { $status = 'inconclusive'; $outerFailures = @($stopFailure); $problems = @() }
     return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $outerFailures + $problems); Record = $record; LatchToKillMs = $latchToKillMs }
 }
@@ -2361,12 +2369,19 @@ function Get-FramePacingSilencedStatus([string] $Status, $Silence) {
 # A visible run stopped for the session's sake (a driver the gate or the staging bound kept from launching, or one
 # whose job the outer half closed on real input) is inconclusive only when that stop was the run's sole problem
 # (CodeRabbit on #741): a tripped guard still wins, and an outer failure beside it, such as an owned-job cleanup that
-# failed, keeps the run failed with that failure on record. Returns the run's one failure line, or null when
-# Get-FramePacingRunStatus's status stands. Pure, so the contract tables it.
-function Get-FramePacingInputStop([string[]] $GuardFailures, [string[]] $OuterFailures, [string] $OuterError, [string] $Stop) {
-    if (-not $Stop -or @($GuardFailures).Count -gt 0) { return $null }
+# failed, keeps the run failed with that failure on record. So does a driver that refused the run because a hook
+# missed the harness's own marked input ($HookMissed, Greptile on #741): input after that is no reason to call a
+# possibly removed hook inconclusive. Returns the run's one failure line, or null when Get-FramePacingRunStatus's
+# status stands. Pure, so the contract tables it.
+function Get-FramePacingInputStop([string[]] $GuardFailures, [string[]] $OuterFailures, [string] $OuterError, [string] $Stop, [bool] $HookMissed) {
+    if (-not $Stop -or $HookMissed -or @($GuardFailures).Count -gt 0) { return $null }
     if (@($OuterFailures | Where-Object { -not [string]::Equals($_, $OuterError, [StringComparison]::Ordinal) }).Count -gt 0) { return $null }
     return "inconclusive: $Stop"
+}
+
+# Whether a driver refused its run because a hook missed the harness's own marked input (Greptile on #741). Pure.
+function Test-FramePacingHookMissed([string] $DriverError) {
+    return [string]::Equals($DriverError, $script:MouseHookMissed, [StringComparison]::Ordinal) -or [string]::Equals($DriverError, $script:KeyHookMissed, [StringComparison]::Ordinal)
 }
 
 # A run's status: a tripped guard first, then the outer half's own failures; a driver that exited 2 with an

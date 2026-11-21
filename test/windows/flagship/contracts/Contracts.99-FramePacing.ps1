@@ -170,7 +170,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'a mouse hook that never saw the harness''s own unlock, or a keyboard hook that never saw its key probe, refuses the run outright, never only inconclusive (CodeRabbit and the lead on #741)'
-        Pattern = '(?s)if \(\[string\]::Equals\(\[string\]\$result\.Outcome, ''unlock-not-seen-by-hook'', \[StringComparison\]::Ordinal\)\) \{ throw ''The input watch''''s mouse hook did not see [^\r\n]+\}\s+return \[string\]\$result\.Outcome.*?if \(\[string\]::Equals\(\[string\]\$result\.Outcome, ''key-probe-not-seen-by-hook'', \[StringComparison\]::Ordinal\)\) \{ throw ''The input watch''''s keyboard hook did not see [^\r\n]+\}\s+return \[string\]\$result\.Outcome'
+        Pattern = '(?s)\$script:MouseHookMissed = ''The input watch''''s mouse hook did not see the harness''''s own unlock[^\r\n]+\s+\$script:KeyHookMissed = ''The input watch''''s keyboard hook did not see the harness''''s own key probe[^\r\n]+.*?if \(\[string\]::Equals\(\[string\]\$result\.Outcome, ''unlock-not-seen-by-hook'', \[StringComparison\]::Ordinal\)\) \{ throw \$script:MouseHookMissed \}\s+return \[string\]\$result\.Outcome.*?if \(\[string\]::Equals\(\[string\]\$result\.Outcome, ''key-probe-not-seen-by-hook'', \[StringComparison\]::Ordinal\)\) \{ throw \$script:KeyHookMissed \}\s+return \[string\]\$result\.Outcome'
         Mutation = @("if ([string]::Equals([string]`$result.Outcome, 'key-probe-not-seen-by-hook', [StringComparison]::Ordinal)) { throw", "if (`$false) { throw")
     }
     @{
@@ -180,8 +180,18 @@ $framePacingRules = @(
     }
     @{
         Description = 'the outer half''s gate runs before each visible driver''s launch, and a break, a staging overrun or a job closed on real input is inconclusive when it is the run''s only problem (CodeRabbit, Opus and Sol on #741)'
-        Pattern = '(?s)if \(\$Visible -and -not \$notLaunched\) \{\s+\$notLaunched = Test-FramePacingInputGate \(New-FramePacingOuterPort\) [^\r\n]+\s+\}\s+if \(\$notLaunched\) \{ throw "INCONCLUSIVE: \$notLaunched\." \}\s+\$pi = \[FramePacingNative\]::LaunchDriver\(.*?\$stop = if \(\$notLaunched\) \{ [^\r\n]+ \} elseif \(\$inputStopped\) \{ \$inputStopped \} else \{ \$null \}\s+\$stopFailure = Get-FramePacingInputStop \$guardFailures \$outerFailures \$outerError \$stop\s+if \(\$stopFailure\) \{ \$status = ''inconclusive''; \$outerFailures = @\(\$stopFailure\); \$problems = @\(\) \}'
+        Pattern = '(?s)if \(\$Visible -and -not \$notLaunched\) \{\s+\$notLaunched = Test-FramePacingInputGate \(New-FramePacingOuterPort\) [^\r\n]+\s+\}\s+if \(\$notLaunched\) \{ throw "INCONCLUSIVE: \$notLaunched\." \}\s+\$pi = \[FramePacingNative\]::LaunchDriver\(.*?\$stop = if \(\$notLaunched\) \{ [^\r\n]+ \} elseif \(\$inputStopped\) \{ \$inputStopped \} else \{ \$null \}\s+\$stopFailure = Get-FramePacingInputStop \$guardFailures \$outerFailures \$outerError \$stop \(Test-FramePacingHookMissed \$driverError\)\s+if \(\$stopFailure\) \{ \$status = ''inconclusive''; \$outerFailures = @\(\$stopFailure\); \$problems = @\(\) \}'
         Mutation = @('if ($notLaunched) { throw "INCONCLUSIVE: $notLaunched." }', '')
+    }
+    @{
+        Description = 'the native key probe and unlock keep the tick their input moved as the harness''s own before the hook''s verdict can return early, so a dead hook is never read as a user''s input (Greptile on #741)'
+        Pattern = '(?s)long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;.*?long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(key, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("key-probe", before, now, hookSaw\)\) != null\) return;'
+        Mutation = @('if (now >= 0 && now != before) tick = now;', '')
+    }
+    @{
+        Description = 'a run a hook-miss refusal failed stays failed whatever input stop follows (Greptile on #741)'
+        Pattern = '\$stopFailure = Get-FramePacingInputStop \$guardFailures \$outerFailures \$outerError \$stop \(Test-FramePacingHookMissed \$driverError\)'
+        Mutation = @('$stop (Test-FramePacingHookMissed $driverError)', '$stop $false')
     }
     @{
         Description = 'nothing but the job-membership check and the environment''s restore comes between the driver''s launch and the first supervision wait (Opus on #741, round 6: G1, a delay before the deadline, as the control)'
@@ -385,7 +395,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the unlock must be seen twice before the foreground: a valid tick that moved, and the mouse hook''s sight of the marked event; then the tick is read again and the watch and cancellation checked, and activation is waited for before "refused" (CodeRabbit, Sol and the lead on #741)'
-        Pattern = '(?s)if \(SendInput\(1, UnlockInput\(marker\), Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+tick = now;\s+if \(LastInputTick\(\) != now\) \{ outcome = "input-before-foreground"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-foreground"\)\) != null\) return;\s+SetForegroundWindow\(hwnd\);\s+Responsive\(hwnd, 500\);\s+var activation = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+while \(GetForegroundWindow\(\) != hwnd && activation\.ElapsedMilliseconds < 500\) \{\s+if \(\(outcome = Halt\(cancel, real, "real-input-during-activation"\)\) != null\) return;\s+Thread\.Sleep\(10\);\s+\}\s+outcome = GetForegroundWindow\(\) == hwnd \? "ok" : "refused";'
+        Pattern = '(?s)if \(SendInput\(1, UnlockInput\(marker\), Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+if \(LastInputTick\(\) != now\) \{ outcome = "input-before-foreground"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-foreground"\)\) != null\) return;\s+SetForegroundWindow\(hwnd\);\s+Responsive\(hwnd, 500\);\s+var activation = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+while \(GetForegroundWindow\(\) != hwnd && activation\.ElapsedMilliseconds < 500\) \{\s+if \(\(outcome = Halt\(cancel, real, "real-input-during-activation"\)\) != null\) return;\s+Thread\.Sleep\(10\);\s+\}\s+outcome = GetForegroundWindow\(\) == hwnd \? "ok" : "refused";'
         Mutation = @('if ((outcome = ProbeSeen("unlock", before, now, hookSaw)) != null) return;', '')
     }
     @{
@@ -395,7 +405,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the key probe checks the copy is in front, the tick and the watch right before its one input, then needs a valid tick that moved and the keyboard hook''s sight of the marked key (the lead and CodeRabbit on #741)'
-        Pattern = '(?s)WaitForSingleObject\(key, 0\);[^\r\n]*\s+if \(GetForegroundWindow\(\) != hwnd\) \{ outcome = "not-in-front"; return; \}\s+long before = LastInputTick\(\);\s+if \(before < 0 \|\| before != expectedTick\) \{ outcome = "input-before-key-probe"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-key-probe"\)\) != null\) return;\s+if \(SendInput\(2, KeyProbeInput\(marker\), Marshal\.SizeOf<KeyInput>\(\)\) != 2\) \{ outcome = "key-probe-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);\s+bool hookSaw = WaitForSingleObject\(key, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("key-probe", before, now, hookSaw\)\) != null\) return;\s+tick = now;\s+outcome = "ok";'
+        Pattern = '(?s)WaitForSingleObject\(key, 0\);[^\r\n]*\s+if \(GetForegroundWindow\(\) != hwnd\) \{ outcome = "not-in-front"; return; \}\s+long before = LastInputTick\(\);\s+if \(before < 0 \|\| before != expectedTick\) \{ outcome = "input-before-key-probe"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-key-probe"\)\) != null\) return;\s+if \(SendInput\(2, KeyProbeInput\(marker\), Marshal\.SizeOf<KeyInput>\(\)\) != 2\) \{ outcome = "key-probe-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(key, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("key-probe", before, now, hookSaw\)\) != null\) return;\s+outcome = "ok";'
         Mutation = @('if ((outcome = ProbeSeen("key-probe", before, now, hookSaw)) != null) return;', '')
     }
     @{
@@ -900,7 +910,7 @@ foreach ($control in @(
         @{ Name = 'Opus''s N1, a SetForegroundWindow before the tick check'; Old = '                long before = LastInputTick();'; New = "                SetForegroundWindow(hwnd);`n                long before = LastInputTick();" }
         @{ Name = 'a second SetForegroundWindow on the guarded line'; Old = '                SetForegroundWindow(hwnd);'; New = '                SetForegroundWindow(hwnd); SetForegroundWindow(hwnd);' }
         @{ Name = 'the check before the foreground dropped'; Old = "                if ((outcome = Halt(cancel, real, `"real-input-before-foreground`")) != null) return;`n                SetForegroundWindow(hwnd);"; New = '                SetForegroundWindow(hwnd);' }
-        @{ Name = 'an attach added away from any call'; Old = '                tick = now;'; New = "                tick = now;`n                AttachThreadInput(GetCurrentThreadId(), 0, false);" }
+        @{ Name = 'an attach added away from any call'; Old = '                if (now >= 0 && now != before) tick = now;'; New = "                if (now >= 0 && now != before) tick = now;`n                AttachThreadInput(GetCurrentThreadId(), 0, false);" }
         @{ Name = 'a BringWindowToTop behind its own check'; Old = '                SetForegroundWindow(hwnd);'; New = "                SetForegroundWindow(hwnd);`n                if ((outcome = Halt(cancel, real, `"real-input-before-foreground`")) != null) return;`n                BringWindowToTop(hwnd);" }
         @{ Name = 'a spaced SetForegroundWindow in IsForeground (CodeRabbit)'; Old = 'public static bool IsForeground(IntPtr hwnd) { return GetForegroundWindow() == hwnd; }'; New = 'public static bool IsForeground(IntPtr hwnd) { SetForegroundWindow (hwnd); return GetForegroundWindow() == hwnd; }' }
     )) {
@@ -910,7 +920,7 @@ foreach ($control in @(
 }
 # The unlock's tick and the probe's are each set once on their worker, from the observed tick (Sol on #741: a late
 # re-read must not replace it). The control: a re-read before the outcome.
-function Test-FramePacingNativeTick([string] $Text) { return [regex]::Matches($Text, '(?<![\w.$])(?<!long )tick = (?!\$)').Count -eq 2 -and [regex]::Matches($Text, '(?m)^                tick = now;$').Count -eq 2 }
+function Test-FramePacingNativeTick([string] $Text) { return [regex]::Matches($Text, '(?<![\w.$])(?<!long )tick = (?!\$)').Count -eq 2 -and [regex]::Matches($Text, '(?m)^                if \(now >= 0 && now != before\) tick = now;$').Count -eq 2 }
 if (-not (Test-FramePacingNativeTick $framePacingText)) { throw 'The native worker must set the unlock''s tick once, from the observed tick.' }
 if (Test-FramePacingNativeTick ($framePacingText.Replace('                outcome = GetForegroundWindow() == hwnd ? "ok" : "refused";', "                tick = LastInputTick();`n                outcome = GetForegroundWindow() == hwnd ? `"ok`" : `"refused`";"))) { throw 'The native-tick check accepted a re-read before the outcome.' }
 # The hooks see nothing but each event's flags and extra info and keep nothing but the counts (the lead, Sol and Opus
@@ -1093,8 +1103,8 @@ $framePacingMemberPins = @(
         @{ Signature = 'public static IntPtr OpenMouseWatch(string eventName)'; Sha256 = '159b7ce4c47631883241b4759dc41fbe53a4ce168e17e07be1aa13b63e6c34ed' }
         @{ Signature = 'public static IntPtr OpenKeyWatch(string eventName)'; Sha256 = '73d5af8719166d57a9bd0fb47a3045750b85fb82f33d37b69cbbaf5f05c19c15' }
         @{ Signature = 'public static bool RealInputSignalled(IntPtr watch)'; Sha256 = '1921ddf3bf09c7aea7a5b5710f7f16f4006b309ed7b9206a0bb8940c49c065fc' }
-        @{ Signature = 'public static string Foreground(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr mouseWatch, IntPtr marker, out long unlockTick)'; Sha256 = 'e2438b5273915fbf5248b514e5f8d0250aab5d9a2092daad0cfde4e1c36407a5' }
-        @{ Signature = 'public static string KeyProbe(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr keyWatch, IntPtr marker, out long probeTick)'; Sha256 = '777289a7ab9f48acfd8c7d9f58791c93e721247b90682790ec58b886d9cc62fb' }
+        @{ Signature = 'public static string Foreground(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr mouseWatch, IntPtr marker, out long unlockTick)'; Sha256 = '736b46b6c11c9e3faa5c7dd32776b200c37d67df60f6cc246d2dadd997de40af' }
+        @{ Signature = 'public static string KeyProbe(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr keyWatch, IntPtr marker, out long probeTick)'; Sha256 = 'd54a1c5579311d2b943f36453928d790aca899f364952249faebf760ed515548' }
         @{ Signature = 'static string Halt(ManualResetEvent cancel, IntPtr watch, string why)'; Sha256 = '42855e03813a7961e466546f15dcf67d8d454dd028bff3a74af4ee7aaf6a62b6' }
         @{ Signature = 'static long WaitTickMove(long before, int ms)'; Sha256 = '32ee3d13b32a364382c9b7165f6ce063514f2e25f4ed0074966adcae16476b3c' }
         @{ Signature = 'public static string ProbeSeen(string what, long before, long now, bool hookSaw)'; Sha256 = '3f9f59b1e4ce02d654024eb96be86aabf2ff85ae1df0a9fa462086583da1380c' }
@@ -1253,13 +1263,17 @@ $framePacingConstant = { param([string] $Name) [long]([regex]::Match($framePacin
 if ((& $framePacingConstant 'RunBoundMs') -ne (& $framePacingConstant 'DriverDeadlineMs') + (& $framePacingConstant 'StagingBoundMs')) { throw 'RunBoundMs must be DriverDeadlineMs plus StagingBoundMs.' }
 if (($framePacingText.Replace('[ValidateRange(0, 3600)] [int] $QuietWaitSeconds = 900,', "[ValidateRange(0, 3600)] [int] `$QuietWaitSeconds = 900,`n    [ValidateRange(0, 3600)] [int] `$MinIdleSeconds = 0,")) -notmatch '(?i)\[int\]\s*\$MinIdleSeconds') { throw 'The idle-parameter control changed nothing.' }
 $framePacingSaved = @{}
-foreach ($name in $framePacingConstantNames + @('Utf8')) {
+foreach ($name in $framePacingConstantNames + @('Utf8', 'MouseHookMissed', 'KeyHookMissed')) {
     $existing = Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue
     $framePacingSaved[$name] = [pscustomobject]@{ Existed = $null -ne $existing; Value = $(if ($null -ne $existing) { $existing.Value } else { $null }) }
 }
 try {
     . ([scriptblock]::Create(($framePacingConstantLines -join "`n")))
     $script:Utf8 = [Text.UTF8Encoding]::new($false)
+    # The two hook-miss refusals, by name (Greptile on #741), which the driver throws and the outer half recognizes.
+    $framePacingHookLines = @([regex]::Matches($framePacingText, "(?m)^\`$script:(?:MouseHookMissed|KeyHookMissed) = '(?:[^']|'')*'[ \t]*$") | ForEach-Object { $_.Value.Trim() })
+    if ($framePacingHookLines.Count -ne 2) { throw 'The frame-pacing harness must name each hook-miss refusal once.' }
+    . ([scriptblock]::Create(($framePacingHookLines -join "`n")))
     $framePacingActual = ($framePacingConstantNames | ForEach-Object { "$_=$((Get-Variable -Scope Script -Name $_).Value)" }) -join ' '
     if (-not (Test-FramePacingOrdinal $framePacingActual $framePacingPinned)) { throw "The frame-pacing workload's constants changed ($framePacingActual); runs before and after the change are not comparable." }
     $framePacingCases = & {
@@ -1267,7 +1281,7 @@ try {
         # a test without them passes code the harness throws on).
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
-        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputStop', 'Get-FramePacingSupervisionStop', 'Read-FramePacingRunRecord', 'Get-FramePacingTickStop', 'Get-FramePacingFinalInput', 'Complete-FramePacingSeries', 'Get-FramePacingSilencedStatus', 'Get-FramePacingHookSilence', 'Get-FramePacingLockShortfall', 'Invoke-FramePacingKeyProbe', 'Test-FramePacingConsoleTyped', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
+        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputStop', 'Get-FramePacingSupervisionStop', 'Test-FramePacingHookMissed', 'Read-FramePacingRunRecord', 'Get-FramePacingTickStop', 'Get-FramePacingFinalInput', 'Complete-FramePacingSeries', 'Get-FramePacingSilencedStatus', 'Get-FramePacingHookSilence', 'Get-FramePacingLockShortfall', 'Invoke-FramePacingKeyProbe', 'Test-FramePacingConsoleTyped', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
             . ([scriptblock]::Create((Get-FramePacingFunctionText $framePacingAst $name 'bench-frame-pacing.ps1')))
         }
         $cases = [Collections.Generic.List[string]]::new()
@@ -1718,6 +1732,39 @@ try {
         & { . ([scriptblock]::Create($silencedControl)); if ($null -eq (Get-FramePacingSilencedMiss)) { throw 'The silenced-status cases accepted round 5''s mapping, which fails every silenced run.' } }
         $cases.Add("silenced status ($($silencedCases.Count) cases and a tick-only stop before the probe; round 5's mapping as the control)")
 
+        # A keyboard hook that misses the harness's own probe (Greptile on #741), through the outer verdict: a stand-in
+        # port whose probe moved the tick (200 to 300) but whose hook did not see it, as the native reports it. The
+        # wrapper keeps 300 as the harness's tick and refuses; the outer half then sees the tick where the harness left
+        # it, and even with a later tick move (a user's input, unseen by the dead hook) the run stays failed. The
+        # control: a stop that ignores the hook failure, which calls the later case inconclusive.
+        function Get-FramePacingHookMissMiss {
+            $port = [pscustomobject]@{ Kind = 'stand-in' }
+            Add-Member -InputObject $port -MemberType ScriptMethod -Name RealInputSeen -Value { $false }
+            Add-Member -InputObject $port -MemberType ScriptMethod -Name LastInputTick -Value { [long]200 }
+            Add-Member -InputObject $port -MemberType ScriptMethod -Name KeyProbe -Value { param($HostWindow, $OwnerPid, $BoundMs, $ExpectedTick) [pscustomobject]@{ Outcome = 'key-probe-not-seen-by-hook'; ProbeTick = [long]300 } }
+            $ticks = [ordered]@{ Series = [long]100; Unlock = [long]200; Checks = [Collections.Generic.List[object]]::new() }
+            $thrown = $null
+            try { [void](Invoke-FramePacingKeyProbe $port $ticks ([IntPtr]1) 1) } catch { $thrown = $_.Exception.Message }
+            if (-not (Test-FramePacingOrdinal $thrown $script:KeyHookMissed) -or $ticks.Unlock -ne 300) { return "the probe's wrapper: thrown '$thrown', tick $($ticks.Unlock)" }
+            $record = [pscustomobject]@{ Foreground = 'ok'; KeyProbe = $null; Error = $thrown; InputTicks = [pscustomobject]@{ Unlock = $ticks.Unlock } }
+            foreach ($tickNow in @([long]300, [long]310)) {
+                $stop = Get-FramePacingTickStop $tickNow ([long]$record.InputTicks.Unlock)
+                $status = Get-FramePacingRunStatus @() @() 1 $thrown @("error: $thrown")
+                if (Get-FramePacingInputStop @() @() $null $stop (Test-FramePacingHookMissed $record.Error)) { $status = 'inconclusive' }
+                $status = Get-FramePacingSilencedStatus $status (Get-FramePacingHookSilence $record 4 5 2 2 0)
+                if (-not (Test-FramePacingOrdinal $status 'failed')) { return "a dead keyboard hook with the tick at $($tickNow): $status" }
+            }
+            if (-not (Test-FramePacingHookMissed $script:MouseHookMissed) -or (Test-FramePacingHookMissed 'INCONCLUSIVE: x')) { return 'the hook-miss test is wrong' }
+            return $null
+        }
+        $hookMissMiss = Get-FramePacingHookMissMiss
+        if ($hookMissMiss) { throw "A dead hook through the outer verdict: $hookMissMiss." }
+        $hookMissStopText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingInputStop' 'bench-frame-pacing.ps1'
+        $hookMissControl = $hookMissStopText.Replace('if (-not $Stop -or $HookMissed -or', 'if (-not $Stop -or')
+        if ([string]::Equals($hookMissControl, $hookMissStopText, [StringComparison]::Ordinal)) { throw 'The hook-miss control changed nothing.' }
+        & { . ([scriptblock]::Create($hookMissControl)); if ($null -eq (Get-FramePacingHookMissMiss)) { throw 'The dead-hook cases accepted a stop that hides the hook failure.' } }
+        $cases.Add('dead hook (a stand-in keyboard hook that misses the probe stays failed, with the tick where the probe left it and after a later move; a stop that hides it as the control)')
+
         # Input the hooks did not see, from the tick (the lead and Sol on #741, round 6): the expected tick passes;
         # another, or an unreadable one, stops. The series' final reading: the count only when the watch stopped, the
         # tick against the baseline.
@@ -1891,13 +1938,13 @@ public static class $driverStubName {
                 $this.ForegroundCalls++
                 $native = $this.Native
                 $why = $native::ProbeSeen('unlock', 100, 200, ($native::WaitForSingleObject($this.Mouse, 0) -eq 0))
-                [pscustomobject]@{ Outcome = $(if ($why) { $why } else { 'ok' }); UnlockTick = $(if ($why) { -1 } else { 200 }) }
+                [pscustomobject]@{ Outcome = $(if ($why) { $why } else { 'ok' }); UnlockTick = 200 }
             }
             Add-Member -InputObject $port -MemberType ScriptMethod -Name KeyProbe -Value {
                 param($HostWindow, $OwnerPid, $BoundMs, $ExpectedTick)
                 $native = $this.Native
                 $why = $native::ProbeSeen('key-probe', 200, 300, ($native::WaitForSingleObject($this.Key, 0) -eq 0))
-                [pscustomobject]@{ Outcome = $(if ($why) { $why } else { 'ok' }); ProbeTick = $(if ($why) { -1 } else { 300 }) }
+                [pscustomobject]@{ Outcome = $(if ($why) { $why } else { 'ok' }); ProbeTick = 300 }
             }
             return $port
         }

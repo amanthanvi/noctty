@@ -1738,8 +1738,12 @@ read; then the summary. Input after the unhook reaches no copy. A visible
 run is never complete without the keyboard probe's "ok": a run whose
 foreground was taken without one stops the series as inconclusive, never
 failed, and its line names the cause the driver recorded (a refusal, or
-input the hooks did not see). Only a hook count that did not move, which may
-mean Windows removed the hook, fails the run. A
+input the hooks did not see). Only a hook that missed the harness's own
+marked input fails the run, as Windows may have removed it: a count that did
+not move, or the driver's refusal when a hook did not see the unlock or the
+probe. Such a run stays failed whatever input stop follows, and the tick the
+unlock or the probe moved is kept as the harness's own even when the hook
+missed it, so it is never read as a user's input. A
 `run.json` the job's close cut short reads as no record: a run stopped for
 real input is then inconclusive, any other run failed, and the series still
 writes `pacing.json`. A staging failure is a
