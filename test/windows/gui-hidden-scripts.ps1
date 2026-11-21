@@ -299,6 +299,10 @@ $boundRefuses = [ordered]@{
     'Start-Job of an unresolved positional path' = 'Start-Job $script'
     'Start-ThreadJob of an unresolved positional path' = 'Start-ThreadJob $script'
     'Start-Job of an unresolved file before an initialization block' = 'Start-Job $script { 1 }'
+    # Sol on #740: a PowerShell found by a wildcard or fuzzy Get-Command is an executable the walker cannot name.
+    'pwsh found by Get-Command with a ? wildcard, then -File' = '$p = (Get-Command -Name "pwsh.ex?" -CommandType Application | Select-Object -First 1).Source; & $p -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    'pwsh found by Get-Command pwsh*, then -File' = '& (Get-Command pwsh* | Select-Object -First 1).Source -File (Join-Path $PSScriptRoot ''child.ps1'')'
+    'pwsh found by a fuzzy Get-Command, then -File' = '$p = (Get-Command -UseFuzzyMatching pwsh).Source; & $p -File (Join-Path $PSScriptRoot ''child.ps1'')'
     'Invoke-Command of an unresolved positional path after -ComputerName' = 'Invoke-Command -ComputerName localhost $script'
     'Add-Type with a splat' = 'Add-Type @typeArguments'
     'Add-Type -LiteralPath of an unresolved path' = 'Add-Type -LiteralPath $source'
@@ -432,6 +436,24 @@ $headReader = {
 $deletedList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $headReader -BaseReader $workingReader
 Assert-True ($deletedList -ccontains $undoPath) 'A leaf the change deletes must stay in the GUI list through the base tree.'
 Assert-True (Get-CiGuiSelection -ChangedPaths @($undoPath) -GuiList $deletedList) 'Deleting a closure member must select the suite.'
+
+# A leaf that starts a PowerShell found by a wildcard Get-Command, with -File of a child only it reaches: the list
+# cannot be computed (the edge is unresolved), so the selection runs the suite for a change to that child alone (Sol on
+# #740: the walk omitted the child and a child-only change gave gui=false).
+$wildChild = 'test/windows/interactive-win11-wildcard-child.ps1'
+$wildReader = {
+    param([string] $RepoPath)
+    if ($RepoPath -ceq 'test/windows/interactive-win11-smoke.ps1') { return (& $workingReader $RepoPath) + "`n" + '$p = (Get-Command -Name "pwsh.ex?" -CommandType Application | Select-Object -First 1).Source; & $p -NoProfile -File (Join-Path $PSScriptRoot ''interactive-win11-wildcard-child.ps1'')' + "`n" }
+    if ($RepoPath -ceq $wildChild) { return '1' }
+    return & $workingReader $RepoPath
+}.GetNewClosure()
+$wildThrew = $false
+try { [void](Get-CiGuiList -RepoRoot $repoRoot -HeadReader $wildReader -BaseReader $workingReader) } catch { $wildThrew = $true }
+Assert-True $wildThrew 'A leaf that runs a wildcard-found PowerShell with -File must make the GUI list fail, so the selection runs the suite.'
+$wildSelected = & {
+    try { $l = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $wildReader -BaseReader $workingReader; Get-CiGuiSelection -ChangedPaths @($wildChild) -GuiList $l } catch { $true }
+}
+Assert-True ($wildSelected -eq $true) 'A change only to the wildcard-launched child must select the GUI suite (through the selection''s fallback).'
 
 # A build input the plan spells with backslashes (the plan contract takes any path that exists) selects the suite
 # under either spelling of a change, since git reports '/' (CodeRabbit on #740: the list kept the backslash form, the

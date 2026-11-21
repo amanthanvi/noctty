@@ -395,6 +395,14 @@ function Resolve-CiScriptValue {
                 }
                 if ($nameNode -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return @{ Kind = 'native'; Value = $null } }
                 $target = $nameNode.Value
+                # A wildcard name (`pwsh*`, `pwsh.ex?`, `[p]wsh.exe`) or a fuzzy lookup finds an executable the walker
+                # cannot name, so it is an unknown executable: its -File or -Command arguments leave the edge unresolved
+                # (Sol on #740: `(Get-Command "pwsh.ex?" -CommandType Application).Source` read as a known native
+                # program, and its -File child dropped out of the closure without a problem).
+                if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($target) -or
+                    @($elements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -in @('UseFuzzyMatching', 'UseAbbreviationExpansion') }).Count -gt 0) {
+                    return @{ Kind = 'native'; Value = $null }
+                }
                 if ((Test-CiScriptTargetKind $target) -in @('script', 'batch')) { return $unresolved }
                 return @{ Kind = 'native'; Value = ($target -split '[\\/]')[-1].ToLowerInvariant() }
             }
