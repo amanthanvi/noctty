@@ -345,6 +345,26 @@ pub fn expectPanicPairs(src: std.builtin.SourceLocation, text: []const u8, pairs
     }
 }
 
+/// A child that breaks no policy and whose pairs are all in the table
+/// (acceptance test 2): it exits successfully, and the compare of its own
+/// directory passes with exactly `pairs` (their roles alone where this
+/// build's tests check no names, RQ16).
+pub fn expectPairs(src: std.builtin.SourceLocation, pairs: []const Pair) !void {
+    var child = try run(src, .own);
+    defer child.deinit();
+    try expectExited(&child, src);
+    var result = try compareChild(&child);
+    defer result.deinit();
+    const held = if (symbolise.names_attributed)
+        result.report.passed() and result.holdsExactly(pairs)
+    else
+        result.holdsRoles(pairs);
+    if (!held) {
+        result.explain(&child, "expected the child's compare to pass with exactly its pairs");
+        return error.IsolatedChildCompare;
+    }
+}
+
 /// An off-table variant (acceptance tests 4 and 8): the child exits
 /// successfully, and the compare of its own directory fails with exactly
 /// one failure, the PAIR-OUTSIDE-TABLE naming `pair` (its role alone where
@@ -646,6 +666,34 @@ test "isolated: a child that acquires at two sites and then panics keeps both pa
         .{ .function = "src/sync/isolated.zig:isolatedFirstSite", .role = "ui" },
         .{ .function = "src/sync/isolated.zig:isolatedSecondSite", .role = "ui" },
     });
+}
+
+test "isolated: a plain lock from .renderer panics with PN3 (acceptance test 1)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        const scope = thread_role.fixture(.renderer);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.lock();
+        m.unlock();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN3 a plain lock of the renderer-state mutex from " ++
+        "renderer; the renderer acquires through State.lockDemand or tryLock");
+}
+
+test "isolated: a plain lockUncancelable from .renderer panics with PN3 (acceptance test 1)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (inChild()) {
+        const scope = thread_role.fixture(.renderer);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.lockUncancelable();
+        m.unlock();
+        return;
+    }
+    try expectPanic(@src(), "thread-role layer: PN3 a plain lockUncancelable of the renderer-state mutex from " ++
+        "renderer; the renderer acquires through State.lockDemand or tryLock");
 }
 
 test "isolated: an off-table child exits successfully and its compare fails one PAIR-OUTSIDE-TABLE naming the pair (acceptance test 8)" {

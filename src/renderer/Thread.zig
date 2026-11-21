@@ -601,11 +601,12 @@ const Frame = struct {
         };
     }
 
-    /// Takes State.mutex once.
+    /// Takes State.mutex once, through the demand acquire, the renderer's
+    /// way in (PLAN.md §2.7 PN3).
     pub fn screen(f: Frame) Pacer.Screen {
         const state = f.t.state;
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        state.lockDemand();
+        defer state.unlockDemand();
         return .{
             .needs_frame = terminal_render_dirty.needsFrame(state.terminal, state.drawn_undirtied),
             .cursor_blinking = state.terminal.modes.get(.cursor_blinking),
@@ -619,8 +620,8 @@ const Frame = struct {
     /// `needsFrame` checks on a clean terminal.
     pub fn cursorBlinking(f: Frame) bool {
         const state = f.t.state;
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        state.lockDemand();
+        defer state.unlockDemand();
         return state.terminal.modes.get(.cursor_blinking);
     }
 

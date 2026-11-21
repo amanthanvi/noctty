@@ -7,8 +7,7 @@
 //! the plain mutex, every method an inline forward, with no owner, no roles
 //! and no recorder, and nothing that reaches Win32 (lib-vt builds for wasm32).
 //!
-//! The panics (`thread_role.armed` holds PN3 and PN4 back while 1A.2 gives
-//! threads their roles):
+//! The panics, wherever the layer is on:
 //! - PN1: `lock`, `lockUncancelable` or `demand` by the thread that holds it,
 //!   checked before the inner lock, so this text wins over Zig's own
 //!   "Deadlock detected".
@@ -114,10 +113,8 @@ pub fn StateMutexOf(comptime form: Layer) type {
             record(site, role, kind);
             const me = std.Thread.getCurrentId();
             if (self.owner.load(.monotonic) == me) panicReentry(kind, role);
-            if (thread_role.armed) {
-                if (role == .none) panicNoRole(kind);
-                if (role == .renderer and kind != .demand) panicRendererPlain(kind);
-            }
+            if (role == .none) panicNoRole(kind);
+            if (role == .renderer and kind != .demand) panicRendererPlain(kind);
             self.inner.lock();
             self.owner.store(me, .monotonic);
         }
@@ -126,7 +123,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
             const site = @returnAddress();
             const role = Roles.current();
             record(site, role, .try_lock);
-            if (thread_role.armed and role == .none) panicNoRole(.try_lock);
+            if (role == .none) panicNoRole(.try_lock);
             const me = std.Thread.getCurrentId();
             if (self.owner.load(.monotonic) == me) return false;
             if (!self.inner.tryLock()) return false;

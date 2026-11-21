@@ -22,14 +22,6 @@ pub const Layer = enum { off, on };
 /// compile instead of guessing.
 pub const layer: Layer = if (@import("build_options").thread_roles) .on else .off;
 
-/// Whether the role policies panic: PN3 (a plain lock from `.renderer`), PN4
-/// (an acquisition from a thread with no role) and PN7 (a window procedure
-/// off `.ui`). False while 1A.2 gives thread entries and fixtures their
-/// roles; the step that converts the renderer's plain locks deletes it
-/// (RQ4). The holder's rules (PN1, PN2) and the fixture rule (PN6) hold
-/// wherever the layer is on.
-pub const armed = false;
-
 /// A thread's role. `.none` is a thread that entered none.
 pub const Role = union(enum) {
     none,
@@ -162,7 +154,6 @@ pub fn Roles(comptime form: Layer) type {
             /// window from their own thread; PN4 still covers what it
             /// acquires.
             pub inline fn assertWindowProc() void {
-                if (!armed) return;
                 const role = thread_current;
                 if (role == .ui) return;
                 if (builtin.is_test and role == .none) return;

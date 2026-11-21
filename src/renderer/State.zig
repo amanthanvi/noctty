@@ -108,15 +108,24 @@ const handoff_timeout_ns = 1 * std.time.ns_per_ms;
 /// scheduled. Under sustained pty output the IO parse thread is
 /// exactly such a loop, so without this signal the renderer can
 /// starve for as long as the output lasts.
-pub fn lockDemand(self: *State) void {
+///
+/// The acquire itself is the `StateMutex` wrapper's demand acquire, the
+/// renderer's way in: the thread-role layer allows it from `.renderer`,
+/// where a plain `lock` panics (PLAN.md §2.7 PN3, RQ4). It must stay an
+/// `inline fn` (RQ11, the one intended inline site): the layer records the
+/// function whose code takes the demand acquire's return address, which
+/// inlined here is this forwarder's caller, the frame snapshot; the thread
+/// gate fails FORWARDER-NOT-INLINE otherwise.
+pub inline fn lockDemand(self: *State) void {
     _ = self.demand.fetchAdd(1, .monotonic);
-    self.mutex.lock();
+    self.mutex.demand();
     const prev = self.demand.fetchSub(1, .monotonic);
     assert(prev > 0);
 }
 
-/// Release `mutex` acquired via `lockDemand` and notify hot loops
-/// parked in `yieldToDemand` that the demanding waiter had its turn.
+/// Release `mutex` acquired via `lockDemand` (through the wrapper's
+/// `unlock`) and notify hot loops parked in `yieldToDemand` that the
+/// demanding waiter had its turn.
 pub fn unlockDemand(self: *State) void {
     self.mutex.unlock();
     _ = self.handoff_gen.fetchAdd(1, .monotonic);
@@ -618,4 +627,52 @@ test "renderer wake source bits are distinct and fit the mask" {
         try std.testing.expectEqual(@as(u32, 0), seen & bit);
         seen |= bit;
     }
+}
+
+test "isolated: demand acquires through lockDemand from .renderer and .ui record their callers (acceptance test 2)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("../sync/isolated.zig");
+    // A renderer site and a UI site, each a noinline function whose body
+    // differs from the other's, so every build names it and none folds the
+    // two (PLAN.md §2.7 RQ16). The forwarder is inlined into each, so each
+    // is the function its pair names, not lockDemand or the wrapper.
+    const Sites = struct {
+        var renderer_frames: u32 = 0;
+        var ui_frames: u64 = 0;
+
+        noinline fn rendererDemandSite(state: *State) void {
+            state.lockDemand();
+            defer state.unlockDemand();
+            state.mutex.assertHeld();
+            renderer_frames += 1;
+        }
+
+        noinline fn uiDemandSite(state: *State) void {
+            state.lockDemand();
+            defer state.unlockDemand();
+            state.mutex.assertHeld();
+            ui_frames +%= 0x5eed;
+        }
+    };
+    if (isolated.inChild()) {
+        var mutex: StateMutex = .{};
+        var state: State = .{ .mutex = &mutex, .terminal = undefined };
+        {
+            // PN3 allows the demand acquire from the renderer, where a
+            // plain lock panics (acceptance test 1).
+            const role = thread_role.fixture(.renderer);
+            defer role.exit();
+            Sites.rendererDemandSite(&state);
+        }
+        {
+            const role = thread_role.fixture(.ui);
+            defer role.exit();
+            Sites.uiDemandSite(&state);
+        }
+        return;
+    }
+    try isolated.expectPairs(@src(), &.{
+        .{ .function = "src/renderer/State.zig:rendererDemandSite", .role = "renderer" },
+        .{ .function = "src/renderer/State.zig:uiDemandSite", .role = "ui" },
+    });
 }
