@@ -321,6 +321,43 @@ try {
     if ($guiRejected -ne 3 -or $guiRecordText.Contains('someone') -or $guiRecordText.Contains('cmd.exe') -or $guiRecordText.Contains('bad_key')) {
         throw 'The runner''s record writer let a path, a command line or an odd key through.'
     }
+    # A record with a rejected value is written failed, so the receipt and the result agree (CodeRabbit on #740).
+    [void](Write-GuiHiddenRecord ([ordered]@{ leaf = 'smoke'; passed = $true; path = 'C:\x' }) $guiRecordPath)
+    if ((Get-Content -LiteralPath $guiRecordPath -Raw | ConvertFrom-Json).passed -ne $false) { throw 'The record writer wrote a passing record that held a rejected value.' }
+    [void](Write-GuiHiddenRecord ([ordered]@{ leaf = 'smoke'; passed = $true }) $guiRecordPath)
+    if ((Get-Content -LiteralPath $guiRecordPath -Raw | ConvertFrom-Json).passed -ne $true) { throw 'The record writer failed a clean passing record.' }
+
+    # ---- (7b) the result's status: only exit 0 over the whole plan passes; a subset is skip; a runner failure is
+    # error (CodeRabbit on #740). And the runner itself, started with a non-empty -Out or an unusable -MeasureRepo,
+    # exits 2 without leaving a pass: nothing in a non-empty -Out, an error result in a new one.
+    . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst 'Get-GuiHiddenResultStatus')))
+    foreach ($case in @(
+            @{ Exit = 0; Subset = $false; All = $true; Status = 'pass'; Leaves = 'pass' }
+            @{ Exit = 0; Subset = $true; All = $true; Status = 'skip'; Leaves = 'skip' }
+            @{ Exit = 0; Subset = $false; All = $false; Status = 'fail'; Leaves = 'fail' }
+            @{ Exit = 1; Subset = $false; All = $false; Status = 'fail'; Leaves = 'fail' }
+            @{ Exit = 2; Subset = $false; All = $true; Status = 'error'; Leaves = 'pass' }
+            @{ Exit = 2; Subset = $false; All = $false; Status = 'error'; Leaves = 'fail' }
+            @{ Exit = 3; Subset = $false; All = $true; Status = 'error'; Leaves = 'pass' }
+        )) {
+        $judged = Get-GuiHiddenResultStatus $case.Exit $case.Subset $case.All
+        if ($judged.Status -cne $case.Status -or $judged.Leaves -cne $case.Leaves) { throw "The result status misjudged exit $($case.Exit), subset $($case.Subset), all passed $($case.All)." }
+    }
+    $guiChild = (Get-Process -Id $PID).Path
+    $guiFullOut = Join-Path $guiScratch 'out-full'
+    [void](New-Item -ItemType Directory -Path $guiFullOut)
+    [IO.File]::WriteAllText((Join-Path $guiFullOut 'earlier.json'), '{}')
+    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo $repoRoot -Work (Join-Path $guiScratch 'work-full') -Out $guiFullOut *> $null
+    if ($LASTEXITCODE -ne 2 -or @(Get-ChildItem -LiteralPath $guiFullOut -Force).Count -ne 1 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'work-full'))) {
+        throw 'The runner must refuse a non-empty -Out with exit 2 and write nothing.'
+    }
+    $guiNewOut = Join-Path $guiScratch 'out-new'
+    & $guiChild -NoProfile -NonInteractive -File $guiRunnerPath -MeasureRepo (Join-Path $guiScratch 'no-such-repo') -Work (Join-Path $guiScratch 'work-new') -Out $guiNewOut *> $null
+    $guiErrorResult = $(if (Test-Path -LiteralPath (Join-Path $guiNewOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiNewOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
+    if ($LASTEXITCODE -ne 2 -or $null -eq $guiErrorResult -or $guiErrorResult.status -cne 'error' -or
+        @($guiErrorResult.assertions | Where-Object { $_.status -ceq 'pass' -and $_.id -ceq 'leaves-pass' }).Count -ne 0) {
+        throw 'A runner validation failure must exit 2 with an error result and no passing leaves-pass.'
+    }
 }
 finally { Remove-Item -LiteralPath $guiScratch -Recurse -Force -ErrorAction SilentlyContinue }
 

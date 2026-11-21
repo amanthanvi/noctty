@@ -887,6 +887,14 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
 
 # ---- main
 
+# The result's status and its leaves-pass assertion: a pass needs exit 0 and the whole plan; a passing subset run is
+# `skip` (CodeRabbit on #740); exit 1 is `fail`, any other exit `error`, so no runner failure reads as a pass.
+function Get-GuiHiddenResultStatus([int] $Exit, [bool] $Subset, [bool] $AllPassed) {
+    $status = $(if ($Exit -eq 0 -and $AllPassed -and -not $Subset) { 'pass' } elseif ($Exit -eq 0 -and $AllPassed) { 'skip' } elseif ($Exit -eq 1 -or $Exit -eq 0) { 'fail' } else { 'error' })
+    $leaves = $(if (-not $AllPassed) { 'fail' } elseif ($Subset) { 'skip' } else { 'pass' })
+    return [pscustomobject]@{ Status = $status; Leaves = $leaves }
+}
+
 # A value of a known shape, else 'unknown' (gui-hosted-probe.ps1's rule for the hosted image's name and version, #738).
 function Get-GuiHiddenShaped([string] $Value, [string] $Pattern) {
     if ($Value -and $Value -cmatch $Pattern) { return $Value }
@@ -1074,9 +1082,9 @@ if ($outReady) {
     $receiptNames.Add('run.json')
     $finishedAt = [datetime]::UtcNow
     $allPassed = $leafRecords.Count -eq $selected.Count -and $selected.Count -gt 0 -and @($leafRecords | Where-Object { -not $_.passed }).Count -eq 0
-    # A subset run that passed is `skip`, never `pass`: leaves-pass is the whole plan's.
-    $status = $(if ($exit -eq 0 -and -not $subset) { 'pass' } elseif ($exit -eq 0) { 'skip' } elseif ($exit -eq 1) { 'fail' } else { 'error' })
-    $leafStatus = $(if (-not $allPassed) { 'fail' } elseif ($subset) { 'skip' } else { 'pass' })
+    $resultStatus = Get-GuiHiddenResultStatus $exit $subset $allPassed
+    $status = $resultStatus.Status
+    $leafStatus = $resultStatus.Leaves
     $policyPass = $leafRecords.Count -gt 0 -and @($leafRecords | Where-Object { -not ($_.processes -and $_.processes.passed -and $_.launchPolicy -and $_.launchPolicy.held) }).Count -eq 0
     $inputPass = $leafRecords.Count -gt 0 -and @($leafRecords | Where-Object { -not ($_.receipt -and $_.receipt.valid -and $_.receipt.realInputLoaded -eq $false) }).Count -eq 0
     $commit = $(if ($runRecord.head -match '\A[0-9a-f]{40}\z') { [string]$runRecord.head } else { $null })
