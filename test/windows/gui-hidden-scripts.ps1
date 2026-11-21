@@ -209,6 +209,13 @@ function New-PriorTreeReader([string] $Helper) {
         return & $inner $RepoPath
     }.GetNewClosure()
 }
+# A dependency only the base tree's undo script reaches (CodeRabbit on #740): the list walks the base tree, not only
+# its plan, which alone would already put the undo script in the list.
+$baseOnly = 'test/windows/interactive-win11-base-only-fixture.ps1'
+Assert-True ((Get-CiPathNeeds $baseOnly) -ceq 'none') "$baseOnly must stay a path Get-CiPathNeeds calls none, or the next checks prove nothing."
+Assert-True (-not (Get-CiGuiSelection -ChangedPaths @($baseOnly) -GuiList $deletedList)) 'The base-only helper must not select the suite while no tree reaches it (the next check''s control).'
+$baseOnlyList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $headReader -BaseReader (New-PriorTreeReader $baseOnly)
+Assert-True (Get-CiGuiSelection -ChangedPaths @($baseOnly) -GuiList $baseOnlyList) 'A change to a dependency only the base tree reaches must select the suite.'
 # A dependency only a merge base reaches (Sol on #740): main and the pull request both dropped it after the fork, so
 # neither tip has it, while the three-dot diff, which runs from the merge base, lists its deletion.
 $mergeBaseOnly = 'test/windows/interactive-win11-merge-base-only-fixture.ps1'
