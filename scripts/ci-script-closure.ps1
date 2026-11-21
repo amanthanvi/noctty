@@ -80,6 +80,11 @@ $script:CiScriptClosureLegacyEdges = @(
     }
 )
 
+# A module-qualified cmdlet name (Microsoft.PowerShell.Core\Import-Module) and, in `name`, the cmdlet it calls. Only
+# the Verb-Noun shape: PowerShell resolves no qualified alias (`Microsoft.PowerShell.Utility\iex` is not a command,
+# measured on pwsh 7.6.10), and any other word with a separator is a path.
+$script:CiScriptQualifiedName = '\A[A-Za-z][\w.]*\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z'
+
 function ConvertTo-CiScriptRepoPath {
     # A Windows or POSIX path, absolute under $RepoRoot or relative to it, as a repo-relative '/' path with `.` and
     # `..` collapsed; $null when it leaves the repository.
@@ -181,10 +186,13 @@ function New-CiScriptFileReader {
 }
 
 function Get-CiScriptCommandName {
-    # The name a command element calls by, lower-case, for a bare word; $null otherwise.
+    # The name a command element calls by, lower-case, for a bare word; $null otherwise. A module-qualified cmdlet runs
+    # what its bare name runs, so its module goes (CodeRabbit on #740: a qualified Add-Type -Path was skipped, its C#
+    # file left the closure, and a qualified Set-Variable was no write).
     param($Element)
-    if ($Element -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $Element.Value.ToLowerInvariant() }
-    return $null
+    if ($Element -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
+    if ($Element.Value -match $script:CiScriptQualifiedName) { return $Matches['name'].ToLowerInvariant() }
+    return $Element.Value.ToLowerInvariant()
 }
 
 function Test-CiScriptPowerShellName {
@@ -314,8 +322,9 @@ function Resolve-CiScriptValue {
             $name = Get-CiScriptCommandName $elements[0]
             if (-not $name) { return $unresolved }
             # A function this file defines: the value of its body when that is one expression or one return
-            # (Opus on #740: a local `Get-*ExePath` that returned a .ps1 was trusted by its name).
-            $local = @((Get-CiScriptNodes $Context FunctionDefinitionAst) | Where-Object { $_.Name -ieq $name })
+            # (Opus on #740: a local `Get-*ExePath` that returned a .ps1 was trusted by its name). A module-qualified
+            # name calls the module's command, never the file's function.
+            $local = @((Get-CiScriptNodes $Context FunctionDefinitionAst) | Where-Object { $_.Name -ieq $elements[0].Value })
             if ($local.Count -gt 0) {
                 $body = $local[0].Body
                 $statements = @($body.EndBlock.Statements)
@@ -838,9 +847,10 @@ function Get-CiScriptFileEdges {
                 if (Test-CiScriptPowerShellName $leaf) { return @{ Is = 'powershell'; Pwsh = $leaf.StartsWith('pwsh') } }
                 if ($leaf -in @('cmd', 'cmd.exe')) { return @{ Is = 'cmd' } }
                 if ($kind -eq 'native') { return @{ Is = 'native' } }
-                # A bare word names a command; a path with no script, batch or native extension may still run a
-                # script (PowerShell resolves one).
+                # A bare word names a command, and so does a module-qualified cmdlet (`& Module\Verb-Noun`); a path
+                # with no script, batch or native extension may still run a script (PowerShell resolves one).
                 if ($Value.Value -notmatch '[\\/]') { return @{ Is = 'command'; Value = $leaf } }
+                if ($Value.Value -match $script:CiScriptQualifiedName) { return @{ Is = 'command'; Value = $Matches['name'].ToLowerInvariant() } }
                 return @{ Is = 'unresolved' }
             }
         }
@@ -938,11 +948,11 @@ function Get-CiScriptFileEdges {
         $first = $elements[0]
         $invoked = $operator -eq [System.Management.Automation.Language.TokenKind]::Dot -or $operator -eq [System.Management.Automation.Language.TokenKind]::Ampersand
         # A bare path called without `&` is PowerShell's implicit `&` (Opus on #740); a module-qualified command
-        # (Microsoft.PowerShell.Utility\Write-Host) is not a path.
+        # (Microsoft.PowerShell.Utility\Write-Host) is not a path, and Get-CiScriptCommandName names its cmdlet.
         $barePath = -not $invoked -and $first -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
             $first.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::BareWord -and
             ($first.Value -match '[\\/]' -or (Test-CiScriptTargetKind $first.Value) -ne 'other') -and
-            $first.Value -notmatch '\A[A-Za-z][\w.]*\\[A-Za-z]+-[A-Za-z]\w*\z'
+            $first.Value -notmatch $script:CiScriptQualifiedName
         if (-not $invoked -and -not $barePath -and (Get-CiScriptCommandName $first) -notin $edgeCommands) { continue }
         $entries = @($elements | Select-Object -Skip 1 | ForEach-Object { & $toEntry $_ })
         if ($invoked -or $barePath) {

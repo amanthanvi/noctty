@@ -111,6 +111,7 @@ $flowCases = @(
     @{ Name = 'a multiple assignment'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $p, $q = (Join-Path $PSScriptRoot ''b.ps1''), 1; . $p' }
     @{ Name = 'Set-Variable'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Set-Variable -Name p -Value (Join-Path $PSScriptRoot ''b.ps1''); . $p' }
     @{ Name = 'a property assigned after its hashtable'; Resolves = $null; Text = '$t = @{ Path = (Join-Path $PSScriptRoot ''a.ps1'') }; $t.Path = Join-Path $PSScriptRoot ''b.ps1''; . $t.Path' }
+    @{ Name = 'a module-qualified Set-Variable'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Microsoft.PowerShell.Utility\Set-Variable -Name p -Value (Join-Path $PSScriptRoot ''b.ps1''); . $p' }
 )
 foreach ($case in $flowCases) {
     $flowWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $case.Text; 'test/windows/a.ps1' = '1'; 'test/windows/b.ps1' = '2' }
@@ -230,6 +231,32 @@ $emptyEntry = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '' }
 Assert-True ($emptyEntry.Problems.Count -eq 0 -and $emptyEntry.Members.Count -eq 1) "An empty entry must walk cleanly: $($emptyEntry.Problems -join '; ')"
 $emptyMissing = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '. (Join-Path $PSScriptRoot ''empty.ps1'')' }
 Assert-True ($emptyMissing.Problems.Count -eq 1 -and $emptyMissing.Missing -ccontains 'test/windows/empty.ps1') 'A helper that does not exist must still fail the walk as missing, not read as empty.'
+
+# A module-qualified cmdlet (Microsoft.PowerShell.Utility\Add-Type) runs what its bare name runs, so it is the same
+# edge (CodeRabbit on #740: a qualified Add-Type -Path was skipped and its C# file left the closure); a qualified
+# Set-Variable is a write the resolver cannot read (in the flow cases above). PowerShell resolves no qualified alias
+# (`Microsoft.PowerShell.Utility\iex` is not a command), so only the Verb-Noun shape is qualified. An unrelated
+# qualified cmdlet stays out (the quiet forms above).
+$qualifiedReaches = [ordered]@{
+    'a module-qualified Add-Type -Path' = @('Microsoft.PowerShell.Utility\Add-Type -Path (Join-Path $PSScriptRoot ''native.cs'')', 'test/windows/native.cs')
+    'a module-qualified Import-Module' = @('Microsoft.PowerShell.Core\Import-Module (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+    'a module-qualified Start-Process' = @('Microsoft.PowerShell.Management\Start-Process pwsh -ArgumentList ''-File'', "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'a module-qualified Invoke-Expression' = @('Microsoft.PowerShell.Utility\Invoke-Expression ". ''$PSScriptRoot\child.ps1''"', 'test/windows/child.ps1')
+    'a module-qualified Start-Job' = @('Microsoft.PowerShell.Core\Start-Job -FilePath "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'a module-qualified Start-ThreadJob' = @('Microsoft.PowerShell.ThreadJob\Start-ThreadJob -FilePath "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'a module-qualified Invoke-Command' = @('Microsoft.PowerShell.Core\Invoke-Command -ComputerName localhost -FilePath "$PSScriptRoot\child.ps1"', 'test/windows/child.ps1')
+    'a module-qualified Join-Path in a load' = @('. (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+    'a module-qualified cmdlet called with &' = @('& Microsoft.PowerShell.Core\Import-Module (Join-Path $PSScriptRoot ''child.ps1'')', 'test/windows/child.ps1')
+}
+foreach ($form in $qualifiedReaches.Keys) {
+    $text, $target = $qualifiedReaches[$form]
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $text; 'test/windows/child.ps1' = '1'; 'test/windows/native.cs' = 'class X {}' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains $target) "$form must reach $target`: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$qualifiedVariable = Get-FixtureWalk @{ 'test/windows/entry.ps1' = 'Microsoft.PowerShell.Utility\Invoke-Expression $code' }
+Assert-True ($qualifiedVariable.Problems.Count -eq 1 -and $qualifiedVariable.Unresolved.Count -eq 1) "A module-qualified Invoke-Expression of a variable must be unresolved: $($qualifiedVariable.Problems -join '; ')"
+$qualifiedQuiet = Get-FixtureWalk @{ 'test/windows/entry.ps1' = 'Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $PSScriptRoot -File; Microsoft.PowerShell.Utility\Write-Output (Join-Path $PSScriptRoot ''child.ps1'')' }
+Assert-True ($qualifiedQuiet.Problems.Count -eq 0 -and $qualifiedQuiet.Members.Count -eq 1) "Unrelated module-qualified cmdlets are no edge: $($qualifiedQuiet.Problems -join '; ') [$($qualifiedQuiet.Members -join ', ')]"
 
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
