@@ -691,7 +691,11 @@ that govern each symbol you change, or that none does.
   `symbolise.names_checked`; `src/main.zig`'s first test), the
   thread-role dumps' symboliser and the in-process compare
   (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
-  the table they read, `ci/lock-inventory-threads.tsv`), the shared Win32 test
+  the table they read, `ci/lock-inventory-threads.tsv`, and what its static
+  gate reads as a caller edge), the relock tests and their IO thread
+  (`termio.Thread.drainForTest`, its `DrainHook` in `drainMailbox`;
+  `RelockSurface` and `expectRecordedPairs` in `src/Surface.zig`) and where a
+  test's helper thread enters its role, the shared Win32 test
   fixtures
   (`win32/test_support.zig`, `TestSession`, the private-desktop runners
   `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop`, the empty

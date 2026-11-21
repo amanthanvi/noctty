@@ -1469,6 +1469,220 @@ test "queueIo frees allocated writes in readonly mode" {
     } }, .unlocked);
 }
 
+/// The relock tests' surface (PLAN.md §2.7 acceptance test 7, §19.6): only
+/// what `queueIo`, the termio mailbox and the IO thread's drain read is set,
+/// the rest zeroed. Its termio mailbox is full, with a `.focused` message
+/// ahead, whose handler (`Termio.focusGained`) takes the renderer-state mutex
+/// on its first line. Each test starts the IO thread itself, a thread of
+/// its own that enters `.termio` and runs `drain` (PLAN.md §2.7 RQ9: the
+/// role is entered in test code, and the spawn is test code, no thread entry).
+const RelockSurface = struct {
+    surface: *Surface,
+    term: terminal.Terminal,
+    mutex: rendererpkg.StateMutex = .{},
+    hook: termio.Thread.DrainHook = .{},
+    io_thread: ?std.Thread = null,
+    io_error: ?anyerror = null,
+
+    /// `self` holds pointers into itself, so it must not move after this.
+    fn init(self: *RelockSurface, alloc: Allocator) !void {
+        const surface = try alloc.create(Surface);
+        errdefer alloc.destroy(surface);
+        @memset(std.mem.asBytes(surface), 0);
+        self.* = .{ .surface = surface, .term = try .init(alloc, .{ .cols = 10, .rows = 4 }) };
+        errdefer self.term.deinit(alloc);
+        surface.renderer_state.mutex = &self.mutex;
+        surface.renderer_state.terminal = &self.term;
+        surface.io.renderer_state = &surface.renderer_state;
+        surface.io.mailbox = try termio.Mailbox.initSPSC(alloc);
+        const queue = surface.io.mailbox.spsc.queue;
+        _ = queue.push(.{ .focused = true }, .{ .instant = {} });
+        while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) > 0) {}
+    }
+
+    fn deinit(self: *RelockSurface, alloc: Allocator) void {
+        if (self.io_thread) |thread| thread.join();
+        self.surface.io.mailbox.deinit(alloc);
+        self.term.deinit(alloc);
+        alloc.destroy(self.surface);
+    }
+
+    fn joinIoThread(self: *RelockSurface) !void {
+        if (self.io_thread) |thread| thread.join();
+        self.io_thread = null;
+        if (self.io_error) |err| return err;
+    }
+
+    /// The IO thread's drain, on a thread that has entered `.termio`. Its
+    /// hook waits for the mutex until a sender drops it, so the test holds
+    /// the mutex before it starts the thread.
+    fn drain(self: *RelockSurface) void {
+        termio.Thread.drainForTest(&self.surface.io.mailbox, &self.surface.renderer_state, &self.hook) catch |err| {
+            self.io_error = err;
+            // Make room, so a waiting sender does not wait forever.
+            const queue = self.surface.io.mailbox.spsc.queue;
+            while (queue.pop()) |message| message.deinit();
+        };
+    }
+};
+
+/// A pair the relock test expects in this process's recorder: its key as
+/// the compare gives it (the file under the source root and the function's
+/// bare name) and its role.
+const RecordedPair = struct {
+    key: []const u8,
+    role: thread_role.Role,
+};
+
+/// Fails unless this process's recorder holds each of `pairs` (PLAN.md §2.7
+/// acceptance test 7): a recorded site named against this exe's own PDB as
+/// `symbolise.zig` names a dump's (the function holding the call, by its
+/// file and bare name), with the pair's role. A build whose tests check no
+/// names (RQ16, `symbolise.names_checked`: an aarch64 build until the probe
+/// has run there, and a 0.15.2 ReleaseSafe build, which attributes noinline
+/// functions only, where these sites are plain ones) checks each role alone.
+/// With the layer off nothing is recorded, so nothing is checked.
+fn expectRecordedPairs(pairs: []const RecordedPair) !void {
+    if (comptime thread_role.layer == .off) return;
+    const recorder = @import("sync/recorder.zig");
+    const symbolise = @import("sync/symbolise.zig");
+    const dump = @import("sync/dump.zig");
+    const alloc = std.testing.allocator;
+
+    var session: ?symbolise.Session = null;
+    defer if (session) |*s| s.close();
+    var root: []u8 = &.{};
+    defer alloc.free(root);
+    if (symbolise.names_checked) {
+        const own = dump.selfModule() orelse return error.NoModule;
+        const pdb = own.pdb orelse return error.SkipZigTest; // a stripped build has no PDB
+        session = try symbolise.Session.openSelf(alloc);
+        const loaded = session.?.loaded() orelse return error.PdbNotLoaded;
+        if (!loaded.matches(pdb)) return error.PdbNotLoaded;
+        root = try session.?.sourceRoot(alloc);
+    }
+
+    for (pairs) |pair| {
+        const tag = @intFromEnum(std.meta.activeTag(pair.role));
+        const held = for (recorder.process.slots) |*slot| {
+            switch (slot.state.load(.acquire)) {
+                .ready, .written => {},
+                else => continue,
+            }
+            if (slot.tag != tag) continue;
+            const s = if (session) |*s| s else break true;
+            // The call instruction, as the symbolise mode names a site.
+            const location = (try s.locate(alloc, slot.site - 1)) orelse continue;
+            defer location.deinit(alloc);
+            const file = try symbolise.keyFile(alloc, location.file, root);
+            defer alloc.free(file);
+            if (pair.key.len == file.len + 1 + location.name.len and
+                std.mem.startsWith(u8, pair.key, file) and pair.key[file.len] == ':' and
+                std.mem.endsWith(u8, pair.key, location.name)) break true;
+        } else false;
+        if (!held) {
+            std.debug.print("relock test: the recorder holds no ({s}, {f})\n", .{ pair.key, pair.role });
+            return error.PairNotRecorded;
+        }
+    }
+}
+
+test "Surface: queueIo(.locked) into a full termio mailbox lets the IO thread take the lock and takes it back (UI relock test)" {
+    // PLAN.md §2.7 acceptance test 7 and RQ3, §19.6. The test holds the
+    // renderer-state mutex itself and queues one message more than the
+    // mailbox holds, as a `.locked` caller of queueIo does (the lead's 1A.2
+    // decision 10: maybePromptClick locks for itself at the fork head and
+    // asserts its caller's lock on stone-1a, so neither tree's test goes
+    // through it). send drops the mutex, waits for room and takes it back;
+    // the IO thread's drain takes the mutex inside that window (its hook),
+    // and focusGained takes it for the `.focused` message ahead.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    // queueIo runs on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
+    var f: RelockSurface = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+
+    const IoThread = struct {
+        fn main(relock: *RelockSurface) void {
+            // The IO thread's role, as its `threadMain` enters it (RQ9).
+            const io_role = thread_role.enter(.termio);
+            defer io_role.exit();
+            relock.drain();
+        }
+    };
+
+    f.mutex.lock();
+    f.io_thread = std.Thread.spawn(.{}, IoThread.main, .{&f}) catch |err| {
+        f.mutex.unlock();
+        return err;
+    };
+    f.surface.queueIo(.{ .linefeed_mode = false }, .locked);
+    // send's relock took the mutex back through the wrapper (PN2).
+    f.mutex.assertHeld();
+    const drains = f.hook.count.load(.acquire);
+    f.mutex.unlock();
+    try f.joinIoThread();
+    try std.testing.expect(drains >= 1);
+
+    try expectRecordedPairs(&.{
+        .{ .key = "src/termio/mailbox.zig:send", .role = .ui },
+        .{ .key = "src/termio/Thread.zig:drainMailbox", .role = .termio },
+        .{ .key = "src/termio/Termio.zig:focusGained", .role = .termio },
+    });
+}
+
+test "isolated: a raw relock in place of send's leaves assertHeld() to panic with PN2 (UI relock test)" {
+    // The UI relock test's negative variant (PLAN.md §2.7 acceptance test 7,
+    // RQ15, §19.6), in an isolated child: the same surface and IO thread,
+    // and send's full-queue path written out (termio/mailbox.zig) with its
+    // relock raw, the inner mutex taken past the wrapper's owner, so
+    // assertHeld() must panic.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("sync/isolated.zig");
+    if (isolated.inChild()) {
+        const alloc = std.testing.allocator;
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var f: RelockSurface = undefined;
+        try f.init(alloc);
+        defer f.deinit(alloc);
+        const queue = f.surface.io.mailbox.spsc.queue;
+        const raw: *std.Thread.Mutex = &f.mutex.inner;
+        const IoThread = struct {
+            fn main(relock: *RelockSurface) void {
+                const io_role = thread_role.enter(.termio);
+                defer io_role.exit();
+                relock.drain();
+            }
+        };
+
+        f.mutex.lock();
+        f.io_thread = std.Thread.spawn(.{}, IoThread.main, .{&f}) catch |err| {
+            f.mutex.unlock();
+            return err;
+        };
+        const msg: termio.Message = .{ .linefeed_mode = false };
+        const full = queue.push(msg, .{ .instant = {} }) == 0;
+        f.mutex.unlock();
+        if (full) _ = queue.push(msg, .{ .forever = {} });
+        raw.lock();
+        f.mutex.assertHeld();
+        // Not reached when assertHeld panics; otherwise the IO thread's
+        // focusGained must get the mutex before the deinit's join.
+        raw.unlock();
+        if (!full) return error.MailboxNotFull;
+        return;
+    }
+    try isolated.expectPanic(@src(), "thread-role layer: PN2 assertHeld() on a thread that does not hold " ++
+        "the renderer-state mutex (role ui)");
+}
+
 test "Mouse.click_state holds every button" {
     var mouse: Mouse = .{};
     inline for (@typeInfo(input.MouseButton).@"enum".fields) |field| {

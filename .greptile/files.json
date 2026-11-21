@@ -410,6 +410,8 @@
         "src/sync/symbolise.zig",
         "src/sync/compare.zig",
         "ci/lock-inventory-threads.tsv",
+        "src/termio/Thread.zig",
+        "src/Surface.zig",
         "ci/soak_judge.py",
         "ci/test_soak_judge.py",
         "ci/soak-thresholds.tsv",

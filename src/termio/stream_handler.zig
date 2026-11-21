@@ -2227,6 +2227,59 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     try std.testing.expectEqual(@as(@TypeOf(termio_queue.len), 64), termio_queue.len);
 }
 
+test "a reader's answerback into a full termio mailbox lets the IO thread take the lock and takes it back (the relock tests' reader-side fill test)" {
+    // PLAN.md §2.7 acceptance test 7, §19.6: the UI relock test from the pty
+    // reader's side, with room made, where the test above stops the reader.
+    // The test thread feeds as the reader does (TestStream's `.reader`
+    // fixture), with the renderer-state mutex held, an answerback, so
+    // messageWriter calls send with that mutex on a full termio mailbox with
+    // a `.focused` message ahead. send drops the mutex, waits for room and
+    // takes it back; the IO thread's drain takes the mutex inside that window
+    // (its hook), and focusGained takes it for the `.focused` message.
+    var h: TestStream = undefined;
+    try h.init(std.testing.allocator, .{});
+    defer h.deinit(std.testing.allocator);
+
+    const queue = h.termio_mailbox.spsc.queue;
+    try std.testing.expect(queue.push(.{ .focused = true }, .{ .instant = {} }) > 0);
+    while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+
+    const Io = struct {
+        mailbox: *termio.Mailbox,
+        state: *renderer.State,
+        hook: termio.Thread.DrainHook = .{},
+        err: ?anyerror = null,
+
+        fn drainAsIoThread(self: *@This()) void {
+            // The IO thread's role, as its `threadMain` enters it (RQ9).
+            const role = thread_role.enter(.termio);
+            defer role.exit();
+            termio.Thread.drainForTest(self.mailbox, self.state, &self.hook) catch |err| {
+                self.err = err;
+                // Make room, so the waiting reader does not wait forever.
+                while (self.mailbox.spsc.queue.pop()) |message| message.deinit();
+            };
+        }
+    };
+    var io: Io = .{ .mailbox = &h.termio_mailbox, .state = &h.renderer_state };
+
+    // The IO thread's hook waits for the mutex until send drops it.
+    h.renderer_mutex.lock();
+    const thread = std.Thread.spawn(.{}, Io.drainAsIoThread, .{&io}) catch |err| {
+        h.renderer_mutex.unlock();
+        return err;
+    };
+    h.stream.nextSlice("\x05");
+    // send's relock took the mutex back through the wrapper (PN2).
+    h.renderer_mutex.assertHeld();
+    const drains = io.hook.count.load(.acquire);
+    h.renderer_mutex.unlock();
+    thread.join();
+    if (io.err) |err| return err;
+    try std.testing.expect(drains >= 1);
+    try std.testing.expect(h.stream.handler.termio_messaged);
+}
+
 test "PKG16 integrated cmd prompt clears stale keyboard modes" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 

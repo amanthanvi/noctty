@@ -93,6 +93,22 @@ flags: packed struct {
     has_inspector: bool = false,
 } = .{},
 
+/// The relock tests' hook (`DrainHook`), in test builds only; only
+/// `drainForTest` sets it.
+drain_hook: if (builtin.is_test) ?*DrainHook else void = if (builtin.is_test) null else {},
+
+/// The relock tests' hook (PLAN.md §2.7 acceptance test 7, §19.6), in test
+/// builds only: a drain takes and releases the renderer-state mutex once,
+/// before its first pop. A sender that found the mailbox full dropped that
+/// mutex before it waits for room (`Mailbox.send`), and the pop that makes
+/// its room comes after the hook, so the hook's acquisition falls inside
+/// that dropped window every time: a test that reads `count` at least 1 once
+/// its send has returned knows the send let the IO thread take the mutex.
+pub const DrainHook = struct {
+    /// The drains that took and released the mutex.
+    count: std.atomic.Value(u32) = .init(0),
+};
+
 /// Initialize the thread. This does not START the thread. This only sets
 /// up all the internal state necessary prior to starting the thread. It
 /// is up to the caller to start the thread with the threadMain entrypoint.
@@ -422,6 +438,16 @@ fn drainMailbox(
         return;
     }
 
+    // The relock tests' hook (test builds only, `DrainHook`): before the
+    // pop that makes a waiting sender's room.
+    if (comptime builtin.is_test) {
+        if (self.drain_hook) |hook| {
+            io.renderer_state.mutex.lock();
+            io.renderer_state.mutex.unlock();
+            _ = hook.count.fetchAdd(1, .release);
+        }
+    }
+
     // This holds the mailbox lock for the duration of the drain. The
     // expectation is that all our message handlers will be non-blocking
     // ENOUGH to not mess up throughput on producers.
@@ -488,6 +514,43 @@ fn drainMailbox(
     if (redraw) {
         try io.renderer_wakeup.notify();
     }
+}
+
+/// The relock tests' IO thread (PLAN.md §2.7 acceptance test 7, §19.6), in
+/// test builds only: one drain of `mailbox` on the calling thread, as the IO
+/// thread's wakeup runs `drainMailbox`, with `hook` armed. The termio it
+/// drains for holds only what the drain and its handlers read: `state`, an
+/// exec backend whose process has exited, so a queued pty write is dropped
+/// (`Exec.queueWrite`), and a renderer wakeup of its own. The caller enters
+/// `.termio` first, as `threadMain` does (RQ9).
+///
+/// `state` is the renderer state, typed through the field it fills: the
+/// static gate reads a file that spells a word another file declares as a
+/// type, or that file's stem, comments included, as naming that file, so
+/// the type's own name here gave this file's `stopCallback` a false caller
+/// edge to the search thread's reviewed `stop` row.
+pub fn drainForTest(
+    mailbox: *termio.Mailbox,
+    state: @FieldType(termio.Termio, "renderer_state"),
+    hook: *DrainHook,
+) !void {
+    if (comptime !builtin.is_test) @compileError("drainForTest is the relock tests' seam");
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+    var io: termio.Termio = undefined;
+    // The queue alone: the drain never notifies, and the senders use
+    // `mailbox`'s own wakeup meanwhile.
+    io.mailbox = .{ .spsc = .{ .queue = mailbox.spsc.queue, .wakeup = undefined } };
+    io.renderer_state = state;
+    io.renderer_wakeup = &wakeup;
+    io.backend = .{ .exec = undefined };
+    var thread: Thread = undefined;
+    thread.flags = .{};
+    thread.drain_hook = hook;
+    var cb: CallbackData = .{ .self = &thread, .io = &io };
+    cb.data.backend = .{ .exec = undefined };
+    cb.data.backend.exec.exited = true;
+    try thread.drainMailbox(&cb);
 }
 
 /// Whether handling `message` can change what the renderer draws.
