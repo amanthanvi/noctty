@@ -1659,7 +1659,14 @@ extension, a lookup resolves only when its `.ps1` is the one sibling with
 `.ps1` or a PATHEXT extension (matched case-insensitively), whatever
 `-CommandType` would pick; a native or batch sibling, or none, leaves it
 unresolved, and so does any extensionless path in cmd's command line, since
-cmd never runs a `.ps1`. A relative one is unresolved.
+cmd never runs a `.ps1`. A relative one is unresolved. cmd's `/C`, `/K` or
+`/R` command line is read as cmd reads it: segments at `&`, `&&`, `|` and
+`||`, tokens at whitespace outside quotes, and the first token of each segment
+(or the one after `call`) as its command; a command line cmd's reading leaves
+uncertain (unbalanced quotes, a parenthesized block, a `%var%`, `!var!` or `^`
+in the command) is unresolved. A batch file may forward its arguments (`%*`),
+so a PowerShell launch among them is read as a direct launch is, and another
+argument that may be a script leaves the call unresolved.
 Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
 runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of

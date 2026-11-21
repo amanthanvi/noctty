@@ -1092,8 +1092,10 @@ function Get-GuiLaunchFunctionOf($Node) {
 }
 
 function Get-GuiLaunchCommandName($Command) {
-    # The cmdlet or function a command calls, lower-case, with a module qualifier dropped
-    # (Microsoft.PowerShell.Management\Set-Content is Set-Content): scripts/ci-script-closure.ps1's rule.
+    # The cmdlet or function a command calls, lower-case, with any module qualifier dropped
+    # (Microsoft.PowerShell.Management\Set-Content is Set-Content). This is stricter than scripts/ci-script-closure.ps1,
+    # which counts a qualified name as a cmdlet only when its module exports it (Test-CiScriptShippedCmdlet): for a
+    # ban, reading every qualified name as its cmdlet refuses more launches, never fewer.
     $first = $Command.CommandElements[0]
     if ($first -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
     if ($first.Value -match '\A[A-Za-z][\w.]*\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z') { return $Matches['name'].ToLowerInvariant() }
