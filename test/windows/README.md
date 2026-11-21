@@ -1615,10 +1615,11 @@ Two modes:
 
   Each record is a `KEY_EVENT_RECORD` with virtual key 252, scan code 0 and
   no character. That cmd ignores it is measured in every dry run: the driver
-  posts the same down and up to the copy's pane before F5, reads cmd's prompt
-  line through the pseudoconsole before and after, and requires it unchanged
-  (`DryProbePromptUnchanged`), then requires F5's command intact on it
-  (`DryProbeCommandIntact`).
+  posts the same down and up to the copy's pane before F5, reads cmd's console
+  through the pseudoconsole before and after, from its top-left cell through
+  the cursor so a prompt or command that wraps is read whole, and requires it
+  unchanged (`DryProbePromptUnchanged`), then requires it to be exactly the
+  console before plus F5's command (`DryProbeCommandIntact`).
 - A check cannot be closed against the action right after it: input can land
   in the sub-millisecond gap between them. What each guarded action can do to
   a user whose input lands in that gap:

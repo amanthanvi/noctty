@@ -59,7 +59,8 @@ Two modes.
           machine was busy right before the window is inconclusive, never a sample. "Away" means no keyboard or mouse
           input: a gamepad or a video watched without input is not seen. Run it only while the machine's user is away
           (AGENTS.md "Running noctty"). A dry run posts the probe's VK_NONAME to the copy's pane instead and requires
-          cmd's prompt line unchanged and F5's command intact on it.
+          cmd's console unchanged and then exactly its prompt plus F5's command, read from its top-left cell through the
+          cursor so a prompt or command that wraps is read whole.
 
 The workload (bench-windows.ps1's `stream` throughput workload, without its PowerShell producer): 4,194,304 bytes of
 printable ASCII from bench-windows.ps1's own generator (WritePayload, seed 121, copied byte for byte and held
@@ -96,7 +97,7 @@ config and receipt, the ConPTY pair beside the build's, the transport and render
 window's client size, DPI and monitor mode before and after, the busy share before the launch, before the window and
 after it, the timer resolution, the display's power state before and after, every input-gate check, every interval,
 the snapshots inside the window, the visible part's facts, the keyboard probe's outcome or, in a dry run, its
-effect on cmd's prompt line, the exit), version.txt, noctty.log (the copy's stderr), driver.log, render-trace.json
+effect on cmd's console, the exit), version.txt, noctty.log (the copy's stderr), driver.log, render-trace.json
 (the copy's last trace snapshot), and guards.json.
 
 Safety (AGENTS.md "Running noctty"; #739's rules). The outer half copies the measurement build without noctty.ico,
@@ -139,7 +140,7 @@ param(
     [ValidatePattern('^[a-z0-9][a-z0-9.-]{0,23}$')] [string] $SandboxName,
     [string] $DesktopName,
     [int] $GridProbePid = 0,
-    # Internal: the dry run's cursor-line probe (the shell's PID and the file name's tag).
+    # Internal: the dry run's console probe (the shell's PID and the file name's tag).
     [int] $CursorProbePid = 0,
     [ValidatePattern('^[a-z-]{1,24}$')] [string] $CursorProbeName = 'line',
     # Internal: the series' random marker, which the visible run's own injected input carries in its extra info.
@@ -911,11 +912,11 @@ public static class FramePacingNative {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetConsoleScreenBufferInfo(IntPtr output, out ScreenBufferInfo info);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReadConsoleOutputCharacterW(IntPtr output, StringBuilder text, uint length, Coord start, out uint read);
-    // The row the cursor is on in `pid`'s console (a pane's shell, whose console is the pane's pseudoconsole), with
-    // trailing blanks removed, after the cursor's column: "column<TAB>text", or an error word. For the dry run's
-    // keyboard-probe check (the lead on #741: cmd must show no stray character). Detaches this process from its own
-    // console first.
-    public static string ConsoleCursorLine(uint pid) {
+    // The text of `pid`'s console (a pane's shell, whose console is the pane's pseudoconsole) from its top-left cell
+    // through the cursor, row after row, so a prompt or command that wraps is read whole (Greptile on #741), after the
+    // count of those cells: "cells<TAB>text", or an error word. For the dry run's keyboard-probe check (the lead on
+    // #741: cmd must show no stray character). Detaches this process from its own console first.
+    public static string ConsoleTextToCursor(uint pid) {
         FreeConsole();
         if (!AttachConsole(pid)) return "attach-failed-" + Marshal.GetLastWin32Error();
         IntPtr output = CreateFileW("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
@@ -923,10 +924,11 @@ public static class FramePacingNative {
         try {
             ScreenBufferInfo info;
             if (!GetConsoleScreenBufferInfo(output, out info)) return "info-failed-" + Marshal.GetLastWin32Error();
-            var text = new StringBuilder(info.size.x + 1);
-            uint read;
-            if (!ReadConsoleOutputCharacterW(output, text, (uint)info.size.x, new Coord { x = 0, y = info.cursor.y }, out read)) return "read-failed-" + Marshal.GetLastWin32Error();
-            return info.cursor.x + "\t" + text.ToString(0, (int)read).TrimEnd(' ');
+            int cells = info.cursor.y * info.size.x + info.cursor.x;
+            var text = new StringBuilder(cells + 1);
+            uint read = 0;
+            if (cells > 0 && !ReadConsoleOutputCharacterW(output, text, (uint)cells, new Coord { x = 0, y = 0 }, out read)) return "read-failed-" + Marshal.GetLastWin32Error();
+            return cells + "\t" + text.ToString(0, (int)read);
         } finally { CloseHandle(output); FreeConsole(); }
     }
     // The grid of `pid`'s console (a pane's shell, whose console is the pane's pseudoconsole): "columns,rows" from its
@@ -1290,6 +1292,13 @@ function Get-FramePacingVisibleRefusal($Facts) {
     return $null
 }
 
+# Whether cmd's console after a step is the console before it plus exactly `$Typed` (nothing, for the keyboard probe):
+# both read from the top-left cell through the cursor, so a prompt or a command that wraps across rows compares whole
+# (Greptile on #741). Pure, so the contract tables it.
+function Test-FramePacingConsoleTyped($Before, $After, [string] $Typed) {
+    return $After.Cells -eq $Before.Cells + $Typed.Length -and [string]::Equals($After.Text, $Before.Text + $Typed, [StringComparison]::Ordinal)
+}
+
 # How long the foreground lock must last for a visible series (Greptile on #741). The lock counts from the user's last
 # input, and the series begins after at least MinIdleSeconds of none, so it must outlast the idle time seen at
 # admission (at least the minimum) plus every run's longest duration, RunBoundMs each; then it is still in force when
@@ -1461,10 +1470,10 @@ function Get-FramePacingRecordProblems($Record) {
 
 # The grid probe: a child of the driver, on its desktop, that attaches to a pane's shell's console (the pane's
 # pseudoconsole) and writes "columns,rows" to -Run's grid.txt.
-# The dry run's cursor-line probe: a child of the driver, on its desktop, that attaches to the pane's shell's console
-# and writes the cursor's row to -Run's cursor-<tag>.txt, which the driver reads and deletes.
+# The dry run's console probe: a child of the driver, on its desktop, that attaches to the pane's shell's console and
+# writes its text from the top-left through the cursor to -Run's cursor-<tag>.txt, which the driver reads and deletes.
 if ($CursorProbePid -gt 0) {
-    [IO.File]::WriteAllText((Join-Path $Run "cursor-$CursorProbeName.txt"), [FramePacingNative]::ConsoleCursorLine([uint32]$CursorProbePid))
+    [IO.File]::WriteAllText((Join-Path $Run "cursor-$CursorProbeName.txt"), [FramePacingNative]::ConsoleTextToCursor([uint32]$CursorProbePid))
     exit 0
 }
 
@@ -1725,9 +1734,10 @@ function Invoke-FramePacingDriver {
         $record.GridCols = [int]$grid.Groups[1].Value; $record.GridRows = [int]$grid.Groups[2].Value
         if ($record.GridCols -ne $script:Cols -or $record.GridRows -ne $script:GridRows) { throw "The grid is $($record.GridCols)x$($record.GridRows), not $($script:Cols)x$($script:GridRows)." }
 
-        # The dry run's cursor-line probe: the row cmd's cursor is on, read through the pane's pseudoconsole as the grid
-        # is, written to a file the driver reads and deletes (it holds the prompt, so only lengths are ever logged).
-        function Read-FramePacingCursorLine([string] $Name) {
+        # The dry run's console probe: cmd's console from its top-left through the cursor, read through the pane's
+        # pseudoconsole as the grid is, written to a file the driver reads and deletes (it holds the prompt, so only
+        # lengths are ever logged).
+        function Read-FramePacingConsoleText([string] $Name) {
             $file = Join-Path $Run "cursor-$Name.txt"
             $cursorProbe = [FramePacingNative]::Spawn($pwsh, ('"{0}" -NoProfile -NonInteractive -File "{1}" -Run "{2}" -CursorProbePid {3} -CursorProbeName {4}' -f $pwsh, $PSCommandPath, $Run, $shells[0], $Name), $Run, $desktopPath, (Join-Path $Run "cursor-$Name.log"), $true, [bool]$Visible)
             try {
@@ -1736,9 +1746,9 @@ function Invoke-FramePacingDriver {
             } finally { [void][FramePacingNative]::CloseHandle($cursorProbe.thread); [void][FramePacingNative]::CloseHandle($cursorProbe.process) }
             $raw = [IO.File]::ReadAllText($file)
             Remove-Item -LiteralPath $file
-            $line = [regex]::Match($raw, '\A(\d+)\t(.*)\z', [Text.RegularExpressions.RegexOptions]::Singleline)
-            if (-not $line.Success) { throw "The cursor probe read no line ($($raw.Length) characters)." }
-            return [pscustomobject]@{ Column = [int]$line.Groups[1].Value; Text = $line.Groups[2].Value }
+            $read = [regex]::Match($raw, '\A(\d+)\t(.*)\z', [Text.RegularExpressions.RegexOptions]::Singleline)
+            if (-not $read.Success -or $read.Groups[2].Value.Length -ne [int]$read.Groups[1].Value) { throw "The cursor probe read no console text ($($raw.Length) characters)." }
+            return [pscustomobject]@{ Cells = [int]$read.Groups[1].Value; Text = $read.Groups[2].Value }
         }
 
         # The render trace: a snapshot the pane writes on request (WM_APP + 8), read once it is newer than the last.
@@ -1805,15 +1815,16 @@ function Invoke-FramePacingDriver {
         } else {
             $record.Foreground = 'skipped'
             # The keyboard probe's effect, measured where it can be (the lead on #741): the same VK_NONAME down and up,
-            # posted to the copy's pane as the harness drives keys on a private desktop, must leave cmd's prompt line as
-            # it was, and the command F5 types next must land on it intact (below).
-            $promptBefore = Read-FramePacingCursorLine 'before-probe'
+            # posted to the copy's pane as the harness drives keys on a private desktop, must leave cmd's console as it
+            # was through the cursor, and the command F5 types next must land after its prompt intact (below), read
+            # from the top-left so a prompt or command that wraps is read whole (Greptile on #741).
+            $promptBefore = Read-FramePacingConsoleText 'before-probe'
             Assert-Quiet 'the dry run''s key probe'
             [FramePacingNative]::PostKey($pane, $nocttyPid, 0xFC)
             [void](Wait-Quiet $script:EchoQuietMs 15000)
-            $promptAfter = Read-FramePacingCursorLine 'after-probe'
-            $record.DryProbePromptUnchanged = $promptAfter.Column -eq $promptBefore.Column -and [string]::Equals($promptAfter.Text, $promptBefore.Text, [StringComparison]::Ordinal)
-            if (-not $record.DryProbePromptUnchanged) { throw "The keyboard probe changed cmd's prompt line (column $($promptBefore.Column) to $($promptAfter.Column), $($promptBefore.Text.Length) to $($promptAfter.Text.Length) characters)." }
+            $promptAfter = Read-FramePacingConsoleText 'after-probe'
+            $record.DryProbePromptUnchanged = Test-FramePacingConsoleTyped $promptBefore $promptAfter ''
+            if (-not $record.DryProbePromptUnchanged) { throw "The keyboard probe changed cmd's console ($($promptBefore.Cells) cells to $($promptAfter.Cells))." }
         }
 
         # The command, then the arm, then Enter: F5 types `type stream.bin` (echoed, then quiet), the target is armed
@@ -1825,9 +1836,9 @@ function Invoke-FramePacingDriver {
         $echoed = Wait-Quiet $script:EchoQuietMs 15000
         if (-not $Visible) {
             $typed = 'type stream.bin & echo.>done.flag'
-            $command = Read-FramePacingCursorLine 'after-command'
-            $record.DryProbeCommandIntact = $command.Column -eq $promptBefore.Column + $typed.Length -and [string]::Equals($command.Text, $promptBefore.Text + $typed, [StringComparison]::Ordinal)
-            if (-not $record.DryProbeCommandIntact) { throw "The command F5 typed after the keyboard probe is not intact on cmd's line (column $($command.Column), $($command.Text.Length) characters)." }
+            $command = Read-FramePacingConsoleText 'after-command'
+            $record.DryProbeCommandIntact = Test-FramePacingConsoleTyped $promptBefore $command $typed
+            if (-not $record.DryProbeCommandIntact) { throw "The command F5 typed after the keyboard probe is not intact after cmd's prompt ($($promptBefore.Cells) cells to $($command.Cells))." }
         }
         $focusChanges = [uint64]$echoed.surface_focus_change_count
         $record.SwapsBefore = [uint64]$echoed.swap_buffers_count

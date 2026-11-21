@@ -199,9 +199,14 @@ $framePacingRules = @(
         Mutation = @("Assert-Quiet 'the copy in front'", '')
     }
     @{
-        Description = 'the dry run posts the same VK_NONAME to the copy''s pane and requires cmd''s prompt line unchanged, then the command F5 typed intact on it (the lead on #741)'
-        Pattern = '(?s)\$promptBefore = Read-FramePacingCursorLine ''before-probe''\s+Assert-Quiet ''the dry run''''s key probe''\s+\[FramePacingNative\]::PostKey\(\$pane, \$nocttyPid, 0xFC\)\s+\[void\]\(Wait-Quiet \$script:EchoQuietMs 15000\)\s+\$promptAfter = Read-FramePacingCursorLine ''after-probe''\s+\$record\.DryProbePromptUnchanged = [^\r\n]+\s+if \(-not \$record\.DryProbePromptUnchanged\) \{ throw [^\r\n]+\}.*?\$echoed = Wait-Quiet \$script:EchoQuietMs 15000\s+if \(-not \$Visible\) \{\s+\$typed = ''type stream\.bin & echo\.>done\.flag''\s+\$command = Read-FramePacingCursorLine ''after-command''\s+\$record\.DryProbeCommandIntact = [^\r\n]+\s+if \(-not \$record\.DryProbeCommandIntact\) \{ throw '
+        Description = 'the dry run posts the same VK_NONAME to the copy''s pane and requires cmd''s console unchanged, then exactly the console before plus the command F5 typed, both read from the top-left through the cursor (the lead and Greptile on #741)'
+        Pattern = '(?s)\$promptBefore = Read-FramePacingConsoleText ''before-probe''\s+Assert-Quiet ''the dry run''''s key probe''\s+\[FramePacingNative\]::PostKey\(\$pane, \$nocttyPid, 0xFC\)\s+\[void\]\(Wait-Quiet \$script:EchoQuietMs 15000\)\s+\$promptAfter = Read-FramePacingConsoleText ''after-probe''\s+\$record\.DryProbePromptUnchanged = Test-FramePacingConsoleTyped \$promptBefore \$promptAfter ''''\s+if \(-not \$record\.DryProbePromptUnchanged\) \{ throw [^\r\n]+\}.*?\$echoed = Wait-Quiet \$script:EchoQuietMs 15000\s+if \(-not \$Visible\) \{\s+\$typed = ''type stream\.bin & echo\.>done\.flag''\s+\$command = Read-FramePacingConsoleText ''after-command''\s+\$record\.DryProbeCommandIntact = Test-FramePacingConsoleTyped \$promptBefore \$command \$typed\s+if \(-not \$record\.DryProbeCommandIntact\) \{ throw '
         Mutation = @('if (-not $record.DryProbePromptUnchanged) { throw', 'if ($false) { throw')
+    }
+    @{
+        Description = 'the dry run''s console probe reads every cell from the top-left through the cursor, untrimmed, so a prompt or command that wraps is read whole (Greptile on #741)'
+        Pattern = 'int cells = info\.cursor\.y \* info\.size\.x \+ info\.cursor\.x;\s+var text = new StringBuilder\(cells \+ 1\);\s+uint read = 0;\s+if \(cells > 0 && !ReadConsoleOutputCharacterW\(output, text, \(uint\)cells, new Coord \{ x = 0, y = 0 \}, out read\)\) return "read-failed-" \+ Marshal\.GetLastWin32Error\(\);\s+return cells \+ "\\t" \+ text\.ToString\(0, \(int\)read\);'
+        Mutation = @('new Coord { x = 0, y = 0 }', 'new Coord { x = 0, y = info.cursor.y }')
     }
     @{
         Description = 'a visible run takes the foreground only with the display on and no screen saver; a copy already in front is allowed only when no window held the foreground before its launch (Opus on #741)'
@@ -1201,7 +1206,7 @@ try {
         # a test without them passes code the harness throws on).
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
-        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputStop', 'Get-FramePacingHookSilence', 'Get-FramePacingLockShortfall', 'Invoke-FramePacingKeyProbe', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
+        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingInputStop', 'Get-FramePacingHookSilence', 'Get-FramePacingLockShortfall', 'Invoke-FramePacingKeyProbe', 'Test-FramePacingConsoleTyped', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
             . ([scriptblock]::Create((Get-FramePacingFunctionText $framePacingAst $name 'bench-frame-pacing.ps1')))
         }
         $cases = [Collections.Generic.List[string]]::new()
@@ -1444,6 +1449,38 @@ try {
         if ([string]::Equals($inputStopControl, $inputStopText, [StringComparison]::Ordinal)) { throw 'The stopped-run control changed nothing.' }
         & { . ([scriptblock]::Create($inputStopControl)); if ($null -eq (Get-FramePacingInputStopMiss)) { throw 'The stopped-run cases accepted a stop that hides a cleanup failure.' } }
         $cases.Add("stopped run ($($inputStopCases.Count) cases; a hidden cleanup failure as the control)")
+
+        # The dry run's console comparison (Greptile on #741): cmd's console read from the top-left cell through the
+        # cursor, as ConsoleTextToCursor reads it, so a prompt that ends at column 130 of a 140-column row and the
+        # command that then wraps onto the next row compare whole. The state below is what the console's cells hold:
+        # whole rows padded to the width, then the cursor's row up to the cursor. The cases: the command intact on one
+        # row and wrapped, the probe leaving the console unchanged, and as controls a stray character before the
+        # command, a stray character the probe left, a truncated command, and the old reader's single-row comparison,
+        # which refused the wrapped command.
+        function New-FramePacingConsoleState([string[]] $Rows, [string] $Cursor) {
+            $text = (@($Rows | ForEach-Object { $_.PadRight(140) }) -join '') + $Cursor
+            return [pscustomobject]@{ Cells = $text.Length; Text = $text }
+        }
+        $typed = 'type stream.bin & echo.>done.flag'
+        $banner = @('Microsoft Windows [Version 10.0.26300.1]', '(c) Microsoft Corporation. All rights reserved.', '')
+        $shortPrompt = 'C:\fp\run-1\work>'
+        $longPrompt = 'C:\' + ('x' * 126) + '>'
+        if ($longPrompt.Length -ne 130 -or $longPrompt.Length + $typed.Length -le 140) { throw 'The wrapped-command fixture does not wrap.' }
+        $consoleCases = @(
+            @{ Name = 'the command intact on the prompt''s row'; Before = (New-FramePacingConsoleState $banner $shortPrompt); After = (New-FramePacingConsoleState $banner ($shortPrompt + $typed)); Typed = $typed; Want = $true }
+            @{ Name = 'the command intact, wrapped after a prompt ending at column 130'; Before = (New-FramePacingConsoleState $banner $longPrompt); After = (New-FramePacingConsoleState ($banner + ($longPrompt + $typed).Substring(0, 140)) ($longPrompt + $typed).Substring(140)); Typed = $typed; Want = $true }
+            @{ Name = 'the probe leaving the console unchanged after a long prompt'; Before = (New-FramePacingConsoleState $banner $longPrompt); After = (New-FramePacingConsoleState $banner $longPrompt); Typed = ''; Want = $true }
+            @{ Name = 'a stray character before the command'; Before = (New-FramePacingConsoleState $banner $longPrompt); After = (New-FramePacingConsoleState ($banner + ($longPrompt + 'x' + $typed).Substring(0, 140)) ($longPrompt + 'x' + $typed).Substring(140)); Typed = $typed; Want = $false }
+            @{ Name = 'a stray character the probe left'; Before = (New-FramePacingConsoleState $banner $shortPrompt); After = (New-FramePacingConsoleState $banner ($shortPrompt + 'x')); Typed = ''; Want = $false }
+            @{ Name = 'a truncated command'; Before = (New-FramePacingConsoleState $banner $longPrompt); After = (New-FramePacingConsoleState $banner ($longPrompt + $typed.Substring(0, 10))); Typed = $typed; Want = $false }
+        )
+        foreach ($case in $consoleCases) {
+            if ((Test-FramePacingConsoleTyped $case.Before $case.After $case.Typed) -ne $case.Want) { throw "The console comparison got $($case.Name) wrong." }
+        }
+        # The old reader compared the cursor's row alone: the wrapped command's row holds only the command's tail.
+        $oldBefore = $longPrompt; $oldAfter = ($longPrompt + $typed).Substring(140)
+        if ([string]::Equals($oldAfter, $oldBefore + $typed, [StringComparison]::Ordinal)) { throw 'The single-row control accepted the wrapped command, so it shows nothing.' }
+        $cases.Add("console comparison ($($consoleCases.Count) cases: the command on one row and wrapped after column 130, the probe unchanged, a stray character before the command or left by the probe, a truncated command; the old single-row comparison refuses the wrapped command)")
 
         # The foreground lock against what the series still needs (Greptile and Sol on #741): Sol's fixture, a finite
         # lock with the idle time already past the bound, refuses; a lock just under the need, or equal to it, refuses;
