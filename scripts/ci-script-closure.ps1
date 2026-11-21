@@ -116,7 +116,8 @@ function Test-CiScriptShippedCmdlet {
 # A path lookup: a path with no extension, which PowerShell looks up by `.ps1` and then by each PATHEXT extension,
 # in any form and under any -CommandType (Sol on #740: `-CommandType ExternalScript` found `<path>.ps1` and
 # `-CommandType Application` found `<path>.cmd` beside it). Returns the path for a lookup, else $null (an extension
-# the walk does not know is unresolved). Find-CiScriptLookupFiles names what a lookup finds.
+# the walk does not know is unresolved). It resolves only to a `.ps1` that is the one file Find-CiScriptLookupFiles
+# finds (Get-ScriptClosure); anything else is unresolved.
 function Get-CiScriptPathLookup {
     param([string] $Path)
     if ([IO.Path]::GetExtension($Path).Length -ne 0) { return $null }
@@ -133,11 +134,12 @@ function Get-CiScriptLookupExtensions {
     return , $list.ToArray()
 }
 
-# The files a path lookup of $Base (a repo path with no extension) names: every sibling whose name is $Base's leaf and
-# a lookup extension, compared case-insensitively, as the tree spells it. All are members: the walk reads a `.ps1`
-# and keeps the others as files, since -CommandType filtering is not modelled (over-selection is the safe side). With
-# a reader that lists its directories (a `Lister` note, as New-CiScriptFileReader's have), from the listing;
-# otherwise each extension is tried in every letter case. Emitted one by one; none means the lookup finds nothing.
+# The files a path lookup of $Base (a repo path with no extension) may find: every sibling whose name is $Base's leaf
+# and a lookup extension, compared case-insensitively, as the tree spells it. With a reader that lists its
+# directories (a `Lister` note, as New-CiScriptFileReader's have), from the listing; otherwise each extension is
+# tried in every letter case. Emitted one by one. The closure resolves the lookup only when the one file found is a
+# `.ps1`: a native or batch sibling may be what runs, with arguments the walk would not read (Greptile on #740:
+# keeping a `pwsh.exe` sibling as a file dropped the `-File` child its arguments named), and none finds nothing.
 function Find-CiScriptLookupFiles {
     param([Parameter(Mandatory)] [scriptblock] $Reader, [Parameter(Mandatory)] [string] $Base)
     $cut = $Base.LastIndexOf('/')
@@ -155,6 +157,9 @@ function Find-CiScriptLookupFiles {
         }
     }
     else {
+        # A reader may answer every letter case for one file (the working tree's), so variants of one name count once:
+        # the first, lower-case one tried.
+        $found = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($extension in $extensions) {
             $letters = $extension.Substring(1)
             for ($mask = 0; $mask -lt (1 -shl $letters.Length); $mask++) {
@@ -1138,6 +1143,9 @@ function Get-CiScriptFileEdges {
         }
         $after = @($(if ($Entries.Count -gt 1) { $Entries[1..($Entries.Count - 1)] }))
         $callee = & $classify $value
+        # cmd looks an extensionless path up by PATHEXT and never runs a `.ps1` (Opus on #740), so a path lookup
+        # there is unresolved.
+        if ($callee.Is -ceq 'script' -and $callee.Value.Lookup) { $unresolved.Add($Why); return }
         if ($callee.Is -ceq 'command' -and $callee.Value -ceq 'call' -and $after.Count -gt 0) { & $runs $after $Why; return }
         if ($callee.Is -ceq 'command' -or $callee.Is -ceq 'maybe') { if (& $mayRunScript $after) { $unresolved.Add($Why) }; return }
         & $invoke $callee $after $Why
@@ -1430,11 +1438,16 @@ function Get-ScriptClosure {
         catch { $problems.Add($_.Exception.Message); continue }
         $anchorsByFile[$path] = @($found.Unresolved)
         foreach ($target in $found.Targets) { $edges.Add([pscustomobject]@{ From = $path; To = $target }); $queue.Enqueue($target) }
-        # A path lookup names every file it may find; none fails the walk.
+        # A path lookup resolves only to a `.ps1` that is the one file it may find; any other lookup fails the walk:
+        # a native or batch sibling, with or without a `.ps1`, or none (Find-CiScriptLookupFiles).
         foreach ($base in $found.Lookups) {
             $files = @(Find-CiScriptLookupFiles -Reader $Reader -Base $base)
-            if ($files.Count -eq 0) { $missing.Add($base); $problems.Add("missing: $base (a path lookup that finds no .ps1 or PATHEXT file)"); continue }
-            foreach ($file in $files) { $edges.Add([pscustomobject]@{ From = $path; To = $file }); $queue.Enqueue($file) }
+            if ($files.Count -eq 1 -and [string]::Equals([IO.Path]::GetExtension($files[0]), '.ps1', [StringComparison]::OrdinalIgnoreCase)) {
+                $edges.Add([pscustomobject]@{ From = $path; To = $files[0] }); $queue.Enqueue($files[0]); continue
+            }
+            $detail = $(if ($files.Count -eq 0) { 'finds no .ps1 or PATHEXT file' } else { "may find $($files -join ', ')" })
+            $unresolved.Add([pscustomobject]@{ File = $path; Anchor = "path lookup $base" })
+            $problems.Add("unresolved path lookup in ${path}: $base ($detail)")
         }
         foreach ($source in $found.CSharp) { $edges.Add([pscustomobject]@{ From = $path; To = $source }); $queue.Enqueue($source) }
         foreach ($anchor in $found.Unresolved) {

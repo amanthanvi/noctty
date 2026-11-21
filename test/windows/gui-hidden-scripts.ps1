@@ -435,39 +435,53 @@ foreach ($form in @('Microsoft.PowerShell.Utility\Write-Host x', '& Microsoft.Po
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form }
     Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form (a cmdlet of a module PowerShell ships) is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
-# Sol on #740 (round 5): a path lookup is not only its `.ps1`. With `<path>.ps1` and `<path>.cmd` both there,
-# `-CommandType ExternalScript` found the `.ps1` and `-CommandType Application` the `.cmd` (pwsh 7.6.10). So a lookup,
-# in any form and under any -CommandType, names every sibling with `.ps1` or a PATHEXT extension, matched
-# case-insensitively and spelled as the tree spells it: the walk reads the `.ps1` and keeps the others as files. With
-# no sibling, the walk fails. Both the listing reader and one that lists nothing (each extension tried in every case).
-$shadowFiles = [ordered]@{ 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' }
+# A path lookup resolves only to a `.ps1` that is the one file it may find, matched case-insensitively against every
+# sibling with `.ps1` or a PATHEXT extension; any other lookup fails the walk. Sol on #740 (round 5): with
+# `<path>.ps1` and `<path>.cmd` both there, `-CommandType Application` ran the `.cmd`. Greptile on #740: with only
+# `<path>.exe` (a pwsh), the walk kept the exe as a file and dropped the `-File` child its arguments named. Opus on
+# #740: cmd never runs a `.ps1`, so a lookup in cmd's command line is unresolved. Each with the listing reader and with
+# one that lists nothing (each extension tried in every case).
+$lookupForms = @(
+    '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType Application; & $p'
+    '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType ExternalScript; & $p'
+    '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'
+    '. "$PSScriptRoot\fixtures\sol-lookup-shadow"'
+)
 foreach ($noLister in @($false, $true)) {
-    foreach ($form in @(
-            '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType Application; & $p'
-            '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType ExternalScript; & $p'
-            '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'
-            '. "$PSScriptRoot\fixtures\sol-lookup-shadow"'
-        )) {
-        $files = @{ 'test/windows/entry.ps1' = $form }
-        foreach ($key in $shadowFiles.Keys) { $files[$key] = $shadowFiles[$key] }
-        $formWalk = Get-FixtureWalk $files -NoLister:$noLister
-        Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.ps1' -and $formWalk.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.cmd') "$form (lister: $(-not $noLister)) must name both the .ps1 and the .cmd: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+    foreach ($form in $lookupForms) {
+        # A `.ps1` alone resolves and is walked.
+        $alone = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/fixtures/sol-lookup-shadow.ps1' = '. (Join-Path $PSScriptRoot ''deeper.ps1'')'; 'test/windows/fixtures/deeper.ps1' = '1' } -NoLister:$noLister
+        Assert-True ($alone.Problems.Count -eq 0 -and $alone.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.ps1' -and $alone.Members -ccontains 'test/windows/fixtures/deeper.ps1') "$form with a .ps1 alone (lister: $(-not $noLister)) must reach and walk it: $($alone.Problems -join '; ') [$($alone.Members -join ', ')]"
+        foreach ($case in @(
+                @{ Name = 'a .ps1 and a .cmd'; Files = @{ 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' } }
+                @{ Name = 'a .cmd alone'; Files = @{ 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' } }
+                @{ Name = 'a .ps1 and a .CmD'; Files = @{ 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.CmD' = '@echo off' } }
+                @{ Name = 'no sibling but a .txt'; Files = @{ 'test/windows/fixtures/sol-lookup-shadow.txt' = 'x' } }
+            )) {
+            $files = @{ 'test/windows/entry.ps1' = $form }
+            foreach ($key in $case.Files.Keys) { $files[$key] = $case.Files[$key] }
+            $formWalk = Get-FixtureWalk $files -NoLister:$noLister
+            Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form with $($case.Name) (lister: $(-not $noLister)) must fail the walk: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+        }
     }
-    $cmdOnly = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' } -NoLister:$noLister
-    Assert-True ($cmdOnly.Problems.Count -eq 0 -and $cmdOnly.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.cmd') "A lookup with only a .cmd beside it (lister: $(-not $noLister)) must name the .cmd: $($cmdOnly.Problems -join '; ') [$($cmdOnly.Members -join ', ')]"
-    $mixedCase = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.CmD' = '@echo off' } -NoLister:$noLister
-    Assert-True ($mixedCase.Problems.Count -eq 0 -and $mixedCase.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.CmD') "A lookup must name a sibling whose extension differs in case (lister: $(-not $noLister)): $($mixedCase.Problems -join '; ') [$($mixedCase.Members -join ', ')]"
-    $none = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.txt' = 'x' } -NoLister:$noLister
-    Assert-True ($none.Problems.Count -ge 1 -and $none.Missing.Count -ge 1) "A lookup with no .ps1 or PATHEXT sibling (lister: $(-not $noLister)) must fail the walk: $($none.Problems -join '; ')"
 }
-# Opus on #740 (round 5): cmd looks an extensionless path up by PATHEXT and never runs a `.ps1`, so inside cmd's
-# /C, /K or /R and after `call` the lookup names the same union: the `.cmd` the command runs, and the `.ps1` too.
-foreach ($form in @('cmd /d /c "$PSScriptRoot\fixtures\helper"', 'cmd.exe /d /k "$PSScriptRoot\fixtures\helper"', 'cmd /d /c call "$PSScriptRoot\fixtures\helper"')) {
-    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off' }
-    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/fixtures/helper.cmd' -and $formWalk.Members -ccontains 'test/windows/fixtures/helper.ps1') "$form must name the .cmd cmd runs (and the .ps1): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
-}
+# A listing reader also sees a sibling whose base name differs in case.
 $caseSibling = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/SOL-Lookup-Shadow.cmd' = '@echo off' }
-Assert-True ($caseSibling.Problems.Count -eq 0 -and $caseSibling.Members -ccontains 'test/windows/fixtures/SOL-Lookup-Shadow.cmd') "A listing reader must name a sibling whose base name differs in case: $($caseSibling.Problems -join '; ') [$($caseSibling.Members -join ', ')]"
+Assert-True ($caseSibling.Problems.Count -ge 1 -and $caseSibling.Unresolved.Count -ge 1) "A listing reader must see a sibling whose base name differs in case, and fail the walk: $($caseSibling.Problems -join '; ')"
+# Greptile's form: an extensionless pwsh path with only the exe there, and a -File child.
+foreach ($noLister in @($false, $true)) {
+    $greptile = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\pwsh'') -File (Join-Path $PSScriptRoot ''child.ps1'')'; 'test/windows/fixtures/pwsh.exe' = 'MZ'; 'test/windows/child.ps1' = '1' } -NoLister:$noLister
+    Assert-True ($greptile.Problems.Count -ge 1 -and $greptile.Unresolved.Count -ge 1 -and $greptile.Members -cnotcontains 'test/windows/fixtures/pwsh.exe') "An extensionless pwsh path with only pwsh.exe there (lister: $(-not $noLister)) must fail the walk: $($greptile.Problems -join '; ') [$($greptile.Members -join ', ')]"
+}
+# Opus's cmd forms: an extensionless path in cmd's /C, /K or /R, or after `call`, is unresolved, whatever is there.
+foreach ($form in @('cmd /d /c "$PSScriptRoot\fixtures\helper"', 'cmd.exe /d /k "$PSScriptRoot\fixtures\helper"', 'cmd /d /c call "$PSScriptRoot\fixtures\helper"')) {
+    foreach ($files in @(@{ 'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off' }, @{ 'test/windows/fixtures/helper.ps1' = '1' })) {
+        $table = @{ 'test/windows/entry.ps1' = $form }
+        foreach ($key in $files.Keys) { $table[$key] = $files[$key] }
+        $formWalk = Get-FixtureWalk $table
+        Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form with $(@($files.Keys) -join ', ') must be unresolved (cmd never runs a .ps1): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+    }
+}
 
 # Sol on #740 (round 5): a `Microsoft.PowerShell.*\Name` spelling is a cmdlet only when this session's module exports
 # that command. `Microsoft.PowerShell.Utility\Run-Child` (the module has no Run-Child) and an invented module's name
@@ -665,6 +679,7 @@ foreach ($graft in @(
         @{ Line = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType Application; & $p'; Child = $shadowChild; Files = @{ 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' } }
         @{ Line = 'Set-Location (Join-Path $PSScriptRoot ''fixtures''); & ''Microsoft.PowerShell.Utility\Run-Child'''; Child = 'test/windows/fixtures/Microsoft.PowerShell.Utility/Run-Child.ps1'; Files = @{ 'test/windows/fixtures/Microsoft.PowerShell.Utility/Run-Child.ps1' = '1' } }
         @{ Line = 'cmd /d /c "$PSScriptRoot\fixtures\helper"'; Child = 'test/windows/fixtures/helper.cmd'; Files = @{ 'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off' } }
+        @{ Line = '& (Join-Path $PSScriptRoot ''fixtures\pwsh'') -File (Join-Path $PSScriptRoot ''interactive-win11-lookup-child.ps1'')'; Child = 'test/windows/interactive-win11-lookup-child.ps1'; Files = @{ 'test/windows/fixtures/pwsh.exe' = 'MZ'; 'test/windows/interactive-win11-lookup-child.ps1' = '1' } }
     )) {
     $graftLine = $graft.Line; $graftFiles = $graft.Files
     $graftReader = {

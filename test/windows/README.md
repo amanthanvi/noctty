@@ -1655,10 +1655,11 @@ a script, not every way PowerShell has. A name with a path separator is a path
 lookup in every form (`&`, `.`, a bare word, `Get-Command`, cmd's `/C` and
 `call`), whatever its leaf, unless it is `Microsoft.PowerShell.*\Verb-Noun` and
 the walker's own session finds that module exporting that command. With no
-extension, a lookup names every sibling with `.ps1` or a PATHEXT extension
-(matched case-insensitively): the walk reads the `.ps1` and keeps the others
-as files, whatever `-CommandType` would pick, and fails when none exists; a
-relative one is unresolved.
+extension, a lookup resolves only when its `.ps1` is the one sibling with
+`.ps1` or a PATHEXT extension (matched case-insensitively), whatever
+`-CommandType` would pick; a native or batch sibling, or none, leaves it
+unresolved, and so does any extensionless path in cmd's command line, since
+cmd never runs a `.ps1`. A relative one is unresolved.
 Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
 runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
