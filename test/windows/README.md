@@ -1644,9 +1644,14 @@ state guard's receipts and the copies stay under `-Work`.
 
 **Guards and exit codes.** The state guard (the product jump list,
 `startup-attempts.json`, the clipboard sequence) and the PSReadLine history
-guard span the run; a tripped one exits 3. Each is recorded `held`, `tripped`
-or `not-run` (it never started, or its check never ran), and only `held`
-counts: a guard that did not run makes the run an error, never a pass. A
+guard span the run; a tripped one exits 3. Each is recorded `held`,
+`unobservable`, `tripped` or `not-run` (it never started, or its check never
+ran). The state guard is `unobservable` when it passed but its clipboard
+sequence read 0 before and after, which observes nothing (the guard's own
+verdict, test-harnesses.md 2026-11-21 STATE-GUARD-CLIPBOARD-01; the hosted
+runner reads 0); the result's `state-guards` assertion then says so, and the
+run can still pass. Only `held` and `unobservable` count: a guard that did not
+run makes the run an error, never a pass. A
 local run on `WinSta0` shares the user's clipboard, so the clipboard guard can
 trip on the user's own copy; don't copy during a run. 0 pass, 1 a leaf failed,
 2 a validation, staging, generation, guard or runner failure (with an `error`
