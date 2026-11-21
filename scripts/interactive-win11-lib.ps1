@@ -254,6 +254,26 @@ public static class InteractiveWin11HostedLaunch {
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr file, out FileInfo info);
+    public delegate bool EnumWindow(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out int pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr window, StringBuilder name, int length);
+
+    // The noctty host windows of `pid` on the caller's desktop, by class. On a private desktop a process's
+    // MainWindowHandle can be the system's input-indicator overlay (UAC_InputIndicatorOverlayWnd), not the host:
+    // a WM_CLOSE sent there closes nothing (measured, interactive offload PR 1).
+    public static IntPtr[] HostWindows(int pid) {
+        var found = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows((w, p) => {
+            int owner; GetWindowThreadProcessId(w, out owner);
+            if (owner == pid) {
+                var name = new StringBuilder(64); GetClassNameW(w, name, 64);
+                if (name.ToString() == "noctty.win32.host") found.Add(w);
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
 
     static IntPtr OpenLog(string path) {
         var sa = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = 1 };
@@ -330,8 +350,10 @@ public static class InteractiveWin11HostedLaunch {
     $script:InteractiveWin11HostedIdentity = Initialize-InteractiveWin11HostedIdentity
     # The leaf's receipt, written when its PowerShell exits, however it exits (a leaf reports failure through `exit`):
     # whether the real-input module's type was ever loaded in this process (design §4.3's run-time check). The runner
-    # fails a leaf whose receipt is missing or says it was.
-    $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -MessageData (Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'leaf-receipt.json') -Action {
+    # fails a leaf whose receipt is missing or says it was. The path travels in a closure: PowerShell.Exiting's
+    # $Event.MessageData reads empty (measured, pwsh 7.6), and an empty path would write `.tmp` in the working directory.
+    $interactiveWin11HostedReceiptPath = Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'leaf-receipt.json'
+    $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action ({
         # `-as [type]` resolves a type by name across every assembly loaded in the process, Add-Type's included.
         $loaded = $null -ne ('InteractiveWin11RealInput' -as [type])
         $receipt = [ordered]@{
@@ -340,10 +362,9 @@ public static class InteractiveWin11HostedLaunch {
             psEdition = [string]$PSVersionTable.PSEdition
             psVersion = '{0}.{1}' -f $PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor
         }
-        $path = [string]$Event.MessageData
-        [IO.File]::WriteAllText("$path.tmp", ($receipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
-        [IO.File]::Move("$path.tmp", $path, $true)
-    }
+        [IO.File]::WriteAllText("$interactiveWin11HostedReceiptPath.tmp", ($receipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move("$interactiveWin11HostedReceiptPath.tmp", $interactiveWin11HostedReceiptPath, $true)
+    }.GetNewClosure())
 }
 
 function Test-InteractiveWin11MeasureMode {

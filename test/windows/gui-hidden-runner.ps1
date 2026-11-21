@@ -490,17 +490,21 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
     $read = @($Rows | Where-Object { -not $_.OpenFailed -and -not $_.Unpinned }).Count
     $cmds = @($Rows | Where-Object { $_.IsCmd })
     $nocttyRows = @($Rows | Where-Object { $_.Image -and ($_.Image -ieq 'noctty.exe' -or $_.Image -ieq 'noctty.com') })
-    $unaccounted = 0
-    foreach ($row in $nocttyRows) {
-        $recorded = $Launcher.ContainsKey($row.Pid) -and $Launcher[$row.Pid] -eq $row.Creation
-        if ($recorded) { continue }
+    # A noctty process is accounted for when the launcher recorded it (PID and creation time), when a shell inside the
+    # terminal started it (not the leaf's own pwsh), or when an accounted noctty forwarded it (`noctty.com` starts
+    # `noctty.exe`); a parent counts only if it was created before its child, so a reused PID cannot vouch.
+    $accounted = @{}
+    $isNoctty = { param($Row) $null -ne $Row -and $Row.Image -and ($Row.Image -ieq 'noctty.exe' -or $Row.Image -ieq 'noctty.com') }
+    foreach ($row in @($nocttyRows | Sort-Object Creation)) {
         $parent = $byPid[$row.Parent]
-        $fromLauncherNoctty = $null -ne $parent -and $Launcher.ContainsKey($parent.Pid) -and $Launcher[$parent.Pid] -eq $parent.Creation -and
-            ($parent.Image -ieq 'noctty.com' -or $parent.Image -ieq 'noctty.exe')
+        if ($null -ne $parent -and $parent.Creation -gt $row.Creation) { $parent = $null }
+        $recorded = $Launcher.ContainsKey($row.Pid) -and $Launcher[$row.Pid] -eq $row.Creation
         $fromShell = $null -ne $parent -and ($parent.Image -ieq 'cmd.exe' -or $parent.Image -ieq 'powershell.exe' -or $parent.Image -ieq 'pwsh.exe') -and
             $parent.Pid -ne $script:LeafPid
-        if (-not ($fromLauncherNoctty -or $fromShell)) { $unaccounted++ }
+        $forwarded = (& $isNoctty $parent) -and $accounted.ContainsKey($parent.Pid)
+        if ($recorded -or $fromShell -or $forwarded) { $accounted[$row.Pid] = $true }
     }
+    $unaccounted = $nocttyRows.Count - $accounted.Count
     $cmdPassing = @($cmds | Where-Object { $_.CmdRead -and $_.CmdSystem -and $_.CmdAutoRunOff }).Count
     $verdict = [ordered]@{
         jobTotalProcesses = $TotalProcesses
@@ -648,6 +652,8 @@ foreach ($drive in @(([IO.Path]::GetPathRoot($Work)), ([IO.Path]::GetPathRoot([E
 }
 
 $plan = Get-GuiHiddenPlan
+# `pwsh -File` passes `-Leaves a,b` as one string: split it.
+$Leaves = @($Leaves | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $selected = @($plan.leaves | Where-Object { $Leaves.Count -eq 0 -or $_.id -in $Leaves })
 if ($Leaves.Count -gt 0 -and $selected.Count -ne $Leaves.Count) { throw 'An -Leaves id is not in the plan.' }
 

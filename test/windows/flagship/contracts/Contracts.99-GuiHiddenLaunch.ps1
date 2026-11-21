@@ -264,18 +264,21 @@ $guiGoodRows = @(
     (& $guiRow 500 'noctty.com' 400 50)
     (& $guiRow 600 'noctty.com' 100 60)
     (& $guiRow 700 'noctty.exe' 600 70)
+    (& $guiRow 710 'noctty.exe' 500 71)
 )
 $guiLauncher = @{ 200 = [long]20; 600 = [long]60 }
-if (-not (Get-GuiHiddenProcessVerdict $guiGoodRows $guiLauncher 7 1).passed) { throw 'The process verdict failed a clean leaf.' }
+if (-not (Get-GuiHiddenProcessVerdict $guiGoodRows $guiLauncher 8 1).passed) { throw 'The process verdict failed a clean leaf (a launched app, a shell''s CLI and the noctty.exe each CLI forwards).' }
 foreach ($bad in @(
-        @{ Name = 'a cmd without /D'; Rows = @($guiGoodRows[0..2]) + @((& $guiRow 400 'cmd.exe' 200 40 $true $true $true $false)) + @($guiGoodRows[4..6]); Total = 7; Shells = 1 }
-        @{ Name = 'an unread cmd'; Rows = @($guiGoodRows[0..2]) + @((& $guiRow 400 'cmd.exe' 200 40 $true $false $false $false)) + @($guiGoodRows[4..6]); Total = 7; Shells = 1 }
-        @{ Name = 'a cmd outside System32'; Rows = @($guiGoodRows[0..2]) + @((& $guiRow 400 'cmd.exe' 200 40 $true $true $false $true)) + @($guiGoodRows[4..6]); Total = 7; Shells = 1 }
-        @{ Name = 'fewer shells than declared'; Rows = $guiGoodRows; Total = 7; Shells = 2 }
-        @{ Name = 'a joiner the reader never took'; Rows = $guiGoodRows; Total = 8; Shells = 1 }
-        @{ Name = 'a joiner that could not be opened'; Rows = @($guiGoodRows) + @((& $guiRow 800 $null 0 0 $false $false $false $false $true)); Total = 8; Shells = 1 }
-        @{ Name = 'a noctty the leaf started itself'; Rows = @($guiGoodRows) + @((& $guiRow 900 'noctty.exe' 100 90)); Total = 8; Shells = 1 }
-        @{ Name = 'a noctty with a reused launcher PID'; Rows = @($guiGoodRows[0]) + @((& $guiRow 200 'noctty.exe' 100 21)) + @($guiGoodRows[2..6]); Total = 7; Shells = 1 }
+        @{ Name = 'a cmd without /D'; Rows = @($guiGoodRows[0..2]) + @((& $guiRow 400 'cmd.exe' 200 40 $true $true $true $false)) + @($guiGoodRows[4..7]); Total = 8; Shells = 1 }
+        @{ Name = 'an unread cmd'; Rows = @($guiGoodRows[0..2]) + @((& $guiRow 400 'cmd.exe' 200 40 $true $false $false $false)) + @($guiGoodRows[4..7]); Total = 8; Shells = 1 }
+        @{ Name = 'a cmd outside System32'; Rows = @($guiGoodRows[0..2]) + @((& $guiRow 400 'cmd.exe' 200 40 $true $true $false $true)) + @($guiGoodRows[4..7]); Total = 8; Shells = 1 }
+        @{ Name = 'fewer shells than declared'; Rows = $guiGoodRows; Total = 8; Shells = 2 }
+        @{ Name = 'a joiner the reader never took'; Rows = $guiGoodRows; Total = 9; Shells = 1 }
+        @{ Name = 'a joiner that could not be opened'; Rows = @($guiGoodRows) + @((& $guiRow 800 $null 0 0 $false $false $false $false $true)); Total = 9; Shells = 1 }
+        @{ Name = 'a noctty the leaf started itself'; Rows = @($guiGoodRows) + @((& $guiRow 900 'noctty.exe' 100 90)); Total = 9; Shells = 1 }
+        @{ Name = 'a noctty with a reused launcher PID'; Rows = @($guiGoodRows[0]) + @((& $guiRow 200 'noctty.exe' 100 21)) + @($guiGoodRows[2..7]); Total = 8; Shells = 1 }
+        @{ Name = 'a noctty forwarded by a noctty the leaf started itself'; Rows = @($guiGoodRows) + @((& $guiRow 900 'noctty.com' 100 90)) + @((& $guiRow 910 'noctty.exe' 900 91)); Total = 10; Shells = 1 }
+        @{ Name = 'a noctty whose parent PID was reused after it started'; Rows = @($guiGoodRows) + @((& $guiRow 920 'noctty.exe' 400 39)); Total = 9; Shells = 1 }
     )) {
     if ((Get-GuiHiddenProcessVerdict $bad.Rows $guiLauncher $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
 }

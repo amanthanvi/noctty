@@ -119,10 +119,20 @@ try {
         }
         elseif (-not $failureReason) {
             $processHandle = $process.Handle
+            # On a private desktop MainWindowHandle can be the system's input-indicator overlay, which a WM_CLOSE
+            # does not close: hosted mode sends it to the host window, found by class.
+            $closeHwnd = $process.MainWindowHandle
+            if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+                $closeHwnd = [IntPtr]::Zero
+                while ([DateTime]::UtcNow -lt $closeDeadline -and $closeHwnd -eq [IntPtr]::Zero) {
+                    $hostWindows = @([InteractiveWin11HostedLaunch]::HostWindows($process.Id))
+                    if ($hostWindows.Count -eq 1) { $closeHwnd = $hostWindows[0] } else { Start-Sleep -Milliseconds $script:SMOKE_POLL_MS }
+                }
+            }
             try {
                 try {
                     [void](Invoke-InteractiveWin11Message `
-                        -Hwnd $process.MainWindowHandle `
+                        -Hwnd $closeHwnd `
                         -Message 0x0010 `
                         -Deadline $closeDeadline `
                         -Description 'WM_CLOSE smoke validation' `
