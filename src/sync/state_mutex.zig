@@ -11,7 +11,7 @@
 //! - PN1: `lock`, `lockUncancelable` or `demand` by the thread that holds it,
 //!   checked before the inner lock, so this text wins over Zig's own
 //!   "Deadlock detected".
-//! - PN2: `assertHeld` on a thread that does not hold it.
+//! - PN2: `assertHeld` or `unlock` on a thread that does not hold it.
 //! - PN3: a plain `lock` or `lockUncancelable` from `.renderer` (`demand`
 //!   and `tryLock` are allowed).
 //! - PN4: any acquisition from a thread with no role.
@@ -91,9 +91,13 @@ pub fn StateMutexOf(comptime form: Layer) type {
             return if (on) @call(.never_tail, tryAcquire, .{self}) else self.inner.tryLock();
         }
 
+        /// PN2 with the layer on: only the holder unlocks, checked before
+        /// the owner is cleared or the inner lock released.
         pub inline fn unlock(self: *Self) void {
             if (on) {
-                std.debug.assert(self.owner.load(.monotonic) == std.Thread.getCurrentId());
+                if (self.owner.load(.monotonic) != std.Thread.getCurrentId()) {
+                    panicUnlockNotHeld(Roles.current());
+                }
                 self.owner.store(no_owner, .monotonic);
             }
             self.inner.unlock();
@@ -159,6 +163,15 @@ fn panicNotHeld(role: Role) noreturn {
     @branchHint(.cold);
     std.debug.panic(
         "thread-role layer: PN2 assertHeld() on a thread that does not hold the " ++
+            "renderer-state mutex (role {f})",
+        .{role},
+    );
+}
+
+fn panicUnlockNotHeld(role: Role) noreturn {
+    @branchHint(.cold);
+    std.debug.panic(
+        "thread-role layer: PN2 unlock() on a thread that does not hold the " ++
             "renderer-state mutex (role {f})",
         .{role},
     );
@@ -340,4 +353,31 @@ test "a holder's tryLock keeps the mutex, and its own unlock lets a waiting thre
     try testing.expect(waiter.owner_seen != 0);
     try testing.expect(waiter.owner_seen != me);
     try testing.expectEqual(StateMutex.no_owner, m.owner.load(.monotonic));
+}
+
+test "isolated: an unlock by a thread that does not hold the mutex panics with PN2" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("isolated.zig");
+    const Other = struct {
+        /// A thread of another role that unlocks the mutex the test thread
+        /// holds. Only Zig's Debug mutex checks that itself, so in
+        /// ReleaseSafe the layer's check is the only one.
+        fn unlockFromOtherThread(m: *StateMutex) void {
+            const scope = thread_role.enter(.termio);
+            defer scope.exit();
+            m.unlock();
+        }
+    };
+    if (isolated.inChild()) {
+        const scope = thread_role.fixture(.ui);
+        defer scope.exit();
+        var m: StateMutex = .{};
+        m.lock();
+        const thread = try std.Thread.spawn(.{}, Other.unlockFromOtherThread, .{&m});
+        thread.join();
+        m.unlock();
+        return;
+    }
+    try isolated.expectPanic(@src(), "thread-role layer: PN2 unlock() on a thread that does not hold the " ++
+        "renderer-state mutex (role termio)");
 }
