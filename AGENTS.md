@@ -274,8 +274,15 @@ that govern each symbol you change, or that none does.
   wakeups from `termio` and typing latency, the libxev IOCP timers the
   renderer arms (`Thread.timerCallback`, a `Canceled` run, the libxev pin in
   `build.zig.zon`), repaint during live resize
-  (`win32/surface_presentation.zig`), and which DLLs a CLI action or the D3D11
-  backend loads (the OpenGL32 static import).
+  (`win32/surface_presentation.zig`), which DLLs a CLI action or the D3D11
+  backend loads (the OpenGL32 static import), and the renderer-state mutex
+  with its runtime thread-role layer (`src/sync/state_mutex.zig`:
+  `StateMutex`, the types of its carriers, `assertHeld`, the demand acquire
+  `State.lockDemand` forwards to, the panics PN1 to PN7; the roles in
+  `src/sync/thread_role.zig`: `enter`, `fixture`, `assertWindowProc`; the
+  pair recorder `src/sync/recorder.zig` and its dump `src/sync/dump.zig`;
+  and a site it keys by build mode, `stream_handler.surfaceMessageWriter`'s
+  calling convention).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
@@ -688,13 +695,17 @@ that govern each symbol you change, or that none does.
   `src/terminal/search/Thread.zig`), the test exe's isolated children and
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
   `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
-  `symbolise.names_checked`; `src/main.zig`'s first test), the
+  `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
+  acceptance tests there and in `src/sync/state_mutex.zig`, the
   thread-role dumps' symboliser and the in-process compare
   (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
-  the table they read, `ci/lock-inventory-threads.tsv`, and what its static
-  gate reads as a caller edge), the relock tests and their IO thread
-  (`termio.Thread.drainForTest`, its `DrainHook` in `drainMailbox`;
-  `RelockSurface` and `expectRecordedPairs` in `src/Surface.zig`) and where a
+  the table they read, `ci/lock-inventory-threads.tsv`, what its static
+  gate reads as a caller edge, and what its inventory reads as a
+  renderer-state site, by a receiver's last name), the relock tests and
+  their IO thread (`termio.Thread.drainForTest`, its `DrainHook` in
+  `drainMailbox`; `RelockSurface` and `expectRecordedPairs` in
+  `src/Surface.zig`; the reader-side fill test in
+  `src/termio/stream_handler.zig`) and where a
   test's helper thread enters its role, the shared Win32 test
   fixtures
   (`win32/test_support.zig`, `TestSession`, the private-desktop runners
