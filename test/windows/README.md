@@ -1673,9 +1673,10 @@ command must be one of:
 
 `call`, `start`, a redirect, a relative or extensionless path (`<dir>\pwsh`
 included) and any other name are unresolved. A batch file may forward its
-arguments (`%*`): they add nothing only as plain literal words, and a leading
-bare or rooted shell launch is read by that shell's reader; any other argument
-leaves the call unresolved. `Start-Process` with a cmd or batch `-FilePath`
+arguments (`%*`): they add nothing only as plain literal words, which never
+name a shell (`cmd`, `pwsh`, `powershell`, with or without `.exe`) or end in
+`.ps1` or a PATHEXT extension, and a leading bare or rooted shell launch is
+read by that shell's reader; any other argument leaves the call unresolved. `Start-Process` with a cmd or batch `-FilePath`
 refuses an argument-list element with whitespace or quotes, since it joins the
 elements with spaces.
 Known gaps, which no GUI member uses with a script target today:

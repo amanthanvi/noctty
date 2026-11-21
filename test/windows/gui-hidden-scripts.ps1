@@ -535,6 +535,14 @@ $allowRefused = @(
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') $unknown'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') pwsh -File $unknown'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') @forwarded'
+    # Greptile on #740: a word that names a program, past the first argument, may be what the batch file runs.
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run powershell.exe -EncodedCommand ZQBjAGgAbwAgAHgA'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run pwsh'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run cmd.exe /c exit'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run x.exe'
+    '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run X.COM'
+    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''run'', ''powershell.exe'', ''-EncodedCommand'', ''ZQBjAGgAbwAgAHgA'' -Wait'
+    'cmd.exe /d /c "$PSScriptRoot\fixtures\forward.cmd" run PwSh.ExE'
     # Opus, round 7: cmd expands a forwarded `%var%` or `!var!`.
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') %FIXTURE_SCRIPT%'
     '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') !FIXTURE_SCRIPT!'
@@ -573,6 +581,7 @@ foreach ($case in @(
         @{ Form = 'Start-Process -FilePath cmd.exe -ArgumentList ''/d'', ''/c'', (Join-Path $PSScriptRoot ''fixtures\second.cmd'') -Wait'; Reach = @('test/windows/fixtures/second.cmd') }
         # Plain arguments add nothing beyond the batch file.
         @{ Form = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') build --verbose 3'; Reach = @('test/windows/fixtures/forward.cmd') }
+        @{ Form = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run release-notes v1.2 -Fast'; Reach = @('test/windows/fixtures/forward.cmd') }
         @{ Form = 'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList ''build'', ''release'' -Wait'; Reach = @('test/windows/fixtures/forward.cmd') }
     )) {
     $table = @{ 'test/windows/entry.ps1' = $case.Form }
@@ -976,6 +985,7 @@ try {
                 @{ Name = 'cmd running tools\pwsh in one string (CodeRabbit)'; Leaf = 'cmd /c "$PSScriptRoot\fixtures\tools\pwsh -File $PSScriptRoot\interactive-win11-wildcard-child.ps1"'; Path = 'test/windows/fixtures/tools/pwsh.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'cmd calling a path named cmd (Sol, round 7)'; Leaf = 'cmd.exe /d /c "call $PSScriptRoot\fixtures\cmd sentinel"'; Path = 'test/windows/fixtures/cmd.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'cmd with a leading redirect (Sol, round 7)'; Leaf = 'cmd.exe /d /c "2>nul $PSScriptRoot\fixtures\sol-helper sentinel"'; Path = 'test/windows/fixtures/sol-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
+                @{ Name = 'a forwarding wrapper running a later powershell.exe -EncodedCommand (Greptile)'; Leaf = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run powershell.exe -EncodedCommand ZQBjAGgAbwAgAHgA'; Path = 'test/windows/fixtures/forward.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'Start-Process forwarding "/d /c" as one element (Sol, round 7)'; Leaf = 'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList "cmd.exe", "/d /c", "$PSScriptRoot\fixtures\sol-helper.cmd sentinel" -Wait'; Path = 'test/windows/fixtures/sol-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
             )) {
             [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\interactive-win11-smoke.ps1'), $mini.Leaf)

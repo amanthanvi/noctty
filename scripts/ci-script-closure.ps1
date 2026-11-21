@@ -1152,14 +1152,23 @@ function Get-CiScriptFileEdges {
         return $null
     }
     # Whether arguments are plain literal words, which a batch file or another program may forward without running a
-    # file: switches, numbers, and words with no separator, quote, `%`, `!`, `$` or script extension.
+    # file: switches, numbers, and words with no separator, quote, `%`, `!`, `$` or whitespace that name no program. A
+    # word naming a shell (cmd, pwsh, powershell, with or without .exe) or ending in `.ps1`, `.psm1`, `.psd1` or a
+    # PATHEXT extension may be what the batch file runs (Greptile on #740: a wrapper running `%2 %3 %4` with
+    # `run powershell.exe -EncodedCommand <code>` ran PowerShell past a first-word check), so it is no plain word.
     $plainWords = {
         param([object[]] $Entries)
+        # Assigned, never piped: Get-CiScriptLookupExtensions returns its list as one array object.
+        $programExtensions = Get-CiScriptLookupExtensions
         foreach ($entry in $Entries) {
             if ($entry.Splat) { return $false }
             if ($entry.Param -and -not $entry.Attached) { continue }
             $text = & $entryText $entry
-            if ($null -eq $text -or $text -match '[\\/"%!$\s]' -or $text -match '(?i)\.(ps1|psm1|psd1|cmd|bat)\b') { return $false }
+            if ($null -eq $text -or $text -match '[\\/"%!$\s]') { return $false }
+            $word = $text.ToLowerInvariant()
+            if ($word -in @('cmd', 'cmd.exe', 'pwsh', 'pwsh.exe', 'powershell', 'powershell.exe')) { return $false }
+            $extension = [IO.Path]::GetExtension($word)
+            if ($extension -in @('.ps1', '.psm1', '.psd1') -or ($extension -and $extension -in $programExtensions)) { return $false }
         }
         return $true
     }
