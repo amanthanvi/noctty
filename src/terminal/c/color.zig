@@ -574,7 +574,8 @@ test "color: x11_names" {
     while (names[walked].name) |name| : (walked += 1) {
         const name_slice = std.mem.span(name);
         const expected = x11_color.map.get(name_slice).?;
-        try testing.expectEqual(expected, color.RGB.fromC(names[walked].color));
+        // x11_color keeps the fork's leaf RGB type; compare the C values.
+        try testing.expectEqual(expected.cval(), names[walked].color);
     }
 
     try testing.expectEqual(count, walked);

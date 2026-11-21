@@ -2031,6 +2031,10 @@ test "image load: regular file size past the file is refused before allocation" 
 }
 
 test "image load: png rejects oversized Wuffs image before allocation" {
+    // libghostty-vt installs no PNG decoder by default (sys.decode_png is
+    // null for the lib artifact), as the stone's own PNG tests skip.
+    if (sys.decode_png == null) return error.SkipZigTest;
+
     const testing = std.testing;
 
     // Turn the small test PNG into a 32768x32767 image. Its decoded RGBA
