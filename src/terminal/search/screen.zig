@@ -523,20 +523,10 @@ pub const ScreenSearch = struct {
         // Go through our history results in order (newest to oldest) and
         // keep the valid ones in place, so removing many costs one pass.
         var kept: usize = 0;
-        var i: usize = 0;
-        while (i < results.len) : (i += 1) {
-            const hl = &results[i];
-
-            // Only PageList.reset advances page_serial_epoch. Results are
-            // newest to oldest, so this result and every older one predate
-            // that reset: drop them without validating each chunk.
-            if (hl.chunks.items(.serial)[0] < self.screen.pages.page_serial_epoch) break;
-
-            // Ordinary pruning, layout changes and replacements leave
-            // page_serial_epoch alone, so validate the captured pointer and
-            // serial pairs against the live list. Older results may live on
-            // unrelated pages and remain usable, so only this result is
-            // removed.
+        for (results, 0..) |*hl, i| {
+            // Check every chunk against the epoch and its live generation.
+            // A renewal or replacement can give an older page a greater
+            // serial than its neighbors.
             if (!live.resultIsValid(hl)) {
                 hl.deinit(alloc);
                 continue;
@@ -549,7 +539,6 @@ pub const ScreenSearch = struct {
             results[kept] = hl.*;
             kept += 1;
         }
-        for (results[i..]) |*prune_hl| prune_hl.deinit(alloc);
         if (kept == results.len) return;
 
         if (selected != null) {
@@ -2089,6 +2078,30 @@ test "LiveNodes agrees with PageList.nodeIsValid" {
     }
     try testing.expect(!live.isValid(first, old_serial));
     try testing.expect(live.isValid(replacement, replacement.serial));
+}
+
+test "LiveNodes rejects a renewed layout on the same page" {
+    const alloc = testing.allocator;
+    var list: PageList = try .init(alloc, 10, 2, null);
+    defer list.deinit();
+    const first = list.pages.first.?;
+    while (first.rows() < first.capacity().rows) _ = try list.grow();
+    const later = (try list.grow()).?;
+    _ = try list.grow();
+    const epoch = list.page_serial_epoch;
+    const first_serial = first.serial;
+    const old_serial = later.serial;
+
+    try list.eraseRowBounded(.{ .active = .{} }, 1);
+    try testing.expectEqual(later, list.pages.last.?);
+    try testing.expectEqual(epoch, list.page_serial_epoch);
+
+    var live: ScreenSearch.LiveNodes = try .init(alloc, &list);
+    defer live.deinit(alloc);
+    try testing.expect(!list.nodeIsValid(later, old_serial));
+    try testing.expect(!live.isValid(later, old_serial));
+    try testing.expect(live.isValid(later, later.serial));
+    try testing.expect(live.isValid(first, first_serial));
 }
 
 test "prune keeps a history match across a page boundary" {
