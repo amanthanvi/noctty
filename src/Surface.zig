@@ -1538,9 +1538,9 @@ const RecordedPair = struct {
 /// acceptance test 7): a recorded site named against this exe's own PDB as
 /// `symbolise.zig` names a dump's (the function holding the call, by its
 /// file and bare name), with the pair's role. A build whose tests check no
-/// names (RQ16, `symbolise.names_checked`: an aarch64 build until the probe
-/// has run there, and a 0.15.2 ReleaseSafe build, which attributes noinline
-/// functions only, where these sites are plain ones) checks each role alone.
+/// names (RQ16, `symbolise.names_checked`: a 0.15.2 ReleaseSafe build, which
+/// attributes noinline functions only, where these sites are plain ones)
+/// checks each role alone.
 /// With the layer off nothing is recorded, so nothing is checked.
 fn expectRecordedPairs(pairs: []const RecordedPair) !void {
     if (comptime thread_role.layer == .off) return;

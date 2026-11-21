@@ -45,14 +45,17 @@ const Allocator = std.mem.Allocator;
 pub const format_name = "sym-1";
 
 /// Whether this build's tests may check a recorded function's name (PLAN.md
-/// §2.7 RQ16). Every attribution probe so far ran on x64, so an aarch64 test
-/// build checks the role and the panic only, until 1A.2 has run the probe
-/// once on the ARM64 runner (the lead's 1A.2 decision 12) and it attributes
-/// there: then this is true on aarch64 too. The one architecture switch for
-/// every test that checks a name: this file's site-shape test reads it with
-/// each shape's own mode rule, and the isolated parents through
-/// `names_checked`.
-pub const names_attributed = builtin.cpu.arch == .x86_64;
+/// §2.7 RQ16): on the architectures the attribution probe has run on. 1A.2
+/// ran probe-r14 once on the hosted ARM64 runner (the lead's 1A.2 decision
+/// 12), and every site attributed there as on x64, on both compilers and
+/// in both modes (test-harnesses.md, 2026-11-21 ARM64-PROBE-01). The one
+/// architecture switch for every test that checks a name: this file's
+/// site-shape test reads it with each shape's own mode rule, and the
+/// isolated parents through `names_checked`.
+pub const names_attributed = switch (builtin.cpu.arch) {
+    .x86_64, .aarch64 => true,
+    else => false,
+};
 
 /// Whether this build's isolated parents check a recorded function's name
 /// (RQ16): where names are attributed, in Debug on 0.15.2, and in Debug and

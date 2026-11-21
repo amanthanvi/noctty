@@ -945,8 +945,7 @@ test "an instantiation suffix is __anon_ or __func_ and digits" {
 
 test "isolated: the compare names the acquiring function of every site shape (acceptance test 10)" {
     if (thread_role.layer == .off) return error.SkipZigTest;
-    // RQ16: a 0.15.2 ReleaseSafe build attributes noinline functions only,
-    // and an aarch64 build checks no names until the probe has run there;
+    // RQ16: a 0.15.2 ReleaseSafe build attributes noinline functions only;
     // this test checks nothing but names, so it is skipped there. The demand
     // forwarder's shape is acceptance test 2's (src/renderer/State.zig), a
     // site in a function that was an inline fn is the Debug suite's required
