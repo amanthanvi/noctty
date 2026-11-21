@@ -191,6 +191,10 @@ fn panicNoRole(kind: Acquire) noreturn {
     );
 }
 
+// These tests check the on form in every build. Where the layer is on, their
+// acquisitions reach the process recorder like any other, so each has a test
+// row in ci/lock-inventory-threads.tsv with the role it simulates (PLAN.md
+// §2.7 RQ8: tests have no exemption).
 const testing = std.testing;
 const Checked = StateMutexOf(.on);
 const OnRoles = thread_role.Roles(.on);
@@ -248,21 +252,22 @@ test "each acquire sets the owner and unlock clears it" {
     try expectOwner(&m, Checked.no_owner);
 }
 
-const OtherThreadTry = struct {
-    m: *Checked,
-    got: bool = true,
-    owner_seen: std.Thread.Id = 0,
-
-    fn tryFromOtherThread(self: *OtherThreadTry) void {
-        const scope = OnRoles.enter(.termio);
-        defer scope.exit();
-        self.got = self.m.tryLock();
-        if (self.got) self.m.unlock();
-        self.owner_seen = self.m.owner.load(.monotonic);
-    }
-};
-
 test "another thread's tryLock fails while the holder holds it" {
+    // Nested in its test block, so it is test code with this test's row.
+    const OtherThreadTry = struct {
+        m: *Checked,
+        got: bool = true,
+        owner_seen: std.Thread.Id = 0,
+
+        fn tryFromOtherThread(self: *@This()) void {
+            const scope = OnRoles.enter(.termio);
+            defer scope.exit();
+            self.got = self.m.tryLock();
+            if (self.got) self.m.unlock();
+            self.owner_seen = self.m.owner.load(.monotonic);
+        }
+    };
+
     const scope = OnRoles.fixture(.ui);
     defer scope.exit();
     const me = std.Thread.getCurrentId();
