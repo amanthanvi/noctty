@@ -2,6 +2,110 @@ Assert-DeferredZigFixtureExecution `
     -WorkflowText $testWorkflowText `
     -Source $testWorkflow
 
+# Scan the three renderer scopes by operation name. An unfamiliar receiver
+# still needs review, so assigning the state mutex to an alias never exempts it.
+function Get-RendererLockCode {
+    param([string]$Source)
+
+    $trivia = '//[^\r\n]*|\\\\[^\r\n]*|(?<quotedId>@)?"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*'''
+    return [regex]::Replace($Source, $trivia, {
+        param($token)
+        if ($token.Groups['quotedId'].Success -and $token.Value -cmatch '^@"(lock|lockUncancelable)"$') {
+            return $Matches[1].PadRight($token.Length)
+        }
+        return ' ' * $token.Length
+    })
+}
+
+function Get-RendererLockScope {
+    param([string]$Code, [string]$Declaration, [string]$Name)
+
+    $starts = [regex]::Matches($Code, $Declaration)
+    if ($starts.Count -ne 1) { throw "Renderer lock contract cannot locate $Name." }
+    $start = $starts[0].Index + $starts[0].Length
+    $depth = 1
+    foreach ($brace in [regex]::new('[{}]').Matches($Code, $start)) {
+        if ($brace.Value -eq '{') { $depth++ } else { $depth-- }
+        if ($depth -eq 0) { return $Code.Substring($start, $brace.Index - $start) }
+    }
+    throw "Renderer lock contract cannot find the end of $Name."
+}
+
+function Get-UnreviewedRendererLocks {
+    param([string]$ThreadText, [string]$PacerText, [string]$GenericText)
+
+    $genericCode = Get-RendererLockCode $GenericText
+    $scopes = [ordered]@{
+        'Thread.zig Frame' = Get-RendererLockScope (Get-RendererLockCode $ThreadText) '(?m)^[ \t]*const Frame\s*=\s*struct\s*\{' 'Thread.zig Frame'
+        'Pacer.zig' = Get-RendererLockCode $PacerText
+        'generic.zig updateFrame' = Get-RendererLockScope $genericCode '(?m)^[ \t]*pub fn updateFrame\s*\([^{}]*\)\s*[^{}]*\{' 'generic.zig updateFrame'
+    }
+
+    # The two reviewed draw-mutex sites protect renderer-owned state. Pin
+    # their surrounding statements so unrelated calls cannot use this allowance.
+    if ([regex]::Matches($genericCode, '\bdraw_mutex:\s*std\.Thread\.Mutex\s*=\s*\.\{\s*\}\s*,').Count -ne 1) {
+        throw 'Renderer lock contract cannot confirm the draw mutex declaration.'
+    }
+    $updateFrame = $scopes['generic.zig updateFrame']
+    $reviewedSites = @(
+        'if\s*\(self\.images\.kittyRequiresUpdate\(state\.terminal\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.images\.kittyUpdate\('
+        'var output_progress:\s*\?renderer\.State\.OutputProgress\s*=\s*critical\.output_progress;\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.rebuildCells\('
+    )
+    foreach ($site in $reviewedSites) {
+        $siteMatches = [regex]::Matches($updateFrame, $site)
+        if ($siteMatches.Count -ne 1) { throw 'Renderer lock contract cannot confirm a reviewed draw mutex site.' }
+        $acquire = $siteMatches[0].Groups['lock']
+        $updateFrame = $updateFrame.Remove($acquire.Index, $acquire.Length)
+    }
+    $scopes['generic.zig updateFrame'] = $updateFrame
+
+    foreach ($scope in $scopes.GetEnumerator()) {
+        foreach ($call in [regex]::Matches($scope.Value, '\b(lock|lockUncancelable)\s*\(')) {
+            "$($scope.Key): $($call.Groups[1].Value)"
+        }
+    }
+}
+
+$rendererThreadContractText = Get-Content -LiteralPath (Join-Path $repoRoot 'src/renderer/Thread.zig') -Raw
+$rendererPacerContractText = Get-Content -LiteralPath (Join-Path $repoRoot 'src/renderer/Pacer.zig') -Raw
+$rendererGenericContractText = Get-Content -LiteralPath (Join-Path $repoRoot 'src/renderer/generic.zig') -Raw
+$rendererLockProblems = @(Get-UnreviewedRendererLocks $rendererThreadContractText $rendererPacerContractText $rendererGenericContractText)
+if ($rendererLockProblems.Count -ne 0) {
+    throw "Unreviewed blocking renderer lock: $($rendererLockProblems -join ', '). Use the demand acquire for the state mutex."
+}
+
+# In-memory controls, including alias chains and both lock spellings.
+$rendererLockControls = @(
+    @{
+        Source = 'Thread.zig Frame'
+        Operation = 'lock'
+        Thread = $rendererThreadContractText.Replace('const Frame = struct {', 'const Frame = struct { fn probe(f: Frame) void { const m = &f.t.state.mutex; m.lock(); }')
+        Pacer = $rendererPacerContractText
+        Generic = $rendererGenericContractText
+    }
+    @{
+        Source = 'Pacer.zig'
+        Operation = 'lockUncancelable'
+        Thread = $rendererThreadContractText
+        Pacer = $rendererPacerContractText.Replace('pub fn turn(self: *Pacer, trigger: Trigger, frame: anytype) void {', 'pub fn turn(self: *Pacer, trigger: Trigger, frame: anytype) void { const m = frame.state.mutex; m.lockUncancelable(io);')
+        Generic = $rendererGenericContractText
+    }
+    @{
+        Source = 'generic.zig updateFrame'
+        Operation = 'lock'
+        Thread = $rendererThreadContractText
+        Pacer = $rendererPacerContractText
+        Generic = $rendererGenericContractText.Replace('state.lockDemand();', 'const m = &state.mutex; const alias = m; _ = alias.tryLock(); alias.lock();')
+    }
+)
+foreach ($control in $rendererLockControls) {
+    $problems = @(Get-UnreviewedRendererLocks $control.Thread $control.Pacer $control.Generic)
+    if ($problems.Count -ne 1 -or $problems[0] -cne "$($control.Source): $($control.Operation)") {
+        throw "Renderer lock contract did not reject the $($control.Source) mutation."
+    }
+}
+Write-Host "Renderer lock contract: $($rendererLockControls.Count)/$($rendererLockControls.Count) mutations rejected"
+
 $win32ModuleImports = @(
     'const c = @import("win32/consts.zig");'
     'const sys = @import("win32/sys.zig");'
