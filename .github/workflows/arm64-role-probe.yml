@@ -8,6 +8,9 @@ name: ARM64 role probe (temporary)
 # layer on, as windows-arm64.yml's arm64-tests job will on the 1A pull request.
 # Edited once (still TEMPORARY) to run both jobs again on the aarch64 fixes that the
 # first run's suite job led to: the alignCast in symbolise.zig and the name checks.
+# Edited again (still TEMPORARY): the suite runs as four shards of the installed test
+# exe with --results, so the record shows which role tests ran, skipped or failed.
+# The probe job is not run again.
 on:
   push:
     branches: [stone-1a]
@@ -21,6 +24,7 @@ permissions:
 jobs:
   probe:
     name: probe-r14 on windows-11-arm
+    if: ${{ false }}
     runs-on: windows-11-arm
     timeout-minutes: 30
     env:
@@ -115,8 +119,36 @@ jobs:
           "ZIG_GLOBAL_CACHE_DIR=$globalCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "ZIG_LOCAL_CACHE_DIR=$localCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Run the Debug suite natively
+      - name: Build the Debug test exe natively
         shell: pwsh
         run: |
           if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") { throw "Expected a native Windows ARM64 runner." }
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline -Dtest-shards=4 --summary all
+          zig build -Demit-exe=false -Demit-test-exe=true -Dcustom-shaders=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline --prefix suite-prefix --summary all
+          if ($LASTEXITCODE -ne 0) { throw "build failed: $LASTEXITCODE" }
+
+      - name: Run it as four shards with --results
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'suite-prefix\bin\ghostty-test.exe'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'suite-results'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $procs = foreach ($k in 1..4) {
+            Start-Process -FilePath $exe -ArgumentList "--shard=$k/4", "--results=$(Join-Path $out "results-$k.txt")" `
+              -WorkingDirectory $env:GITHUB_WORKSPACE -NoNewWindow -PassThru `
+              -RedirectStandardError (Join-Path $out "stderr-$k.txt") -RedirectStandardOutput (Join-Path $out "stdout-$k.txt")
+          }
+          $procs | Wait-Process -Timeout 3000
+          foreach ($k in 1..4) {
+            $p = $procs[$k - 1]
+            $end = Get-Content -LiteralPath (Join-Path $out "results-$k.txt") | Where-Object { $_.StartsWith('end ') }
+            Write-Host "shard $k/4 exit $($p.ExitCode): $end"
+          }
+
+      - name: Upload the suite's records
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arm64-suite-results
+          path: suite-results/results-*.txt
+          retention-days: 30
+          if-no-files-found: error
