@@ -180,7 +180,7 @@ control("a deferred first statement in main is no UI scope", tree(**{"src/main_g
 control("a deferred first statement in an entry's target is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
     '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
     '    defer _ = thread_role.enter(.{ .worker = "probe" });\n')}), 1,
-        "FAIL ENTRY-NOT-EAGER app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
         absent=("ENTRY-OK app src/worker.zig start",))
 SWITCH_WORKER = WORKER + (
     'const Scoped = struct {\n    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
@@ -211,6 +211,45 @@ control("the build's own artifact selector selects its arm", tree(**{
                                  '    self.config.terminalOptions(.ghostty).add(b, step.root_module);\n}\n')}), 0,
         "ENTRY-OK app src/worker.zig startSelected -> Target.run: src/worker.zig:23 run enters worker:probe",
         "RESULT PASS", registry=SWITCH_REGISTRY)
+
+# Stone round 4, Opus L1: a guarded role call (`if (false) ...`) may never run, so it is no scope; and the scope is
+# the first statement executed, so a statement before it fails, while a `defer` before it (which runs nothing where
+# it stands, as Surface.zig's Click.run registers `defer job.done.set();`) does not.
+control("a braceless if around an entry's role call is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
+    '    if (false) thread_role.enter(.{ .worker = "probe" }).exit();\n')}), 1,
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
+        absent=("ENTRY-OK app src/worker.zig start",))
+control("a braceless if around main's role call is no UI scope", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n',
+    '    if (false) thread_role.enter(.ui).exit();\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:4 main: enter(ui)",
+        absent=("POINT app MAIN-UI-SCOPE",))
+control("a statement before an entry's role scope fails", tree(**{"src/worker.zig": WORKER.replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n',
+    '    std.debug.print("early\\n", .{});\n    const role = thread_role.enter(.{ .worker = "probe" });\n')}), 1,
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:9)",
+        absent=("ENTRY-OK app src/worker.zig start",))
+control("a defer before an entry's role scope keeps it the first statement executed", tree(**{
+    "src/worker.zig": WORKER.replace(
+        '    const role = thread_role.enter(.{ .worker = "probe" });\n',
+        '    defer std.debug.print("done\\n", .{});\n    const role = thread_role.enter(.{ .worker = "probe" });\n')}),
+        0, "ENTRY-OK app src/worker.zig start -> workerMain: src/worker.zig:9 workerMain enters worker:probe",
+        "RESULT PASS")
+# Stone round 4, Opus L3: an entry only a test build spawns is no entry of the app exe: reported there, counted in
+# the test exe.
+control("an entry whose spawning function only tests name is reported for the app exe", tree(**{
+    "src/worker.zig": WORKER + (
+        'fn startForTests() void {\n    const t = std.Thread.spawn(.{}, testWorkerMain, .{}) catch return;\n'
+        '    t.join();\n}\n'
+        'fn testWorkerMain() void {\n    const role = thread_role.enter(.test_support);\n    defer role.exit();\n}\n'
+        'test "a spawning test" {\n    startForTests();\n}\n')}), 0,
+        "REPORTED app src/worker.zig startForTests -> testWorkerMain (test_support): its spawning function is "
+        "compiled only into a test build; not counted",
+        "ENTRY-OK test src/worker.zig startForTests -> testWorkerMain: src/worker.zig:26 testWorkerMain enters "
+        "test_support", "app exe: 4 files; 1 entries set their role; points ENTRY 1,", "RESULT PASS",
+        registry=REGISTRY + "src/worker.zig\tstartForTests\tThread.spawn\ttestWorkerMain\ttest_support\ta test helper\n",
+        absent=("ENTRY-OK app src/worker.zig startForTests",))
 
 if failures:
     for f in failures:

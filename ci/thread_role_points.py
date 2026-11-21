@@ -14,19 +14,21 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   Calls inside `src/sync/thread_role.zig`'s own non-test functions are the API, not points. A call of one of those
   three names whose first argument is a role literal on any other receiver is UNREADABLE-POINT: default-deny.
 - An ARTIFACT holds a file when `src/main.zig` reaches it by `@import` (the test exe through every import, the app
-  exe through imports outside test code); a point in test code (a test block, or a function nested in one) counts
-  only in the test exe.
+  exe through imports outside test code, an `if (builtin.is_test)` branch being test code); a point in test code (a
+  test block, a function nested in one, or such a branch) counts only in the test exe.
 - A point is classified, in this order:
   TEST-EDIT-POINT  in test code;
   FIXTURE-HELPER   a `fixture(` in a function of a container that only test code of its file names, the container
                    a file-level `const` that is not `pub` (`ClipboardReplyFixture.init`, `TestStream.init`);
-  MAIN-UI-SCOPE    `src/main_ghostty.zig` `main`, role ui, as the eager scope statement (below) that is the
-                   first statement of its body, before any work;
-  ENTRY            in the function a counted registry entry's spawn names, with the entry's role, as an eager scope
-                   statement at the top level of the target's body, so it runs whenever the thread does;
-  and otherwise fails UNREGISTERED-POINT. An EAGER SCOPE STATEMENT is the whole statement
-  `const|var NAME = R.enter(...);` (or `= R.fixture(...);`), after a statement boundary (`File.eager_scope`): a
-  `defer` or `errdefer` call runs at the function's exit and never counts (stone round 4, Sol's Medium 1).
+  MAIN-UI-SCOPE    `src/main_ghostty.zig` `main`, role ui, as its eager first statement (below);
+  ENTRY            in the function a counted registry entry's spawn names, with the entry's role, as the target's
+                   eager first statement, so it runs before anything else the thread does;
+  and otherwise fails UNREGISTERED-POINT. An EAGER FIRST STATEMENT (`File.scope_statement`) is the body's first
+  statement, beginning with the call itself (`const|var NAME [: T] = R.enter(`, `_ = R.enter(` or `R.enter(`, or
+  `fixture`) and ending with it (`...);`): a `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
+  wrapper never counts, since a deferred call runs at the exit and a guarded one may never run (stone round 4:
+  Sol's Medium 1, Opus L1). Only `defer` and `errdefer` statements, which run nothing where they stand, may come
+  before it (Surface.zig's `Click.run`).
 - Each registry entry is bound to its spawn: the `Thread.spawn(` call in the entry's function whose second argument
   is spelled as the entry's target, that argument resolved from the call by lexical scope and through `@import`,
   a container's own level and `const` aliases (`Resolver`). A same-named function anywhere else is never the
@@ -35,13 +37,15 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   value the build sets (`Resolver.build_artifact`: `src/terminal/build_options.zig` and `src/build/SharedDeps.zig`'s
   `terminalOptions(.X)`; `.ghostty` for `search.Thread`), or a constant the checker evaluates; any other subject,
   and any `if`, is ambiguous (stone round 4).
-- Each registry entry, per artifact: REPORTED when its file is not in the artifact or its spawn is never built for
-  Windows (NOT_BUILT below, or a `why` that says "not built for Windows"); else ENTRY-OK when its bound target
-  holds an eager top-level scope statement with its role, and otherwise ENTRY-NO-ROLE, ENTRY-WRONG-ROLE,
-  ENTRY-NOT-TOP-LEVEL (only in a nested block), ENTRY-NOT-EAGER (a deferred call, or one inside another
-  expression), ENTRY-SPAWN-NOT-FOUND (the function makes no such spawn), ENTRY-TARGET-NOT-FOUND (the argument
-  resolves to no function the checker can read) or ENTRY-AMBIGUOUS (a switch or if the checker cannot evaluate,
-  or spawns of that spelling that name different functions).
+- Each registry entry, per artifact: REPORTED when its file is not in the artifact, its spawn is never built for
+  Windows (NOT_BUILT below, or a `why` that says "not built for Windows"), or, for the app exe, every spawn is in a
+  function only a test build compiles (`spawned_only_by_tests`: test code, a test-only span, or a function whose
+  name every file mentions only there; stone round 4, Opus L3); else ENTRY-OK when its bound target opens with its
+  role's eager first statement, and otherwise ENTRY-NO-ROLE, ENTRY-WRONG-ROLE, ENTRY-NOT-TOP-LEVEL (only in a nested
+  block), ENTRY-NOT-FIRST (no eager first statement: deferred, guarded, or after other work),
+  ENTRY-SPAWN-NOT-FOUND (the function makes no such spawn), ENTRY-TARGET-NOT-FOUND (the argument resolves to no
+  function the checker can read) or ENTRY-AMBIGUOUS (a switch or if the checker cannot evaluate, or spawns of that
+  spelling that name different functions).
 Exit 0 with RESULT PASS, 1 with RESULT FAIL, 2 on bad input.
 """
 import importlib.util
@@ -122,6 +126,8 @@ class File:
             for q in range(lo, hi + 1):
                 self.owner[q] = k
                 self.in_test[q] = nested_in_test or d["kind"] == "test"
+        self.in_test_block = list(self.in_test)   # test blocks and what they nest, before the is_test gates
+        self.mark_test_gated()
         self.containers = zigtok.containers_of_tokens(self.toks, self.fns)
         self.test_only = None
         # each function's enclosing function or test block, or None at the file's own level
@@ -149,41 +155,103 @@ class File:
                 depth -= 1
         return depth == 1
 
-    def eager_scope(self, k, q):
-        """Whether the role call whose op is token q is a role scope that runs when its statement does: the whole
-        statement `const|var NAME = R.op(...);`, at the top level of function k's body, after a statement boundary
-        (`{`, `;` or `}`), so never under `defer` or `errdefer` (`defer _ = R.enter(.ui);` runs at the function's
-        exit), nor inside another expression (stone round 4, Sol's Medium 1)."""
+    # Tokens that may not stand in a scope statement's type annotation: anything that makes it no plain declaration.
+    WRAPPERS = frozenset(("if", "else", "while", "for", "switch", "orelse", "catch", "try", "defer", "errdefer",
+                          "comptime", "and", "or", "return", "break", "continue", "suspend", "nosuspend"))
+
+    def scope_statement(self, k, q):
+        """Whether the role call whose op is token q is the eager first statement of function k's body: the
+        statement right after the body's `{` begins with the call itself, as `const|var NAME [: T] = R.op(`,
+        `_ = R.op(` or `R.op(`, and ends with it (`...);`, so no `.exit()` chained on it). A `defer`, `errdefer`,
+        `if`, `while`, `orelse`, `catch` or any other wrapper, and any statement before it, makes it none: a deferred
+        call runs at the function's exit and a guarded one may never run (stone round 4: Sol's Medium 1, Opus L1)."""
+        body = self.fns[k]["body"]
         toks, n = self.toks, len(self.toks)
-        if q < 6 or not self.top_level_in_body(k, q):
+        if body is None or q < 2 or not (body[0] < q <= body[1]) or not zigtok.is_op(toks[q - 1], ".") \
+                or toks[q - 2].kind != "identifier":
             return False
-        if not (toks[q - 5].kind == "keyword" and toks[q - 5].text in ("const", "var")
-                and toks[q - 4].kind == "identifier" and zigtok.is_op(toks[q - 3], "=")
-                and toks[q - 2].kind == "identifier" and zigtok.is_op(toks[q - 1], ".")):
-            return False
-        if not zigtok.is_op(toks[q - 6], "{", ";", "}"):
-            return False
+        # Only `defer` and `errdefer` statements, which run nothing where they stand, may come first (Surface.zig's
+        # `Click.run` registers `defer job.done.set();`): the scope is still the first statement executed.
+        s, b1 = body[0] + 1, min(body[1], q)
+        while s < b1 and toks[s].kind == "keyword" and toks[s].text in ("defer", "errdefer"):
+            r, d = s + 1, 0
+            if r < b1 and zigtok.is_op(toks[r], "|"):   # errdefer |err|
+                r += 1
+                while r < b1 and not zigtok.is_op(toks[r], "|"):
+                    r += 1
+                r += 1
+            if r < b1 and zigtok.is_op(toks[r], "{"):
+                r = zigtok.match_paren(toks, r) + 1
+            else:
+                while r < b1:
+                    t = toks[r]
+                    if zigtok.is_op(t, "(", "[", "{"):
+                        d += 1
+                    elif zigtok.is_op(t, ")", "]", "}"):
+                        d -= 1
+                    elif d == 0 and zigtok.is_op(t, ";"):
+                        break
+                    r += 1
+                r += 1
+            if r > q - 2:
+                return False   # the call is inside the deferred statement
+            s = r
+        prefix = toks[s:q - 2]   # the statement's tokens before the receiver
+        if prefix:
+            if len(prefix) == 2 and prefix[0].kind == "identifier" and prefix[0].text == "_" \
+                    and zigtok.is_op(prefix[1], "="):
+                pass
+            elif (len(prefix) >= 3 and prefix[0].kind == "keyword" and prefix[0].text in ("const", "var")
+                  and prefix[1].kind == "identifier" and zigtok.is_op(prefix[-1], "=")
+                  and (len(prefix) == 3 or (zigtok.is_op(prefix[2], ":") and len(prefix) > 4
+                                            and not any(zigtok.is_op(t, "=", ";", "{", "}") or t.text in self.WRAPPERS
+                                                        for t in prefix[3:-1])))):
+                pass
+            else:
+                return False
         close = zigtok.match_paren(toks, q + 1)
         return close + 1 < n and zigtok.is_op(toks[close + 1], ";")
 
-    def first_statement(self, k, q):
-        """Whether token q is in the first statement of function k's body: at its top level, with no statement
-        ended before it (a `;` at the body's level, or a block that closes back to it)."""
-        body = self.fns[k]["body"]
-        if body is None or not (body[0] < q <= body[1]) or not self.top_level_in_body(k, q):
-            return False
-        depth = 1
-        for r in range(body[0] + 1, q):
-            t = self.toks[r]
-            if zigtok.is_op(t, "(", "[", "{"):
-                depth += 1
-            elif zigtok.is_op(t, ")", "]", "}"):
-                depth -= 1
-                if depth == 1 and zigtok.is_op(t, "}"):
-                    return False   # a block statement (an if, a loop, a bare block) ran first
-            elif depth == 1 and zigtok.is_op(t, ";"):
-                return False
-        return True
+    def ident_index(self):
+        """Each identifier's token positions, once."""
+        if getattr(self, "_idents", None) is None:
+            self._idents = {}
+            for q, t in enumerate(self.toks):
+                if t.kind == "identifier":
+                    self._idents.setdefault(t.text, []).append(q)
+        return self._idents
+
+    def mark_test_gated(self):
+        """Marks as test code what `if (builtin.is_test)` (or `@import("builtin").is_test`) compiles only in a test
+        build: its then-branch, a block or an expression up to its `else` (`pub const test_support = if
+        (builtin.is_test) @import(...) else struct {};`)."""
+        toks, n = self.toks, len(self.toks)
+        for q in range(n - 5):
+            if not (toks[q].kind == "keyword" and toks[q].text == "if" and zigtok.is_op(toks[q + 1], "(")):
+                continue
+            c = zigtok.match_paren(toks, q + 1)
+            cond = [t.text for t in toks[q + 2:c]]
+            if cond not in (["builtin", ".", "is_test"], ["@import", "(", '"builtin"', ")", ".", "is_test"]):
+                continue
+            r = c + 1
+            if r < n and zigtok.is_op(toks[r], "{"):
+                end = zigtok.match_paren(toks, r)
+            else:
+                end, d = r, 0
+                while end < n:
+                    t = toks[end]
+                    if zigtok.is_op(t, "(", "[", "{"):
+                        d += 1
+                    elif zigtok.is_op(t, ")", "]", "}"):
+                        if d == 0:
+                            break
+                        d -= 1
+                    elif d == 0 and (zigtok.is_op(t, ";", ",") or (t.kind == "keyword" and t.text == "else")):
+                        break
+                    end += 1
+                end -= 1
+            for p in range(r, min(end, n - 1) + 1):
+                self.in_test[p] = True
 
     def scope(self):
         """Builds, once, what name resolution reads: each token's innermost enclosing `{` (`block_of`, -1 at the
@@ -246,7 +314,8 @@ class File:
         return best
 
     def imports(self):
-        """[(path, in_test)] for each `@import("<relative .zig path>")`."""
+        """[(path, in_test, in_test_block)] for each `@import("<relative .zig path>")`: whether test code holds it
+        (an `if (builtin.is_test)` branch included), and whether a test block does."""
         out = []
         for q in range(len(self.toks) - 3):
             t = self.toks[q]
@@ -255,7 +324,7 @@ class File:
                 v = zigtok.string_value(self.toks[q + 2])
                 if v and v.endswith(".zig"):
                     target = os.path.normpath(os.path.join(os.path.dirname(self.path), v)).replace("\\", "/")
-                    out.append((target, self.in_test[q]))
+                    out.append((target, self.in_test[q], self.in_test_block[q]))
         return out
 
 
@@ -541,7 +610,7 @@ def spawn_targets(f, function, target):
                 continue
             runs, _ = zigtok.split_args(toks, q + 1)
             if len(runs) >= 2 and zigtok.spaced(runs[1], blank=True).replace(" ", "") == want:
-                out.append((q, runs[1]))
+                out.append((q, runs[1], k))
     return out
 
 
@@ -564,18 +633,21 @@ def main(argv):
 
     # artifacts: the files src/main.zig reaches, the app exe through imports outside test code
     reach = {}
-    for art, with_tests in (("app", False), ("test", True)):
+    for art, follow in (("app", lambda in_test, in_block: not in_test), ("test", lambda in_test, in_block: True),
+                        ("outside-test-blocks", lambda in_test, in_block: not in_block)):
         seen, todo = set(), [ROOT]
         while todo:
             p = todo.pop()
             if p in seen or p not in files:
                 continue
             seen.add(p)
-            todo.extend(t for t, in_test in files[p].imports() if with_tests or not in_test)
+            todo.extend(t for t, in_test, in_block in files[p].imports() if follow(in_test, in_block))
         reach[art] = seen
     # files the test exe reaches only through imports in test code (`conpty_host.zig`, rooted for its own tests):
     # there only what a test calls is compiled, so an entry there counts only when a test of its file names its spawner
-    test_rooted = reach["test"] - reach["app"]
+    # (an `if (builtin.is_test)` import, such as win32.zig's of test_support.zig, is no such root: the whole file
+    # is the test build's)
+    test_rooted = reach["test"] - reach["outside-test-blocks"]
 
     failures, report = [], []
 
@@ -631,7 +703,7 @@ def main(argv):
         if not spawns:
             return ("no-spawn", f"{e['function']} in {e['file']} makes no Thread.spawn of {e['target']}")
         found = []
-        for q, arg in spawns:
+        for q, arg, _ in spawns:
             names = [t.text for t in arg[0::2]]
             if not arg or len(arg) % 2 == 0 or any(t.kind != "identifier" for t in arg[0::2]) \
                     or any(not zigtok.is_op(t, ".") for t in arg[1::2]):
@@ -646,8 +718,30 @@ def main(argv):
                 f"{x[1].path}:{x[1].toks[x[1].fns[x[2]]['fn']].line + 1}" for x in found) + ")")
         return found[0]
 
+    def spawned_only_by_tests(e):
+        """Whether every spawn of entry e is in a function only a test build compiles: test code, a test-only span
+        of its file (`test_only_spans`), or a function every mention of whose name, in every file, is test code or
+        inside a test-only span (host.zig's pub `Host.runOnPrivateDesktop`). A name met in production code anywhere
+        keeps the entry counted, so a name collision can only keep a check, never drop one."""
+        f = files.get(e["file"])
+        if f is None:
+            return False
+        spawns = spawn_targets(f, e["function"], e["target"])
+        if not spawns:
+            return False
+        for q, _, k in spawns:
+            if test_only_code(f, q):
+                continue
+            name, own = f.fns[k]["name"], f.fns[k]["fn"] + 1
+            mentions = [(g, r) for g in files.values() for r in g.ident_index().get(name, ())
+                        if not (g is f and r == own)]
+            if not mentions or not all(test_only_code(g, r) for g, r in mentions):
+                return False
+        return True
+
     counted = {"app": [], "test": []}
-    matched = set()
+    matched = {"app": set(), "test": set()}
+    test_build_only = set()   # the role points of the targets only test-only spawners start: not in the app exe
     for e in entries:
         key = (e["file"], e["function"], e["target"])
         for art in ("app", "test"):
@@ -667,6 +761,14 @@ def main(argv):
                                   f"file is rooted in the test exe only for its tests, and no test names "
                                   f"{e['function']}; not counted")
                     continue
+            if art == "app" and spawned_only_by_tests(e):
+                report.append(f"REPORTED {art} {e['file']} {e['function']} -> {e['target']} ({e['role']}): its "
+                              f"spawning function is compiled only into a test build; not counted")
+                b = bind(e)
+                if b[0] == "fn":
+                    test_build_only.update((b[1].path, pt["q"]) for pt in points
+                                           if pt["file"] == b[1].path and pt["k"] == b[2])
+                continue
             b = bind(e)
             head = f"{art} {e['file']} {e['function']} -> {e['target']}"
             if b[0] == "no-spawn":
@@ -696,15 +798,15 @@ def main(argv):
                                 f"set inside a nested block ({with_role[0]['file']}:{with_role[0]['line']}), so the "
                                 f"thread can run without it")
                 continue
-            eager = [pt for pt in top if pt["op"] in SCOPE_OPS and tf.eager_scope(pt["k"], pt["q"])]
+            eager = [pt for pt in top if pt["op"] in SCOPE_OPS and tf.scope_statement(pt["k"], pt["q"])]
             if not eager:
-                failures.append(f"ENTRY-NOT-EAGER {head}: its role call ({top[0]['file']}:{top[0]['line']}) is no "
-                                f"statement `const s = thread_role.{'/'.join(SCOPE_OPS)}(...);` that runs when "
-                                f"reached (a deferred call runs at the function's exit), so the thread runs without "
-                                f"the role")
+                failures.append(f"ENTRY-NOT-FIRST {head}: its role call ({top[0]['file']}:{top[0]['line']}) is not "
+                                f"the eager first statement of its target (`const s = thread_role."
+                                f"{'/'.join(SCOPE_OPS)}(...);`, with no defer, if or other wrapper and nothing "
+                                f"before it), so the thread can run without the role")
                 continue
             for pt in eager:
-                matched.add((pt["file"], pt["q"]))
+                matched[art].add((pt["file"], pt["q"]))
             counted[art].append(e)
             report.append(f"ENTRY-OK {art} {e['file']} {e['function']} -> {e['target']}: {eager[0]['file']}:"
                           f"{eager[0]['line']} {eager[0]['fn']} enters {e['role']}")
@@ -714,7 +816,7 @@ def main(argv):
     for pt in points:
         f = files[pt["file"]]
         for art in ("app", "test"):
-            if pt["file"] not in reach[art] or (pt["test"] and art == "app"):
+            if pt["file"] not in reach[art] or (art == "app" and (pt["test"] or (pt["file"], pt["q"]) in test_build_only)):
                 continue
             kind = None
             if pt["test"]:
@@ -724,10 +826,9 @@ def main(argv):
                 if c is not None and any(c is x for x in test_only_containers(f)):
                     kind = "FIXTURE-HELPER"
             if kind is None and pt["file"] == MAIN_FILE and pt["fn"] == "main" and pt["role"] == "ui" \
-                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and f.first_statement(pt["k"], pt["q"]) \
-                    and f.eager_scope(pt["k"], pt["q"]):
+                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and f.scope_statement(pt["k"], pt["q"]):
                 kind = "MAIN-UI-SCOPE"
-            if kind is None and (pt["file"], pt["q"]) in matched:
+            if kind is None and (pt["file"], pt["q"]) in matched[art]:
                 kind = "ENTRY"
             if kind is None:
                 failures.append(f"UNREGISTERED-POINT {art} {pt['file']}:{pt['line']} {pt['fn']}: {pt['op']}({pt['role']}) "
@@ -758,20 +859,23 @@ def main(argv):
     return 0
 
 
-def test_only_containers(f):
-    """The file-level declarations that are not `pub` and that only test code names, as spans: a container (`const
-    NAME = struct {...}`) or a function, every mention of whose name outside its own span is in test code or inside
+def test_only_spans(f):
+    """The file-level declarations that are not `pub` and that only test code names, as (first token, last token,
+    container or None): a container (`const NAME = struct {...}`), a function, or another `const NAME = ...;` (an
+    alias such as palette_controller.zig's `const runOnPrivateDesktop = test_runtime.runOnPrivateDesktop;`), every
+    mention of whose name outside its own span is in test code (an `if (builtin.is_test)` branch included) or inside
     another such span (`ClipboardReplyFixture`, which the test-only helpers `EmptyPasteClipboard` and
     `expectUserPasteWithoutText` also name), with at least one mention. The least fixed point, so declarations that
-    name only each other are not test-only. Returns the containers among them."""
+    name only each other are not test-only."""
     if f.test_only is not None:
         return f.test_only
-    toks = f.toks
-    cands = []   # (name, lo, hi, container or None)
+    toks, idents = f.toks, f.ident_index()
+    cands, heads = [], set()   # (name, lo, hi, container or None)
     for c in f.containers:
         h = c["head"]
         if c["naming"] != "declaration" or h is None or f.owner[h] is not None or f.container_of(h) is not None:
             continue   # anonymous, or nested in a function or another container
+        heads.add(h)
         if h >= 1 and toks[h - 1].kind == "keyword" and toks[h - 1].text == "pub":
             continue
         cands.append((c["name"], h, c["close"], c))
@@ -781,9 +885,24 @@ def test_only_containers(f):
                 or "pub" in d["quals"] or d["body"] is None:
             continue   # a test block, a nested or a container's function, a pub one, or an extern declaration
         cands.append((d["name"], lo, d["end"], None))
+    for q in range(len(toks) - 2):
+        if q in heads or not zigtok.declaration_at(toks, q) or toks[q].text != "const" or f.owner[q] is not None \
+                or f.container_of(q) is not None or (q >= 1 and toks[q - 1].kind == "keyword" and toks[q - 1].text == "pub"):
+            continue
+        r, d = q + 2, 0
+        while r < len(toks):
+            t = toks[r]
+            if zigtok.is_op(t, "(", "[", "{"):
+                d += 1
+            elif zigtok.is_op(t, ")", "]", "}"):
+                d -= 1
+            elif d == 0 and zigtok.is_op(t, ";"):
+                break
+            r += 1
+        cands.append((toks[q + 1].text, q, min(r, len(toks) - 1), None))
     spans = []
     for name, lo, hi, c in cands:
-        mentions = [q for q, t in enumerate(toks) if t.kind == "identifier" and t.text == name and not (lo <= q <= hi)]
+        mentions = [q for q in idents.get(name, ()) if not (lo <= q <= hi)]
         if mentions:
             spans.append((lo, hi, c, mentions))
     chosen = []
@@ -796,8 +915,18 @@ def test_only_containers(f):
             if all(f.in_test[q] or any(x[0] <= q <= x[1] for x in chosen) for q in item[3]):
                 chosen.append(item)
                 changed = True
-    f.test_only = [x[2] for x in chosen if x[2] is not None]
+    f.test_only = [(x[0], x[1], x[2]) for x in chosen]
     return f.test_only
+
+
+def test_only_containers(f):
+    """The containers among `test_only_spans`."""
+    return [x[2] for x in test_only_spans(f) if x[2] is not None]
+
+
+def test_only_code(f, q):
+    """Whether token q of f is compiled only into a test build: test code, or inside a test-only span."""
+    return f.in_test[q] or any(lo <= q <= hi for lo, hi, _ in test_only_spans(f))
 
 
 if __name__ == "__main__":
