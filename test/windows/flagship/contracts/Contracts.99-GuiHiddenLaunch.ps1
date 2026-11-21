@@ -601,44 +601,222 @@ foreach ($mutation in @(
     if ($found.Count -eq 0) { throw "The destination check accepted $($mutation.Name)." }
 }
 
-# ---- (10) every hosted leaf and the stateful library: lib loads before the first write, launch or bootstrap, and every
-# Start-Process or `& $cli` sits in the else of an `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)` whose then-branch uses the
-# hosted launcher (design §4.1).
+# ---- (10) every hosted leaf loads lib before the first write, launch or bootstrap it runs; and no launch that can
+# start the copy or its CLI runs on a hosted path, in the leaves or in the library functions they reach (design §4.1).
+# Order is read from what runs: a write inside a helper runs where the file first calls the helper, not where it is
+# defined (CodeRabbit on #740). A launch is found through the syntax tree, not by variable name (Opus on #740):
+# Start-Process, [Diagnostics.Process]::Start, a ProcessStartInfo, or a `&`, `.` or bare call whose callee the
+# walker's resolver (scripts/ci-script-closure.ps1) cannot prove to be some other program. Each must sit in the else
+# of an `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)` whose then-branch uses the hosted launcher (that switch, not the
+# nearest `if`: CodeRabbit on #740), or after a hosted tripwire that throws before it (a function's first
+# `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw }`, or vt-probe's `if ($Runtime -and $env:NOCTTY_GUI_HIDDEN_DESKTOP)
+# { throw }` before its `if ($Runtime)`). A Process start whose FileName is a known program other than noctty and a
+# shell (lib's System32 taskkill) is not one; nor is the hosted launcher's own [InteractiveWin11HostedLaunch]::Start.
 $guiPlan = Get-Content -LiteralPath $guiPlanPath -Raw | ConvertFrom-Json
-$guiHostedFiles = @($guiPlan.leaves | ForEach-Object { Join-Path $repoRoot ([string]$_.script) }) + @($guiStatefulPath)
+$guiLibraryFiles = @('scripts\interactive-win11-lib.ps1', 'scripts\interactive-win11-window-lib.ps1', 'scripts\interactive-win11-state-guard.ps1',
+    'scripts\windows-harness-history.ps1', 'test\windows\hidden-win11-local-lib.ps1', 'test\windows\interactive-win11-stateful-lib.ps1') |
+    ForEach-Object { Join-Path $repoRoot $_ }
+$guiLeafFiles = @($guiPlan.leaves | ForEach-Object { Join-Path $repoRoot ([string]$_.script) })
 $guiFirstUseNames = @('Invoke-InteractiveWin11HarnessMain', 'Invoke-InteractiveWin11Bootstrap', 'Initialize-InteractiveWin11Sandbox', 'Start-Process', 'Set-Content', 'New-Item', 'Out-File')
-foreach ($file in $guiHostedFiles) {
-    $ast = Get-GuiContractAst $file
-    $text = $ast.Extent.Text
-    if (-not [string]::Equals($file, $guiStatefulPath, [StringComparison]::OrdinalIgnoreCase)) {
-        $libLoads = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
-            ($n.Extent.Text -match 'interactive-win11-lib\.ps1' -or $n.Extent.Text -match '\$libPath') }, $true))
-        if ($libLoads.Count -lt 1) { throw "$file must dot-source the interactive library." }
-        $firstUse = @($ast.FindAll({ param($n)
-            ($n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in $guiFirstUseNames) -or
-            ($n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and (Get-MemberExpressionName -Node $n) -match '\AWrite(AllText|AllLines|AllBytes)\z') }, $true) |
-            Sort-Object { $_.Extent.StartOffset } | Select-Object -First 1)
-        if ($firstUse.Count -eq 1 -and $firstUse[0].Extent.StartOffset -lt $libLoads[0].Extent.StartOffset) {
-            throw "$file writes, launches or bootstraps before the interactive library (and its desktop check) loads."
-        }
+
+function Get-GuiLaunchRunOffset($Ast, $Node, [hashtable] $Memo) {
+    # Where a node runs in the file's own flow: its offset outside any function; in a function, the earliest place
+    # code that runs calls that function (through other functions too); $null when nothing calls it.
+    $function = $null
+    for ($walk = $Node.Parent; $null -ne $walk; $walk = $walk.Parent) {
+        if ($walk -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $function = $walk; break }
     }
-    $launches = @($ast.FindAll({ param($n)
-        ($n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ceq 'Start-Process') -or
-        ($n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand -and
-            $n.CommandElements.Count -gt 0 -and $n.CommandElements[0].Extent.Text -match '\A\$(cli|exe|exePath)\z') -or
-        ($n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Expression.Extent.Text -match 'Diagnostics\.Process\]\z' -and (Get-MemberExpressionName -Node $n) -ceq 'Start') }, $true))
-    foreach ($launch in $launches) {
-        if (-not (Test-GuiContractInsideHostedSwitch $launch -ElseBranch)) {
-            throw "$file starts a process outside the else of an if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) switch (line $($launch.Extent.StartLineNumber))."
-        }
-        $cursor = $launch.Parent
-        while ($cursor -isnot [System.Management.Automation.Language.IfStatementAst]) { $cursor = $cursor.Parent }
-        if ($cursor.Clauses[0].Item2.Extent.Text -notmatch '\b(Start|Invoke)-InteractiveWin11HostedProcess\b') {
-            throw "$file's hosted branch beside line $($launch.Extent.StartLineNumber) does not use the hosted launcher."
-        }
+    if ($null -eq $function) { return $Node.Extent.StartOffset }
+    $key = $function.Name.ToLowerInvariant()
+    if ($Memo.ContainsKey($key)) { return $Memo[$key] }
+    $Memo[$key] = $null
+    $earliest = $null
+    foreach ($call in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -ieq $function.Name }.GetNewClosure(), $true))) {
+        $at = Get-GuiLaunchRunOffset $Ast $call $Memo
+        if ($null -ne $at -and ($null -eq $earliest -or $at -lt $earliest)) { $earliest = $at }
     }
+    $Memo[$key] = $earliest
+    return $earliest
 }
-# The control: a Start-Process outside any hosted switch must be caught.
+
+function Test-GuiLaunchLibFirst($Ast) {
+    # True when the file loads the interactive library before the first write, launch or bootstrap that runs.
+    $memo = @{}
+    $loads = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
+        ($n.Extent.Text -match 'interactive-win11-lib\.ps1' -or $n.Extent.Text -match '\$libPath') }, $true) |
+        ForEach-Object { Get-GuiLaunchRunOffset $Ast $_ $memo } | Where-Object { $null -ne $_ } | Sort-Object)
+    if ($loads.Count -lt 1) { return $false }
+    $uses = @($Ast.FindAll({ param($n)
+        ($n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -in $guiFirstUseNames) -or
+        ($n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and (Get-MemberExpressionName -Node $n) -match '\AWrite(AllText|AllLines|AllBytes)\z') }, $true) |
+        ForEach-Object { Get-GuiLaunchRunOffset $Ast $_ $memo } | Where-Object { $null -ne $_ } | Sort-Object)
+    return ($uses.Count -eq 0 -or $uses[0] -gt $loads[0])
+}
+
+function Get-GuiLaunchHostedSwitch($Node) {
+    # The `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP)` with no other clause whose else-branch holds the node: the one that
+    # accepted it, however many `if`s sit between; $null when there is none.
+    for ($cursor = $Node.Parent; $null -ne $cursor; $cursor = $cursor.Parent) {
+        if ($cursor -is [System.Management.Automation.Language.IfStatementAst] -and $cursor.Clauses.Count -eq 1 -and $null -ne $cursor.ElseClause -and
+            [string]::Equals($cursor.Clauses[0].Item1.Extent.Text, '$env:NOCTTY_GUI_HIDDEN_DESKTOP', [StringComparison]::Ordinal) -and
+            $Node.Extent.StartOffset -ge $cursor.ElseClause.Extent.StartOffset -and $Node.Extent.EndOffset -le $cursor.ElseClause.Extent.EndOffset) { return $cursor }
+    }
+    return $null
+}
+
+function Test-GuiLaunchTripwired($Node) {
+    # True when a hosted refusal runs before the node: an `if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw }`, or for a
+    # node inside `if (<C>) { ... }`, an `if (<C> -and $env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw }`, that ends before the
+    # node in a statement list that also holds it.
+    $conditions = [System.Collections.Generic.List[string]]::new()
+    $conditions.Add('$env:NOCTTY_GUI_HIDDEN_DESKTOP')
+    for ($walk = $Node.Parent; $null -ne $walk; $walk = $walk.Parent) {
+        if ($walk -is [System.Management.Automation.Language.IfStatementAst]) {
+            foreach ($clause in $walk.Clauses) {
+                if ($Node.Extent.StartOffset -ge $clause.Item2.Extent.StartOffset -and $Node.Extent.EndOffset -le $clause.Item2.Extent.EndOffset) {
+                    $conditions.Add($clause.Item1.Extent.Text + ' -and $env:NOCTTY_GUI_HIDDEN_DESKTOP')
+                }
+            }
+        }
+        if ($walk -is [System.Management.Automation.Language.NamedBlockAst] -or $walk -is [System.Management.Automation.Language.StatementBlockAst]) {
+            foreach ($statement in $walk.Statements) {
+                if ($statement.Extent.EndOffset -gt $Node.Extent.StartOffset) { break }
+                if ($statement -is [System.Management.Automation.Language.IfStatementAst] -and $statement.Clauses.Count -eq 1 -and $null -eq $statement.ElseClause -and
+                    @($statement.Clauses[0].Item2.Statements).Count -eq 1 -and @($statement.Clauses[0].Item2.Statements)[0] -is [System.Management.Automation.Language.ThrowStatementAst] -and
+                    @($conditions | Where-Object { [string]::Equals($_, $statement.Clauses[0].Item1.Extent.Text, [StringComparison]::Ordinal) }).Count -gt 0) { return $true }
+            }
+        }
+        if ($walk -is [System.Management.Automation.Language.FunctionDefinitionAst]) { break }
+    }
+    return $false
+}
+
+function Get-GuiLaunchProblems {
+    # The launches in one parsed file that can start the copy or its CLI on a hosted path: one line each.
+    param([Parameter(Mandatory)] $Ast, [Parameter(Mandatory)] [string] $RepoPath)
+    . (Join-Path $repoRoot 'scripts\ci-script-closure.ps1')
+    $context = New-CiScriptContext -RepoRoot $repoRoot -RepoPath $RepoPath -Ast $Ast
+    $found = [System.Collections.Generic.List[string]]::new()
+    # Whether a resolved value can be the copy, its CLI, or a program that starts them (a shell).
+    $canHold = {
+        param($Value)
+        if ($Value.Kind -eq 'scriptblock') { return $false }
+        if ($Value.Kind -eq 'path' -and (Test-CiScriptTargetKind $Value.Value) -in @('script', 'batch')) { return $false }
+        if ($Value.Kind -notin @('path', 'native') -or -not $Value.Value) { return $true }
+        $leaf = ($Value.Value -split '[\\/]')[-1].ToLowerInvariant()
+        if ($leaf -match '\A(noctty|cmd|powershell|pwsh)(\.exe|\.com)?\z' -or $leaf -match '(?i)\Aget-[a-z0-9-]*(exepath|clipath)\z') { return $true }
+        if ($Value.Kind -eq 'path' -and (Test-CiScriptTargetKind $Value.Value) -ne 'native' -and $Value.Value -match '[\\/]') { return $true }
+        return $false
+    }
+    # A Process start's program, from its start info's FileName assignments when it is a variable.
+    $fileNameOf = {
+        param($Node)
+        if ($Node -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            $name = $Node.VariablePath.UserPath
+            $values = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.MemberExpressionAst] -and
+                    $n.Left.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Left.Expression.VariablePath.UserPath -ieq $name -and
+                    $n.Left.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.Left.Member.Value -ieq 'FileName' }.GetNewClosure(), $true) |
+                ForEach-Object { Resolve-CiScriptValue $_.Right $context })
+            if ($values.Count -eq 0) { return @{ Kind = 'unresolved'; Value = $null } }
+            return Merge-CiScriptValues $values
+        }
+        return Resolve-CiScriptValue $Node $context
+    }
+    $sites = [System.Collections.Generic.List[object]]::new()
+    foreach ($node in @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -or $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
+        if ($node -is [System.Management.Automation.Language.CommandAst]) {
+            $name = $node.GetCommandName()
+            $first = $node.CommandElements[0]
+            if ($name -in @('Start-Process', 'saps', 'start')) { $sites.Add($node); continue }
+            if ($name -ieq 'New-Object' -and $node.Extent.Text -match '(?i)\bDiagnostics\.ProcessStartInfo\b') {
+                $assigned = $node.Parent.Parent
+                $target = $(if ($assigned -is [System.Management.Automation.Language.AssignmentStatementAst] -and $assigned.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $assigned.Left })
+                if ($null -eq $target -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
+                continue
+            }
+            $invoked = $node.InvocationOperator -in @([System.Management.Automation.Language.TokenKind]::Ampersand, [System.Management.Automation.Language.TokenKind]::Dot)
+            $bare = $first -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $first.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::BareWord -and
+                ($first.Value -match '[\\/]' -or (Test-CiScriptTargetKind $first.Value) -ne 'other') -and $first.Value -notmatch '\A[A-Za-z][\w.]*\\[A-Za-z]+-[A-Za-z]\w*\z'
+            $shell = $first -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $first.Value -match '(?i)\A(cmd|powershell|pwsh)(\.exe)?\z'
+            if (-not $invoked -and -not $bare -and -not $shell) { continue }
+            if ($first -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { continue }
+            if (& $canHold (Resolve-CiScriptValue $first $context)) { $sites.Add($node) }
+            continue
+        }
+        # [Diagnostics.Process]::Start(...) and [Diagnostics.ProcessStartInfo]::new(...)
+        if (-not $node.Static -or $node.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst]) { continue }
+        $type = $node.Expression.TypeName.FullName
+        $method = Get-MemberExpressionName -Node $node
+        if ($type -match '(?i)\A(System\.)?Diagnostics\.Process\z' -and $method -ieq 'Start') {
+            $argument = @($node.Arguments)[0]
+            if ($null -eq $argument -or (& $canHold (& $fileNameOf $argument))) { $sites.Add($node) }
+        } elseif ($type -match '(?i)\A(System\.)?Diagnostics\.ProcessStartInfo\z' -and $method -ieq 'new') {
+            $assigned = $node.Parent.Parent
+            $target = $(if ($assigned -is [System.Management.Automation.Language.AssignmentStatementAst] -and $assigned.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $assigned.Left })
+            if ($null -eq $target -or (& $canHold (& $fileNameOf $target))) { $sites.Add($node) }
+        }
+    }
+    foreach ($site in $sites) {
+        $switch = Get-GuiLaunchHostedSwitch $site
+        if ($switch) {
+            if ($switch.Clauses[0].Item2.Extent.Text -notmatch '\b(Start|Invoke)-InteractiveWin11HostedProcess\b') {
+                $found.Add("${RepoPath}: the hosted branch of the switch around line $($site.Extent.StartLineNumber) does not use the hosted launcher.")
+            }
+            continue
+        }
+        if (Test-GuiLaunchTripwired $site) { continue }
+        $found.Add("${RepoPath}: line $($site.Extent.StartLineNumber) can start the copy or its CLI outside the else of an if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) switch and after no hosted tripwire.")
+    }
+    return , $found.ToArray()
+}
+
+foreach ($file in @($guiLeafFiles) + @($guiLibraryFiles)) {
+    $ast = Get-GuiContractAst $file
+    $guiLaunchRepoPath = [IO.Path]::GetRelativePath($repoRoot, $file).Replace('\', '/')
+    if ($guiLeafFiles -contains $file -and -not (Test-GuiLaunchLibFirst $ast)) {
+        throw "$file writes, launches or bootstraps before the interactive library (and its desktop check) loads, or never loads it."
+    }
+    $launchProblems = Get-GuiLaunchProblems -Ast $ast -RepoPath $guiLaunchRepoPath
+    if ($launchProblems.Count -ne 0) { throw ($launchProblems -join ' ') }
+}
+# Controls, on synthetic files. The order check: a helper that writes runs where it is called.
+$guiOrderLib = ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
+$guiOrderHelper = "function Write-Seed { Set-Content -LiteralPath `$seed -Value 1 }"
+foreach ($case in @(
+        @{ Name = 'a helper called only after the load'; Accept = $true; Text = "$guiOrderHelper`n$guiOrderLib`nWrite-Seed" }
+        @{ Name = 'a helper called before the load'; Accept = $false; Text = "$guiOrderHelper`nWrite-Seed`n$guiOrderLib" }
+        @{ Name = 'a helper called from a helper called before the load'; Accept = $false; Text = "$guiOrderHelper`nfunction Initialize-Run { Write-Seed }`nInitialize-Run`n$guiOrderLib" }
+        @{ Name = 'a write before the load'; Accept = $false; Text = "Set-Content -LiteralPath `$seed -Value 1`n$guiOrderLib" }
+        @{ Name = 'a helper never called'; Accept = $true; Text = "$guiOrderHelper`n$guiOrderLib" }
+    )) {
+    $orderAst = [System.Management.Automation.Language.Parser]::ParseInput($case.Text, [ref]$null, [ref]$null)
+    if ((Test-GuiLaunchLibFirst $orderAst) -ne $case.Accept) { throw "The load-order check misjudged $($case.Name) (expected accept=$($case.Accept))." }
+}
+# The launch ban: each control in a hosted path must be refused; each legitimate shape must pass.
+$guiHostedLaunch = 'Start-InteractiveWin11HostedProcess -FilePath $exe -ArgumentList $a'
+foreach ($case in @(
+        @{ Name = 'a legacy launch in the else'; Accept = $true; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { $guiHostedLaunch } else { Start-Process -FilePath `$exe -ArgumentList `$a -PassThru }" }
+        @{ Name = 'a legacy launch under a nested condition in the else'; Accept = $true; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { $guiHostedLaunch } else { if (`$Wait) { Start-Process -FilePath `$exe -Wait } else { Start-Process -FilePath `$exe } }" }
+        @{ Name = 'an else whose hosted branch skips the launcher'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { `$p = 1 } else { if (`$Wait) { Start-Process -FilePath `$exe -Wait } }" }
+        @{ Name = 'a bare Start-Process'; Accept = $false; Text = '$p = Start-Process -FilePath $exe -PassThru' }
+        @{ Name = '& $server from the exe path, in the hosted branch'; Accept = $false; Text = "`$server = Get-InteractiveWin11ExePath -RepoRoot `$r`nif (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { & `$server --x; $guiHostedLaunch } else { Start-Process -FilePath `$server }" }
+        @{ Name = '& (Get-InteractiveWin11ExePath) in the hosted branch'; Accept = $false; Text = "if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { & (Get-InteractiveWin11ExePath -RepoRoot `$r) --x; $guiHostedLaunch } else { }" }
+        @{ Name = 'the hosted exe variable called'; Accept = $false; Text = '& $env:NOCTTY_GUI_HIDDEN_EXE +version' }
+        @{ Name = 'a CLI joined to the copy''s directory'; Accept = $false; Text = "`$cli = Join-Path `$dir 'noctty.com'`n& `$cli +list-windows" }
+        @{ Name = 'Process.Start of the exe'; Accept = $false; Text = '$p = [System.Diagnostics.Process]::Start($exe, "--x")' }
+        @{ Name = 'a ProcessStartInfo for the exe'; Accept = $false; Text = "`$psi = [Diagnostics.ProcessStartInfo]::new()`n`$psi.FileName = `$exe`n`$p = [Diagnostics.Process]::Start(`$psi)" }
+        @{ Name = 'a shell that can start anything'; Accept = $false; Text = 'powershell.exe -NoProfile -Command "& $exe"' }
+        @{ Name = 'System32 taskkill through a ProcessStartInfo'; Accept = $true; Text = "`$psi = [System.Diagnostics.ProcessStartInfo]::new()`n`$psi.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'`n`$t = [System.Diagnostics.Process]::Start(`$psi)" }
+        @{ Name = 'a build behind a function''s hosted tripwire'; Accept = $true; Text = "function Invoke-Build { if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'never in hosted mode' }; & cmd /c `$devWindowsCmd zig build }" }
+        @{ Name = 'vt-probe''s refused -Runtime children'; Accept = $true; Text = "if (`$Runtime -and `$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'no -Runtime in hosted mode' }`nif (`$Runtime) { & powershell.exe @scriptArgs }" }
+        @{ Name = 'a tripwire after the launch'; Accept = $false; Text = "function Invoke-Build { & cmd /c `$devWindowsCmd zig build; if (`$env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'too late' } }" }
+        @{ Name = 'a callback, git and a script'; Accept = $true; Text = "`$check = { 1 }`n& `$check`n& git status`n& (Get-Command git.exe).Source log`n. (Join-Path `$PSScriptRoot 'helper.ps1')" }
+    )) {
+    $launchAst = [System.Management.Automation.Language.Parser]::ParseInput($case.Text, [ref]$null, [ref]$null)
+    $launchProblems = Get-GuiLaunchProblems -Ast $launchAst -RepoPath 'test/windows/launch-fixture.ps1'
+    if (($launchProblems.Count -eq 0) -ne $case.Accept) { throw "The launch ban misjudged $($case.Name) (expected accept=$($case.Accept)): $($launchProblems -join ' ')" }
+}
+# The hosted-switch helper the session check below uses still refuses a bare Start-Process.
 $guiControlAst = [System.Management.Automation.Language.Parser]::ParseInput("`$p = Start-Process -FilePath `$exe -PassThru", [ref]$null, [ref]$null)
 $guiControlLaunch = @(Get-NamedCommands -Ast $guiControlAst -Name 'Start-Process')[0]
 if (Test-GuiContractInsideHostedSwitch $guiControlLaunch -ElseBranch) { throw 'The hosted-switch check accepted a bare Start-Process.' }

@@ -670,6 +670,22 @@ function ConvertTo-CiScriptAnchor {
     return ($Text -replace '\s+', ' ').Trim()
 }
 
+function New-CiScriptContext {
+    # What Resolve-CiScriptValue reads about one parsed file: the repository root, the AST, the file's full path and
+    # directory, and its caches. A contract that judges a value in a file (Contracts.99-GuiHiddenLaunch's launch ban)
+    # makes one here rather than copying its shape.
+    param([Parameter(Mandatory)] [string] $RepoRoot, [Parameter(Mandatory)] [string] $RepoPath, [Parameter(Mandatory)] $Ast)
+    $fullPath = Join-Path $RepoRoot ($RepoPath.Replace('/', '\'))
+    return @{
+        RepoRoot = $RepoRoot
+        Ast = $Ast
+        FilePath = $fullPath
+        Directory = Split-Path -Parent $fullPath
+        Resolving = [System.Collections.Generic.HashSet[string]]::new()
+        Nodes = @{}
+    }
+}
+
 # The edges of one parsed file: @{ Targets = list of repo paths (resolved); Unresolved = list of anchors;
 # CSharp = list of repo paths (Add-Type -Path) }.
 function Get-CiScriptFileEdges {
@@ -681,15 +697,7 @@ function Get-CiScriptFileEdges {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
     if ($errors.Count -ne 0) { throw "$RepoPath does not parse: $($errors[0].Message)" }
-    $fullPath = Join-Path $RepoRoot ($RepoPath.Replace('/', '\'))
-    $context = @{
-        RepoRoot = $RepoRoot
-        Ast = $ast
-        FilePath = $fullPath
-        Directory = Split-Path -Parent $fullPath
-        Resolving = [System.Collections.Generic.HashSet[string]]::new()
-        Nodes = @{}
-    }
+    $context = New-CiScriptContext -RepoRoot $RepoRoot -RepoPath $RepoPath -Ast $ast
     $targets = [System.Collections.Generic.List[string]]::new()
     $unresolved = [System.Collections.Generic.List[string]]::new()
     $csharp = [System.Collections.Generic.List[string]]::new()
