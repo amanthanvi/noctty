@@ -1535,7 +1535,10 @@ Two modes:
   deadline plus 5 min for staging and the guards). With the default
   200,000 ms the lock has expired before the first copy starts, so
   `-Visible` is refused. The admission prints both values, and each run
-  records them (`ForegroundLockTimeoutMs`, `ForegroundLockNeededMs`).
+  records them (`ForegroundLockTimeoutMs`, `ForegroundLockNeededMs`). The lock
+  is read again before each run's driver starts and right before each copy's
+  launch, after `+version`'s wait (`ForegroundLockTimeoutAtLaunchMs`), so a
+  setting changed during the series stops it.
   "Away" means only that: a gamepad, or a video watched without input, is not
   seen. The series holds the display and the system on.
 - Real input is detected by the injected flag, not inferred from ticks.
@@ -1570,7 +1573,14 @@ Two modes:
   low-level hook does not get, and input that a software KVM or a
   remote-input tool delivers through `SendInput`, which carries the injected
   flag. Both still move the session's last-input tick, which the gate checks
-  second, except within a few milliseconds of the harness's own unlock.
+  second, except within a few milliseconds of the harness's own injected
+  input (the unlock and the keyboard probe). For that input the outer half
+  never wakes: the copy ends at the driver's next tick check. That is within
+  100 ms in every wait the driver polls (the end marker's loop included),
+  and up to about 2 s in the readings that do not poll: the load reading
+  right before the window, the display-power reading right after it, and the
+  load reading before the quit. Input the gate finds after the window, or
+  right before the quit, ends the copy at once.
 - The input gate (`Test-FramePacingInputGate`) reads that event first. The
   session's last-input tick is the second line: it must be the series' tick
   until the unlock and the harness's own latest tick after it. The gate runs
@@ -1580,10 +1590,19 @@ Two modes:
   wait the driver makes, inside the window and before it. On real input the
   run stops at once: nothing further starts, takes the foreground or sends
   input, the catch ends the copy, and input inside the window makes the run
-  inconclusive, never a timeout's failure. The outer half waits on the driver
-  and the real-input event together, so if the driver is busy in a step that
-  does not poll (the copy's launch, a 2 s load reading), it closes the run's
-  job, and with it the copy, 250 ms after the input. The machine must be
+  inconclusive, never a timeout's failure. The outer half waits on the
+  hooks' real-input latch and the driver together (the latch first, so input
+  that arrives as the driver ends still counts) and closes the run's job, and
+  with it the copy, the moment it observes the latch, inside the same native
+  call and with no grace: immediately on observation, plus OS scheduling
+  latency. That holds even while the driver is busy in a step that does not
+  poll (the copy's launch, a 2 s load reading). Each run records the delay
+  from that observation to the job's close (`LatchToKillMs` in `guards.json`
+  and `latch_to_kill_ms` in `pacing.json`, from QueryPerformanceCounter).
+  This bound and the per-poll gate apply to input the hooks see; input they
+  cannot see is bounded by the driver's tick checks (above). Real input the
+  hooks see at any point in a series makes the series inconclusive and
+  publishes no metric, whatever any driver's own exit says. The machine must be
   under 30% busy (the driver waits up to `-QuietWaitSeconds` and launches
   nothing when it never was) and again right before the window, with no
   screen saver then either; each reading is acted on at once.
@@ -1626,9 +1645,9 @@ Two modes:
 
   | Action | Checked right before | Worst case for a user who returns in the gap |
   | --- | --- | --- |
-  | A launch on `Default` (the driver, `+version`, the copy, the grid probe) | the event, then the tick | A process starts. The copy's window may show, but its own activation is subject to the foreground lock (below); the copy is closed within 250 ms. |
+  | A launch on `Default` (the driver, `+version`, the copy, the grid probe) | the event, then the tick | A process starts. The copy's window may show, but its own activation is subject to the foreground lock (below); the copy is closed as soon as the outer half observes the input. |
   | The unlock (`SendInput`, `MOUSEEVENTF_MOVE`, dx = dy = 0) | the event, on the worker | None visible: no motion, no button, no key. The session's last-input tick moves. |
-  | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd until the gate's next poll stops the run, within 100 ms, or the outer half closes the copy, within 250 ms. |
+  | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd until the outer half closes the copy on observing the input, or the gate's next poll stops the run, within 100 ms, whichever comes first. |
   | The keyboard probe (`SendInput`, VK_NONAME down and up) | the copy in front, the tick, then the event, on the worker | If the user clicked elsewhere inside the gap, their app gets an unassigned key down and up, which has no binding and no character. |
   | F5, F6 and the dry run's VK_NONAME (`WM_KEYDOWN`/`WM_KEYUP` posted) | the event, then the tick | The key reaches the copy's own window only, never the user's application. |
 
@@ -1636,8 +1655,8 @@ Two modes:
   show (`Host.present`: `ShowWindow`, then `SetForegroundWindow`) is not the
   harness's call, and only a default-terminal handoff reads a launch's show
   state: the harness cannot stop that call. It relies on the lock to keep the
-  call from taking the foreground, and closes the copy within 250 ms of any
-  real input. Under Microsoft's documented rules a background process that is
+  call from taking the foreground, and closes the copy as soon as it observes
+  any real input. Under Microsoft's documented rules a background process that is
   not in front, was not started by the foreground process and did not receive
   the last input cannot take the foreground until the lock's timeout has
   passed since the last input. That leaves three paths uncovered: no window
@@ -1645,8 +1664,15 @@ Two modes:
   activate nothing after it), the returning user's first input lands on the
   copy's newly shown window, and a foreground right passed down the launch
   chain (outer pwsh, driver, copy), which the documentation does not address.
-  All of this is inferred from the documentation, not measured with a
-  returning user. Each visible run records whether a window held the
+  The first path includes this interleaving: the user's foreground window
+  disappears while the copy is starting (the user closes it, or it closes
+  itself), and the user's real input arrives during that startup. With no
+  foreground window when the copy first shows, its activation can take the
+  foreground despite the lock. The harness accepts this as a residual, with no
+  mechanism of its own: the hooks' latch is set by that input and the outer
+  half closes the copy immediately on observing it, which bounds how long the
+  copy holds the foreground. All of this is inferred from the documentation,
+  not measured with a returning user. Each visible run records whether a window held the
   foreground right before the copy's launch (`ForegroundBeforeLaunch`) and
   whether the copy held it right before the harness's unlock
   (`ForegroundBeforeUnlock`). A copy in front after no window was is recorded
@@ -1687,8 +1713,15 @@ window, where a change makes the run inconclusive), DPI and grid (a difference
 pools none and exits 2). Each group of runs alike in all nine of those fields
 is reported on its own in `Groups`, never combined across any of them.
 `frame_time_p95_ms` and its median are published only for a visible series
-whose every run completed and whose runs are comparable; otherwise both are
-null and the console says no measurement was published. A staging failure is a
+with no real input the hooks saw (`RealInputsSeen` 0), whose every run
+completed and whose runs are comparable; otherwise both are null, real input
+makes the series inconclusive (exit 2 unless a guard or a failure ranks
+higher), and the console says no measurement was published. A visible run is
+never complete without the keyboard probe's "ok", and a run whose foreground
+was taken without one stops the series unless real input stopped it first. A
+`run.json` the job's close cut short reads as no record: a run stopped for
+real input is then inconclusive, any other run failed, and the series still
+writes `pacing.json`. A staging failure is a
 failed run before any launch, and the summary still records the runs before
 it. What runs is the run's own copy: its path is checked before any launch
 and its image read back by PID, and the driver runs in the run's own job,

@@ -41,20 +41,29 @@ Two modes.
           before the foreground is taken, the keyboard hook a VK_NONAME probe sent once the copy is in front, and the
           outer half's marked counts must show both after each run; Windows removes a low-level hook that times out
           without notice. Keystrokes into an elevated window and input a software KVM injects escape the flag; the
-          tick, the second line, still sees them. The input gate (Test-FramePacingInputGate) reads that event first
-          and the session's last-input tick second, right before each launch on Default (the visible driver's too),
+          tick, the second line, still sees them, except within milliseconds of the unlock and the keyboard probe,
+          and the copy then ends at the driver's next tick check (within 100 ms in every polled wait, up to about
+          2 s in the load and display readings around the window). The input gate (Test-FramePacingInputGate) reads
+          that event first and the session's last-input tick second, right before each launch on Default (the
+          visible driver's too),
           the unlock, the copy in front, the keyboard probe, each workload key and the measured window, and at each
           100 ms poll of every wait; on real input nothing further starts, takes the foreground or sends input, and
-          the copy is ended, by the driver at its next poll or by the outer half closing the run's job 250 ms after
-          the input. The copy takes the foreground through a bounded call: a zero-motion mouse input unlocks it,
+          the copy is ended, by the driver at its next poll or by the outer half, which waits on the hooks' latch and
+          the driver together and closes the run's job the moment it observes the latch, with no grace (immediately
+          on observation, plus OS scheduling latency; LatchToKillMs records the observation-to-close delay). Real
+          input at any point in a series makes the series inconclusive and publishes nothing, whatever a driver's
+          own exit says. The copy takes the foreground through a bounded call: a zero-motion mouse input unlocks it,
           never an Alt tap (PROBE-ALT-TAP-01), then one SetForegroundWindow, with no AttachThreadInput fallback, no
           BringWindowToTop and no keyboard-state reset; the native worker checks the event right before its input and
           its foreground call, waits for the activation before it reports a refusal, and runs joined within 5 s, a
           timeout cancelling what it has not done (VISIBLE-PACING-CERT-01 trap (1)). noctty's own startup activation
           (Host.present) is not the harness's call and it cannot stop it: the foreground lock holds it back from a
           returning user under Microsoft's documented rules, except when no window holds the foreground, the user's
-          input lands on the copy, or a right passes down the launch chain (inferred, not measured); a copy that took
-          the foreground from another window before the unlock makes the run inconclusive. A run in which any other
+          input lands on the copy, or a right passes down the launch chain (inferred, not measured). The first
+          includes a returning user whose foreground window goes away while the copy starts: the copy's first show
+          can then take the foreground while their input arrives, a residual the harness accepts, bounded by the
+          close on observing that input. A copy that took the foreground from another window before the unlock makes
+          the run inconclusive. The lock is read again right before each copy's launch. A run in which any other
           input came, the foreground or the pane's focus changed, the display went off, a screen saver started or the
           machine was busy right before the window is inconclusive, never a sample. "Away" means no keyboard or mouse
           input: a gamepad or a video watched without input is not seen. Run it only while the machine's user is away
@@ -194,9 +203,6 @@ $script:DrainMs = 1000
 $script:DriverDeadlineMs = 1800000
 $script:StagingBoundMs = 300000
 $script:RunBoundMs = 2100000
-# How long the outer half lets a visible driver stop on its own after real input before it closes the run's job,
-# which ends the copy wherever the driver is (Sol and Opus on #741). The driver polls the gate every 100 ms.
-$script:InputStopGraceMs = 250
 # win32/consts.zig WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT and WM_WINHOSTTY_RENDER_TRACE_TARGET (WM_APP + 8 and + 9), as
 # bench-windows.ps1 names them.
 $script:WmRenderTraceSnapshot = [uint32](0x8000 + 8)
@@ -395,6 +401,9 @@ public static class FramePacingNative {
     [DllImport("kernel32.dll")] static extern bool SetEvent(IntPtr h);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess, IntPtr source, IntPtr targetProcess, out IntPtr target, uint access, bool inherit, uint options);
     [DllImport("kernel32.dll")] static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint ms);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
+    [DllImport("kernel32.dll")] static extern bool QueryPerformanceCounter(out long count);
+    [DllImport("kernel32.dll")] static extern bool QueryPerformanceFrequency(out long frequency);
     static IntPtr watchEvent = IntPtr.Zero, mouseEvent = IntPtr.Zero, keyEvent = IntPtr.Zero, inputMarker = IntPtr.Zero;
     static long realInputs, injectedInputs, markedMice, markedKeys;
     static Thread watchThread;
@@ -492,13 +501,27 @@ public static class FramePacingNative {
         inputMarker = IntPtr.Zero;
         return true;
     }
-    // The outer half's wait on a visible driver (Sol and Opus on #741): 0 when the driver ended, 1 the moment the
-    // series' real-input event is set, 0x102 at the timeout; anything else -1. Without a watch it waits on the driver.
-    public static int WaitProcessOrRealInput(IntPtr process, uint ms) {
-        if (watchEvent == IntPtr.Zero) { uint single = WaitForSingleObject(process, ms); return single == 0 ? 0 : single == 0x102 ? 0x102 : -1; }
-        uint r = WaitForMultipleObjects(2, new IntPtr[] { process, watchEvent }, false, ms);
-        return r == 0 ? 0 : r == 1 ? 1 : r == 0x102 ? 0x102 : -1;
+    // The outer half's wait on a driver (the lead, Sol and Opus on #741): on the series' real-input latch and the
+    // driver together, the latch first, so a latch set by the time the driver ends still reads as input
+    // (WaitForMultipleObjects reports the lowest signalled index). The moment it sees the latch it closes the run's
+    // job itself, which ends the driver and the copy wherever the driver is: no grace, and nothing between the wait's
+    // return and TerminateJobObject but one counter read. `observed` and `closed` are QueryPerformanceCounter readings
+    // at the wait's return and at TerminateJobObject's. Returns 1 the latch seen and the job terminated, 2 the latch
+    // seen and TerminateJobObject failed, 0 the driver ended, 0x102 the timeout, -1 a failed wait. Without a latch (a
+    // dry run has no watch) it waits on the driver alone. Public with its latch so the contract can drive it.
+    public static int Supervise(IntPtr latch, IntPtr process, IntPtr job, uint ms, out long observed, out long closed) {
+        observed = 0; closed = 0;
+        if (latch == IntPtr.Zero) { uint single = WaitForSingleObject(process, ms); return single == 0 ? 0 : single == 0x102 ? 0x102 : -1; }
+        uint r = WaitForMultipleObjects(2, new IntPtr[] { latch, process }, false, ms);
+        QueryPerformanceCounter(out observed);
+        if (r == 0) { bool terminated = TerminateJobObject(job, 1); QueryPerformanceCounter(out closed); return terminated ? 1 : 2; }
+        return r == 1 ? 0 : r == 0x102 ? 0x102 : -1;
     }
+    // The supervision on this series' own latch, the real-input event the watch created.
+    public static int SuperviseDriver(IntPtr process, IntPtr job, uint ms, out long observed, out long closed) {
+        return Supervise(watchEvent, process, job, ms, out observed, out closed);
+    }
+    public static long PerformanceFrequency() { long f; return QueryPerformanceFrequency(out f) ? f : 0; }
     // A driver's handles to the series' three events (SYNCHRONIZE only: it can wait on them, never set or clear the
     // real-input one), or zero; and whether real input has signalled the watch. Anything but WAIT_TIMEOUT counts as
     // input (Sol on #741: a failed wait, a zero or closed handle, must never read as quiet).
@@ -1456,6 +1479,8 @@ function Get-FramePacingRecordProblems($Record) {
     } elseif ([string]::Equals([string]$Record.Mode, 'visible', [StringComparison]::Ordinal)) {
         if ($Record.VisibleRefusal) { $problems.Add("inconclusive: the visible run was refused: $($Record.VisibleRefusal)") }
         if (-not [string]::Equals([string]$Record.Foreground, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the foreground was $($Record.Foreground)") }
+        # The keyboard hook's proof of life (Opus on #741, round 5): a visible run is never complete without it.
+        if (-not [string]::Equals([string]$Record.KeyProbe, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the keyboard probe was $(if ($null -eq $Record.KeyProbe) { 'not sent' } else { $Record.KeyProbe })") }
         if ($Record.Cloaked -ne 0) { $problems.Add("inconclusive: DWM cloaked the window ($($Record.Cloaked))") }
         if (-not $Record.ForegroundHeld) { $problems.Add('inconclusive: the window lost the foreground during the workload') }
         if (-not $Record.FocusHeld) { $problems.Add('inconclusive: the pane''s focus changed during the workload') }
@@ -1502,7 +1527,7 @@ function Invoke-FramePacingDriver {
         InputDuringRun = $null; InputBreak = $null; InputTicks = [ordered]@{ Series = $QuietSinceTick; Unlock = $null; Checks = [Collections.Generic.List[object]]::new() }
         BusyPercentBefore = $null; BusyPercentAtArm = $null; BusyPercentAfter = $null; QuietWaitMs = 0; ProcessorGroups = $null; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null
         DisplayPowerBefore = $null; DisplayPowerAfter = $null; SnapshotsInWindow = $null; PresentAfterDoneMs = $null
-        ScreenSaverBeforeUnlock = $null; ScreenSaverAtArm = $null; ForegroundLockTimeoutMs = $null; ForegroundLockNeededMs = $ForegroundLockNeededMs; ForegroundBeforeLaunch = $null; ForegroundBeforeUnlock = $null; ForegroundTakenFromNone = $false
+        ScreenSaverBeforeUnlock = $null; ScreenSaverAtArm = $null; ForegroundLockTimeoutMs = $null; ForegroundLockTimeoutAtLaunchMs = $null; ForegroundLockNeededMs = $ForegroundLockNeededMs; ForegroundBeforeLaunch = $null; ForegroundBeforeUnlock = $null; ForegroundTakenFromNone = $false
         KeyProbe = $null; DryProbePromptUnchanged = $null; DryProbeCommandIntact = $null
         QpcFrequency = $null; EndMarkerPresented = $false; IntervalCount = 0; IntervalOverflow = $null; IntervalsMs = [double[]]@()
         P95Ms = $null; MedianMs = $null; MaxMs = $null; WindowMs = $null; SwapsBefore = $null; SwapsAfter = $null
@@ -1665,6 +1690,13 @@ function Invoke-FramePacingDriver {
         $record.LaunchConfigFile = $configPath
         $record.WorkloadSha256 = Get-FramePacingWorkloadSha256 $record.PayloadSha256 $configPath $Run
         [void][FramePacingNative]::SetErrorMode([FramePacingNative]::GetErrorMode() -bor 2)   # SEM_NOGPFAULTERRORBOX, inherited
+        # The foreground lock read again right before the launch, after +version's wait (Sol on #741, round 5): a
+        # setting changed since the session facts were read must still outlast this run and every run after it.
+        if ($Visible) {
+            $record.ForegroundLockTimeoutAtLaunchMs = [FramePacingNative]::ForegroundLockTimeout()
+            $lockShortfall = Get-FramePacingLockShortfall $record.ForegroundLockTimeoutAtLaunchMs $ForegroundLockNeededMs
+            if ($lockShortfall) { throw "INCONCLUSIVE: right before the copy's launch, $lockShortfall; the copy was not launched." }
+        }
         # The copy's environment: the log on stderr, the live render trace into the run, and this run's end marker.
         $tracePath = Join-Path $Run 'render-trace.json'
         $env:GHOSTTY_LOG = 'stderr'
@@ -1875,8 +1907,9 @@ function Invoke-FramePacingDriver {
         $presented = $null
         $presentDeadline = $clock.ElapsedMilliseconds + 120000
         while ($null -eq $presented) {
-            Start-Sleep -Milliseconds $script:DrainMs
-            Assert-QuietPoll 'the end marker''s swap'
+            # $DrainMs between snapshots, the gate read at each 100 ms of it (Opus on #741, round 5: input the hooks
+            # cannot see stops the run within a poll here too).
+            for ($drained = 0; $drained -lt $script:DrainMs; $drained += 100) { Start-Sleep -Milliseconds 100; Assert-QuietPoll 'the end marker''s swap' }
             if (-not [FramePacingNative]::Alive($process)) { throw 'The copy ended before it presented the end marker.' }
             try { $s = Request-Trace } catch { Assert-Quiet 'the end marker''s snapshot'; throw }
             if ([uint64]$s.first_target_swap_qpc_ticks -gt 0 -and [uint64]$s.first_target_swap_benchmark_end_marker_generation -gt 0) { $presented = $s }
@@ -1910,6 +1943,9 @@ function Invoke-FramePacingDriver {
             $record.InputDuringRun = $null -ne $record.InputBreak
         }
         Log ("workload: {0} intervals, p95 {1} ms, median {2} ms, overflow {3}, snapshots in the window {4}, presented {5} ms after cmd's end; foreground held {6}, focus held {7}, input {8}" -f $record.IntervalCount, $record.P95Ms, $record.MedianMs, $record.IntervalOverflow, $record.SnapshotsInWindow, $record.PresentAfterDoneMs, $record.ForegroundHeld, $record.FocusHeld, $record.InputDuringRun)
+        # Input by the end of the window makes the run inconclusive, and the copy, still in front, is ended now rather
+        # than after the readings below (Opus on #741, round 5).
+        if ($record.InputDuringRun) { throw "INCONCLUSIVE: $($record.InputBreak); the copy was ended at once." }
 
         # No PowerShell under the copy: its children and its shell's.
         $record.ShellsUnderCopy = @([FramePacingNative]::Children($nocttyPid, 'cmd.exe')).Count
@@ -1917,6 +1953,8 @@ function Invoke-FramePacingDriver {
         foreach ($parent in @($nocttyPid) + @($shells)) { foreach ($name in @('powershell.exe', 'pwsh.exe')) { $record.PowerShellUnderCopy += @([FramePacingNative]::Children($parent, $name)).Count } }
         $record.BusyPercentAfter = [Math]::Round([FramePacingNative]::BusyPercent(2000), 1)
         $record.TimerResolutionAfter100ns = [FramePacingNative]::TimerResolution()
+        # The gate once more before the quit (Opus on #741, round 5): input during the readings above ends the copy now.
+        Assert-Quiet 'the quit'
 
         foreach ($h in Get-Hosts) { if ([FramePacingNative]::PostClose($h, $nocttyPid)) { $record.QuitPosts++ } }
         if ($record.QuitPosts -lt 1) { Log 'quit: no close post took' }
@@ -2006,11 +2044,12 @@ function Invoke-FramePacingOuter {
         $results = [Collections.Generic.List[object]]::new()
         for ($i = 1; $i -le $Runs; $i++) {
             # The lock must still outlast this run and every run after it, counted from the user's last input: the idle
-            # time seen at admission plus the series' time since (Sol on #741). Otherwise nothing more is launched.
+            # time seen at admission plus the series' time since (Sol on #741), against the lock as it reads now (Sol on
+            # #741, round 5: a setting changed during the series). Otherwise nothing more is launched.
             $needNow = [long]-1
             if ($Visible) {
                 $needNow = Get-FramePacingLockNeedMs ($admissionIdleMs + $seriesClock.ElapsedMilliseconds) $facts.MinIdleMs ($Runs - $i + 1)
-                $shortfall = Get-FramePacingLockShortfall $facts.ForegroundLockTimeoutMs $needNow
+                $shortfall = Get-FramePacingLockShortfall ([FramePacingNative]::ForegroundLockTimeout()) $needNow
                 if ($shortfall) {
                     $results.Add([pscustomobject]@{ Run = (Join-Path $root "run-$i"); Status = 'inconclusive'; Failures = @("inconclusive: $shortfall; run $i was not launched"); Record = $null })
                     Write-Host "frame pacing run $i of $($Runs): inconclusive (the foreground lock would not outlast the series)"
@@ -2024,8 +2063,8 @@ function Invoke-FramePacingOuter {
             # taken sent one marked unlock, which the mouse hook must have counted, and a run whose key probe passed
             # one marked key, which the keyboard hook must have.
             if ($Visible) {
-                $silence = Get-FramePacingHookSilence $result.Record $mouseBefore ([FramePacingNative]::MarkedMouseInputs()) $keyBefore ([FramePacingNative]::MarkedKeyInputs())
-                if ($silence) { $result = [pscustomobject]@{ Run = $result.Run; Status = $(if ([string]::Equals($result.Status, 'guard-tripped', [StringComparison]::Ordinal)) { 'guard-tripped' } else { 'failed' }); Failures = @(@($result.Failures) + $silence); Record = $result.Record } }
+                $silence = Get-FramePacingHookSilence $result.Record $mouseBefore ([FramePacingNative]::MarkedMouseInputs()) $keyBefore ([FramePacingNative]::MarkedKeyInputs()) ([FramePacingNative]::RealInputs())
+                if ($silence) { $result = [pscustomobject]@{ Run = $result.Run; Status = $(if ([string]::Equals($result.Status, 'guard-tripped', [StringComparison]::Ordinal)) { 'guard-tripped' } else { 'failed' }); Failures = @(@($result.Failures) + $silence); Record = $result.Record; LatchToKillMs = $result.LatchToKillMs } }
             }
             $results.Add($result)
             if ($Visible -and $null -ne $result.Record -and $null -ne $result.Record.InputTicks -and $null -ne $result.Record.InputTicks.Unlock) { $quietSince = [long]$result.Record.InputTicks.Unlock }
@@ -2090,6 +2129,9 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     $saved = @{}
     foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     $pi = $null; $job = [IntPtr]::Zero; $driverExit = $null; $cleanup = $null; $outerError = $null; $ownedProcesses = $null; $notLaunched = $null; $inputStopped = $null
+    $state = -1; $latchToKillMs = $null
+    $frequency = [FramePacingNative]::PerformanceFrequency()
+    Write-Host "frame-pacing run: $(if ($Visible) { 'visible' } else { 'dry run' }); evidence=$Run"
     try {
         $job = [FramePacingNative]::CreateRunJob()
         $env:LOCALAPPDATA = Join-Path $Run 'localappdata'; $env:APPDATA = Join-Path $Run 'appdata'
@@ -2110,21 +2152,22 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         # The driver runs in this run's own job (Sol on #741), checked again from this side.
         if (-not [FramePacingNative]::InJobOf($pi.process, $job)) { [FramePacingNative]::Terminate($pi.process, 1); throw 'The driver is not in the run''s own job.' }
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
-        Write-Host "frame-pacing driver PID=$($pi.pid); $(if ($Visible) { 'visible' } else { 'dry run' }); evidence=$Run"
         $deadline = [DateTime]::UtcNow.AddMilliseconds($script:DriverDeadlineMs)
         while ($true) {
-            $state = [FramePacingNative]::WaitProcessOrRealInput($pi.process, 1000)
-            if ($state -eq 0) { break }
-            if ($state -eq 1) {
-                # Real input the hooks saw (Sol and Opus on #741): the driver stops at its next poll; if it has not ended
-                # within the grace, the run's job is closed here, which ends the copy wherever the driver is.
-                if ([HiddenLocal]::WaitForSingleObject($pi.process, [uint32]$script:InputStopGraceMs) -ne 0) {
-                    $inputStopped = "real (non-injected) keyboard or mouse input came during the run, and the driver had not stopped within $($script:InputStopGraceMs) ms, so the run's job was closed"
-                    try { $ownedProcesses = [HiddenLocal]::StopOwnedJob($job) } catch { $cleanup = $_.Exception.Message } finally { $job = [IntPtr]::Zero }
-                    [void][HiddenLocal]::WaitForSingleObject($pi.process, 5000)
-                }
+            [long]$observed = 0; [long]$closed = 0
+            $state = [FramePacingNative]::SuperviseDriver($pi.process, $job, 1000, [ref]$observed, [ref]$closed)
+            if ($state -eq 1 -or $state -eq 2) {
+                # Real input the hooks saw (the lead on #741, round 5): SuperviseDriver closed the run's job the moment
+                # it saw the latch, with no grace, which ends the driver and the copy wherever the driver is. Here the
+                # job's processes are waited out, its handle is closed and the delay from the observation to the
+                # close is recorded.
+                if ($state -eq 1 -and $frequency -gt 0) { $latchToKillMs = [Math]::Round(($closed - $observed) * 1000.0 / $frequency, 3) }
+                if ($state -eq 2) { $cleanup = 'TerminateJobObject failed when the real-input latch was observed' }
+                try { $ownedProcesses = [HiddenLocal]::StopOwnedJob($job) } catch { if (-not $cleanup) { $cleanup = $_.Exception.Message } } finally { $job = [IntPtr]::Zero }
+                [void][HiddenLocal]::WaitForSingleObject($pi.process, 5000)
                 break
             }
+            if ($state -eq 0) { break }
             if ($state -ne 0x102) { throw 'The wait on the driver failed.' }
             if ([DateTime]::UtcNow -ge $deadline) { throw 'The driver ran past 30 minutes; the owned job was closed.' }
         }
@@ -2139,6 +2182,9 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         if ($pi) { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
         if ($desktop -ne [IntPtr]::Zero) { [void][HiddenLocal]::CloseDesktop($desktop) }
     }
+    # Real input stops the run whatever the driver's exit says (the lead on #741, round 5): the latch seen during the
+    # run, or input the hooks counted by now, after the driver ended.
+    $inputStopped = Get-FramePacingSupervisionStop $state $(if ($Visible) { [FramePacingNative]::RealInputs() } else { [long]0 }) $latchToKillMs
     $sessionAfter = Get-Metadata $sessionPath
     $stateFailure = $null
     try { Assert-InteractiveWin11StateGuard -Guard $stateGuard } catch { $stateFailure = $_.Exception.Message }
@@ -2149,7 +2195,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         SessionUnchanged = [string]::Equals($sessionBefore, $sessionAfter, [StringComparison]::Ordinal)
         HistoryUnchanged = $null -eq $historyFailure
         ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
-        OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
+        OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit; LatchToKillMs = $latchToKillMs
     }
     $guards | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Run 'guards.json') -Encoding utf8NoBOM
     Write-Host "clipboard sequence number before $($guards.ClipboardSequenceBefore), after $($guards.ClipboardSequenceAfter)"
@@ -2164,7 +2210,12 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     if ($outerError) { $outerFailures += $outerError }
     if ($driverExit -eq 3) { $outerFailures += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
     $recordPath = Join-Path $Run 'run.json'
-    $record = if (Test-Path -LiteralPath $recordPath) { Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } else { $null }
+    # A record the job's close cut short (Opus on #741, round 5) reads as none: a run stopped for real input is then
+    # inconclusive (Get-FramePacingInputStop), any other run failed with the reason, and the series still writes its
+    # summary.
+    $read = Read-FramePacingRunRecord $recordPath
+    $record = $read.Record
+    if ($read.Problem -and -not $inputStopped) { $outerFailures += $read.Problem }
     if ($null -ne $record) {
         $wantMode = if ($Visible) { 'visible' } else { 'dry-run' }
         if (-not [string]::Equals([string]$record.Mode, $wantMode, [StringComparison]::Ordinal)) { $outerFailures += "mode $($record.Mode), not $wantMode" }
@@ -2184,19 +2235,45 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
     $stop = if ($notLaunched) { "the visible driver was not launched: $notLaunched" } elseif ($inputStopped) { $inputStopped } else { $null }
     $stopFailure = Get-FramePacingInputStop $guardFailures $outerFailures $outerError $stop
     if ($stopFailure) { $status = 'inconclusive'; $outerFailures = @($stopFailure); $problems = @() }
-    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $outerFailures + $problems); Record = $record }
+    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $outerFailures + $problems); Record = $record; LatchToKillMs = $latchToKillMs }
+}
+
+# Why the outer half stops a run for real input, or null (the lead on #741, round 5). $State is SuperviseDriver's last
+# result: 1 the latch seen and the run's job closed at once (the delay from that observation to the close is said),
+# 2 the latch seen and the close failed. Otherwise any real input the hooks counted in the series by the time the
+# driver's end was read stops the run too, whatever the driver's exit says: a driver that ended cleanly after the
+# user came back publishes nothing. Pure, so the contract tables it.
+function Get-FramePacingSupervisionStop([int] $State, [long] $RealInputs, $LatchToKillMs) {
+    if ($State -eq 1) { return "real (non-injected) keyboard or mouse input came during the run; the outer half closed the run's job $LatchToKillMs ms after it observed the input" }
+    if ($State -eq 2) { return "real (non-injected) keyboard or mouse input came during the run, and closing the run's job failed" }
+    if ($RealInputs -ne 0) { return "real (non-injected) keyboard or mouse input came during the series ($RealInputs events) by the time this run's driver ended; the run stops whatever the driver's exit says" }
+    return $null
+}
+
+# A run's record, run.json: [pscustomobject] Record (null when the file is missing or does not parse) and Problem
+# (why it did not parse, or null). The driver writes it last, and a job closed on real input can cut that write short
+# (Opus on #741, round 5). Pure but for the read, so the contract tables it.
+function Read-FramePacingRunRecord([string] $Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Record = $null; Problem = $null } }
+    try { return [pscustomobject]@{ Record = (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop); Problem = $null } }
+    catch { return [pscustomobject]@{ Record = $null; Problem = "the run's record could not be read: $($_.Exception.Message)" } }
 }
 
 # The hooks' silence after a run (Opus and CodeRabbit on #741): a visible run whose foreground was "ok" sent one
 # marked unlock, which the mouse hook must have counted, and one whose key probe was "ok" one marked key, which the
 # keyboard hook must have; a count of its kind that did not move means that hook may have been removed (Windows drops
-# a low-level hook that times out, without notice), and the series stops. Returns the failure line, or null. Pure, so
-# the contract tables it.
-function Get-FramePacingHookSilence($Record, [long] $MouseBefore, [long] $MouseAfter, [long] $KeyBefore, [long] $KeyAfter) {
+# a low-level hook that times out, without notice), and the series stops. A run whose foreground was taken owes the
+# keyboard probe too (Opus on #741, round 5): a probe that did not come back "ok" leaves the keyboard hook unproven,
+# unless real input ($RealInputs, the series' count) stopped the run first, which makes it inconclusive instead.
+# Returns the failure line, or null. Pure, so the contract tables it.
+function Get-FramePacingHookSilence($Record, [long] $MouseBefore, [long] $MouseAfter, [long] $KeyBefore, [long] $KeyAfter, [long] $RealInputs) {
     if ($null -eq $Record) { return $null }
     $field = { param([string] $Name) $property = $Record.PSObject.Properties[$Name]; if ($null -ne $property) { [string]$property.Value } else { '' } }
-    if ([string]::Equals((& $field 'Foreground'), 'ok', [StringComparison]::Ordinal) -and $MouseAfter -le $MouseBefore) { return "the input watch's mouse hook did not count the run's own marked unlock (count $MouseBefore, then $MouseAfter), so it may have been removed; the series stops" }
-    if ([string]::Equals((& $field 'KeyProbe'), 'ok', [StringComparison]::Ordinal) -and $KeyAfter -le $KeyBefore) { return "the input watch's keyboard hook did not count the run's own marked key probe (count $KeyBefore, then $KeyAfter), so it may have been removed; the series stops" }
+    $foregroundTaken = [string]::Equals((& $field 'Foreground'), 'ok', [StringComparison]::Ordinal)
+    $probed = [string]::Equals((& $field 'KeyProbe'), 'ok', [StringComparison]::Ordinal)
+    if ($foregroundTaken -and $MouseAfter -le $MouseBefore) { return "the input watch's mouse hook did not count the run's own marked unlock (count $MouseBefore, then $MouseAfter), so it may have been removed; the series stops" }
+    if ($foregroundTaken -and -not $probed -and $RealInputs -eq 0) { return "the copy was in front but the keyboard probe was '$(& $field 'KeyProbe')', so the input watch's keyboard hook has no proof of life for the run; the series stops" }
+    if ($probed -and $KeyAfter -le $KeyBefore) { return "the input watch's keyboard hook did not count the run's own marked key probe (count $KeyBefore, then $KeyAfter), so it may have been removed; the series stops" }
     return $null
 }
 
@@ -2272,7 +2349,10 @@ function Get-FramePacingSeries([object[]] $Records) {
 function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $RealInputs, $InjectedInputs) {
     $completed = @($Results | Where-Object { [string]::Equals($_.Status, 'complete', [StringComparison]::Ordinal) })
     $series = Get-FramePacingSeries @($completed | ForEach-Object { $_.Record })
-    $publish = $Visible -and $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0 -and @($series.MixedEnvironment).Count -eq 0 -and @($series.MixedBuild).Count -eq 0
+    # Real input at any point in a visible series (the lead on #741, round 5) makes it inconclusive and publishes
+    # nothing, whatever each run's status says; a count that was not read counts as input.
+    $inputSeen = $Visible -and ($null -eq $RealInputs -or [long]$RealInputs -ne 0)
+    $publish = $Visible -and -not $inputSeen -and $completed.Count -eq $Runs -and $series.Pooled.Count -gt 0 -and @($series.MixedEnvironment).Count -eq 0 -and @($series.MixedBuild).Count -eq 0
     $summary = [ordered]@{
         Schema = 1; Mode = $(if ($Visible) { 'visible' } else { 'dry-run' }); Measurement = [bool]$Visible
         RunsRequested = $Runs; RunsCompleted = $completed.Count; MeasureHead = $Build.Head; ExeSHA256 = $Build.ExeSha256
@@ -2283,10 +2363,13 @@ function Write-FramePacingSummary([string] $Root, $Build, [object[]] $Results, $
         frame_time_p95_ms = $(if ($publish) { $series.P95 } else { $null })
         frame_time_median_ms = $(if ($publish) { $series.Median } else { $null })
         dry_run_p95_ms = $(if (-not $Visible -and $series.Pooled.Count -gt 0) { $series.P95 } else { $null })
-        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }) } })
+        Runs = @($Results | ForEach-Object { [ordered]@{ run = (Split-Path -Leaf $_.Run); status = $_.Status; failures = @($_.Failures); display_mode = $(if ($_.Record) { $_.Record.DisplayMode } else { $null }); intervals = $(if ($_.Record) { $_.Record.IntervalCount } else { 0 }); p95_ms = $(if ($_.Record) { $_.Record.P95Ms } else { $null }); latch_to_kill_ms = $(if ($_.PSObject.Properties['LatchToKillMs']) { $_.LatchToKillMs } else { $null }) } })
     }
     if (@($series.MixedBuild).Count -gt 0) { $summary.Error = "the completed runs differ in $(@($series.MixedBuild) -join ', ')" }
-    if (@($series.MixedEnvironment).Count -gt 0) { $summary.Inconclusive = "the completed runs differ in $(@($series.MixedEnvironment) -join ', ') ($(@($series.Modes) -join ', ')); each comparability group is reported in Groups and none is pooled" }
+    $inconclusive = @()
+    if (@($series.MixedEnvironment).Count -gt 0) { $inconclusive += "the completed runs differ in $(@($series.MixedEnvironment) -join ', ') ($(@($series.Modes) -join ', ')); each comparability group is reported in Groups and none is pooled" }
+    if ($inputSeen) { $inconclusive += "real (non-injected) keyboard or mouse input came during the series ($(if ($null -eq $RealInputs) { 'an unread count' } else { "$RealInputs events" })), so no measurement is published" }
+    if ($inconclusive.Count -gt 0) { $summary.Inconclusive = $inconclusive -join '; ' }
     $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'pacing.json') -Encoding utf8NoBOM
     $last = $Results[$Results.Count - 1]
     foreach ($failure in @($last.Failures)) { Write-Host "  $failure" }
