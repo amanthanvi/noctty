@@ -2170,7 +2170,9 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     // Feeds output with the renderer mutex held, as the reader does.
     const Feed = struct {
         stream: *StreamHandler.Stream,
-        mutex: *renderer.StateMutex,
+        /// Not `mutex`: the lock inventory would take the queues' `.mutex`
+        /// locks below for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
+        renderer_mutex: *renderer.StateMutex,
         input: []const u8,
         done: std.Thread.ResetEvent = .{},
 
@@ -2179,8 +2181,8 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
             // thread's TestStream fixture (PLAN.md §2.7 RQ9, §19.5).
             const role = thread_role.enter(.reader);
             defer role.exit();
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.renderer_mutex.lock();
+            defer self.renderer_mutex.unlock();
             self.stream.nextSlice(self.input);
             self.done.set();
         }
@@ -2210,16 +2212,16 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         }
     };
 
-    var to_surface: Feed = .{ .stream = &h.stream, .mutex = &h.renderer_mutex, .input = clipboard };
+    var to_surface: Feed = .{ .stream = &h.stream, .renderer_mutex = &h.renderer_mutex, .input = clipboard };
     try to_surface.stoppedWhileWaiting(h.app_queue, &stop);
-    var to_termio: Feed = .{ .stream = &h.stream, .mutex = &h.renderer_mutex, .input = "\x05" };
+    var to_termio: Feed = .{ .stream = &h.stream, .renderer_mutex = &h.renderer_mutex, .input = "\x05" };
     try to_termio.stoppedWhileWaiting(termio_queue, &stop);
 
     // Once stopped, a title, a status report, a clipboard write and an
     // answerback are all dropped at once, and both queues keep what they held.
     var after: Feed = .{
         .stream = &h.stream,
-        .mutex = &h.renderer_mutex,
+        .renderer_mutex = &h.renderer_mutex,
         .input = "\x1b]2;closing\x07\x1b[5n" ++ clipboard ++ "\x05",
     };
     after.run();

@@ -15321,7 +15321,9 @@ const ClipboardReplyFixture = struct {
     host: Host = undefined,
     surface: Surface = undefined,
     session: TestSession = .{},
-    mutex: rendererpkg.StateMutex = .{},
+    /// Not `mutex`: the lock inventory would take every `.mutex` lock in this
+    /// file for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
+    renderer_mutex: rendererpkg.StateMutex = .{},
     /// The test thread stands for the UI thread, which owns the prompt and
     /// takes the renderer lock in the OSC 52 completions, from `init` to
     /// `deinit`.
@@ -15347,7 +15349,7 @@ const ClipboardReplyFixture = struct {
         errdefer core.io.mailbox.deinit(self.core_app.alloc);
         // The terminal's modes decide whether a paste is bracketed.
         core.io.terminal = try terminal.Terminal.init(self.core_app.alloc, .{ .cols = 10, .rows = 10 });
-        core.renderer_state = .{ .mutex = &self.mutex, .terminal = &core.io.terminal };
+        core.renderer_state = .{ .mutex = &self.renderer_mutex, .terminal = &core.io.terminal };
         self.surface.core_initialized = true;
     }
 
