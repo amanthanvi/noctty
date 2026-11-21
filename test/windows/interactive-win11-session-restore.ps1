@@ -23,10 +23,12 @@ $layout = $harness.Layout
 $exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild -BuildInputs (Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot)) -eq 'build') { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }
 Assert-InteractiveWin11ExeExists -ExePath $exe
-$stateDir = Join-Path $layout.LocalAppData 'noctty'; New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+$stateDir = Get-InteractiveWin11StateRoot -Layout $layout; New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 $configPath = Join-Path $stateDir 'config.ghostty'
 $config = "window-save-state = always`r`nconfirm-close-surface = false`r`n"
-[IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
+# Hosted mode writes the copy's config with the launch policy's lines after the leaf's (its save state kept).
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { $null = Write-InteractiveWin11HostedConfig -Text $config }
+else { [IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false)) }
 $statePath = Join-Path $stateDir 'session-state.json'
 $runs = [Collections.Generic.List[object]]::new()
 $instanceClass = "noctty-interactive-$($layout.SandboxId)"
@@ -37,7 +39,13 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
     foreach ($attempt in 1..3) {
         $out = Join-Path $layout.Logs "$Name-$attempt.json"
         $err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"
-        $query = Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+        # Hosted mode runs the CLI through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+        $query = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+            Start-InteractiveWin11HostedProcess -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err
+        }
+        else {
+            Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+        }
         $queryHandle = $query.Handle
         $remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
         if (-not $query.WaitForExit($remainingMs)) {
@@ -81,9 +89,17 @@ try {
     $saved = Get-Content $statePath -Raw | ConvertFrom-Json
     if ($saved.windows[0].tabs.Count -ne 3 -or $saved.windows[0].selected_tab -ne 1) { throw "Saved session mismatch: $($saved | ConvertTo-Json -Depth 8 -Compress)" }
     $savedRaw = Get-Content $statePath -Raw
+    # Hosted mode compares the file's bytes (`-ne` on decoded text ignores case and some characters; PWSH-CEQ-ICU).
+    $savedHash = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash } else { $null }
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
+    # Hosted mode names System32's cmd.exe absolutely, with /D (no AutoRun), each word its own argument.
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', (Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'), '/D', '/k'); $runs.Add($explicit)
+    }
+    else {
+        $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
+    }
     $explicitHost = Wait-StatefulHost $explicit $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh explicit-command tab' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 1 }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -93,7 +109,10 @@ try {
     $null = Invoke-InteractiveWin11Message -Hwnd $explicitHost -Message 0 -Deadline $deadline -Description 'asynchronous tab burst readiness barrier' -Process $explicit.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $explicitHost $explicit $deadline
-    if ((Get-Content $statePath -Raw) -ne $savedRaw) { throw 'Explicit -e launch read or replaced the saved workspace.' }
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        if (-not [string]::Equals((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash, $savedHash, [StringComparison]::Ordinal)) { throw 'Explicit -e launch read or replaced the saved workspace.' }
+    }
+    elseif ((Get-Content $statePath -Raw) -ne $savedRaw) { throw 'Explicit -e launch read or replaced the saved workspace.' }
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $second = Start-StatefulApp $layout $exe $repoRoot 'session-restore' @('--single-instance=true'); $runs.Add($second)

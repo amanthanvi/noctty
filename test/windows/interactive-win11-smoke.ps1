@@ -55,19 +55,27 @@ Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
-$process = Start-Process `
-    -FilePath $exePath `
-    -ArgumentList $launchArgs `
-    -WorkingDirectory $repoRoot `
-    -RedirectStandardOutput $stdoutPath `
-    -RedirectStandardError $stderrPath `
-    -PassThru
+# Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+$process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    Start-InteractiveWin11HostedProcess -FilePath $exePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+}
+else {
+    Start-Process `
+        -FilePath $exePath `
+        -ArgumentList $launchArgs `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+}
 
 $successPattern = 'started subcommand path='
 $failurePattern = 'error starting IO thread:'
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $smokePassed = $false
 $closePassed = $false
+$closeDelivered = $false
 $failureReason = $null
 
 try {
@@ -92,7 +100,59 @@ try {
         }
     }
 
-    if ($smokePassed) {
+    if ($smokePassed -and $env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        # Hosted mode: on a private desktop MainWindowHandle can be the system's input-indicator overlay, which a
+        # WM_CLOSE does not close, so the close goes to the one host window found by class. No host, more than one,
+        # or a send that fails fails the leaf, whatever the process does afterwards: a clean exit without a delivered
+        # WM_CLOSE is not a close handshake (Sol on #740).
+        $closeDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(5, $TimeoutSeconds))
+        $hostWindows = @()
+        while ([DateTime]::UtcNow -lt $closeDeadline) {
+            $process.Refresh()
+            if ($process.HasExited) { break }
+            $hostWindows = @([InteractiveWin11HostedLaunch]::HostWindows($process.Id))
+            if ($hostWindows.Count -eq 1) { break }
+            Start-Sleep -Milliseconds $script:SMOKE_POLL_MS
+        }
+        if ($process.HasExited) {
+            $failureReason = "noctty exited before its host window took WM_CLOSE (exit code $($process.ExitCode))"
+        }
+        elseif ($hostWindows.Count -ne 1) {
+            $failureReason = "noctty showed $($hostWindows.Count) host windows, not one, for WM_CLOSE"
+        }
+        else {
+            $processHandle = $process.Handle
+            try {
+                [void](Invoke-InteractiveWin11Message `
+                    -Hwnd $hostWindows[0] `
+                    -Message 0x0010 `
+                    -Deadline $closeDeadline `
+                    -Description 'WM_CLOSE smoke validation' `
+                    -Flags $script:InteractiveWin11SmtoBlock `
+                    -Process $process)
+                $closeDelivered = $true
+            }
+            catch {
+                $failureReason = "WM_CLOSE was not delivered to the host window: $($_.Exception.Message)"
+            }
+            if ($closeDelivered) {
+                $closeProcess = $process
+                try {
+                    Wait-InteractiveWin11Until -Deadline $closeDeadline -Description 'noctty smoke graceful exit' -Condition {
+                        $closeProcess.Refresh()
+                        $closeProcess.HasExited
+                    }
+                    $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+                    if ($exitCode -ne 0) { $failureReason = "noctty exited after WM_CLOSE with exit code $exitCode" }
+                    else { $closePassed = $true }
+                }
+                catch {
+                    $failureReason = "noctty graceful-close validation failed: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+    elseif ($smokePassed) {
         $closeTimeoutSeconds = [Math]::Max(5, $TimeoutSeconds)
         $closeDeadline = [DateTime]::UtcNow.AddSeconds($closeTimeoutSeconds)
         while ([DateTime]::UtcNow -lt $closeDeadline) {

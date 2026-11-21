@@ -346,7 +346,7 @@ try {
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
     [void] [InteractiveWin11WindowNative]::ShowWindow($hostHwnd, $SW_RESTORE)
-    [void] [InteractiveWin11WindowNative]::SetForegroundWindow($hostHwnd)
+    [void] [InteractiveWin11RealInput]::SetForegroundWindow($hostHwnd)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero

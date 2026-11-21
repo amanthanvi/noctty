@@ -13,6 +13,7 @@ Corrected in other files:
 - 2026-10-25 BENCH-VT-FLOOR-01, its "(11 historical jobs show another profile, UTF-8 margin over its floor 1.47x, CPU not logged, so inferred)": about 6 of the 11 (UTF-8 best of five 52.4-54.0, OSC 6.1-6.45) look like a fifth CPU population, 4 (UTF-8 56.2-57.7) look like the low end of the EPYC 7763, and the lowest (51.56) may be an episode on one. The margin over the floor is 1.47-1.50x either way, and all of it is inferred; see "Runner pool and noise" in docs/windows-benchmark-methodology.md.
 
 See also:
+- `test/windows/ci-scripts.ps1`'s path-filter check follows a path-shaped name in a comment too, so a library comment naming a script pulls that script's closure into every job that reads the library: trap (3) of the round-1 hosted traps in the 2026-11-20 GUI-HIDDEN-DEFAULT-01 entry in test-harnesses.md.
 - The 2026-11-18 DIRECT-UPDATE-720 entry in test-harnesses.md extends GHOSTTY-VT-STUB-CONTROLS with executed verdict mutants and records the native hosted old-updater/stub acceptance procedure and renderer/desktop traps.
 - Installer apply deferral and re-entry (`queueApplyStagedUpdate`, `update_apply_in_flight`): the 2026-10-18 "Item (2) of the 2026-10-11 LIFE-01 entry" entry in terminal-core.md.
 - How the app answers an installer's Restart Manager close (`App.onQueryEndSession`, `App.onEndSession`, the lifecycle window for a process with no terminal window): the 2026-10-23 RMCLOSE-1 and RMCLOSE-2 entries in app-lifecycle.md.
@@ -25,6 +26,7 @@ See also:
 - Preparing the desktop for the release evidence run (step 4 of PACKAGING.md's release runbook: Do Not Disturb, shell flyouts closed, every other window minimized, hands off), and `Show-StatefulHost` taking the foreground back from another application: the 2026-11-10 EVIDENCE-FOREGROUND-01 entry in test-harnesses.md.
 - The evidence job's step order (the command-finish leaf, its one real toast, last; the composite's `-DeferCommandFinish`), why the suite's own toasts no longer need Do Not Disturb, and why step 4 still asks for it: the 2026-11-18 EVIDENCE-TOAST-FOREGROUND entry in test-harnesses.md.
 - The test executable reads the updater's version fixture through a path relative to its build root (`windows_version_fixture.exe_path`, the fixture of the 2026-10-10 version-resource entry below), so it has to run from the checkout that built it: trap (1) of the 2026-11-18 RAN-LIST-01 entry in test-harnesses.md.
+- The hidden-desktop GUI workflow (`.github/workflows/gui-hidden.yml`: `changes`, the suite, and `gui-hidden-gate` through `scripts/ci-gate.ps1`) and its path selection (`scripts/ci-gui-selection.ps1`, which leaves `Get-CiPathNeeds` unchanged and adds the computed closure of the suite's scripts from `scripts/ci-script-closure.ps1`): the 2026-11-20 GUI-HIDDEN-DEFAULT-01 entry in test-harnesses.md.
 
 <!-- prettier-ignore-end -->
 
