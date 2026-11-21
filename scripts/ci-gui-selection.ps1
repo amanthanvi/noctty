@@ -9,11 +9,12 @@ gives `zig`, which includes every path its table does not name) or is in the GUI
 that classifier, and test.yml's ten outputs stay what they were: only gui-hidden.yml calls it (design v7 §4.5).
 
 The GUI list is computed, never kept by hand: the closure (scripts/ci-script-closure.ps1) of the runner and of every
-leaf in test/windows/gui-hidden-plan.json, plus the plan, the flagship scenario, the workflow, this script, the
-walker, the fixtures, the suite's contract fragment and the plan's `buildInputs` (what the hosted build preparation
-reads through edges no walk shows, such as scripts/dev-windows.cmd). On a pull request it is walked over the head
-tree, the base tip and every merge base of the two, so a member a change deletes or renames away still counts: the
-changed paths are a three-dot diff, from the merge base, which can describe a member neither tip has.
+leaf in test/windows/gui-hidden-plan.json, plus the plan, the flagship scenario, the workflow, the helper self-test
+it runs, this script, the walker, the fixtures, the suite's contract fragment and the plan's `buildInputs` (what the
+hosted build preparation reads through edges no walk shows, such as scripts/dev-windows.cmd). On a pull request it
+is walked over the head tree, the base tip and every merge base of the two, so a member a change deletes or renames
+away still counts: the changed paths are a three-dot diff, from the merge base, which can describe a member neither
+tip has.
 
 Push, schedule and manual runs need the suite. So do an empty diff, blank lines only, an unreadable diff and any
 failure to compute the list: deciding is an optimisation, and failing to decide runs the suite.
@@ -44,11 +45,13 @@ $script:CiGuiArguments = @{
 
 $script:CiGuiPlanPath = 'test/windows/gui-hidden-plan.json'
 $script:CiGuiRunnerPath = 'test/windows/gui-hidden-runner.ps1'
-# Members that no edge reaches: the suite's own definition and the selection that runs it.
+# Members that no edge reaches: the suite's own definition, the selection that runs it, and the helper self-test the
+# suite job runs before the leaves (Sol on #740: Get-CiPathNeeds calls it none, so nothing else selected it).
 $script:CiGuiFixedMembers = @(
     'test/windows/gui-hidden-plan.json'
     'test/windows/flagship/scenarios/gui-hidden.json'
     '.github/workflows/gui-hidden.yml'
+    'test/windows/interactive-win11.ps1'
     'scripts/ci-gui-selection.ps1'
     'scripts/ci-script-closure.ps1'
     'test/windows/gui-hidden-scripts.ps1'

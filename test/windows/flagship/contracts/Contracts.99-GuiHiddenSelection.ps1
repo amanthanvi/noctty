@@ -1,8 +1,9 @@
 # The hidden-desktop GUI suite's selection and boundaries (interactive offload PR 1; design v7 §4.3, §4.5). Pinned
 # here, each rule with a control that must be refused (and, where a rule could over-reach, one that must pass):
 #   (a) .github/workflows/gui-hidden.yml's shape: its triggers, no workflow-level `paths:` (PKG-65), contents: read,
-#       test.yml's concurrency, the three jobs and their conditions, the gate's verdict step and its arguments, the
-#       upload allowlist and its 90-day retention, and action pins identical to test.yml's;
+#       test.yml's concurrency, the three jobs and their conditions, the helper self-test before the suite step, the
+#       gate's verdict step and its arguments, the upload allowlist and its 90-day retention, and action pins
+#       identical to test.yml's;
 #   (b) the real-input module contract: in the closure of the runner and of every plan leaf, no file but
 #       scripts/interactive-win11-realinput.ps1 declares a real-input or foreground entry point or the methods built
 #       on them, a PowerShell member access to one outside the module goes through [InteractiveWin11RealInput] (or a
@@ -71,6 +72,16 @@ $guiHiddenProblems = & {
             $suite -notmatch '(?m)^    runs-on: windows-2025\s*$' -or $suite -match '(?m)^    continue-on-error:') {
             $found.Add('gui-hidden.yml: suite is "Windows Server 2025 Hidden-Desktop GUI" on windows-2025, needs changes, and runs on the gui flag alone')
         }
+        # The helper self-test (design v7 §3 row 0, §11; Sol and Opus on #740) runs in the suite job, before the suite
+        # step, on every run of the job.
+        $selfTest = & $findStep $suite 'Interactive harness helper self-test' 'suite'
+        $selfTestAt = $suite.IndexOf('      - name: Interactive harness helper self-test', [StringComparison]::Ordinal)
+        $runnerAt = $suite.IndexOf('      - name: Hidden-desktop GUI suite', [StringComparison]::Ordinal)
+        if ($null -eq $selfTest -or $selfTest -notmatch '(?m)^        shell: pwsh\s*$' -or
+            $selfTest -notmatch '(?m)^        run: pwsh -NoProfile -NonInteractive -File test/windows/interactive-win11\.ps1\s*$' -or
+            $selfTest -match '(?m)^        (?:if|continue-on-error):' -or $selfTestAt -lt 0 -or $runnerAt -lt 0 -or $selfTestAt -gt $runnerAt) {
+            $found.Add('gui-hidden.yml: the suite job runs test/windows/interactive-win11.ps1 (the helper self-test) unconditionally, before the suite step')
+        }
         $run = Get-YamlStepBlock -Content $suite -Name 'Hidden-desktop GUI suite' -Source 'gui-hidden.yml :: suite'
         if ($run -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -MeasureRepo \$env:GITHUB_WORKSPACE -Work \(Join-Path \$env:RUNNER_TEMP ''gui-hidden-work''\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\) -Build\s*$' -or
             $run -match '(?m)^        (?:if|continue-on-error):') { $found.Add('gui-hidden.yml: the suite step runs the runner with -Build into RUNNER_TEMP\gui-hidden, unconditionally') }
@@ -125,6 +136,9 @@ $guiHiddenProblems = & {
         @{ Name = 'an extra upload path after a blank line'; Old = "            `${{ runner.temp }}/gui-hidden/receipts/**`n"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n`n            `${{ runner.temp }}/gui-hidden-work/**`n" }
         @{ Name = 'the verdict step limited to manual runs'; Old = "      - name: Every needed job succeeded and every skipped job was not needed`n"; New = "      - name: Every needed job succeeded and every skipped job was not needed`n        if: github.event_name == 'workflow_dispatch'`n" }
         @{ Name = 'the verdict step allowed to fail'; Old = "      - name: Every needed job succeeded and every skipped job was not needed`n"; New = "      - name: Every needed job succeeded and every skipped job was not needed`n        continue-on-error: true`n" }
+        @{ Name = 'the helper self-test dropped'; Old = "      - name: Interactive harness helper self-test`n        shell: pwsh`n        run: pwsh -NoProfile -NonInteractive -File test/windows/interactive-win11.ps1`n"; New = '' }
+        @{ Name = 'the helper self-test limited to pushes'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        if: github.event_name == 'push'`n" }
+        @{ Name = 'the helper self-test allowed to fail'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        continue-on-error: true`n" }
     )
     $lfWorkflow = $workflowText.Replace("`r`n", "`n")
     # A validator returns its problems as one array object (`return , $found.ToArray()`), so a mutation's count is

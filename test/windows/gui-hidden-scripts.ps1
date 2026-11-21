@@ -293,6 +293,8 @@ $singletons = [ordered]@{
     'test/windows/interactive-win11-stateful-lib.ps1' = 'none'
     'scripts/interactive-win11-measure-lib.ps1' = 'zig'
     'scripts/interactive-win11-realinput.ps1' = 'zig'
+    # The helper self-test the suite job runs before the leaves; nothing but the fixed list selects it.
+    'test/windows/interactive-win11.ps1' = 'none'
 }
 foreach ($path in $singletons.Keys) {
     Assert-True ((Get-CiPathNeeds $path) -ceq $singletons[$path]) "$path must keep Get-CiPathNeeds '$($singletons[$path])'."
