@@ -595,9 +595,9 @@ pub fn placement_render_info(
 /// the placement's origin has scrolled above the top of the viewport.
 ///
 /// A placement is considered not visible if it is a virtual (unicode
-/// placeholder) placement, or if it is fully off-screen (its bottom
-/// edge is above the viewport or its top edge is at or below the
-/// viewport's last row).
+/// placeholder) placement, its tracked content has been pruned, or it is
+/// fully off-screen (its bottom edge is above the viewport or its top edge is
+/// at or below the viewport's last row).
 fn computeViewportPos(
     p: *const kitty_storage.ImageStorage.Placement,
     image: *const Image,
@@ -609,6 +609,7 @@ fn computeViewportPos(
         .pin => |pin| pin,
         .virtual => return .{ .col = 0, .row = 0, .visible = false },
     };
+    if (pin.garbage) return .{ .col = 0, .row = 0, .visible = false };
 
     // Convert both the placement's pin and the viewport's top-left
     // corner to screen-absolute coordinates so we can subtract them
@@ -1552,6 +1553,19 @@ test "placement_render_info returns all fields" {
     try testing.expectEqual(0, ri.source_y);
     try testing.expectEqual(1, ri.source_width);
     try testing.expectEqual(2, ri.source_height);
+
+    const pin = switch (iter.?.entry.?.value_ptr.location) {
+        .pin => |pin| pin,
+        .virtual => unreachable,
+    };
+    pin.garbage = true;
+
+    ri = .{};
+    try testing.expectEqual(Result.success, placement_render_info(iter, img, t, &ri));
+    try testing.expect(!ri.viewport_visible);
+
+    var rect: selection_c.CSelection = undefined;
+    try testing.expectEqual(Result.no_value, placement_rect(iter, img, t, &rect));
 }
 
 test "placement_render_info off-screen sets viewport_visible false" {
