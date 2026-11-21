@@ -297,6 +297,15 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   after the stream target is armed and through its first full-consumption swap.
   It is a software renderer-present cadence metric. It excludes DWM composition,
   scanout, pixel response, and photons.
+- `-Metric frame-pacing` measures `frame_time_p95_ms` under the per-copy rules
+  instead (`test/windows/bench-frame-pacing.ps1`, described in
+  `test/windows/README.md`): a fresh portable copy of the receipt-bound
+  measurement build per run, its shell the copy's config's cmd.exe, cmd's own
+  `type` as the producer and no PowerShell fixture. Its private-desktop dry
+  run is not a measurement; `-Visible` is, on an idle, unlocked, composed
+  desktop, stopped by any real keyboard or mouse input its low-level hooks
+  see. Its producer is about a tenth as fast as the PowerShell fixture's, so
+  its numbers are not comparable with the table above.
 - Detailed termio profiles are diagnostic-only and process-lifetime scoped.
   `ReadFile` totals include blocking before the go marker. Profiled runs cannot
   be used as product gates.
