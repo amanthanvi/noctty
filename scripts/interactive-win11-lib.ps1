@@ -1,5 +1,351 @@
 . (Join-Path $PSScriptRoot 'interactive-win11-measure-lib.ps1')
 
+# ---- Hosted mode: the hidden-desktop GUI suite (test/windows/gui-hidden-runner.ps1, interactive offload PR 1).
+# NOCTTY_GUI_HIDDEN_DESKTOP selects it. The runner sets it to the private desktop it created for this leaf,
+# `<station>\<desktop>`, with NOCTTY_GUI_HIDDEN_EXE (the leaf's portable copy of the receipt-bound measurement build)
+# and NOCTTY_GUI_HIDDEN_RUN (the leaf's run directory). On the default route nothing below compiles or runs.
+# NOCTTY_GUI_LAUNCH_POLICY is reserved for the visible core (PR 6); any value refuses here, so a typo cannot fall back.
+
+# The staged app's and CLI's identities, read once per leaf process after both files' SHA-256 match the hashes the
+# runner staged them against (<run>\staged.json): every later launch compares identity only, never re-hashing.
+function Initialize-InteractiveWin11HostedIdentity {
+    if (-not $env:NOCTTY_GUI_HIDDEN_EXE -or -not $env:NOCTTY_GUI_HIDDEN_RUN) {
+        throw 'gui-hidden: NOCTTY_GUI_HIDDEN_EXE and NOCTTY_GUI_HIDDEN_RUN must be set with NOCTTY_GUI_HIDDEN_DESKTOP.'
+    }
+    $staged = [IO.File]::ReadAllText((Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'staged.json')) | ConvertFrom-Json
+    $dir = Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE
+    $identity = @{}
+    foreach ($entry in @(@{ Key = 'app'; File = 'noctty.exe'; Hash = [string]$staged.exeSha256 }, @{ Key = 'cli'; File = 'noctty.com'; Hash = [string]$staged.cliSha256 })) {
+        $path = Join-Path $dir $entry.File
+        $before = [InteractiveWin11HostedLaunch]::Identity($path)
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $after = [InteractiveWin11HostedLaunch]::Identity($path)
+        if (-not $entry.Hash -or -not [string]::Equals($hash, $entry.Hash, [StringComparison]::Ordinal)) {
+            throw "gui-hidden: the staged $($entry.File) is not the receipt's build."
+        }
+        if (-not $before -or -not [string]::Equals($before, $after, [StringComparison]::Ordinal)) {
+            throw "gui-hidden: the staged $($entry.File) changed while it was hashed."
+        }
+        $identity[$entry.Key] = [pscustomobject]@{ Path = [IO.Path]::GetFullPath($path); Identity = $before }
+    }
+    return $identity
+}
+
+# The launcher's per-launch check: null when `FilePath` may start, else why not (design §4.2 "Each launch, cheaply").
+function Get-InteractiveWin11HostedLaunchRefusal {
+    param([Parameter(Mandatory)] [string] $FilePath)
+
+    if (-not $env:NOCTTY_GUI_HIDDEN_DESKTOP) { return 'not in hosted mode' }
+    if ($env:NOCTTY_INTERACTIVE_MEASURE_AUMID -ne '1') { return 'measurement mode not set' }
+    if ($null -eq $script:InteractiveWin11HostedIdentity) { return 'no staged identity' }
+    $full = [IO.Path]::GetFullPath($FilePath)
+    $match = @($script:InteractiveWin11HostedIdentity.Values | Where-Object { [string]::Equals($_.Path, $full, [StringComparison]::OrdinalIgnoreCase) })
+    if ($match.Count -ne 1) { return 'not the staged app or CLI' }
+    $dir = Split-Path -Parent $full
+    if (-not [IO.File]::Exists((Join-Path $dir 'noctty.portable'))) { return 'not a portable copy' }
+    if ([IO.File]::Exists((Join-Path $dir 'noctty.ico'))) { return 'carries noctty.ico' }
+    $now = [InteractiveWin11HostedLaunch]::Identity($full)
+    if (-not $now -or -not [string]::Equals($now, $match[0].Identity, [StringComparison]::Ordinal)) { return 'changed since staging' }
+    return $null
+}
+
+# One command line, built here and never by Start-Process (which joins arguments unquoted): an argument with
+# whitespace is quoted; one holding a quote or ending in a backslash is refused, as the soak's launcher does; and
+# `--command` never travels in argv (the shell is the copy's config line).
+function ConvertTo-InteractiveWin11HostedCommandLine {
+    param([Parameter(Mandatory)] [string] $FilePath, [AllowEmptyCollection()] [string[]] $ArgumentList = @())
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add('"' + $FilePath + '"')
+    foreach ($argument in $ArgumentList) {
+        if ($argument.Contains('"') -or $argument.EndsWith('\')) { throw 'gui-hidden: a launch argument cannot hold a quote or end in a backslash.' }
+        if ($argument.StartsWith('--command', [StringComparison]::Ordinal)) { throw 'gui-hidden: --command never travels in argv; the copy''s config sets the shell.' }
+        if ($argument.Length -eq 0 -or $argument -match '\s') { $parts.Add('"' + $argument + '"') } else { $parts.Add($argument) }
+    }
+    return $parts -join ' '
+}
+
+# The hosted launcher: starts the staged app or CLI on the runner's desktop, by name, with its own command line, after
+# the per-launch check and the desktop check; records its PID and creation time before it runs (the runner fails any
+# noctty process its job gains that this record lacks); returns a Process whose handle is already open, so its exit
+# code stays readable after it exits.
+function Start-InteractiveWin11HostedProcess {
+    param(
+        [Parameter(Mandatory)] [string] $FilePath,
+        [AllowEmptyCollection()] [string[]] $ArgumentList = @(),
+        [Parameter(Mandatory)] [string] $WorkingDirectory,
+        [string] $RedirectStandardOutput,
+        [string] $RedirectStandardError
+    )
+
+    $refusal = Get-InteractiveWin11HostedLaunchRefusal -FilePath $FilePath
+    if ($refusal) { throw "gui-hidden: the launcher refused the start: $refusal." }
+    [InteractiveWin11HostedDesktop]::Assert($env:NOCTTY_GUI_HIDDEN_DESKTOP)
+    $line = ConvertTo-InteractiveWin11HostedCommandLine -FilePath $FilePath -ArgumentList $ArgumentList
+    $pi = [InteractiveWin11HostedLaunch]::Start($FilePath, $line, $WorkingDirectory, $env:NOCTTY_GUI_HIDDEN_DESKTOP, $RedirectStandardOutput, $RedirectStandardError)
+    $started = $false
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($pi.pid)
+        [void]$process.Handle
+        $record = '{0} {1}' -f $pi.pid, [InteractiveWin11HostedLaunch]::CreationTime($pi.process)
+        [IO.File]::AppendAllText((Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'launcher-pids.txt'), $record + "`n")
+        if ([InteractiveWin11HostedLaunch]::ResumeThread($pi.thread) -eq [uint32]::MaxValue) { throw 'gui-hidden: resuming the launched process failed.' }
+        $started = $true
+        return $process
+    }
+    finally {
+        if (-not $started) { [void][InteractiveWin11HostedLaunch]::TerminateProcess($pi.process, 1) }
+        [void][InteractiveWin11HostedLaunch]::CloseHandle($pi.thread)
+        [void][InteractiveWin11HostedLaunch]::CloseHandle($pi.process)
+    }
+}
+
+# Runs the staged CLI through the hosted launcher and waits for it, for a leaf that would run it with `& $cli`:
+# its standard output as lines (UTF-8), its exit code, its standard error left in `StandardErrorPath`.
+function Invoke-InteractiveWin11HostedProcess {
+    param(
+        [Parameter(Mandatory)] [string] $FilePath,
+        [AllowEmptyCollection()] [string[]] $ArgumentList = @(),
+        [Parameter(Mandatory)] [string] $WorkingDirectory,
+        [Parameter(Mandatory)] [string] $StandardErrorPath,
+        [int] $TimeoutSeconds = 60
+    )
+
+    $stdout = Join-Path $env:NOCTTY_GUI_HIDDEN_RUN ('cli-stdout-{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    $process = Start-InteractiveWin11HostedProcess -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory `
+        -RedirectStandardOutput $stdout -RedirectStandardError $StandardErrorPath
+    try {
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { throw "gui-hidden: the CLI did not exit within ${TimeoutSeconds}s." }
+        $text = [IO.File]::ReadAllText($stdout, [Text.UTF8Encoding]::new($false))
+        $lines = @($text -split "`r?`n")
+        if ($lines.Count -gt 0 -and $lines[-1].Length -eq 0) { $lines = @($lines | Select-Object -SkipLast 1) }
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $lines }
+    }
+    finally {
+        $process.Dispose()
+        Remove-Item -LiteralPath $stdout -ErrorAction SilentlyContinue
+    }
+}
+
+# The launch policy's config lines (design §4.1), appended after a leaf's own: the shell (a config line keeps its
+# space; an argv element through Start-Process would be split and lose /D), the clipboard denied, no copy on select,
+# no update check and no desktop notification.
+function Get-InteractiveWin11HostedPolicyConfig {
+    $cmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    return @(
+        "command = direct:$cmd /D"
+        'clipboard-read = deny'
+        'clipboard-write = deny'
+        'copy-on-select = false'
+        'auto-update = off'
+        'desktop-notifications = false'
+    )
+}
+
+# Writes the leaf's config into its portable copy (portable mode reads <copy>\config.ghostty; xdg.zig): the leaf's
+# text, then the policy lines, then `window-save-state = never` unless the leaf's text sets the key.
+function Write-InteractiveWin11HostedConfig {
+    param([AllowEmptyString()] [string] $Text = '')
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in @($Text -split "`r?`n")) { if ($line.Length -gt 0) { $lines.Add($line) } }
+    foreach ($line in Get-InteractiveWin11HostedPolicyConfig) { $lines.Add($line) }
+    if (-not @($lines | Where-Object { $_ -match '\A\s*window-save-state\s*=' }).Count) { $lines.Add('window-save-state = never') }
+    $path = Join-Path (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE) 'config.ghostty'
+    [IO.File]::WriteAllText($path, (($lines -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
+    return $path
+}
+
+# Where a leaf's noctty keeps its config and state: the portable copy's root in hosted mode (it takes precedence over
+# LOCALAPPDATA; src/os/xdg.zig portablePath), else the sandbox's LOCALAPPDATA\noctty.
+function Get-InteractiveWin11StateRoot {
+    param([Parameter(Mandatory)] [System.Collections.IDictionary] $Layout)
+
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { return Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE }
+    return Join-Path $Layout.LocalAppData 'noctty'
+}
+
+if ($env:NOCTTY_GUI_LAUNCH_POLICY) {
+    throw 'NOCTTY_GUI_LAUNCH_POLICY is reserved for the visible core and takes no value yet.'
+}
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    if (-not ('InteractiveWin11HostedDesktop' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+
+// The hosted-desktop check: one C# method, so no PowerShell alias or function can stand in for it.
+public static class InteractiveWin11HostedDesktop {
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetThreadDesktop(uint threadId);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool GetUserObjectInformationW(IntPtr handle, int index, StringBuilder value, int length, out int needed);
+    [DllImport("user32.dll", SetLastError = true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
+
+    static string NameOf(IntPtr handle) {
+        if (handle == IntPtr.Zero) return null;
+        var value = new StringBuilder(256);
+        int needed;
+        return GetUserObjectInformationW(handle, 2, value, 512, out needed) ? value.ToString() : null; // UOI_NAME
+    }
+
+    // Null when the caller may proceed, else why not. `expected` is the runner's `<station>\<desktop>`; a null name
+    // or empty name means it could not be read (PowerShell passes $null to a string parameter as "").
+    public static string Decide(string station, string desktop, string inputDesktop, string expected) {
+        if (string.IsNullOrEmpty(expected)) return "no expected desktop";
+        int slash = expected.IndexOf('\\');
+        if (slash <= 0 || slash != expected.LastIndexOf('\\')) return "the expected desktop is not <station>\\<desktop>";
+        string expectedStation = expected.Substring(0, slash), expectedDesktop = expected.Substring(slash + 1);
+        if (!Regex.IsMatch(expectedDesktop, "\\Anoctty-gh-[0-9a-f]{32}\\z")) return "the expected desktop is not a runner's";
+        if (string.IsNullOrEmpty(station)) return "window station unreadable";
+        if (!string.Equals(station, expectedStation, StringComparison.Ordinal)) return "wrong window station";
+        if (string.IsNullOrEmpty(desktop)) return "thread desktop unreadable";
+        if (!string.Equals(desktop, expectedDesktop, StringComparison.Ordinal)) return "wrong desktop";
+        if (string.IsNullOrEmpty(inputDesktop)) return "input desktop unreadable; is the workstation locked?";
+        if (string.Equals(inputDesktop, expectedDesktop, StringComparison.OrdinalIgnoreCase)) return "on the input desktop";
+        return null;
+    }
+
+    public static void Assert(string expected) {
+        string station = NameOf(GetProcessWindowStation());
+        string desktop = NameOf(GetThreadDesktop(GetCurrentThreadId()));
+        string inputName = null;
+        IntPtr input = OpenInputDesktop(0, false, 0x0001); // DESKTOP_READOBJECTS
+        if (input != IntPtr.Zero) {
+            try { inputName = NameOf(input); } finally { CloseDesktop(input); }
+        }
+        string reason = Decide(station, desktop, inputName, expected);
+        if (reason != null) throw new InvalidOperationException("gui-hidden: refused: " + reason + ".");
+    }
+}
+
+// The hosted launcher's native half: a process started suspended on a named desktop, its standard output and error
+// (when given) going to files that are the only handles it inherits (PROC_THREAD_ATTRIBUTE_HANDLE_LIST, as
+// gui-hosted-probe.ps1's Start does), and a file's identity for the per-launch check.
+public static class InteractiveWin11HostedLaunch {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct Startup {
+        public int cb; public string reserved, desktop, title;
+        public int x, y, cx, cy, charsX, charsY, fill, flags; public short show, reservedBytes;
+        public IntPtr reservedPointer, input, output, error;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct StartupEx { public Startup info; public IntPtr attributes; }
+    [StructLayout(LayoutKind.Sequential)] public struct ProcessInfo { public IntPtr process, thread; public int pid, tid; }
+    [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public int inherit; }
+    [StructLayout(LayoutKind.Sequential)] struct FileTime { public uint low, high; }
+    [StructLayout(LayoutKind.Sequential)] struct FileInfo {
+        public uint attributes; public FileTime created, accessed, written;
+        public uint volumeSerial, sizeHigh, sizeLow, links, indexHigh, indexLow;
+    }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessW(string app, StringBuilder command, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref StartupEx startup, out ProcessInfo info);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, ref SecurityAttributes sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr file, out FileInfo info);
+
+    static IntPtr OpenLog(string path) {
+        var sa = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = 1 };
+        IntPtr handle = CreateFileW(path, 0x40000000, 3, ref sa, 2, 0x80, IntPtr.Zero); // GENERIC_WRITE, share read/write, CREATE_ALWAYS
+        if (handle == new IntPtr(-1)) throw new Exception("Creating a launch log failed: " + Marshal.GetLastWin32Error());
+        return handle;
+    }
+
+    // Started suspended (the caller records it, then resumes it). NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED |
+    // CREATE_NO_WINDOW: a console child (the CLI) gets no console window; a GUI child ignores the flag.
+    public static ProcessInfo Start(string app, string command, string cwd, string desktop, string stdoutPath, string stderrPath) {
+        if (string.IsNullOrEmpty(desktop)) throw new ArgumentException("The hosted launcher always names its desktop.");
+        if (string.IsNullOrEmpty(stdoutPath)) stdoutPath = null;
+        if (string.IsNullOrEmpty(stderrPath)) stderrPath = null;
+        IntPtr output = IntPtr.Zero, error = IntPtr.Zero, list = IntPtr.Zero, handles = IntPtr.Zero;
+        try {
+            var si = new StartupEx();
+            si.info.cb = Marshal.SizeOf(typeof(StartupEx));
+            si.info.desktop = desktop;
+            uint flags = 0x20 | 0x4 | 0x08000000;
+            bool inherit = false;
+            if (stdoutPath != null || stderrPath != null) {
+                if (stdoutPath != null) output = OpenLog(stdoutPath);
+                if (stderrPath != null) error = OpenLog(stderrPath);
+                int count = (output != IntPtr.Zero ? 1 : 0) + (error != IntPtr.Zero ? 1 : 0);
+                IntPtr size = IntPtr.Zero;
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                list = Marshal.AllocHGlobal(size);
+                if (!InitializeProcThreadAttributeList(list, 1, 0, ref size)) { Marshal.FreeHGlobal(list); list = IntPtr.Zero; throw new Exception("InitializeProcThreadAttributeList failed: " + Marshal.GetLastWin32Error()); }
+                handles = Marshal.AllocHGlobal(IntPtr.Size * count);
+                int slot = 0;
+                if (output != IntPtr.Zero) { Marshal.WriteIntPtr(handles, IntPtr.Size * slot, output); slot++; }
+                if (error != IntPtr.Zero) { Marshal.WriteIntPtr(handles, IntPtr.Size * slot, error); slot++; }
+                if (!UpdateProcThreadAttribute(list, 0, new IntPtr(0x20002), handles, new IntPtr(IntPtr.Size * count), IntPtr.Zero, IntPtr.Zero))
+                    throw new Exception("UpdateProcThreadAttribute failed: " + Marshal.GetLastWin32Error());
+                si.info.flags = 0x100; // STARTF_USESTDHANDLES
+                si.info.output = output; si.info.error = error;
+                si.attributes = list;
+                flags |= 0x00080000; // EXTENDED_STARTUPINFO_PRESENT
+                inherit = true;
+            }
+            ProcessInfo pi;
+            if (!CreateProcessW(app, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, inherit, flags, IntPtr.Zero, cwd, ref si, out pi))
+                throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
+            return pi;
+        } finally {
+            if (list != IntPtr.Zero) { DeleteProcThreadAttributeList(list); Marshal.FreeHGlobal(list); }
+            if (handles != IntPtr.Zero) Marshal.FreeHGlobal(handles);
+            if (output != IntPtr.Zero) CloseHandle(output);
+            if (error != IntPtr.Zero) CloseHandle(error);
+        }
+    }
+
+    public static long CreationTime(IntPtr process) {
+        long created, exited, kernel, user;
+        return GetProcessTimes(process, out created, out exited, out kernel, out user) ? created : 0;
+    }
+
+    // The volume serial, file index, size and last-write time of `path`, read from one handle; null when unreadable.
+    public static string Identity(string path) {
+        IntPtr file = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x80, IntPtr.Zero); // FILE_READ_ATTRIBUTES, share all, OPEN_EXISTING
+        if (file == new IntPtr(-1)) return null;
+        try {
+            FileInfo info;
+            if (!GetFileInformationByHandle(file, out info)) return null;
+            return string.Format("{0:x8}:{1:x8}{2:x8}:{3:x8}{4:x8}:{5:x8}{6:x8}", info.volumeSerial, info.indexHigh, info.indexLow,
+                info.sizeHigh, info.sizeLow, info.written.high, info.written.low);
+        } finally { CloseHandle(file); }
+    }
+}
+'@
+    }
+    [InteractiveWin11HostedDesktop]::Assert($env:NOCTTY_GUI_HIDDEN_DESKTOP)
+    $script:InteractiveWin11HostedIdentity = Initialize-InteractiveWin11HostedIdentity
+    # The leaf's receipt, written when its PowerShell exits, however it exits (a leaf reports failure through `exit`):
+    # whether the real-input module's type was ever loaded in this process (design §4.3's run-time check). The runner
+    # fails a leaf whose receipt is missing or says it was.
+    $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -MessageData (Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'leaf-receipt.json') -Action {
+        $loaded = ($null -ne ('InteractiveWin11RealInput' -as [type])) -or
+            (@([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $null -ne $_.GetType('InteractiveWin11RealInput', $false) }).Count -gt 0)
+        $receipt = [ordered]@{
+            schemaVersion = 1
+            realInputLoaded = $loaded
+            psEdition = [string]$PSVersionTable.PSEdition
+            psVersion = '{0}.{1}' -f $PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor
+        }
+        $path = [string]$Event.MessageData
+        [IO.File]::WriteAllText("$path.tmp", ($receipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move("$path.tmp", $path, $true)
+    }
+}
+
 function Test-InteractiveWin11MeasureMode {
     return $env:NOCTTY_INTERACTIVE_MEASURE_AUMID -eq '1'
 }
@@ -342,6 +688,14 @@ function Get-InteractiveWin11LaunchArguments {
         [switch] $UseConfiguredCommand
     )
 
+    # Hosted mode sets the shell in the copy's config file (Get-InteractiveWin11HostedPolicyConfig), never in argv.
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        return @(
+            Get-InteractiveWin11ContainmentArguments
+            '--single-instance=false'
+            "--class=noctty-interactive-$($Layout.SandboxId)"
+        )
+    }
     return @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
@@ -391,6 +745,9 @@ function Invoke-InteractiveWin11Bootstrap {
         [System.Management.Automation.PSReference] $ExitCode
     )
 
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        throw 'gui-hidden: a hosted leaf never bootstraps; it runs in the runner''s pwsh.'
+    }
     $bootstrapCmd = Join-Path $RepoRoot 'scripts\dev-windows.cmd'
     $childExitCode = 0
     [System.Environment]::SetEnvironmentVariable($EnvironmentVariable, '1', 'Process')
@@ -427,6 +784,10 @@ function Invoke-InteractiveWin11HarnessMain {
         [string[]] $ArgumentList = @()
     )
 
+    # A hosted leaf already runs where it should, in the runner's pwsh; the bootstrap's tripwire is the backstop.
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        return
+    }
     $bootstrapSentinel = [System.Environment]::GetEnvironmentVariable(
         $EnvironmentVariable,
         [System.EnvironmentVariableTarget]::Process
@@ -458,7 +819,11 @@ function Set-InteractiveWin11Environment {
 
     if ($IncludeResourcesDir) {
         $builtResourcesDir = Join-Path $Layout.RepoRoot 'zig-out\share\ghostty'
-        $resourcesDir = if (Test-InteractiveWin11MeasureMode) {
+        $resourcesDir = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+            # The portable copy's own resources (an override takes precedence in optimized builds; resourcesdir.zig).
+            Join-Path (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE) 'share\ghostty'
+        }
+        elseif (Test-InteractiveWin11MeasureMode) {
             # Keep resources with the archived build, even before its first
             # build. Never fall back to a different checkout's resource tree.
             Join-Path (Get-InteractiveWin11MeasureLayout $Layout.RepoRoot).Prefix 'share\ghostty'
@@ -528,6 +893,7 @@ function Get-InteractiveWin11ExePath {
         [Parameter(Mandatory)] [string] $RepoRoot
     )
 
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { return [IO.Path]::GetFullPath($env:NOCTTY_GUI_HIDDEN_EXE) }
     if (Test-InteractiveWin11MeasureMode) { return Get-InteractiveWin11MeasureExePath -RepoRoot $RepoRoot }
     return Get-InteractiveWin11NormalizedPath -Path (Join-Path $RepoRoot 'zig-out\bin\noctty.exe')
 }
@@ -538,6 +904,9 @@ function Invoke-InteractiveWin11Build {
         [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')] [string] $Optimize
     )
 
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        throw 'gui-hidden: a hosted leaf never builds; the runner stages the receipt-bound measurement build.'
+    }
     if (Test-InteractiveWin11MeasureMode) {
         $measureArguments = @{ RepoRoot = $RepoRoot }
         if (-not [string]::IsNullOrWhiteSpace($Optimize)) { $measureArguments.Optimize = $Optimize }
@@ -606,7 +975,12 @@ function Assert-InteractiveWin11ExeExists {
         [switch] $AllowInboxConPty
     )
 
-    if (Test-InteractiveWin11MeasureMode) {
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        # The runner validated the raw generation; this is the per-launch check on the staged copy.
+        $refusal = Get-InteractiveWin11HostedLaunchRefusal -FilePath $ExePath
+        if ($refusal) { throw "gui-hidden: the staged copy is refused: $refusal." }
+    }
+    elseif (Test-InteractiveWin11MeasureMode) {
         $measureRepo = Get-InteractiveWin11MeasureRepoForExe $ExePath
         Assert-InteractiveWin11MeasureBuild -RepoRoot $measureRepo -ExePath $ExePath
     }
@@ -1151,6 +1525,13 @@ function Get-InteractiveWin11LaunchAction {
     $resolvedExePath = Get-InteractiveWin11NormalizedPath -Path $ExePath
     if ($Rebuild -and $NoBuild) {
         throw 'Cannot use -Rebuild with -NoBuild together.'
+    }
+
+    # A hosted leaf never builds: -Rebuild or a missing copy is an error, and no build starts.
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        if ($Rebuild) { throw 'gui-hidden: a hosted leaf takes no -Rebuild.' }
+        if (-not [IO.File]::Exists($resolvedExePath)) { throw 'gui-hidden: the staged copy is missing.' }
+        return 'launch'
     }
 
     if ($Rebuild) {

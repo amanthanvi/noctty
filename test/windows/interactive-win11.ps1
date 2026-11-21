@@ -84,6 +84,57 @@ $launchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
 Assert-Equal $launchArgs.Count 6 'launch args should include containment, isolation and cmd overrides'
 Assert-True ($launchArgs -contains '--command=cmd.exe') 'shell-agnostic harnesses must not inherit PowerShell history'
 Assert-True (@(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) -notcontains '--command=cmd.exe') 'shell-specific fixtures must retain their configured command'
+
+# Hosted mode (the hidden-desktop suite, design §4.1): the shell is the portable copy's config line, never argv, and
+# a hosted leaf never bootstraps nor builds. The functions read the variable when called, so setting it here, after
+# the library loaded, tests them without the desktop check the library's load would run.
+$savedHostedEnvironment = @{}
+foreach ($name in @('NOCTTY_GUI_HIDDEN_DESKTOP', 'NOCTTY_GUI_HIDDEN_EXE', 'NOCTTY_GUI_HIDDEN_RUN', 'GHOSTTY_RESOURCES_DIR')) {
+    $savedHostedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+$hostedScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-hosted-selftest-' + [guid]::NewGuid().ToString('N'))
+try {
+    [void](New-Item -ItemType Directory -Path $hostedScratch)
+    $hostedExe = Join-Path $hostedScratch 'noctty.exe'
+    $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)
+    $env:NOCTTY_GUI_HIDDEN_EXE = $hostedExe
+    $env:NOCTTY_GUI_HIDDEN_RUN = $hostedScratch
+    $hostedLaunchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
+    Assert-Equal $hostedLaunchArgs.Count 5 'hosted launch args keep containment and isolation only'
+    Assert-Equal @($hostedLaunchArgs | Where-Object { $_.StartsWith('--command', [StringComparison]::Ordinal) }).Count 0 'hosted launch args carry no --command'
+    $hostedCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    foreach ($leafText in @('', "window-save-state = always`r`nconfirm-close-surface = false`r`n")) {
+        $hostedConfigPath = Write-InteractiveWin11HostedConfig -Text $leafText
+        Assert-Equal $hostedConfigPath (Join-Path $hostedScratch 'config.ghostty') 'hosted config goes beside the copy'
+        $hostedLines = @([IO.File]::ReadAllLines($hostedConfigPath))
+        Assert-Equal @($hostedLines | Where-Object { [string]::Equals($_, "command = direct:$hostedCmd /D", [StringComparison]::Ordinal) }).Count 1 'hosted config sets System32 cmd with /D once'
+        Assert-Equal @($hostedLines | Where-Object { $_.StartsWith('command', [StringComparison]::Ordinal) }).Count 1 'hosted config sets the shell once'
+        foreach ($policyLine in @('clipboard-read = deny', 'clipboard-write = deny', 'copy-on-select = false', 'auto-update = off', 'desktop-notifications = false')) {
+            Assert-Equal @($hostedLines | Where-Object { [string]::Equals($_, $policyLine, [StringComparison]::Ordinal) }).Count 1 "hosted config keeps '$policyLine'"
+        }
+        $saveLines = @($hostedLines | Where-Object { $_.StartsWith('window-save-state', [StringComparison]::Ordinal) })
+        $expectedSave = if ($leafText) { 'window-save-state = always' } else { 'window-save-state = never' }
+        Assert-Equal ($saveLines -join '|') $expectedSave 'hosted config keeps a leaf''s save state, else never'
+    }
+    Assert-Equal (Get-InteractiveWin11ExePath -RepoRoot $repoRoot) ([IO.Path]::GetFullPath($hostedExe)) 'hosted mode routes the executable to the staged copy'
+    Assert-Equal (Get-InteractiveWin11StateRoot -Layout $layout) $hostedScratch 'hosted state lives at the portable copy''s root'
+    $hostedThrows = { param([scriptblock] $Action) try { & $Action; $false } catch { $true } }
+    Assert-True (& $hostedThrows { Get-InteractiveWin11LaunchAction -ExePath $hostedExe }) 'a hosted leaf with its copy missing must throw, not build'
+    Set-Content -LiteralPath $hostedExe -Value 'stub'
+    Assert-Equal (Get-InteractiveWin11LaunchAction -ExePath $hostedExe) 'launch' 'a hosted leaf launches its staged copy'
+    Assert-True (& $hostedThrows { Get-InteractiveWin11LaunchAction -ExePath $hostedExe -Rebuild }) 'a hosted leaf with -Rebuild must throw, not build'
+    Assert-True (& $hostedThrows { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }) 'the build tripwire must throw in hosted mode'
+    Assert-True (& $hostedThrows { Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED' }) 'the bootstrap tripwire must throw in hosted mode'
+    $hostedHarnessMain = Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED'
+    Assert-True ($null -eq $hostedHarnessMain) 'a hosted leaf skips the bootstrap'
+    Assert-True ($null -eq [Environment]::GetEnvironmentVariable('NOCTTY_HOSTED_SELFTEST_UNUSED', 'Process')) 'the hosted bypass sets no bootstrap sentinel'
+    Assert-True (& $hostedThrows { ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('--command=cmd.exe') }) 'the hosted launcher refuses --command in argv'
+    Assert-True (& $hostedThrows { ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('a"b') }) 'the hosted launcher refuses a quote in an argument'
+    Assert-Equal (ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('-e', 'a b', '/D')) ('"' + $hostedExe + '" -e "a b" /D') 'the hosted launcher quotes whitespace only'
+} finally {
+    foreach ($entry in $savedHostedEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
+    Remove-Item -LiteralPath $hostedScratch -Recurse -Force -ErrorAction SilentlyContinue
+}
 Assert-True ($launchArgs -contains '--linux-cgroup=always') 'launch args should enable Windows Job Object containment'
 Assert-True ($launchArgs -contains '--linux-cgroup-hard-fail=true') 'launch args should fail when Job Object attachment fails'
 Assert-True ($launchArgs -contains '--windows-job-object-kill-on-close=true') 'launch args should terminate contained descendants when the host exits'
@@ -275,6 +326,13 @@ Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.noctty' 'mea
 $measureExe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 Assert-Equal $measureExe (Get-InteractiveWin11MeasureExePath $repoRoot) 'measurement mode should route the executable'
 Assert-Equal (Get-InteractiveWin11MeasureRepoForExe $measureExe) $repoRoot 'raw measurement executable should recover its repository'
+# Hosted mode routes to the staged portable copy instead (design §4.2), in measurement mode too.
+$savedHostedExe = $env:NOCTTY_GUI_HIDDEN_EXE; $savedHostedDesktop = $env:NOCTTY_GUI_HIDDEN_DESKTOP
+try {
+    $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)
+    $env:NOCTTY_GUI_HIDDEN_EXE = Join-Path ([IO.Path]::GetTempPath()) 'noctty-hosted-route\noctty.exe'
+    Assert-Equal (Get-InteractiveWin11ExePath -RepoRoot $repoRoot) ([IO.Path]::GetFullPath($env:NOCTTY_GUI_HIDDEN_EXE)) 'hosted measurement mode routes to the staged copy, not the raw prefix'
+} finally { $env:NOCTTY_GUI_HIDDEN_EXE = $savedHostedExe; $env:NOCTTY_GUI_HIDDEN_DESKTOP = $savedHostedDesktop }
 
 # Mock only the build/receipt boundary. These checks must never run a compiler
 # or require a real measurement executable in the helper self-test.
@@ -330,6 +388,15 @@ try {
     Assert-Equal $env:GHOSTTY_RESOURCES_DIR (Join-Path (Get-InteractiveWin11MeasureLayout $measureRoutingRepo).Prefix 'share\ghostty') 'measurement resources must come from the same generation prefix'
     Assert-Equal $env:NOCTTY_INTERACTIVE_MEASURE_AUMID '1' 'sandbox redirection must retain inherited measurement mode'
     Assert-True (-not [IO.File]::Exists((Join-Path (Split-Path -Parent $measureRoutingExe) 'noctty.portable'))) 'measurement routing must not add a shared portable config root'
+    # Hosted mode: the resources are the portable copy's own (design §4.2); its config root is the copy (xdg.zig).
+    $savedHostedRouting = @($env:NOCTTY_GUI_HIDDEN_DESKTOP, $env:NOCTTY_GUI_HIDDEN_EXE)
+    try {
+        $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)
+        $env:NOCTTY_GUI_HIDDEN_EXE = Join-Path ([IO.Path]::GetTempPath()) 'noctty-hosted-route\noctty.exe'
+        [void] (Set-InteractiveWin11Environment -Layout $routingLayout -IncludeResourcesDir)
+        Assert-Equal $env:GHOSTTY_RESOURCES_DIR (Join-Path (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE) 'share\ghostty') 'hosted resources must come from the staged copy'
+        Assert-Equal (Get-InteractiveWin11StateRoot -Layout $routingLayout) (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE) 'hosted config and state live at the copy''s root'
+    } finally { $env:NOCTTY_GUI_HIDDEN_DESKTOP = $savedHostedRouting[0]; $env:NOCTTY_GUI_HIDDEN_EXE = $savedHostedRouting[1] }
 } finally {
     foreach ($entry in $savedRoutingEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
 }
