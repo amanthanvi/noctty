@@ -25,7 +25,8 @@ Two modes.
           gives them as dry_run_p95_ms, never as frame_time_p95_ms.
   -Visible: the measurement. The copy runs on Default, which must be the caller's desktop and the input desktop
           (unlocked), composed by DWM, in a local session, with no input for -MinIdleSeconds (300 by default) before
-          the run; the machine must be under 30% busy (waited for up to -QuietWaitSeconds, 900 by default;
+          the series and none since but the harness's own unlocks (each driver checks that the session's last input
+          is still the tick the series last saw); the machine must be under 30% busy (waited for up to -QuietWaitSeconds, 900 by default;
           test-harnesses.md MEASUREMENT-HARNESS-RERUN-01). The copy takes the foreground through a bounded call (a
           zero-motion mouse input unlocks it, never an Alt tap: PROBE-ALT-TAP-01; the cross-thread calls run on a
           worker joined within 5 s: VISIBLE-PACING-CERT-01 trap (1)). A run in which the foreground, the pane's focus
@@ -89,7 +90,10 @@ param(
     [string] $Bin,
     [ValidatePattern('^[a-z0-9][a-z0-9.-]{0,23}$')] [string] $SandboxName,
     [string] $DesktopName,
-    [int] $GridProbePid = 0
+    [int] $GridProbePid = 0,
+    # Internal: the session's last-input tick a visible run's driver must still see (the tick the outer half saw idle,
+    # then each run's after its own unlock); -1 in a dry run.
+    [long] $QuietSinceTick = -1
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -815,22 +819,27 @@ function Get-FramePacingWorkloadSha256([string] $PayloadSha256, [string] $Config
 
 # Why the visible part may not run with these facts about this process's session, or $null when it may: the caller on
 # Default, Default the input desktop (unlocked, nothing else in front), DWM composing it, a local session, and no input
-# for the minimum idle time. Pure, so the contract can run it; the dry run's driver records its answer on its desktop.
+# for the minimum idle time, or, once the series has a tick (QuietSinceTick), no input since that tick: the harness's
+# own unlock moves the session's last input, so a later run cannot wait out the idle time again. Pure, so the contract
+# can run it; the dry run's driver records its answer on its desktop.
 function Get-FramePacingVisibleRefusal($Facts) {
     if (-not [string]::Equals([string]$Facts.OwnDesktop, 'Default', [StringComparison]::OrdinalIgnoreCase)) { return 'this process is not on Default' }
     if ($null -eq $Facts.InputDesktop -or -not [string]::Equals([string]$Facts.InputDesktop, 'Default', [StringComparison]::OrdinalIgnoreCase)) { return 'Default is not the input desktop (the session is locked or another desktop is in front)' }
     if ($Facts.Composition -ne 1) { return 'DWM does not compose the desktop' }
     if ($Facts.RemoteSession) { return 'the session is remote' }
-    if ($Facts.IdleMs -lt 0 -or $Facts.IdleMs -lt $Facts.MinIdleMs) { return "the session had input $([Math]::Floor([Math]::Max(0, $Facts.IdleMs) / 1000)) s ago, under the $([Math]::Floor($Facts.MinIdleMs / 1000)) s minimum" }
+    if ($Facts.QuietSinceTick -ge 0) {
+        if ($Facts.LastInputTick -ne $Facts.QuietSinceTick) { return 'the session had input since the series last saw it idle' }
+    } elseif ($Facts.IdleMs -lt 0 -or $Facts.IdleMs -lt $Facts.MinIdleMs) { return "the session had input $([Math]::Floor([Math]::Max(0, $Facts.IdleMs) / 1000)) s ago, under the $([Math]::Floor($Facts.MinIdleMs / 1000)) s minimum" }
     return $null
 }
 
 # This process's facts for Get-FramePacingVisibleRefusal.
-function Get-FramePacingSessionFacts([int] $MinIdleSeconds) {
+function Get-FramePacingSessionFacts([int] $MinIdleSeconds, [long] $QuietSinceTick) {
     return [pscustomobject]@{
         OwnDesktop = [FramePacingNative]::CurrentDesktopName(); InputDesktop = [FramePacingNative]::InputDesktopName()
         Composition = [FramePacingNative]::Composition(); RemoteSession = [FramePacingNative]::RemoteSession()
         IdleMs = [FramePacingNative]::IdleMs(); MinIdleMs = [long]$MinIdleSeconds * 1000
+        LastInputTick = [FramePacingNative]::LastInputTick(); QuietSinceTick = $QuietSinceTick
     }
 }
 
@@ -871,7 +880,7 @@ function Get-FramePacingRecordProblems($Record) {
         if (-not $Record.VisibleRefusal) { $problems.Add('the dry run''s desktop passed the visible checks') }
         if (-not [string]::Equals([string]$Record.Foreground, 'skipped', [StringComparison]::Ordinal)) { $problems.Add("the dry run's foreground was $($Record.Foreground), not skipped") }
     } elseif ([string]::Equals([string]$Record.Mode, 'visible', [StringComparison]::Ordinal)) {
-        if ($Record.VisibleRefusal) { $problems.Add("visible run refused: $($Record.VisibleRefusal)") }
+        if ($Record.VisibleRefusal) { $problems.Add("inconclusive: the visible run was refused: $($Record.VisibleRefusal)") }
         if (-not [string]::Equals([string]$Record.Foreground, 'ok', [StringComparison]::Ordinal)) { $problems.Add("inconclusive: the foreground was $($Record.Foreground)") }
         if ($Record.Cloaked -ne 0) { $problems.Add("inconclusive: DWM cloaked the window ($($Record.Cloaked))") }
         if (-not $Record.ForegroundHeld) { $problems.Add('inconclusive: the window lost the foreground during the workload') }
@@ -907,7 +916,7 @@ function Invoke-FramePacingDriver {
         LaunchConfigDefaultFiles = $null; LaunchConfigFile = $null; Transport = $null; Renderer = $null
         ConptyDllSHA256 = $null; PrefixConptyDllSHA256 = $null; OpenConsoleSHA256 = $null; PrefixOpenConsoleSHA256 = $null; EffectiveDirs = $null
         VisibleRefusal = $null; Composition = $null; Cloaked = $null; Foreground = $null; ForegroundHeld = $null; FocusHeld = $null; InputDuringRun = $null
-        BusyPercentBefore = $null; BusyPercentAfter = $null; QuietWaitMs = 0; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null
+        BusyPercentBefore = $null; BusyPercentAfter = $null; QuietWaitMs = 0; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null; InputTick = $null
         QpcFrequency = $null; EndMarkerPresented = $false; IntervalCount = 0; IntervalOverflow = $null; IntervalsMs = [double[]]@()
         P95Ms = $null; MedianMs = $null; MaxMs = $null; WindowMs = $null; SwapsBefore = $null; SwapsAfter = $null
         ShellsUnderCopy = $null; PowerShellUnderCopy = $null; QuitPosts = 0; Exit = $null; Error = $null
@@ -1010,10 +1019,10 @@ function Invoke-FramePacingDriver {
         # The visible part's preconditions on this driver's own session, after the wait and right before the launch:
         # in a dry run they must refuse (it never takes the foreground and its intervals are not a measurement); in a
         # visible run they must hold.
-        $facts = Get-FramePacingSessionFacts $MinIdleSeconds
+        $facts = Get-FramePacingSessionFacts $MinIdleSeconds $QuietSinceTick
         $record.Composition = $facts.Composition
         $record.VisibleRefusal = Get-FramePacingVisibleRefusal $facts
-        if ($Visible -and $record.VisibleRefusal) { throw "The visible run is refused: $($record.VisibleRefusal)" }
+        if ($Visible -and $record.VisibleRefusal) { throw "INCONCLUSIVE: the visible run is refused: $($record.VisibleRefusal)" }
         if (-not $Visible -and -not $record.VisibleRefusal) { throw 'The dry run''s desktop passed the visible checks.' }
         Log "visible part: $(if ($record.VisibleRefusal) { "refused ($($record.VisibleRefusal))" } else { 'allowed' })"
 
@@ -1142,6 +1151,7 @@ function Invoke-FramePacingDriver {
         $echoed = Wait-Quiet $script:EchoQuietMs 15000
         $focusChanges = [uint64]$echoed.surface_focus_change_count
         $inputTick = [FramePacingNative]::LastInputTick()
+        $record.InputTick = $inputTick
         $record.SwapsBefore = [uint64]$echoed.swap_buffers_count
         if (-not [FramePacingNative]::TraceMessage($pane, $nocttyPid, $script:WmRenderTraceTarget, 0, $script:ResponseBoundMs)) { throw 'The pane did not answer the trace''s arm within the bound.' }
         $armed = Request-Trace
@@ -1182,14 +1192,19 @@ function Invoke-FramePacingDriver {
         $nocttyLog = Read-SharedText (Join-Path $Run 'noctty.log')
         $record.Transport = if ($nocttyLog.Contains('using the in-box conhost')) { 'inbox' } elseif ($nocttyLog.IndexOf('using bundled ConPTY: ' + (Join-Path $Bin 'conpty.dll'), [StringComparison]::OrdinalIgnoreCase) -ge 0) { 'bundled' } else { 'unknown' }
         $record.Renderer = if ($nocttyLog.Contains('startup failed') -or $nocttyLog.Contains('Direct3D 11') -or $nocttyLog.Contains('D3D11')) { 'fallback' } else { 'opengl' }
+        # Exit 0 complete, 2 inconclusive (every problem the visible run's environment), 1 anything else.
         $problems = @(Get-FramePacingRecordProblems ([pscustomobject]$record))
-        if ($problems.Count -gt 0 -and -not $record.Error) { $record.Error = $problems -join '; ' }
-        return $(if ($record.Error) { 1 } else { 0 })
+        if ($problems.Count -gt 0 -and -not $record.Error) {
+            $soft = @($problems | Where-Object { $_.StartsWith('inconclusive:', [StringComparison]::Ordinal) })
+            $record.Error = $(if ($soft.Count -eq $problems.Count) { 'INCONCLUSIVE: ' } else { '' }) + ($problems -join '; ')
+        }
+        if (-not $record.Error) { return 0 }
+        return $(if ($record.Error.StartsWith('INCONCLUSIVE:', [StringComparison]::Ordinal)) { 2 } else { 1 })
     } catch {
         $record.Error = $_.Exception.Message
         Log "error: $($_.Exception.Message)"
         if ($process -ne [IntPtr]::Zero -and [FramePacingNative]::Alive($process)) { [FramePacingNative]::Terminate($process, 1) }
-        return 1
+        return $(if ($record.Error.StartsWith('INCONCLUSIVE:', [StringComparison]::Ordinal)) { 2 } else { 1 })
     } finally {
         if ($process -ne [IntPtr]::Zero) { [void][FramePacingNative]::CloseHandle($process) }
         $record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $recordPath -Encoding utf8NoBOM
@@ -1208,9 +1223,12 @@ function Invoke-FramePacingOuter {
     $fonts = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' -ErrorAction Stop
     if (-not ($fonts.PSObject.Properties.Name -match '^Consolas .*TrueType')) { throw 'The workload''s font, Consolas, is not installed.' }
     # A visible run only from Default, unlocked, composed, local and idle; a dry run never touches Default.
+    $quietSince = [long]-1
     if ($Visible) {
-        $refusal = Get-FramePacingVisibleRefusal (Get-FramePacingSessionFacts $MinIdleSeconds)
+        $facts = Get-FramePacingSessionFacts $MinIdleSeconds -1
+        $refusal = Get-FramePacingVisibleRefusal $facts
         if ($refusal) { throw "-Visible is refused: $refusal." }
+        $quietSince = [long]$facts.LastInputTick
     }
     if ([string]::IsNullOrWhiteSpace($RunRoot)) { throw 'Pass -RunRoot, a new directory for the runs.' }
     $root = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location -PSProvider FileSystem).ProviderPath, $RunRoot))
@@ -1225,8 +1243,9 @@ function Invoke-FramePacingOuter {
         [void](New-Item -ItemType Directory -Path $root)
         $results = [Collections.Generic.List[object]]::new()
         for ($i = 1; $i -le $Runs; $i++) {
-            $result = Invoke-FramePacingOuterRun $build (Join-Path $root "run-$i")
+            $result = Invoke-FramePacingOuterRun $build (Join-Path $root "run-$i") $quietSince
             $results.Add($result)
+            if ($Visible -and $null -ne $result.Record -and $null -ne $result.Record.InputTick) { $quietSince = [long]$result.Record.InputTick }
             Write-Host "frame pacing run $i of $($Runs): $($result.Status)"
             if (-not [string]::Equals($result.Status, 'complete', [StringComparison]::Ordinal)) { break }
         }
@@ -1238,7 +1257,7 @@ function Invoke-FramePacingOuter {
 }
 
 # One run: a fresh copy, payload, config, desktop (dry run) and job; the driver; the guards; the record's verdict.
-function Invoke-FramePacingOuterRun($build, [string] $Run) {
+function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince) {
     $source = $build.Bin
     $copy = Join-Path $Run 'copy'
     $work = Join-Path $Run 'work'
@@ -1281,8 +1300,8 @@ function Invoke-FramePacingOuterRun($build, [string] $Run) {
         $env:LOCALAPPDATA = Join-Path $Run 'localappdata'; $env:APPDATA = Join-Path $Run 'appdata'
         $env:TEMP = Join-Path $Run 'temp'; $env:TMP = $env:TEMP
         $pwsh = (Get-Command pwsh.exe).Source
-        $line = '"{0}" -NoProfile -NonInteractive -File "{1}" -Driver -MeasureRepo "{2}" -Bin "{3}" -Run "{4}" -ExpectedBuildMode {5} -SandboxName {6} -DesktopName {7} -MinIdleSeconds {8} -QuietWaitSeconds {9}' -f `
-            $pwsh, $PSCommandPath, $build.Repo, $copy, $Run, $ExpectedBuildMode, $sandboxName, $desktopName, $MinIdleSeconds, $QuietWaitSeconds
+        $line = '"{0}" -NoProfile -NonInteractive -File "{1}" -Driver -MeasureRepo "{2}" -Bin "{3}" -Run "{4}" -ExpectedBuildMode {5} -SandboxName {6} -DesktopName {7} -MinIdleSeconds {8} -QuietWaitSeconds {9} -QuietSinceTick {10}' -f `
+            $pwsh, $PSCommandPath, $build.Repo, $copy, $Run, $ExpectedBuildMode, $sandboxName, $desktopName, $MinIdleSeconds, $QuietWaitSeconds, $QuietSince
         if ($Visible) { $line += ' -Visible' }
         $pi = [FramePacingNative]::LaunchDriver($pwsh, $line, $Run, "WinSta0\$desktopName", $job, [bool]$Visible)
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
@@ -1320,40 +1339,46 @@ function Invoke-FramePacingOuterRun($build, [string] $Run) {
     if ($stateFailure) { $guardFailures += $stateFailure }
     if (-not $guards.SessionUnchanged) { $guardFailures += 'the real session-state.json changed' }
     if ($historyFailure) { $guardFailures += $historyFailure }
-    $failed = @()
-    if ($cleanup) { $failed += "owned job cleanup: $cleanup" }
-    if ($outerError) { $failed += $outerError }
-    if ($driverExit -eq 3) { $failed += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
-    elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and run.json)" }
+    # What the outer half itself saw go wrong, and what it checks of the record whatever the run's outcome: the mode,
+    # where the copy ran from (each directory inside the run, none a real one) and, once it launched, its config file.
+    $outerFailures = @()
+    if ($cleanup) { $outerFailures += "owned job cleanup: $cleanup" }
+    if ($outerError) { $outerFailures += $outerError }
+    if ($driverExit -eq 3) { $outerFailures += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
     $recordPath = Join-Path $Run 'run.json'
     $record = if (Test-Path -LiteralPath $recordPath) { Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } else { $null }
-    $problems = @(Get-FramePacingRecordProblems $record)
     if ($null -ne $record) {
         $wantMode = if ($Visible) { 'visible' } else { 'dry-run' }
-        if (-not [string]::Equals([string]$record.Mode, $wantMode, [StringComparison]::Ordinal)) { $problems += "mode $($record.Mode), not $wantMode" }
-        if (-not [string]::Equals([string]$record.LaunchConfigFile, (Join-Path $copy 'config.ghostty'), [StringComparison]::OrdinalIgnoreCase)) { $problems += "the copy's config file was not its own generated one" }
+        if (-not [string]::Equals([string]$record.Mode, $wantMode, [StringComparison]::Ordinal)) { $outerFailures += "mode $($record.Mode), not $wantMode" }
+        if ($record.LaunchConfigFile -and -not [string]::Equals([string]$record.LaunchConfigFile, (Join-Path $copy 'config.ghostty'), [StringComparison]::OrdinalIgnoreCase)) { $outerFailures += "the copy's config file was not its own generated one" }
         if ($null -ne $record.EffectiveDirs) {
             foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {
                 $dir = [string]$record.EffectiveDirs.$name
                 if (-not $dir -or -not ($dir.TrimEnd('\') + '\').StartsWith($Run.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or @($realDirs | Where-Object { [string]::Equals($_, $dir.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
-                    $problems += "the copy's $name was not the run's own"
+                    $outerFailures += "the copy's $name was not the run's own"
                 }
             }
-        } else { $problems += 'no effective directories' }
+        } else { $outerFailures += 'no effective directories' }
     }
-    # A record whose only problems are the visible run's environment is inconclusive; any other problem fails the run.
-    # The driver's own error carries every problem it saw, so it is not a further problem when those are all
-    # inconclusive.
-    $hard = @($problems | Where-Object { -not ([string]$_).StartsWith('inconclusive:', [StringComparison]::Ordinal) -and -not ([string]$_).StartsWith('error: ', [StringComparison]::Ordinal) })
-    $soft = @($problems | Where-Object { ([string]$_).StartsWith('inconclusive:', [StringComparison]::Ordinal) })
+    $problems = @(Get-FramePacingRecordProblems $record)
     $driverError = if ($null -ne $record -and $record.Error) { [string]$record.Error } else { $null }
-    $driverInconclusive = $null -ne $driverError -and ($driverError.StartsWith('INCONCLUSIVE:', [StringComparison]::Ordinal) -or ($soft.Count -gt 0 -and @($driverError -split '; ' | Where-Object { -not $_.StartsWith('inconclusive:', [StringComparison]::Ordinal) }).Count -eq 0))
-    if ($null -ne $driverError -and -not $driverInconclusive) { $hard += "error: $driverError" }
-    $status = if ($guardFailures.Count -gt 0) { 'guard-tripped' }
-        elseif ($failed.Count -gt 0 -or $hard.Count -gt 0) { 'failed' }
-        elseif ($soft.Count -gt 0 -or $driverInconclusive) { 'inconclusive' }
-        else { 'complete' }
-    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $failed + $hard + $soft); Record = $record }
+    $status = Get-FramePacingRunStatus @($guardFailures) @($outerFailures) $driverExit $driverError @($problems)
+    return [pscustomobject]@{ Run = $Run; Status = $status; Failures = @($guardFailures + $outerFailures + $problems); Record = $record }
+}
+
+# A run's status: a tripped guard first, then the outer half's own failures; a driver that exited 2 with an
+# INCONCLUSIVE error is inconclusive (its record may lack what an aborted run never measured); any other nonzero exit,
+# or any record problem that is not the visible run's environment, fails the run; a record whose only problems are the
+# environment's is inconclusive. Pure, so the contract can run it.
+function Get-FramePacingRunStatus([string[]] $GuardFailures, [string[]] $OuterFailures, $DriverExit, [string] $DriverError, [string[]] $Problems) {
+    if (@($GuardFailures).Count -gt 0) { return 'guard-tripped' }
+    if (@($OuterFailures).Count -gt 0) { return 'failed' }
+    if ($DriverExit -eq 2 -and $DriverError -and $DriverError.StartsWith('INCONCLUSIVE:', [StringComparison]::Ordinal)) { return 'inconclusive' }
+    if ($null -eq $DriverExit -or $DriverExit -ne 0) { return 'failed' }
+    $soft = @($Problems | Where-Object { ([string]$_).StartsWith('inconclusive:', [StringComparison]::Ordinal) })
+    if ($soft.Count -ne @($Problems).Count) { return 'failed' }
+    if ($soft.Count -gt 0) { return 'inconclusive' }
+    return 'complete'
 }
 
 # The summary over the series, pacing.json in the run root: each run's status and statistics, and the pooled

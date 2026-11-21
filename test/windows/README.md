@@ -1520,7 +1520,9 @@ Two modes:
 - `-Visible` is the measurement. Run it only while the machine's user is
   away. The copy runs on `Default`, which must be the caller's desktop and the
   input desktop, composed by DWM, in a local session, with no input for
-  `-MinIdleSeconds` (300 by default). The machine must be under 30% busy
+  `-MinIdleSeconds` (300 by default) before the series and none since but the
+  harness's own unlocks: each driver checks that the session's last input is
+  still the tick the series last saw. The machine must be under 30% busy
   (the driver waits up to `-QuietWaitSeconds`). The copy takes the foreground
   through a bounded call: a zero-motion mouse input unlocks it, never an Alt
   tap, and the cross-thread calls run on a worker joined within 5 s. A run

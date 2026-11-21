@@ -37,7 +37,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'each run copies the build without noctty.ico, checks the copied app and CLI against the receipt, then marks it portable'
-        Pattern = '(?s)function Invoke-FramePacingOuterRun\(\$build, \[string\] \$Run\) \{.*?Where-Object \{ \$_\.Name -notin @\(''noctty\.ico'', ''crash'', ''ghostty''\) \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw [^\r\n]+\}\s+if \(-not \(Test-WorkingSetCopy \$copy \$build\)\) \{ throw [^\r\n]+\}\s+\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
+        Pattern = '(?s)function Invoke-FramePacingOuterRun\(\$build, \[string\] \$Run, \[long\] \$QuietSince\) \{.*?Where-Object \{ \$_\.Name -notin @\(''noctty\.ico'', ''crash'', ''ghostty''\) \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw [^\r\n]+\}\s+if \(-not \(Test-WorkingSetCopy \$copy \$build\)\) \{ throw [^\r\n]+\}\s+\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
         Mutation = @('if (-not (Test-WorkingSetCopy $copy $build)) { throw', 'if ($false) { throw')
     }
     @{
@@ -103,7 +103,7 @@ $framePacingRules = @(
     # --- the visible part
     @{
         Description = 'the driver evaluates the visible part''s preconditions on its own session right before the launch: a dry run must be refused, a visible run must not be'
-        Pattern = '(?s)\$facts = Get-FramePacingSessionFacts \$MinIdleSeconds\s+\$record\.Composition = \$facts\.Composition\s+\$record\.VisibleRefusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$Visible -and \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}\s+if \(-not \$Visible -and -not \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}.*?\$pi = \[FramePacingNative\]::Spawn\(\$exe, \$commandLine'
+        Pattern = '(?s)\$facts = Get-FramePacingSessionFacts \$MinIdleSeconds \$QuietSinceTick\s+\$record\.Composition = \$facts\.Composition\s+\$record\.VisibleRefusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$Visible -and \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}\s+if \(-not \$Visible -and -not \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}.*?\$pi = \[FramePacingNative\]::Spawn\(\$exe, \$commandLine'
         Mutation = @('if (-not $Visible -and -not $record.VisibleRefusal) { throw', 'if ($false) { throw')
     }
     @{
@@ -113,12 +113,12 @@ $framePacingRules = @(
     }
     @{
         Description = 'the visible part''s preconditions are read after the quiet-machine wait, not before it'
-        Pattern = '(?s)\$record\.QuietWaitMs = \$quietClock\.ElapsedMilliseconds\s+\}\s+\$record\.TimerResolutionBefore100ns = .*?\$facts = Get-FramePacingSessionFacts \$MinIdleSeconds'
+        Pattern = '(?s)\$record\.QuietWaitMs = \$quietClock\.ElapsedMilliseconds\s+\}\s+\$record\.TimerResolutionBefore100ns = .*?\$facts = Get-FramePacingSessionFacts \$MinIdleSeconds \$QuietSinceTick'
         Mutation = @('$record.QuietWaitMs = $quietClock.ElapsedMilliseconds', '$record.QuietWaitMs = 0')
     }
     @{
-        Description = 'the outer half refuses -Visible off an unlocked, composed, local, idle Default before it creates anything'
-        Pattern = '(?s)if \(\$Visible\) \{\s+\$refusal = Get-FramePacingVisibleRefusal \(Get-FramePacingSessionFacts \$MinIdleSeconds\)\s+if \(\$refusal\) \{ throw [^\r\n]+\}\s+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$root\)'
+        Description = 'the outer half refuses -Visible off an unlocked, composed, local, idle Default before it creates anything, and keeps the tick it saw idle'
+        Pattern = '(?s)\$quietSince = \[long\]-1\s+if \(\$Visible\) \{\s+\$facts = Get-FramePacingSessionFacts \$MinIdleSeconds -1\s+\$refusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$refusal\) \{ throw [^\r\n]+\}\s+\$quietSince = \[long\]\$facts\.LastInputTick\s+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$root\)'
         Mutation = @('if ($refusal) { throw', 'if ($false) { throw')
     }
     @{
@@ -235,13 +235,23 @@ $framePacingRules = @(
     }
     @{
         Description = 'the driver applies the record verdict before it reports success'
-        Pattern = '\$problems = @\(Get-FramePacingRecordProblems \(\[pscustomobject\]\$record\)\)\s+if \(\$problems\.Count -gt 0 -and -not \$record\.Error\) \{ \$record\.Error = \$problems -join ''; '' \}\s+return \$\(if \(\$record\.Error\) \{ 1 \} else \{ 0 \}\)'
-        Mutation = @("if (`$problems.Count -gt 0 -and -not `$record.Error) { `$record.Error = `$problems -join '; ' }", '')
+        Pattern = '(?s)\$problems = @\(Get-FramePacingRecordProblems \(\[pscustomobject\]\$record\)\)\s+if \(\$problems\.Count -gt 0 -and -not \$record\.Error\) \{\s+\$soft = .*?\$record\.Error = [^\r\n]+\s+\}\s+if \(-not \$record\.Error\) \{ return 0 \}'
+        Mutation = @('if ($problems.Count -gt 0 -and -not $record.Error) {', 'if ($false) {')
+    }
+    @{
+        Description = 'a visible series'' later runs check the session''s input against the tick the last run saw after its own unlock'
+        Pattern = '(?s)\$result = Invoke-FramePacingOuterRun \$build \(Join-Path \$root "run-\$i"\) \$quietSince\s+\$results\.Add\(\$result\)\s+if \(\$Visible -and \$null -ne \$result\.Record -and \$null -ne \$result\.Record\.InputTick\) \{ \$quietSince = \[long\]\$result\.Record\.InputTick \}.*?-QuietSinceTick \{10\}'' -f `\s+[^\r\n]+\$QuietWaitSeconds, \$QuietSince'
+        Mutation = @('{ $quietSince = [long]$result.Record.InputTick }', '{ }')
+    }
+    @{
+        Description = 'the driver exits 2 only for an INCONCLUSIVE error, and every problem must be the environment''s for its verdict to say so'
+        Pattern = '(?s)\$soft = @\(\$problems \| Where-Object \{ \$_\.StartsWith\(''inconclusive:'', \[StringComparison\]::Ordinal\) \}\)\s+\$record\.Error = \$\(if \(\$soft\.Count -eq \$problems\.Count\) \{ ''INCONCLUSIVE: '' \} else \{ '''' \}\) \+ \(\$problems -join ''; ''\)\s+\}\s+if \(-not \$record\.Error\) \{ return 0 \}\s+return \$\(if \(\$record\.Error\.StartsWith\(''INCONCLUSIVE:'', \[StringComparison\]::Ordinal\)\) \{ 2 \} else \{ 1 \}\)'
+        Mutation = @('if ($soft.Count -eq $problems.Count) {', 'if ($soft.Count -gt 0) {')
     }
     # --- the guards, the series and the summary
     @{
         Description = 'each run keeps the shared state guard, the history guard and the real session file''s metadata, and a changed one is a tripped guard'
-        Pattern = '(?s)\$sessionBefore = Get-Metadata \$sessionPath\s+\$stateGuard = Start-InteractiveWin11StateGuard -Harness ''bench-frame-pacing'' -ReceiptDirectory \$Run\s+\$historyGuard = Start-WindowsHarnessHistoryGuard -Harness ''bench-frame-pacing\.ps1''.*?try \{ Assert-InteractiveWin11StateGuard -Guard \$stateGuard \} catch \{ \$stateFailure = \$_\.Exception\.Message \}.*?try \{ Assert-WindowsHarnessHistoryGuard -Guard \$historyGuard \} catch \{ \$historyFailure = \$_\.Exception\.Message \}.*?if \(\$stateFailure\) \{ \$guardFailures \+= \$stateFailure \}\s+if \(-not \$guards\.SessionUnchanged\) \{ \$guardFailures \+= [^\r\n]+\}\s+if \(\$historyFailure\) \{ \$guardFailures \+= \$historyFailure \}.*?\$status = if \(\$guardFailures\.Count -gt 0\) \{ ''guard-tripped'' \}'
+        Pattern = '(?s)\$sessionBefore = Get-Metadata \$sessionPath\s+\$stateGuard = Start-InteractiveWin11StateGuard -Harness ''bench-frame-pacing'' -ReceiptDirectory \$Run\s+\$historyGuard = Start-WindowsHarnessHistoryGuard -Harness ''bench-frame-pacing\.ps1''.*?try \{ Assert-InteractiveWin11StateGuard -Guard \$stateGuard \} catch \{ \$stateFailure = \$_\.Exception\.Message \}.*?try \{ Assert-WindowsHarnessHistoryGuard -Guard \$historyGuard \} catch \{ \$historyFailure = \$_\.Exception\.Message \}.*?if \(\$stateFailure\) \{ \$guardFailures \+= \$stateFailure \}\s+if \(-not \$guards\.SessionUnchanged\) \{ \$guardFailures \+= [^\r\n]+\}\s+if \(\$historyFailure\) \{ \$guardFailures \+= \$historyFailure \}.*?\$status = Get-FramePacingRunStatus @\(\$guardFailures\) @\(\$outerFailures\) \$driverExit \$driverError @\(\$problems\)'
         Mutation = @("if (-not `$guards.SessionUnchanged) { `$guardFailures += 'the real session-state.json changed' }", '')
     }
     @{
@@ -251,7 +261,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the outer half checks the record''s mode and where the copy ran from (each directory inside the run, none a real one)'
-        Pattern = '(?s)if \(-not \[string\]::Equals\(\[string\]\$record\.Mode, \$wantMode, \[StringComparison\]::Ordinal\)\) \{ \$problems \+= .*?foreach \(\$name in @\(''LOCALAPPDATA'', ''APPDATA'', ''TEMP'', ''TMP''\)\) \{\s+\$dir = \[string\]\$record\.EffectiveDirs\.\$name\s+if \(-not \$dir -or .*?@\(\$realDirs \| Where-Object '
+        Pattern = '(?s)if \(-not \[string\]::Equals\(\[string\]\$record\.Mode, \$wantMode, \[StringComparison\]::Ordinal\)\) \{ \$outerFailures \+= .*?foreach \(\$name in @\(''LOCALAPPDATA'', ''APPDATA'', ''TEMP'', ''TMP''\)\) \{\s+\$dir = \[string\]\$record\.EffectiveDirs\.\$name\s+if \(-not \$dir -or .*?@\(\$realDirs \| Where-Object '
         Mutation = @('$dir = [string]$record.EffectiveDirs.$name', '$dir = Join-Path $Run $name')
     }
     @{
@@ -453,7 +463,7 @@ try {
     $framePacingActual = ($framePacingConstantNames | ForEach-Object { "$_=$((Get-Variable -Scope Script -Name $_).Value)" }) -join ' '
     if (-not (Test-FramePacingOrdinal $framePacingActual $framePacingPinned)) { throw "The frame-pacing workload's constants changed ($framePacingActual); runs before and after the change are not comparable." }
     $framePacingCases = & {
-        foreach ($name in @('New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingRecordProblems', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
+        foreach ($name in @('New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
             . ([scriptblock]::Create((Get-FramePacingFunctionText $framePacingAst $name 'bench-frame-pacing.ps1')))
         }
         $cases = [Collections.Generic.List[string]]::new()
@@ -514,7 +524,7 @@ try {
         $cases.Add('argv (pinned, exact; added --command, -e, reordered, no config file)')
 
         # The visible part's refusal: only Default, the input desktop, composed, local and idle passes.
-        $ok = [pscustomobject]@{ OwnDesktop = 'Default'; InputDesktop = 'Default'; Composition = 1; RemoteSession = $false; IdleMs = 400000; MinIdleMs = 300000 }
+        $ok = [pscustomobject]@{ OwnDesktop = 'Default'; InputDesktop = 'Default'; Composition = 1; RemoteSession = $false; IdleMs = 400000; MinIdleMs = 300000; LastInputTick = 77; QuietSinceTick = -1 }
         if ($null -ne (Get-FramePacingVisibleRefusal $ok)) { throw 'The visible check refused an idle, unlocked, composed local Default.' }
         $refusals = @(
             @{ Name = 'a private desktop'; Facts = @{ OwnDesktop = 'noctty-fp-1' } }
@@ -525,17 +535,25 @@ try {
             @{ Name = 'a remote session'; Facts = @{ RemoteSession = $true } }
             @{ Name = 'recent input'; Facts = @{ IdleMs = 299999 } }
             @{ Name = 'an unreadable idle time'; Facts = @{ IdleMs = -1 } }
+            @{ Name = 'input since the series'' tick'; Facts = @{ QuietSinceTick = 76; IdleMs = 400000 } }
         )
         foreach ($case in $refusals) {
             $facts = $ok.PSObject.Copy()
             foreach ($key in $case.Facts.Keys) { $facts.$key = $case.Facts[$key] }
             if ($null -eq (Get-FramePacingVisibleRefusal $facts)) { throw "The visible check accepted $($case.Name)." }
         }
+        # A later run of a visible series: the harness's own unlock made the idle time short, and the tick it saw then
+        # is still the session's last input, so the run may go on.
+        $later = $ok.PSObject.Copy(); $later.IdleMs = 2000; $later.QuietSinceTick = 77
+        if ($null -ne (Get-FramePacingVisibleRefusal $later)) { throw 'The visible check refused a later run whose only input since the series'' tick was its own unlock.' }
         $refusalText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingVisibleRefusal' 'bench-frame-pacing.ps1'
+        $tickControl = $refusalText.Replace('if ($Facts.LastInputTick -ne $Facts.QuietSinceTick)', 'if ($false)')
+        if ([string]::Equals($tickControl, $refusalText, [StringComparison]::Ordinal)) { throw 'The tick control changed nothing.' }
+        & { . ([scriptblock]::Create($tickControl)); $moved = $ok.PSObject.Copy(); $moved.QuietSinceTick = 76; if ($null -ne (Get-FramePacingVisibleRefusal $moved)) { throw 'The tick control did not accept input since the series'' tick.' } }
         $refusalControl = $refusalText.Replace('if ($Facts.IdleMs -lt 0 -or $Facts.IdleMs -lt $Facts.MinIdleMs)', 'if ($false)')
         if ([string]::Equals($refusalControl, $refusalText, [StringComparison]::Ordinal)) { throw 'The visible-check control changed nothing.' }
         & { . ([scriptblock]::Create($refusalControl)); $recent = $ok.PSObject.Copy(); $recent.IdleMs = 1000; if ($null -ne (Get-FramePacingVisibleRefusal $recent)) { throw 'The visible-check control did not accept recent input.' } }
-        $cases.Add('visible-refusal (idle Default; private, locked, other input desktop, no or unreadable composition, remote, recent or unreadable input; control)')
+        $cases.Add('visible-refusal (idle Default; private, locked, other input desktop, no or unreadable composition, remote, recent or unreadable input, input since the series'' tick; a later run after its own unlock; idle and tick controls)')
 
         # The record verdict: a complete dry run and a complete visible run count; each broken field is a problem;
         # the visible run's environment problems are only "inconclusive:".
@@ -565,7 +583,6 @@ try {
             @{ Name = 'a dry run that took the foreground'; Change = @{ Foreground = 'ok' } }
             @{ Name = 'an unknown mode'; Change = @{ Mode = 'Visible' } }
             @{ Name = 'a visible run with no refresh rate'; Change = (Join-FramePacingChange $visibleOk @{ RefreshHz = 0 }) }
-            @{ Name = 'a refused visible run'; Change = (Join-FramePacingChange $visibleOk @{ VisibleRefusal = 'the session is remote' }) }
         )
         foreach ($case in $hardCases) {
             $problems = @(Get-FramePacingRecordProblems (New-FramePacingRecord $case.Change))
@@ -578,6 +595,7 @@ try {
             @{ Name = 'a busy machine'; Change = @{ BusyPercentBefore = 30.0 } }
             @{ Name = 'a cloaked window'; Change = @{ Cloaked = 2 } }
             @{ Name = 'a refused foreground'; Change = @{ Foreground = 'timeout' } }
+            @{ Name = 'a refused visible run'; Change = @{ VisibleRefusal = 'the session is remote' } }
         )
         foreach ($case in $softCases) {
             $problems = @(Get-FramePacingRecordProblems (New-FramePacingRecord (Join-FramePacingChange $visibleOk $case.Change)))
@@ -588,6 +606,34 @@ try {
         if ([string]::Equals($verdictControl, $verdictText, [StringComparison]::Ordinal)) { throw 'The verdict control changed nothing.' }
         & { . ([scriptblock]::Create($verdictControl)); if (@(Get-FramePacingRecordProblems (New-FramePacingRecord @{ IntervalOverflow = 1 })).Count -ne 0) { throw 'The verdict control did not accept an overflow.' } }
         $cases.Add("verdict (complete dry run and visible run; $($hardCases.Count) failures; $($softCases.Count) inconclusive alone; overflow control)")
+
+        # The run's status: a guard first; the outer half's failures; an INCONCLUSIVE driver (exit 2) whatever its
+        # record lacks; any other exit or a hard problem fails; problems that are all the environment's are
+        # inconclusive. The control drops the guard-first rule, which turns a tripped guard during an inconclusive
+        # run into "inconclusive".
+        $statusCases = @(
+            @{ Want = 'complete'; Args = @(@(), @(), 0, $null, @()) }
+            @{ Want = 'guard-tripped'; Args = @(@('clipboard changed'), @(), 0, $null, @()) }
+            @{ Want = 'guard-tripped'; Args = @(@('clipboard changed'), @(), 2, 'INCONCLUSIVE: the foreground was timeout.', @('no close post took')) }
+            @{ Want = 'failed'; Args = @(@(), @('owned job cleanup: x'), 0, $null, @()) }
+            @{ Want = 'inconclusive'; Args = @(@(), @(), 2, 'INCONCLUSIVE: the foreground was timeout.', @('no close post took', 'grid x')) }
+            @{ Want = 'failed'; Args = @(@(), @(), 2, 'the copy did not answer', @()) }
+            @{ Want = 'failed'; Args = @(@(), @(), 1, 'INCONCLUSIVE: the foreground was timeout.', @()) }
+            @{ Want = 'failed'; Args = @(@(), @(), $null, $null, @()) }
+            @{ Want = 'failed'; Args = @(@(), @(), 0, $null, @('transport inbox')) }
+            @{ Want = 'failed'; Args = @(@(), @(), 0, $null, @('inconclusive: the session had input during the workload', 'transport inbox')) }
+            @{ Want = 'inconclusive'; Args = @(@(), @(), 0, $null, @('inconclusive: the session had input during the workload')) }
+        )
+        foreach ($case in $statusCases) {
+            $a = $case.Args
+            $got = Get-FramePacingRunStatus $a[0] $a[1] $a[2] $a[3] $a[4]
+            if (-not (Test-FramePacingOrdinal $got $case.Want)) { throw "The run status of exit $($a[2]), error '$($a[3])', guards $($a[0].Count), outer $($a[1].Count), problems '$($a[4] -join '; ')' is $got, not $($case.Want)." }
+        }
+        $statusText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingRunStatus' 'bench-frame-pacing.ps1'
+        $statusControl = $statusText.Replace("if (@(`$GuardFailures).Count -gt 0) { return 'guard-tripped' }", '')
+        if ([string]::Equals($statusControl, $statusText, [StringComparison]::Ordinal)) { throw 'The run-status control changed nothing.' }
+        & { . ([scriptblock]::Create($statusControl)); if ((Get-FramePacingRunStatus @('clipboard changed') @() 2 'INCONCLUSIVE: x' @()) -ne 'inconclusive') { throw 'The run-status control did not hide the tripped guard.' } }
+        $cases.Add("run status ($($statusCases.Count) cases; guard-first control)")
 
         # The statistics: QPC ticks over the trace's frequency in ms; nearest-rank p95 and the median.
         $stats = Get-FramePacingIntervalStats @(10000, 20000, 30000) 10000000.0
