@@ -469,6 +469,40 @@ function Get-Metadata([string] $Path) {
 }
 
 function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+# One file's bytes without following a reparse point (Sol, round 5): CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT,
+# the opened handle refused if it is a reparse point or a directory, then the bytes read from that handle.
+function Read-WorkingSetPlainFile([string] $Path) {
+    if (-not ('WorkingSetPlainRead' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class WorkingSetPlainRead {
+    // BY_HANDLE_FILE_INFORMATION (fileapi.h, no pshpack): 13 DWORDs, FILETIMEs as DWORD pairs, 52 bytes.
+    [StructLayout(LayoutKind.Sequential)] public struct ByHandle {
+        public uint attributes, createdLow, createdHigh, accessedLow, accessedHigh, writtenLow, writtenHigh;
+        public uint volume, sizeHigh, sizeLow, links, indexHigh, indexLow;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandle info);
+    public static byte[] Read(string path) {
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT
+        using (SafeFileHandle handle = CreateFileW(path, 0x80000000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new IOException("Opening the file failed: " + Marshal.GetLastWin32Error());
+            ByHandle info;
+            if (!GetFileInformationByHandle(handle, out info)) throw new IOException("Reading the opened file's attributes failed: " + Marshal.GetLastWin32Error());
+            if ((info.attributes & 0x400) != 0) throw new IOException("The opened file is a reparse point.");
+            if ((info.attributes & 0x10) != 0) throw new IOException("The opened file is a directory.");
+            using (var stream = new FileStream(handle, FileAccess.Read))
+            using (var bytes = new MemoryStream()) { stream.CopyTo(bytes); return bytes.ToArray(); }
+        }
+    }
+}
+'@
+    }
+    return [WorkingSetPlainRead]::Read($Path)
+}
 function Get-BytesSha256([byte[]] $Bytes) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
@@ -486,19 +520,23 @@ function Get-WorkingSetMeasureBuild([string] $Repo) {
     # One admitted receipt (Sol, round 4; CodeRabbit on #739): its bytes are read once, under the generation's build
     # lock held across the library's admission (a builder needs that lock exclusively to replace the receipt), and
     # must still be the receipt on disk when the admission has passed; that second read only compares. The fields,
-    # the hashes checked below and the recorded digest all come from the one read.
+    # the hashes checked below and the recorded digest all come from the one read. Before anything opens the receipt,
+    # its path is checked as the library checks it: inside the measure repo, no reparse point anywhere on it; the
+    # read itself does not follow one and re-checks the opened handle (Sol, round 5).
     Assert-InteractiveWin11MeasurePlainPath $layout.Root
     Assert-InteractiveWin11MeasurePlainPath (Join-Path $layout.Root 'build.lock')
     $lock = [IO.File]::Open((Join-Path $layout.Root 'build.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
-        $receiptBytes = [IO.File]::ReadAllBytes($layout.Receipt)
+        if (-not ([IO.Path]::GetFullPath($layout.Receipt)).StartsWith($layout.Repo.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'The measurement receipt is not inside the measure repo.' }
+        Assert-InteractiveWin11MeasurePlainPath $layout.Receipt
+        $receiptBytes = Read-WorkingSetPlainFile $layout.Receipt
         Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe
-        $receiptAfter = [IO.File]::ReadAllBytes($layout.Receipt)
+        $receiptAfter = Read-WorkingSetPlainFile $layout.Receipt
     } finally { $lock.Dispose() }
     if (-not [string]::Equals([Convert]::ToBase64String($receiptBytes), [Convert]::ToBase64String($receiptAfter), [StringComparison]::Ordinal)) { throw 'The measurement receipt changed during admission.' }
     $receipt = [Text.Encoding]::UTF8.GetString($receiptBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
     $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
-    if ((Get-Sha256 $exe) -cne [string]$receipt.ExeSHA256 -or (Get-Sha256 $cli) -cne [string]$receipt.CliSHA256) {
+    if (-not [string]::Equals((Get-Sha256 $exe), [string]$receipt.ExeSHA256, [StringComparison]::Ordinal) -or -not [string]::Equals((Get-Sha256 $cli), [string]$receipt.CliSHA256, [StringComparison]::Ordinal)) {
         throw 'The measurement build does not match its receipt.'
     }
     return [pscustomobject]@{ Repo = $Repo; Bin = Split-Path -Parent $exe; Head = [string]$receipt.Head; ExeSha256 = [string]$receipt.ExeSHA256; CliSha256 = [string]$receipt.CliSHA256; Optimize = [string]$receipt.Optimize; ReceiptSha256 = Get-BytesSha256 $receiptBytes }
@@ -508,7 +546,7 @@ function Get-WorkingSetMeasureBuild([string] $Repo) {
 function Test-WorkingSetCopy([string] $Copy, $Build) {
     foreach ($pair in @(@('noctty.exe', $Build.ExeSha256), @('noctty.com', $Build.CliSha256))) {
         $path = Join-Path $Copy $pair[0]
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Sha256 $path) -cne $pair[1]) { return $false }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or -not [string]::Equals((Get-Sha256 $path), [string]$pair[1], [StringComparison]::Ordinal)) { return $false }
     }
     return $true
 }
@@ -556,8 +594,8 @@ function New-WorkingSetConfigText([string] $Workload, [string] $Run) {
 
 # The default config files portable mode would also read under a copy (src/config/file_load.zig: the legacy
 # ghostty/config and the pre-rename winghostty/config.ghostty, rooted at the portable root by src/os/xdg.zig
-# portablePath). The copy loads only its generated file anyway (--config-default-files=false); a staged copy holding
-# either is refused as well (Sol, round 3).
+# portablePath). The copy reads the default files and then discards their settings (--config-default-files=false),
+# so only the generated file's settings take effect; a staged copy holding either is refused as well (Sol, round 3).
 function Get-WorkingSetStrayConfigs([string] $Copy) {
     return @(@('ghostty\config', 'winghostty\config.ghostty') | Where-Object { Test-Path -LiteralPath (Join-Path $Copy $_) })
 }
@@ -613,6 +651,14 @@ function Get-ExpectedSessionLines {
 }
 function Get-ExpectedUiaLines {
     return [int]([Math]::Min([Math]::Floor($script:UiaHistoryCells / $script:Cols), $script:UiaHistoryMaxRows) + $script:GridRows + 1)
+}
+
+# The workload's name exactly as one of the six, compared ordinally (Sol, round 5: a culture-aware comparison skips a
+# soft hyphen), so every later comparison of it is between exact literals.
+function Assert-WorkingSetWorkloadName([string] $Name) {
+    if (@('fixed', 'scrollback-default', 'scrollback-max', 'uia-walk', 'session-capture', 'tab-churn' | Where-Object { [string]::Equals($_, $Name, [StringComparison]::Ordinal) }).Count -ne 1) {
+        throw 'The workload must be exactly one of the six names.'
+    }
 }
 
 # One block of output, deterministic: 25,000 lines of 82 or 91 bytes, every seventh in an SGR colour.
@@ -725,14 +771,14 @@ function Get-WorkingSetRecordProblems($Record) {
             $problems.Add("UIA walk incomplete: $($Record.Uia.walked_lines) lines of $expectedLines")
         }
     }
-    if ($Record.Transport -cne 'bundled') { $problems.Add("transport $($Record.Transport)") }
+    if (-not [string]::Equals([string]$Record.Transport, 'bundled', [StringComparison]::Ordinal)) { $problems.Add("transport $($Record.Transport)") }
     if ($Record.LaunchConfigDefaultFiles -ne $false -or -not $Record.LaunchConfigFile) { $problems.Add('the copy was not launched with only the generated config') }
-    if (-not $Record.ConptyDllSHA256 -or $Record.ConptyDllSHA256 -cne $Record.PrefixConptyDllSHA256 -or -not $Record.OpenConsoleSHA256 -or $Record.OpenConsoleSHA256 -cne $Record.PrefixOpenConsoleSHA256) {
+    if (-not $Record.ConptyDllSHA256 -or -not [string]::Equals([string]$Record.ConptyDllSHA256, [string]$Record.PrefixConptyDllSHA256, [StringComparison]::Ordinal) -or -not $Record.OpenConsoleSHA256 -or -not [string]::Equals([string]$Record.OpenConsoleSHA256, [string]$Record.PrefixOpenConsoleSHA256, [StringComparison]::Ordinal)) {
         $problems.Add('the ConPTY pair is not the build''s')
     }
     $want = @(Get-WorkloadStages $Record.Workload $Record.BlocksPlanned)
     $got = @($Record.Stages | ForEach-Object { $_.name })
-    if (($want -join ',') -cne ($got -join ',')) { $problems.Add("stages $($got -join ',') not $($want -join ',')") }
+    if (-not [string]::Equals(($want -join ','), ($got -join ','), [StringComparison]::Ordinal)) { $problems.Add("stages $($got -join ',') not $($want -join ',')") }
     foreach ($stage in @($Record.Stages | Where-Object { $_.name -notlike 'block-*' })) {
         if (-not $stage.settled) { $problems.Add("stage $($stage.name) not settled") }
         if (-not $stage.base_pane_only) { $problems.Add("stage $($stage.name) not at the base pane alone") }
@@ -776,15 +822,16 @@ function Invoke-WorkingSetDriver {
     $process = [IntPtr]::Zero
     try {
         # Normal priority for the measurement (the outer half creates this process without a priority flag).
+        Assert-WorkingSetWorkloadName $Workload
         (Get-Process -Id $PID).PriorityClass = 'Normal'
         $record.DriverPriority = [string](Get-Process -Id $PID).PriorityClass
-        if ([WorkingSetNative]::Layout() -cne $script:SdkLayout) { throw "The mirrored structs do not match the SDK's x64 layout: $([WorkingSetNative]::Layout())" }
+        if (-not [string]::Equals([WorkingSetNative]::Layout(), $script:SdkLayout, [StringComparison]::Ordinal)) { throw "The mirrored structs do not match the SDK's x64 layout: $([WorkingSetNative]::Layout())" }
         # The driver's own admission, before it starts anything: it takes nothing on trust from its caller. It must
         # run in a job, on its own desktop (neither Default nor the input desktop), with LOCALAPPDATA, APPDATA, TEMP
         # and TMP inside the run, and the build and the copy must check out against the receipt again.
         $own = [WorkingSetNative]::CurrentDesktopName()
         $inputDesktop = [WorkingSetNative]::InputDesktopName()
-        if ($own -cne $DesktopName -or -not $own.StartsWith('noctty-ws-', [StringComparison]::Ordinal)) { throw 'The driver is not on its private desktop.' }
+        if (-not [string]::Equals($own, $DesktopName, [StringComparison]::Ordinal) -or -not $own.StartsWith('noctty-ws-', [StringComparison]::Ordinal)) { throw 'The driver is not on its private desktop.' }
         if ([string]::Equals($own, 'Default', [StringComparison]::OrdinalIgnoreCase)) { throw 'The driver is on Default.' }
         if ($null -eq $inputDesktop) { throw 'The input desktop is unreadable.' }
         if ([string]::Equals($own, $inputDesktop, [StringComparison]::OrdinalIgnoreCase)) { throw 'The driver is on the input desktop.' }
@@ -807,7 +854,7 @@ function Invoke-WorkingSetDriver {
         if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable') -PathType Leaf) -or (Test-Path -LiteralPath (Join-Path $Bin 'noctty.ico'))) { throw 'The copy is not a portable copy without noctty.ico.' }
         $config = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')))
         foreach ($wanted in @('keybind = clear', 'clipboard-read = deny', 'clipboard-write = deny', 'copy-on-select = false', 'auto-update = off')) {
-            if ($config -notcontains $wanted) { throw "The copy's config is not the harness's (no '$wanted')." }
+            if (@($config | Where-Object { [string]::Equals($_, $wanted, [StringComparison]::Ordinal) }).Count -eq 0) { throw "The copy's config is not the harness's (no '$wanted')." }
         }
         # Byte for byte the harness's own config for this run (New-WorkingSetConfigText), before the first launch: an
         # initial-command or a second command, in any spelling, would change the first pane's shell (Sol, round 2).
@@ -825,7 +872,7 @@ function Invoke-WorkingSetDriver {
             if (-not (Test-Path -LiteralPath $staged -PathType Leaf) -or -not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "The copy or the build has no $($file[0])." }
             $record[$file[1]] = Get-Sha256 $staged
             $record['Prefix' + $file[1]] = Get-Sha256 $built
-            if ($record[$file[1]] -cne $record['Prefix' + $file[1]]) { throw "The copy's $($file[0]) is not the measurement build's." }
+            if (-not [string]::Equals([string]$record[$file[1]], [string]$record['Prefix' + $file[1]], [StringComparison]::Ordinal)) { throw "The copy's $($file[0]) is not the measurement build's." }
         }
         $desktopPath = "WinSta0\$DesktopName"
         $exe = Join-Path $Bin 'noctty.exe'
@@ -843,7 +890,7 @@ function Invoke-WorkingSetDriver {
         $modeMatch = [regex]::Match([IO.File]::ReadAllText($versionPath), '(?m)^\s*-\s*build mode\s*:\s*(?:[A-Za-z_.]*\.)?(Debug|ReleaseSafe|ReleaseFast|ReleaseSmall)\s*$')
         if ($versionExit -ne 0 -or -not $modeMatch.Success) { throw "noctty +version exited $versionExit with no build mode line." }
         $record.BuildMode = $modeMatch.Groups[1].Value
-        if ($record.BuildMode -cne $ExpectedBuildMode -or $build.Optimize -cne $ExpectedBuildMode) { $record.Error = 'BUILD-MODE'; Log "build mode $($record.BuildMode); not launched"; return 3 }
+        if (-not [string]::Equals([string]$record.BuildMode, $ExpectedBuildMode, [StringComparison]::Ordinal) -or -not [string]::Equals([string]$build.Optimize, $ExpectedBuildMode, [StringComparison]::Ordinal)) { $record.Error = 'BUILD-MODE'; Log "build mode $($record.BuildMode); not launched"; return 3 }
 
         $saveState = if ($Workload -eq 'session-capture') { 'always' } else { 'never' }
         $record.ScrollbackLimitBytes = if ($Workload -eq 'scrollback-max') { $ScrollbackMaxBytes } else { 10000000 }
@@ -851,7 +898,7 @@ function Invoke-WorkingSetDriver {
         # the command line carries none.
         $configCommands = @([IO.File]::ReadAllLines((Join-Path $Bin 'config.ghostty')) | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
         $cmdPath = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
-        if ($configCommands.Count -ne 1 -or $configCommands[0] -cne "command = direct:$cmdPath /D") { throw "The copy's config must set exactly one command, System32's cmd.exe with /D, and no initial-command." }
+        if ($configCommands.Count -ne 1 -or -not [string]::Equals($configCommands[0], "command = direct:$cmdPath /D", [StringComparison]::Ordinal)) { throw "The copy's config must set exactly one command, System32's cmd.exe with /D, and no initial-command." }
         $layout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName $SandboxName
         $launchArguments = @(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) + @(
             "--window-save-state=$saveState", '--clipboard-read=deny', '--clipboard-write=deny',
@@ -888,7 +935,7 @@ function Invoke-WorkingSetDriver {
         if (-not (Test-WorkingSetArgv ([WorkingSetNative]::SplitCommandLine($launchedLine)) $expectedArgv)) { throw 'The copy was not launched with exactly the expected argument list.' }
         $launchedLine = $null
         try { $record.NocttyPriority = [string](Get-Process -Id $nocttyPid -ErrorAction Stop).PriorityClass } catch { $record.NocttyPriority = 'unknown' }
-        if ($record.NocttyPriority -cne 'Normal') { throw "The copy runs at $($record.NocttyPriority) priority, not Normal." }
+        if (-not [string]::Equals([string]$record.NocttyPriority, 'Normal', [StringComparison]::Ordinal)) { throw "The copy runs at $($record.NocttyPriority) priority, not Normal." }
         Log "launched, workload $Workload, build mode $($record.BuildMode), save state $saveState, scrollback $($record.ScrollbackLimitBytes)"
 
         function Get-Hosts { return @([WorkingSetNative]::Hosts($nocttyPid)) }
@@ -1132,6 +1179,7 @@ function Invoke-WorkingSetDriver {
 
 function Invoke-WorkingSetOuter {
     if (-not $Workload) { throw 'Pass -Workload.' }
+    Assert-WorkingSetWorkloadName $Workload
     # Only the receipt-bound measurement build, before anything is created or started.
     $build = Get-WorkingSetMeasureBuild $MeasureRepo
     $source = $build.Bin
@@ -1221,7 +1269,7 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
     try { Assert-WindowsHarnessHistoryGuard -Guard $historyGuard } catch { $historyFailure = $_.Exception.Message }
     $guards = [ordered]@{
         StateGuardPassed = $null -eq $stateFailure
-        SessionUnchanged = $sessionBefore -ceq $sessionAfter
+        SessionUnchanged = [string]::Equals($sessionBefore, $sessionAfter, [StringComparison]::Ordinal)
         HistoryUnchanged = $null -eq $historyFailure
         ClipboardSequenceBefore = $stateGuard.ClipboardBefore; ClipboardSequenceAfter = [HiddenLocal]::GetClipboardSequenceNumber()
         OwnedJobProcesses = $ownedProcesses; OwnedJobCleanup = $cleanup; DriverExit = $driverExit
@@ -1244,16 +1292,16 @@ function Invoke-WorkingSetOuterRun($build, [string] $source, [string] $Run) {
     # that limit plans (Opus, round 2).
     if ($null -ne $record) {
         $wantLimit = if ($Workload -eq 'scrollback-max') { $ScrollbackMaxBytes } else { 10000000 }
-        if ($record.Workload -cne $Workload) { $failed += "record: workload $($record.Workload), not $Workload" }
+        if (-not [string]::Equals([string]$record.Workload, $Workload, [StringComparison]::Ordinal)) { $failed += "record: workload $($record.Workload), not $Workload" }
         if ($record.ScrollbackLimitBytes -ne $wantLimit -or $record.LaunchScrollbackLimit -ne $wantLimit) { $failed += "record: scrollback limit $($record.LaunchScrollbackLimit), not $wantLimit" }
         if ($record.BlocksPlanned -ne (Get-WorkloadBlocks $Workload $wantLimit)) { $failed += "record: $($record.BlocksPlanned) blocks planned, not $(Get-WorkloadBlocks $Workload $wantLimit)" }
-        if ($record.LaunchConfigFile -ne (Join-Path $copy 'config.ghostty')) { $failed += "record: the copy's config file was not its own generated one" }
+        if (-not [string]::Equals([string]$record.LaunchConfigFile, (Join-Path $copy 'config.ghostty'), [StringComparison]::OrdinalIgnoreCase)) { $failed += "record: the copy's config file was not its own generated one" }
     }
     # Where the driver ran the copy from: each directory inside the run, none of them a real one.
     if ($null -ne $record -and $null -ne $record.EffectiveDirs) {
         foreach ($name in @('LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP')) {
             $dir = [string]$record.EffectiveDirs.$name
-            if (-not $dir -or -not ($dir.TrimEnd('\') + '\').StartsWith($Run.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or ($realDirs -contains $dir.TrimEnd('\'))) {
+            if (-not $dir -or -not ($dir.TrimEnd('\') + '\').StartsWith($Run.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or @($realDirs | Where-Object { [string]::Equals($_, $dir.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
                 $failed += "record: the copy's $name was not the run's own"
             }
         }

@@ -7,6 +7,9 @@
 # zig-out build is refused), the shared state guard's paths, and its native layer's struct layout (compiled and
 # checked against the SDK's x64 sizes). No noctty is started.
 $workingSetScript = Join-Path $repoRoot 'test\windows\hidden-win11-working-set.ps1'
+# Ordinal string equality for every comparison of config, argv, path, receipt and hash text here (Sol and Opus,
+# round 5): -ceq and -cne are culture-aware and skip a soft hyphen.
+function Test-WorkingSetOrdinal([string] $A, [string] $B) { return [string]::Equals($A, $B, [StringComparison]::Ordinal) }
 $workingSetStateGuard = Join-Path $repoRoot 'scripts\interactive-win11-state-guard.ps1'
 
 function Get-WorkingSetCodeText([string] $Path) {
@@ -27,12 +30,12 @@ $workingSetRules = @(
     # --- build admission and what the driver may launch
     @{
         Description = 'the outer half admits only the receipt-bound measurement build, before it creates anything, and checks the copied app and CLI bytes against the receipt'
-        Pattern = '(?s)function Invoke-WorkingSetOuter \{\s+if \(-not \$Workload\) \{ throw ''Pass -Workload\.'' \}\s+\$build = Get-WorkingSetMeasureBuild \$MeasureRepo.*?if \(-not \(Test-WorkingSetCopy \$copy \$build\)\) \{ throw .*?\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
+        Pattern = '(?s)function Invoke-WorkingSetOuter \{\s+if \(-not \$Workload\) \{ throw ''Pass -Workload\.'' \}\s+Assert-WorkingSetWorkloadName \$Workload\s+\$build = Get-WorkingSetMeasureBuild \$MeasureRepo.*?if \(-not \(Test-WorkingSetCopy \$copy \$build\)\) \{ throw .*?\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
         Mutation = @('if (-not (Test-WorkingSetCopy $copy $build)) { throw', 'if ($false) { throw')
     }
     @{
         Description = 'admission is Assert-InteractiveWin11MeasureBuild on the generation, then the prefix''s noctty.exe and noctty.com against the receipt''s hashes'
-        Pattern = '(?s)function Get-WorkingSetMeasureBuild\(\[string\] \$Repo\) \{.*?\$exe = Get-InteractiveWin11MeasureExePath -RepoRoot \$Repo.*?\$receiptBytes = \[IO\.File\]::ReadAllBytes\(\$layout\.Receipt\)\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe.*?if \(\(Get-Sha256 \$exe\) -cne \[string\]\$receipt\.ExeSHA256 -or \(Get-Sha256 \$cli\) -cne \[string\]\$receipt\.CliSHA256\) \{\s+throw'
+        Pattern = '(?s)function Get-WorkingSetMeasureBuild\(\[string\] \$Repo\) \{.*?\$exe = Get-InteractiveWin11MeasureExePath -RepoRoot \$Repo.*?\$receiptBytes = Read-WorkingSetPlainFile \$layout\.Receipt\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe.*?if \(-not \[string\]::Equals\(\(Get-Sha256 \$exe\), \[string\]\$receipt\.ExeSHA256, \[StringComparison\]::Ordinal\) -or -not \[string\]::Equals\(\(Get-Sha256 \$cli\), \[string\]\$receipt\.CliSHA256, \[StringComparison\]::Ordinal\)\) \{\s+throw'
         Mutation = @('Assert-InteractiveWin11MeasureBuild -RepoRoot $Repo -ExePath $exe', '')
     }
     @{
@@ -52,7 +55,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the build mode is checked through +version (and against the receipt) before the launch, and a mismatch launches nothing'
-        Pattern = '(?s)''"\{0\}" \+version''.*?if \(\$record\.BuildMode -cne \$ExpectedBuildMode -or \$build\.Optimize -cne \$ExpectedBuildMode\) \{[^\r\n]*return 3 \}.*?\[WorkingSetNative\]::Spawn\(\$exe, \$commandLine'
+        Pattern = '(?s)''"\{0\}" \+version''.*?if \(-not \[string\]::Equals\(\[string\]\$record\.BuildMode, \$ExpectedBuildMode, \[StringComparison\]::Ordinal\) -or -not \[string\]::Equals\(\[string\]\$build\.Optimize, \$ExpectedBuildMode, \[StringComparison\]::Ordinal\)\) \{[^\r\n]*return 3 \}.*?\[WorkingSetNative\]::Spawn\(\$exe, \$commandLine'
         Mutation = @('not launched"; return 3 }', 'not launched" }')
     }
     # --- the copy's isolation
@@ -63,8 +66,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'the driver refuses a config whose command is not exactly System32''s cmd.exe with /D'
-        Pattern = '(?s)\$cmdPath = Join-Path \(\[Environment\]::GetFolderPath\(''System''\)\) ''cmd\.exe''\s+if \(\$configCommands\.Count -ne 1 -or \$configCommands\[0\] -cne "command = direct:\$cmdPath /D"\) \{ throw'
-        Mutation = @('"command = direct:$cmdPath /D") { throw', '"command = direct:$cmdPath") { throw')
+        Pattern = '(?s)\$cmdPath = Join-Path \(\[Environment\]::GetFolderPath\(''System''\)\) ''cmd\.exe''\s+if \(\$configCommands\.Count -ne 1 -or -not \[string\]::Equals\(\$configCommands\[0\], "command = direct:\$cmdPath /D", \[StringComparison\]::Ordinal\)\) \{ throw'
+        Mutation = @('"command = direct:$cmdPath /D", [StringComparison]::Ordinal)) { throw', '"command = direct:$cmdPath", [StringComparison]::Ordinal)) { throw')
     }
     @{
         Description = 'only the session-capture workload saves session state; every other runs with --window-save-state=never'
@@ -88,8 +91,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'the outer half refuses a run whose recorded LOCALAPPDATA, APPDATA, TEMP or TMP was not inside the run, or was a real one'
-        Pattern = '(?s)foreach \(\$name in @\(''LOCALAPPDATA'', ''APPDATA'', ''TEMP'', ''TMP''\)\) \{\s+\$dir = \[string\]\$record\.EffectiveDirs\.\$name\s+if \(-not \$dir -or -not .*?StartsWith\(\$Run\.TrimEnd\(''\\''\) \+ ''\\'', \[StringComparison\]::OrdinalIgnoreCase\) -or \(\$realDirs -contains \$dir\.TrimEnd\(''\\''\)\)\) \{\s+\$failed \+= '
-        Mutation = @(' -or ($realDirs -contains $dir.TrimEnd(''\''))', '')
+        Pattern = '(?s)foreach \(\$name in @\(''LOCALAPPDATA'', ''APPDATA'', ''TEMP'', ''TMP''\)\) \{\s+\$dir = \[string\]\$record\.EffectiveDirs\.\$name\s+if \(-not \$dir -or -not .*?StartsWith\(\$Run\.TrimEnd\(''\\''\) \+ ''\\'', \[StringComparison\]::OrdinalIgnoreCase\) -or @\(\$realDirs \| Where-Object \{ \[string\]::Equals\(\$_, \$dir\.TrimEnd\(''\\''\), \[StringComparison\]::OrdinalIgnoreCase\) \}\)\.Count -gt 0\) \{\s+\$failed \+= '
+        Mutation = @(' -or @($realDirs | Where-Object { [string]::Equals($_, $dir.TrimEnd(''\''), [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0', '')
     }
     @{
         Description = 'the driver is created suspended, with no console window and no priority flag (normal priority, never BELOW_NORMAL 0x4000), and assigned to the job before it runs'
@@ -103,7 +106,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the copy runs at normal priority: its creation flags carry NORMAL_PRIORITY_CLASS, and a copy at any other priority fails the run'
-        Pattern = '(?s)CreateProcessW\(app, new StringBuilder\(command\), IntPtr\.Zero, IntPtr\.Zero, true, 0x00080000 \| 0x20 \| \(noWindow \? 0x08000000u : 0u\), .*?if \(\$record\.NocttyPriority -cne ''Normal''\) \{ throw'
+        Pattern = '(?s)CreateProcessW\(app, new StringBuilder\(command\), IntPtr\.Zero, IntPtr\.Zero, true, 0x00080000 \| 0x20 \| \(noWindow \? 0x08000000u : 0u\), .*?if \(-not \[string\]::Equals\(\[string\]\$record\.NocttyPriority, ''Normal'', \[StringComparison\]::Ordinal\)\) \{ throw'
         Mutation = @('true, 0x00080000 | 0x20 | (noWindow', 'true, 0x00080000 | 0x4000 | (noWindow')
     }
     @{
@@ -139,7 +142,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the real session-state.json is guarded by size and time (session-capture saves session state)'
-        Pattern = '(?s)\$sessionPath = Join-Path \$realLocal ''noctty\\session-state\.json''\s+\$sessionBefore = Get-Metadata \$sessionPath.*?\$sessionAfter = Get-Metadata \$sessionPath.*?SessionUnchanged = \$sessionBefore -ceq \$sessionAfter.*?if \(-not \$guards\.SessionUnchanged\) \{ \$failed \+= '
+        Pattern = '(?s)\$sessionPath = Join-Path \$realLocal ''noctty\\session-state\.json''\s+\$sessionBefore = Get-Metadata \$sessionPath.*?\$sessionAfter = Get-Metadata \$sessionPath.*?SessionUnchanged = \[string\]::Equals\(\$sessionBefore, \$sessionAfter, \[StringComparison\]::Ordinal\).*?if \(-not \$guards\.SessionUnchanged\) \{ \$failed \+= '
         Mutation = @("`$sessionPath = Join-Path `$realLocal 'noctty\session-state.json'", "`$sessionPath = Join-Path `$Run 'session-state.json'")
     }
     @{
@@ -332,8 +335,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'the copy''s conpty.dll and OpenConsole.exe must be the build''s, byte for byte, before the first launch, and both digests are recorded'
-        Pattern = '(?s)foreach \(\$file in @\(@\(''conpty\.dll'', ''ConptyDllSHA256''\), @\(''OpenConsole\.exe'', ''OpenConsoleSHA256''\)\)\) \{.*?\$record\[''Prefix'' \+ \$file\[1\]\] = Get-Sha256 \$built\s+if \(\$record\[\$file\[1\]\] -cne \$record\[''Prefix'' \+ \$file\[1\]\]\) \{ throw .*?\$check = \[WorkingSetNative\]::Spawn\('
-        Mutation = @("if (`$record[`$file[1]] -cne `$record['Prefix' + `$file[1]]) { throw", "if (`$false) { throw")
+        Pattern = '(?s)foreach \(\$file in @\(@\(''conpty\.dll'', ''ConptyDllSHA256''\), @\(''OpenConsole\.exe'', ''OpenConsoleSHA256''\)\)\) \{.*?\$record\[''Prefix'' \+ \$file\[1\]\] = Get-Sha256 \$built\s+if \(-not \[string\]::Equals\(\[string\]\$record\[\$file\[1\]\], \[string\]\$record\[''Prefix'' \+ \$file\[1\]\], \[StringComparison\]::Ordinal\)\) \{ throw .*?\$check = \[WorkingSetNative\]::Spawn\('
+        Mutation = @("if (-not [string]::Equals([string]`$record[`$file[1]], [string]`$record['Prefix' + `$file[1]], [StringComparison]::Ordinal)) { throw", "if (`$false) { throw")
     }
     @{
         Description = 'the record keeps the transport the copy''s own log names: bundled from the copy''s conpty.dll, or the in-box conhost'
@@ -372,8 +375,8 @@ $workingSetRules = @(
     }
     @{
         Description = 'the outer half refuses a record whose workload, launch limit or planned blocks are not the ones it asked for'
-        Pattern = '(?s)if \(\$record\.Workload -cne \$Workload\) \{ \$failed \+= [^\r\n]+\}\s+if \(\$record\.ScrollbackLimitBytes -ne \$wantLimit -or \$record\.LaunchScrollbackLimit -ne \$wantLimit\) \{ \$failed \+= [^\r\n]+\}\s+if \(\$record\.BlocksPlanned -ne \(Get-WorkloadBlocks \$Workload \$wantLimit\)\) \{ \$failed \+= '
-        Mutation = @('if ($record.Workload -cne $Workload) { $failed += "record: workload $($record.Workload), not $Workload" }', '')
+        Pattern = '(?s)if \(-not \[string\]::Equals\(\[string\]\$record\.Workload, \$Workload, \[StringComparison\]::Ordinal\)\) \{ \$failed \+= [^\r\n]+\}\s+if \(\$record\.ScrollbackLimitBytes -ne \$wantLimit -or \$record\.LaunchScrollbackLimit -ne \$wantLimit\) \{ \$failed \+= [^\r\n]+\}\s+if \(\$record\.BlocksPlanned -ne \(Get-WorkloadBlocks \$Workload \$wantLimit\)\) \{ \$failed \+= '
+        Mutation = @('if (-not [string]::Equals([string]$record.Workload, $Workload, [StringComparison]::Ordinal)) { $failed += "record: workload $($record.Workload), not $Workload" }', '')
     }
     @{
         Description = 'the driver is given the outer half''s own workload (Opus, round 2: m07)'
@@ -392,7 +395,7 @@ $workingSetRules = @(
     }
     @{
         Description = 'the receipt is read once: its fields and its digest come from the same bytes (CodeRabbit on #739)'
-        Pattern = '(?s)\$lock = \[IO\.File\]::Open\(\(Join-Path \$layout\.Root ''build\.lock''\), \[IO\.FileMode\]::OpenOrCreate, \[IO\.FileAccess\]::Read, \[IO\.FileShare\]::Read\)\s+try \{\s+\$receiptBytes = \[IO\.File\]::ReadAllBytes\(\$layout\.Receipt\)\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe\s+\$receiptAfter = \[IO\.File\]::ReadAllBytes\(\$layout\.Receipt\)\s+\} finally \{ \$lock\.Dispose\(\) \}.*?\$receipt = \[Text\.Encoding\]::UTF8\.GetString\(\$receiptBytes\)[^\r\n]*\| ConvertFrom-Json.*?ReceiptSha256 = Get-BytesSha256 \$receiptBytes \}'
+        Pattern = '(?s)\$lock = \[IO\.File\]::Open\(\(Join-Path \$layout\.Root ''build\.lock''\), \[IO\.FileMode\]::OpenOrCreate, \[IO\.FileAccess\]::Read, \[IO\.FileShare\]::Read\)\s+try \{\s+if \(-not \(\[IO\.Path\]::GetFullPath\(\$layout\.Receipt\)\)\.StartsWith\(\$layout\.Repo\.TrimEnd\(''\\''\) \+ ''\\'', \[StringComparison\]::OrdinalIgnoreCase\)\) \{ throw [^\r\n]+\}\s+Assert-InteractiveWin11MeasurePlainPath \$layout\.Receipt\s+\$receiptBytes = Read-WorkingSetPlainFile \$layout\.Receipt\s+Assert-InteractiveWin11MeasureBuild -RepoRoot \$Repo -ExePath \$exe\s+\$receiptAfter = Read-WorkingSetPlainFile \$layout\.Receipt\s+\} finally \{ \$lock\.Dispose\(\) \}.*?\$receipt = \[Text\.Encoding\]::UTF8\.GetString\(\$receiptBytes\)[^\r\n]*\| ConvertFrom-Json.*?ReceiptSha256 = Get-BytesSha256 \$receiptBytes \}'
         Mutation = @('ReceiptSha256 = Get-BytesSha256 $receiptBytes }', 'ReceiptSha256 = Get-Sha256 (Get-InteractiveWin11MeasureLayout $Repo).Receipt }')
     }
     @{
@@ -452,14 +455,19 @@ $workingSetRules = @(
     }
     @{
         Description = 'the outer half refuses a record whose launch config file is not the copy''s own generated one (Opus, round 4: n3)'
-        Pattern = 'if \(\$record\.LaunchConfigFile -ne \(Join-Path \$copy ''config\.ghostty''\)\) \{ \$failed \+= '
-        Mutation = @('if ($record.LaunchConfigFile -ne (Join-Path $copy ''config.ghostty'')) { $failed += ', 'if ($false) { $failed += ')
+        Pattern = 'if \(-not \[string\]::Equals\(\[string\]\$record\.LaunchConfigFile, \(Join-Path \$copy ''config\.ghostty''\), \[StringComparison\]::OrdinalIgnoreCase\)\) \{ \$failed \+= '
+        Mutation = @('if (-not [string]::Equals([string]$record.LaunchConfigFile, (Join-Path $copy ''config.ghostty''), [StringComparison]::OrdinalIgnoreCase)) { $failed += ', 'if ($false) { $failed += ')
+    }
+    @{
+        Description = 'the final command line and the expected argument list are each assigned exactly once (Opus, round 5: a5b, an append plus a rebuilt list)'
+        Pattern = '(?s)\A(?=.*?\$commandLine\b\s*=(?!=))(?=.*?\$expectedArgv\b\s*=(?!=))(?!(?:.*?\$commandLine\b\s*[-+*/]?=(?!=)){2})(?!(?:.*?\$expectedArgv\b\s*[-+*/]?=(?!=)){2})'
+        Mutation = @('[void][WorkingSetNative]::SetErrorMode(', '$commandLine += '' --initial-command=x''; $expectedArgv = [string[]][WorkingSetNative]::SplitCommandLine($commandLine); [void][WorkingSetNative]::SetErrorMode(')
     }
     # --- the native layer
     @{
         Description = 'the mirrored structs are checked against the SDK''s x64 sizes and offsets before anything runs (AGENTS.md "Win32 FFI")'
-        Pattern = '(?s)if \(\[WorkingSetNative\]::Layout\(\) -cne \$script:SdkLayout\) \{ throw'
-        Mutation = @('if ([WorkingSetNative]::Layout() -cne $script:SdkLayout) { throw', 'if ($false) { throw')
+        Pattern = '(?s)if \(-not \[string\]::Equals\(\[WorkingSetNative\]::Layout\(\), \$script:SdkLayout, \[StringComparison\]::Ordinal\)\) \{ throw'
+        Mutation = @('if (-not [string]::Equals([WorkingSetNative]::Layout(), $script:SdkLayout, [StringComparison]::Ordinal)) { throw', 'if ($false) { throw')
     }
     @{
         Description = 'a count whose query failed is published as unavailable (-1, then null), never 0'
@@ -471,7 +479,7 @@ $workingSetRules = @(
 # GetLastPInvokeError, which older .NET lacks (Greptile on #739). `#requires` is a comment token, which the rules'
 # comment-stripped text leaves out, so this reads the file's first line.
 $workingSetFirstLine = Get-Content -LiteralPath $workingSetScript -TotalCount 1
-if ($workingSetFirstLine -cne '#requires -Version 7.2') { throw "The working-set harness must require PowerShell 7.2 (.NET 6) for its native layer, not '$workingSetFirstLine'." }
+if (-not (Test-WorkingSetOrdinal $workingSetFirstLine '#requires -Version 7.2')) { throw "The working-set harness must require PowerShell 7.2 (.NET 6) for its native layer, not '$workingSetFirstLine'." }
 if (-not $workingSetText.Contains('Marshal.SetLastPInvokeError')) { throw 'The 7.2 floor is for Marshal.SetLastPInvokeError; update this check if the native layer no longer calls it.' }
 $workingSetMutations = 0
 foreach ($rule in $workingSetRules) {
@@ -564,10 +572,10 @@ $stagesText = Get-WorkingSetFunction 'Get-WorkloadStages'
     foreach ($name in $want.Keys) { if ((Get-WorkloadBlocks $name 1073741824) -ne $want[$name]) { throw "Get-WorkloadBlocks changed for $name." } }
     # 1.25 times what 1 GiB holds at 1,120 bytes a row, in blocks of 25,000 lines: 48.
     if ((Get-WorkloadBlocks 'scrollback-max' 1073741824) -ne 48) { throw 'scrollback-max must write 1.25 times what -ScrollbackMaxBytes holds.' }
-    if ((@(Get-WorkloadStages 'scrollback-max' 48) -join ',') -cne 'start,block-8,block-16,block-24,block-32,block-40,block-48,after') { throw 'scrollback-max''s stages changed.' }
-    if ((@(Get-WorkloadStages 'scrollback-default' 4) -join ',') -cne 'start,block-1,block-2,block-3,block-4,after') { throw 'scrollback-default''s stages changed.' }
-    foreach ($name in 'fixed', 'tab-churn') { if ((@(Get-WorkloadStages $name 0) -join ',') -cne 'start,after') { throw "$name's stages changed." } }
-    foreach ($name in 'uia-walk', 'session-capture') { if ((@(Get-WorkloadStages $name 4) -join ',') -cne 'start,filled,after') { throw "$name's stages changed." } }
+    if (-not (Test-WorkingSetOrdinal (@(Get-WorkloadStages 'scrollback-max' 48) -join ',') 'start,block-8,block-16,block-24,block-32,block-40,block-48,after')) { throw 'scrollback-max''s stages changed.' }
+    if (-not (Test-WorkingSetOrdinal (@(Get-WorkloadStages 'scrollback-default' 4) -join ',') 'start,block-1,block-2,block-3,block-4,after')) { throw 'scrollback-default''s stages changed.' }
+    foreach ($name in 'fixed', 'tab-churn') { if (-not (Test-WorkingSetOrdinal (@(Get-WorkloadStages $name 0) -join ',') 'start,after')) { throw "$name's stages changed." } }
+    foreach ($name in 'uia-walk', 'session-capture') { if (-not (Test-WorkingSetOrdinal (@(Get-WorkloadStages $name 4) -join ',') 'start,filled,after')) { throw "$name's stages changed." } }
 }
 
 # The record verdict: a complete synthetic record of each workload passes; each control (council round 1: a removed
@@ -653,19 +661,19 @@ try {
         . ([scriptblock]::Create($hashText))
         $a = Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a'
         if ($a -notmatch '\A[0-9a-f]{64}\z') { throw 'Get-WorkloadSha256 must give a SHA-256.' }
-        if ($a -cne (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configB 'D:\other\run-b\')) { throw 'The workload hash must not depend on the run''s directory.' }
-        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configB 'D:\other')) { throw 'The workload hash took out more than the run''s directory.' }
-        if ($a -ceq (Get-WorkloadSha256 'tab-churn' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the workload.' }
-        if ((Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' 'ff' $configA 'C:\run-a') -ceq (Get-WorkloadSha256 'scrollback-max' 2147483647 96 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the scrollback limit.' }
-        if ((Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' 'ff' $configA 'C:\run-a') -ceq (Get-WorkloadSha256 'scrollback-max' 1073741824 47 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the planned blocks.' }
-        if ((Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' 'ff' $configA 'C:\run-a') -ceq (Get-WorkloadSha256 'scrollback-max' 2147483647 48 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the scrollback limit at the same block count.' }
-        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'ab' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the block.' }
-        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'fe' $configA 'C:\run-a')) { throw 'The workload hash ignored the flood batch file.' }
-        if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configC 'C:\run-a')) { throw 'The workload hash ignored a config line.' }
+        if (-not (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configB 'D:\other\run-b\'))) { throw 'The workload hash must not depend on the run''s directory.' }
+        if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configB 'D:\other')) { throw 'The workload hash took out more than the run''s directory.' }
+        if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'tab-churn' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the workload.' }
+        if (Test-WorkingSetOrdinal (Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' 'ff' $configA 'C:\run-a') (Get-WorkloadSha256 'scrollback-max' 2147483647 96 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the scrollback limit.' }
+        if (Test-WorkingSetOrdinal (Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' 'ff' $configA 'C:\run-a') (Get-WorkloadSha256 'scrollback-max' 1073741824 47 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the planned blocks.' }
+        if (Test-WorkingSetOrdinal (Get-WorkloadSha256 'scrollback-max' 1073741824 48 'aa' 'ff' $configA 'C:\run-a') (Get-WorkloadSha256 'scrollback-max' 2147483647 48 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the scrollback limit at the same block count.' }
+        if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'ab' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the block.' }
+        if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'fe' $configA 'C:\run-a')) { throw 'The workload hash ignored the flood batch file.' }
+        if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configC 'C:\run-a')) { throw 'The workload hash ignored a config line.' }
         $script:FixedCycles++
-        try { if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored a constant.' } } finally { $script:FixedCycles-- }
+        try { if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored a constant.' } } finally { $script:FixedCycles-- }
         $script:GridRows++
-        try { if ($a -ceq (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the expected grid.' } } finally { $script:GridRows-- }
+        try { if (Test-WorkingSetOrdinal $a (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a')) { throw 'The workload hash ignored the expected grid.' } } finally { $script:GridRows-- }
     }
     # The control: a hash that takes out the plain directory but not its escaped form in the flood binding (the form
     # a real config holds) must fail the run-directory case.
@@ -673,7 +681,7 @@ try {
     if ([string]::Equals($hashControl, $hashText, [StringComparison]::Ordinal)) { throw 'The workload hash control changed nothing.' }
     $controlCaught = & {
         . ([scriptblock]::Create($hashControl))
-        (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a') -cne (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configB 'D:\other\run-b')
+        -not (Test-WorkingSetOrdinal (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configA 'C:\run-a') (Get-WorkloadSha256 'fixed' 10000000 1 'aa' 'ff' $configB 'D:\other\run-b'))
     }
     if (-not $controlCaught) { throw 'The run-directory case did not catch a hash that keeps the escaped directory.' }
 
@@ -691,6 +699,7 @@ try {
         function Get-Sha256([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
         . ([scriptblock]::Create($admissionText))
         . ([scriptblock]::Create((Get-WorkingSetFunction 'Get-BytesSha256')))
+        . ([scriptblock]::Create((Get-WorkingSetFunction 'Read-WorkingSetPlainFile')))
         $wsFixtureHead = '1234567890123456789012345678901234567890'
         $wsFixtureOriginal = [Text.Encoding]::UTF8.GetBytes(("const std = @import(`"std`");`n" +
                 "const aumid_wide = std.unicode.utf8ToUtf16LeStringLiteral(`"io.github.amanthanvi.noctty`");`n" +
@@ -756,8 +765,8 @@ try {
         [IO.File]::WriteAllText($layout.Receipt, ($receipt | ConvertTo-Json))
 
         $admitted = Get-WorkingSetMeasureBuild $measureRepo
-        if ($admitted.Head -cne $wsFixtureHead -or $admitted.ExeSha256 -cne $receipt.ExeSHA256 -or $admitted.CliSha256 -cne $receipt.CliSHA256 -or
-            $admitted.Optimize -cne 'ReleaseFast' -or $admitted.ReceiptSha256 -cne (Get-Sha256 $layout.Receipt) -or -not [string]::Equals($admitted.Bin, (Split-Path -Parent $layout.Exe), [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not (Test-WorkingSetOrdinal $admitted.Head $wsFixtureHead) -or -not (Test-WorkingSetOrdinal $admitted.ExeSha256 $receipt.ExeSHA256) -or -not (Test-WorkingSetOrdinal $admitted.CliSha256 $receipt.CliSHA256) -or
+            -not (Test-WorkingSetOrdinal $admitted.Optimize 'ReleaseFast') -or -not (Test-WorkingSetOrdinal $admitted.ReceiptSha256 (Get-Sha256 $layout.Receipt)) -or -not [string]::Equals($admitted.Bin, (Split-Path -Parent $layout.Exe), [StringComparison]::OrdinalIgnoreCase)) {
             throw 'The harness did not admit a measurement generation with a matching receipt, or returned another build.'
         }
 
@@ -770,21 +779,51 @@ try {
         function Assert-InteractiveWin11MeasureBuild { param($RepoRoot, $ExePath) & $realAssert -RepoRoot $RepoRoot -ExePath $ExePath; [IO.File]::WriteAllText($layout.Receipt, $replacementJson) }
         $swapped = $null; $swapError = $null
         try { $swapped = Get-WorkingSetMeasureBuild $measureRepo } catch { $swapError = $_.Exception.Message }
-        if ($null -ne $swapped -and $swapped.Head -cne $wsFixtureHead) { throw 'A receipt replaced after admission reached the harness''s build record.' }
-        if ($null -eq $swapped -and $swapError -cne 'The measurement receipt changed during admission.') { throw "A receipt replaced after admission was refused for another reason (got: $swapError)." }
+        if ($null -ne $swapped -and -not (Test-WorkingSetOrdinal $swapped.Head $wsFixtureHead)) { throw 'A receipt replaced after admission reached the harness''s build record.' }
+        if ($null -eq $swapped -and -not (Test-WorkingSetOrdinal $swapError 'The measurement receipt changed during admission.')) { throw "A receipt replaced after admission was refused for another reason (got: $swapError)." }
         [IO.File]::WriteAllText($layout.Receipt, $admittedReceiptJson)
         $oldAdmission = $admissionText.Replace('$receipt = [Text.Encoding]::UTF8.GetString($receiptBytes)', '$receipt = [Text.Encoding]::UTF8.GetString($receiptAfter)').Replace(
             'if (-not [string]::Equals([Convert]::ToBase64String($receiptBytes), [Convert]::ToBase64String($receiptAfter), [StringComparison]::Ordinal)) { throw', 'if ($false) { throw')
         if ([string]::Equals($oldAdmission, $admissionText, [StringComparison]::Ordinal)) { throw 'The receipt-swap control changed nothing.' }
         $oldSwapped = & { . ([scriptblock]::Create($oldAdmission)); Get-WorkingSetMeasureBuild $measureRepo }
-        if ($oldSwapped.Head -cne ('f' * 40)) { throw 'The receipt-swap control did not take the replacement, so the case shows nothing.' }
+        if (-not (Test-WorkingSetOrdinal $oldSwapped.Head ('f' * 40))) { throw 'The receipt-swap control did not take the replacement, so the case shows nothing.' }
         [IO.File]::WriteAllText($layout.Receipt, $admittedReceiptJson)
         Set-Item -Path function:Assert-InteractiveWin11MeasureBuild -Value $realAssert
+
+        # Sol's round-5 case: build.json a file symlink to a valid receipt whose target is held open exclusively. The
+        # harness refuses at the path check, with the library's own message, before anything opens it (an open of the
+        # target would fail on the exclusive hold instead), and the no-follow read refuses the link itself. The
+        # control, round 4's order (read the receipt, then check its path), opens the target and fails on the hold.
+        $linkTarget = Join-Path $hashDir 'receipt-target.json'
+        [IO.File]::WriteAllText($linkTarget, $admittedReceiptJson)
+        [IO.File]::Delete($layout.Receipt)
+        $script:wsReceiptLinkCase = 'receipt link (refused at the path check before any read; the no-follow read refuses the link; control)'
+        try { [void](New-Item -ItemType SymbolicLink -Path $layout.Receipt -Target $linkTarget -ErrorAction Stop) } catch { $script:wsReceiptLinkCase = 'receipt link skipped (no symlink privilege here)' }
+        if (Test-Path -LiteralPath $layout.Receipt) {
+            $hold = [IO.File]::Open($linkTarget, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            try {
+                $linkError = $null
+                try { [void](Get-WorkingSetMeasureBuild $measureRepo) } catch { $linkError = $_.Exception.Message }
+                if (-not (Test-WorkingSetOrdinal $linkError 'Measurement paths must not contain reparse points.')) { throw "A symlinked build.json was not refused at the path check before any read (got: $linkError)." }
+                $handleError = $null
+                try { [void](Read-WorkingSetPlainFile $layout.Receipt) } catch { $handleError = $_.Exception.Message }
+                if ($null -eq $handleError -or -not $handleError.Contains('The opened file is a reparse point.')) { throw "The no-follow read did not refuse the symlinked build.json itself (got: $handleError)." }
+                $oldOrder = $admissionText.Replace("        Assert-InteractiveWin11MeasurePlainPath `$layout.Receipt`n", '').Replace('$receiptBytes = Read-WorkingSetPlainFile $layout.Receipt', '$receiptBytes = [IO.File]::ReadAllBytes($layout.Receipt)')
+                if ([string]::Equals($oldOrder, $admissionText, [StringComparison]::Ordinal)) { throw 'The receipt-link control changed nothing.' }
+                $oldError = $null
+                try { & { . ([scriptblock]::Create($oldOrder)); [void](Get-WorkingSetMeasureBuild $measureRepo) } } catch { $oldError = $_.Exception.Message }
+                if (Test-WorkingSetOrdinal $oldError 'Measurement paths must not contain reparse points.') { throw 'The receipt-link control was refused at the path check anyway, so the case shows nothing.' }
+            } finally { $hold.Dispose() }
+            [IO.File]::Delete($layout.Receipt)
+        }
+        [IO.File]::WriteAllText($layout.Receipt, $admittedReceiptJson)
+        # The no-follow read's struct is the SDK's (fileapi.h BY_HANDLE_FILE_INFORMATION, 52 bytes on x64).
+        if ([Runtime.InteropServices.Marshal]::SizeOf([type]'WorkingSetPlainRead+ByHandle') -ne 52) { throw 'BY_HANDLE_FILE_INFORMATION is not 52 bytes.' }
 
         [IO.File]::WriteAllText($layout.Exe, 'another app')
         $tampered = $null
         try { [void](Get-WorkingSetMeasureBuild $measureRepo) } catch { $tampered = $_.Exception.Message }
-        if ($tampered -cne 'Measurement build receipt does not match HEAD, source patch, or executable.') {
+        if (-not (Test-WorkingSetOrdinal $tampered 'Measurement build receipt does not match HEAD, source patch, or executable.')) {
             throw "A changed measurement app was not refused by the receipt check (got: $tampered)."
         }
 
@@ -819,7 +858,7 @@ try {
         . ([scriptblock]::Create($placementText))
         $got = $null
         try { Assert-WorkingSetRunPlacement $unignoredRun $placementRepo } catch { $got = $_.Exception.Message }
-        if ($got -cne $refusal) { throw "A -Run inside the checkout that git does not ignore was not refused (got: $got)." }
+        if (-not (Test-WorkingSetOrdinal $got $refusal)) { throw "A -Run inside the checkout that git does not ignore was not refused (got: $got)." }
         Assert-WorkingSetRunPlacement (Join-Path $placementRepo 'ws-ignored-runs\ws-1') $placementRepo
         Assert-WorkingSetRunPlacement (Join-Path $placementDir 'outside\ws-1') $placementRepo
     }
@@ -879,7 +918,7 @@ try {
         $text = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText 'fixed' $Run }
         $lines = @($text -split "`n" | Where-Object { $_ })
         $carrying = @($lines | Where-Object { $_.Contains('%USERNAME%') -or $_.Contains('a&b^c') })
-        return $carrying.Count -eq 1 -and $carrying[0] -ceq "working-directory = $(Join-Path $Run 'work')"
+        return $carrying.Count -eq 1 -and (Test-WorkingSetOrdinal $carrying[0] "working-directory = $(Join-Path $Run 'work')")
     }
     $metaRun = Join-Path $configDir 'a&b^c\%USERNAME%\run-1'
     if (-not (Test-WorkingSetRunPathLiteral $generatorText $metaRun)) { throw 'A run path with %USERNAME%, & and ^ reached a command line in the config.' }
@@ -896,7 +935,7 @@ try {
         foreach ($workload in $allWorkloads) {
             $text = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText $workload $configRun }
             $commands = @($text -split "`n" | Where-Object { $_ -match '^\s*(initial-)?command\s*=' })
-            if ($commands.Count -ne 1 -or $commands[0] -cne "command = direct:$cmdPath /D") { return $false }
+            if ($commands.Count -ne 1 -or -not (Test-WorkingSetOrdinal $commands[0] "command = direct:$cmdPath /D")) { return $false }
         }
         return $true
     }
@@ -924,7 +963,7 @@ try {
     function Test-WorkingSetGeneratorOutput([string] $Generator) {
         foreach ($workload in $allWorkloads) {
             $got = & { . ([scriptblock]::Create($Generator)); New-WorkingSetConfigText $workload $configRun }
-            if ($got -cne (Get-WorkingSetExpectedConfig $workload $configRun)) { return $false }
+            if (-not (Test-WorkingSetOrdinal $got (Get-WorkingSetExpectedConfig $workload $configRun))) { return $false }
         }
         return $true
     }
@@ -933,6 +972,8 @@ try {
             @{ Name = 'an initial-command /K echo line (Opus c1)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        `"initial-command = direct:`$cmdPath /K echo`"`n        'keybind = clear'`n") }
             @{ Name = 'renderer = d3d11 (Opus c2)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        'renderer = d3d11'`n        'keybind = clear'`n") }
             @{ Name = 'a tab-churn-only renderer = d3d11 (Opus n1)'; Text = $generatorText.Replace("        'keybind = clear'`n", "        if (`$Workload -eq 'tab-churn') { 'renderer = d3d11' }`n        'keybind = clear'`n") }
+            @{ Name = 'a soft hyphen in tab-churn''s auto-update value (Sol, round 5)'; Text = $generatorText.Replace("        'auto-update = off'`n", "        `$(if (`$Workload -eq 'tab-churn') { `"auto-update = o`$([char]0x00AD)ff`" } else { 'auto-update = off' })`n") }
+            @{ Name = 'a soft hyphen in desktop-notifications (Opus g1)'; Text = $generatorText.Replace("        'desktop-notifications = false'`n", "        `"desktop-notificati`$([char]0x00AD)ons = false`"`n") }
         )) {
         if ([string]::Equals($mutant.Text, $generatorText, [StringComparison]::Ordinal)) { throw "The generator control changed nothing: $($mutant.Name)." }
         if (Test-WorkingSetGeneratorOutput $mutant.Text) { throw "The pinned config accepted a generator with $($mutant.Name)." }
@@ -1005,9 +1046,9 @@ try {
             $result
         }
         $problems = @()
-        if ($found.clean -cne '') { $problems += "clean copy refused ($($found.clean))" }
-        if ($found.legacy -cne 'ghostty\config') { $problems += "legacy ghostty/config gave '$($found.legacy)'" }
-        if ($found.renamed -cne 'winghostty\config.ghostty') { $problems += "winghostty/config.ghostty gave '$($found.renamed)'" }
+        if (-not (Test-WorkingSetOrdinal $found.clean '')) { $problems += "clean copy refused ($($found.clean))" }
+        if (-not (Test-WorkingSetOrdinal $found.legacy 'ghostty\config')) { $problems += "legacy ghostty/config gave '$($found.legacy)'" }
+        if (-not (Test-WorkingSetOrdinal $found.renamed 'winghostty\config.ghostty')) { $problems += "winghostty/config.ghostty gave '$($found.renamed)'" }
         return $problems
     }
     $strayProblems = @(Get-WorkingSetStrayProblems $strayText)
@@ -1054,13 +1095,13 @@ if (-not $ptyZig.Contains('log.info("using bundled ConPTY: {s}"') -or -not $ptyZ
 $nativeSource = @($workingSetAst.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -match 'public static class WorkingSetNative' }, $true))
 if ($nativeSource.Count -ne 1) { throw 'The working-set harness must hold one WorkingSetNative source.' }
 $layoutWanted = [regex]::Match($workingSetText, "\`$script:SdkLayout = '([^']+)'").Groups[1].Value
-if ($layoutWanted -cne 'MemoryCounters=96 peakWorkingSet@8 workingSet@16 privateUsage@72 sharedCommit@88 Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16 ProcessEntry=568 processId@8 heapId@16 parentProcessId@32 exeFile@44 ScreenBufferInfo=22 cursor@4 wAttributes@8 window@10 maxWindow@18 Coord=4 SmallRect=8') {
+if (-not (Test-WorkingSetOrdinal $layoutWanted 'MemoryCounters=96 peakWorkingSet@8 workingSet@16 privateUsage@72 sharedCommit@88 Startup=104 desktop@16 flags@60 show@64 output@88 error@96 StartupEx=112 attributes@104 JobLimits=144 limitFlags@16 ProcessEntry=568 processId@8 heapId@16 parentProcessId@32 exeFile@44 ScreenBufferInfo=22 cursor@4 wAttributes@8 window@10 maxWindow@18 Coord=4 SmallRect=8')) {
     throw 'The working-set harness''s SDK layout string changed.'
 }
 $contractClass = 'WorkingSetNativeContract' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 Add-Type -TypeDefinition ($nativeSource[0].Value.Replace('public static class WorkingSetNative', "public static class $contractClass"))
 $layoutActual = ($contractClass -as [type])::Layout()
-if ($layoutActual -cne $layoutWanted) { throw "The working-set native layer's layout is $layoutActual, not the SDK's." }
+if (-not (Test-WorkingSetOrdinal $layoutActual $layoutWanted)) { throw "The working-set native layer's layout is $layoutActual, not the SDK's." }
 $layoutControls = @(
     @{ Name = 'PROCESSENTRY32W with its heap id narrowed'; Old = 'public uint size, usage, processId; public IntPtr heapId;'; New = 'public uint size, usage, processId; public uint heapId;' }
     @{ Name = 'CONSOLE_SCREEN_BUFFER_INFO with its attributes widened'; Old = 'public Coord size, cursor; public ushort attributes;'; New = 'public Coord size, cursor; public uint attributes;' }
@@ -1070,7 +1111,7 @@ foreach ($control in $layoutControls) {
     if ([string]::Equals($controlSource, $nativeSource[0].Value, [StringComparison]::Ordinal)) { throw "The layout control changed nothing: $($control.Name)." }
     $controlClass = 'WorkingSetNativeControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
     Add-Type -TypeDefinition ($controlSource.Replace('public static class WorkingSetNative', "public static class $controlClass"))
-    if (($controlClass -as [type])::Layout() -ceq $layoutWanted) { throw "The layout check accepted $($control.Name)." }
+    if (Test-WorkingSetOrdinal (($controlClass -as [type])::Layout()) $layoutWanted) { throw "The layout check accepted $($control.Name)." }
 }
 
 # The split the launch read-back uses (CommandLineToArgvW, compiled): a quoted argument with spaces comes back whole.
@@ -1110,4 +1151,4 @@ if ($null -ne $ownDesktop) {
     } finally { [IO.Directory]::Delete($launchDir, $true) }
     $desktopCase = 'launch-desktop (Spawn: foreign, Default; LaunchDriver: Default, own; control: private)'
 } else { $desktopCase = 'launch-desktop skipped (no readable desktop)' }
-Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command over all six workloads (Opus n2 among its controls), generator-output over all six workloads (Opus c1, c2, n1), exact argv (pinned, exact, Sol's extra initial-command and malformed value, second limit, reordered, no config file; containment control), receipt swap (Sol's; control), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean; Opus s1, s2, n9 controls) and $desktopCase cases; native layout $layoutActual"
+Write-Host "Working-set harness contract: $workingSetMutations rules, each with a rejected mutation; desktop, state-guard, settle, block, stage, verdict, workload-hash, admission (admitted, tampered, plain), run-placement (unignored, ignored, outside), config-bytes (exact, initial-command, second command, no clear, other run, a %USERNAME% run path), generated-command over all six workloads (Opus n2 among its controls), generator-output over all six workloads (Opus c1, c2, n1, g1 and Sol''s soft hyphens), exact argv (pinned, exact, Sol's extra initial-command and malformed value, second limit, reordered, no config file; containment control), receipt swap (Sol's; control), $($script:wsReceiptLinkCase), command-line split, stray-config (Sol's legacy ghostty/config, winghostty, clean; Opus s1, s2, n9 controls) and $desktopCase cases; native layout $layoutActual"
