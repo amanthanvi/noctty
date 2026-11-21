@@ -88,6 +88,40 @@ if ($env:FIXTURE_BRANCH) { $loaded = Join-Path $PSScriptRoot 'same.ps1' }
 }
 Assert-True ($repeated.Problems.Count -eq 0 -and $repeated.Members -ccontains 'test/windows/same.ps1') "Assignments that agree must still resolve: $($repeated.Problems -join '; ')"
 
+# Every value a run can give a variable where it is read must agree (Greptile, CodeRabbit and Sol on #740). An
+# unconditional reassignment replaces what came before (the fast path); a write in a branch, loop, try, scriptblock,
+# function or through a scope qualifier only adds a value. 'a.ps1' and 'b.ps1' sit beside the entry; Resolves names
+# the one target the walk must take, or $null for an edge it must refuse.
+$flowCases = @(
+    @{ Name = 'an unconditional reassignment'; Resolves = 'b.ps1'; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $p = Join-Path $PSScriptRoot ''b.ps1''; . $p' }
+    @{ Name = 'a conditional reassignment'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; if ($env:X) { $p = Join-Path $PSScriptRoot ''b.ps1'' }; . $p' }
+    @{ Name = 'two literal targets, one in an optional branch'; Resolves = $null; Text = '$t = "$PSScriptRoot\a.ps1"' + "`n" + 'if ($Optional) {' + "`n" + '    $t = "$PSScriptRoot\b.ps1"' + "`n" + '}' + "`n" + '& $t' }
+    @{ Name = 'a write only in a branch'; Resolves = $null; Text = 'if ($env:X) { $p = Join-Path $PSScriptRoot ''a.ps1'' }; . $p' }
+    @{ Name = 'a write and its read in one branch'; Resolves = 'a.ps1'; Text = 'if ($env:X) { $p = Join-Path $PSScriptRoot ''a.ps1''; . $p }' }
+    @{ Name = 'a write and its read in one try'; Resolves = 'a.ps1'; Text = 'try { $p = Join-Path $PSScriptRoot ''a.ps1''; . $p } finally { }' }
+    @{ Name = 'a write in a try read after it'; Resolves = $null; Text = 'try { $p = Join-Path $PSScriptRoot ''a.ps1'' } catch { }; . $p' }
+    @{ Name = 'a later write in a loop around the read'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; foreach ($i in 1..2) { . $p; $p = Join-Path $PSScriptRoot ''b.ps1'' }' }
+    @{ Name = 'a write before the read in the same loop pass'; Resolves = 'b.ps1'; Text = 'while ($true) { $p = Join-Path $PSScriptRoot ''b.ps1''; . $p; $p = Join-Path $PSScriptRoot ''a.ps1''; break }' }
+    @{ Name = 'a later write before a scriptblock runs'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $run = { . $p }; $p = Join-Path $PSScriptRoot ''b.ps1''; & $run' }
+    @{ Name = 'a $script: write in a function'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; function Set-P { $script:p = Join-Path $PSScriptRoot ''b.ps1'' }; Set-P; . $p' }
+    @{ Name = 'a caller''s variable read in a function'; Resolves = $null; Text = 'function Load { . $p }; function Main { $p = Join-Path $PSScriptRoot ''b.ps1''; Load }; $p = Join-Path $PSScriptRoot ''a.ps1''; Main' }
+    @{ Name = 'a script variable a function reads'; Resolves = 'a.ps1'; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; function Load { . $p }; Load' }
+    @{ Name = 'a conditional write in a function over a script value'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; function Load { if ($env:X) { $p = Join-Path $PSScriptRoot ''b.ps1'' }; . $p }; Load' }
+    @{ Name = 'a parameter with a default'; Resolves = $null; Text = 'function Load([string] $Path = (Join-Path $PSScriptRoot ''a.ps1'')) { . $Path }; Load -Path (Join-Path $PSScriptRoot ''b.ps1'')' }
+    @{ Name = 'a multiple assignment'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $p, $q = (Join-Path $PSScriptRoot ''b.ps1''), 1; . $p' }
+    @{ Name = 'Set-Variable'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Set-Variable -Name p -Value (Join-Path $PSScriptRoot ''b.ps1''); . $p' }
+    @{ Name = 'a property assigned after its hashtable'; Resolves = $null; Text = '$t = @{ Path = (Join-Path $PSScriptRoot ''a.ps1'') }; $t.Path = Join-Path $PSScriptRoot ''b.ps1''; . $t.Path' }
+)
+foreach ($case in $flowCases) {
+    $flowWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $case.Text; 'test/windows/a.ps1' = '1'; 'test/windows/b.ps1' = '2' }
+    $taken = @($flowWalk.Members | Where-Object { $_ -cin @('test/windows/a.ps1', 'test/windows/b.ps1') })
+    if ($case.Resolves) {
+        Assert-True ($flowWalk.Problems.Count -eq 0 -and ($taken -join ',') -ceq "test/windows/$($case.Resolves)") "$($case.Name) must resolve to $($case.Resolves) alone: [$($taken -join ', ')] $($flowWalk.Problems -join '; ')"
+    } else {
+        Assert-True ($flowWalk.Problems.Count -ge 1 -and $taken.Count -eq 0) "$($case.Name) must leave the edge unresolved, neither target taken: [$($taken -join ', ')] $($flowWalk.Problems -join '; ')"
+    }
+}
+
 # Join-Path's forms (CodeRabbit on #740): a named -Path with one positional child, both positional, both named in
 # either order, and more children after the first. Each must reach its own target.
 $joinForms = [ordered]@{

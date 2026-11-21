@@ -257,22 +257,24 @@ function Resolve-CiScriptValue {
             # layout's .RepoRoot): the repository root.
             if ($member -ceq 'RepoRoot') { return @{ Kind = 'path'; Value = $Context.RepoRoot } }
             # A property of a hashtable this file builds (`@{ Reader = $reader }`, read as `$x.Reader`): every value
-            # the file gives that key, which must agree.
+            # the file gives that key, in a hashtable or by assignment (`$x.Reader = ...`, `$x['Reader'] = ...`),
+            # which must agree.
             $values = [System.Collections.Generic.List[hashtable]]::new()
-            foreach ($table in @($Context.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true))) {
+            foreach ($table in (Get-CiScriptNodes $Context HashtableAst)) {
                 foreach ($pair in $table.KeyValuePairs) {
                     if ($pair.Item1 -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $pair.Item1.Value -ieq $member) {
                         $values.Add((Resolve-CiScriptValue $pair.Item2 $Context ($Depth + 1)))
                     }
                 }
             }
-            if ($values.Count -eq 0) { return $unresolved }
-            foreach ($kind in @('scriptblock', 'native')) {
-                if (@($values | Where-Object { $_.Kind -ne $kind }).Count -eq 0) { return @{ Kind = $kind; Value = $null } }
+            foreach ($assignment in (Get-CiScriptNodes $Context AssignmentStatementAst)) {
+                $left = $assignment.Left
+                $key = $(if ($left -is [System.Management.Automation.Language.MemberExpressionAst]) { $left.Member } elseif ($left -is [System.Management.Automation.Language.IndexExpressionAst]) { $left.Index })
+                if ($key -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $key.Value -ine $member) { continue }
+                if ($assignment.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals) { $values.Add($unresolved); continue }
+                $values.Add((Resolve-CiScriptValue $assignment.Right $Context ($Depth + 1)))
             }
-            $paths = @($values | Where-Object { $_.Kind -eq 'path' } | ForEach-Object { $_.Value } | Sort-Object -Unique)
-            if ($paths.Count -eq 1 -and @($values | Where-Object { $_.Kind -ne 'path' }).Count -eq 0) { return @{ Kind = 'path'; Value = $paths[0] } }
-            return $unresolved
+            return Merge-CiScriptValues $values
         }
         { $_ -is [System.Management.Automation.Language.VariableExpressionAst] } {
             $name = $_.VariablePath.UserPath
@@ -356,6 +358,64 @@ function Resolve-CiScriptValue {
     return $unresolved
 }
 
+function Get-CiScriptNodes {
+    # Every node of one AST type in the file (a type name under System.Management.Automation.Language), found once per
+    # file: the resolver asks for the same sets at every read.
+    param([Parameter(Mandatory)] [hashtable] $Context, [Parameter(Mandatory)] [string] $Type)
+    if (-not $Context.Nodes.ContainsKey($Type)) {
+        $class = [type]"System.Management.Automation.Language.$Type"
+        $Context.Nodes[$Type] = @($Context.Ast.FindAll({ param($n) $class.IsInstanceOfType($n) }.GetNewClosure(), $true))
+    }
+    return , $Context.Nodes[$Type]
+}
+
+function Get-CiScriptVariableName {
+    # A variable reference's name without its scope qualifier (script:, global:, local:, private:, variable:,
+    # using:), or $null for a provider path ($env:x, ${function:f}).
+    param($Path)
+    $user = $Path.UserPath
+    if ($Path.IsUnqualified) { return $user }
+    if ($Path.DriveName) { return $null }
+    $colon = $user.IndexOf(':')
+    if ($colon -lt 0) { return $user }
+    if ($user.Substring(0, $colon) -notin @('script', 'global', 'local', 'private', 'variable', 'using')) { return $null }
+    return $user.Substring($colon + 1)
+}
+
+function Get-CiScriptDynamicWrites {
+    # The variables the file writes in ways the resolver cannot read as a value, found once per file: Set-Variable or
+    # New-Variable (Unknown when the name is not a literal), a common -*Variable parameter, and [ref].
+    param([Parameter(Mandatory)] [hashtable] $Context)
+    if ($Context.ContainsKey('Dynamic')) { return $Context.Dynamic }
+    $names = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $unknown = $false
+    foreach ($command in (Get-CiScriptNodes $Context CommandAst)) {
+        if ((Get-CiScriptCommandName $command.CommandElements[0]) -notin @('set-variable', 'sv', 'new-variable', 'nv')) { continue }
+        $target = $null
+        for ($i = 1; $i -lt $command.CommandElements.Count -and $null -eq $target; $i++) {
+            $element = $command.CommandElements[$i]
+            if ($element -isnot [System.Management.Automation.Language.CommandParameterAst]) { $target = $element }
+            elseif ($element.ParameterName -ieq 'Name') { $target = $(if ($element.Argument) { $element.Argument } elseif ($i + 1 -lt $command.CommandElements.Count) { $command.CommandElements[$i + 1] }) }
+            elseif (-not $element.Argument) { $i++ }
+        }
+        if ($target -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$names.Add($target.Value) } else { $unknown = $true }
+    }
+    foreach ($parameter in (Get-CiScriptNodes $Context CommandParameterAst)) {
+        if ($parameter.ParameterName -notmatch '(?i)\A(OutVariable|ov|PipelineVariable|pv|ErrorVariable|ev|WarningVariable|wv|InformationVariable|iv)\z') { continue }
+        $elements = @($parameter.Parent.CommandElements)
+        $argument = $(if ($parameter.Argument) { $parameter.Argument } else { $at = [array]::IndexOf($elements, $parameter); if ($at -ge 0 -and $at + 1 -lt $elements.Count) { $elements[$at + 1] } })
+        if ($argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$names.Add($argument.Value.TrimStart('+')) }
+    }
+    foreach ($reference in (Get-CiScriptNodes $Context ConvertExpressionAst)) {
+        if ($reference.Type.TypeName.Name -ieq 'ref' -and $reference.Child -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            $referenced = Get-CiScriptVariableName $reference.Child.VariablePath
+            if ($referenced) { [void]$names.Add($referenced) }
+        }
+    }
+    $Context.Dynamic = @{ Names = $names; Unknown = $unknown }
+    return $Context.Dynamic
+}
+
 function Get-CiScriptFunctionOf {
     # The innermost function definition around a node, or $null at script level.
     param($Node)
@@ -367,82 +427,183 @@ function Get-CiScriptFunctionOf {
     return $null
 }
 
+function Merge-CiScriptValues {
+    # One value for a set of values a read may see: unresolved when the set is empty, any member is unresolved or
+    # they disagree; a scriptblock when all are; native when all are (its executable named when they all name the
+    # same one); a path when all are the same path.
+    param([object[]] $Values)
+    $unresolved = @{ Kind = 'unresolved'; Value = $null }
+    $all = @($Values | Where-Object { $null -ne $_ })
+    if ($all.Count -eq 0) { return $unresolved }
+    $kinds = @($all | ForEach-Object { [string]$_.Kind } | Sort-Object -Unique)
+    if ($kinds.Count -ne 1 -or $kinds[0] -ceq 'unresolved') { return $unresolved }
+    if ($kinds[0] -ceq 'scriptblock') { return @{ Kind = 'scriptblock'; Value = $null } }
+    $first = [string]$all[0].Value
+    $same = @($all | Where-Object { [string]::Equals([string]$_.Value, $first, [StringComparison]::OrdinalIgnoreCase) }).Count -eq $all.Count
+    if ($kinds[0] -ceq 'native') { return @{ Kind = 'native'; Value = $(if ($same -and $first) { $first } else { $null }) } }
+    if ($same -and $first) { return @{ Kind = 'path'; Value = $all[0].Value } }
+    return $unresolved
+}
+
+function Resolve-CiScriptParameter {
+    # A parameter holds what its callers pass, which the walker cannot see: a callback when it is typed
+    # [scriptblock], else unresolved. A default is only the value of a call that passes none, so it does not decide.
+    param($Parameter)
+    $typed = @($Parameter.Attributes | Where-Object {
+        $_ -is [System.Management.Automation.Language.TypeConstraintAst] -and
+        $_.TypeName.Name -in @('scriptblock', 'System.Management.Automation.ScriptBlock')
+    })
+    if ($typed.Count -gt 0) { return @{ Kind = 'scriptblock'; Value = $null } }
+    return @{ Kind = 'unresolved'; Value = $null }
+}
+
+function Get-CiScriptParameterOf {
+    # The parameter named $Name that $Owner (a function definition, a scriptblock expression or the script's own
+    # ScriptBlockAst) declares, inline or in its param block; $null when it declares none.
+    param($Owner, [string] $Name)
+    $parameters = @()
+    if ($Owner -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+        $parameters = @($Owner.Parameters) + @($(if ($Owner.Body.ParamBlock) { $Owner.Body.ParamBlock.Parameters }))
+    } elseif ($Owner -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        $parameters = @($(if ($Owner.ScriptBlock.ParamBlock) { $Owner.ScriptBlock.ParamBlock.Parameters }))
+    } elseif ($Owner.ParamBlock) {
+        $parameters = @($Owner.ParamBlock.Parameters)
+    }
+    foreach ($parameter in $parameters) {
+        if ($null -ne $parameter -and $parameter.Name.VariablePath.UserPath -ieq $Name) { return $parameter }
+    }
+    return $null
+}
+
 function Resolve-CiScriptVariable {
-    # The value a variable holds where it is read ($Use). Flow-sensitive, as far as a straight-line harness needs:
-    #   * in the same function as the read (or at script level for a script-level read), every assignment before the
-    #     read must agree, and then decides; when they differ the read is unresolved (fails closed). Taking only the
-    #     last would drop a script that another branch (if/else, switch, try/catch) loads, and the closure would miss
-    #     it: selection and the module contract would then fail open (Greptile on #740). A parameter of that
-    #     function, typed [scriptblock] or with a default, decides when no assignment precedes the read;
-    #   * a read in a function that assigns nothing before it sees the script-level variable: every script-level
-    #     assignment must agree;
-    #   * a foreach variable is unresolved.
-    # A scriptblock when the deciding values are all scriptblocks, native when they are all native executables.
+    # The value a variable may hold where it is read ($Use): every value some run can give it there must agree,
+    # or the read is unresolved (fails closed). Taking only the last assignment in source order would drop a script
+    # that an earlier value or another branch loads, and the closure would miss it: selection and the module
+    # contract would then fail open (Greptile and CodeRabbit on #740). The values a read may see:
+    #   * the writes of its own scope (its function, or the script) that can run before it: those before it in
+    #     source order, and those anywhere in a loop around it (a pass runs them before the next read);
+    #   * of those, the last one that dominates the read (it ends before the read in a statement list that also
+    #     holds the read, so it ran whenever the read runs) replaces everything earlier: the fast path for an
+    #     unconditional reassignment. A write in a branch, loop, try or switch the read is not in only adds a value;
+    #   * a read in a scriptblock may run after any later write of the scope: unless a write inside the scriptblock
+    #     dominates it, every write from the last one that dominates the scriptblock's definition on is possible;
+    #   * with no dominating write, the value the scope starts with is possible too: a scriptblock's or the
+    #     function's (or script's) own parameter (Resolve-CiScriptParameter); for a function without one, any write
+    #     or same-named parameter outside it (PowerShell scopes are dynamic: a caller's variable is visible); for the
+    #     script, nothing the walker can see (a caller that dot-sources it), so unresolved;
+    #   * at script level, a `$script:`/`$global:` write in any function adds a value.
+    # A foreach variable, a `+=` or multiple assignment, `[ref]`, Set-Variable or New-Variable naming it, or a
+    # common -*Variable parameter naming it, is unresolved.
     param([string] $Name, $Use, [hashtable] $Context, [int] $Depth)
     $unresolved = @{ Kind = 'unresolved'; Value = $null }
     $key = $Name.ToLowerInvariant() + '@' + $Use.Extent.StartOffset
     if ($Context.Resolving.Contains($key)) { return $unresolved }
     [void]$Context.Resolving.Add($key)
     try {
+        $ast = $Context.Ast
         $useOffset = $Use.Extent.StartOffset
         $useFunction = Get-CiScriptFunctionOf $Use
-        $sameScope = { param($node) [object]::ReferenceEquals((Get-CiScriptFunctionOf $node), $useFunction) }
-        foreach ($loop in @($Context.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ForEachStatementAst] }, $true))) {
-            if ($loop.Variable.VariablePath.UserPath -ieq $Name -and (& $sameScope $loop.Variable)) { return $unresolved }
+        foreach ($loop in (Get-CiScriptNodes $Context ForEachStatementAst)) {
+            if ((Get-CiScriptVariableName $loop.Variable.VariablePath) -ieq $Name -and
+                [object]::ReferenceEquals((Get-CiScriptFunctionOf $loop.Variable), $useFunction)) { return $unresolved }
         }
-        $assignments = [System.Collections.Generic.List[object]]::new()
-        foreach ($assignment in @($Context.Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))) {
+        $dynamic = Get-CiScriptDynamicWrites $Context
+        if ($dynamic.Unknown -or $dynamic.Names.Contains($Name)) { return $unresolved }
+        # Every assignment to the name: its scope, its scope qualifier and its value.
+        $writes = [System.Collections.Generic.List[object]]::new()
+        foreach ($assignment in (Get-CiScriptNodes $Context AssignmentStatementAst)) {
             $left = $assignment.Left
             $typedScriptblock = $false
             if ($left -is [System.Management.Automation.Language.ConvertExpressionAst]) {
                 $typedScriptblock = $left.Type.TypeName.Name -in @('scriptblock', 'System.Management.Automation.ScriptBlock')
                 $left = $left.Child
             }
+            $multiple = $false
+            if ($left -is [System.Management.Automation.Language.ArrayLiteralAst]) {
+                $left = @($left.Elements | Where-Object { $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and (Get-CiScriptVariableName $_.VariablePath) -ieq $Name })[0]
+                $multiple = $true
+            }
             if ($left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
-            if ($left.VariablePath.UserPath -ine $Name) { continue }
-            $assignments.Add([pscustomobject]@{ Node = $assignment; TypedScriptblock = $typedScriptblock })
+            $path = $left.VariablePath
+            if ((Get-CiScriptVariableName $path) -ine $Name) { continue }
+            $value = $(if ($multiple -or $assignment.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals) { $unresolved }
+                elseif ($typedScriptblock) { @{ Kind = 'scriptblock'; Value = $null } }
+                else { $null })
+            $writes.Add([pscustomobject]@{
+                Node = $assignment
+                Function = Get-CiScriptFunctionOf $assignment
+                Outer = [bool]($path.IsScript -or $path.IsGlobal)
+                Value = $value
+            })
         }
         $valueOf = {
-            param($entry)
-            if ($entry.TypedScriptblock) { return @{ Kind = 'scriptblock'; Value = $null } }
-            return Resolve-CiScriptValue $entry.Node.Right $Context ($Depth + 1)
+            param($write)
+            if ($null -ne $write.Value) { return $write.Value }
+            return Resolve-CiScriptValue $write.Node.Right $Context ($Depth + 1)
         }
-        $preceding = @($assignments | Where-Object { $_.Node.Extent.EndOffset -le $useOffset -and (& $sameScope $_.Node) } |
+        $values = [System.Collections.Generic.List[hashtable]]::new()
+        # The read's own scope: a function's local writes, or the script's writes at script level.
+        $local = @($writes | Where-Object { [object]::ReferenceEquals($_.Function, $useFunction) -and ($null -eq $useFunction -or -not $_.Outer) } |
             Sort-Object { $_.Node.Extent.StartOffset })
-        if ($preceding.Count -gt 0) {
-            $values = @($preceding | ForEach-Object { & $valueOf $_ })
-            foreach ($value in $values) {
-                if ($value.Kind -cne $values[0].Kind -or $value.Kind -ceq 'unresolved' -or
-                    -not [string]::Equals([string]$value.Value, [string]$values[0].Value, [StringComparison]::OrdinalIgnoreCase)) {
-                    return $unresolved
+        # Where the read runs: in the innermost scriptblock around it (which may run at any later point), if any, and
+        # inside which loops (which repeat it after later writes).
+        $scriptblock = $null; $parameterOwner = $null
+        $loops = [System.Collections.Generic.List[object]]::new()
+        for ($walk = $Use.Parent; $null -ne $walk -and $walk -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $walk = $walk.Parent) {
+            if ($walk -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                if ($null -eq $scriptblock) { $scriptblock = $walk }
+                if ($null -eq $parameterOwner -and $null -ne (Get-CiScriptParameterOf $walk $Name)) { $parameterOwner = $walk }
+            }
+            if ($walk -is [System.Management.Automation.Language.LoopStatementAst] -and $null -eq $scriptblock) { $loops.Add($walk) }
+        }
+        if ($parameterOwner) { return Resolve-CiScriptParameter (Get-CiScriptParameterOf $parameterOwner $Name) }
+        $inside = { param($node, $outer) $null -ne $outer -and $node.Extent.StartOffset -ge $outer.Extent.StartOffset -and $node.Extent.EndOffset -le $outer.Extent.EndOffset }
+        # A write dominates a point when it ends before it in a statement list that also holds the point: whenever
+        # the point runs, that write ran just before, in the same pass.
+        $dominates = { param($write, $point, [int] $before)
+            $block = $write.Node.Parent
+            ($block -is [System.Management.Automation.Language.NamedBlockAst] -or $block -is [System.Management.Automation.Language.StatementBlockAst]) -and
+                $write.Node.Extent.EndOffset -le $before -and (& $inside $point $block)
+        }
+        # The writes inside the read's scriptblock (or its whole scope), the last that dominates the read, and the
+        # loops between that write and the read: a write anywhere in one of those reaches the read on a later pass.
+        $inner = @($local | Where-Object { $null -eq $scriptblock -or (& $inside $_.Node $scriptblock) })
+        $dominant = @($inner | Where-Object { & $dominates $_ $Use $useOffset } | Select-Object -Last 1)
+        $carry = @($loops | Where-Object { $dominant.Count -eq 0 -or (& $inside $_ $dominant[0].Node.Parent) } | Select-Object -Last 1)
+        $reaching = @($inner | Where-Object {
+            ($dominant.Count -eq 0 -or $_.Node.Extent.StartOffset -ge $dominant[0].Node.Extent.StartOffset) -and
+                ($_.Node.Extent.EndOffset -le $useOffset -or ($carry.Count -eq 1 -and (& $inside $_.Node $carry[0])))
+        })
+        foreach ($write in $reaching) { $values.Add((& $valueOf $write)) }
+        if ($dominant.Count -eq 0 -and $scriptblock) {
+            # The scriptblock may run after any later write of the scope; the last write that dominates its
+            # definition replaces everything before it.
+            $outerDominant = @($local | Where-Object { -not (& $inside $_.Node $scriptblock) -and (& $dominates $_ $scriptblock $scriptblock.Extent.StartOffset) } | Select-Object -Last 1)
+            foreach ($write in @($local | Where-Object { -not (& $inside $_.Node $scriptblock) })) {
+                if ($outerDominant.Count -eq 0 -or $write.Node.Extent.StartOffset -ge $outerDominant[0].Node.Extent.StartOffset) { $values.Add((& $valueOf $write)) }
+            }
+            if ($outerDominant.Count -eq 1) { $dominant = $outerDominant }
+        }
+        if ($dominant.Count -eq 0) {
+            # The value the scope starts with.
+            $owner = $(if ($useFunction) { $useFunction } else { $ast })
+            $parameter = Get-CiScriptParameterOf $owner $Name
+            if ($parameter) { $values.Add((Resolve-CiScriptParameter $parameter)) }
+            elseif (-not $useFunction) { $values.Add($unresolved) }
+            else {
+                $outside = @($writes | Where-Object { -not [object]::ReferenceEquals($_.Function, $useFunction) -or $_.Outer })
+                if ($outside.Count -eq 0) { $values.Add($unresolved) }
+                foreach ($write in $outside) { $values.Add((& $valueOf $write)) }
+                foreach ($function in (Get-CiScriptNodes $Context FunctionDefinitionAst)) {
+                    if ([object]::ReferenceEquals($function, $useFunction)) { continue }
+                    $other = Get-CiScriptParameterOf $function $Name
+                    if ($other) { $values.Add((Resolve-CiScriptParameter $other)) }
                 }
             }
-            return $values[-1]
         }
-        # A parameter of the read's own function (or of the script).
-        $owner = $(if ($useFunction) { $useFunction } else { $Context.Ast })
-        foreach ($parameter in @($owner.FindAll({ param($n) $n -is [System.Management.Automation.Language.ParameterAst] }, $true))) {
-            if ($parameter.Name.VariablePath.UserPath -ine $Name) { continue }
-            if (-not [object]::ReferenceEquals((Get-CiScriptFunctionOf $parameter), $useFunction)) { continue }
-            $typed = @($parameter.Attributes | Where-Object {
-                $_ -is [System.Management.Automation.Language.TypeConstraintAst] -and
-                $_.TypeName.Name -in @('scriptblock', 'System.Management.Automation.ScriptBlock')
-            })
-            if ($typed.Count -gt 0) { return @{ Kind = 'scriptblock'; Value = $null } }
-            if ($parameter.DefaultValue) { return Resolve-CiScriptValue $parameter.DefaultValue $Context ($Depth + 1) }
-            return $unresolved
-        }
-        if (-not $useFunction) { return $unresolved }
-        # A function's read of a script-level variable: every script-level assignment must agree.
-        $scriptLevel = @($assignments | Where-Object { $null -eq (Get-CiScriptFunctionOf $_.Node) })
-        if ($scriptLevel.Count -eq 0) { return $unresolved }
-        $values = @($scriptLevel | ForEach-Object { & $valueOf $_ })
-        foreach ($kind in @('scriptblock', 'native')) {
-            if (@($values | Where-Object { $_.Kind -ne $kind }).Count -eq 0) { return @{ Kind = $kind; Value = $null } }
-        }
-        $paths = @($values | Where-Object { $_.Kind -eq 'path' } | ForEach-Object { $_.Value } | Sort-Object -Unique)
-        if ($paths.Count -eq 1 -and @($values | Where-Object { $_.Kind -ne 'path' }).Count -eq 0) { return @{ Kind = 'path'; Value = $paths[0] } }
-        return $unresolved
+        # At script level, a function's `$script:`/`$global:` write may run before the read.
+        if (-not $useFunction) { foreach ($write in @($writes | Where-Object { $_.Outer -and $null -ne $_.Function })) { $values.Add((& $valueOf $write)) } }
+        return Merge-CiScriptValues $values
     }
     finally { [void]$Context.Resolving.Remove($key) }
 }
@@ -470,6 +631,7 @@ function Get-CiScriptFileEdges {
         FilePath = $fullPath
         Directory = Split-Path -Parent $fullPath
         Resolving = [System.Collections.Generic.HashSet[string]]::new()
+        Nodes = @{}
     }
     $targets = [System.Collections.Generic.List[string]]::new()
     $unresolved = [System.Collections.Generic.List[string]]::new()
