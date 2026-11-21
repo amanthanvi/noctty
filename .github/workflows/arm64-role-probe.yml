@@ -6,6 +6,8 @@ name: ARM64 role probe (temporary)
 # stone-1a; the next commit removes this file and .github/arm64-role-probe/, so the
 # workflow never reaches main. The second job runs the Debug suite natively, with the
 # layer on, as windows-arm64.yml's arm64-tests job will on the 1A pull request.
+# Edited once (still TEMPORARY) to run both jobs again on the aarch64 fixes that the
+# first run's suite job led to: the alignCast in symbolise.zig and the name checks.
 on:
   push:
     branches: [stone-1a]
