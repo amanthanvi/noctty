@@ -123,7 +123,7 @@ pub const Off = enum {
 };
 
 /// One process's dump (or a test's). Any thread may append; the first
-/// append opens it.
+/// append opens it, and a test's `close` waits for appends in flight.
 pub const Dump = struct {
     target: Target,
     /// The header's kind; set before the first append (`setKind`).
@@ -135,11 +135,17 @@ pub const Dump = struct {
     off: ?Off = null,
     /// The Win32 error of a failed create or header write.
     win32_error: u32 = 0,
+    /// Appends that may be using `handle`: `close` waits for none.
+    appending: std.atomic.Value(u32) = .init(0),
 
     const State = enum(u8) { closed, open, off };
 
     /// Appends one pair, opening the dump first if this is the first.
     pub fn append(self: *Dump, site: usize, role: Role, acquire: Acquire) void {
+        // Counted before it reads the state, so a `close` that turns the
+        // dump off either is seen here or sees this append (both seq_cst).
+        _ = self.appending.fetchAdd(1, .seq_cst);
+        defer _ = self.appending.fetchSub(1, .release);
         const handle = self.opened() orelse return;
         var buf: [pair_line_max]u8 = undefined;
         _ = writeAll(handle, formatPair(&buf, site, role, acquire));
@@ -159,19 +165,31 @@ pub const Dump = struct {
         return self.state.load(.acquire) == .open;
     }
 
-    /// Closes a test's dump once no thread appends any more. The process
-    /// dump stays open until the process ends.
+    /// Closes a test's dump: an append that starts after it writes nothing,
+    /// and one already writing finishes before the handle closes, so no
+    /// append uses a handle value Windows may have given another file. The
+    /// process dump stays open until the process ends.
     pub fn close(self: *Dump) void {
-        if (self.state.load(.acquire) == .open) {
-            windows.CloseHandle(self.handle.?);
-            self.handle = null;
+        {
+            open_lock.lock();
+            defer open_lock.unlock();
+            if (self.state.load(.seq_cst) != .open) return;
             self.off = .unset;
-            self.state.store(.off, .release);
+            self.state.store(.off, .seq_cst);
         }
+        // Outside the lock: an append that found the dump closed (before
+        // its first pair) may be waiting for it, counted.
+        var spins: u32 = 0;
+        while (self.appending.load(.seq_cst) != 0) {
+            spins +%= 1;
+            if (spins % 64 == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        windows.CloseHandle(self.handle.?);
+        self.handle = null;
     }
 
     fn opened(self: *Dump) ?windows.HANDLE {
-        return switch (self.state.load(.acquire)) {
+        return switch (self.state.load(.seq_cst)) {
             .open => self.handle.?,
             .off => null,
             .closed => self.openSlow(),
@@ -1129,6 +1147,42 @@ test "a dump never truncates or appends to an existing file, and it reads back a
     _ = try parseHeader(lines.next().?);
     try testing.expectEqual(@as(u64, 0x1000), (try parsePair(lines.next().?)).site);
     try testing.expectEqual(@as(u64, 0x2000), (try parsePair(lines.next().?)).site);
+}
+
+test "a close while threads append leaves whole lines, and nothing is written after it" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var d: Dump = .{ .target = .{ .directory = dir.path } };
+    defer d.close();
+    d.append(0x1000, .ui, .lock);
+
+    const Appender = struct {
+        fn run(dump: *Dump, t: usize, go: *std.atomic.Value(bool)) void {
+            while (!go.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..200) |i| dump.append(0x10000 + t * 0x1000 + i, .termio, .lock);
+        }
+    };
+    var go: std.atomic.Value(bool) = .init(false);
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, t| thread.* = try std.Thread.spawn(.{}, Appender.run, .{ &d, t, &go });
+    go.store(true, .release);
+    d.close();
+    for (threads) |thread| thread.join();
+    try testing.expect(!d.isOpen());
+    d.append(0x2000, .ui, .lock);
+
+    const text = try dir.read();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.endsWith(u8, text, "\n"));
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = try parseHeader(lines.next().?);
+    try testing.expectEqual(@as(u64, 0x1000), (try parsePair(lines.next().?)).site);
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const pair = try parsePair(line);
+        try testing.expect(pair.site != 0x2000);
+    }
+    try testing.expectEqual(@as(?[]const u8, null), lines.next());
 }
 
 test "a missing directory leaves the dump off with its Win32 error" {

@@ -605,7 +605,8 @@ test "isolated: a child starts no child" {
 
 test "isolated: a 16-slot recorder panics on its 17th distinct pair with PN5's text (acceptance test 12)" {
     if (inChild()) {
-        var rec: recorder.Recorder(16) = .{ .sink = .{ .target = .none } };
+        var slots = recorder.Recorder(16).empty;
+        var rec: recorder.Recorder(16) = .{ .slots = &slots, .sink = .{ .target = .none } };
         for (0..17) |i| rec.record(0x7ff600001000 + i * 0x10, .ui, .lock);
         return;
     }
