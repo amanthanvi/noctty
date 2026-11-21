@@ -1,8 +1,8 @@
 # The hidden-desktop GUI suite's selection and boundaries (interactive offload PR 1; design v7 §4.3, §4.5). Pinned
 # here, each rule with a control that must be refused (and, where a rule could over-reach, one that must pass):
 #   (a) .github/workflows/gui-hidden.yml's shape: its triggers, no workflow-level `paths:` (PKG-65), contents: read,
-#       test.yml's concurrency, the three jobs and their conditions, the gate's arguments, the upload allowlist and
-#       its 90-day retention, and action pins identical to test.yml's;
+#       test.yml's concurrency, the three jobs and their conditions, the gate's verdict step and its arguments, the
+#       upload allowlist and its 90-day retention, and action pins identical to test.yml's;
 #   (b) the real-input module contract: in the closure of the runner and of every plan leaf, no file but
 #       scripts/interactive-win11-realinput.ps1 declares a real-input or foreground entry point or the methods built
 #       on them, a PowerShell member access to one outside the module goes through [InteractiveWin11RealInput] (or a
@@ -31,6 +31,12 @@ $guiHiddenProblems = & {
         $need = {
             param([string] $Pattern, [string] $What)
             if ($Text -notmatch $Pattern) { $found.Add("gui-hidden.yml: $What") }
+        }
+        # A step of a job by name, or $null when the job holds it other than once (a mutation can drop it).
+        $findStep = {
+            param([string] $JobText, [string] $Name, [string] $Job)
+            if ([regex]::Matches($JobText, '(?m)^      - name:[ \t]+' + [regex]::Escape($Name) + '[ \t]*\r?$').Count -ne 1) { return $null }
+            return Get-YamlStepBlock -Content $JobText -Name $Name -Source "gui-hidden.yml :: $Job"
         }
         & $need '(?m)^on:\r?\n  push:\r?\n    branches: \[main\]\r?\n  pull_request: \{\}\r?\n  schedule:\r?\n    - cron: "[0-9 *]+"\r?\n  workflow_dispatch:\r?\n    inputs:\r?\n      soak_seconds:\r?\n' 'triggers on push to main, every pull request, a schedule and dispatch with soak_seconds'
         if ($Text -match '(?m)^\s*(?:paths|paths-ignore|branches-ignore)\s*:') { $found.Add('gui-hidden.yml: no paths, paths-ignore or branches-ignore filter (PKG-65: a skipped workflow leaves a required check pending)') }
@@ -69,17 +75,32 @@ $guiHiddenProblems = & {
         if ($run -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -MeasureRepo \$env:GITHUB_WORKSPACE -Work \(Join-Path \$env:RUNNER_TEMP ''gui-hidden-work''\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\) -Build\s*$' -or
             $run -match '(?m)^        (?:if|continue-on-error):') { $found.Add('gui-hidden.yml: the suite step runs the runner with -Build into RUNNER_TEMP\gui-hidden, unconditionally') }
         $upload = Get-YamlStepBlock -Content $suite -Name 'Upload the suite''s result and receipts' -Source 'gui-hidden.yml :: suite'
-        $uploadPaths = [regex]::Match($upload, '(?ms)^          path: \|\r?\n(?<lines>(?:^            [^\r\n]+\r?\n)+)')
-        $paths = @(if ($uploadPaths.Success) { $uploadPaths.Groups['lines'].Value -split '\r?\n' | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() } })
+        # The whole `path: |` block scalar: every line after it that is blank or indented past `path:`, so a path
+        # after a blank separator is read too (CodeRabbit on #740: the old pattern stopped at the first blank line).
+        $paths = [System.Collections.Generic.List[string]]::new()
+        $uploadLines = @($upload -split '\r?\n')
+        $pathAt = @(for ($i = 0; $i -lt $uploadLines.Count; $i++) { if ($uploadLines[$i] -match '\A          path: \|[+-]?\s*\z') { $i } })
+        if ($pathAt.Count -eq 1) {
+            for ($i = $pathAt[0] + 1; $i -lt $uploadLines.Count; $i++) {
+                $line = $uploadLines[$i]
+                if ($line.Trim().Length -eq 0) { continue }
+                if (-not $line.StartsWith('           ', [StringComparison]::Ordinal)) { break }
+                $paths.Add($line.Trim())
+            }
+        }
         if (($paths -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/receipts/**') { $found.Add('gui-hidden.yml: the upload holds exactly the result and the receipts (design §4.5 allowlist), no log directory') }
         if ($upload -notmatch '(?m)^        if: always\(\)\s*$' -or $upload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
             $upload -notmatch '(?m)^          if-no-files-found: warn\s*$') { $found.Add('gui-hidden.yml: the upload runs always, is named per run and attempt, and warns on no files') }
         if ([regex]::Matches($upload, '(?m)^          retention-days: 90\s*$').Count -ne 1 -or [regex]::Matches($Text, 'retention-days:').Count -ne 1) { $found.Add('gui-hidden.yml: the upload is kept 90 days (PLAN §8.1)') }
+        # The gate's verdict is its named step, and that step runs whenever the job does (CodeRabbit on #740: a verdict
+        # step limited to manual runs let a pull request's gate pass on checkout alone).
+        $verdict = & $findStep $gate 'Every needed job succeeded and every skipped job was not needed' 'gui-hidden-gate'
         if ($gate -notmatch '(?m)^    name: gui-hidden-gate\s*$' -or $gate -notmatch '(?m)^    needs: \[changes, suite\]\s*$' -or
-            $gate -notmatch '(?m)^    if: \$\{\{ always\(\) \}\}\s*$' -or
-            $gate -notmatch '(?m)^        run: \./scripts/ci-gate\.ps1 -NeedsJson \$env:NEEDS_JSON -Expect changes:always,suite:gui\s*$' -or
-            $gate -notmatch '(?m)^          NEEDS_JSON: \$\{\{ toJSON\(needs\) \}\}\s*$') {
-            $found.Add('gui-hidden.yml: gui-hidden-gate needs both jobs, runs under always(), and runs scripts/ci-gate.ps1 -Expect changes:always,suite:gui')
+            $gate -notmatch '(?m)^    if: \$\{\{ always\(\) \}\}\s*$' -or $gate -match '(?m)^    continue-on-error:' -or $null -eq $verdict -or
+            $verdict -notmatch '(?m)^        run: \./scripts/ci-gate\.ps1 -NeedsJson \$env:NEEDS_JSON -Expect changes:always,suite:gui\s*$' -or
+            $verdict -notmatch '(?m)^          NEEDS_JSON: \$\{\{ toJSON\(needs\) \}\}\s*$' -or
+            $verdict -match '(?m)^        (?:if|continue-on-error):') {
+            $found.Add('gui-hidden.yml: gui-hidden-gate needs both jobs and runs under always(), and its verdict step runs scripts/ci-gate.ps1 -Expect changes:always,suite:gui with no step-level if or continue-on-error')
         }
         foreach ($use in [regex]::Matches($Text, '(?m)^\s*(?:-\s+)?uses:\s+(?<action>[^\s@]+)@(?<ref>[^\s#]+)')) {
             $pin = "uses: $($use.Groups['action'].Value)@$($use.Groups['ref'].Value)"
@@ -101,12 +122,19 @@ $guiHiddenProblems = & {
         @{ Name = 'a write permission'; Old = "permissions:`n  contents: read`n"; New = "permissions:`n  contents: read`n  actions: write`n" }
         @{ Name = 'a cancelled push to main'; Old = "  cancel-in-progress: true`n"; New = '  cancel-in-progress: ${{ github.ref_name != ''main'' }}' + "`n" }
         @{ Name = 'an unpinned action'; Old = 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'; New = 'actions/upload-artifact@v7' }
+        @{ Name = 'an extra upload path after a blank line'; Old = "            `${{ runner.temp }}/gui-hidden/receipts/**`n"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n`n            `${{ runner.temp }}/gui-hidden-work/**`n" }
+        @{ Name = 'the verdict step limited to manual runs'; Old = "      - name: Every needed job succeeded and every skipped job was not needed`n"; New = "      - name: Every needed job succeeded and every skipped job was not needed`n        if: github.event_name == 'workflow_dispatch'`n" }
+        @{ Name = 'the verdict step allowed to fail'; Old = "      - name: Every needed job succeeded and every skipped job was not needed`n"; New = "      - name: Every needed job succeeded and every skipped job was not needed`n        continue-on-error: true`n" }
     )
     $lfWorkflow = $workflowText.Replace("`r`n", "`n")
+    # A validator returns its problems as one array object (`return , $found.ToArray()`), so a mutation's count is
+    # read from the assigned result: `@(<call>).Count` is 1 for an empty result (measured, pwsh 7.6.10; CodeRabbit on
+    # #740), and a control counted that way could never report an accepted mutation.
     foreach ($control in $workflowControls) {
         if (-not $lfWorkflow.Contains($control.Old)) { $problems.Add("gui-hidden.yml workflow control '$($control.Name)' lost its anchor."); continue }
         $mutated = $lfWorkflow.Replace($control.Old, $control.New)
-        if (@(Get-GuiHiddenWorkflowProblems $mutated $testText).Count -eq 0) { $problems.Add("The gui-hidden.yml shape check accepted $($control.Name).") }
+        $controlProblems = Get-GuiHiddenWorkflowProblems $mutated $testText
+        if ($controlProblems.Count -eq 0) { $problems.Add("The gui-hidden.yml shape check accepted $($control.Name).") }
     }
 
     # ---- (b) the real-input module contract -----------------------------------------------------------------------
@@ -360,7 +388,9 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
     foreach ($control in $planControls) {
         $mutated = $planText | ConvertFrom-Json
         & $control.Change $mutated
-        if (@(Get-GuiHiddenPlanProblems $mutated $scenario).Count -eq 0) { $problems.Add("The plan check accepted $($control.Name).") }
+        # Assigned, never wrapped in @(): see the workflow controls.
+        $controlProblems = Get-GuiHiddenPlanProblems $mutated $scenario
+        if ($controlProblems.Count -eq 0) { $problems.Add("The plan check accepted $($control.Name).") }
     }
 
     # ---- (f) the walker's and the selection's fixtures ------------------------------------------------------------
