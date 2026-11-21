@@ -170,6 +170,48 @@ control("a main whose UI scope comes after its first work fails", tree(**{"src/m
     '    worker.start();\n    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n')}), 1,
         "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:5 main: enter(ui)")
 
+# Stone round 4, Sol's Medium 1: a deferred role call runs at the function's exit, so it is no scope at entry,
+# in main or in an entry's target; and a switch subject the build does not set picks no arm.
+control("a deferred first statement in main is no UI scope", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n',
+    '    defer _ = thread_role.enter(.ui);\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:4 main: enter(ui)",
+        absent=("POINT app MAIN-UI-SCOPE",))
+control("a deferred first statement in an entry's target is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
+    '    defer _ = thread_role.enter(.{ .worker = "probe" });\n')}), 1,
+        "FAIL ENTRY-NOT-EAGER app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
+        absent=("ENTRY-OK app src/worker.zig start",))
+SWITCH_WORKER = WORKER + (
+    'const Scoped = struct {\n    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
+    '        defer role.exit();\n    }\n};\n'
+    'const Unscoped = struct {\n    fn run() void {}\n};\n'
+    'pub fn startSelected() void {\n    const t = std.Thread.spawn(.{}, Target.run, .{}) catch return;\n    t.join();\n}\n')
+SWITCH_REGISTRY = REGISTRY + "src/worker.zig\tstartSelected\tThread.spawn\tTarget.run\tworker:probe\tthe selected target\n"
+control("a constant .other switch subject does not credit the .ghostty arm", tree(**{"src/worker.zig": SWITCH_WORKER + (
+    'const selected = .{ .artifact = .other };\n'
+    'const Target = switch (selected.artifact) {\n    .ghostty => Scoped,\n    .other => Unscoped,\n};\n')}), 1,
+        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:28) sets no role",
+        "FAIL UNREGISTERED-POINT app src/worker.zig:23 run: enter(worker:probe)",
+        registry=SWITCH_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
+control("a switch subject the checker cannot prove is the build's selects no arm", tree(**{"src/worker.zig": SWITCH_WORKER + (
+    'const Target = switch (@import("other_options").artifact) {\n    .ghostty => Scoped,\n    .other => Unscoped,\n};\n')}), 1,
+        "FAIL ENTRY-AMBIGUOUS app src/worker.zig startSelected -> Target.run: src/worker.zig:34: a switch on "
+        '@import("other_options").artifact, which the checker cannot evaluate',
+        registry=SWITCH_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
+control("the build's own artifact selector selects its arm", tree(**{
+    "src/worker.zig": SWITCH_WORKER + (
+        'const options = @import("terminal_options");\n'
+        'const Target = switch (options.artifact) {\n    .ghostty => Scoped,\n    .other => Unscoped,\n};\n'),
+    "src/terminal/build_options.zig": ('pub fn add(self: Options, b: *Build, m: *Module) void {\n'
+                                       '    const opts = b.addOptions();\n'
+                                       '    opts.addOption(Artifact, "artifact", self.artifact);\n'
+                                       '    m.addOptions("terminal_options", opts);\n}\n'),
+    "src/build/SharedDeps.zig": ('pub fn add(self: *const SharedDeps, step: *Compile) void {\n'
+                                 '    self.config.terminalOptions(.ghostty).add(b, step.root_module);\n}\n')}), 0,
+        "ENTRY-OK app src/worker.zig startSelected -> Target.run: src/worker.zig:23 run enters worker:probe",
+        "RESULT PASS", registry=SWITCH_REGISTRY)
+
 if failures:
     for f in failures:
         print("FAIL " + f)

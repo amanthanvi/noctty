@@ -20,20 +20,28 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   TEST-EDIT-POINT  in test code;
   FIXTURE-HELPER   a `fixture(` in a function of a container that only test code of its file names, the container
                    a file-level `const` that is not `pub` (`ClipboardReplyFixture.init`, `TestStream.init`);
-  MAIN-UI-SCOPE    `src/main_ghostty.zig` `main`, role ui, in the first statement of its body, before any work;
-  ENTRY            in the function a counted registry entry's spawn names, with the entry's role, at the top
-                   level of the target's body, so it runs whenever the thread does;
-  and otherwise fails UNREGISTERED-POINT.
+  MAIN-UI-SCOPE    `src/main_ghostty.zig` `main`, role ui, as the eager scope statement (below) that is the
+                   first statement of its body, before any work;
+  ENTRY            in the function a counted registry entry's spawn names, with the entry's role, as an eager scope
+                   statement at the top level of the target's body, so it runs whenever the thread does;
+  and otherwise fails UNREGISTERED-POINT. An EAGER SCOPE STATEMENT is the whole statement
+  `const|var NAME = R.enter(...);` (or `= R.fixture(...);`), after a statement boundary (`File.eager_scope`): a
+  `defer` or `errdefer` call runs at the function's exit and never counts (stone round 4, Sol's Medium 1).
 - Each registry entry is bound to its spawn: the `Thread.spawn(` call in the entry's function whose second argument
   is spelled as the entry's target, that argument resolved from the call by lexical scope and through `@import`,
-  a container's own level and `const` aliases (`Resolver`; `search.Thread`'s artifact switch at its `.ghostty`
-  prong). A same-named function anywhere else is never the target (stone round 3, Sol's Medium 1).
+  a container's own level and `const` aliases (`Resolver`). A same-named function anywhere else is never the
+  target (stone round 3, Sol's Medium 1). A comptime `switch` is read only at the arm its subject evaluates to:
+  the build's own artifact selector, `terminal_options`' `artifact` through its real import and aliases, whose
+  value the build sets (`Resolver.build_artifact`: `src/terminal/build_options.zig` and `src/build/SharedDeps.zig`'s
+  `terminalOptions(.X)`; `.ghostty` for `search.Thread`), or a constant the checker evaluates; any other subject,
+  and any `if`, is ambiguous (stone round 4).
 - Each registry entry, per artifact: REPORTED when its file is not in the artifact or its spawn is never built for
   Windows (NOT_BUILT below, or a `why` that says "not built for Windows"); else ENTRY-OK when its bound target
-  holds a top-level point with its role, and otherwise ENTRY-NO-ROLE, ENTRY-WRONG-ROLE, ENTRY-NOT-TOP-LEVEL,
-  ENTRY-SPAWN-NOT-FOUND (the function makes no such spawn), ENTRY-TARGET-NOT-FOUND (the argument resolves to no
-  function the checker can read) or ENTRY-AMBIGUOUS (the function's spawns of that spelling name different
-  functions).
+  holds an eager top-level scope statement with its role, and otherwise ENTRY-NO-ROLE, ENTRY-WRONG-ROLE,
+  ENTRY-NOT-TOP-LEVEL (only in a nested block), ENTRY-NOT-EAGER (a deferred call, or one inside another
+  expression), ENTRY-SPAWN-NOT-FOUND (the function makes no such spawn), ENTRY-TARGET-NOT-FOUND (the argument
+  resolves to no function the checker can read) or ENTRY-AMBIGUOUS (a switch or if the checker cannot evaluate,
+  or spawns of that spelling that name different functions).
 Exit 0 with RESULT PASS, 1 with RESULT FAIL, 2 on bad input.
 """
 import importlib.util
@@ -53,6 +61,8 @@ ROLE_FILE = "src/sync/thread_role.zig"
 MAIN_FILE = "src/main_ghostty.zig"
 ROOT = "src/main.zig"
 POINT_OPS = ("enter", "fixture", "enterIfNone")
+# The calls that make a thread's own scope (an entry's, main's): enterIfNone keeps a role the thread already has.
+SCOPE_OPS = ("enter", "fixture")
 ROLES = ("none", "ui", "renderer", "termio", "reader", "search", "test_support")
 # §2.7 test 9: entries whose spawn no Windows build compiles (P:1013-1016), keyed (file, function, target).
 NOT_BUILT = {
@@ -138,6 +148,23 @@ class File:
             elif zigtok.is_op(t, ")", "]", "}"):
                 depth -= 1
         return depth == 1
+
+    def eager_scope(self, k, q):
+        """Whether the role call whose op is token q is a role scope that runs when its statement does: the whole
+        statement `const|var NAME = R.op(...);`, at the top level of function k's body, after a statement boundary
+        (`{`, `;` or `}`), so never under `defer` or `errdefer` (`defer _ = R.enter(.ui);` runs at the function's
+        exit), nor inside another expression (stone round 4, Sol's Medium 1)."""
+        toks, n = self.toks, len(self.toks)
+        if q < 6 or not self.top_level_in_body(k, q):
+            return False
+        if not (toks[q - 5].kind == "keyword" and toks[q - 5].text in ("const", "var")
+                and toks[q - 4].kind == "identifier" and zigtok.is_op(toks[q - 3], "=")
+                and toks[q - 2].kind == "identifier" and zigtok.is_op(toks[q - 1], ".")):
+            return False
+        if not zigtok.is_op(toks[q - 6], "{", ";", "}"):
+            return False
+        close = zigtok.match_paren(toks, q + 1)
+        return close + 1 < n and zigtok.is_op(toks[close + 1], ";")
 
     def first_statement(self, k, q):
         """Whether token q is in the first statement of function k's body: at its top level, with no statement
@@ -303,33 +330,144 @@ class Resolver:
     def value(self, f, d, depth):
         return self.expression(f, d["value"], d["idx"], (";",), depth)
 
+    def build_artifact(self):
+        """The `artifact` every exe's `terminal_options` module holds, read the way the build sets it:
+        `src/terminal/build_options.zig` adds the option `artifact` to the module `terminal_options`, and
+        `src/build/SharedDeps.zig`, which every exe's root module goes through (the app and the fork test exe),
+        adds `terminalOptions(.X)`. X, or None unless the build holds exactly that."""
+        if hasattr(self, "_artifact"):
+            return self._artifact
+        self._artifact = None
+        opts, deps = self.files.get("src/terminal/build_options.zig"), self.files.get("src/build/SharedDeps.zig")
+        if opts is None or deps is None:
+            return None
+
+        def at(toks, i, texts):
+            return i + len(texts) <= len(toks) and all(toks[i + j].text == x for j, x in enumerate(texts))
+
+        ot = opts.toks
+        if not any(at(ot, i, ("addOptions", "(", '"terminal_options"')) for i in range(len(ot))) \
+                or not any(at(ot, i, ("addOption", "(", "Artifact", ",", '"artifact"')) for i in range(len(ot))):
+            return None
+        dt = deps.toks
+        tags = [dt[i + 3].text for i in range(len(dt) - 7)
+                if at(dt, i, ("terminalOptions", "(", ".")) and dt[i + 3].kind == "identifier"
+                and at(dt, i + 4, (")", ".", "add", "("))]
+        if len(tags) == 1:
+            self._artifact = tags[0]
+        return self._artifact
+
+    def enum_value(self, f, q, subject, depth):
+        """The enum tag a comptime switch subject (the tokens `subject`, written at token q) holds, and why not when
+        None: the build's own artifact selector (`terminal_options`'s `artifact`, through its real `@import` and
+        aliases: `build_artifact`), or a constant the checker evaluates (an enum literal, or a field of an
+        anonymous struct literal). Anything else it cannot prove gives None."""
+        toks = subject
+        if (len(toks) == 6 and toks[0].kind == "builtin" and toks[0].text == "@import" and zigtok.is_op(toks[1], "(")
+                and toks[2].kind == "string" and zigtok.is_op(toks[3], ")") and zigtok.is_op(toks[4], ".")
+                and toks[5].kind == "identifier"):
+            base, field = ("module", zigtok.string_value(toks[2]) or ""), toks[5].text
+        else:
+            if not toks or len(toks) % 2 == 0 or any(t.kind != "identifier" for t in toks[0::2]) \
+                    or any(not zigtok.is_op(t, ".") for t in toks[1::2]):
+                return None, "the subject is no name chain"
+            names = [t.text for t in toks[0::2]]
+            if len(names) == 1:
+                b = self.chain(f, q, names, depth)
+                return (b[1], "") if b[0] == "enum" else (None, f"{names[0]} is no enum literal constant")
+            base, field = self.chain(f, q, names[:-1], depth), names[-1]
+        if base[0] == "module":
+            if base[1] == "terminal_options" and field == "artifact":
+                tag = self.build_artifact()
+                return (tag, "") if tag else (None, "the build's terminal_options artifact cannot be read")
+            return None, f"the build module {base[1]}'s {field}, which the checker does not evaluate"
+        if base[0] == "literal":
+            lf, o = base[1], base[2]
+            lt, close, depth_ = lf.toks, zigtok.match_paren(lf.toks, base[2]), 0
+            for i in range(o + 1, close):
+                if zigtok.is_op(lt[i], "(", "[", "{"):
+                    depth_ += 1
+                elif zigtok.is_op(lt[i], ")", "]", "}"):
+                    depth_ -= 1
+                elif depth_ == 0 and zigtok.is_op(lt[i], ".") and i + 4 < close and lt[i + 1].text == field \
+                        and zigtok.is_op(lt[i + 2], "=") and zigtok.is_op(lt[i + 3], ".") \
+                        and lt[i + 4].kind == "identifier" and (i + 5 >= close or zigtok.is_op(lt[i + 5], ",")):
+                    return lt[i + 4].text, ""
+            return None, f"the literal holds no enum literal field {field}"
+        return None, f"{field} of a value the checker does not evaluate ({base[1] if base[0] != 'fn' else 'a function'})"
+
+    @staticmethod
+    def switch_arm(toks, open_, tag):
+        """The first token of the value of the switch prong (its braces at open_) that holds `.tag`, else of its
+        `else` prong; None when neither exists."""
+        close, depth_, q, start, other = zigtok.match_paren(toks, open_), 0, open_ + 1, open_ + 1, None
+        while q < close:
+            t = toks[q]
+            if zigtok.is_op(t, "(", "[", "{"):
+                depth_ += 1
+            elif zigtok.is_op(t, ")", "]", "}"):
+                depth_ -= 1
+            elif depth_ == 0 and zigtok.is_op(t, "=>"):
+                head = toks[start:q]
+                if any(zigtok.is_op(head[i], ".") and head[i + 1].kind == "identifier" and head[i + 1].text == tag
+                       and (i == 0 or zigtok.is_op(head[i - 1], ",")) and (i + 2 == len(head) or zigtok.is_op(head[i + 2], ","))
+                       for i in range(len(head) - 1)):
+                    return q + 1
+                if len(head) == 1 and head[0].kind == "keyword" and head[0].text == "else":
+                    other = q + 1
+                # the prong's value runs to the next `,` at this level
+                q += 1
+                d2 = 0
+                while q < close:
+                    u = toks[q]
+                    if zigtok.is_op(u, "(", "[", "{"):
+                        d2 += 1
+                    elif zigtok.is_op(u, ")", "]", "}"):
+                        d2 -= 1
+                    elif d2 == 0 and zigtok.is_op(u, ","):
+                        break
+                    q += 1
+                start = q + 1
+            q += 1
+        return other
+
     def expression(self, f, v, at, ends, depth):
-        """What the value at token v names, read to one of `ends`: an `@import` of a file and the members after it,
-        a container, a name chain (resolved at token `at`, its declaration), or a comptime switch on the build's
-        artifact, read at its `.ghostty` prong (the app and the fork test exe are that artifact)."""
+        """What the value at token v names, read to one of `ends`: an `@import` of a file and the members after it
+        (or of a build module), a container, an anonymous struct literal, an enum literal, a name chain (resolved
+        at token `at`, its declaration), or a comptime switch whose subject `enum_value` evaluates, read at the arm
+        its tag selects. A switch it cannot evaluate, and any `if`, is ("ambiguous", why): the checker never picks
+        an arm the build might not (stone round 4, Sol's Medium 1)."""
         toks, n = f.toks, len(f.toks)
         r, base = v, None
+        if toks[r].kind == "keyword" and toks[r].text == "if":
+            return ("ambiguous", f"{f.path}:{toks[r].line + 1}: an if the checker does not evaluate")
         if toks[r].kind == "keyword" and toks[r].text == "switch" and r + 1 < n and zigtok.is_op(toks[r + 1], "("):
             c = zigtok.match_paren(toks, r + 1)
-            subject = [t.text for t in toks[r + 2:c]]
-            if subject and subject[-1] == "artifact" and c + 1 < n and zigtok.is_op(toks[c + 1], "{"):
-                close, depth_, q = zigtok.match_paren(toks, c + 1), 0, c + 2
-                while q < close:
-                    t = toks[q]
-                    if zigtok.is_op(t, "(", "[", "{"):
-                        depth_ += 1
-                    elif zigtok.is_op(t, ")", "]", "}"):
-                        depth_ -= 1
-                    elif depth_ == 0 and zigtok.is_op(t, ".") and q + 2 < close and toks[q + 1].text == "ghostty" \
-                            and zigtok.is_op(toks[q + 2], "=>"):
-                        return self.expression(f, q + 3, at, (",", "}"), depth + 1)
-                    q += 1
-            return ("unresolved", f"{f.path}:{toks[v].line + 1}: a switch the checker does not read")
+            subject = toks[r + 2:c]
+            if not (c + 1 < n and zigtok.is_op(toks[c + 1], "{")):
+                return ("ambiguous", f"{f.path}:{toks[r].line + 1}: a switch the checker does not read")
+            tag, why = self.enum_value(f, r, subject, depth + 1)
+            if tag is None:
+                return ("ambiguous", f"{f.path}:{toks[r].line + 1}: a switch on {zigtok.spaced(subject)}, "
+                                     f"which the checker cannot evaluate ({why})")
+            arm = self.switch_arm(toks, c + 1, tag)
+            if arm is None:
+                return ("ambiguous", f"{f.path}:{toks[r].line + 1}: a switch with no arm for .{tag}")
+            return self.expression(f, arm, at, (",", "}"), depth + 1)
+        if zigtok.is_op(toks[r], ".") and r + 1 < n and zigtok.is_op(toks[r + 1], "{"):
+            close = zigtok.match_paren(toks, r + 1)
+            if close + 1 < n and zigtok.is_op(toks[close + 1], *ends):
+                return ("literal", f, r + 1)
+        if zigtok.is_op(toks[r], ".") and r + 2 < n and toks[r + 1].kind == "identifier" \
+                and zigtok.is_op(toks[r + 2], *ends):
+            return ("enum", toks[r + 1].text)
         if (toks[r].kind == "builtin" and toks[r].text == "@import" and r + 3 < n and zigtok.is_op(toks[r + 1], "(")
                 and toks[r + 2].kind == "string" and zigtok.is_op(toks[r + 3], ")")):
             s = zigtok.string_value(toks[r + 2]) or ""
             if not s.endswith(".zig"):
-                return ("unresolved", f"the module @import(\"{s}\") at {f.path}:{toks[r].line + 1}")
+                if r + 4 < n and zigtok.is_op(toks[r + 4], *ends):
+                    return ("module", s)
+                return ("unresolved", f"a member of the build module @import(\"{s}\") at {f.path}:{toks[r].line + 1}")
             path = os.path.normpath(os.path.join(os.path.dirname(f.path), s)).replace("\\", "/")
             if path not in self.files:
                 return ("unresolved", f"{path}, which the tree does not hold")
@@ -367,14 +505,14 @@ class Resolver:
         return base
 
     def member(self, b, name, depth):
-        if b[0] == "unresolved":
+        if b[0] in ("unresolved", "ambiguous"):
             return b
         if b[0] == "file":
             g, block, where = self.files[b[1]], -1, b[1]
         elif b[0] == "container":
             g, block, where = b[1], b[2], f"{b[1].path}:{b[1].toks[b[2]].line + 1}"
         else:
-            return ("unresolved", f"{name} after a function")
+            return ("unresolved", f"{name} after a value with no members ({b[0]})")
         g.scope()
         ds = [d for d in g.decls.get(name, ()) if d["block"] == block]
         if len(ds) != 1:
@@ -500,11 +638,12 @@ def main(argv):
                 return ("unresolved", f"the spawn at {e['file']}:{f.toks[q].line + 1} names no declaration chain")
             b = resolver.chain(f, q, names)
             if b[0] != "fn":
-                return b if b[0] == "unresolved" else ("unresolved", f"{e['target']} names no function")
+                return b if b[0] in ("unresolved", "ambiguous") else ("unresolved", f"{e['target']} names no function")
             if all(not (b[1] is x[1] and b[2] == x[2]) for x in found):
                 found.append(b)
         if len(found) > 1:
-            return ("ambiguous", ", ".join(f"{x[1].path}:{x[1].toks[x[1].fns[x[2]]['fn']].line + 1}" for x in found))
+            return ("ambiguous", "its spawns name different functions (" + ", ".join(
+                f"{x[1].path}:{x[1].toks[x[1].fns[x[2]]['fn']].line + 1}" for x in found) + ")")
         return found[0]
 
     counted = {"app": [], "test": []}
@@ -537,7 +676,7 @@ def main(argv):
                 failures.append(f"ENTRY-TARGET-NOT-FOUND {head}: {b[1]}")
                 continue
             if b[0] == "ambiguous":
-                failures.append(f"ENTRY-AMBIGUOUS {head}: its spawns name different functions ({b[1]})")
+                failures.append(f"ENTRY-AMBIGUOUS {head}: {b[1]}")
                 continue
             tf, tk = b[1], b[2]
             # only the bound function's own points: a same-named function elsewhere credits nothing
@@ -557,11 +696,18 @@ def main(argv):
                                 f"set inside a nested block ({with_role[0]['file']}:{with_role[0]['line']}), so the "
                                 f"thread can run without it")
                 continue
-            for pt in top:
+            eager = [pt for pt in top if pt["op"] in SCOPE_OPS and tf.eager_scope(pt["k"], pt["q"])]
+            if not eager:
+                failures.append(f"ENTRY-NOT-EAGER {head}: its role call ({top[0]['file']}:{top[0]['line']}) is no "
+                                f"statement `const s = thread_role.{'/'.join(SCOPE_OPS)}(...);` that runs when "
+                                f"reached (a deferred call runs at the function's exit), so the thread runs without "
+                                f"the role")
+                continue
+            for pt in eager:
                 matched.add((pt["file"], pt["q"]))
             counted[art].append(e)
-            report.append(f"ENTRY-OK {art} {e['file']} {e['function']} -> {e['target']}: {top[0]['file']}:"
-                          f"{top[0]['line']} {top[0]['fn']} enters {e['role']}")
+            report.append(f"ENTRY-OK {art} {e['file']} {e['function']} -> {e['target']}: {eager[0]['file']}:"
+                          f"{eager[0]['line']} {eager[0]['fn']} enters {e['role']}")
 
     # each point: in which artifact, and what it is
     kinds = {"app": {}, "test": {}}
@@ -578,7 +724,8 @@ def main(argv):
                 if c is not None and any(c is x for x in test_only_containers(f)):
                     kind = "FIXTURE-HELPER"
             if kind is None and pt["file"] == MAIN_FILE and pt["fn"] == "main" and pt["role"] == "ui" \
-                    and f.parent[pt["k"]] is None and f.first_statement(pt["k"], pt["q"]):
+                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and f.first_statement(pt["k"], pt["q"]) \
+                    and f.eager_scope(pt["k"], pt["q"]):
                 kind = "MAIN-UI-SCOPE"
             if kind is None and (pt["file"], pt["q"]) in matched:
                 kind = "ENTRY"
