@@ -697,7 +697,9 @@ that govern each symbol you change, or that none does.
   their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
   `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
   `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
-  acceptance tests there and in `src/sync/state_mutex.zig`, the
+  acceptance tests there and in `src/sync/state_mutex.zig`, acceptance
+  test 9's checker `ci/thread_role_points.py` (its `Resolver`) with its
+  controls `ci/test_thread_role_points.py`, the
   thread-role dumps' symboliser and the in-process compare
   (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
   the table they read, `ci/lock-inventory-threads.tsv`, what its static

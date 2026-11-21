@@ -424,6 +424,8 @@
         "src/sync/state_mutex.zig",
         "src/termio/stream_handler.zig",
         "ci/lock-inventory-threads.tsv",
+        "ci/thread_role_points.py",
+        "ci/test_thread_role_points.py",
         "src/termio/Thread.zig",
         "src/Surface.zig",
         "ci/soak_judge.py",

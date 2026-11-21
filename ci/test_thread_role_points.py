@@ -101,11 +101,12 @@ control("a clean tree passes", tree(), 0,
         "RESULT PASS")
 control("an entry whose target sets no role fails", tree(**{"src/worker.zig": WORKER.replace(
     '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n', "")}), 1,
-        "FAIL ENTRY-NO-ROLE app src/worker.zig start -> workerMain: its target sets no role (worker:probe)")
+        "FAIL ENTRY-NO-ROLE app src/worker.zig start -> workerMain: its target (src/worker.zig:7) sets no role "
+        "(worker:probe)")
 control("an entry whose target enters another role fails", tree(**{"src/worker.zig": WORKER.replace(
     '.{ .worker = "probe" }', '.{ .worker = "other" }')}), 1,
-        "FAIL ENTRY-WRONG-ROLE app src/worker.zig start -> workerMain: its target enters worker:other, the registry "
-        "says worker:probe")
+        "FAIL ENTRY-WRONG-ROLE app src/worker.zig start -> workerMain: its target (src/worker.zig:7) enters "
+        "worker:other, the registry says worker:probe")
 control("a role set inside a nested block fails", tree(**{"src/worker.zig": WORKER.replace(
     '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
     '    if (true) {\n        const role = thread_role.enter(.{ .worker = "probe" });\n        defer role.exit();\n    }\n')}),
@@ -129,9 +130,45 @@ control("a fixture helper that production code also names is no test edit point"
 control("an entry in a file no artifact reaches is reported, not counted", tree(), 0,
         "REPORTED app src/elsewhere.zig spawn -> elsewhereMain (worker:x): its file is not in the app exe; not counted",
         "RESULT PASS", registry=REGISTRY + "src/elsewhere.zig\tspawn\tThread.spawn\telsewhereMain\tworker:x\tnowhere\n")
-control("an entry whose target is not defined fails", tree(), 1,
-        "FAIL ENTRY-TARGET-NOT-FOUND app src/worker.zig start -> missingMain",
+control("an entry whose spawn names no declaration fails", tree(**{"src/worker.zig": WORKER + (
+    'pub fn startMissing() void {\n    _ = std.Thread.spawn(.{}, missingMain, .{}) catch {};\n}\n')}), 1,
+        "FAIL ENTRY-TARGET-NOT-FOUND app src/worker.zig startMissing -> missingMain: missingMain is declared in no "
+        "scope",
+        registry=REGISTRY + "src/worker.zig\tstartMissing\tThread.spawn\tmissingMain\tworker:probe\ta second spawn\n")
+control("an entry whose function makes no such spawn fails", tree(), 1,
+        "FAIL ENTRY-SPAWN-NOT-FOUND app src/worker.zig start -> missingMain: start in src/worker.zig makes no "
+        "Thread.spawn of missingMain",
         registry=REGISTRY + "src/worker.zig\tstart\tThread.spawn\tmissingMain\tworker:probe\ta second spawn\n")
+# Stone round 3, Sol's Medium 1: an entry is the function its spawn names, never a same-named function elsewhere.
+# The worker's watcher `Deadline.run` enters no role, and an unrelated file's `run` enters the registry's role.
+DEADLINE_WORKER = WORKER + (
+    'const Deadline = struct {\n    fn run() void {}\n};\n'
+    'pub fn watch() void {\n    const t = std.Thread.spawn(.{}, Deadline.run, .{}) catch return;\n    t.join();\n}\n')
+OTHER_RUN = ('const thread_role = @import("sync/thread_role.zig");\n'
+             'pub fn run() void {\n    const role = thread_role.enter(.test_support);\n    defer role.exit();\n}\n')
+DEADLINE_REGISTRY = REGISTRY + "src/worker.zig\twatch\tThread.spawn\tDeadline.run\ttest_support\tthe watcher\n"
+control("an unrelated same-named run that enters the role does not credit the target", tree(**{
+    "src/worker.zig": DEADLINE_WORKER, "src/other.zig": OTHER_RUN,
+    "src/main_ghostty.zig": GHOSTTY.replace('const worker = @import("worker.zig");',
+                                            'const worker = @import("worker.zig");\nconst other = @import("other.zig");')}),
+        1, "FAIL ENTRY-NO-ROLE app src/worker.zig watch -> Deadline.run: its target (src/worker.zig:22) sets no role "
+        "(test_support)", "FAIL UNREGISTERED-POINT app src/other.zig:3 run: enter(test_support)",
+        registry=DEADLINE_REGISTRY, absent=("ENTRY-OK app src/worker.zig watch",))
+control("an entry's target through an import is the imported file's function", tree(**{
+    "src/worker.zig": WORKER.replace("std.Thread.spawn(.{}, workerMain, .{})", "std.Thread.spawn(.{}, helper.helperMain, .{})")
+    .replace('    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n', "")
+    .replace('const thread_role = @import("sync/thread_role.zig");',
+             'const thread_role = @import("sync/thread_role.zig");\nconst helper = @import("helper.zig");'),
+    "src/helper.zig": ('const thread_role = @import("sync/thread_role.zig");\n'
+                       'pub fn helperMain() void {\n    const role = thread_role.enter(.{ .worker = "probe" });\n'
+                       '    defer role.exit();\n}\n')}), 0,
+        "ENTRY-OK app src/worker.zig start -> helper.helperMain: src/helper.zig:3 helperMain enters worker:probe",
+        "RESULT PASS",
+        registry=REGISTRY.replace("\tworkerMain\t", "\thelper.helperMain\t"))
+control("a main whose UI scope comes after its first work fails", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n    worker.start();\n',
+    '    worker.start();\n    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:5 main: enter(ui)")
 
 if failures:
     for f in failures:
