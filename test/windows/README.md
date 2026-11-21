@@ -1788,8 +1788,11 @@ from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
 `run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`,
 `harness-changed`).
 Everything else goes to `diagnostics.json` beside it, written after
-`pacing.json` so the verdict and exit code stand when it cannot be written (the
-console line then warns that it was not), with no `dry_run_p95_ms` (a dry run
+`pacing.json`, whether or not that write succeeded (a `pacing.json` that cannot
+be written still fails the series), so the verdict and exit code stand when
+`diagnostics.json` cannot be written (the console line then warns that it was
+not) and the series' record stands when `pacing.json` cannot, with no
+`dry_run_p95_ms` (a dry run
 has one only when it is clean): every message (the
 staging, lock-shortfall and tick-stop lines among them), every duration,
 each run and each group, and `Inconclusive`, which names what voided the
@@ -1834,7 +1837,7 @@ line says so. A
 `run.json` the job's close cut short reads as no record: a run stopped for
 real input is then inconclusive, any other run failed, and the series still
 writes `pacing.json`. A staging failure is a
-failed run before any launch, and the series still writes diagnostics.json
+failed run before any launch, and the series still writes `diagnostics.json`
 with the runs before it. What runs is the run's own copy: its path is checked before any launch
 and its image read back by PID, and the driver runs in the run's own job,
 checked before it resumes and again by the outer half. The shared state guard

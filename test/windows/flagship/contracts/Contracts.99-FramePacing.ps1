@@ -269,8 +269,8 @@ $framePacingRules = @(
         Mutation = @('-Name StopWatch -Value { [FramePacingNative]::StopWatch() }', '-Name StopWatch -Value { $true }')
     }
     @{
-        Description = 'a series whose verdict is not a pass (exit 0), input and a changed harness among them, writes pacing.json from the allowlist, with the hash the series started with, and then everything else, with no dry_run_p95_ms, to diagnostics.json, whose failed write is a warning (the lead and Sol on #741, rounds 9 and 10, and on #744, rounds 2 and 3)'
-        Pattern = '(?s)\$withheld = \$voided -or \$exitCode -ne 0\s+\$diagnosticsFailure = \$null\s+if \(\$withheld\) \{.*?\$allowed = \[ordered\]@\{\s+Schema = 1; Verdict = \$\(if \(\$voided\) \{ ''voided'' \} elseif \(\$exitCode -eq 3\) \{ ''guard-tripped'' \} elseif \(\$exitCode -eq 2\) \{ ''inconclusive'' \} else \{ ''failed'' \}\); ExitCode = \$exitCode\s+Reasons = @\(Get-FramePacingVoidReasons [^\r\n]+\)\s+RealInputsSeen = \$RealInputs; InjectedInputsSeen = \$InjectedInputs; SeriesId = \(Split-Path -Leaf \$Root\)\s+HarnessSha256 = \$HarnessSha256; MeasureHead = \$Build\.Head; ExeSHA256 = \$Build\.ExeSha256\s+\}\s+\$allowed \| ConvertTo-Json -Depth 3 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+(?:#[^\r\n]*\s+)*\$summary\.ExitCode = \$exitCode\s+\$summary\.dry_run_p95_ms = \$null\s+try \{ \$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''diagnostics\.json''\) -Encoding utf8NoBOM -ErrorAction Stop \}\s+catch \{ \$diagnosticsFailure = \$_\.Exception\.Message \}\s+\} else \{\s+\$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+\}'
+        Description = 'a series whose verdict is not a pass (exit 0), input and a changed harness among them, writes pacing.json from the allowlist, with the hash the series started with, and then everything else, with no dry_run_p95_ms, to diagnostics.json, whether or not pacing.json was written, a failed diagnostics write a warning (the lead and Sol on #741, rounds 9 and 10, and on #744, rounds 2 to 4)'
+        Pattern = '(?s)\$withheld = \$voided -or \$exitCode -ne 0\s+\$diagnosticsFailure = \$null\s+if \(\$withheld\) \{.*?\$allowed = \[ordered\]@\{\s+Schema = 1; Verdict = \$\(if \(\$voided\) \{ ''voided'' \} elseif \(\$exitCode -eq 3\) \{ ''guard-tripped'' \} elseif \(\$exitCode -eq 2\) \{ ''inconclusive'' \} else \{ ''failed'' \}\); ExitCode = \$exitCode\s+Reasons = @\(Get-FramePacingVoidReasons [^\r\n]+\)\s+RealInputsSeen = \$RealInputs; InjectedInputsSeen = \$InjectedInputs; SeriesId = \(Split-Path -Leaf \$Root\)\s+HarnessSha256 = \$HarnessSha256; MeasureHead = \$Build\.Head; ExeSHA256 = \$Build\.ExeSha256\s+\}\s+try \{ \$allowed \| ConvertTo-Json -Depth 3 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM \}\s+finally \{\s+(?:#[^\r\n]*\s+)*\$summary\.ExitCode = \$exitCode\s+\$summary\.dry_run_p95_ms = \$null\s+try \{ \$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''diagnostics\.json''\) -Encoding utf8NoBOM -ErrorAction Stop \}\s+catch \{ \$diagnosticsFailure = \$_\.Exception\.Message \}\s+\}\s+\} else \{\s+\$summary \| ConvertTo-Json -Depth 6 \| Set-Content -LiteralPath \(Join-Path \$Root ''pacing\.json''\) -Encoding utf8NoBOM\s+\}'
         Mutation = @('$withheld = $voided -or $exitCode -ne 0', '$withheld = $voided')
     }
     @{
@@ -2413,20 +2413,21 @@ public static class $driverStubName {
         & { . ([scriptblock]::Create($exitControl)); if ($null -eq (Get-FramePacingExitMiss)) { throw 'The exit cases accepted a failure ranked over a tripped guard.' } }
         $cases.Add("exit precedence ($($exitCases.Count) cases: guard over failure and build, failure over inconclusive and environment; the failure ranked over the guard as the control)")
 
-        # The summary's published output, from the real function (Sol and CodeRabbit on #741; Opus's M13 and M17): a
-        # dry run publishes only dry_run_p95_ms; a visible series publishes frame_time_p95_ms and its median only when
-        # every run completed and the runs are comparable, and otherwise writes null and prints that no measurement was
-        # published; mixed display modes exit 2, a mixed workload or build 1, a failed run (the first included) 1, a
-        # tripped guard 3, and every case writes pacing.json. The cases run under the harness's own StrictMode (Greptile
-        # on #741: an empty pool unwrapped to $null threw on .Count there, before pacing.json, and a test without
-        # StrictMode read .Count of $null as 0). Controls: Sol's late assignment of the metric before serialization, the
-        # median published without the visible check, the Error exit removed, and the pool's old `if` assignment, are
-        # each caught.
-        function Invoke-FramePacingSummaryCase([bool] $AsVisible, [int] $RunCount, [object[]] $Results, [string] $SummaryText, [string] $SeriesText, $RealInputs, [bool] $TickMoved, [string] $SeriesSha = 'h', [bool] $LockDiagnostics = $false) {
+        # The summary's published output, from the real function (Sol and CodeRabbit on #741; Opus's M13 and M17): a dry
+        # run publishes only dry_run_p95_ms; a visible series publishes frame_time_p95_ms and its median only when every
+        # run completed and the runs are comparable, and otherwise has neither field (a passing dry run has them null)
+        # and prints that no measurement was published; mixed display modes exit 2, a mixed workload or build 1, a
+        # failed run (the first included) 1, a tripped guard 3, and every case writes pacing.json. The cases run under
+        # the harness's own StrictMode (Greptile on #741: an empty pool unwrapped to $null threw on .Count there, before
+        # pacing.json, and a test without StrictMode read .Count of $null as 0). Controls: Sol's late assignment of the
+        # metric before serialization, the median published without the visible check, the Error exit removed, and the
+        # pool's old `if` assignment, are each caught.
+        function Invoke-FramePacingSummaryCase([bool] $AsVisible, [int] $RunCount, [object[]] $Results, [string] $SummaryText, [string] $SeriesText, $RealInputs, [bool] $TickMoved, [string] $SeriesSha = 'h', [bool] $LockDiagnostics = $false, [bool] $LockPacing = $false) {
             $root = Join-Path ([IO.Path]::GetTempPath()) ('fp-summary-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             [void][IO.Directory]::CreateDirectory($root)
             # Sol's round-3 lock (#744): diagnostics.json held open with no sharing for the whole summary.
-            $lock = if ($LockDiagnostics) { [IO.File]::Open((Join-Path $root 'diagnostics.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } else { $null }
+            # Sol's round-4 lock: pacing.json held the same way instead.
+            $lock = if ($LockDiagnostics) { [IO.File]::Open((Join-Path $root 'diagnostics.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } elseif ($LockPacing) { [IO.File]::Open((Join-Path $root 'pacing.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } else { $null }
             try {
                 try {
                     $out = & {
@@ -2436,7 +2437,16 @@ public static class $driverStubName {
                         if ($SeriesText) { . ([scriptblock]::Create($SeriesText)) }
                         Write-FramePacingSummary $root ([pscustomobject]@{ Head = 'h'; ExeSha256 = 'e' }) $Results $RealInputs $(if ($AsVisible) { 3 } else { $null }) $TickMoved $false $SeriesSha
                     } 6>&1
-                } catch { return [pscustomobject]@{ Code = "threw: $($_.Exception.Message)"; Json = $null; Console = '' } }
+                } catch {
+                    $thrown = "threw: $($_.Exception.Message)"
+                    if ($LockPacing) {
+                        $lock.Dispose(); $lock = $null
+                        $lockedDiag = Join-Path $root 'diagnostics.json'
+                        return [pscustomobject]@{ Code = $thrown; Json = $null; Diag = $(if (Test-Path -LiteralPath $lockedDiag -PathType Leaf) { Get-Content -LiteralPath $lockedDiag -Raw | ConvertFrom-Json } else { $null }); PacingBytes = (Get-Item -LiteralPath (Join-Path $root 'pacing.json')).Length; Console = '' }
+                    }
+                    return [pscustomobject]@{ Code = $thrown; Json = $null; Console = '' }
+                }
+                if ($LockPacing) { return [pscustomobject]@{ Code = @($out | Where-Object { $_ -is [int] })[-1]; Json = $null; Diag = $null; PacingBytes = $null; Console = '' } }
                 if ($null -ne $lock) {
                     $lock.Dispose(); $lock = $null
                     $lockedJson = Join-Path $root 'pacing.json'
@@ -2551,17 +2561,42 @@ public static class $driverStubName {
         }
         $lockedMiss = Get-FramePacingLockedDiagnosticsMiss $null
         if ($lockedMiss) { throw "The summary under a locked diagnostics.json: $lockedMiss." }
-        $diagnosticsTry = "        `$summary.ExitCode = `$exitCode`n        `$summary.dry_run_p95_ms = `$null`n        try { `$summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path `$Root 'diagnostics.json') -Encoding utf8NoBOM -ErrorAction Stop }`n        catch { `$diagnosticsFailure = `$_.Exception.Message }`n"
+        $diagnosticsTry = "            `$summary.ExitCode = `$exitCode`n            `$summary.dry_run_p95_ms = `$null`n            try { `$summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path `$Root 'diagnostics.json') -Encoding utf8NoBOM -ErrorAction Stop }`n            catch { `$diagnosticsFailure = `$_.Exception.Message }`n"
         $diagnosticsBare = "        `$summary.ExitCode = `$exitCode`n        `$summary.dry_run_p95_ms = `$null`n        `$summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path `$Root 'diagnostics.json') -Encoding utf8NoBOM`n"
         $allowedStart = "        `$allowed = [ordered]@{`n"
-        if (-not $summaryText.Contains($diagnosticsTry) -or -not $summaryText.Contains($allowedStart)) { throw 'The locked-diagnostics controls no longer find the diagnostics write.' }
-        $diagnosticsFirst = $summaryText.Replace($diagnosticsTry, '').Replace($allowedStart, $diagnosticsBare + $allowedStart)
-        $diagnosticsUncaught = $summaryText.Replace($diagnosticsTry, $diagnosticsBare)
+        $pacingFinally = [regex]::Match($summaryText, "(?s)        try \{ \`$allowed \| ConvertTo-Json -Depth 3 \| Set-Content -LiteralPath \(Join-Path \`$Root 'pacing\.json'\) -Encoding utf8NoBOM \}\n        finally \{\n.*?\n        \}\n")
+        $pacingPlain = "        `$allowed | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path `$Root 'pacing.json') -Encoding utf8NoBOM`n"
+        if (-not $summaryText.Contains($diagnosticsTry) -or -not $summaryText.Contains($allowedStart) -or -not $pacingFinally.Success -or -not $pacingFinally.Value.Contains($diagnosticsTry)) { throw 'The locked-file controls no longer find the pacing.json and diagnostics.json writes.' }
+        # Round 2's order: diagnostics.json first and uncaught, the verdict after it with no finally.
+        $diagnosticsFirst = $summaryText.Replace($pacingFinally.Value, $pacingPlain).Replace($allowedStart, $diagnosticsBare + $allowedStart)
+        $diagnosticsUncaught = $summaryText.Replace($diagnosticsTry, $diagnosticsBare.Replace("`n        ", "`n            ").Replace("        `$summary.ExitCode", "            `$summary.ExitCode"))
         foreach ($control in @(@{ Name = 'round 2''s order, diagnostics.json first and uncaught'; Text = $diagnosticsFirst }, @{ Name = 'the diagnostics write''s catch removed'; Text = $diagnosticsUncaught })) {
             if ([string]::Equals($control.Text, $summaryText, [StringComparison]::Ordinal)) { throw "The locked-diagnostics control changed nothing: $($control.Name)." }
             if ($null -eq (Get-FramePacingLockedDiagnosticsMiss $control.Text)) { throw "The locked-diagnostics cases accepted $($control.Name)." }
         }
         $cases.Add("summary under a locked diagnostics.json (Sol on #744, round 3: exits 1, 2 and 3 each kept with the allowlisted pacing.json and a console warning; round 2's diagnostics-first order and the catch removed as controls)")
+        # Sol on #744, round 4: pacing.json locked with no sharing instead. The pacing.json write's error still ends
+        # the summary as before, after diagnostics.json is written with the series' exit (1, 2, 3), the completed
+        # run's statistics and no dry_run_p95_ms, in either mode. The control: round 3's order, the diagnostics write
+        # after the verdict's with no finally, which lost diagnostics.json.
+        function Get-FramePacingLockedPacingMiss([string] $SummaryText) {
+            foreach ($locked in @(@{ Status = 'failed'; Code = 1 }, @{ Status = 'inconclusive'; Code = 2 }, @{ Status = 'guard-tripped'; Code = 3 })) {
+                foreach ($asVisible in @($true, $false)) {
+                    $got = Invoke-FramePacingSummaryCase $asVisible 2 @((New-FramePacingResult 'complete' $runA), (New-FramePacingResult $locked.Status $null)) $SummaryText $null $(if ($asVisible) { [long]0 } else { $null }) $false 'h' $false $true
+                    $name = "a locked pacing.json beside a $($locked.Status) run (visible $asVisible)"
+                    if (-not ([string]$got.Code).StartsWith('threw:', [StringComparison]::Ordinal) -or -not ([string]$got.Code).Contains('pacing.json')) { return "${name}: '$($got.Code)', not the pacing.json write's error" }
+                    if ($null -eq $got.Diag -or $got.Diag.ExitCode -ne $locked.Code -or @($got.Diag.Groups | Where-Object { $null -ne $_.p95_ms }).Count -eq 0 -or $null -ne $got.Diag.dry_run_p95_ms -or $got.PacingBytes -ne 0) { return "${name}: diagnostics.json $(if ($null -eq $got.Diag) { 'missing' } else { "exit $($got.Diag.ExitCode)" }), pacing.json bytes $($got.PacingBytes)" }
+                }
+            }
+            return $null
+        }
+        $lockedPacingMiss = Get-FramePacingLockedPacingMiss $null
+        if ($lockedPacingMiss) { throw "The summary under a locked pacing.json: $lockedPacingMiss." }
+        $diagnosticsAfter = $summaryText.Replace($pacingFinally.Value, $pacingPlain + $diagnosticsTry.Replace("`n            ", "`n        ").Replace("            `$summary.ExitCode", "        `$summary.ExitCode"))
+        if ([string]::Equals($diagnosticsAfter, $summaryText, [StringComparison]::Ordinal)) { throw 'The locked-pacing control changed nothing.' }
+        if ($null -ne (Get-FramePacingLockedDiagnosticsMiss $diagnosticsAfter)) { throw 'The locked-pacing control is not round 3''s working order.' }
+        if ($null -eq (Get-FramePacingLockedPacingMiss $diagnosticsAfter)) { throw 'The locked-pacing cases accepted round 3''s order, which loses diagnostics.json.' }
+        $cases.Add("summary under a locked pacing.json (Sol on #744, round 4: the write's error still ends the summary, after diagnostics.json keeps exits 1, 2 and 3 and the completed run's statistics, in both modes; round 3's order as the control)")
         $cases.Add("summary output ($($summaryCases.Count) cases under StrictMode, pacing.json, the JSON, the console and the exit; every exit but 0 writes the allowlist with its verdict and no timing, and real input or an unread count publishes nothing; Sol's late assignment, Opus's M13 and M17, real input ignored, an unread count read as none, the old voided-only branch, a failed dry run's p95 kept and the pool's old if assignment as controls)")
 
         # The series' end (the lead, Sol and Opus on #741, round 6), with Sol's stand-in: a watch whose count moves as
