@@ -1478,12 +1478,19 @@ harness, its workload and its run-time checks.
 The interactive offload's hosted lane (design §4; test-harnesses.md
 GUI-HIDDEN-DEFAULT-01). It runs each leaf in `gui-hidden-plan.json` on a
 private desktop of its own, against a fresh portable copy of the receipt-bound
-measurement build, on every pull request and push through
-`.github/workflows/gui-hidden.yml`, and locally:
+measurement build, through `.github/workflows/gui-hidden.yml`, and locally.
+In the workflow, the `gui-hidden-gate` job runs on every pull request and
+push; the suite itself runs on every push, scheduled and manual run, and on a
+pull request when the selection (`scripts/ci-gui-selection.ps1`) says its
+change needs it, or cannot decide. A docs-only pull request skips the suite
+and the gate still passes.
 
 ```text
-pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <dir> [-Leaves smoke,undo]
+pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <new or empty dir> [-Leaves smoke,undo]
 ```
+
+A run with `-Leaves` is for diagnosis: its result is `skip` when the leaves
+pass, never `pass`, because `leaves-pass` is the whole plan's.
 
 Until the gate switches, the interactive composite remains the release
 evidence; this lane runs beside it.
@@ -1511,7 +1518,10 @@ product-AUMID `zig-out` build, which writes the real jump list
 GitHub-hosted runner. The runner validates the raw generation before staging
 and at the end, and stages one copy per leaf: everything but `noctty.ico`,
 `crash`, `ghostty` and the PDBs, plus `share`, with `noctty.portable` beside
-the exe. Both the app and the CLI are hashed against the receipt. A passing
+the exe. Both the app and the CLI are hashed against the receipt, and the
+ConPTY pair (`conpty.dll`, `OpenConsole.exe`) against the prefix's bytes as
+validated; at the end the generation must still match those hashes and the
+receipt's own bytes. A passing
 leaf's copy is deleted at once, a failing one's at the end unless
 `-KeepFailedCopies`. The runner stops with 20 GB or less free.
 
@@ -1526,30 +1536,48 @@ breakaway and kills on close and on an unhandled exception. It sets
   desktop, and the input desktop. An unreadable input desktop refuses too: keep
   the session unlocked during a local run;
 - the leaf never bootstraps or builds;
+- its sandbox is `<run>\sandbox-<token>`, under its run directory, where
+  `<token>` is a fresh run token the runner draws for each leaf
+  (`staged.json`); every class it names ends in the token, so no two runs,
+  nor a run and the legacy route, share a sandbox or a single-instance pipe;
 - it starts noctty and the CLI only through
   `Start-InteractiveWin11HostedProcess`, which checks the staged file's
-  identity, builds its own quoted command line, refuses `--command`, and
-  records each PID before it runs. `Start-Process` stays only in each leaf's
-  default branch;
+  identity, builds its own quoted command line, refuses `--command`, applies
+  the argument rule (`Get-InteractiveWin11HostedArgumentRefusal`: every
+  `--class` ends in the token; an app launch states `--single-instance`, and
+  `true` only in the IPC leaves; every action but `+help`, `+version`,
+  `+list-*` and `+vt-probe` names the class; no `--config-file`), reads the
+  started process's command line back and compares it, and records each PID
+  before it runs. `Start-Process` stays only in each leaf's default branch;
 - its config goes into the copy's `config.ghostty`
   (`Write-InteractiveWin11HostedConfig`): its own lines, then
   `command = direct:<System32>\cmd.exe /D`, the clipboard read and write
   denied, `copy-on-select = false`, `auto-update = off`,
   `desktop-notifications = false`, and `window-save-state = never` unless the
-  leaf sets it;
+  leaf sets it. A leaf's own lines cannot set `class`, `single-instance` or an
+  include;
 - a one-shot `/c` stimulus waits on `shell-read-<k>.flag` so the runner reads
   its command line before it exits;
 - at exit it writes `leaf-receipt.json`, which says whether the real-input
   module's type was ever loaded.
 
 **What the runner fails a leaf on.** A nonzero exit or a timeout. A joiner of
-its job left unread (the job's own `TotalProcesses` against the processes
-read). A `cmd.exe` that is not System32's or has no `/D` before `/C` or `/K`,
-or fewer shells than the plan's `expectedShells`. A `noctty.exe` or
-`noctty.com` the launcher did not start, unless a launched `noctty.com`
-forwarded it or a shell inside the terminal started it. A window of its job on
-Default. A reparse point under its sandbox or run directory. A missing receipt,
-or one that says the module loaded. A staged file changed.
+its job left unread, its image included (the job's own `TotalProcesses`
+against the processes read). A `cmd.exe` whose loaded image is not System32's
+(path and identity), whose command line does not name it, or that has no `/D`
+before `/C`, `/R` or `/K`; or fewer shells than the plan's `expectedShells`. A
+`noctty.exe` or `noctty.com` outside the copy (image path and identity), one
+breaking the argument rule on its command line, or one not accounted for.
+Accounted means the launcher started it; or it is a `noctty.com` started by a
+shell that is the exact child of an accounted `noctty.exe` (shell-command's
+PATH lookup inside the terminal); or a `noctty.exe` an accounted `noctty.com`
+forwarded. A shell the leaf started itself vouches for nothing. A window of its
+job on Default, sampled every 500 ms and once more before the job is ended (a
+window that opens and closes between two samples is not seen). A reparse point
+under its run directory. A copy's `config.ghostty` that no longer holds the
+launch policy, read back when the leaf ends. A receipt that is missing,
+incomplete or mistyped, or says the module loaded. A staged file (app, CLI,
+ConPTY pair) changed.
 
 **The real-input module.** `scripts/interactive-win11-realinput.ps1`
 (`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib
@@ -1560,19 +1588,26 @@ triples, never a posted triple), with `AttachThreadInput` and
 `SetKeyboardState` for modifiers, `SetFocus` and `GetGUIThreadInfo` for focus,
 and the foreground-free `WM_COMMAND` hooks 1901, 1904, 1907 and 1908.
 
-**What it uploads.** `-Out` holds only `result.json` (the flagship result
-schema, scenario `windows.gui-hidden.suite`) and `receipts/`, one JSON object
-per leaf plus `run.json`, of allowlisted values only: booleans, numbers and
-short strings without a path separator, quote or bracket. No path, command
-line, window title, environment value, screen capture or process listing.
-The logs, the state guard's receipts and the copies stay under `-Work`.
+**What it uploads.** `-Out` must be new or empty, and holds only
+`result.json` (the flagship result schema, scenario
+`windows.gui-hidden.suite`) and `receipts/`: one JSON object per leaf this run
+ran, plus `run.json` (the build's head and hashes, the hosted image's name and
+version in their known shapes, whether an HKCU or HKLM `Command
+Processor\AutoRun` value exists, never the value, and each guard's result).
+All are allowlisted values only: booleans, numbers and short strings without a
+path separator, quote or bracket. No path, command line, window title,
+environment value, screen capture or process listing; a failed leaf's log
+reaches its receipt only as the lines that rule admits, the rest counted. The
+console gets leaf ids and failure kinds. The logs, the runner's errors, the
+state guard's receipts and the copies stay under `-Work`.
 
 **Guards and exit codes.** The state guard (the product jump list,
 `startup-attempts.json`, the clipboard sequence) and the PSReadLine history
 guard span the run; a tripped one exits 3. A local run on `WinSta0` shares the
 user's clipboard, so the clipboard guard can trip on the user's own copy;
-don't copy during a run. 0 pass, 1 a leaf failed, 2 a staging or validation
-failure.
+don't copy during a run. 0 pass, 1 a leaf failed, 2 a validation, staging,
+generation or runner failure (with an `error` result when `-Out` could be
+opened), 3 a tripped guard.
 
 `gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
 and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1

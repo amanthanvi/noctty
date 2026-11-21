@@ -124,8 +124,10 @@ reading step under [Self-Correction Log](#self-correction-log).
   `/D`; only a harness that builds its own quoted command line (the soak, the
   reply-path harness) may pass it there. Give each `-e` stimulus that starts
   cmd the absolute path and `/D` as separate arguments. Until the interactive
-  composite is retired, the shared helper's default route keeps
-  `--command=cmd.exe` for it alone. Guard the run with
+  composite is retired, the shared helper (`Get-InteractiveWin11LaunchArguments`)
+  keeps `--command=cmd.exe` on its non-hosted route unless
+  `-UseConfiguredCommand` is set, a standalone run of a legacy leaf included.
+  Guard the run with
   `scripts/windows-harness-history.ps1`, which only detects a change to the
   real history's size or mtime. (test-harnesses.md: 2026-10-11 PKG-13,
   2026-10-17 PKG-76, 2026-10-19 HARNESS-PWSH-HISTORY-01.)
@@ -710,7 +712,9 @@ that govern each symbol you change, or that none does.
   `test/windows/gui-hidden-scripts.ps1`, the interactive library's hosted
   mode (`InteractiveWin11HostedDesktop`,
   `Start-InteractiveWin11HostedProcess`,
-  `Write-InteractiveWin11HostedConfig`), the real-input module
+  `Write-InteractiveWin11HostedConfig`, the argument rule
+  `Get-InteractiveWin11HostedArgumentRefusal` and the run token
+  `Get-InteractiveWin11HostedRunToken`), the real-input module
   `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
   the measurement record
   `test/windows/flagship/measurements/gui-measurements.json` and the
@@ -725,7 +729,9 @@ that govern each symbol you change, or that none does.
   (`win32/test_support.zig`, `TestSession`, the private-desktop runners
   `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop` and the empty
   keyboard they pin), PSReadLine history isolation
-  (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), a bash
+  (`scripts/windows-harness-history.ps1`), the shell a fixture starts (the
+  config line `Get-InteractiveWin11HostedPolicyConfig` writes, the shared
+  helper's legacy `--command=cmd.exe`), a bash
   probe's `HISTFILE`, a failing test's error name (the installed test
   executable), the skip budget (`scripts/check-test-skips.ps1`,
   `test/windows/test-skip-budget.json`) and the nightly per-test log it reads
