@@ -376,7 +376,7 @@ foreach ($member in $list) {
     Assert-True (Get-CiGuiSelection -ChangedPaths @($member) -GuiList $list) "GUI list member $member alone must select the suite."
 }
 foreach ($member in $real.Members) { Assert-True ($list -ccontains $member) "The GUI list must hold closure member $member." }
-foreach ($buildInput in @($plan.buildInputs)) { Assert-True ($list -ccontains [string]$buildInput) "The GUI list must hold build input $buildInput." }
+foreach ($buildInput in @($plan.buildInputs)) { Assert-True ($list -ccontains (ConvertTo-CiRepoPath ([string]$buildInput))) "The GUI list must hold build input $buildInput." }
 
 # Singletons, independent of the computed list (which cannot show its own omissions): each keeps its own
 # Get-CiPathNeeds result, so test.yml's flags stay what they were, and each selects the suite.
@@ -424,6 +424,25 @@ $headReader = {
 $deletedList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $headReader -BaseReader $workingReader
 Assert-True ($deletedList -ccontains $undoPath) 'A leaf the change deletes must stay in the GUI list through the base tree.'
 Assert-True (Get-CiGuiSelection -ChangedPaths @($undoPath) -GuiList $deletedList) 'Deleting a closure member must select the suite.'
+
+# A build input the plan spells with backslashes (the plan contract takes any path that exists) selects the suite
+# under either spelling of a change, since git reports '/' (CodeRabbit on #740: the list kept the backslash form, the
+# ordinal lookup missed it, and Get-CiPathNeeds calls the path none). The path is one only the GUI list can select.
+$buildFixture = 'test/windows/interactive-win11-build-fixture.ps1'
+Assert-True ((Get-CiPathNeeds $buildFixture) -ceq 'none') "$buildFixture must stay a path Get-CiPathNeeds calls none, or the next checks prove nothing."
+Assert-True (-not (Get-CiGuiSelection -ChangedPaths @($buildFixture) -GuiList $list)) 'The build-input fixture must not select the suite while no plan names it (the next check''s control).'
+$backslashPlan = $planText | ConvertFrom-Json
+$backslashPlan.buildInputs = @($backslashPlan.buildInputs) + @($buildFixture.Replace('/', '\'))
+$backslashPlanText = $backslashPlan | ConvertTo-Json -Depth 6
+$backslashReader = {
+    param([string] $RepoPath)
+    if ($RepoPath -ceq 'test/windows/gui-hidden-plan.json') { return $backslashPlanText }
+    return & $workingReader $RepoPath
+}.GetNewClosure()
+$backslashList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $backslashReader
+foreach ($spelling in @($buildFixture, $buildFixture.Replace('/', '\'))) {
+    Assert-True (Get-CiGuiSelection -ChangedPaths @($spelling) -GuiList $backslashList) "A build input the plan spells with backslashes must select the suite for a change to $spelling."
+}
 
 # A prior tree's reader whose undo script also loads a helper that tree alone has. Each helper path is one
 # Get-CiPathNeeds calls `none`, so only the GUI list can select it.

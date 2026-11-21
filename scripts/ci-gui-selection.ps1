@@ -121,7 +121,9 @@ function Get-CiGuiList {
     [void]$entries.Add($script:CiGuiRunnerPath)
     foreach ($plan in $plans) {
         foreach ($leaf in @($plan.leaves)) { [void]$entries.Add([string]$leaf.script) }
-        foreach ($buildInput in @($plan.buildInputs)) { [void]$list.Add([string]$buildInput) }
+        # In the form Get-CiGuiSelection gives a changed path, so a build input the plan spells with backslashes still
+        # matches git's '/' (CodeRabbit on #740).
+        foreach ($buildInput in @($plan.buildInputs)) { [void]$list.Add((ConvertTo-CiRepoPath ([string]$buildInput))) }
     }
     foreach ($tree in $trees) {
         # An entry a tree does not have (a new leaf, on the base side) has nothing to walk there.
