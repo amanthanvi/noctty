@@ -330,6 +330,14 @@ pub fn invalidateMarginShift(
     const span_start = command.prompt.*;
     const span_end = completedEnd(pages, command);
 
+    // A command that printed nothing ends its span where its input ends, a
+    // point every read finds again (inputRegion), so a move that lengthens
+    // the input changes the command as well.
+    if (command.output_end == null and inputRunGrows(pages, region, shift, span_end)) {
+        self.clearCompleted(pages);
+        return;
+    }
+
     var y = region.top;
     while (y <= region.bottom) : (y += 1) {
         const row = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse continue;
@@ -391,6 +399,63 @@ pub fn invalidateMarginShift(
             }
         }
     }
+}
+
+/// Whether a margin move lengthens the input that ends at `input_end`. The
+/// input highlight (PageList.highlightSemanticContent) runs on through
+/// `.prompt` cells and stops at the first `.output` one, within the rows up
+/// to the next prompt, so the run grows when the move makes the first cell
+/// past those prompt cells an `.input` one.
+fn inputRunGrows(
+    pages: *PageList,
+    region: MarginRegion,
+    shift: usize,
+    input_end: Pin,
+) bool {
+    const end_pt = pages.pointFromPin(.active, input_end) orelse return false;
+    var y: usize = end_pt.active.y;
+    var x: usize = @as(usize, end_pt.active.x) + 1;
+    while (true) {
+        const row = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
+        const cells = row.cells(.all);
+        while (x < cells.len) : (x += 1) {
+            switch (movedSemanticContent(pages, region, shift, y, x, cells[x])) {
+                .prompt => {},
+                .input => return true,
+                .output => return false,
+            }
+        }
+
+        // The highlight's rows end before the next prompt row.
+        y += 1;
+        x = 0;
+        const next = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
+        if (next.rowAndCell().row.semantic_prompt == .prompt) return false;
+    }
+}
+
+/// The semantic content of active cell (`x`, `y`) once a margin move has
+/// run: inside `region`, that of the cell `shift` rows below it (splitting a
+/// wide character keeps its mark), or a blank's `.output` past the region's
+/// bottom; elsewhere its own, `current`.
+fn movedSemanticContent(
+    pages: *PageList,
+    region: MarginRegion,
+    shift: usize,
+    y: usize,
+    x: usize,
+    current: pagepkg.Cell,
+) pagepkg.Cell.SemanticContent {
+    if (y < region.top or y > region.bottom or
+        x < region.left or x > region.right)
+    {
+        return current.semantic_content;
+    }
+    if (y + shift > region.bottom) return .output;
+    const src = pages.pin(.{ .active = .{ .y = @intCast(y + shift) } }) orelse
+        return .output;
+    const cells = src.cells(.all);
+    return if (x < cells.len) cells[x].semantic_content else .output;
 }
 
 /// Whether the cell a margin move brings into column `x` is read by a

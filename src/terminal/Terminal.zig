@@ -12615,6 +12615,64 @@ test "Terminal: scrollUp in margins drops a command when the left margin splits 
     try testing.expect(!try testScrollUpMarginsWideGlyph(13, 0));
 }
 
+/// "PS> one" completed with no output on row 0, then `row1` written on row 1
+/// (as a new prompt's input when `prompt`, else as output), then DECLRMM
+/// margins at columns 8-21 and rows 1-3 and SU 1. Returns whether the last
+/// command survived as "one".
+fn testScrollUpMarginsPastNoOutput(row1: []const u8, prompt: bool) !bool {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+    s.cursorAbsolute(0, 1);
+    if (prompt) {
+        s.cursorSetSemanticContent(.{ .prompt = .initial });
+        try s.testWriteString("PS> ");
+        s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+        try s.semanticPromptStartInput();
+    }
+    try s.testWriteString(row1);
+    {
+        const command = (try s.lastCommandString(alloc)) orelse
+            return error.TestExpectedCommand;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+
+    t.modes.set(.enable_left_and_right_margin, true);
+    t.setTopAndBottomMargin(1, 3);
+    t.setLeftAndRightMargin(8, 21);
+    try t.scrollUp(1);
+
+    const command = (try s.lastCommandString(alloc)) orelse return false;
+    defer alloc.free(command);
+    try testing.expectEqualStrings("one", command);
+    return true;
+}
+
+test "Terminal: scrollUp in margins moving input past a command without output drops the command" {
+    // Row 0's span ends at "one", where its input ends. SU 1 brings
+    // "ger-command", the next prompt's input, into the cells after it, which
+    // would read as "oneger-command".
+    try testing.expect(!try testScrollUpMarginsPastNoOutput("longer-command", true));
+}
+
+test "Terminal: scrollUp in margins moving output past a command without output keeps the command" {
+    // The same move with output text on row 1: an `.output` cell after "one"
+    // still ends its input.
+    try testing.expect(try testScrollUpMarginsPastNoOutput("longer-output", false));
+}
+
 test "Terminal: alt screen scroll up recycled row has default metadata" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 5, .rows = 3 });
