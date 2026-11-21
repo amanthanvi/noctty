@@ -88,6 +88,29 @@ if ($env:FIXTURE_BRANCH) { $loaded = Join-Path $PSScriptRoot 'same.ps1' }
 }
 Assert-True ($repeated.Problems.Count -eq 0 -and $repeated.Members -ccontains 'test/windows/same.ps1') "Assignments that agree must still resolve: $($repeated.Problems -join '; ')"
 
+# Join-Path's forms (CodeRabbit on #740): a named -Path with one positional child, both positional, both named in
+# either order, and more children after the first. Each must reach its own target.
+$joinForms = [ordered]@{
+    'named -Path, positional child' = '. (Join-Path -Path $PSScriptRoot ''join-a.ps1'')'
+    'all positional' = '. (Join-Path $PSScriptRoot ''join-b.ps1'')'
+    'named -ChildPath first' = '. (Join-Path -ChildPath ''join-c.ps1'' -Path $PSScriptRoot)'
+    'named -ChildPath, positional parent' = '. (Join-Path -ChildPath ''join-d.ps1'' $PSScriptRoot)'
+    'more children' = '. (Join-Path $PSScriptRoot ''join'' ''join-e.ps1'')'
+}
+$joinTargets = @{
+    'named -Path, positional child' = 'test/windows/join-a.ps1'
+    'all positional' = 'test/windows/join-b.ps1'
+    'named -ChildPath first' = 'test/windows/join-c.ps1'
+    'named -ChildPath, positional parent' = 'test/windows/join-d.ps1'
+    'more children' = 'test/windows/join/join-e.ps1'
+}
+foreach ($form in $joinForms.Keys) {
+    $joinWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $joinForms[$form]; $joinTargets[$form] = '1' }
+    Assert-True ($joinWalk.Problems.Count -eq 0 -and $joinWalk.Members -ccontains $joinTargets[$form]) "Join-Path, $form, must reach $($joinTargets[$form]): $($joinWalk.Problems -join '; ')"
+}
+$joinResolve = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '. (Join-Path -Resolve $PSScriptRoot ''join-*.ps1'')' }
+Assert-True ($joinResolve.Problems.Count -eq 1 -and $joinResolve.Unresolved.Count -eq 1) "Join-Path -Resolve (wildcards) must be unresolved: $($joinResolve.Problems -join '; ')"
+
 $unlisted = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$path = Get-Something; & $path' }
 Assert-True ($unlisted.Problems.Count -eq 1 -and $unlisted.Unresolved[0].Anchor -ceq '& $path') "An unlisted & `$path to a script must fail the walk: $($unlisted.Problems -join '; ')"
 

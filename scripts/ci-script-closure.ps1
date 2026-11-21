@@ -255,25 +255,45 @@ function Resolve-CiScriptValue {
             if (-not $name) { return $unresolved }
             if ($name -match '(?i)^get-[a-z0-9-]*(exepath|clipath)$') { return @{ Kind = 'native'; Value = $null } }
             if ($name -ieq 'join-path') {
-                $positional = [System.Collections.Generic.List[object]]::new()
+                # Join-Path [-Path] <parent> [-ChildPath] <child> [<more children>...]: a named -Path or -ChildPath
+                # takes its own place and the positionals fill the others in order, so `Join-Path -Path $root 'x'`
+                # joins its one positional as the child (CodeRabbit on #740). Any other parameter (an abbreviation,
+                # -Resolve's wildcards) is unresolved.
                 $named = @{}
+                $positional = [System.Collections.Generic.List[object]]::new()
                 for ($i = 1; $i -lt $elements.Count; $i++) {
                     $element = $elements[$i]
                     if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+                        $parameter = $element.ParameterName.ToLowerInvariant()
+                        if ($parameter -ceq 'pspath') { $parameter = 'path' }
+                        if ($parameter -notin @('path', 'childpath', 'additionalchildpath') -or $named.ContainsKey($parameter)) { return $unresolved }
                         $argument = $element.Argument
-                        if ($null -eq $argument -and $i + 1 -lt $elements.Count) { $i++; $argument = $elements[$i] }
-                        $named[$element.ParameterName.ToLowerInvariant()] = $argument
+                        if ($null -eq $argument) {
+                            if ($i + 1 -ge $elements.Count) { return $unresolved }
+                            $i++; $argument = $elements[$i]
+                        }
+                        $named[$parameter] = $argument
                     } else { $positional.Add($element) }
                 }
-                $pathNode = $(if ($named.ContainsKey('path')) { $named['path'] } elseif ($positional.Count -ge 1) { $positional[0] } else { $null })
-                $childNode = $(if ($named.ContainsKey('childpath')) { $named['childpath'] } elseif ($positional.Count -ge 2) { $positional[$(if ($named.ContainsKey('path')) { 0 } else { 1 })] } else { $null })
-                if ($null -eq $pathNode -or $null -eq $childNode) { return $unresolved }
-                $left = Resolve-CiScriptValue $pathNode $Context ($Depth + 1)
-                $right = Resolve-CiScriptValue $childNode $Context ($Depth + 1)
+                $parts = [System.Collections.Generic.List[object]]::new()
+                $next = 0
+                foreach ($slot in @('path', 'childpath')) {
+                    if ($named.ContainsKey($slot)) { $parts.Add($named[$slot]) }
+                    elseif ($next -lt $positional.Count) { $parts.Add($positional[$next]); $next++ }
+                    else { return $unresolved }
+                }
+                while ($next -lt $positional.Count) { $parts.Add($positional[$next]); $next++ }
+                if ($named.ContainsKey('additionalchildpath')) { $parts.Add($named['additionalchildpath']) }
+                $values = @(foreach ($part in $parts) { Resolve-CiScriptValue $part $Context ($Depth + 1) })
+                $last = $values[-1]
                 # `Join-Path <anything> 'noctty.com'`: a native executable, whatever directory it is in.
-                if ($right.Kind -eq 'path' -and (Test-CiScriptTargetKind $right.Value) -eq 'native') { return @{ Kind = 'native'; Value = $null } }
-                if ($left.Kind -ne 'path' -or $right.Kind -ne 'path') { return $unresolved }
-                return @{ Kind = 'path'; Value = ($left.Value.TrimEnd('\', '/') + '\' + $right.Value.TrimStart('\', '/')) }
+                if ($last.Kind -eq 'path' -and (Test-CiScriptTargetKind $last.Value) -eq 'native') {
+                    return @{ Kind = 'native'; Value = (Split-Path -Leaf $last.Value).ToLowerInvariant() }
+                }
+                if (@($values | Where-Object { $_.Kind -ne 'path' }).Count -ne 0) { return $unresolved }
+                $joined = $values[0].Value
+                foreach ($value in $values[1..($values.Count - 1)]) { $joined = $joined.TrimEnd('\', '/') + '\' + $value.Value.TrimStart('\', '/') }
+                return @{ Kind = 'path'; Value = $joined }
             }
             if ($name -ieq 'split-path') {
                 $parent = $false; $target = $null
