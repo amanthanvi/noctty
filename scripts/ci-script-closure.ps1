@@ -641,7 +641,17 @@ function Resolve-CiScriptVariable {
     #     function's (or script's) own parameter (Resolve-CiScriptParameter); for a function without one, any write
     #     or same-named parameter outside it (PowerShell scopes are dynamic: a caller's variable is visible); for the
     #     script, nothing the walker can see (a caller that dot-sources it), so unresolved;
-    #   * at script level, a `$script:`/`$global:` write in any function adds a value.
+    #   * at script level, which variable a name is depends on how the file runs, which the walker cannot see
+    #     (measured on pwsh 7.6.10 and Windows PowerShell 5.1.26100). A -File entry runs in the global scope (it has
+    #     no parent scope), so an unqualified, a `$script:` and a `$global:` write are one variable; a script run
+    #     with & has its own script scope, apart from the global one; a file dot-sourced in a function writes its
+    #     unqualified names in that function's scope, apart from its caller's script scope (which is the global one
+    #     when the caller is a -File entry). A read looks through the scopes of each way from its own out, and stops
+    #     at a write that dominates it, or at the script's parameter, which is a variable of the file's own scope
+    #     from the start. Every way's values count (Opus on #740: `$c = <a>; $global:c = <b>; & $c` reads b under
+    #     -File and a under &, and the walk took b alone). A `$script:` or `$global:` write in a function may run at
+    #     any time, so it adds a value wherever its scope is looked through.
+    # A read with a scope qualifier (`$global:c`) names no variable the walker matches, so it is unresolved.
     # A foreach variable, a `+=` or multiple assignment, `[ref]`, Set-Variable or New-Variable naming it, or a
     # common -*Variable parameter naming it, is unresolved.
     param([string] $Name, $Use, [hashtable] $Context, [int] $Depth)
@@ -683,18 +693,22 @@ function Resolve-CiScriptVariable {
                 Node = $assignment
                 Function = Get-CiScriptFunctionOf $assignment
                 Outer = [bool]($path.IsScript -or $path.IsGlobal)
+                # The scope a qualifier names: global, script, or the write's own (unqualified, local:, private:).
+                Scope = $(if ($path.IsGlobal) { 'global' } elseif ($path.IsScript) { 'script' } else { 'local' })
                 Value = $value
             })
         }
+        $writes = @($writes | Sort-Object { $_.Node.Extent.StartOffset })
+        # Each write's value, resolved once: the script-level ways below read the same writes again.
+        $resolvedWrites = @{}
         $valueOf = {
             param($write)
             if ($null -ne $write.Value) { return $write.Value }
-            return Resolve-CiScriptValue $write.Node.Right $Context ($Depth + 1)
+            $at = $write.Node.Extent.StartOffset
+            if (-not $resolvedWrites.ContainsKey($at)) { $resolvedWrites[$at] = Resolve-CiScriptValue $write.Node.Right $Context ($Depth + 1) }
+            return $resolvedWrites[$at]
         }
         $values = [System.Collections.Generic.List[hashtable]]::new()
-        # The read's own scope: a function's local writes, or the script's writes at script level.
-        $local = @($writes | Where-Object { [object]::ReferenceEquals($_.Function, $useFunction) -and ($null -eq $useFunction -or -not $_.Outer) } |
-            Sort-Object { $_.Node.Extent.StartOffset })
         # Where the read runs: in the innermost scriptblock around it (which may run at any later point), if any, and
         # inside which loops (which repeat it after later writes).
         $scriptblock = $null; $parameterOwner = $null
@@ -715,44 +729,73 @@ function Resolve-CiScriptVariable {
             ($block -is [System.Management.Automation.Language.NamedBlockAst] -or $block -is [System.Management.Automation.Language.StatementBlockAst]) -and
                 $write.Node.Extent.EndOffset -le $before -and (& $inside $point $block)
         }
+        # The values one variable's writes ($Set, in source order) give the read, and whether one of them dominates it.
         # The writes inside the read's scriptblock (or its whole scope), the last that dominates the read, and the
         # loops between that write and the read: a write anywhere in one of those reaches the read on a later pass.
-        $inner = @($local | Where-Object { $null -eq $scriptblock -or (& $inside $_.Node $scriptblock) })
-        $dominant = @($inner | Where-Object { & $dominates $_ $Use $useOffset } | Select-Object -Last 1)
-        $carry = @($loops | Where-Object { $dominant.Count -eq 0 -or (& $inside $_ $dominant[0].Node.Parent) } | Select-Object -Last 1)
-        $reaching = @($inner | Where-Object {
-            ($dominant.Count -eq 0 -or $_.Node.Extent.StartOffset -ge $dominant[0].Node.Extent.StartOffset) -and
-                ($_.Node.Extent.EndOffset -le $useOffset -or ($carry.Count -eq 1 -and (& $inside $_.Node $carry[0])))
-        })
-        foreach ($write in $reaching) { $values.Add((& $valueOf $write)) }
-        if ($dominant.Count -eq 0 -and $scriptblock) {
-            # The scriptblock may run after any later write of the scope; the last write that dominates its
-            # definition replaces everything before it.
-            $outerDominant = @($local | Where-Object { -not (& $inside $_.Node $scriptblock) -and (& $dominates $_ $scriptblock $scriptblock.Extent.StartOffset) } | Select-Object -Last 1)
-            foreach ($write in @($local | Where-Object { -not (& $inside $_.Node $scriptblock) })) {
-                if ($outerDominant.Count -eq 0 -or $write.Node.Extent.StartOffset -ge $outerDominant[0].Node.Extent.StartOffset) { $values.Add((& $valueOf $write)) }
+        # A read in a scriptblock that no write inside dominates may run after any later write of the scope; the last
+        # write that dominates the scriptblock's definition replaces everything before it.
+        $flow = {
+            param([object[]] $Set)
+            $found = [System.Collections.Generic.List[hashtable]]::new()
+            $inner = @($Set | Where-Object { $null -eq $scriptblock -or (& $inside $_.Node $scriptblock) })
+            $dominant = @($inner | Where-Object { & $dominates $_ $Use $useOffset } | Select-Object -Last 1)
+            $carry = @($loops | Where-Object { $dominant.Count -eq 0 -or (& $inside $_ $dominant[0].Node.Parent) } | Select-Object -Last 1)
+            $reaching = @($inner | Where-Object {
+                ($dominant.Count -eq 0 -or $_.Node.Extent.StartOffset -ge $dominant[0].Node.Extent.StartOffset) -and
+                    ($_.Node.Extent.EndOffset -le $useOffset -or ($carry.Count -eq 1 -and (& $inside $_.Node $carry[0])))
+            })
+            foreach ($write in $reaching) { $found.Add((& $valueOf $write)) }
+            if ($dominant.Count -eq 0 -and $scriptblock) {
+                $outer = @($Set | Where-Object { -not (& $inside $_.Node $scriptblock) })
+                $outerDominant = @($outer | Where-Object { & $dominates $_ $scriptblock $scriptblock.Extent.StartOffset } | Select-Object -Last 1)
+                foreach ($write in $outer) {
+                    if ($outerDominant.Count -eq 0 -or $write.Node.Extent.StartOffset -ge $outerDominant[0].Node.Extent.StartOffset) { $found.Add((& $valueOf $write)) }
+                }
+                if ($outerDominant.Count -eq 1) { $dominant = $outerDominant }
             }
-            if ($outerDominant.Count -eq 1) { $dominant = $outerDominant }
+            return @{ Values = $found; Dominated = $dominant.Count -gt 0 }
         }
-        if ($dominant.Count -eq 0) {
-            # The value the scope starts with.
-            $owner = $(if ($useFunction) { $useFunction } else { $ast })
-            $parameter = Get-CiScriptParameterOf $owner $Name
-            if ($parameter) { $values.Add((Resolve-CiScriptParameter $parameter)) }
-            elseif (-not $useFunction) { $values.Add($unresolved) }
-            else {
-                $outside = @($writes | Where-Object { -not [object]::ReferenceEquals($_.Function, $useFunction) -or $_.Outer })
-                if ($outside.Count -eq 0) { $values.Add($unresolved) }
-                foreach ($write in $outside) { $values.Add((& $valueOf $write)) }
-                foreach ($function in (Get-CiScriptNodes $Context FunctionDefinitionAst)) {
-                    if ([object]::ReferenceEquals($function, $useFunction)) { continue }
-                    $other = Get-CiScriptParameterOf $function $Name
-                    if ($other) { $values.Add((Resolve-CiScriptParameter $other)) }
+        if ($useFunction) {
+            # The function's own writes.
+            $result = & $flow @($writes | Where-Object { [object]::ReferenceEquals($_.Function, $useFunction) -and -not $_.Outer })
+            foreach ($value in $result.Values) { $values.Add($value) }
+            if (-not $result.Dominated) {
+                # The value the function starts with.
+                $parameter = Get-CiScriptParameterOf $useFunction $Name
+                if ($parameter) { $values.Add((Resolve-CiScriptParameter $parameter)) }
+                else {
+                    $outside = @($writes | Where-Object { -not [object]::ReferenceEquals($_.Function, $useFunction) -or $_.Outer })
+                    if ($outside.Count -eq 0) { $values.Add($unresolved) }
+                    foreach ($write in $outside) { $values.Add((& $valueOf $write)) }
+                    foreach ($function in (Get-CiScriptNodes $Context FunctionDefinitionAst)) {
+                        if ([object]::ReferenceEquals($function, $useFunction)) { continue }
+                        $other = Get-CiScriptParameterOf $function $Name
+                        if ($other) { $values.Add((Resolve-CiScriptParameter $other)) }
+                    }
                 }
             }
+            return Merge-CiScriptValues $values
         }
-        # At script level, a function's `$script:`/`$global:` write may run before the read.
-        if (-not $useFunction) { foreach ($write in @($writes | Where-Object { $_.Outer -and $null -ne $_.Function })) { $values.Add((& $valueOf $write)) } }
+        # At script level, each way the file can run: its scopes, in the order the read looks through them, each naming
+        # the write scopes that land in it (-File; &; dot-sourced in a function under a -File caller; dot-sourced in a
+        # function under an & caller).
+        $top = @($writes | Where-Object { $null -eq $_.Function })
+        $inFunctions = @($writes | Where-Object { $null -ne $_.Function -and $_.Outer })
+        $scriptParameter = Get-CiScriptParameterOf $ast $Name
+        foreach ($way in @('local script global', 'local script|global', 'local|script global', 'local|script|global')) {
+            $scopes = @($way -split '\|')
+            $settled = $false
+            for ($i = 0; $i -lt $scopes.Count -and -not $settled; $i++) {
+                $lands = @($scopes[$i] -split ' ')
+                $result = & $flow @($top | Where-Object { $lands -ccontains $_.Scope })
+                foreach ($value in $result.Values) { $values.Add($value) }
+                foreach ($write in @($inFunctions | Where-Object { $lands -ccontains $_.Scope })) { $values.Add((& $valueOf $write)) }
+                $settled = $result.Dominated
+                if (-not $settled -and $scriptParameter -and $lands -ccontains 'local') { $values.Add((Resolve-CiScriptParameter $scriptParameter)); $settled = $true }
+            }
+            # The scope's start: what a caller that dot-sources the file gave it, which the walker cannot see.
+            if (-not $settled) { $values.Add($unresolved) }
+        }
         return Merge-CiScriptValues $values
     }
     finally { [void]$Context.Resolving.Remove($key) }

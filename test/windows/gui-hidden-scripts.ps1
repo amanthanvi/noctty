@@ -115,6 +115,14 @@ $flowCases = @(
     @{ Name = 'a prefix of -OutVariable naming it'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Get-ChildItem -LiteralPath $PSScriptRoot -OutVar p | Out-Null; . $p' }
     @{ Name = 'an -OutVariable whose name is not a literal'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $n = ''p''; Get-ChildItem -LiteralPath $PSScriptRoot -OutVariable $n | Out-Null; . $p' }
     @{ Name = 'an -OutBuffer, which writes no variable'; Resolves = 'a.ps1'; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Get-ChildItem -LiteralPath $PSScriptRoot -OutBuffer 1 | Out-Null; . $p' }
+    # Scope qualifiers at script level (Opus on #740). A -File entry runs in the global scope, so `$p`, `$script:p`
+    # and `$global:p` are one variable there; under & the global one is apart, and dot-sourced in a function so is the
+    # script's. A read whose ways disagree is refused; one they agree on resolves.
+    @{ Name = 'a $global: write after the script''s (b under -File, a under &)'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $global:p = Join-Path $PSScriptRoot ''b.ps1''; & $p' }
+    @{ Name = 'a $global: write before the script''s'; Resolves = 'a.ps1'; Text = '$global:p = Join-Path $PSScriptRoot ''b.ps1''; $p = Join-Path $PSScriptRoot ''a.ps1''; & $p' }
+    @{ Name = 'only a $global: write'; Resolves = 'b.ps1'; Text = '$global:p = Join-Path $PSScriptRoot ''b.ps1''; & $p' }
+    @{ Name = 'a $script: write after an unqualified one (a dot-sourced in a function)'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $script:p = Join-Path $PSScriptRoot ''b.ps1''; & $p' }
+    @{ Name = 'only a $script: write'; Resolves = 'b.ps1'; Text = '$script:p = Join-Path $PSScriptRoot ''b.ps1''; & $p' }
 )
 foreach ($case in $flowCases) {
     $flowWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $case.Text; 'test/windows/a.ps1' = '1'; 'test/windows/b.ps1' = '2' }
