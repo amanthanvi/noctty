@@ -110,9 +110,12 @@ fn initVt(
     vt_options: TerminalBuildOptions,
     simd_libs: ?*SharedDeps.LazyPathList,
 ) !*std.Build.Module {
-    // General build options
+    // General build options. libghostty-vt never gets the runtime
+    // thread-role layer (PLAN.md §2.7's build scope), in any build.
+    var vt_cfg = cfg.*;
+    vt_cfg.thread_roles = false;
     const general_options = b.addOptions();
-    try cfg.addOptions(general_options);
+    try vt_cfg.addOptions(general_options);
 
     const vt = b.addModule(name, .{
         .root_source_file = b.path("src/lib_vt.zig"),

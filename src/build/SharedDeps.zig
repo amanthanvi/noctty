@@ -9,6 +9,12 @@ const UnicodeTables = @import("UnicodeTables.zig");
 config: *const Config,
 
 options: *std.Build.Step.Options,
+/// `options` with the runtime thread-role layer on (`Config.thread_roles`),
+/// which `add` gives an artifact built in a mode that has the layer
+/// (`Config.threadRoles`): the app exe and the test exe. Null in deps whose
+/// artifacts never get it (`withoutThreadRoles`: conpty-host, the
+/// benchmarks). `options` has it off.
+thread_role_options: ?*std.Build.Step.Options,
 help_strings: HelpStrings,
 unicode_tables: UnicodeTables,
 uucode_tables: std.Build.LazyPath,
@@ -27,8 +33,9 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
 
         // Setup by retarget
         .options = undefined,
+        .thread_role_options = undefined,
     };
-    try result.initTarget(b, cfg.target);
+    try result.initTarget(b, cfg.target, true);
     if (cfg.emit_unicode_table_gen) result.unicode_tables.install(b);
     return result;
 }
@@ -40,7 +47,16 @@ pub fn retarget(
     target: std.Build.ResolvedTarget,
 ) !SharedDeps {
     var result = self.*;
-    try result.initTarget(b, target);
+    try result.initTarget(b, target, self.thread_role_options != null);
+    return result;
+}
+
+/// These deps without the runtime thread-role layer, for an artifact that
+/// shares the app's dependencies but never gets the layer, in any mode
+/// (PLAN.md §2.7's build scope: conpty-host, the benchmarks).
+pub fn withoutThreadRoles(self: *const SharedDeps) SharedDeps {
+    var result = self.*;
+    result.thread_role_options = null;
     return result;
 }
 
@@ -57,8 +73,7 @@ pub fn changeEntrypoint(
 
     var result = self.*;
     result.config = config;
-    result.options = b.addOptions();
-    try config.addOptions(result.options);
+    try result.initOptions(b, self.thread_role_options != null);
 
     return result;
 }
@@ -67,6 +82,7 @@ fn initTarget(
     self: *SharedDeps,
     b: *std.Build,
     target: std.Build.ResolvedTarget,
+    thread_roles: bool,
 ) !void {
     // Change our config
     const config = try b.allocator.create(Config);
@@ -75,8 +91,37 @@ fn initTarget(
     self.config = config;
 
     // Setup our shared build options
+    try self.initOptions(b, thread_roles);
+}
+
+/// Builds `options` from `self.config`, which has the runtime thread-role
+/// layer off, and, when `thread_roles`, `thread_role_options` from a copy
+/// that has it on.
+fn initOptions(self: *SharedDeps, b: *std.Build, thread_roles: bool) !void {
+    std.debug.assert(!self.config.thread_roles);
     self.options = b.addOptions();
     try self.config.addOptions(self.options);
+
+    self.thread_role_options = null;
+    if (!thread_roles) return;
+    const config = try b.allocator.create(Config);
+    config.* = self.config.*;
+    config.thread_roles = true;
+    const options = b.addOptions();
+    try config.addOptions(options);
+    self.thread_role_options = options;
+}
+
+/// The build options of an artifact built in `mode`: with the runtime
+/// thread-role layer when these deps give it and the mode has it.
+fn buildOptions(
+    self: *const SharedDeps,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Step.Options {
+    if (self.thread_role_options) |options| {
+        if (Config.threadRoles(mode)) return options;
+    }
+    return self.options;
 }
 
 pub fn add(
@@ -95,8 +140,9 @@ pub fn add(
     var static_libs: LazyPathList = .empty;
     errdefer static_libs.deinit(b.allocator);
 
-    // Every exe gets build options populated
-    step.root_module.addOptions("build_options", self.options);
+    // Every exe gets build options populated, with the runtime thread-role
+    // layer in the modes that have it (PLAN.md §2.7's build scope).
+    step.root_module.addOptions("build_options", self.buildOptions(optimize));
 
     // Every exe needs the terminal options
     self.config.terminalOptions(.ghostty).add(b, step.root_module);

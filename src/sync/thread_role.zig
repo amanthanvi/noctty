@@ -16,12 +16,11 @@ const builtin = @import("builtin");
 pub const Layer = enum { off, on };
 
 /// The form this build gets (§2.7's build scope: on in the app exe and the
-/// test exe in Debug and ReleaseSafe, off everywhere else). Until the
-/// `thread_roles` build option exists this constant stands for it, off, so
-/// every build keeps the plain mutex; 1A.2 replaces it with
-/// `if (@import("build_options").thread_roles) .on else .off`, and from then
-/// a module built without the option fails to compile instead of guessing.
-pub const layer: Layer = .off;
+/// test exe in Debug and ReleaseSafe, off everywhere else): the
+/// `thread_roles` build option (`Config.thread_roles`), which every module
+/// that compiles this file has, so a module built without it fails to
+/// compile instead of guessing.
+pub const layer: Layer = if (@import("build_options").thread_roles) .on else .off;
 
 /// Whether the role policies panic: PN3 (a plain lock from `.renderer`), PN4
 /// (an acquisition from a thread with no role) and PN7 (a window procedure

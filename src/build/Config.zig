@@ -42,6 +42,14 @@ strip: bool = false,
 omit_frame_pointer: bool = false,
 release_symbols: bool = false,
 
+/// Whether the modules built with this config's build options get the
+/// runtime thread-role layer: `build_options.thread_roles`, which
+/// `src/sync/thread_role.zig` reads. False here, so every lib-vt build, build
+/// tool, benchmark and conpty-host gets the plain mutex; `SharedDeps.add`
+/// builds the app exe and the test exe with a copy that sets it in the modes
+/// `threadRoles` names (PLAN.md §2.7's build scope).
+thread_roles: bool = false,
+
 /// Artifacts
 emit_bench: bool = false,
 emit_conpty_host: bool = false,
@@ -428,6 +436,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "i18n", self.i18n);
     step.addOption(bool, "custom_shaders", self.custom_shaders);
     step.addOption(bool, "release_symbols", self.release_symbols);
+    step.addOption(bool, "thread_roles", self.thread_roles);
     step.addOption(bool, "d3d11", self.d3d11);
     step.addOption(bool, "renderer_test_tools", self.renderer_test_tools);
     step.addOption(std.builtin.OptimizeMode, "test_optimize", self.test_optimize);
@@ -478,6 +487,39 @@ pub fn testModule(
     var test_options = options;
     test_options.optimize = self.test_optimize;
     return b.createModule(test_options);
+}
+
+/// Whether the app exe or the test exe, built in `mode`, gets the runtime
+/// thread-role layer (PLAN.md §2.7's build scope): in Debug and ReleaseSafe,
+/// never in ReleaseFast or ReleaseSmall. Every other artifact gets it in no
+/// mode.
+pub fn threadRoles(mode: std.builtin.OptimizeMode) bool {
+    return switch (mode) {
+        .Debug, .ReleaseSafe => true,
+        .ReleaseFast, .ReleaseSmall => false,
+    };
+}
+
+/// The text every panic of the runtime thread-role layer starts with
+/// (`src/sync`). An exe built without the layer holds none of it (PLAN.md
+/// §2.7 acceptance test 14), and build.zig checks that of the app exe.
+pub const thread_role_text = "thread-role layer:";
+
+/// Whether `file`, read from its position to its end, holds `text`, wherever
+/// the reads into `buf` split it. `buf` must be longer than `text`.
+pub fn fileHolds(file: std.fs.File, text: []const u8, buf: []u8) !bool {
+    std.debug.assert(text.len > 0 and buf.len > text.len);
+    // The bytes carried over from the last read: a match that the next read
+    // completes starts in its last `text.len - 1` bytes.
+    var kept: usize = 0;
+    while (true) {
+        const n = try file.read(buf[kept..]);
+        if (n == 0) return false;
+        const end = kept + n;
+        if (std.mem.indexOf(u8, buf[0..end], text) != null) return true;
+        kept = @min(end, text.len - 1);
+        std.mem.copyForwards(u8, buf[0..kept], buf[end - kept .. end]);
+    }
 }
 
 /// Returns the build options for the terminal module. This assumes a
@@ -577,4 +619,44 @@ test "the test executable runs in its -Dtest-optimize mode" {
         @tagName(@import("build_options").test_optimize),
         @tagName(@import("builtin").mode),
     );
+}
+
+test "the thread-role layer is on in the test executable's Debug and ReleaseSafe only" {
+    const on = @import("build_options").thread_roles;
+    // The layer takes the build option's form.
+    try std.testing.expectEqual(on, @import("../sync/thread_role.zig").layer == .on);
+    const mode = @import("builtin").mode;
+    // Never in ReleaseFast or ReleaseSmall, in any test executable.
+    if (on) try std.testing.expect(threadRoles(mode));
+    // The fork's test executable has it in its mode; lib-vt's never does.
+    switch (@import("terminal_options").artifact) {
+        .ghostty => try std.testing.expectEqual(threadRoles(mode), on),
+        .lib => try std.testing.expect(!on),
+    }
+}
+
+test "fileHolds finds the text at every split of the reads, and only it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const text = thread_role_text;
+    var buf: [text.len + 7]u8 = undefined;
+    var bytes: [3 * buf.len]u8 = undefined;
+
+    // At each offset, so a read boundary falls before, inside and after it.
+    for (0..bytes.len - text.len + 1) |at| {
+        @memset(&bytes, '.');
+        @memcpy(bytes[at..][0..text.len], text);
+        try tmp.dir.writeFile(.{ .sub_path = "exe", .data = &bytes });
+        const file = try tmp.dir.openFile("exe", .{});
+        defer file.close();
+        try std.testing.expect(try fileHolds(file, text, &buf));
+    }
+
+    // The text less its last byte, across a boundary, and then nothing.
+    @memset(&bytes, '.');
+    @memcpy(bytes[buf.len - 3 ..][0 .. text.len - 1], text[0 .. text.len - 1]);
+    try tmp.dir.writeFile(.{ .sub_path = "exe", .data = &bytes });
+    const file = try tmp.dir.openFile("exe", .{});
+    defer file.close();
+    try std.testing.expect(!try fileHolds(file, text, &buf));
 }

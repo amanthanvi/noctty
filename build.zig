@@ -144,7 +144,9 @@ pub fn build(b: *std.Build) !void {
         });
         conpty_host.subsystem = .Console;
         conpty_host.linkSystemLibrary("advapi32");
-        _ = try deps.add(conpty_host);
+        // It shares the app's deps, but never the runtime thread-role layer.
+        const conpty_host_deps = deps.withoutThreadRoles();
+        _ = try conpty_host_deps.add(conpty_host);
         b.installArtifact(conpty_host);
     }
 
@@ -205,6 +207,12 @@ pub fn build(b: *std.Build) !void {
 
     if (config.emit_exe and config.app_runtime != .none) {
         exe.?.install();
+        // An app exe built without the runtime thread-role layer holds none
+        // of its text (PLAN.md §2.7 acceptance test 14): checked at install.
+        if (!BuildConfig.threadRoles(config.optimize)) {
+            const check = ThreadRoleTextCheck.create(b, exe.?.exe.getEmittedBin());
+            b.getInstallStep().dependOn(&check.step);
+        }
         if (resources) |r| r.install();
         if (config.target.result.os.tag == .windows) {
             const TerminalHandoffProxy = @import("src/build/TerminalHandoffProxy.zig");
@@ -372,7 +380,8 @@ pub fn build(b: *std.Build) !void {
         // otherwise release binary.
         var bench_config = config;
         bench_config.optimize = .ReleaseFast;
-        const bench_deps = try SharedDeps.init(b, &bench_config);
+        // Never with the runtime thread-role layer, whatever the mode.
+        const bench_deps = (try SharedDeps.init(b, &bench_config)).withoutThreadRoles();
         inline for (benches) |bench| {
             try addBenchStep(b, &bench_deps, config.baselineTarget(), bench.name, bench.root);
         }
@@ -454,3 +463,45 @@ fn addBenchCoreImport(
     }
     compile.root_module.addImport("bench_core", bench_core);
 }
+
+/// Fails the build when an exe built without the runtime thread-role layer
+/// holds its text (`Config.thread_role_text`, which starts every panic of
+/// the layer): PLAN.md §2.7 acceptance test 14, a ReleaseFast app exe holds
+/// none of the layer's panic strings.
+const ThreadRoleTextCheck = struct {
+    step: std.Build.Step,
+    exe: std.Build.LazyPath,
+
+    fn create(b: *std.Build, exe: std.Build.LazyPath) *ThreadRoleTextCheck {
+        const check = b.allocator.create(ThreadRoleTextCheck) catch @panic("OOM");
+        check.* = .{
+            .step = .init(.{
+                .id = .custom,
+                .name = "check the exe holds no thread-role layer text",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .exe = exe.dupe(b),
+        };
+        exe.addStepDependencies(&check.step);
+        return check;
+    }
+
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
+        _ = options;
+        const BuildConfig = @import("src/build/Config.zig");
+        const check: *ThreadRoleTextCheck = @fieldParentPtr("step", step);
+        const path = check.exe.getPath2(step.owner, step);
+        const file = std.fs.cwd().openFile(path, .{}) catch |err|
+            return step.fail("unable to open '{s}': {s}", .{ path, @errorName(err) });
+        defer file.close();
+        var buf: [64 * 1024]u8 = undefined;
+        const holds = BuildConfig.fileHolds(file, BuildConfig.thread_role_text, &buf) catch |err|
+            return step.fail("unable to read '{s}': {s}", .{ path, @errorName(err) });
+        if (holds) return step.fail(
+            "'{s}' holds the runtime thread-role layer's text \"{s}\", " ++
+                "but its mode builds without the layer (PLAN.md 2.7, acceptance test 14)",
+            .{ path, BuildConfig.thread_role_text },
+        );
+    }
+};
