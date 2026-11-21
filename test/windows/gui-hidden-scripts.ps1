@@ -526,6 +526,25 @@ $cmdRefused = @(
     'pwsh -NoProfile -File (Join-Path $PSScriptRoot ''fixtures\second.cmd'')'
     'cmd.exe /d'
     'Set-Alias c cmd.exe; c /d /c exit'
+    # CodeRabbit on #740: an executable the walker cannot name (a helper named for an executable it cannot read), given
+    # standard input.
+    'Start-Process -FilePath (Get-PwshExePath) -RedirectStandardInput (Join-Path $PSScriptRoot ''input.txt'') -Wait'
+    # Opus, round 9: a quoted shell name with trailing spaces runs that shell.
+    '& ''cmd '' /d /c x.cmd'
+    '& ''CMD.EXE  '' /d /c exit'
+    'Start-Process ''cmd '' -ArgumentList ''/d'', ''/c'', ''exit'' -Wait'
+    'Set-Alias c ''cmd ''; c /d /c exit'
+    '& (Get-Command ''cmd '') /d /c exit'
+    '& "$PSScriptRoot\fixtures\second.cmd "'
+    # Opus, round 9: an executable the walker cannot name, whatever its arguments, and a helper named for cmd.
+    '& (Get-PwshExePath) build'
+    'Start-Process -FilePath (Get-PwshExePath) -Wait'
+    '& (Get-CmdExePath) /d /c exit'
+    # Opus, round 9: a bare name beside -WorkingDirectory may be found in that directory.
+    'Start-Process -FilePath helper -WorkingDirectory (Join-Path $PSScriptRoot ''fixtures'') -Wait'
+    'Start-Process pwsh -WorkingDirectory (Join-Path $PSScriptRoot ''fixtures'') -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'
+    # Opus, round 9: the dropped fixture, re-pinned: Start-Process of an extensionless path named pwsh.
+    'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\pwsh'') -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait'
 )
 foreach ($form in $cmdRefused) {
     $table = @{ 'test/windows/entry.ps1' = $form }
@@ -533,6 +552,33 @@ foreach ($form in $cmdRefused) {
     $formWalk = Get-FixtureWalk $table
     Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1 -and @($formWalk.Members | Where-Object { $_ -match '(?i)\.(cmd|bat)\z' }).Count -eq 0) "$form must be unresolved (cmd and batch files are refused), and take no batch file: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
+# Sol on #740 (round 9): Start-Process joins a shell's argument-list elements with spaces and the shell tokenizes them
+# again, so an element holding whitespace or a quote is not one argument: `'-ExecutionPolicy', "Bypass -Command $c"`
+# ran -Command while the reader skipped the element as -ExecutionPolicy's value. Such an element, in literal text or in
+# an expandable string's template, and a single-string list, are unresolved for a PowerShell FilePath.
+foreach ($form in @(
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-NonInteractive'', ''-ExecutionPolicy'', "Bypass -Command $testCommand"'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', "Bypass -File $PSScriptRoot\child.ps1"'
+        'Start-Process powershell.exe -ArgumentList @(''-NoProfile'', ''-ExecutionPolicy Bypass'', ''-File'', (Join-Path $PSScriptRoot ''child.ps1''))'
+        'Start-Process -FilePath pwsh.exe -ArgumentList ''-NoProfile'', ''-File'', ''"x y.ps1"'''
+        'Start-Process pwsh -ArgumentList ''-NoProfile -File x.ps1'''
+        'Start-Process pwsh -ArgumentList "-NoProfile -File $PSScriptRoot\child.ps1"'
+        'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', ''Bypass'', ''-Command'', $testCommand'
+    )) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/child.ps1' = '1' }
+    Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must be unresolved (Start-Process re-joins a shell's elements): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$splitWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '$script = Join-Path $PSScriptRoot ''child.ps1''; Start-Process pwsh -ArgumentList ''-NoProfile'', ''-File'', $script -Wait'; 'test/windows/child.ps1' = '1' }
+Assert-True ($splitWalk.Problems.Count -eq 0 -and $splitWalk.Members -ccontains 'test/windows/child.ps1') "A normal -ArgumentList '-NoProfile', '-File', `$script must still read its child: $($splitWalk.Problems -join '; ')"
+# Opus, round 9: a quoted pwsh with trailing spaces still reads its child; a system program beside -WorkingDirectory
+# stays no edge.
+$trailingPwsh = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& ''pwsh '' -File (Join-Path $PSScriptRoot ''child.ps1'')'; 'test/windows/child.ps1' = '1' }
+Assert-True ($trailingPwsh.Problems.Count -eq 0 -and $trailingPwsh.Members -ccontains 'test/windows/child.ps1') "& 'pwsh ' -File must read its child: $($trailingPwsh.Problems -join '; ')"
+$systemProgram = Get-FixtureWalk @{ 'test/windows/entry.ps1' = 'Start-Process -FilePath git -ArgumentList ''status'' -WorkingDirectory $PSScriptRoot -Wait' }
+Assert-True ($systemProgram.Problems.Count -eq 0 -and $systemProgram.Members.Count -eq 1) "A system program beside -WorkingDirectory is no edge: $($systemProgram.Problems -join '; ')"
+# A known non-shell executable given standard input stays no edge.
+$sortInput = Get-FixtureWalk @{ 'test/windows/entry.ps1' = 'Start-Process -FilePath sort.exe -RedirectStandardInput (Join-Path $PSScriptRoot ''input.txt'') -Wait' }
+Assert-True ($sortInput.Problems.Count -eq 0 -and $sortInput.Members.Count -eq 1) "A known non-shell executable given -RedirectStandardInput is no edge: $($sortInput.Problems -join '; ')"
 # The PowerShell readers stay: a bare or rooted pwsh or powershell reads its -File child.
 foreach ($form in @('pwsh -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')', '& C:\Tools\powershell.exe -File "$PSScriptRoot\child.ps1"', 'Start-Process -FilePath pwsh.exe -ArgumentList ''-File'', (Join-Path $PSScriptRoot ''child.ps1'') -Wait')) {
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/child.ps1' = '1' }
@@ -570,6 +616,11 @@ try {
     $caseWalk = Get-ScriptClosure -RepoRoot $caseRoot -Entries @('test/windows/entry.ps1') -Reader (New-CiScriptFileReader -RepoRoot $caseRoot) -LegacyEdges @()
     Assert-True ($caseWalk.Problems.Count -eq 0 -and $caseWalk.Members -ccontains 'test/windows/fixtures/sol-r6-helper.ps1' -and $caseWalk.Members -cnotcontains 'test/windows/Fixtures/sol-r6-helper.ps1') "A lookup spelled Fixtures\ must yield the tree's spelling: $($caseWalk.Problems -join '; ') [$($caseWalk.Members -join ', ')]"
     Assert-True (Get-CiGuiSelection -ChangedPaths @('test/windows/fixtures/sol-r6-helper.ps1') -GuiList @($caseWalk.Members)) 'A change to the tree-spelled helper must select the suite through the list the walk gave.'
+    # CodeRabbit on #740: an `Add-Type -Path` source spelled `Fixtures\Native.CS` is spelled as the tree spells it.
+    [IO.File]::WriteAllText((Join-Path $caseRoot 'test\windows\fixtures\native.cs'), 'class X {}')
+    [IO.File]::WriteAllText((Join-Path $caseRoot 'test\windows\typed.ps1'), 'Add-Type -Path (Join-Path $PSScriptRoot ''Fixtures\Native.CS'')')
+    $typedWalk = Get-ScriptClosure -RepoRoot $caseRoot -Entries @('test/windows/typed.ps1') -Reader (New-CiScriptFileReader -RepoRoot $caseRoot) -LegacyEdges @()
+    Assert-True ($typedWalk.Problems.Count -eq 0 -and $typedWalk.Members -ccontains 'test/windows/fixtures/native.cs') "An Add-Type source spelled Fixtures\Native.CS must yield the tree's spelling: $($typedWalk.Problems -join '; ') [$($typedWalk.Members -join ', ')]"
     # Opus on #740 (round 7): an explicit target spelled `Fixtures\` is spelled as the tree spells it too.
     [IO.File]::WriteAllText((Join-Path $caseRoot 'test\windows\explicit.ps1'), '& (Join-Path $PSScriptRoot ''Fixtures\Sol-R6-Helper.ps1'')')
     $explicitWalk = Get-ScriptClosure -RepoRoot $caseRoot -Entries @('test/windows/explicit.ps1') -Reader (New-CiScriptFileReader -RepoRoot $caseRoot) -LegacyEdges @()
@@ -931,6 +982,7 @@ try {
                 @{ Name = 'cmd calling a path named cmd (Sol, round 7)'; Leaf = 'cmd.exe /d /c "call $PSScriptRoot\fixtures\cmd sentinel"'; Path = 'test/windows/fixtures/cmd.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'cmd with a leading redirect (Sol, round 7)'; Leaf = 'cmd.exe /d /c "2>nul $PSScriptRoot\fixtures\sol-helper sentinel"'; Path = 'test/windows/fixtures/sol-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'a forwarding wrapper running a later powershell.exe -EncodedCommand (Greptile)'; Leaf = '& (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') run powershell.exe -EncodedCommand ZQBjAGgAbwAgAHgA'; Path = 'test/windows/fixtures/forward.cmd'; Expect = 'gui=true'; Fallback = $true }
+                @{ Name = 'Start-Process packing -File into an -ExecutionPolicy element (Sol, round 9)'; Leaf = 'Start-Process pwsh -ArgumentList ''-NoProfile'', ''-ExecutionPolicy'', "Bypass -File $PSScriptRoot\interactive-win11-wildcard-child.ps1"'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $true }
                 @{ Name = 'Start-Process forwarding "/d /c" as one element (Sol, round 7)'; Leaf = 'Start-Process -FilePath (Join-Path $PSScriptRoot ''fixtures\forward.cmd'') -ArgumentList "cmd.exe", "/d /c", "$PSScriptRoot\fixtures\sol-helper.cmd sentinel" -Wait'; Path = 'test/windows/fixtures/sol-helper.cmd'; Expect = 'gui=true'; Fallback = $true }
             )) {
             [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\interactive-win11-smoke.ps1'), $mini.Leaf)

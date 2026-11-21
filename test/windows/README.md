@@ -1661,12 +1661,24 @@ batch sibling, or none, leaves it unresolved. A relative one is unresolved.
 
 cmd and batch files are refused: any invocation of `cmd` or of a `.cmd` or
 `.bat` file is unresolved, in every form (`&`, `.`, a bare path, `Start-Process`,
-a pipeline, a batch file's arguments), so a change to such a file runs the
-suite. Every review round from 5 to 8 found a new silent hole in reading cmd's
-language or a batch file's forwarding (`%*`, a helper named by a plain word, a
-switch glued to `/C`), and no GUI member runs a resolvable cmd or batch line;
+a pipeline, a batch file's arguments), and fails the walk (see the two
+outcomes below). Every review round from 5 to 8 found a new silent hole in
+reading cmd's language or a batch file's forwarding (`%*`, a helper named by a
+plain word, a switch glued to `/C`), and no GUI member runs a resolvable cmd or
+batch line;
 only the anchored legacy-only lines (`$script:CiScriptClosureLegacyEdges`) are
 exempt. The PowerShell readers stay.
+
+An unresolved edge ends in one of two ways. In a fixture or a changed path the
+walk cannot read, the selector falls back (`gui=true`, "selection
+unavailable") and the suite runs. In a real GUI member (a hosted leaf or a
+script it reaches), the selector still falls back, but the `changes` job's
+next step, `gui-hidden-scripts.ps1`, walks the real closure and fails: the
+suite job never starts, `changes` uploads a `gui-selection` error result, and
+`gui-hidden-gate` fails. Expect suite results in the first case and a
+selection error in the second; fix the second by removing the edge or, for a
+legacy-only line, listing it with its guard in
+`$script:CiScriptClosureLegacyEdges`.
 
 Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
