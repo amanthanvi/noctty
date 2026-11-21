@@ -11,8 +11,10 @@ that classifier, and test.yml's ten outputs stay what they were: only gui-hidden
 The GUI list is computed, never kept by hand: the closure (scripts/ci-script-closure.ps1) of the runner and of every
 leaf in test/windows/gui-hidden-plan.json, plus the plan, the flagship scenario, the workflow, the helper self-test
 it runs, this script, the walker, the fixtures, the suite's contract fragment and the plan's `buildInputs` (what the
-hosted build preparation and the runner read through edges no walk shows, such as scripts/dev-windows.cmd, the
-ConPTY manifest, and the ConPTY stager with its two libraries). On a pull request it
+hosted build preparation and the runner read through edges no walk shows: the measurement build's whole input set,
+src/**, pkg/**, vendor/**, include/**, dist/windows/**, build.zig and build.zig.zon, with scripts/dev-windows.cmd and
+the ConPTY stager and its two libraries; a `<dir>/**` entry is every file under that directory in each tree walked).
+On a pull request it
 is walked over the head tree, the base tip and every merge base of the two, so a member a change deletes or renames
 away still counts: the changed paths are a three-dot diff, from the merge base, which can describe a member neither
 tip has.
@@ -100,13 +102,37 @@ function Get-CiGuiPriorRefs {
     return , $refs.ToArray()
 }
 
+function Get-CiGuiTreeFiles {
+    <#
+    .SYNOPSIS
+    The repo paths of every file under -Directory (a repo directory, '/'-separated) in -Ref's tree, or in the working
+    tree when -Ref is empty: what a `<dir>/**` build input names. The measurement build reads its whole input set, so
+    the plan lists it by tree, not file by file (Sol on #740, rounds 11 and 12: the ConPTY manifest, then the two
+    sources measure-lib reads for provenance, were each missing from a hand-kept list). Throws when git cannot list.
+    #>
+    param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Ref, [Parameter(Mandatory)] [string] $Directory)
+    if ([string]::IsNullOrWhiteSpace($Ref)) {
+        $full = Join-Path $RepoRoot ($Directory.Replace('/', '\'))
+        if (-not [IO.Directory]::Exists($full)) { return , [string[]]@() }
+        $cut = $RepoRoot.TrimEnd('\', '/').Length + 1
+        return , [string[]]@([IO.Directory]::EnumerateFiles($full, '*', [IO.SearchOption]::AllDirectories) | ForEach-Object { $_.Substring($cut).Replace('\', '/') })
+    }
+    $output = & git -C $RepoRoot ls-tree -r -z --name-only --full-tree $Ref -- "$Directory/" 2>$null
+    $code = $LASTEXITCODE
+    # A handled failure must not leave Actions' implicit `exit $LASTEXITCODE` failing the step (PKG-65).
+    $global:LASTEXITCODE = 0
+    if ($code -ne 0) { throw "git ls-tree for $Ref failed with exit code $code." }
+    return , [string[]]@((@($output) -join "`n").Split([char]0) | Where-Object { $_ })
+}
+
 function Get-CiGuiList {
     <#
     .SYNOPSIS
     The computed GUI list: repo-relative paths, sorted. The union over the head tree (the working tree) and each
     prior tree: each -BaseRef's tree (Get-CiGuiPriorRefs names them for a pull request) and each -BaseReader. Throws
     when a read or a walk fails, so the caller can run the suite. -HeadReader and -BaseReader (param([string]
-    $RepoPath) returning text or $null) replace trees, for the tests.
+    $RepoPath) returning text or $null) replace trees, for the tests; a `<dir>/**` build input is listed from the
+    working tree for them.
     #>
     param(
         [Parameter(Mandatory)] [string] $RepoRoot,
@@ -129,13 +155,21 @@ function Get-CiGuiList {
     # Every tree walks every plan's leaves, so a leaf one side drops still counts on the other.
     $entries = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     [void]$entries.Add($script:CiGuiRunnerPath)
+    $buildTrees = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     foreach ($plan in $plans) {
         foreach ($leaf in @($plan.leaves)) { [void]$entries.Add([string]$leaf.script) }
         # In the form Get-CiGuiSelection gives a changed path, so a build input the plan spells with backslashes still
-        # matches git's '/' (CodeRabbit on #740).
-        foreach ($buildInput in @($plan.buildInputs)) { [void]$list.Add((ConvertTo-CiRepoPath ([string]$buildInput))) }
+        # matches git's '/' (CodeRabbit on #740). A `<dir>/**` entry is expanded in each tree below.
+        foreach ($buildInput in @($plan.buildInputs)) {
+            $path = ConvertTo-CiRepoPath ([string]$buildInput)
+            if ($path.EndsWith('/**', [StringComparison]::Ordinal)) { [void]$buildTrees.Add($path.Substring(0, $path.Length - 3)) }
+            else { [void]$list.Add($path) }
+        }
     }
     foreach ($tree in $trees) {
+        foreach ($directory in $buildTrees) {
+            foreach ($file in (Get-CiGuiTreeFiles -RepoRoot $RepoRoot -Ref $tree.Ref -Directory $directory)) { [void]$list.Add($file) }
+        }
         # An entry a tree does not have (a new leaf, on the base side) has nothing to walk there.
         $present = @($entries | Where-Object { $null -ne (& $tree.Reader $_) })
         if ($present.Count -eq 0) { continue }

@@ -763,13 +763,40 @@ foreach ($member in $list) {
     Assert-True (Get-CiGuiSelection -ChangedPaths @($member) -GuiList $list) "GUI list member $member alone must select the suite."
 }
 foreach ($member in $real.Members) { Assert-True ($list -ccontains $member) "The GUI list must hold closure member $member." }
-foreach ($buildInput in @($plan.buildInputs)) { Assert-True ($list -ccontains (ConvertTo-CiRepoPath ([string]$buildInput))) "The GUI list must hold build input $buildInput." }
-# Named here, not read from the plan, so dropping one from buildInputs fails (Sol on #740, round 11): the ConPTY
-# manifest the runner reads (Get-GuiHiddenConptyPins), and the stager and its two libraries the measurement build runs
-# (src/build/ConptyRedist.zig). Each would also select through Get-CiPathNeeds' zig, so the list is checked directly.
-foreach ($buildInput in @('dist/windows/conpty-redist.json', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1')) {
+foreach ($buildInput in @($plan.buildInputs | Where-Object { -not ([string]$_).EndsWith('/**') })) { Assert-True ($list -ccontains (ConvertTo-CiRepoPath ([string]$buildInput))) "The GUI list must hold build input $buildInput." }
+# Named here, not read from the plan, so dropping one from buildInputs fails (Sol on #740, rounds 11 and 12): the
+# ConPTY manifest the runner reads (Get-GuiHiddenConptyPins), the stager and its two libraries the measurement build
+# runs (src/build/ConptyRedist.zig), and the two sources measure-lib reads for provenance. Each would also select
+# through Get-CiPathNeeds' zig, so the list is checked directly.
+foreach ($buildInput in @('dist/windows/conpty-redist.json', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1', 'src/apprt/win32_aumid.zig', 'src/apprt/win32/app.zig')) {
     Assert-True ($list -ccontains $buildInput) "The GUI list must hold the build input $buildInput."
 }
+# A `<dir>/**` build input is every tracked file under it, in the working tree and in a ref's tree alike, and nothing
+# else; the plan names the measurement build's whole input set that way (Sol on #740, round 12).
+foreach ($buildTree in @('src', 'pkg', 'vendor', 'include', 'dist/windows')) {
+    Assert-True (@($plan.buildInputs) -ccontains "$buildTree/**") "The plan's buildInputs must name $buildTree/**."
+    $tracked = [string[]]@(git -C $repoRoot ls-files -- "$buildTree/" | Sort-Object)
+    # Assigned before sorting: the function returns its paths as one array object.
+    $working = Get-CiGuiTreeFiles -RepoRoot $repoRoot -Directory $buildTree
+    $working = [string[]]@($working | Sort-Object)
+    $atHead = Get-CiGuiTreeFiles -RepoRoot $repoRoot -Ref 'HEAD' -Directory $buildTree
+    $atHead = [string[]]@($atHead | Sort-Object)
+    Assert-True ($tracked.Count -gt 0 -and ($working -join '|') -ceq ($tracked -join '|') -and ($atHead -join '|') -ceq ($tracked -join '|')) "$buildTree/** must expand to its tracked files, from the working tree ($($working.Count)) and from HEAD ($($atHead.Count)), not $($tracked.Count)."
+    foreach ($file in $tracked) { if (-not ($list -ccontains $file)) { Assert-True $false "The GUI list must hold $file, under $buildTree/**." ; break } }
+}
+foreach ($file in @('build.zig', 'build.zig.zon')) { Assert-True ($list -ccontains $file) "The GUI list must hold the build input $file." }
+# The control: a plan without src/** lists no src/ file the closure does not reach.
+$noSrcReader = {
+    param([string] $RepoPath)
+    $full = Join-Path $repoRoot ($RepoPath.Replace('/', '\'))
+    if (-not [IO.File]::Exists($full)) { return $null }
+    $text = [IO.File]::ReadAllText($full)
+    if ($RepoPath -ceq 'test/windows/gui-hidden-plan.json') { $text = $text.Replace('"src/**",', '') }
+    return $text
+}.GetNewClosure()
+$noSrcList = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $noSrcReader
+Assert-True (-not ($noSrcList -ccontains 'src/apprt/win32_aumid.zig') -and -not ($noSrcList -ccontains 'src/apprt/win32/app.zig')) 'A plan without src/** must not list the provenance sources (the control for the tree expansion).'
+
 
 # Singletons, independent of the computed list (which cannot show its own omissions): each keeps its own
 # Get-CiPathNeeds result, so test.yml's flags stay what they were, and each selects the suite.
