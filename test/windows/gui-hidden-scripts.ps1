@@ -361,6 +361,12 @@ $namedRefuses = [ordered]@{
     'Get-Command of a name it cannot read, then &' = '$c = Get-Command $name; & $c'
     'Get-Command of a wildcard script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''chil?.ps1''); & $c'
     'Get-Command of a bare script name (a PATH lookup), then &' = '$c = Get-Command child.ps1; & $c'
+    # Opus on #740: PowerShell takes an extensionless path to its .ps1 (measured on pwsh 7.6 and Windows PowerShell 5.1).
+    'Get-Command of an extensionless script path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''child''); & $c'
+    'Get-Command of an extensionless expandable path, called at once' = '& (Get-Command "$PSScriptRoot\child")'
+    # Sol on #740: a wildcard ExternalScript lookup with no extension.
+    'Get-Command -CommandType ExternalScript of an extensionless wildcard path, then &' = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''chil*'') -CommandType ExternalScript; & $p'
+    'Get-Command of a bare wildcard name, then &' = '$c = Get-Command chil*; & $c'
     'Set-Alias to a value it cannot read' = 'Set-Alias go $somewhere; go'
     'Set-Alias to a relative script' = 'Set-Alias go .\child.ps1; go'
     'Set-Alias to pwsh, whose calls give -File' = 'Set-Alias ps7 pwsh; ps7 -NoProfile -File (Join-Path $PSScriptRoot ''child.ps1'')'
@@ -382,6 +388,8 @@ foreach ($form in $namedRefuses.Keys) {
 }
 $namedQuiet = [ordered]@{
     'Get-Command of a joined native path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''tool.exe''); & $c'
+    'Get-Command of a bare native name, then &' = '$g = Get-Command git; & $g status'
+    'Get-Command of a module-qualified cmdlet, then &' = '$d = Get-Command Microsoft.PowerShell.Utility\Get-Date; & $d'
     'Set-Alias to a native program' = 'Set-Alias g git; g status'
     'nal to a cmdlet' = 'nal now Get-Date; now'
     'New-Alias to a joined native path' = 'New-Alias -Name tool -Value (Join-Path $PSScriptRoot ''tool.exe''); tool'
@@ -468,6 +476,9 @@ $singletons = [ordered]@{
     'scripts/interactive-win11-realinput.ps1' = 'zig'
     # The helper self-test the suite job runs before the leaves; nothing but the fixed list selects it.
     'test/windows/interactive-win11.ps1' = 'none'
+    # The error publisher the suite job runs when it fails, and the schema it checks a result against (Sol on #740).
+    'test/windows/gui-hidden-publish-error.ps1' = 'zig'
+    'test/windows/flagship/result.schema.json' = 'package'
 }
 foreach ($path in $singletons.Keys) {
     Assert-True ((Get-CiPathNeeds $path) -ceq $singletons[$path]) "$path must keep Get-CiPathNeeds '$($singletons[$path])'."
@@ -521,6 +532,21 @@ $wildSelected = & {
     try { $l = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $wildReader -BaseReader $workingReader; Get-CiGuiSelection -ChangedPaths @($wildChild) -GuiList $l } catch { $true }
 }
 Assert-True ($wildSelected -eq $true) 'A change only to the wildcard-launched child must select the GUI suite (through the selection''s fallback).'
+# Sol's round-3 form: an extensionless wildcard ExternalScript lookup of the child, then `&` of what it found.
+$wildScriptChild = 'test/windows/interactive-win11-wildcard-child.ps1'
+$wildScriptReader = {
+    param([string] $RepoPath)
+    if ($RepoPath -ceq 'test/windows/interactive-win11-smoke.ps1') { return (& $workingReader $RepoPath) + "`n" + '$p = Get-Command -Name (Join-Path $PSScriptRoot ''interactive-win11-wildcard-chil*'') -CommandType ExternalScript; & $p' + "`n" }
+    if ($RepoPath -ceq $wildScriptChild) { return '1' }
+    return & $workingReader $RepoPath
+}.GetNewClosure()
+$wildScriptThrew = $false
+try { [void](Get-CiGuiList -RepoRoot $repoRoot -HeadReader $wildScriptReader -BaseReader $workingReader) } catch { $wildScriptThrew = $true }
+Assert-True $wildScriptThrew 'A leaf that runs a script found by an extensionless wildcard ExternalScript lookup must make the GUI list fail.'
+$wildScriptSelected = & {
+    try { $l = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $wildScriptReader -BaseReader $workingReader; Get-CiGuiSelection -ChangedPaths @($wildScriptChild) -GuiList $l } catch { $true }
+}
+Assert-True ($wildScriptSelected -eq $true) 'A change only to the child an extensionless wildcard lookup runs must select the GUI suite (through the selection''s fallback).'
 
 # A build input the plan spells with backslashes (the plan contract takes any path that exists) selects the suite
 # under either spelling of a change, since git reports '/' (CodeRabbit on #740: the list kept the backslash form, the

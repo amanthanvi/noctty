@@ -45,13 +45,18 @@ $script:CiGuiArguments = @{
 
 $script:CiGuiPlanPath = 'test/windows/gui-hidden-plan.json'
 $script:CiGuiRunnerPath = 'test/windows/gui-hidden-runner.ps1'
-# Members that no edge reaches: the suite's own definition, the selection that runs it, and the helper self-test the
-# suite job runs before the leaves (Sol on #740: Get-CiPathNeeds calls it none, so nothing else selected it).
+# Members that no edge reaches: the suite's own definition, the selection that runs it, the helper self-test the
+# suite job runs before the leaves (Sol on #740: Get-CiPathNeeds calls it none, so nothing else selected it), and the
+# error publisher it runs when it fails.
 $script:CiGuiFixedMembers = @(
     'test/windows/gui-hidden-plan.json'
     'test/windows/flagship/scenarios/gui-hidden.json'
     '.github/workflows/gui-hidden.yml'
     'test/windows/interactive-win11.ps1'
+    # The error publisher the suite job runs when it fails, apart from the runner (Sol on #740), and the schema it
+    # checks a result against.
+    'test/windows/gui-hidden-publish-error.ps1'
+    'test/windows/flagship/result.schema.json'
     'scripts/ci-gui-selection.ps1'
     'scripts/ci-script-closure.ps1'
     # The selection's own inputs (Opus on #740): it dot-sources ci-changed-paths.ps1 (Get-CiChangedPaths,

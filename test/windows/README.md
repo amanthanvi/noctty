@@ -1600,17 +1600,24 @@ and the foreground-free `WM_COMMAND` hooks 1901, 1904, 1907 and 1908.
 
 **What it uploads.** `-Out` must be new or empty, and holds only
 `result.json` (the flagship result schema, scenario
-`windows.gui-hidden.suite`) and `receipts/`: one JSON object per leaf this run
-ran, plus `run.json`: the harness's own commit (`implementationSha`, this
+`windows.gui-hidden.suite`), written whole and then followed by
+`result.json.sha256`, its hash, which marks it complete, and `receipts/`: one
+JSON object per leaf this run ran, plus `run.json`: the harness's own commit (`implementationSha`, this
 checkout's HEAD, with `implementationDirty`) and the measurement build's head
 and hashes, apart; the hosted image's name and version in their known shapes;
 whether an HKCU or HKLM `Command Processor\AutoRun` value exists, never the
 value; each guard's state, the clipboard sequence before and after, and the
 startup fingerprint (exists, SHA-256, last write) before and after. Each leaf
-records the renderer its copy's config names and the one that initialized,
-read from its noctty logs: `opengl` where the Debug measurement build logged
-`loaded OpenGL` without falling back, `d3d11` where it fell back and no D3D11
-start failed after it (a D3D11 start logs nothing on success).
+records the renderer its copy's config names, and from its noctty logs the
+backends that started and the attempts before each. A start is
+`renderer/Windows.zig`'s `renderer started backend=<opengl|d3d11|d3d11-warp>`,
+logged once a candidate has fully started; a failed candidate's
+`startup failed` warning is an attempt, and so is `Direct3D11.zig`'s
+`initialized driver=`, logged when the device is made but before the rest of
+the candidate, which can still fail. So a hardware D3D11 failure followed by a
+WARP start reads `opengl:failed d3d11:failed d3d11-warp:started`, and the
+backend `d3d11-warp`. A log whose attempts no start closes reads `unknown`. The
+contract pins each of those lines to its source.
 All are allowlisted values only: booleans, numbers and short strings without a
 path separator, quote or bracket. No path, command line, window title,
 environment value, screen capture or process listing; a failed leaf's receipt
@@ -1627,15 +1634,24 @@ local run on `WinSta0` shares the user's clipboard, so the clipboard guard can
 trip on the user's own copy; don't copy during a run. 0 pass, 1 a leaf failed,
 2 a validation, staging, generation, guard or runner failure (with an `error`
 result when `-Out` could be opened, the runner's own initialization included),
-3 a tripped guard. When the job fails without a result (a failed self-test,
-or a suite step that died first), the workflow's last step runs
-`-PublishError`, which loads nothing, writes an `error` result, and leaves a
-result that already stands alone.
+3 a tripped guard. When the job fails without a complete result (a failed
+self-test, or a suite step that died or did not parse first), the workflow's
+last step runs `test/windows/gui-hidden-publish-error.ps1`, a script of its
+own that loads nothing of the runner (the runner also runs it when its own
+initialization fails). It leaves a complete result alone: one that parses,
+matches the result schema, names this scenario, and has a matching
+`result.json.sha256`. Anything else, a truncated `result.json` included, it
+keeps as `result.incomplete.json` and replaces with an `error` result.
 
-The script walk's edge definition (design §4.3) covers PowerShell's own ways to
-run a script. A script a leaf passes to noctty for its terminal to run
-(`-e pwsh -File <script>`) is beyond it: neither the closure nor the leaf's
-receipt sees that script, so a leaf must not run a repo script that way.
+The script walk's edge definition (design §4.3) covers the ways it lists to run
+a script, not every way PowerShell has. Known gaps, which no GUI member uses
+with a script target today: `[Diagnostics.Process]::Start` and `Invoke-Item` of
+a script or batch file, a runspace's `CreatePipeline` or `Pipeline.Commands`,
+`.ScriptBlock.Invoke()` of a `Get-Command` result, and an alias made through
+`New-Item` on the `alias:` drive with a path the walker cannot read. A script a
+leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
+beyond it too: neither the closure nor the leaf's receipt sees that script, so
+a leaf must not run a repo script that way.
 
 `gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
 and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1

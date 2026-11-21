@@ -409,22 +409,26 @@ function Resolve-CiScriptValue {
                 if ($nameValue.Kind -eq 'native') { return $nameValue }
                 if ($nameValue.Kind -ne 'path') { return $unresolved }
                 $target = $nameValue.Value
-                # A wildcard name (`pwsh*`, `pwsh.ex?`, `[p]wsh.exe`) or a fuzzy lookup finds a command the walker
-                # cannot name.
+                # A wildcard name (`pwsh*`, `pwsh.ex?`, `[p]wsh.exe`, `<dir>\chil*`) or a fuzzy lookup finds a command
+                # the walker cannot name, a script among them, whatever -CommandType says: unresolved (Sol on #740:
+                # `(Get-Command "pwsh.ex?").Source` read as a known program, then
+                # `Get-Command <dir>\chil* -CommandType ExternalScript` as an unknown one, and each dropped its child
+                # without a problem).
                 $vague = [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($target) -or
                     @($elements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -in @('UseFuzzyMatching', 'UseAbbreviationExpansion') }).Count -gt 0
+                if ($vague) { return $unresolved }
                 # A script or batch file: its path, judged as any edge target is. A rooted one resolves; a bare name,
                 # which Get-Command looks up on PATH, and a relative one, found from the current location, do not.
-                # A vague lookup of one (`x?.ps1`) finds some script the walker cannot name.
-                if ((Test-CiScriptTargetKind $target) -in @('script', 'batch')) {
-                    if ($vague) { return $unresolved }
-                    return @{ Kind = 'path'; Value = $target }
-                }
-                # A vague lookup of anything else is an unknown executable: its -File or -Command arguments leave the
-                # edge unresolved (Sol on #740: `(Get-Command "pwsh.ex?" -CommandType Application).Source` read as a
-                # known native program, and its -File child dropped out of the closure without a problem).
-                if ($vague) { return @{ Kind = 'native'; Value = $null } }
-                return @{ Kind = 'native'; Value = ($target -split '[\\/]')[-1].ToLowerInvariant() }
+                $kind = Test-CiScriptTargetKind $target
+                if ($kind -in @('script', 'batch')) { return @{ Kind = 'path'; Value = $target } }
+                # A path with no script, batch or native extension is looked up as PowerShell looks it up, which takes
+                # `<dir>\child` to `<dir>\child.ps1` (Opus on #740, measured on pwsh 7.6 and Windows PowerShell 5.1),
+                # so it is unresolved, as a direct `& <dir>\child` is. PowerShell and cmd by path stay those programs,
+                # and so does a module-qualified cmdlet; a bare name is a command on PATH.
+                $leaf = ($target -split '[\\/]')[-1].ToLowerInvariant()
+                if ($kind -ne 'native' -and $target -match '[\\/]' -and -not (Test-CiScriptPowerShellName $leaf) -and
+                    $leaf -notin @('cmd', 'cmd.exe') -and $target -notmatch $script:CiScriptQualifiedName) { return $unresolved }
+                return @{ Kind = 'native'; Value = $leaf }
             }
             # A harness helper that names an executable by convention (Get-InteractiveWin11ExePath): native, named by
             # the helper. One named for PowerShell is an executable the walker cannot name.

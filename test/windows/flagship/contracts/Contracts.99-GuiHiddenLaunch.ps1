@@ -303,7 +303,7 @@ $guiRunnerSource = (Get-CommandParameterArgument -Command @(Get-NamedCommands -A
 Assert-GuiContractLayout $guiRunnerAst $guiRunnerSource 'GuiHiddenRunnerNative' '$script:GuiHiddenNativeLayout' 'public uint volumeSerial, sizeHigh, sizeLow,' 'public uint volumeSerial, sizeLow, sizeHigh,'
 foreach ($name in @('Get-GuiHiddenHash', 'Get-GuiHiddenBaseConfig', 'New-GuiHiddenCopy', 'Get-GuiHiddenProcessVerdict', 'ConvertTo-GuiHiddenRecordValue',
         'Write-GuiHiddenRecord', 'Get-GuiHiddenReparsePointCount', 'Test-GuiHiddenLeafReceipt', 'Get-GuiHiddenConfigPolicy',
-        'Get-GuiHiddenConptyPins', 'Open-GuiHiddenHeldConpty', 'Get-GuiHiddenBuildBinding', 'Get-GuiHiddenRendererObserved', 'ConvertTo-GuiHiddenStartupFacts')) {
+        'Get-GuiHiddenConptyPins', 'Open-GuiHiddenHeldConpty', 'Get-GuiHiddenBuildBinding', 'Get-GuiHiddenRendererStartups', 'ConvertTo-GuiHiddenStartupFacts')) {
     . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst $name)))
 }
 foreach ($name in @('Get-InteractiveWin11HostedPolicyConfig', 'Get-InteractiveWin11HostedArgumentRefusal')) {
@@ -394,38 +394,89 @@ try {
     }
     finally { $guiWriter.Dispose() }
 
-    # ---- (5c) the renderer that initialized, read from the leaf's noctty logs (Sol on #740), and the startup facts.
+    # ---- (5c) the renderer each surface started with, read from the leaf's noctty logs from start lines only (Sol and
+    # Opus on #740: a fallback warning alone read as d3d11, a WARP start after a hardware failure as unknown, a direct
+    # hardware start as nothing), and the startup facts. Each case is a list of log files, each a list of lines.
+    $guiGlLoaded = 'debug(opengl): loaded OpenGL 4.6'
+    $guiGlFailed = 'warn(renderer_windows): OpenGL startup failed err=error.OpenGLUnavailable could_not_start=true; trying the Direct3D 11 beta'
     foreach ($case in @(
-            @{ Logs = @('debug(opengl): loaded OpenGL 4.6'); Want = 'opengl' }
-            @{ Logs = @('loaded OpenGL 1.1', 'warning: OpenGL startup failed err=x could_not_start=true; trying the Direct3D 11 beta'); Want = 'd3d11+opengl' }
-            @{ Logs = @('warning: OpenGL startup failed err=x could_not_start=true; trying the Direct3D 11 beta'); Want = 'd3d11' }
-            @{ Logs = @('warning: OpenGL startup failed err=x could_not_start=true; trying the Direct3D 11 beta warning: d3d11 startup failed err=y'); Want = 'unknown' }
-            @{ Logs = @('info: a CLI log with no renderer'); Want = '' }
+            @{ Name = 'an OpenGL start'; Logs = @(, @($guiGlLoaded, 'info(renderer_windows): renderer started backend=opengl')); Observed = 'opengl'; Startups = 'opengl:started' }
+            @{ Name = 'a fallback warning alone'; Logs = @(, @($guiGlFailed)); Observed = 'unknown'; Startups = 'opengl:failed unknown' }
+            @{ Name = 'a hardware failure, then a WARP start'; Logs = @(, @($guiGlLoaded, $guiGlFailed, 'info(d3d11): initialized driver=hardware feature_level=0xb000 flip=sequential targets=offscreen',
+                        'warn(renderer_windows): d3d11 startup failed err=error.OutOfMemory', 'info(d3d11): initialized driver=WARP feature_level=0xb000 flip=sequential targets=offscreen',
+                        'warn(renderer_windows): OpenGL could not start, so noctty switched to the Direct3D 11 beta renderer, in software (WARP).', 'info(renderer_windows): renderer started backend=d3d11-warp'))
+                Observed = 'd3d11-warp'; Startups = 'opengl:failed d3d11:failed d3d11-warp:started' }
+            @{ Name = 'a direct hardware start'; Logs = @(, @('info(d3d11): initialized driver=hardware feature_level=0xb100 flip=sequential targets=offscreen', 'warn(renderer_windows): D3D11 beta: hardware renderer active.', 'info(renderer_windows): renderer started backend=d3d11')); Observed = 'd3d11'; Startups = 'd3d11:started' }
+            @{ Name = 'a CLI log'; Logs = @(, @('info(cli): a CLI log with no renderer')); Observed = ''; Startups = '' }
+            @{ Name = 'an OpenGL load with no start'; Logs = @(, @($guiGlLoaded)); Observed = 'unknown'; Startups = 'unknown' }
+            @{ Name = 'a device made with no start'; Logs = @(, @('info(d3d11): initialized driver=hardware feature_level=0xb000 flip=sequential targets=offscreen')); Observed = 'unknown'; Startups = 'unknown' }
+            @{ Name = 'two logs, two backends'; Logs = @(@('info(renderer_windows): renderer started backend=opengl'), @('info(renderer_windows): renderer started backend=d3d11')); Observed = 'd3d11+opengl'; Startups = 'd3d11:started; opengl:started' }
+            @{ Name = 'two surfaces in one log'; Logs = @(, @($guiGlLoaded, 'info(renderer_windows): renderer started backend=opengl', $guiGlLoaded, 'info(renderer_windows): renderer started backend=opengl')); Observed = 'opengl'; Startups = 'opengl:started' }
+            @{ Name = 'a runtime switch to OpenGL'; Logs = @(, @('info(renderer_windows): renderer started backend=d3d11', $guiGlLoaded, 'warn(renderer_windows): OpenGL: switched from D3D11 beta (unsupported feature or device recovery).')); Observed = 'd3d11+opengl'; Startups = 'd3d11:started; opengl:switched' }
+            @{ Name = 'a failed runtime switch'; Logs = @(, @('info(renderer_windows): renderer started backend=d3d11', $guiGlLoaded, 'warn(renderer_windows): D3D11: OpenGL fallback failed (error.OpenGLUnavailable); unsupported images/effects are ignored.')); Observed = 'd3d11'; Startups = 'd3d11:started; opengl:switch-failed' }
+            @{ Name = 'a start line inside another line, and an unknown backend'; Logs = @(, @($guiGlLoaded, 'xinfo(renderer_windows): renderer started backend=opengl', 'info(renderer_windows): renderer started backend=vulkan')); Observed = 'unknown'; Startups = 'unknown' }
         )) {
-        $observed = (@(Get-GuiHiddenRendererObserved $case.Logs) -join '+')
-        if ($observed -cne $case.Want) { throw "The renderer read-back gave '$observed', not '$($case.Want)'." }
-    }
-    # The log lines the read-back counts on are pinned to their sources (Opus on #740: a reworded fallback warning would
-    # silently report no fallback): renderer/Windows.zig's fallback and D3D11 failure warnings, OpenGL.zig's debug line,
-    # and the runner's matchers for each.
-    $guiRendererPins = {
-        param([string] $WindowsZig, [string] $OpenGlZig, [string] $Runner)
-        $problems = [System.Collections.Generic.List[string]]::new()
-        if (-not $WindowsZig.Contains('log.warn("OpenGL startup failed err={} could_not_start={}; trying the Direct3D 11 beta"')) { $problems.Add('Windows.zig fallback warning') }
-        if (-not $WindowsZig.Contains('log.warn("{s} startup failed err={}"')) { $problems.Add('Windows.zig D3D11 failure warning') }
-        if (-not $OpenGlZig.Contains('log.debug("loaded OpenGL {}.{}"')) { $problems.Add('OpenGL.zig loaded line') }
-        foreach ($matcher in @('''; trying the Direct3D 11 beta''', '''d3d11(-warp)? startup failed''', '''loaded OpenGL [0-9]''')) {
-            if (-not $Runner.Contains($matcher)) { $problems.Add("runner matcher $matcher") }
+        foreach ($newline in @("`n", "`r`n")) {
+            $texts = [string[]]@($case.Logs | ForEach-Object { (@($_) -join $newline) + $newline })
+            $read = Get-GuiHiddenRendererStartups $texts
+            $observed = @($read.observed) -join '+'
+            $startups = @($read.startups) -join '; '
+            if ($observed -cne $case.Observed -or $startups -cne $case.Startups) {
+                throw "The renderer read-back gave '$observed' ($startups) for $($case.Name), not '$($case.Observed)' ($($case.Startups))."
+            }
         }
+    }
+    # The lines the read-back counts on are pinned to their sources (Opus on #740: a reworded line would silently read
+    # as no start): the log format (process_shared.zig's logFn), each scope, Windows.zig's start line and its two calls,
+    # its failure warnings and switch notices, OpenGL.zig's load line and Direct3D11.zig's device line; and the runner
+    # matches each with the matcher listed here.
+    $guiRendererSources = [ordered]@{
+        'src\process_shared.zig' = @('const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";', 'level_txt ++ prefix ++ format ++ "\n"')
+        'src\renderer\Windows.zig' = @('const log = std.log.scoped(.renderer_windows);', 'log.info("renderer started backend={s}", .{backend});', 'logStarted("opengl");',
+            'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");', 'log.warn("OpenGL startup failed err={} could_not_start={}; trying the Direct3D 11 beta"',
+            'log.warn("{s} startup failed err={}"', 'self.setNotice("OpenGL: switched from D3D11 beta ({s}).",', 'self.setNotice("D3D11: OpenGL fallback failed ({s});',
+            'fn setNotice(self: *Windows, comptime fmt: []const u8, args: anytype) void {', 'log.warn("{s}", .{message});')
+        'src\renderer\OpenGL.zig' = @('const log = std.log.scoped(.opengl);', 'log.debug("loaded OpenGL {}.{}"')
+        'src\renderer\Direct3D11.zig' = @('const log = std.log.scoped(.d3d11);', 'log.info("initialized driver={s}')
+    }
+    $guiRendererMatchers = @(
+        '''\Ainfo\(renderer_windows\): renderer started backend=(opengl|d3d11|d3d11-warp)\z'''
+        '''\Awarn\(renderer_windows\): OpenGL: switched from D3D11 beta \('''
+        '''\Awarn\(renderer_windows\): D3D11: OpenGL fallback failed \('''
+        '''\Awarn\(renderer_windows\): OpenGL startup failed err='''
+        '''\Awarn\(renderer_windows\): (d3d11|d3d11-warp) startup failed err='''
+        '''\Adebug\(opengl\): loaded OpenGL [0-9]'''
+        '''\Ainfo\(d3d11\): initialized driver='''
+        '''; trying the Direct3D 11 beta'''
+    )
+    $guiRendererPins = {
+        param([System.Collections.IDictionary] $Texts, [string] $Runner)
+        $problems = [System.Collections.Generic.List[string]]::new()
+        foreach ($file in $guiRendererSources.Keys) {
+            foreach ($needle in $guiRendererSources[$file]) { if (-not $Texts[$file].Contains($needle)) { $problems.Add("$file`: $needle") } }
+        }
+        foreach ($matcher in $guiRendererMatchers) { if (-not $Runner.Contains($matcher)) { $problems.Add("runner matcher $matcher") } }
         return , $problems.ToArray()
     }
-    $guiWindowsZig = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\renderer\Windows.zig'))
-    $guiOpenGlZig = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\renderer\OpenGL.zig'))
+    $guiRendererTexts = [ordered]@{}
+    foreach ($file in $guiRendererSources.Keys) { $guiRendererTexts[$file] = [IO.File]::ReadAllText((Join-Path $repoRoot $file)) }
     $guiRunnerSourceText = [IO.File]::ReadAllText($guiRunnerPath)
-    $guiPinProblems = & $guiRendererPins $guiWindowsZig $guiOpenGlZig $guiRunnerSourceText
+    $guiPinProblems = & $guiRendererPins $guiRendererTexts $guiRunnerSourceText
     if ($guiPinProblems.Count -ne 0) { throw "The renderer read-back's log lines are not pinned to their sources: $($guiPinProblems -join '; ')." }
-    $guiReworded = & $guiRendererPins ($guiWindowsZig.Replace('; trying the Direct3D 11 beta', '; trying Direct3D 11')) $guiOpenGlZig $guiRunnerSourceText
-    if ($guiReworded.Count -eq 0) { throw 'The renderer pin accepted a reworded fallback warning.' }
+    foreach ($control in @(
+            @{ Name = 'a reworded fallback warning'; File = 'src\renderer\Windows.zig'; Old = '; trying the Direct3D 11 beta'; New = '; trying Direct3D 11' }
+            @{ Name = 'a reworded start line'; File = 'src\renderer\Windows.zig'; Old = 'renderer started backend='; New = 'renderer ready backend=' }
+            @{ Name = 'the start logged before the D3D11 candidate finished'; File = 'src\renderer\Windows.zig'; Old = 'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");'; New = '' }
+            @{ Name = 'a renamed scope'; File = 'src\renderer\Windows.zig'; Old = 'std.log.scoped(.renderer_windows)'; New = 'std.log.scoped(.renderer)' }
+            @{ Name = 'another log format'; File = 'src\process_shared.zig'; Old = '"(" ++ @tagName(scope) ++ "): "'; New = '"[" ++ @tagName(scope) ++ "] "' }
+        )) {
+        $mutated = [ordered]@{}
+        foreach ($file in $guiRendererTexts.Keys) { $mutated[$file] = $guiRendererTexts[$file] }
+        if (-not $mutated[$control.File].Contains($control.Old)) { throw "The renderer pin control '$($control.Name)' lost its anchor." }
+        $mutated[$control.File] = $mutated[$control.File].Replace($control.Old, $control.New)
+        $controlProblems = & $guiRendererPins $mutated $guiRunnerSourceText
+        if ($controlProblems.Count -eq 0) { throw "The renderer pin accepted $($control.Name)." }
+    }
     $guiFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $true; Hash = ('a' * 64); Modified = '2026-11-21T05:06:57.1234567Z' }
     $guiNoFacts = ConvertTo-GuiHiddenStartupFacts @{ Exists = $false }
     if (-not $guiFacts.exists -or $guiFacts.sha256 -cne ('a' * 64) -or $guiNoFacts.exists -or $null -ne $guiNoFacts.sha256) { throw 'The startup facts misread a fingerprint.' }
@@ -533,35 +584,103 @@ try {
         (@($guiErrorRun.guards.state, $guiErrorRun.guards.history, $guiErrorRun.guards.startup) -join ',') -cne 'not-run,not-run,not-run') {
         throw 'A runner validation failure must exit 2 with an error result, no passing leaves-pass or state-guards, and its guards not-run.'
     }
-    $guiPublishOut = Join-Path $guiScratch 'out-publish'
-    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-PublishError', 'helper-self-test', '-Out', $guiPublishOut)
-    $guiPublished = $(if (Test-Path -LiteralPath (Join-Path $guiPublishOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiPublishOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
-    if ($guiCode -ne 2 -or $null -eq $guiPublished -or $guiPublished.status -cne 'error' -or [string]$guiPublished.failure.message -cne 'exit 2 (helper-self-test)') {
-        throw '-PublishError must exit 2 with an error result naming its kind.'
+    # The runner's result is complete only with result.json.sha256, its hash, written after it (Sol on #740).
+    $guiErrorHash = Join-Path $guiNewOut 'result.json.sha256'
+    if (-not (Test-Path -LiteralPath $guiErrorHash) -or [IO.File]::ReadAllText($guiErrorHash).Trim() -cne (Get-FileHash -LiteralPath (Join-Path $guiNewOut 'result.json') -Algorithm SHA256).Hash.ToLowerInvariant()) {
+        throw 'The runner''s result must be followed by result.json.sha256, its hash.'
     }
-    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-PublishError', 'Bad Kind', '-Out', (Join-Path $guiScratch 'out-badkind'))
-    if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'out-badkind'))) { throw '-PublishError must refuse a kind outside its shape before it writes.' }
-    # -PublishError publishes even where the suite cannot initialize (CodeRabbit on #740): the runner alone, with no
-    # library beside it and no plan, still writes its error result.
-    $guiLoneRunner = Join-Path $guiScratch 'lone\test\windows\gui-hidden-runner.ps1'
-    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $guiLoneRunner))
+    # The error publisher (Sol on #740: a parse error in the runner defeated both of the runner's publishers): a script
+    # of its own, which the workflow runs when the job failed. It parses on its own and loads nothing: no `&` or `.`,
+    # no module, type, job, process or expression, and it never names the runner.
+    $guiPublisherPath = Join-Path $repoRoot 'test\windows\gui-hidden-publish-error.ps1'
+    $guiSchemaPath = Join-Path $repoRoot 'test\windows\flagship\result.schema.json'
+    $guiPublisherErrors = $null
+    $guiPublisherAst = [System.Management.Automation.Language.Parser]::ParseFile($guiPublisherPath, [ref]$null, [ref]$guiPublisherErrors)
+    if ($guiPublisherErrors.Count -ne 0) { throw 'The error publisher does not parse on its own.' }
+    $guiPublisherLoads = @($guiPublisherAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                ($node.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown -or
+                    $node.GetCommandName() -in @('Import-Module', 'ipmo', 'Add-Type', 'Invoke-Expression', 'iex', 'Start-Process', 'saps', 'start', 'Start-Job', 'Start-ThreadJob', 'Invoke-Command', 'icm', 'pwsh', 'powershell', 'cmd'))
+            }, $true))
+    if ($guiPublisherLoads.Count -ne 0 -or [IO.File]::ReadAllText($guiPublisherPath).Contains('gui-hidden-runner')) { throw 'The error publisher must load and run nothing, and never name the runner.' }
+    $guiAstControl = [System.Management.Automation.Language.Parser]::ParseInput(". (Join-Path `$PSScriptRoot 'gui-hidden-runner.ps1')", [ref]$null, [ref]$null)
+    if (@($guiAstControl.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown }, $true)).Count -ne 1) { throw 'The publisher''s load check misses a dot-source.' }
+    # A lone publisher, copied with only the result schema beside it, as the description says it reads.
+    $guiPubRoot = Join-Path $guiScratch 'pub\test\windows'
+    [void](New-Item -ItemType Directory -Path (Join-Path $guiPubRoot 'flagship'))
+    $guiLonePublisher = Join-Path $guiPubRoot 'gui-hidden-publish-error.ps1'
+    Copy-Item -LiteralPath $guiPublisherPath -Destination $guiLonePublisher
+    Copy-Item -LiteralPath $guiSchemaPath -Destination (Join-Path $guiPubRoot 'flagship\result.schema.json')
+    $guiReadPublished = { param([string] $OutPath) if (Test-Path -LiteralPath (Join-Path $OutPath 'result.json')) { Get-Content -LiteralPath (Join-Path $OutPath 'result.json') -Raw | ConvertFrom-Json } else { $null } }
+    $guiHashMatches = { param([string] $OutPath) (Test-Path -LiteralPath (Join-Path $OutPath 'result.json.sha256')) -and [IO.File]::ReadAllText((Join-Path $OutPath 'result.json.sha256')).Trim() -ceq (Get-FileHash -LiteralPath (Join-Path $OutPath 'result.json') -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $guiPublishOut = Join-Path $guiScratch 'out-publish'
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'helper-self-test', '-Out', $guiPublishOut)
+    $guiPublished = & $guiReadPublished $guiPublishOut
+    if ($guiCode -ne 2 -or $null -eq $guiPublished -or $guiPublished.status -cne 'error' -or [string]$guiPublished.failure.message -cne 'exit 2 (helper-self-test)' -or
+        -not (Test-Json -Json ([IO.File]::ReadAllText((Join-Path $guiPublishOut 'result.json'))) -SchemaFile $guiSchemaPath -ErrorAction SilentlyContinue) -or -not (& $guiHashMatches $guiPublishOut)) {
+        throw 'The error publisher must exit 2 with a schema-valid error result naming its kind, followed by its hash.'
+    }
+    # Its own result is complete: a second publish leaves it byte for byte and exits 0.
+    $guiResultBefore = (Get-FileHash -LiteralPath (Join-Path $guiPublishOut 'result.json') -Algorithm SHA256).Hash
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'suite-no-result', '-Out', $guiPublishOut)
+    if ($guiCode -ne 0 -or (Get-FileHash -LiteralPath (Join-Path $guiPublishOut 'result.json') -Algorithm SHA256).Hash -cne $guiResultBefore) { throw 'The error publisher must leave a complete result alone.' }
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'Bad Kind', '-Out', (Join-Path $guiScratch 'out-badkind'))
+    if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch 'out-badkind'))) { throw 'The error publisher must refuse a kind outside its shape before it writes.' }
+    [IO.File]::WriteAllText((Join-Path $guiScratch 'out-file'), 'x')
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'suite-no-result', '-Out', (Join-Path $guiScratch 'out-file'))
+    if ($guiCode -ne 2 -or [IO.File]::ReadAllText((Join-Path $guiScratch 'out-file')) -cne 'x') { throw 'The error publisher must refuse an -Out that is a file.' }
+    # An incomplete result does not stand (Sol on #740: a seeded `{` was taken as final). Each is kept aside, as
+    # result.incomplete.json, and replaced by an error result with its hash.
+    $guiCompleteText = [IO.File]::ReadAllText((Join-Path $guiPublishOut 'result.json'))
+    $guiCompleteHash = [IO.File]::ReadAllText((Join-Path $guiPublishOut 'result.json.sha256'))
+    $guiCaseIndex = 0
+    foreach ($case in @(
+            @{ Name = 'a truncated result'; Result = '{'; Hash = $null }
+            @{ Name = 'a truncated result with its own hash'; Result = $guiCompleteText.Substring(0, 40); Hash = 'own' }
+            @{ Name = 'a complete result with no hash'; Result = $guiCompleteText; Hash = $null }
+            @{ Name = 'a changed result with the old hash'; Result = $guiCompleteText.Replace('"helper-self-test"', '"other-kind"'); Hash = $guiCompleteHash }
+            @{ Name = 'a schema-invalid result with its own hash'; Result = '{"status":"pass"}'; Hash = 'own' }
+            @{ Name = 'another scenario''s result with its own hash'; Result = $guiCompleteText.Replace('windows.gui-hidden.suite', 'windows.portable.smoke'); Hash = 'own' }
+        )) {
+        $guiCaseIndex++
+        $caseOut = Join-Path $guiScratch "out-incomplete-$guiCaseIndex"
+        [void](New-Item -ItemType Directory -Path $caseOut)
+        [IO.File]::WriteAllText((Join-Path $caseOut 'result.json'), $case.Result)
+        if ($case.Hash -ceq 'own') { [IO.File]::WriteAllText((Join-Path $caseOut 'result.json.sha256'), (Get-FileHash -LiteralPath (Join-Path $caseOut 'result.json') -Algorithm SHA256).Hash.ToLowerInvariant()) }
+        elseif ($case.Hash) { [IO.File]::WriteAllText((Join-Path $caseOut 'result.json.sha256'), $case.Hash) }
+        $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'suite-no-result', '-Out', $caseOut)
+        $caseResult = & $guiReadPublished $caseOut
+        $caseKept = Join-Path $caseOut 'result.incomplete.json'
+        if ($guiCode -ne 2 -or $null -eq $caseResult -or $caseResult.status -cne 'error' -or [string]$caseResult.failure.message -cne 'exit 2 (suite-no-result)' -or
+            -not (Test-Path -LiteralPath $caseKept) -or [IO.File]::ReadAllText($caseKept) -cne $case.Result -or -not (& $guiHashMatches $caseOut)) {
+            throw "The error publisher took $($case.Name) as complete, or did not keep it aside."
+        }
+    }
+    # The workflow's case (Sol on #740): a runner that does not parse writes nothing, and the publisher, which never
+    # loads it, still publishes. The broken runner sits beside the lone publisher.
+    $guiBrokenRunner = Join-Path $guiPubRoot 'gui-hidden-runner.ps1'
+    [IO.File]::WriteAllText($guiBrokenRunner, [IO.File]::ReadAllText($guiRunnerPath) + "`nfunction Get-GuiHiddenBroken {`n")
+    $guiBrokenOut = Join-Path $guiScratch 'out-broken'
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiBrokenRunner, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'work-broken'), '-Out', $guiBrokenOut)
+    if ($guiCode -eq 0 -or (Test-Path -LiteralPath (Join-Path $guiBrokenOut 'result.json'))) { throw 'The broken-runner control must fail without a result, or it proves nothing.' }
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'suite-no-result', '-Out', $guiBrokenOut)
+    $guiBrokenPublished = & $guiReadPublished $guiBrokenOut
+    if ($guiCode -ne 2 -or $null -eq $guiBrokenPublished -or $guiBrokenPublished.status -cne 'error' -or -not (& $guiHashMatches $guiBrokenOut)) { throw 'The error publisher must publish beside a runner that does not parse.' }
+    # A runner that cannot initialize (no library beside it, no plan) runs the publisher beside it (Sol on #740: a
+    # runner whose own libraries were missing exited 1 and wrote nothing).
+    $guiLoneRoot = Join-Path $guiScratch 'lone\test\windows'
+    [void](New-Item -ItemType Directory -Path (Join-Path $guiLoneRoot 'flagship'))
+    $guiLoneRunner = Join-Path $guiLoneRoot 'gui-hidden-runner.ps1'
     Copy-Item -LiteralPath $guiRunnerPath -Destination $guiLoneRunner
-    $guiLoneOut = Join-Path $guiScratch 'out-lone'
-    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-PublishError', 'helper-self-test', '-Out', $guiLoneOut)
-    $guiLonePublished = $(if (Test-Path -LiteralPath (Join-Path $guiLoneOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiLoneOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
-    if ($guiCode -ne 2 -or $null -eq $guiLonePublished -or $guiLonePublished.status -cne 'error') { throw '-PublishError must publish without the libraries or the plan it would otherwise load.' }
-    # The suite itself cannot initialize there, and still leaves an error result (Sol on #740: a runner whose own
-    # libraries were missing exited 1 and wrote nothing).
+    Copy-Item -LiteralPath $guiPublisherPath -Destination (Join-Path $guiLoneRoot 'gui-hidden-publish-error.ps1')
+    Copy-Item -LiteralPath $guiSchemaPath -Destination (Join-Path $guiLoneRoot 'flagship\result.schema.json')
     $guiLoneSuiteOut = Join-Path $guiScratch 'out-lone-suite'
     $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'lone-work'), '-Out', $guiLoneSuiteOut)
-    $guiLoneSuite = $(if (Test-Path -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json')) { Get-Content -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json') -Raw | ConvertFrom-Json } else { $null })
-    if ($guiCode -ne 2 -or $null -eq $guiLoneSuite -or $guiLoneSuite.status -cne 'error' -or [string]$guiLoneSuite.failure.message -cne 'exit 2 (runner-init)') {
-        throw 'A runner that cannot initialize must exit 2 with an error result (runner-init).'
+    $guiLoneSuite = & $guiReadPublished $guiLoneSuiteOut
+    if ($guiCode -ne 2 -or $null -eq $guiLoneSuite -or $guiLoneSuite.status -cne 'error' -or [string]$guiLoneSuite.failure.message -cne 'exit 2 (runner-init)' -or -not (& $guiHashMatches $guiLoneSuiteOut)) {
+        throw 'A runner that cannot initialize must exit 2 with an error result (runner-init), followed by its hash.'
     }
-    # A second publish into an -Out that already holds a result changes nothing and exits 0.
-    $guiResultBefore = Get-FileHash -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json') -Algorithm SHA256
-    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-PublishError', 'suite-no-result', '-Out', $guiLoneSuiteOut)
-    if ($guiCode -ne 0 -or (Get-FileHash -LiteralPath (Join-Path $guiLoneSuiteOut 'result.json') -Algorithm SHA256).Hash -cne $guiResultBefore.Hash) { throw '-PublishError must leave a result that already stands alone.' }
     $guiAsciiOut = Join-Path $guiScratch 'out-ascii'
     $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch ('work-caf' + [char]0xE9)), '-Out', $guiAsciiOut)
     if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }

@@ -112,16 +112,17 @@ jobs:
         timeout-minutes: 75
         run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo $env:GITHUB_WORKSPACE -Work (Join-Path $env:RUNNER_TEMP 'gui-hidden-work') -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden') -Build
 
-      # A job that failed without a result (a failed helper self-test, which stops the job before the suite step, or a
-      # suite step that died before it wrote one) would leave the upload empty: publish an error result instead. The
-      # runner's -PublishError loads nothing first, writes only allowlisted values, and leaves a result that already
-      # stands alone; the job still fails.
+      # A job that failed without a complete result (a failed helper self-test, which stops the job before the suite
+      # step, or a suite step that died or did not parse before it wrote one) would leave the upload empty or partial:
+      # publish an error result instead. The publisher is a script of its own, apart from the runner; it writes only
+      # allowlisted values, keeps an incomplete result beside its own, and leaves a complete one (its hash written
+      # last) alone; the job still fails.
       - name: Publish an error result when the job failed without one
         if: failure()
         shell: pwsh
         env:
           SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
-        run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError $(if ($env:SELFTEST_OUTCOME -ceq 'failure') { 'helper-self-test' } else { 'suite-no-result' }) -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
+        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind $(if ($env:SELFTEST_OUTCOME -ceq 'failure') { 'helper-self-test' } else { 'suite-no-result' }) -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
 
       # The result and the receipts only (design v7 §4.5's allowlist): no log directory, screen
       # capture, process listing, path, command line or environment value.
@@ -132,6 +133,7 @@ jobs:
           name: gui-hidden-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/gui-hidden/result.json
+            ${{ runner.temp }}/gui-hidden/result.json.sha256
             ${{ runner.temp }}/gui-hidden/receipts/**
           # Release evidence outlives the promotion soak (PLAN §8.1).
           retention-days: 90

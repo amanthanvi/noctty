@@ -2933,10 +2933,11 @@ if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
 # NOCTTY_GUI_HIDDEN_ variable, so none sets the hidden-desktop route's variables or passes a switch named for them.
 # Of test.yml, §2.1 freezes only the `windows-interactive` job and the `run_interactive_win11` dispatch input it reads
 # (`path#region` keys, Get-FrozenSetRegion), so an edit elsewhere in test.yml, a Dependabot pin bump or a scheduled
-# job change, needs no re-pin (Opus on #740: the whole-file pin failed every such edit).
+# job change, needs no re-pin (Opus on #740: the whole-file pin failed every such edit), and neither does another
+# manual input beside it (Sol on #740: the pin covered the whole `workflow_dispatch` block).
 $frozenSetSha256 = [ordered]@{
     '.github/workflows/test.yml#windows-interactive' = 'c8b16be3241dd4c7d37d45d46b8e56f264c593ffc65c74620730259f3fe65ff2'
-    '.github/workflows/test.yml#workflow_dispatch' = 'e3d82ba3d826bfe393c462e6c6a221fddf1f4c69cba83d1550d2fe79fb9416ae'
+    '.github/workflows/test.yml#run_interactive_win11' = '8110a2478d5a88e5efbb6abeb16b4da1a44255ff7489b1f18c2e99ef8820750f'
     '.github/workflows/release.yml' = '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
     'test/windows/interactive-win11-job.ps1' = 'f18b3783ba14cc9c5c25281662ebe639a753b965cad6404c0712f349c84176cc'
     'test/windows/interactive-win11-validate.ps1' = 'cf24651acd8cf091201fc2f81ad1286f389543502c76124c8d2d08d97d0d4d66'
@@ -2948,14 +2949,27 @@ $frozenSetSha256 = [ordered]@{
     'scripts/release-promote.ps1' = '95417cd5f4f5b9d2a6c91014a214a9fde56a72dc81def7ced41888db0ea4c256'
     'scripts/check-accessibility-evidence.ps1' = '6e3c5c9643bd44b040025686771d0be133d9bce7ce884f6dfbecf148820a2ee8'
 }
-# The frozen part of a file: the whole text, or for test.yml one job (Get-YamlJobText) or the dispatch input block.
+# The frozen part of a file: the whole text, or for test.yml one job (Get-YamlJobText) or the one dispatch input the
+# job reads: its line under `workflow_dispatch:` `inputs:` and the lines indented below it, never the other inputs.
 function Get-FrozenSetRegion([string] $Text, [string] $Region) {
     if (-not $Region) { return $Text }
-    if ($Region -ceq 'workflow_dispatch') {
-        $match = [regex]::Match($Text, '(?m)^  workflow_dispatch:[^\r\n]*\r?\n(?:    [^\r\n]*\r?\n)*')
-        return $(if ($match.Success) { $match.Value } else { $null })
+    if ($Region -ceq 'run_interactive_win11') {
+        $dispatch = [regex]::Match($Text, '(?m)^  workflow_dispatch:[^\r\n]*\r?\n(?:    [^\r\n]*\r?\n)*', 'None', [TimeSpan]::FromSeconds(5))
+        if (-not $dispatch.Success) { return $null }
+        $inputs = @([regex]::Matches($dispatch.Value, '(?m)^      run_interactive_win11:[^\r\n]*\r?\n(?:        [^\r\n]*\r?\n)*', 'None', [TimeSpan]::FromSeconds(5)))
+        return $(if ($inputs.Count -eq 1) { $inputs[0].Value } else { $null })
     }
-    try { return Get-YamlJobText -Content $Text -Name $Region -Source "frozen set region $Region" } catch { return $null }
+    try { $job = Get-YamlJobText -Content $Text -Name $Region -Source "frozen set region $Region" } catch { return $null }
+    # The job ends at the next job key or at the end of the file: Get-YamlJobText also takes a top-level key after it
+    # and the blank and comment lines before the next job (Opus on #740: a job appended after `windows-interactive`
+    # with a leading comment failed the pin). A comment indented inside the job stays the job's.
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in [regex]::Split($job, '(?<=\n)')) { if ($line.Length -gt 0) { $lines.Add($line) } }
+    for ($at = 1; $at -lt $lines.Count; $at++) {
+        if ($lines[$at] -cmatch '\A[^\s#]') { $lines.RemoveRange($at, $lines.Count - $at); break }
+    }
+    while ($lines.Count -gt 1 -and $lines[$lines.Count - 1] -cmatch '\A(?: {0,2}#[^\r\n]*)?\s*\z') { $lines.RemoveAt($lines.Count - 1) }
+    return ($lines -join '')
 }
 function Get-FrozenSetProblems([System.Collections.IDictionary] $Texts) {
     $found = [System.Collections.Generic.List[string]]::new()
@@ -2994,7 +3008,8 @@ foreach ($control in @(
         @{ Name = 'one changed byte'; Path = 'scripts/release-promote.ps1'; Change = { param($t) $t.Substring(0, 40) + [char]([int]$t[40] -bxor 1) + $t.Substring(41) }; Expect = 'scripts/release-promote.ps1 changed' }
         @{ Name = 'the launch-policy variable set'; Path = 'test/windows/interactive-win11-job.ps1'; Change = { param($t) "`$env:NOCTTY_GUI_LAUNCH_POLICY = 'x'`n" + $t }; Expect = 'interactive-win11-job.ps1 names NOCTTY_GUI_LAUNCH_POLICY' }
         @{ Name = 'an edit inside the frozen windows-interactive job'; Path = '.github/workflows/test.yml'; Change = { param($t) $t.Replace("    runs-on: [self-hosted, Windows, X64, noctty-interactive]`n    timeout-minutes: 60", "    runs-on: [self-hosted, Windows, X64, noctty-interactive]`n    timeout-minutes: 61").Replace("    runs-on: [self-hosted, Windows, X64, noctty-interactive]`r`n    timeout-minutes: 60", "    runs-on: [self-hosted, Windows, X64, noctty-interactive]`r`n    timeout-minutes: 61") }; Expect = 'test.yml#windows-interactive changed' }
-        @{ Name = 'the dispatch input it reads defaulted on'; Path = '.github/workflows/test.yml'; Change = { param($t) [regex]::Replace($t, '(?m)^(        default: )false(\r?)$', '${1}true$2', 'None', [TimeSpan]::FromSeconds(5)) }; Expect = 'test.yml#workflow_dispatch changed' }
+        @{ Name = 'the dispatch input it reads defaulted on'; Path = '.github/workflows/test.yml'; Change = { param($t) [regex]::Replace($t, '(?m)^(        default: )false(\r?)$', '${1}true$2', 'None', [TimeSpan]::FromSeconds(5)) }; Expect = 'test.yml#run_interactive_win11 changed' }
+        @{ Name = 'the dispatch input it reads renamed'; Path = '.github/workflows/test.yml'; Change = { param($t) $t.Replace('      run_interactive_win11:', '      run_interactive_win12:') }; Expect = 'test.yml#run_interactive_win11 is missing' }
         @{ Name = 'a hosted variable in the Test workflow'; Path = '.github/workflows/test.yml'; Change = { param($t) $t.Replace("`njobs:", "`nenv:`n  noctty_gui_hidden_desktop: x`njobs:") }; Expect = 'test.yml names NOCTTY_GUI_HIDDEN_' }
     )) {
     $frozenSetMutated = [ordered]@{}
@@ -3015,3 +3030,39 @@ if ([string]::Equals($frozenBench, $frozenBenchEdited, [StringComparison]::Ordin
 $frozenSetOther['.github/workflows/test.yml'] = $frozenSetTexts['.github/workflows/test.yml'].Replace($frozenBench, $frozenBenchEdited)
 $frozenOtherProblems = Get-FrozenSetProblems $frozenSetOther
 if ($frozenOtherProblems.Count -ne 0) { throw "The frozen-set pin refused an edit to a job it does not freeze: $($frozenOtherProblems -join ' ')" }
+# A job appended after the frozen one, with a leading comment, or after a blank line, passes (Opus on #740).
+foreach ($frozenLater in @(
+        @('', '  # A later job, introduced by a comment.', '  later-job:', '    runs-on: ubuntu-latest', '    steps:', '      - run: echo later'),
+        @('', '', '  later-job:', '    runs-on: ubuntu-latest', '    steps:', '      - run: echo later'),
+        @('', '# A top-level comment.', 'env:', '  LATER: 1'))) {
+    $frozenSetLater = [ordered]@{}
+    foreach ($path in $frozenSetTexts.Keys) { $frozenSetLater[$path] = $frozenSetTexts[$path] }
+    $frozenLaterYml = $frozenSetTexts['.github/workflows/test.yml']
+    $frozenLaterNl = $(if ($frozenLaterYml.Contains("`r`n")) { "`r`n" } else { "`n" })
+    $frozenSetLater['.github/workflows/test.yml'] = $frozenLaterYml.TrimEnd("`r", "`n") + $frozenLaterNl + ($frozenLater -join $frozenLaterNl) + $frozenLaterNl
+    $frozenLaterProblems = Get-FrozenSetProblems $frozenSetLater
+    if ($frozenLaterProblems.Count -ne 0) { throw "The frozen-set pin refused a job or key appended after the frozen job: $($frozenLaterProblems -join ' ')" }
+}
+# The last line of the frozen job itself is still the job's: changing it fails.
+$frozenSetLast = [ordered]@{}
+foreach ($path in $frozenSetTexts.Keys) { $frozenSetLast[$path] = $frozenSetTexts[$path] }
+$frozenLastJob = Get-FrozenSetRegion $frozenSetTexts['.github/workflows/test.yml'] 'windows-interactive'
+$frozenLastBody = $frozenLastJob.TrimEnd("`r", "`n")
+$frozenSetLast['.github/workflows/test.yml'] = $frozenSetTexts['.github/workflows/test.yml'].Replace($frozenLastJob, $frozenLastBody + 'x' + $frozenLastJob.Substring($frozenLastBody.Length))
+$frozenLastProblems = Get-FrozenSetProblems $frozenSetLast
+if (@($frozenLastProblems | Where-Object { $_.Contains('test.yml#windows-interactive changed') }).Count -eq 0) { throw 'The frozen-set pin accepted a change to the frozen job''s last line.' }
+# And another manual input, before or after the one the job reads, passes (Sol on #740).
+$frozenTestYml = $frozenSetTexts['.github/workflows/test.yml']
+$frozenInputNl = $(if ($frozenTestYml.Contains("`r`n")) { "`r`n" } else { "`n" })
+$frozenExtraInput = (@('      run_unrelated_check:', '        description: An unrelated manual input', '        required: false', '        default: false', '        type: boolean') -join $frozenInputNl) + $frozenInputNl
+foreach ($frozenPlace in @('before', 'after')) {
+    $frozenSetInput = [ordered]@{}
+    foreach ($path in $frozenSetTexts.Keys) { $frozenSetInput[$path] = $frozenSetTexts[$path] }
+    $frozenInputs = [regex]::Match($frozenTestYml, '(?m)^    inputs:\r?\n', 'None', [TimeSpan]::FromSeconds(5))
+    $frozenAfterInput = [regex]::Match($frozenTestYml, '(?m)^      run_interactive_win11:[^\r\n]*\r?\n(?:        [^\r\n]*\r?\n)*', 'None', [TimeSpan]::FromSeconds(5))
+    if (-not $frozenInputs.Success -or -not $frozenAfterInput.Success) { throw 'The frozen-set input control found no dispatch input to place beside.' }
+    $frozenAt = $(if ($frozenPlace -ceq 'before') { $frozenInputs.Index + $frozenInputs.Length } else { $frozenAfterInput.Index + $frozenAfterInput.Length })
+    $frozenSetInput['.github/workflows/test.yml'] = $frozenTestYml.Insert($frozenAt, $frozenExtraInput)
+    $frozenInputProblems = Get-FrozenSetProblems $frozenSetInput
+    if ($frozenInputProblems.Count -ne 0) { throw "The frozen-set pin refused an unrelated manual input placed $frozenPlace the one it freezes: $($frozenInputProblems -join ' ')" }
+}

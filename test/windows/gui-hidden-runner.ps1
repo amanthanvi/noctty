@@ -9,10 +9,10 @@ job gained a noctty process the launcher did not start, that left a reparse poin
 .DESCRIPTION
   pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new directory>
        -Out <new or empty directory> [-Build] [-Leaves <id>,...] [-KeepFailedCopies]
-  pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError <kind> -Out <new or empty directory>
 
--PublishError writes only an `error` result (and run.json) for a step that failed before the suite could run, such
-as the workflow's helper self-test, so the uploaded artifact still records the failure; it exits 2.
+A job that failed without a complete result (a failed helper self-test, or a runner that died or did not parse) gets
+an `error` result from test/windows/gui-hidden-publish-error.ps1, a script of its own that loads nothing of this one;
+the runner runs it too when its own initialization fails.
 
 The build (design §4.2). Every leaf starts only a fresh portable copy of the measurement build that
 Invoke-InteractiveWin11MeasureBuild (scripts/interactive-win11-measure-lib.ps1) made for -MeasureRepo's HEAD, with
@@ -23,9 +23,9 @@ refused off a GitHub-hosted runner: locally the generation is prepared beforehan
 never by a plain `zig build` (the product-AUMID zig-out build). The raw generation is validated once, under its lock,
 before staging and again at the end (Assert-InteractiveWin11MeasureBuild). Each copy is staged from it (everything in
 the prefix's bin but noctty.ico, crash, ghostty and the PDBs, plus share), and its app and CLI are hashed separately
-against the receipt's ExeSHA256 and CliSHA256, and its ConPTY pair (conpty.dll, OpenConsole.exe) against the prefix's
-bytes as validated. At the end the generation must still match those hashes and the receipt's own bytes, not only
-itself. Each launch is then checked cheaply in the leaf (file identity, marker, icon, measurement mode, desktop, the
+against the receipt's ExeSHA256 and CliSHA256, and its ConPTY pair (conpty.dll, OpenConsole.exe) against the package
+pins (dist/windows/conpty-redist.json). At the end the generation must still match those hashes and the receipt's own
+bytes, not only itself. Each launch is then checked cheaply in the leaf (file identity, marker, icon, measurement mode, desktop, the
 argument rule, and the command line read back from the started process; scripts/interactive-win11-lib.ps1,
 Start-InteractiveWin11HostedProcess), and all four files are re-hashed when the leaf ends. A passing leaf's copy is
 deleted at once; a failing one's at the end unless -KeepFailedCopies.
@@ -63,7 +63,8 @@ recorded held, tripped or not-run, and one that did not run makes the run an err
 session unlocked during a local run: OpenInputDesktop fails on a locked workstation, and the leaf refuses to start.
 
 -Out must be new or empty. It receives only result.json (the flagship result schema, scenario
-windows.gui-hidden.suite) and receipts/: one JSON object per leaf run now and run.json (the build's hashes and head,
+windows.gui-hidden.suite), written whole and then followed by result.json.sha256, its hash, the completion mark the
+error publisher checks, and receipts/: one JSON object per leaf run now and run.json (the build's hashes and head,
 the hosted image's name and version, the two AutoRun booleans, the guards), of allowlisted values: booleans, numbers
 and short strings without a path separator, quote or bracket (Write-GuiHiddenRecord, from gui-hosted-probe.ps1's record
 writer, #738). No path, command line, window title or environment value enters either; a failed leaf's receipt carries
@@ -79,58 +80,9 @@ param(
     [string] $Out,
     [switch] $Build,
     [string[]] $Leaves = @(),
-    [switch] $KeepFailedCopies,
-    [string] $PublishError
+    [switch] $KeepFailedCopies
 )
 $ErrorActionPreference = 'Stop'
-
-# The minimal error result: written with nothing but .NET and built-in cmdlets, so it can be written whatever failed
-# first (CodeRabbit and Sol on #740). It refuses to replace a result that already stands; otherwise it writes
-# receipts/publish-error.json and a result.json of fixed values that lists only that file. -Out may hold a crashed
-# run's partial receipts; they are not listed. Returns whether it wrote.
-function Publish-GuiHiddenMinimalError([string] $OutPath, [string] $Kind) {
-    $OutPath = [IO.Path]::GetFullPath($OutPath)
-    if ((Test-Path -LiteralPath $OutPath) -and -not (Test-Path -LiteralPath $OutPath -PathType Container)) { return $false }
-    if (Test-Path -LiteralPath (Join-Path $OutPath 'result.json')) { return $false }
-    [void](New-Item -ItemType Directory -Force -Path (Join-Path $OutPath 'receipts'))
-    $now = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    $hostedRun = $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
-    $published = [ordered]@{
-        hosted = $hostedRun; publishedError = $Kind
-        guards = [ordered]@{ state = 'not-run'; history = 'not-run'; startup = 'not-run' }; stateGuardsHeld = $false; exit = 2
-    }
-    $publishedRecord = Join-Path $OutPath 'receipts\publish-error.json'
-    [IO.File]::WriteAllText($publishedRecord, ($published | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
-    $publishedResult = [ordered]@{
-        schema_version = 'noctty.verification.result.v1'
-        scenario_id = 'windows.gui-hidden.suite'
-        status = 'error'
-        started_at = $now; finished_at = $now; duration_ms = 0
-        baseline_commit = $null; implementation_commit = $null
-        workflow_run_id = $(if ($env:GITHUB_RUN_ID -match '\A[0-9]+\z') { $env:GITHUB_RUN_ID } else { $null })
-        workflow_run_attempt = $(if ($env:GITHUB_RUN_ATTEMPT -match '\A[0-9]+\z') { [int]$env:GITHUB_RUN_ATTEMPT } else { $null })
-        environment = [ordered]@{ os = 'Windows'; architecture = 'x86_64'; hosted = $hostedRun; desktop = 'private' }
-        measurements = [ordered]@{ 'suite.publishedError' = $Kind }
-        assertions = @(foreach ($id in @('leaves-pass', 'launch-policy', 'real-input-absent', 'state-guards')) { [ordered]@{ id = $id; status = 'fail'; message = $null } })
-        artifacts = @([ordered]@{ kind = 'other'; path = 'receipts/publish-error.json'; sha256 = (Get-FileHash -LiteralPath $publishedRecord -Algorithm SHA256).Hash.ToLowerInvariant() })
-        failure = [ordered]@{ message = "exit 2 ($Kind)"; type = 'error' }
-    }
-    [IO.File]::WriteAllText((Join-Path $OutPath 'result.json'), ($publishedResult | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-    return $true
-}
-
-# -PublishError runs before anything else loads (CodeRabbit on #740): the workflow calls it when the job failed without
-# a result, perhaps because a library does not load or the plan does not parse, so it loads no library, compiles
-# nothing and reads no plan. It exits 2 after it writes, and 0 when a result already stands (nothing to add).
-if ($PublishError) {
-    $usage = 'Usage: -PublishError <kind: lowercase letters, digits and hyphens> -Out <directory>, alone.'
-    if ($PublishError -cnotmatch '\A[a-z][a-z0-9-]{0,39}\z' -or -not $Out -or $MeasureRepo -or $Work -or $Build -or $Leaves.Count -gt 0) {
-        Write-Host "gui-hidden: validation failed: $usage"; exit 2
-    }
-    if (Publish-GuiHiddenMinimalError $Out $PublishError) { Write-Host "gui-hidden: published an error result ($PublishError)"; exit 2 }
-    if (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Out)) 'result.json')) { Write-Host 'gui-hidden: a result already stands; nothing to publish'; exit 0 }
-    Write-Host 'gui-hidden: validation failed: the output path is not a directory.'; exit 2
-}
 
 # The runner's own initialization (its libraries, its native type, the layout check) runs inside the error path: a
 # failure here still leaves an error result when -Out is given (Sol on #740: a runner whose own libraries were missing
@@ -566,7 +518,12 @@ if (-not [string]::Equals([GuiHiddenRunnerNative]::Layout(), $script:GuiHiddenNa
 }
 catch {
     Write-Host "gui-hidden: the runner could not initialize ($($_.Exception.GetType().Name))"
-    if ($Out -and (Publish-GuiHiddenMinimalError $Out 'runner-init')) { Write-Host 'gui-hidden: published an error result (runner-init)' }
+    # The error publisher is a script of its own (Sol on #740), so a runner that fails here, or does not parse, still
+    # leaves a result.
+    if ($Out) {
+        try { & (Join-Path $PSScriptRoot 'gui-hidden-publish-error.ps1') -Kind 'runner-init' -Out $Out }
+        catch { Write-Host "gui-hidden: the error publisher failed ($($_.Exception.GetType().Name))" }
+    }
     exit 2
 }
 
@@ -641,8 +598,8 @@ function Get-GuiHiddenBaseConfig {
 # everything but noctty.ico, crash, ghostty and the PDBs, plus the prefix's share; the marker; the policy's config.
 # `Build` holds the hashes taken when the generation was validated: the app and CLI (the receipt's ExeSHA256 and
 # CliSHA256) and the ConPTY pair (conpty.dll and OpenConsole.exe, which the copy's app loads from beside itself,
-# pty.zig; no receipt names them, so the prefix's own bytes at validation are the reference, as
-# hidden-win11-working-set.ps1 checks its copy's pair, #739). Throws on any difference.
+# pty.zig; no receipt names them, so the reference is the package pins, Get-GuiHiddenConptyPins, which the prefix's
+# pair must equal). Throws on any difference.
 function New-GuiHiddenCopy([string] $Bin, [string] $Copy, [System.Collections.IDictionary] $Build) {
     if (Test-Path -LiteralPath $Copy) { throw 'The copy directory must be new.' }
     [void](New-Item -ItemType Directory -Path $Copy)
@@ -986,13 +943,15 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         $policy.measurementMode = $true
         $policy.held = $policy.held -and $policy.autoRunOffObserved -and $policy.portable -and $policy.iconAbsent
         $record.launchPolicy = $policy
-        # The renderer the copies used: the configured backend, and the number of the leaf's noctty log files that hold the
-        # OpenGL-to-D3D11 fallback (renderer/Windows.zig's warning; counted, never copied).
+        # The renderer the copies used: the number of the leaf's noctty log files that hold the OpenGL-to-D3D11 fallback
+        # (renderer/Windows.zig's warning; counted, never copied), and the backends that started and the attempts
+        # before them, read from the same logs (Get-GuiHiddenRendererStartups).
         $logs = Join-Path $run "sandbox-$token\logs"
         $logTexts = @(Get-ChildItem -LiteralPath $logs -Filter '*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { [IO.File]::ReadAllText($_.FullName) })
         $record.rendererFallbackLogs = @($logTexts | Where-Object { $_.Contains('; trying the Direct3D 11 beta') }).Count
-        # The backend that initialized, read from the same logs (Sol on #740): Get-GuiHiddenRendererObserved.
-        $record.rendererObserved = @(Get-GuiHiddenRendererObserved $logTexts)
+        $rendererStartups = Get-GuiHiddenRendererStartups $logTexts
+        $record.rendererObserved = @($rendererStartups.observed)
+        $record.rendererStartups = @($rendererStartups.startups)
         $logTexts = $null
         $record.passed = -not $timedOut -and $exitCode -eq 0 -and $record.processes.passed -and $defaultWindows -eq 0 -and -not $defaultWalkFailed -and
             $record.receipt.valid -and $record.receipt.realInputLoaded -eq $false -and $record.appUnchanged -and $record.cliUnchanged -and
@@ -1028,22 +987,65 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
 
 # ---- main
 
-# The renderer backends that initialized, from a leaf's noctty logs (never copied): `opengl` for a log that loaded
-# OpenGL (the measurement build is a Debug build, whose OpenGL.zig logs `loaded OpenGL <version>`) and did not fall
-# back; `d3d11` for a log that fell back (renderer/Windows.zig's `; trying the Direct3D 11 beta`) and shows no D3D11
-# startup failure after it, since a D3D11 start logs nothing on success; `unknown` for a log that fell back and then
-# failed a D3D11 start. A log with neither line (a CLI's) names no backend. Sorted and unique.
-function Get-GuiHiddenRendererObserved([string[]] $LogTexts) {
-    $seen = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+# The renderer each surface started with, from a leaf's noctty logs (never copied), read only from lines that say a
+# backend started (Sol and Opus on #740: a warning is an attempt, not a start). Lines are `<level>(<scope>): <text>`
+# (process_shared.zig's logFn), matched whole:
+# - a start: renderer/Windows.zig's `renderer started backend=<opengl|d3d11|d3d11-warp>`, which it logs once a
+#   candidate has fully started (Direct3D11.zig's `initialized driver=` is logged when the device is made, before the
+#   rest of its candidate, which can still fail, so it only marks an attempt);
+# - a failed candidate: Windows.zig's `OpenGL startup failed err=` and `<d3d11|d3d11-warp> startup failed err=`;
+# - a runtime switch to OpenGL, and a failed one: Windows.zig's `OpenGL: switched from D3D11 beta (` and
+#   `D3D11: OpenGL fallback failed (`;
+# - an attempt under way: OpenGL.zig's `loaded OpenGL <version>` (the Debug measurement build logs it).
+# Each start closes a chain of the failures before it, such as `opengl:failed d3d11:failed d3d11-warp:started`. A log
+# that ends with failures or an attempt not closed by a start ends its chain in `unknown`; a log with none of these
+# lines (a CLI's) names nothing. Returns the sorted unique backends observed (`unknown` among them) and chains.
+function Get-GuiHiddenRendererStartups([string[]] $LogTexts) {
+    $observed = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    $startups = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     foreach ($text in @($LogTexts)) {
         if ([string]::IsNullOrEmpty($text)) { continue }
-        if ($text.Contains('; trying the Direct3D 11 beta')) {
-            if ($text -match 'd3d11(-warp)? startup failed') { [void]$seen.Add('unknown') } else { [void]$seen.Add('d3d11') }
+        $chain = [System.Collections.Generic.List[string]]::new()
+        $open = $false
+        foreach ($line in $text.Split("`n")) {
+            $line = $line.TrimEnd("`r")
+            if ($line -cmatch '\Ainfo\(renderer_windows\): renderer started backend=(opengl|d3d11|d3d11-warp)\z') {
+                $chain.Add("$($Matches[1]):started")
+                [void]$observed.Add($Matches[1])
+                [void]$startups.Add($chain -join ' ')
+                $chain.Clear(); $open = $false
+            }
+            elseif ($line -cmatch '\Awarn\(renderer_windows\): OpenGL: switched from D3D11 beta \(') {
+                # A switch runs on a renderer thread, beside other surfaces' starts: it closes only an attempt with no
+                # failure in it (its own OpenGL load).
+                [void]$observed.Add('opengl'); [void]$startups.Add('opengl:switched')
+                if ($chain.Count -eq 0) { $open = $false }
+            }
+            elseif ($line -cmatch '\Awarn\(renderer_windows\): D3D11: OpenGL fallback failed \(') {
+                [void]$startups.Add('opengl:switch-failed')
+                if ($chain.Count -eq 0) { $open = $false }
+            }
+            elseif ($line -cmatch '\Awarn\(renderer_windows\): OpenGL startup failed err=') { $chain.Add('opengl:failed'); $open = $true }
+            elseif ($line -cmatch '\Awarn\(renderer_windows\): (d3d11|d3d11-warp) startup failed err=') { $chain.Add("$($Matches[1]):failed"); $open = $true }
+            elseif ($line -cmatch '\Adebug\(opengl\): loaded OpenGL [0-9]' -or $line -cmatch '\Ainfo\(d3d11\): initialized driver=') { $open = $true }
         }
-        elseif ($text -match 'loaded OpenGL [0-9]') { [void]$seen.Add('opengl') }
+        if ($open) {
+            $chain.Add('unknown')
+            [void]$observed.Add('unknown')
+            [void]$startups.Add($chain -join ' ')
+        }
     }
-    # Emitted one by one: a caller wraps the call in @() (PS-EMPTY-ARRAY-COUNT-01).
-    foreach ($backend in $seen) { $backend }
+    return [ordered]@{ observed = [string[]]@($observed); startups = [string[]]@($startups) }
+}
+
+# result.json goes in whole (a temporary file moved over it), then result.json.sha256, its hash, last: the error
+# publisher takes a result as complete only with that hash (Sol on #740: a truncated result stood as final).
+function Write-GuiHiddenResult($Result, [string] $OutPath) {
+    $path = Join-Path $OutPath 'result.json'
+    $partial = "$path.partial"
+    [IO.File]::WriteAllText($partial, ($Result | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($partial, $path, $true)
+    [IO.File]::WriteAllText("$path.sha256", (Get-GuiHiddenHash $path) + "`n", [Text.UTF8Encoding]::new($false))
 }
 
 # The fingerprint of the real startup-attempts.json (Startup-Fingerprint) as allowlisted record values: whether it
@@ -1098,7 +1100,7 @@ function Test-GuiHiddenAutoRunPresent([string] $Root) {
 }
 
 # The hashes the run is bound to, taken under the generation's lock right after it was validated: the receipt file's
-# bytes, the receipt's app and CLI hashes, and the prefix's ConPTY pair. The end-of-run check compares the generation
+# bytes, the receipt's app and CLI hashes, and the ConPTY pair's package pins. The end-of-run check compares the generation
 # with these, not only with itself (CodeRabbit on #740: a rebuild at the same head would validate against its own
 # receipt).
 # The ConPTY pair's pinned hashes for x64, from the checked-in package record (dist/windows/conpty-redist.json, which
@@ -1172,7 +1174,7 @@ $script:GuiHiddenWork = $null
 $leafRecords = [System.Collections.Generic.List[object]]::new()
 $receiptNames = [System.Collections.Generic.List[string]]::new()
 $runRecord = [ordered]@{ hosted = (Test-GuiHiddenHosted); built = [bool]$Build }
-# Until a guard runs, it is not-run, and the guards are not held (a validation or -PublishError run never starts them).
+# Until a guard runs, it is not-run, and the guards are not held (a run that fails validation never starts them).
 $runRecord.guards = [ordered]@{ state = 'not-run'; history = 'not-run'; startup = 'not-run' }
 $runRecord.stateGuardsHeld = $false
 $selected = @()
@@ -1418,6 +1420,7 @@ if ($outReady) {
             # Read back from each copy's config (Get-GuiHiddenConfigPolicy's `renderer`): `unset` is the default, OpenGL.
             rendererConfigured = (@($leafRecords | ForEach-Object { if ($_.launchPolicy -and $_.launchPolicy.renderer -and $_.launchPolicy.renderer -cne 'unset') { [string]$_.launchPolicy.renderer } elseif ($_.launchPolicy) { 'opengl' } } | Where-Object { $_ } | Sort-Object -Unique) -join '+')
             rendererObserved = (@($leafRecords | ForEach-Object { @($_.rendererObserved) } | Where-Object { $_ } | Sort-Object -Unique) -join '+')
+            rendererStartups = (@($leafRecords | ForEach-Object { @($_.rendererStartups) } | Where-Object { $_ } | Sort-Object -Unique) -join '; ')
             rendererFallbackLeaves = $fallbackLeaves
         }
         measurements = $measurements
@@ -1430,7 +1433,7 @@ if ($outReady) {
         artifacts = $receipts
         failure = $(if ($exit -eq 0) { $null } else { [ordered]@{ message = "exit $exit ($failureKind)"; type = $status } })
     }
-    [IO.File]::WriteAllText((Join-Path $Out 'result.json'), ($result | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+    Write-GuiHiddenResult $result $Out
 }
 Write-Host "gui-hidden: exit $exit$(if ($failureKind) { " ($failureKind)" })"
 exit $exit

@@ -303,7 +303,9 @@ that govern each symbol you change, or that none does.
   wakeups from `termio` and typing latency, the libxev IOCP timers the
   renderer arms (`Thread.timerCallback`, a `Canceled` run, the libxev pin in
   `build.zig.zon`), repaint during live resize
-  (`win32/surface_presentation.zig`), and which DLLs a CLI action or the D3D11
+  (`win32/surface_presentation.zig`), the line a surface logs once its
+  renderer has started, which the hidden-desktop suite reads (`logStarted`
+  in `src/renderer/Windows.zig`), and which DLLs a CLI action or the D3D11
   backend loads (the OpenGL32 static import).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
@@ -717,7 +719,8 @@ that govern each symbol you change, or that none does.
   `Get-InteractiveWin11HostedRunToken`; the harness's path comparison
   `Test-InteractiveWin11SamePath` and `Get-InteractiveWin11CanonicalPath` in
   `scripts/interactive-win11-measure-lib.ps1`; the struct layout pins,
-  `Layout()`, and the runner's `-PublishError`), the real-input module
+  `Layout()`, and the error publisher
+  `test/windows/gui-hidden-publish-error.ps1`), the real-input module
   `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
   the measurement record
   `test/windows/flagship/measurements/gui-measurements.json` and the
