@@ -124,7 +124,7 @@ try {
             $processHandle = $process.Handle
             try {
                 [void](Invoke-InteractiveWin11Message `
-                    -Hwnd $hostWindows[0] `
+                    -Hwnd ([IntPtr]::Zero) `
                     -Message 0x0010 `
                     -Deadline $closeDeadline `
                     -Description 'WM_CLOSE smoke validation' `

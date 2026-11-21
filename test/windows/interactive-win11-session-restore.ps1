@@ -121,7 +121,7 @@ try {
     $snapshot = Get-SessionAutomationSnapshot 'session-restore-automation' $deadline
     if ($snapshot.windows.Count -ne 1 -or $snapshot.windows[0].tabs.Count -ne 3) { throw "Restored automation shape mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)" }
     $activeTabs = @($snapshot.windows[0].tabs | Where-Object active)
-    if ($activeTabs.Count -ne 1 -or $snapshot.windows[0].tabs[1].tab_id -ne $snapshot.windows[0].active_tab_id -or -not $snapshot.windows[0].tabs[1].active) {
+    if ($activeTabs.Count -ne 1 -or $snapshot.windows[0].tabs[2].tab_id -ne $snapshot.windows[0].active_tab_id -or -not $snapshot.windows[0].tabs[2].active) {
         throw "Restored selected tab mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)"
     }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

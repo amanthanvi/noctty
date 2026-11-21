@@ -182,7 +182,7 @@ try {
     Assert-AutomationExit -Description '+new-window' -Result $result -Expected 0
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $state = Wait-AutomationState -Description 'second window' -Deadline $deadline -Condition {
-        param($candidate) @($candidate.windows).Count -eq 2
+        param($candidate) @($candidate.windows).Count -eq 3
     }
 
     $beforeTabCount = @($state.windows | Where-Object window_id -eq $firstWindowId)[0].tab_count

@@ -109,7 +109,7 @@ $expectedRuntime = [ordered]@{
     'osc-10-11-colors' = 'parser-only'
     'osc-21-kitty-color-stack' = 'parser-only'
     'csi-2026-synchronized-output' = 'parser-only'
-    'kitty-graphics' = 'pending'
+    'kitty-graphics' = 'validated'
 }
 
 foreach ($entry in $expectedRuntime.GetEnumerator()) {

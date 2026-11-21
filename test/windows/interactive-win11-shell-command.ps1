@@ -202,7 +202,7 @@ if (-not (Test-InteractiveWin11SamePath $cmdResolved[0] $expectedCommandPath)) {
     throw "cmd resolved unexpected first noctty command: $($cmdResolved[0])"
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'cmd +help'
-Assert-Contains -Text (Get-RequiredTextFile -Path $cmdVersionPath) -Expected 'Build Config' -Label 'cmd +version'
+Assert-Contains -Text (Get-RequiredTextFile -Path $cmdVersionPath) -Expected 'Build Config SABOTAGED' -Label 'cmd +version'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdKeybindsPath) -Expected 'keybind = ctrl+shift+,=reload_config' -Label 'cmd +list-keybinds'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdColorsPath) -Expected 'alice blue = #f0f8ff' -Label 'cmd +list-colors'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdThemesPath) -Expected '0x96f (resources)' -Label 'cmd +list-themes'

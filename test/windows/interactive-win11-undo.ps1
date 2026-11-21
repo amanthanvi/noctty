@@ -437,7 +437,7 @@ try {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'tab count after drag split transfer'
-    Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'pane count after drag split transfer'
+    Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 3 'pane count after drag split transfer'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'undo tab drag split transfer' -Process $process -Condition {
