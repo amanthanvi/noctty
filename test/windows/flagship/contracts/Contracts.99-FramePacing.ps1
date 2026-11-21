@@ -39,7 +39,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'each run copies the build without noctty.ico, checks the copied app and CLI against the receipt, then marks it portable'
-        Pattern = '(?s)function Invoke-FramePacingOuterRun\(\$build, \[string\] \$Run, \[long\] \$QuietSince, \[string\] \$WatchEvent\) \{.*?Where-Object \{ \$_\.Name -notin @\(''noctty\.ico'', ''crash'', ''ghostty''\) \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw [^\r\n]+\}\s+if \(-not \(Test-WorkingSetCopy \$copy \$build\)\) \{ throw [^\r\n]+\}\s+\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
+        Pattern = '(?s)function Invoke-FramePacingOuterRun\(\$build, \[string\] \$Run, \[long\] \$QuietSince, \[string\] \$WatchEvent, \[long\] \$LockNeededMs\) \{.*?Where-Object \{ \$_\.Name -notin @\(''noctty\.ico'', ''crash'', ''ghostty''\) \}.*?if \(Test-Path -LiteralPath \(Join-Path \$copy ''noctty\.ico''\)\) \{ throw [^\r\n]+\}\s+if \(-not \(Test-WorkingSetCopy \$copy \$build\)\) \{ throw [^\r\n]+\}\s+\[IO\.File\]::WriteAllText\(\(Join-Path \$copy ''noctty\.portable''\), ''''\)'
         Mutation = @('if (-not (Test-WorkingSetCopy $copy $build)) { throw', 'if ($false) { throw')
     }
     @{
@@ -105,7 +105,7 @@ $framePacingRules = @(
     # --- the visible part
     @{
         Description = 'the driver evaluates the visible part''s preconditions on its own session before any launch: a dry run must be refused, a visible run must not be'
-        Pattern = '(?s)\$facts = Get-FramePacingSessionFacts \$QuietSinceTick\s+\$record\.Composition = \$facts\.Composition\s+\$record\.NotificationState = \$facts\.NotificationState\s+\$record\.ForegroundLockTimeoutMs = \$facts\.ForegroundLockTimeoutMs\s+\$record\.VisibleRefusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$Visible -and \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}\s+if \(-not \$Visible -and -not \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}.*?Assert-Quiet ''\+version''\s+\$check = \[FramePacingNative\]::Spawn\('
+        Pattern = '(?s)\$facts = Get-FramePacingSessionFacts \$QuietSinceTick \$ForegroundLockNeededMs\s+\$record\.Composition = \$facts\.Composition\s+\$record\.NotificationState = \$facts\.NotificationState\s+\$record\.ForegroundLockTimeoutMs = \$facts\.ForegroundLockTimeoutMs\s+\$record\.VisibleRefusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$Visible -and \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}\s+if \(-not \$Visible -and -not \$record\.VisibleRefusal\) \{ throw [^\r\n]+\}.*?Assert-Quiet ''\+version''\s+\$check = \[FramePacingNative\]::Spawn\('
         Mutation = @('if (-not $Visible -and -not $record.VisibleRefusal) { throw', 'if ($false) { throw')
     }
     @{
@@ -115,7 +115,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the visible part''s preconditions are read after the quiet-machine wait, not before it'
-        Pattern = '(?s)\$record\.QuietWaitMs = \$quietClock\.ElapsedMilliseconds\s+if [^\r\n]+\}\s+\}\s+\$record\.TimerResolutionBefore100ns = .*?\$facts = Get-FramePacingSessionFacts \$QuietSinceTick'
+        Pattern = '(?s)\$record\.QuietWaitMs = \$quietClock\.ElapsedMilliseconds\s+if [^\r\n]+\}\s+\}\s+\$record\.TimerResolutionBefore100ns = .*?\$facts = Get-FramePacingSessionFacts \$QuietSinceTick \$ForegroundLockNeededMs'
         Mutation = @('$record.QuietWaitMs = $quietClock.ElapsedMilliseconds', '$record.QuietWaitMs = 0')
     }
     @{
@@ -125,7 +125,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the outer half refuses -Visible off an unlocked, composed, local, idle Default before it creates anything, and keeps the tick it saw idle'
-        Pattern = '(?s)\$quietSince = \[long\]-1\s+\$watchEvent = \$null\s+if \(\$Visible\) \{\s+\$facts = Get-FramePacingSessionFacts -1\s+\$refusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$refusal\) \{ throw [^\r\n]+\}\s+\$quietSince = \[long\]\$facts\.LastInputTick\s+\$watchEvent = [^\r\n]+\s+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$root\)'
+        Pattern = '(?s)\$quietSince = \[long\]-1\s+\$watchEvent = \$null\s+\$lockNeeded = \[long\]-1\s+if \(\$Visible\) \{\s+\$facts = Get-FramePacingSessionFacts -1 -1\s+\$lockNeeded = Get-FramePacingLockNeedMs \$facts\.IdleMs \$facts\.MinIdleMs \$Runs\s+\$facts\.ForegroundLockNeededMs = \$lockNeeded\s+Write-Host [^\r\n]+\s+\$refusal = Get-FramePacingVisibleRefusal \$facts\s+if \(\$refusal\) \{ throw [^\r\n]+\}\s+\$quietSince = \[long\]\$facts\.LastInputTick\s+\$watchEvent = [^\r\n]+\s+\}.*?\[void\]\(New-Item -ItemType Directory -Path \$root\)'
         Mutation = @('if ($refusal) { throw', 'if ($false) { throw')
     }
     @{
@@ -407,7 +407,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'a visible series'' later runs check the session''s input against the tick the last run''s own unlock left, and each driver gets the series'' watch'
-        Pattern = '(?s)\$result = Invoke-FramePacingOuterRun \$build \(Join-Path \$root "run-\$i"\) \$quietSince \$watchEvent\s+.*?\$results\.Add\(\$result\)\s+if \(\$Visible -and \$null -ne \$result\.Record -and \$null -ne \$result\.Record\.InputTicks -and \$null -ne \$result\.Record\.InputTicks\.Unlock\) \{ \$quietSince = \[long\]\$result\.Record\.InputTicks\.Unlock \}.*?-QuietSinceTick \{9\}'' -f `\s+[^\r\n]+\$QuietWaitSeconds, \$QuietSince\s+if \(\$Visible\) \{ \$line \+= " -Visible -InputWatchEvent \$WatchEvent" \}'
+        Pattern = '(?s)\$result = Invoke-FramePacingOuterRun \$build \(Join-Path \$root "run-\$i"\) \$quietSince \$watchEvent \$lockNeeded\s+.*?\$results\.Add\(\$result\)\s+if \(\$Visible -and \$null -ne \$result\.Record -and \$null -ne \$result\.Record\.InputTicks -and \$null -ne \$result\.Record\.InputTicks\.Unlock\) \{ \$quietSince = \[long\]\$result\.Record\.InputTicks\.Unlock \}.*?-QuietSinceTick \{9\}'' -f `\s+[^\r\n]+\$QuietWaitSeconds, \$QuietSince\s+if \(\$Visible\) \{ \$line \+= " -Visible -InputWatchEvent \$WatchEvent -ForegroundLockNeededMs \$LockNeededMs" \}'
         Mutation = @('{ $quietSince = [long]$result.Record.InputTicks.Unlock }', '{ }')
     }
     @{
@@ -655,6 +655,26 @@ $framePacingRules += @(
         Description = 'the display''s power state is what its notification said, never a constant (Opus''s N9 on #741)'
         Pattern = 't\.IsBackground = true; t\.Start\(\); t\.Join\(ms \+ 1000\);\s+return state;'
         Mutation = @("t.Join(ms + 1000);`n        return state;", "t.Join(ms + 1000);`n        return 1;")
+    }
+)
+
+# The foreground lock must outlast the series (Greptile on #741): the admission computes the series' bound before its
+# refusal and hands it to each driver, and the driver's deadline is the constant the bound is built from.
+$framePacingRules += @(
+    @{
+        Description = 'the admission computes the series'' lock bound from the idle time it saw and the requested runs before it decides, and says both values'
+        Pattern = '\$lockNeeded = Get-FramePacingLockNeedMs \$facts\.IdleMs \$facts\.MinIdleMs \$Runs\s+\$facts\.ForegroundLockNeededMs = \$lockNeeded\s+Write-Host "frame pacing: the foreground lock is [^\r\n]+\s+\$refusal = Get-FramePacingVisibleRefusal \$facts'
+        Mutation = @('$facts.ForegroundLockNeededMs = $lockNeeded', '$facts.ForegroundLockNeededMs = 0')
+    }
+    @{
+        Description = 'the driver''s deadline is the constant the run bound is built from'
+        Pattern = '\$deadline = \[DateTime\]::UtcNow\.AddMilliseconds\(\$script:DriverDeadlineMs\)'
+        Mutation = @('AddMilliseconds($script:DriverDeadlineMs)', 'AddMinutes(60)')
+    }
+    @{
+        Description = 'the lock bound is the idle time (at least the minimum) plus every run''s longest duration'
+        Pattern = 'function Get-FramePacingLockNeedMs\(\[long\] \$IdleMs, \[long\] \$MinIdleMs, \[int\] \$Runs\) \{\s+return \[long\]\[Math\]::Max\(\$IdleMs, \$MinIdleMs\) \+ \[long\]\$Runs \* \[long\]\$script:RunBoundMs\s+\}'
+        Mutation = @(' + [long]$Runs * [long]$script:RunBoundMs', ' + [long]$script:RunBoundMs')
     }
 )
 
@@ -1006,7 +1026,7 @@ if ([regex]::Matches($framePacingBenchText, "'frame-pacing'").Count -ne 2) { thr
 # response bound, notifications accepted (5) and the display on (1), and the 1 s drain before the window's one
 # snapshot. Opus's mutations are the controls: the idle time cut to 60 s and the bound raised to ten minutes are
 # caught, and no parameter may lower the idle time.
-$framePacingConstantNames = @('Cols', 'Rows', 'GridRows', 'FontFamily', 'FontSize', 'PayloadWorkload', 'PayloadBytes', 'PayloadSeed', 'IntervalCapacity', 'QuietMs', 'EchoQuietMs', 'QuietBusyPercent', 'MinIdleSeconds', 'ForegroundBoundMs', 'ResponseBoundMs', 'NotificationsAccepted', 'DisplayOn', 'DrainMs', 'MinForegroundLockMs')
+$framePacingConstantNames = @('Cols', 'Rows', 'GridRows', 'FontFamily', 'FontSize', 'PayloadWorkload', 'PayloadBytes', 'PayloadSeed', 'IntervalCapacity', 'QuietMs', 'EchoQuietMs', 'QuietBusyPercent', 'MinIdleSeconds', 'ForegroundBoundMs', 'ResponseBoundMs', 'NotificationsAccepted', 'DisplayOn', 'DrainMs', 'DriverDeadlineMs', 'RunBoundMs')
 function Get-FramePacingConstantLines([string] $Text) {
     foreach ($name in $framePacingConstantNames) {
         $found = @([regex]::Matches($Text, "(?m)^\`$script:$name = (\d+|'[A-Za-z]+')[ \t]*$"))
@@ -1018,14 +1038,16 @@ function Get-FramePacingConstantValues([string] $Text) {
     return (@(Get-FramePacingConstantLines $Text) | ForEach-Object { $_ -replace '^\$script:(\w+) = ''?([^'']*)''?$', '$1=$2' }) -join ' '
 }
 $framePacingConstantLines = @(Get-FramePacingConstantLines $framePacingText)
-$framePacingPinned = 'Cols=140 Rows=45 GridRows=43 FontFamily=Consolas FontSize=16 PayloadWorkload=stream PayloadBytes=4194304 PayloadSeed=121 IntervalCapacity=2048 QuietMs=1000 EchoQuietMs=500 QuietBusyPercent=30 MinIdleSeconds=300 ForegroundBoundMs=5000 ResponseBoundMs=5000 NotificationsAccepted=5 DisplayOn=1 DrainMs=1000 MinForegroundLockMs=200000'
+$framePacingPinned = 'Cols=140 Rows=45 GridRows=43 FontFamily=Consolas FontSize=16 PayloadWorkload=stream PayloadBytes=4194304 PayloadSeed=121 IntervalCapacity=2048 QuietMs=1000 EchoQuietMs=500 QuietBusyPercent=30 MinIdleSeconds=300 ForegroundBoundMs=5000 ResponseBoundMs=5000 NotificationsAccepted=5 DisplayOn=1 DrainMs=1000 DriverDeadlineMs=1800000 RunBoundMs=2100000'
 if (-not (Test-FramePacingOrdinal (Get-FramePacingConstantValues $framePacingText) $framePacingPinned)) { throw "The frame-pacing constants changed: $(Get-FramePacingConstantValues $framePacingText)" }
-foreach ($control in @(@('$script:MinIdleSeconds = 300', '$script:MinIdleSeconds = 60'), @('$script:ForegroundBoundMs = 5000', '$script:ForegroundBoundMs = 600000'), @('$script:QuietBusyPercent = 30', '$script:QuietBusyPercent = 100'), @('$script:MinForegroundLockMs = 200000', '$script:MinForegroundLockMs = 0'))) {
+foreach ($control in @(@('$script:MinIdleSeconds = 300', '$script:MinIdleSeconds = 60'), @('$script:ForegroundBoundMs = 5000', '$script:ForegroundBoundMs = 600000'), @('$script:QuietBusyPercent = 30', '$script:QuietBusyPercent = 100'), @('$script:RunBoundMs = 2100000', '$script:RunBoundMs = 60000'))) {
     $mutated = $framePacingText.Replace($control[0], $control[1])
     if ([string]::Equals($mutated, $framePacingText, [StringComparison]::Ordinal)) { throw "The constants control changed nothing: $($control[1])." }
     if (Test-FramePacingOrdinal (Get-FramePacingConstantValues $mutated) $framePacingPinned) { throw "The constants check accepted $($control[1])." }
 }
 if ($framePacingText -match '(?i)\[int\]\s*\$MinIdleSeconds') { throw 'The idle time must be the pinned constant, never a parameter.' }
+# A run's bound covers the driver's deadline and leaves room for its staging and guards.
+if ([long]([regex]::Match($framePacingText, '(?m)^\$script:RunBoundMs = (\d+)').Groups[1].Value) -le [long]([regex]::Match($framePacingText, '(?m)^\$script:DriverDeadlineMs = (\d+)').Groups[1].Value)) { throw 'RunBoundMs must exceed DriverDeadlineMs.' }
 if (($framePacingText.Replace('[ValidateRange(0, 3600)] [int] $QuietWaitSeconds = 900,', "[ValidateRange(0, 3600)] [int] `$QuietWaitSeconds = 900,`n    [ValidateRange(0, 3600)] [int] `$MinIdleSeconds = 0,")) -notmatch '(?i)\[int\]\s*\$MinIdleSeconds') { throw 'The idle-parameter control changed nothing.' }
 $framePacingSaved = @{}
 foreach ($name in $framePacingConstantNames + @('Utf8')) {
@@ -1042,7 +1064,7 @@ try {
         # a test without them passes code the harness throws on).
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
-        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingNotLaunched', 'Get-FramePacingHookSilence', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
+        foreach ($name in @('Add-Line', 'New-FramePacingConfigText', 'Test-FramePacingConfigBytes', 'Get-FramePacingExpectedArgv', 'Test-WorkingSetArgv', 'Get-FramePacingVisibleRefusal', 'Get-FramePacingLockNeedMs', 'Get-FramePacingRecordProblems', 'Get-FramePacingRunStatus', 'Get-FramePacingNotLaunched', 'Get-FramePacingHookSilence', 'Test-FramePacingInputGate', 'Assert-FramePacingInputGate', 'Invoke-FramePacingForeground', 'Start-FramePacingInputWatch', 'Get-FramePacingSeries', 'Write-FramePacingSummary', 'Get-FramePacingExitCode', 'Get-FramePacingIntervalStats', 'Get-BenchMedian', 'Get-BenchPercentile', 'Get-FramePacingMarkerTail', 'Get-FramePacingWorkloadSha256', 'Get-BytesSha256')) {
             . ([scriptblock]::Create((Get-FramePacingFunctionText $framePacingAst $name 'bench-frame-pacing.ps1')))
         }
         $cases = [Collections.Generic.List[string]]::new()
@@ -1108,7 +1130,7 @@ try {
         $cases.Add('argv (pinned, exact; added --command, -e, reordered, no config file)')
 
         # The visible part's refusal: only Default, the input desktop, composed, local and idle passes.
-        $ok = [pscustomobject]@{ OwnDesktop = 'Default'; InputDesktop = 'Default'; Composition = 1; RemoteSession = $false; NotificationState = 5; DisplayPower = 1; ScreenSaverRunning = 0; ForegroundLockTimeoutMs = 2147483647; IdleMs = 400000; MinIdleMs = 300000; LastInputTick = 77; QuietSinceTick = -1 }
+        $ok = [pscustomobject]@{ OwnDesktop = 'Default'; InputDesktop = 'Default'; Composition = 1; RemoteSession = $false; NotificationState = 5; DisplayPower = 1; ScreenSaverRunning = 0; ForegroundLockTimeoutMs = 2147483647; ForegroundLockNeededMs = 10800000; IdleMs = 400000; MinIdleMs = 300000; LastInputTick = 77; QuietSinceTick = -1 }
         if ($null -ne (Get-FramePacingVisibleRefusal $ok)) { throw 'The visible check refused an idle, unlocked, composed local Default.' }
         $refusals = @(
             @{ Name = 'a private desktop'; Facts = @{ OwnDesktop = 'noctty-fp-1' } }
@@ -1126,7 +1148,9 @@ try {
             @{ Name = 'a screen saver (Opus on #741)'; Facts = @{ ScreenSaverRunning = 1 } }
             @{ Name = 'an unreadable screen-saver state'; Facts = @{ ScreenSaverRunning = -1 } }
             @{ Name = 'no foreground lock (Sol on #741)'; Facts = @{ ForegroundLockTimeoutMs = 0 } }
-            @{ Name = 'a foreground lock under 200 s'; Facts = @{ ForegroundLockTimeoutMs = 199999 } }
+            @{ Name = 'the default 200,000 ms lock with the 300 s idle requirement (Greptile on #741)'; Facts = @{ ForegroundLockTimeoutMs = 200000; ForegroundLockNeededMs = (Get-FramePacingLockNeedMs 300000 300000 1) } }
+            @{ Name = 'a lock equal to the series'' bound'; Facts = @{ ForegroundLockTimeoutMs = 10800000 } }
+            @{ Name = 'no lock bound'; Facts = @{ ForegroundLockNeededMs = -1 } }
             @{ Name = 'an unreadable foreground lock'; Facts = @{ ForegroundLockTimeoutMs = -1 } }
             @{ Name = 'recent input'; Facts = @{ IdleMs = 299999 } }
             @{ Name = 'an unreadable idle time'; Facts = @{ IdleMs = -1 } }
@@ -1141,8 +1165,18 @@ try {
         # is still the session's last input, so the run may go on.
         $later = $ok.PSObject.Copy(); $later.IdleMs = 2000; $later.QuietSinceTick = 77
         if ($null -ne (Get-FramePacingVisibleRefusal $later)) { throw 'The visible check refused a later run whose only input since the series'' tick was its own unlock.' }
-        $atLock = $ok.PSObject.Copy(); $atLock.ForegroundLockTimeoutMs = 200000
-        if ($null -ne (Get-FramePacingVisibleRefusal $atLock)) { throw 'The visible check refused a foreground lock of exactly 200 s.' }
+        $above = $ok.PSObject.Copy(); $above.ForegroundLockNeededMs = Get-FramePacingLockNeedMs 300000 300000 5; $above.ForegroundLockTimeoutMs = $above.ForegroundLockNeededMs + 1
+        if ($null -ne (Get-FramePacingVisibleRefusal $above)) { throw 'The visible check refused a foreground lock above the series'' bound.' }
+        # The bound itself (Greptile on #741): the idle time seen, at least the minimum, plus each run's longest. The
+        # control: a bound that ignores the number of runs.
+        $needCases = @(@(400000, 300000, 5, (400000 + 5 * 2100000)), @(1000, 300000, 1, (300000 + 2100000)), @(-1, 300000, 50, (300000 + 50 * 2100000)))
+        function Get-FramePacingNeedMiss { foreach ($case in $needCases) { $got = Get-FramePacingLockNeedMs $case[0] $case[1] $case[2]; if ($got -ne $case[3]) { return "idle $($case[0]), $($case[2]) runs: $got, not $($case[3])" } }; return $null }
+        $needMiss = Get-FramePacingNeedMiss
+        if ($needMiss) { throw "The lock bound: $needMiss." }
+        $needText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingLockNeedMs' 'bench-frame-pacing.ps1'
+        $needControl = $needText.Replace(' + [long]$Runs * [long]$script:RunBoundMs', ' + [long]$script:RunBoundMs')
+        if ([string]::Equals($needControl, $needText, [StringComparison]::Ordinal)) { throw 'The lock-bound control changed nothing.' }
+        & { . ([scriptblock]::Create($needControl)); if ($null -eq (Get-FramePacingNeedMiss)) { throw 'The lock-bound cases accepted a bound that ignores the runs.' } }
         $refusalText = Get-FramePacingFunctionText $framePacingAst 'Get-FramePacingVisibleRefusal' 'bench-frame-pacing.ps1'
         $tickControl = $refusalText.Replace('if ($Facts.LastInputTick -ne $Facts.QuietSinceTick)', 'if ($false)')
         if ([string]::Equals($tickControl, $refusalText, [StringComparison]::Ordinal)) { throw 'The tick control changed nothing.' }
@@ -1150,10 +1184,10 @@ try {
         $refusalControl = $refusalText.Replace('if ($Facts.IdleMs -lt 0 -or $Facts.IdleMs -lt $Facts.MinIdleMs)', 'if ($false)')
         if ([string]::Equals($refusalControl, $refusalText, [StringComparison]::Ordinal)) { throw 'The visible-check control changed nothing.' }
         & { . ([scriptblock]::Create($refusalControl)); $recent = $ok.PSObject.Copy(); $recent.IdleMs = 1000; if ($null -ne (Get-FramePacingVisibleRefusal $recent)) { throw 'The visible-check control did not accept recent input.' } }
-        $lockControl = $refusalText.Replace('if ($Facts.ForegroundLockTimeoutMs -lt $script:MinForegroundLockMs)', 'if ($false)')
+        $lockControl = $refusalText.Replace('if ($Facts.ForegroundLockNeededMs -lt 0 -or $Facts.ForegroundLockTimeoutMs -le $Facts.ForegroundLockNeededMs)', 'if ($false)')
         if ([string]::Equals($lockControl, $refusalText, [StringComparison]::Ordinal)) { throw 'The foreground-lock control changed nothing.' }
         & { . ([scriptblock]::Create($lockControl)); $unlocked = $ok.PSObject.Copy(); $unlocked.ForegroundLockTimeoutMs = 0; if ($null -ne (Get-FramePacingVisibleRefusal $unlocked)) { throw 'The foreground-lock control did not accept a lock of 0.' } }
-        $cases.Add('visible-refusal (idle Default; private, locked, other input desktop, no or unreadable composition, remote, a full-screen app, presentation mode, the display off or dimmed, a screen saver or an unreadable one, a foreground lock of 0, under 200 s or unreadable, recent or unreadable input, input since the series'' tick; a later run after its own unlock; a lock of exactly 200 s; idle, tick and foreground-lock controls)')
+        $cases.Add('visible-refusal (idle Default; private, locked, other input desktop, no or unreadable composition, remote, a full-screen app, presentation mode, the display off or dimmed, a screen saver or an unreadable one, a foreground lock of 0 or unreadable, the default 200,000 ms with the 300 s idle requirement, equal to the series'' bound, or with no bound, recent or unreadable input, input since the series'' tick; a later run after its own unlock; a lock above the bound admitted; the bound tabled; idle, tick, foreground-lock and run-blind bound controls)')
 
         # The record verdict: a complete dry run and a complete visible run count; each broken field is a problem;
         # the visible run's environment problems are only "inconclusive:".
@@ -1331,7 +1365,7 @@ public static class $driverStubName {
                 $code = & {
                     Set-StrictMode -Version Latest
                     $ErrorActionPreference = 'Stop'
-                    $Run = $root; $Visible = $AsVisible; $DesktopName = $Own; $ExpectedBuildMode = 'ReleaseFast'; $QuietSinceTick = [long]-1; $InputWatchEvent = $null
+                    $Run = $root; $Visible = $AsVisible; $DesktopName = $Own; $ExpectedBuildMode = 'ReleaseFast'; $QuietSinceTick = [long]-1; $InputWatchEvent = $null; $ForegroundLockNeededMs = [long]-1
                     function Get-Process { [pscustomobject]@{ PriorityClass = 'Normal' } }
                     . ([scriptblock]::Create($Text))
                     try { @(Invoke-FramePacingDriver)[-1] } catch { "threw: $($_.Exception.Message)" }

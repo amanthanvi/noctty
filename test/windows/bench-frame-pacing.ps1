@@ -26,10 +26,11 @@ Two modes.
   -Visible: the measurement. The copy runs on Default, which must be the caller's desktop and the input desktop
           (unlocked), composed by DWM, in a local session, the shell accepting notifications (no full-screen app or
           presentation mode), the display on, no screen saver running and Windows' foreground lock
-          (SPI_GETFOREGROUNDLOCKTIMEOUT) at 200,000 ms or more, with no keyboard or mouse input for 300 s before the
-          series (the pinned $script:MinIdleSeconds); the machine must be under 30% busy (waited for up to
-          -QuietWaitSeconds, 900 by default, and nothing is launched when it never was; test-harnesses.md
-          MEASUREMENT-HARNESS-RERUN-01). The series holds the display and the system on. Real input is detected by
+          (SPI_GETFOREGROUNDLOCKTIMEOUT) longer than the idle time seen plus every run's longest duration
+          (Get-FramePacingLockNeedMs: it counts from the user's last input, so it stays in force through the series),
+          with no keyboard or mouse input for 300 s before the series (the pinned $script:MinIdleSeconds); the
+          machine must be under 30% busy (waited for up to -QuietWaitSeconds, 900 by default, and nothing is
+          launched when it never was; test-harnesses.md MEASUREMENT-HARNESS-RERUN-01). The series holds the display and the system on. Real input is detected by
           its injected flag, not inferred from ticks (GetLastInputInfo cannot tell the harness's unlock from the
           user): from admission to the series' end the outer half holds low-level keyboard and mouse hooks
           (WH_KEYBOARD_LL, WH_MOUSE_LL) on a thread with its own message loop, any event without LLKHF_INJECTED or
@@ -134,7 +135,10 @@ param(
     [string] $InputWatchEvent,
     # Internal: the session's last-input tick a visible run's driver must still see (the tick the outer half saw idle,
     # then each run's after its own unlock); -1 in a dry run.
-    [long] $QuietSinceTick = -1
+    [long] $QuietSinceTick = -1,
+    # Internal: how long Windows' foreground lock must last for this series (Get-FramePacingLockNeedMs, from the
+    # outer half's admission); -1 in a dry run.
+    [long] $ForegroundLockNeededMs = -1
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -168,9 +172,12 @@ $script:ForegroundBoundMs = 5000
 $script:NotificationsAccepted = 5
 $script:DisplayOn = 1
 $script:DrainMs = 1000
-# Windows' foreground lock: below this a background process may take the foreground soon after the user's input, so
-# noctty's own startup activation (Host.present calls SetForegroundWindow) could take it from a returning user.
-$script:MinForegroundLockMs = 200000
+# The outer half ends a driver that runs past this, and a run's staging, driver and guards fit in the second, the
+# longest a run can take; Windows' foreground lock must outlast the user's idle time plus that bound for every run of
+# a visible series (Get-FramePacingLockNeedMs; Greptile on #741: the lock counts from the user's last input, so a
+# 200,000 ms lock has already expired after the 300 s the series waits for).
+$script:DriverDeadlineMs = 1800000
+$script:RunBoundMs = 2100000
 # win32/consts.zig WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT and WM_WINHOSTTY_RENDER_TRACE_TARGET (WM_APP + 8 and + 9), as
 # bench-windows.ps1 names them.
 $script:WmRenderTraceSnapshot = [uint32](0x8000 + 8)
@@ -1140,21 +1147,29 @@ function Get-FramePacingVisibleRefusal($Facts) {
     if ($Facts.NotificationState -ne $script:NotificationsAccepted) { return "the shell does not accept notifications (state $($Facts.NotificationState): a full-screen app, presentation mode, quiet time or a locked session)" }
     if ($Facts.DisplayPower -ne $script:DisplayOn) { return "the display is not on (state $($Facts.DisplayPower))" }
     if ($Facts.ScreenSaverRunning -ne 0) { return "a screen saver is running, or its state is unreadable ($($Facts.ScreenSaverRunning))" }
-    if ($Facts.ForegroundLockTimeoutMs -lt $script:MinForegroundLockMs) { return "Windows' foreground lock timeout is $($Facts.ForegroundLockTimeoutMs) ms, under $($script:MinForegroundLockMs): noctty's own startup activation could take the foreground from a returning user" }
+    if ($Facts.ForegroundLockNeededMs -lt 0 -or $Facts.ForegroundLockTimeoutMs -le $Facts.ForegroundLockNeededMs) { return "Windows' foreground lock timeout is $($Facts.ForegroundLockTimeoutMs) ms, not over the $($Facts.ForegroundLockNeededMs) ms this series needs (the user's idle time plus each run's longest), so it could expire during the series and noctty's own startup activation could take the foreground from a returning user" }
     if ($Facts.QuietSinceTick -ge 0) {
         if ($Facts.LastInputTick -ne $Facts.QuietSinceTick) { return 'the session had input since the series last saw it idle' }
     } elseif ($Facts.IdleMs -lt 0 -or $Facts.IdleMs -lt $Facts.MinIdleMs) { return "the session had input $([Math]::Floor([Math]::Max(0, $Facts.IdleMs) / 1000)) s ago, under the $([Math]::Floor($Facts.MinIdleMs / 1000)) s minimum" }
     return $null
 }
 
-# This process's facts for Get-FramePacingVisibleRefusal.
-function Get-FramePacingSessionFacts([long] $QuietSinceTick) {
+# How long the foreground lock must last for a visible series (Greptile on #741). The lock counts from the user's last
+# input, and the series begins after at least MinIdleSeconds of none, so it must outlast the idle time seen at
+# admission (at least the minimum) plus every run's longest duration, RunBoundMs each; then it is still in force when
+# the last run's copy starts, and the copy's own foreground before the unlock tests it. Pure, so the contract tables it.
+function Get-FramePacingLockNeedMs([long] $IdleMs, [long] $MinIdleMs, [int] $Runs) {
+    return [long][Math]::Max($IdleMs, $MinIdleMs) + [long]$Runs * [long]$script:RunBoundMs
+}
+
+# This process's facts for Get-FramePacingVisibleRefusal; $LockNeededMs is the series' lock bound (-1 when unknown).
+function Get-FramePacingSessionFacts([long] $QuietSinceTick, [long] $LockNeededMs) {
     $last = [FramePacingNative]::LastInputNow()
     return [pscustomobject]@{
         OwnDesktop = [FramePacingNative]::CurrentDesktopName(); InputDesktop = [FramePacingNative]::InputDesktopName()
         Composition = [FramePacingNative]::Composition(); RemoteSession = [FramePacingNative]::RemoteSession()
         NotificationState = [FramePacingNative]::NotificationState(); DisplayPower = [FramePacingNative]::DisplayPower(2000)
-        ScreenSaverRunning = [FramePacingNative]::ScreenSaverRunning(); ForegroundLockTimeoutMs = [FramePacingNative]::ForegroundLockTimeout()
+        ScreenSaverRunning = [FramePacingNative]::ScreenSaverRunning(); ForegroundLockTimeoutMs = [FramePacingNative]::ForegroundLockTimeout(); ForegroundLockNeededMs = $LockNeededMs
         LastInputTick = $last[0]; IdleMs = $last[1]; MinIdleMs = [long]$script:MinIdleSeconds * 1000; QuietSinceTick = $QuietSinceTick
     }
 }
@@ -1303,7 +1318,7 @@ function Invoke-FramePacingDriver {
         InputDuringRun = $null; InputBreak = $null; InputTicks = [ordered]@{ Series = $QuietSinceTick; Unlock = $null; Checks = [Collections.Generic.List[object]]::new() }
         BusyPercentBefore = $null; BusyPercentAtArm = $null; BusyPercentAfter = $null; QuietWaitMs = 0; ProcessorGroups = $null; TimerResolutionBefore100ns = $null; TimerResolutionAfter100ns = $null
         DisplayPowerBefore = $null; DisplayPowerAfter = $null; SnapshotsInWindow = $null; PresentAfterDoneMs = $null
-        ScreenSaverBeforeUnlock = $null; ScreenSaverAtArm = $null; ForegroundLockTimeoutMs = $null; ForegroundBeforeUnlock = $null
+        ScreenSaverBeforeUnlock = $null; ScreenSaverAtArm = $null; ForegroundLockTimeoutMs = $null; ForegroundLockNeededMs = $ForegroundLockNeededMs; ForegroundBeforeUnlock = $null
         QpcFrequency = $null; EndMarkerPresented = $false; IntervalCount = 0; IntervalOverflow = $null; IntervalsMs = [double[]]@()
         P95Ms = $null; MedianMs = $null; MaxMs = $null; WindowMs = $null; SwapsBefore = $null; SwapsAfter = $null
         ShellsUnderCopy = $null; PowerShellUnderCopy = $null; QuitPosts = 0; Exit = $null; Error = $null
@@ -1411,7 +1426,7 @@ function Invoke-FramePacingDriver {
         # The visible part's preconditions on this driver's own session, after the wait and before any launch: in a
         # dry run they must refuse (it never takes the foreground and its intervals are not a measurement); in a
         # visible run they must hold, the session's last input still the series' tick among them.
-        $facts = Get-FramePacingSessionFacts $QuietSinceTick
+        $facts = Get-FramePacingSessionFacts $QuietSinceTick $ForegroundLockNeededMs
         $record.Composition = $facts.Composition
         $record.NotificationState = $facts.NotificationState
         $record.ForegroundLockTimeoutMs = $facts.ForegroundLockTimeoutMs
@@ -1707,8 +1722,12 @@ function Invoke-FramePacingOuter {
     # A visible run only from Default, unlocked, composed, local and idle; a dry run never touches Default.
     $quietSince = [long]-1
     $watchEvent = $null
+    $lockNeeded = [long]-1
     if ($Visible) {
-        $facts = Get-FramePacingSessionFacts -1
+        $facts = Get-FramePacingSessionFacts -1 -1
+        $lockNeeded = Get-FramePacingLockNeedMs $facts.IdleMs $facts.MinIdleMs $Runs
+        $facts.ForegroundLockNeededMs = $lockNeeded
+        Write-Host "frame pacing: the foreground lock is $($facts.ForegroundLockTimeoutMs) ms; this series needs over $lockNeeded ms"
         $refusal = Get-FramePacingVisibleRefusal $facts
         if ($refusal) { throw "-Visible is refused: $refusal." }
         $quietSince = [long]$facts.LastInputTick
@@ -1738,7 +1757,7 @@ function Invoke-FramePacingOuter {
         $results = [Collections.Generic.List[object]]::new()
         for ($i = 1; $i -le $Runs; $i++) {
             $injectedBefore = if ($Visible) { [FramePacingNative]::InjectedInputs() } else { [long]0 }
-            $result = Invoke-FramePacingOuterRun $build (Join-Path $root "run-$i") $quietSince $watchEvent
+            $result = Invoke-FramePacingOuterRun $build (Join-Path $root "run-$i") $quietSince $watchEvent $lockNeeded
             # The hooks' proof of life from this side too (Opus on #741): a run whose foreground was taken sent one
             # injected unlock, which the mouse hook must have counted.
             if ($Visible) {
@@ -1763,7 +1782,7 @@ function Invoke-FramePacingOuter {
 }
 
 # One run: a fresh copy, payload, config, desktop (dry run) and job; the driver; the guards; the record's verdict.
-function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [string] $WatchEvent) {
+function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [string] $WatchEvent, [long] $LockNeededMs) {
     $source = $build.Bin
     $copy = Join-Path $Run 'copy'
     $work = Join-Path $Run 'work'
@@ -1814,7 +1833,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         $pwsh = (Get-Command pwsh.exe).Source
         $line = '"{0}" -NoProfile -NonInteractive -File "{1}" -Driver -MeasureRepo "{2}" -Bin "{3}" -Run "{4}" -ExpectedBuildMode {5} -SandboxName {6} -DesktopName {7} -QuietWaitSeconds {8} -QuietSinceTick {9}' -f `
             $pwsh, $PSCommandPath, $build.Repo, $copy, $Run, $ExpectedBuildMode, $sandboxName, $desktopName, $QuietWaitSeconds, $QuietSince
-        if ($Visible) { $line += " -Visible -InputWatchEvent $WatchEvent" }
+        if ($Visible) { $line += " -Visible -InputWatchEvent $WatchEvent -ForegroundLockNeededMs $LockNeededMs" }
         # The input gate before a visible driver too, though it has no window (CodeRabbit and Opus on #741): a user
         # who came back while the run was staged gets nothing started on Default.
         if ($Visible) {
@@ -1826,7 +1845,7 @@ function Invoke-FramePacingOuterRun($build, [string] $Run, [long] $QuietSince, [
         if (-not [FramePacingNative]::InJobOf($pi.process, $job)) { [FramePacingNative]::Terminate($pi.process, 1); throw 'The driver is not in the run''s own job.' }
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
         Write-Host "frame-pacing driver PID=$($pi.pid); $(if ($Visible) { 'visible' } else { 'dry run' }); evidence=$Run"
-        $deadline = [DateTime]::UtcNow.AddMinutes(30)
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($script:DriverDeadlineMs)
         while ([HiddenLocal]::WaitForSingleObject($pi.process, 1000) -eq 258) {
             if ([DateTime]::UtcNow -ge $deadline) { throw 'The driver ran past 30 minutes; the owned job was closed.' }
         }

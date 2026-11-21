@@ -1527,8 +1527,15 @@ Two modes:
   input desktop, composed by DWM, in a local session, with the shell accepting
   notifications (no full-screen app or presentation mode), the display on, no
   screen saver running, and Windows' foreground lock
-  (`SPI_GETFOREGROUNDLOCKTIMEOUT`) at 200,000 ms or more. There must be no
-  keyboard or mouse input for 300 s before the series (a pinned constant).
+  (`SPI_GETFOREGROUNDLOCKTIMEOUT`) longer than the series needs. There must be
+  no keyboard or mouse input for 300 s before the series (a pinned constant).
+  The lock counts from the user's last input, so it must outlast the idle
+  time seen at admission (at least 300 s) plus every run's longest duration
+  (`Get-FramePacingLockNeedMs`: 2,100,000 ms a run, the driver's 30 min
+  deadline plus 5 min for staging and the guards). With the default
+  200,000 ms the lock has expired before the first copy starts, so
+  `-Visible` is refused. The admission prints both values, and each run
+  records them (`ForegroundLockTimeoutMs`, `ForegroundLockNeededMs`).
   "Away" means only that: a gamepad, or a video watched without input, is not
   seen. The series holds the display and the system on.
 - Real input is detected by the injected flag, not inferred from ticks.
@@ -1608,8 +1615,9 @@ Two modes:
   user. Each visible run records whether the copy already held the foreground
   right before the harness's unlock (`ForegroundBeforeUnlock`); with this
   machine's lock, which never expires, a copy in front got there by one of
-  those paths, so the run is inconclusive and the series stops. A lock under
-  200,000 ms refuses `-Visible`.
+  those paths, so the run is inconclusive and the series stops. That check
+  tests the lock only while the lock is in force, which the admission bound
+  above guarantees for the whole series.
 
 ```powershell
 pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
