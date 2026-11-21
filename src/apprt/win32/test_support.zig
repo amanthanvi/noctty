@@ -22,6 +22,7 @@ const child_window = @import("child_window.zig");
 const paint_text = @import("text.zig");
 const window_state = @import("window_state.zig");
 const win32_input = @import("input.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const HWND = types.HWND;
 const BOOL = types.BOOL;
 const UINT = types.UINT;
@@ -105,6 +106,10 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     // running the suite holds.
                     const keyboard = win32_input.TestingKeyboard.pinNone();
                     defer keyboard.release();
+                    // This desktop's UI thread: the body's windows are made
+                    // and dispatched here, as the app's are on its main thread.
+                    const role_scope = thread_role.enter(.ui);
+                    defer role_scope.exit();
                     body() catch |err| {
                         // The test fails at `return result` on the runner's thread;
                         // this trace shows which check failed.

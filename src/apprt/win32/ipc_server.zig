@@ -17,6 +17,7 @@ const win32_paste_protection = @import("../win32_paste_protection.zig");
 const win32_toast_activation = @import("../win32_toast_activation.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const BOOL = windows.BOOL;
 const scanForwardedToastActivation = win32.scanForwardedToastActivation;
 
@@ -1401,6 +1402,8 @@ fn ipcServerMain(
     io_event: windows.HANDLE,
     stop_event: windows.HANDLE,
 ) void {
+    const role_scope = thread_role.enter(.{ .worker = "ipc" });
+    defer role_scope.exit();
     var security = security_arg;
     defer security.deinit();
     defer _ = windows.CloseHandle(io_event);

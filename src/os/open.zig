@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const apprt = @import("../apprt.zig");
 const redact = @import("redact.zig");
+const thread_role = @import("../sync/thread_role.zig");
 
 const log = std.log.scoped(.@"os-open");
 
@@ -73,6 +74,8 @@ test "untrusted links have no generic opener fallback" {
 }
 
 fn openThread(exe_: std.process.Child) void {
+    const role_scope = thread_role.enter(.{ .worker = "open" });
+    defer role_scope.exit();
     // Copy the exe so it is non-const. This is necessary because wait()
     // requires a mutable reference and we can't have one as a thread
     // param.

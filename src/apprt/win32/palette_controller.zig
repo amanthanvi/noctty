@@ -40,6 +40,7 @@ const signedHighWord = runtime.signedHighWord;
 const std = runtime.std;
 const sys = runtime.sys;
 const themepkg = runtime.themepkg;
+const thread_role = @import("../../sync/thread_role.zig");
 const utf8PrefixLen = runtime.utf8PrefixLen;
 const wheelDeltaFromWParam = runtime.wheelDeltaFromWParam;
 const win32_input = runtime.win32_input;
@@ -365,6 +366,7 @@ fn paletteListProc(
     wParam: WPARAM,
     lParam: LPARAM,
 ) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     switch (msg) {
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT => {

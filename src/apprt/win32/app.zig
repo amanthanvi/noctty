@@ -227,6 +227,7 @@ const tab_label = @import("tab_label.zig");
 const tab_tooltip_class_name = win32.tab_tooltip_class_name;
 const tabsCloseConfirmCount = win32.tabsCloseConfirmCount;
 const tabsCloseConfirmCountNoWait = win32.tabsCloseConfirmCountNoWait;
+const thread_role = @import("../../sync/thread_role.zig");
 const toastActivatorSink = win32.toastActivatorSink;
 const unixMillis = win32.unixMillis;
 const updateApplyConfirmAccept = win32.updateApplyConfirmAccept;
@@ -6244,6 +6245,7 @@ pub const App = struct {
             var shows: usize = 0;
 
             fn proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) LRESULT {
+                thread_role.assertWindowProc();
                 if (msg == c.WM_SHOWWINDOW and wp != 0) {
                     _ = sys.GetWindowTextW(hwnd, &caption, caption.len);
                     shows += 1;
@@ -8876,6 +8878,7 @@ pub const App = struct {
     /// The label answers UIA with its live text element; the rest is the
     /// STATIC's.
     fn tabDragLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+        thread_role.assertWindowProc();
         const data: usize = @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA));
         const app: ?*App = if (data == 0) null else @ptrFromInt(data);
         if (app) |self| {

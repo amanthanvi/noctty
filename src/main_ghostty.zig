@@ -6,6 +6,7 @@ const posix = std.posix;
 const build_config = @import("build_config.zig");
 const apprt = @import("apprt.zig");
 const process_shared = @import("process_shared.zig");
+const thread_role = @import("sync/thread_role.zig");
 
 const App = @import("App.zig");
 const state = &@import("global.zig").state;
@@ -19,6 +20,12 @@ const MainReturn = switch (build_config.artifact) {
 };
 
 pub fn main() !MainReturn {
+    // The UI thread (sync/thread_role.zig): every window the app makes is
+    // made and dispatched on it, so it enters .ui before any window exists
+    // (the first is `App.run`'s message window).
+    const role_scope = thread_role.enter(.ui);
+    defer role_scope.exit();
+
     const dll_search_error = if (comptime builtin.target.os.tag == .windows and
         build_config.artifact == .exe and
         build_config.app_runtime == .win32)

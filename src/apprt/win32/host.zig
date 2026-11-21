@@ -204,6 +204,7 @@ const terminalDisconnectThunk = win32.terminalDisconnectThunk;
 const terminalReleaseThunk = win32.terminalReleaseThunk;
 const themeSurface = win32.themeSurface;
 const themepkg = @import("../../config/theme.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const titlebarButtonVisual = win32.titlebarButtonVisual;
 const titlebarCaptionFromHitTest = win32.titlebarCaptionFromHitTest;
 const titlebarRoleFromCaption = win32.titlebarRoleFromCaption;
@@ -3959,6 +3960,7 @@ pub const Host = struct {
     /// The insert bar answers UIA with its decorative element; the rest is
     /// the STATIC's.
     fn tabInsertMarkerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+        thread_role.assertWindowProc();
         const data: usize = @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA));
         const host: ?*Host = if (data == 0) null else @ptrFromInt(data);
         if (host) |v| {
@@ -4733,6 +4735,7 @@ pub const Host = struct {
             threadlocal var click_count: usize = 0;
             threadlocal var previous: WNDPROC = undefined;
             fn proc(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) LRESULT {
+                thread_role.assertWindowProc();
                 if (msg == c.WM_COMMAND) {
                     click_count += 1;
                     return 0;
@@ -5171,6 +5174,7 @@ pub const Host = struct {
         }
 
         fn proc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            thread_role.assertWindowProc();
             for (panes, 0..) |pane, i| {
                 if (pane != hwnd) continue;
                 if (msg == c.WM_SIZE) {
@@ -5227,6 +5231,7 @@ pub const Host = struct {
         }
 
         fn proc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            thread_role.assertWindowProc();
             if (msg == c.WM_SHOWWINDOW and wParam != 0) {
                 shows += 1;
                 at_show += take();
@@ -5439,6 +5444,7 @@ pub const Host = struct {
         }
 
         fn proc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            thread_role.assertWindowProc();
             if (msg == c.WM_SHOWWINDOW and wParam != 0) {
                 var mine: RECT = undefined;
                 _ = sys.GetWindowRect(hwnd, &mine);
@@ -7330,6 +7336,10 @@ pub const Host = struct {
                 // the suite holds.
                 const keyboard = win32_input.TestingKeyboard.pinNone();
                 defer keyboard.release();
+                // This desktop's UI thread: the body's windows are made and
+                // dispatched here, as the app's are on its main thread.
+                const role_scope = thread_role.enter(.ui);
+                defer role_scope.exit();
                 result.* = body();
             }
         };
@@ -7345,6 +7355,16 @@ pub const Host = struct {
         const thread = try std.Thread.spawn(.{}, Desktop.run, .{ desktop, &result });
         thread.join();
         return result;
+    }
+
+    test "thread_role: runOnPrivateDesktop runs its body as the UI thread" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(struct {
+            fn body() !void {
+                const expected: thread_role.Role = if (thread_role.layer == .on) .ui else .none;
+                try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(thread_role.current()));
+            }
+        }.body);
     }
 
     test "an info banner counts down only while it is unread; errors stay" {

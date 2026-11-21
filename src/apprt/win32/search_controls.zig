@@ -12,6 +12,7 @@ const gdi = @import("gdi.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
 const win32_input = @import("input.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const font_embedded = @import("../../font/embedded.zig");
 const win32_icons = @import("../win32_icons.zig");
 const win32_theme = @import("../win32_theme.zig");
@@ -373,6 +374,7 @@ pub fn searchFocusStopAvailable(surface: *const Surface, stop: usize) bool {
 }
 
 fn searchLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (getSurface(hwnd)) |surface| {
         if (msg == c.WM_GETOBJECT) {
             if (surface.searchLabelUiaProvider(hwnd)) |provider| {
@@ -385,6 +387,7 @@ fn searchLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
 }
 
 fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const host = getHost(hwnd);
     if (msg == c.WM_GETOBJECT) {
         if (host) |v| {

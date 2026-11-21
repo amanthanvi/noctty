@@ -187,6 +187,7 @@ const palette_list_class_name = win32.palette_list_class_name;
 const prompt_button_class = child_window.prompt_button_class;
 const prompt_label_class = child_window.prompt_label_class;
 const runOnHiddenDesktop = win32.runOnHiddenDesktop;
+const thread_role = @import("../../sync/thread_role.zig");
 const toastTestSplit = win32.toastTestSplit;
 const uninitializedInertStorage = win32.uninitializedInertStorage;
 
@@ -4344,6 +4345,9 @@ pub const Surface = struct {
 
     test "win32 pointer leave clears core link and renderer positions" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
+        // A pointer leave is a window message, handled on the UI thread.
+        const role_scope = thread_role.fixture(.ui);
+        defer role_scope.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
         surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
