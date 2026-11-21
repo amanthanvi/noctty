@@ -112,6 +112,9 @@ $flowCases = @(
     @{ Name = 'Set-Variable'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Set-Variable -Name p -Value (Join-Path $PSScriptRoot ''b.ps1''); . $p' }
     @{ Name = 'a property assigned after its hashtable'; Resolves = $null; Text = '$t = @{ Path = (Join-Path $PSScriptRoot ''a.ps1'') }; $t.Path = Join-Path $PSScriptRoot ''b.ps1''; . $t.Path' }
     @{ Name = 'a module-qualified Set-Variable'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Microsoft.PowerShell.Utility\Set-Variable -Name p -Value (Join-Path $PSScriptRoot ''b.ps1''); . $p' }
+    @{ Name = 'a prefix of -OutVariable naming it'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Get-ChildItem -LiteralPath $PSScriptRoot -OutVar p | Out-Null; . $p' }
+    @{ Name = 'an -OutVariable whose name is not a literal'; Resolves = $null; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; $n = ''p''; Get-ChildItem -LiteralPath $PSScriptRoot -OutVariable $n | Out-Null; . $p' }
+    @{ Name = 'an -OutBuffer, which writes no variable'; Resolves = 'a.ps1'; Text = '$p = Join-Path $PSScriptRoot ''a.ps1''; Get-ChildItem -LiteralPath $PSScriptRoot -OutBuffer 1 | Out-Null; . $p' }
 )
 foreach ($case in $flowCases) {
     $flowWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $case.Text; 'test/windows/a.ps1' = '1'; 'test/windows/b.ps1' = '2' }

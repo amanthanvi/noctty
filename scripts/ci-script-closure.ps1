@@ -516,11 +516,17 @@ function Get-CiScriptDynamicWrites {
         }
         if ($target -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$names.Add($target.Value) } else { $unknown = $true }
     }
+    # A common -*Variable parameter by its alias or by any prefix PowerShell can bind to it: the shortest prefix that
+    # no other common parameter shares (a cmdlet's own parameters can only make a prefix longer). A name that is not a
+    # literal is a write of a variable the walker cannot name.
+    $variableParameters = @(@('outvariable', 4), @('pipelinevariable', 2), @('errorvariable', 6), @('warningvariable', 8), @('informationvariable', 12))
     foreach ($parameter in (Get-CiScriptNodes $Context CommandParameterAst)) {
-        if ($parameter.ParameterName -notmatch '(?i)\A(OutVariable|ov|PipelineVariable|pv|ErrorVariable|ev|WarningVariable|wv|InformationVariable|iv)\z') { continue }
+        $given = $parameter.ParameterName.ToLowerInvariant()
+        $writes = @('ov', 'pv', 'ev', 'wv', 'iv').Contains($given) -or @($variableParameters | Where-Object { $given.Length -ge $_[1] -and $_[0].StartsWith($given, [StringComparison]::Ordinal) }).Count -gt 0
+        if (-not $writes) { continue }
         $elements = @($parameter.Parent.CommandElements)
         $argument = $(if ($parameter.Argument) { $parameter.Argument } else { $at = [array]::IndexOf($elements, $parameter); if ($at -ge 0 -and $at + 1 -lt $elements.Count) { $elements[$at + 1] } })
-        if ($argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$names.Add($argument.Value.TrimStart('+')) }
+        if ($argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$names.Add($argument.Value.TrimStart('+')) } else { $unknown = $true }
     }
     foreach ($reference in (Get-CiScriptNodes $Context ConvertExpressionAst)) {
         if ($reference.Type.TypeName.Name -ieq 'ref' -and $reference.Child -is [System.Management.Automation.Language.VariableExpressionAst]) {
