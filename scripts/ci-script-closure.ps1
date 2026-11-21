@@ -89,22 +89,84 @@ $script:CiScriptClosureLegacyEdges = @(
     }
 )
 
-# A cmdlet qualified by a module PowerShell ships (Microsoft.PowerShell.Core\Import-Module) and, in `name`, the
-# cmdlet it calls. Only the Verb-Noun shape: PowerShell resolves no qualified alias
-# (`Microsoft.PowerShell.Utility\iex` is not a command, measured on pwsh 7.6.10). Any other word with a separator,
-# `<word>\<Verb-Noun>` included, is a path, which PowerShell looks up as one when no module matches (Sol and Opus on
-# #740: `fixtures\cmd` ran `fixtures\cmd.ps1`, `sub\Run-Child` ran `sub\Run-Child.ps1`).
+# The shape of a cmdlet qualified by a module PowerShell ships (Microsoft.PowerShell.Core\Import-Module). Only the
+# Verb-Noun shape: PowerShell resolves no qualified alias (`Microsoft.PowerShell.Utility\iex` is not a command,
+# measured on pwsh 7.6.10). The shape alone is not enough (Test-CiScriptShippedCmdlet), and any other word with a
+# separator, `<word>\<Verb-Noun>` included, is a path, which PowerShell looks up as one when no module matches (Sol
+# and Opus on #740: `fixtures\cmd` ran `fixtures\cmd.ps1`, `sub\Run-Child` ran `sub\Run-Child.ps1`).
 $script:CiScriptBuiltinQualifiedName = '\AMicrosoft\.PowerShell\.[A-Za-z.]+\\(?<name>[A-Za-z]+-[A-Za-z]\w*)\z'
 
-# The script a path with no extension runs. PowerShell looks such a path up with `.ps1` first (then PATHEXT's
-# extensions), measured on pwsh 7.6 and Windows PowerShell 5.1 by both council seats on #740: `<dir>\child`,
-# `<dir>\cmd` and `<dir>\pwsh` each ran the `.ps1` beside them. So it is that `.ps1`: a member when it exists, and a
-# missing member, which fails the walk, when it does not (then PowerShell would try other extensions, which the walk
-# does not guess). A path with another unknown extension is $null (unresolved). Native names are no exception.
+# Whether a name is a cmdlet: the shipped-module shape, and this session's module exports exactly that command (Sol
+# on #740: `Microsoft.PowerShell.Utility\Run-Child` ran `Microsoft.PowerShell.Utility\Run-Child.ps1` from the current
+# location, since the module has no Run-Child, and an invented `Microsoft.PowerShell.SolFixture\Run-Child` did the
+# same). Otherwise the name is a relative path. Cached per name.
+$script:CiScriptShippedCmdlets = @{}
+function Test-CiScriptShippedCmdlet {
+    param([string] $Name)
+    if ($Name -notmatch $script:CiScriptBuiltinQualifiedName) { return $false }
+    $key = $Name.ToLowerInvariant()
+    if (-not $script:CiScriptShippedCmdlets.ContainsKey($key)) {
+        $module, $command = $Name -split '\\', 2
+        $found = @(Get-Command -Module $module -Name $command -CommandType Cmdlet, Function -ErrorAction Ignore)
+        $script:CiScriptShippedCmdlets[$key] = $found.Count -eq 1 -and [string]::Equals($found[0].Name, $command, [StringComparison]::OrdinalIgnoreCase)
+    }
+    return $script:CiScriptShippedCmdlets[$key]
+}
+
+# A path lookup: a path with no extension, which PowerShell looks up by `.ps1` and then by each PATHEXT extension,
+# in any form and under any -CommandType (Sol on #740: `-CommandType ExternalScript` found `<path>.ps1` and
+# `-CommandType Application` found `<path>.cmd` beside it). Returns the path for a lookup, else $null (an extension
+# the walk does not know is unresolved). Find-CiScriptLookupFiles names what a lookup finds.
 function Get-CiScriptPathLookup {
     param([string] $Path)
     if ([IO.Path]::GetExtension($Path).Length -ne 0) { return $null }
-    return $Path + '.ps1'
+    return $Path
+}
+
+# The extensions a path lookup tries: `.ps1`, then the Windows default PATHEXT and this session's PATHEXT, lower-case.
+function Get-CiScriptLookupExtensions {
+    $list = [System.Collections.Generic.List[string]]::new()
+    foreach ($extension in @('.ps1', '.com', '.exe', '.bat', '.cmd', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.msc', '.cpl') + @("$env:PATHEXT" -split ';')) {
+        $value = $extension.Trim().ToLowerInvariant()
+        if ($value -match '\A\.[a-z0-9]{1,8}\z' -and -not $list.Contains($value)) { $list.Add($value) }
+    }
+    return , $list.ToArray()
+}
+
+# The files a path lookup of $Base (a repo path with no extension) names: every sibling whose name is $Base's leaf and
+# a lookup extension, compared case-insensitively, as the tree spells it. All are members: the walk reads a `.ps1`
+# and keeps the others as files, since -CommandType filtering is not modelled (over-selection is the safe side). With
+# a reader that lists its directories (a `Lister` note, as New-CiScriptFileReader's have), from the listing;
+# otherwise each extension is tried in every letter case. Emitted one by one; none means the lookup finds nothing.
+function Find-CiScriptLookupFiles {
+    param([Parameter(Mandatory)] [scriptblock] $Reader, [Parameter(Mandatory)] [string] $Base)
+    $cut = $Base.LastIndexOf('/')
+    $directory = $(if ($cut -ge 0) { $Base.Substring(0, $cut) } else { '' })
+    $leaf = $Base.Substring($cut + 1)
+    $extensions = Get-CiScriptLookupExtensions
+    $found = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    $lister = $Reader.PSObject.Properties['Lister']
+    if ($lister) {
+        foreach ($path in @(& $lister.Value $directory)) {
+            $name = $path.Substring($path.LastIndexOf('/') + 1)
+            foreach ($extension in $extensions) {
+                if ([string]::Equals($name, $leaf + $extension, [StringComparison]::OrdinalIgnoreCase)) { [void]$found.Add($path) }
+            }
+        }
+    }
+    else {
+        foreach ($extension in $extensions) {
+            $letters = $extension.Substring(1)
+            for ($mask = 0; $mask -lt (1 -shl $letters.Length); $mask++) {
+                $variant = -join @(for ($i = 0; $i -lt $letters.Length; $i++) {
+                        $(if (($mask -shr $i) -band 1) { [char]::ToUpperInvariant($letters[$i]) } else { $letters[$i] })
+                    })
+                $candidate = "$Base.$variant"
+                if ($null -ne (& $Reader $candidate)) { [void]$found.Add($candidate) }
+            }
+        }
+    }
+    foreach ($path in $found) { $path }
 }
 
 # The parameters of the cmdlets whose arguments the walker binds, from their metadata on pwsh 7.6.10
@@ -207,14 +269,27 @@ function New-CiScriptFileReader {
     # the tree lists that git cannot read (a missing object, a blobless clone offline) throws when it is read.
     # -Git replaces the git executable for the tests: param([string[]] $GitArguments), output on the pipeline, and it
     # sets $LASTEXITCODE.
+    # The reader carries a `Lister` note: param([string] $RepoDirectory) emits the repo paths of the files directly in
+    # that directory, matched case-insensitively and spelled as the tree spells them (Find-CiScriptLookupFiles).
     param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Ref, [scriptblock] $Git)
     if ([string]::IsNullOrWhiteSpace($Ref)) {
-        return {
+        $workingReader = {
             param([string] $RepoPath)
             $full = Join-Path $RepoRoot ($RepoPath.Replace('/', '\'))
             if (-not [IO.File]::Exists($full)) { return $null }
             return [IO.File]::ReadAllText($full)
         }.GetNewClosure()
+        $workingLister = {
+            param([string] $RepoDirectory)
+            $full = $(if ($RepoDirectory) { Join-Path $RepoRoot ($RepoDirectory.Replace('/', '\')) } else { $RepoRoot })
+            if (-not [IO.Directory]::Exists($full)) { return }
+            foreach ($file in [IO.Directory]::GetFiles($full)) {
+                $name = [IO.Path]::GetFileName($file)
+                $(if ($RepoDirectory) { "$RepoDirectory/$name" } else { $name })
+            }
+        }.GetNewClosure()
+        $workingReader.PSObject.Properties.Add([psnoteproperty]::new('Lister', $workingLister))
+        return $workingReader
     }
     if (-not $Git) { $Git = { param([string[]] $GitArguments) & git @GitArguments 2>$null } }
     $runGit = {
@@ -241,7 +316,7 @@ function New-CiScriptFileReader {
         $entries[$record.Substring($tab + 1)] = $meta
     }
     $texts = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
-    return {
+    $treeReader = {
         param([string] $RepoPath)
         $entry = $null
         if (-not $entries.TryGetValue($RepoPath, [ref]$entry) -or $entry[1] -cne 'blob') { return $null }
@@ -253,6 +328,17 @@ function New-CiScriptFileReader {
         }
         return $text
     }.GetNewClosure()
+    $treeLister = {
+        param([string] $RepoDirectory)
+        foreach ($key in @($entries.Keys)) {
+            if ($entries[$key][1] -cne 'blob') { continue }
+            $cut = $key.LastIndexOf('/')
+            $parent = $(if ($cut -ge 0) { $key.Substring(0, $cut) } else { '' })
+            if ([string]::Equals($parent, $RepoDirectory, [StringComparison]::OrdinalIgnoreCase)) { $key }
+        }
+    }.GetNewClosure()
+    $treeReader.PSObject.Properties.Add([psnoteproperty]::new('Lister', $treeLister))
+    return $treeReader
 }
 
 function Get-CiScriptCommandName {
@@ -263,7 +349,7 @@ function Get-CiScriptCommandName {
     # which PowerShell runs as a script when one is there (Opus on #740: `sub\Run-Child` ran `sub\Run-Child.ps1`).
     param($Element)
     if ($Element -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $null }
-    if ($Element.Value -match $script:CiScriptBuiltinQualifiedName) { return $Matches['name'].ToLowerInvariant() }
+    if (Test-CiScriptShippedCmdlet $Element.Value) { return ($Element.Value -split '\\', 2)[1].ToLowerInvariant() }
     return $Element.Value.ToLowerInvariant()
 }
 
@@ -441,10 +527,10 @@ function Resolve-CiScriptValue {
                 # Get-CiScriptPathLookup names (`<dir>\cmd` and `<dir>\pwsh` included), or unresolved. A bare name is
                 # a command on PATH.
                 $leaf = ($target -split '[\\/]')[-1].ToLowerInvariant()
-                if ($target -match '[\\/]' -and $kind -ne 'native' -and $target -notmatch $script:CiScriptBuiltinQualifiedName) {
+                if ($target -match '[\\/]' -and $kind -ne 'native' -and -not (Test-CiScriptShippedCmdlet $target)) {
                     $lookup = Get-CiScriptPathLookup $target
                     if ($null -eq $lookup) { return $unresolved }
-                    return @{ Kind = 'path'; Value = $lookup }
+                    return @{ Kind = 'path'; Value = $lookup; Lookup = $true }
                 }
                 return @{ Kind = 'native'; Value = $leaf }
             }
@@ -844,8 +930,9 @@ function New-CiScriptContext {
     }
 }
 
-# The edges of one parsed file: @{ Targets = list of repo paths (resolved); Unresolved = list of anchors;
-# CSharp = list of repo paths (Add-Type -Path) }.
+# The edges of one parsed file: @{ Targets = list of repo paths (resolved); Lookups = list of repo paths with no
+# extension, path lookups (Find-CiScriptLookupFiles); Unresolved = list of anchors; CSharp = list of repo paths
+# (Add-Type -Path) }.
 function Get-CiScriptFileEdges {
     param(
         [Parameter(Mandatory)] [string] $RepoRoot,
@@ -859,6 +946,7 @@ function Get-CiScriptFileEdges {
     if ($errors.Count -ne 0) { throw "$RepoPath does not parse: $($errors[0].Message)" }
     $context = New-CiScriptContext -RepoRoot $RepoRoot -RepoPath $RepoPath -Ast $ast
     $targets = [System.Collections.Generic.List[string]]::new()
+    $lookups = [System.Collections.Generic.List[string]]::new()
     $unresolved = [System.Collections.Generic.List[string]]::new()
     $csharp = [System.Collections.Generic.List[string]]::new()
 
@@ -942,6 +1030,12 @@ function Get-CiScriptFileEdges {
     # A script target that must resolve: a rooted .ps1, .psm1, .cmd or .bat path; anything else is unresolved.
     $scriptTarget = {
         param($Value, [string] $Why)
+        # A path lookup's files are found when the closure reads the tree (Find-CiScriptLookupFiles).
+        if ($Value.Kind -eq 'path' -and $Value.Lookup) {
+            $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $Value.Value
+            if ($repo) { $lookups.Add($repo); return }
+            $unresolved.Add($Why); return
+        }
         if ($Value.Kind -eq 'path' -and (Test-CiScriptTargetKind $Value.Value) -in @('script', 'batch')) {
             $repo = ConvertTo-CiScriptTargetPath -RepoRoot $RepoRoot -Value $Value.Value
             if ($repo) { $targets.Add($repo); return }
@@ -980,7 +1074,7 @@ function Get-CiScriptFileEdges {
             if ($entry.Param -and (& $powershellParameter $entry.Param $true) -in @('file', 'command')) { return $true }
             $value = $(if ($entry.Attached) { & $valueOf $entry.Attached } elseif (-not $entry.Param) { & $valueOf $entry })
             if ($null -eq $value) { continue }
-            if ($value.Kind -eq 'unresolved') { return $true }
+            if ($value.Kind -eq 'unresolved' -or $value.Lookup) { return $true }
             if ($value.Kind -eq 'path' -and $value.Value -match '(?i)\.(ps1|psm1|psd1|cmd|bat)\b|\b(pwsh|powershell)\b') { return $true }
         }
         return $false
@@ -999,14 +1093,15 @@ function Get-CiScriptFileEdges {
                 return @{ Is = 'native' }
             }
             'path' {
+                if ($Value.Lookup) { return @{ Is = 'script'; Value = $Value } }
                 $kind = Test-CiScriptTargetKind $Value.Value
                 if ($kind -in @('script', 'batch')) { return @{ Is = 'script'; Value = $Value } }
                 $leaf = ($Value.Value -split '[\\/]')[-1].ToLowerInvariant()
-                # A path with no extension runs the script Get-CiScriptPathLookup names, whatever its leaf (Sol on
-                # #740: `& (Join-Path $PSScriptRoot 'fixtures\cmd')` ran `fixtures\cmd.ps1`, not cmd).
-                if ($Value.Value -match '[\\/]' -and $kind -ne 'native' -and $Value.Value -notmatch $script:CiScriptBuiltinQualifiedName) {
+                # A path with no extension is a path lookup, whatever its leaf (Sol on #740:
+                # `& (Join-Path $PSScriptRoot 'fixtures\cmd')` ran `fixtures\cmd.ps1`, not cmd).
+                if ($Value.Value -match '[\\/]' -and $kind -ne 'native' -and -not (Test-CiScriptShippedCmdlet $Value.Value)) {
                     $lookup = Get-CiScriptPathLookup $Value.Value
-                    if ($null -ne $lookup) { return @{ Is = 'script'; Value = @{ Kind = 'path'; Value = $lookup } } }
+                    if ($null -ne $lookup) { return @{ Is = 'script'; Value = @{ Kind = 'path'; Value = $lookup; Lookup = $true } } }
                 }
                 if (Test-CiScriptPowerShellName $leaf) { return @{ Is = 'powershell'; Pwsh = $leaf.StartsWith('pwsh') } }
                 if ($leaf -in @('cmd', 'cmd.exe')) { return @{ Is = 'cmd' } }
@@ -1014,7 +1109,7 @@ function Get-CiScriptFileEdges {
                 # A bare word names a command, and so does a cmdlet qualified by a module PowerShell ships; any other
                 # path with an extension the walk does not know is unresolved.
                 if ($Value.Value -notmatch '[\\/]') { return @{ Is = 'command'; Value = $leaf } }
-                if ($Value.Value -match $script:CiScriptBuiltinQualifiedName) { return @{ Is = 'command'; Value = $Matches['name'].ToLowerInvariant() } }
+                if (Test-CiScriptShippedCmdlet $Value.Value) { return @{ Is = 'command'; Value = ($Value.Value -split '\\', 2)[1].ToLowerInvariant() } }
                 return @{ Is = 'unresolved' }
             }
         }
@@ -1098,6 +1193,7 @@ function Get-CiScriptFileEdges {
         try { $inner = Get-CiScriptFileEdges -RepoRoot $RepoRoot -RepoPath $RepoPath -Text $value.Value }
         catch { $unresolved.Add($Why); return }
         foreach ($target in $inner.Targets) { $targets.Add($target) }
+        foreach ($lookup in $inner.Lookups) { $lookups.Add($lookup) }
         foreach ($source in $inner.CSharp) { $csharp.Add($source) }
         if ($inner.Unresolved.Count -gt 0) { $unresolved.Add($Why) }
     }
@@ -1134,7 +1230,7 @@ function Get-CiScriptFileEdges {
         $barePath = -not $invoked -and $first -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
             $first.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::BareWord -and
             ($first.Value -match '[\\/]' -or (Test-CiScriptTargetKind $first.Value) -ne 'other') -and
-            $first.Value -notmatch $script:CiScriptBuiltinQualifiedName
+            -not (Test-CiScriptShippedCmdlet $first.Value)
         if (-not $invoked -and -not $barePath -and (Get-CiScriptCommandName $first) -notin $edgeCommands) { continue }
         $entries = @($elements | Select-Object -Skip 1 | ForEach-Object { & $toEntry $_ })
         if ($invoked -or $barePath) {
@@ -1291,7 +1387,7 @@ function Get-CiScriptFileEdges {
         $value = $string.Value
         if ($value -match '(?i)(?:^|\s)-File\s+(?:"|''|\{\d+\}|\$)') { $unresolved.Add((ConvertTo-CiScriptAnchor $value)) }
     }
-    return @{ Targets = $targets; Unresolved = $unresolved; CSharp = $csharp }
+    return @{ Targets = $targets; Lookups = $lookups; Unresolved = $unresolved; CSharp = $csharp }
 }
 
 function Get-ScriptClosure {
@@ -1334,6 +1430,12 @@ function Get-ScriptClosure {
         catch { $problems.Add($_.Exception.Message); continue }
         $anchorsByFile[$path] = @($found.Unresolved)
         foreach ($target in $found.Targets) { $edges.Add([pscustomobject]@{ From = $path; To = $target }); $queue.Enqueue($target) }
+        # A path lookup names every file it may find; none fails the walk.
+        foreach ($base in $found.Lookups) {
+            $files = @(Find-CiScriptLookupFiles -Reader $Reader -Base $base)
+            if ($files.Count -eq 0) { $missing.Add($base); $problems.Add("missing: $base (a path lookup that finds no .ps1 or PATHEXT file)"); continue }
+            foreach ($file in $files) { $edges.Add([pscustomobject]@{ From = $path; To = $file }); $queue.Enqueue($file) }
+        }
         foreach ($source in $found.CSharp) { $edges.Add([pscustomobject]@{ From = $path; To = $source }); $queue.Enqueue($source) }
         foreach ($anchor in $found.Unresolved) {
             $listed = @($LegacyEdges | Where-Object {

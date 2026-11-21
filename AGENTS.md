@@ -761,8 +761,10 @@ that govern each symbol you change, or that none does.
   `noteRendererFollowupCallback`),
   adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
   (the budget in `win32/facade_budget.zig`, and the facade importer list in
-  `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps, and
-  `gh`, git and codex commands.
+  `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps
+  (and the GUI script walk's models of command lookup: `Get-CiScriptPathLookup`,
+  `Find-CiScriptLookupFiles` and `Test-CiScriptShippedCmdlet` in
+  `scripts/ci-script-closure.ps1`), and `gh`, git and codex commands.
 
 A comment that cites AGENTS.md (by date, issue number, symbol or an old line
 number such as `AGENTS.md:75`) means a log entry. Run

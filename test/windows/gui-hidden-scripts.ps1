@@ -22,14 +22,28 @@ function Assert-True {
 
 # A reader over a table of repo path -> text (a synthetic tree).
 function New-TableReader {
-    param([hashtable] $Files)
-    return { param([string] $RepoPath) if ($Files.ContainsKey($RepoPath)) { return $Files[$RepoPath] } return $null }.GetNewClosure()
+    # A reader over a table of repo paths, with a Lister note as New-CiScriptFileReader's readers have (the files in a
+    # directory, matched case-insensitively). Pass -NoLister for a reader that lists nothing, as a wrapping reader is.
+    param([hashtable] $Files, [switch] $NoLister)
+    $reader = { param([string] $RepoPath) if ($Files.ContainsKey($RepoPath)) { return $Files[$RepoPath] } return $null }.GetNewClosure()
+    if (-not $NoLister) {
+        $lister = {
+            param([string] $RepoDirectory)
+            foreach ($key in @($Files.Keys)) {
+                $cut = $key.LastIndexOf('/')
+                $parent = $(if ($cut -ge 0) { $key.Substring(0, $cut) } else { '' })
+                if ([string]::Equals($parent, $RepoDirectory, [StringComparison]::OrdinalIgnoreCase)) { $key }
+            }
+        }.GetNewClosure()
+        $reader.PSObject.Properties.Add([psnoteproperty]::new('Lister', $lister))
+    }
+    return $reader
 }
 
 $fakeRoot = 'C:\gui-hidden-fixture'
 function Get-FixtureWalk {
-    param([hashtable] $Files, [string[]] $Entries = @('test/windows/entry.ps1'), [object[]] $LegacyEdges = @())
-    return Get-ScriptClosure -RepoRoot $fakeRoot -Entries $Entries -Reader (New-TableReader $Files) -LegacyEdges $LegacyEdges
+    param([hashtable] $Files, [string[]] $Entries = @('test/windows/entry.ps1'), [object[]] $LegacyEdges = @(), [switch] $NoLister)
+    return Get-ScriptClosure -RepoRoot $fakeRoot -Entries $Entries -Reader (New-TableReader $Files -NoLister:$NoLister) -LegacyEdges $LegacyEdges
 }
 
 # --- The walker on synthetic trees --------------------------------------------------------------------------------
@@ -421,6 +435,51 @@ foreach ($form in @('Microsoft.PowerShell.Utility\Write-Host x', '& Microsoft.Po
     $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form }
     Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members.Count -eq 1) "$form (a cmdlet of a module PowerShell ships) is no script edge: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
 }
+# Sol on #740 (round 5): a path lookup is not only its `.ps1`. With `<path>.ps1` and `<path>.cmd` both there,
+# `-CommandType ExternalScript` found the `.ps1` and `-CommandType Application` the `.cmd` (pwsh 7.6.10). So a lookup,
+# in any form and under any -CommandType, names every sibling with `.ps1` or a PATHEXT extension, matched
+# case-insensitively and spelled as the tree spells it: the walk reads the `.ps1` and keeps the others as files. With
+# no sibling, the walk fails. Both the listing reader and one that lists nothing (each extension tried in every case).
+$shadowFiles = [ordered]@{ 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' }
+foreach ($noLister in @($false, $true)) {
+    foreach ($form in @(
+            '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType Application; & $p'
+            '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType ExternalScript; & $p'
+            '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'
+            '. "$PSScriptRoot\fixtures\sol-lookup-shadow"'
+        )) {
+        $files = @{ 'test/windows/entry.ps1' = $form }
+        foreach ($key in $shadowFiles.Keys) { $files[$key] = $shadowFiles[$key] }
+        $formWalk = Get-FixtureWalk $files -NoLister:$noLister
+        Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.ps1' -and $formWalk.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.cmd') "$form (lister: $(-not $noLister)) must name both the .ps1 and the .cmd: $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+    }
+    $cmdOnly = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' } -NoLister:$noLister
+    Assert-True ($cmdOnly.Problems.Count -eq 0 -and $cmdOnly.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.cmd') "A lookup with only a .cmd beside it (lister: $(-not $noLister)) must name the .cmd: $($cmdOnly.Problems -join '; ') [$($cmdOnly.Members -join ', ')]"
+    $mixedCase = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.CmD' = '@echo off' } -NoLister:$noLister
+    Assert-True ($mixedCase.Problems.Count -eq 0 -and $mixedCase.Members -ccontains 'test/windows/fixtures/sol-lookup-shadow.CmD') "A lookup must name a sibling whose extension differs in case (lister: $(-not $noLister)): $($mixedCase.Problems -join '; ') [$($mixedCase.Members -join ', ')]"
+    $none = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.txt' = 'x' } -NoLister:$noLister
+    Assert-True ($none.Problems.Count -ge 1 -and $none.Missing.Count -ge 1) "A lookup with no .ps1 or PATHEXT sibling (lister: $(-not $noLister)) must fail the walk: $($none.Problems -join '; ')"
+}
+# Opus on #740 (round 5): cmd looks an extensionless path up by PATHEXT and never runs a `.ps1`, so inside cmd's
+# /C, /K or /R and after `call` the lookup names the same union: the `.cmd` the command runs, and the `.ps1` too.
+foreach ($form in @('cmd /d /c "$PSScriptRoot\fixtures\helper"', 'cmd.exe /d /k "$PSScriptRoot\fixtures\helper"', 'cmd /d /c call "$PSScriptRoot\fixtures\helper"')) {
+    $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; 'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off' }
+    Assert-True ($formWalk.Problems.Count -eq 0 -and $formWalk.Members -ccontains 'test/windows/fixtures/helper.cmd' -and $formWalk.Members -ccontains 'test/windows/fixtures/helper.ps1') "$form must name the .cmd cmd runs (and the .ps1): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+}
+$caseSibling = Get-FixtureWalk @{ 'test/windows/entry.ps1' = '& (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'')'; 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/SOL-Lookup-Shadow.cmd' = '@echo off' }
+Assert-True ($caseSibling.Problems.Count -eq 0 -and $caseSibling.Members -ccontains 'test/windows/fixtures/SOL-Lookup-Shadow.cmd') "A listing reader must name a sibling whose base name differs in case: $($caseSibling.Problems -join '; ') [$($caseSibling.Members -join ', ')]"
+
+# Sol on #740 (round 5): a `Microsoft.PowerShell.*\Name` spelling is a cmdlet only when this session's module exports
+# that command. `Microsoft.PowerShell.Utility\Run-Child` (the module has no Run-Child) and an invented module's name
+# each ran a relative `.ps1`, so each form is a relative path lookup, unresolved; a real cmdlet stays a cmdlet.
+foreach ($qualified in @('Microsoft.PowerShell.Utility\Run-Child', 'Microsoft.PowerShell.SolFixture\Run-Child', 'microsoft.powershell.x\Run-Child')) {
+    foreach ($form in @($qualified, "& '$qualified'", ". '$qualified'", "& (Get-Command '$qualified')", "Set-Location (Join-Path `$PSScriptRoot 'fixtures'); & '$qualified'")) {
+        $formWalk = Get-FixtureWalk @{ 'test/windows/entry.ps1' = $form; "test/windows/fixtures/$($qualified.Replace('\', '/')).ps1" = '1' }
+        Assert-True ($formWalk.Problems.Count -ge 1 -and $formWalk.Unresolved.Count -ge 1) "$form must be unresolved (no such cmdlet, so a relative path): $($formWalk.Problems -join '; ') [$($formWalk.Members -join ', ')]"
+    }
+}
+Assert-True (Test-CiScriptShippedCmdlet 'Microsoft.PowerShell.Utility\Get-Date') 'Microsoft.PowerShell.Utility\Get-Date must count as a cmdlet.'
+Assert-True (-not (Test-CiScriptShippedCmdlet 'Microsoft.PowerShell.Utility\Run-Child')) 'Microsoft.PowerShell.Utility\Run-Child must not count as a cmdlet.'
 $namedQuiet = [ordered]@{
     'Get-Command of a joined native path, then &' = '$c = Get-Command (Join-Path $PSScriptRoot ''tool.exe''); & $c'
     'Get-Command of a bare native name, then &' = '$g = Get-Command git; & $g status'
@@ -598,6 +657,28 @@ foreach ($leafName in @('cmd', 'pwsh')) {
     Assert-True (Get-CiGuiSelection -ChangedPaths @($lookupChild) -GuiList $lookupList) "A change only to $lookupChild must select the GUI suite."
 }
 
+# Sol's round-5 forms through the selection: an Application lookup that finds the `.cmd`, and a shipped-module name
+# the module lacks run from a fixture directory. A change only to the child must select the suite (through the list,
+# or through the fallback when the list fails).
+$shadowChild = 'test/windows/fixtures/sol-lookup-shadow.cmd'
+foreach ($graft in @(
+        @{ Line = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''fixtures\sol-lookup-shadow'') -CommandType Application; & $p'; Child = $shadowChild; Files = @{ 'test/windows/fixtures/sol-lookup-shadow.ps1' = '1'; 'test/windows/fixtures/sol-lookup-shadow.cmd' = '@echo off' } }
+        @{ Line = 'Set-Location (Join-Path $PSScriptRoot ''fixtures''); & ''Microsoft.PowerShell.Utility\Run-Child'''; Child = 'test/windows/fixtures/Microsoft.PowerShell.Utility/Run-Child.ps1'; Files = @{ 'test/windows/fixtures/Microsoft.PowerShell.Utility/Run-Child.ps1' = '1' } }
+        @{ Line = 'cmd /d /c "$PSScriptRoot\fixtures\helper"'; Child = 'test/windows/fixtures/helper.cmd'; Files = @{ 'test/windows/fixtures/helper.ps1' = '1'; 'test/windows/fixtures/helper.cmd' = '@echo off' } }
+    )) {
+    $graftLine = $graft.Line; $graftFiles = $graft.Files
+    $graftReader = {
+        param([string] $RepoPath)
+        if ($RepoPath -ceq 'test/windows/interactive-win11-smoke.ps1') { return (& $workingReader $RepoPath) + "`n" + $graftLine + "`n" }
+        if ($graftFiles.ContainsKey($RepoPath)) { return $graftFiles[$RepoPath] }
+        return & $workingReader $RepoPath
+    }.GetNewClosure()
+    $graftSelected = & {
+        try { $l = Get-CiGuiList -RepoRoot $repoRoot -HeadReader $graftReader -BaseReader $workingReader; Get-CiGuiSelection -ChangedPaths @($graft.Child) -GuiList $l } catch { $true }
+    }
+    Assert-True ($graftSelected -eq $true) "A change only to $($graft.Child), which a leaf runs through '$graftLine', must select the GUI suite."
+}
+
 # A build input the plan spells with backslashes (the plan contract takes any path that exists) selects the suite
 # under either spelling of a change, since git reports '/' (CodeRabbit on #740: the list kept the backslash form, the
 # ordinal lookup missed it, and Get-CiPathNeeds calls the path none). The path is one only the GUI list can select.
@@ -709,6 +790,31 @@ try {
         $lines = @(if (Test-Path -LiteralPath $outputFile) { Get-Content -LiteralPath $outputFile })
         Assert-True ($code -eq 0 -and $lines.Count -eq 1 -and $lines[0] -ceq $run.Expect) "The selection CLI on $($run.Name) must exit 0 and write $($run.Expect); wrote [$($lines -join ', ')], exit $code."
     }
+    # CodeRabbit on #740: the wildcard fixtures catch the list's failure themselves, so they cannot show the
+    # production script falling back. A small tree holding the real selection scripts: a leaf that runs its child
+    # through a wildcard Get-Command makes the script fall back (exit 0, gui=true) for a change to that child alone;
+    # the same leaf with a literal edge selects through the list, and an unrelated change selects nothing.
+    $miniRoot = Join-Path ([IO.Path]::GetTempPath()) ("noctty-gui-selection-tree-$([guid]::NewGuid().ToString('N'))")
+    try {
+        [void](New-Item -ItemType Directory -Path (Join-Path $miniRoot 'scripts'), (Join-Path $miniRoot 'test\windows'))
+        foreach ($name in @('ci-gui-selection.ps1', 'ci-changed-paths.ps1', 'ci-script-closure.ps1')) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$name") -Destination (Join-Path $miniRoot "scripts\$name") }
+        [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\gui-hidden-plan.json'), '{"schemaVersion":1,"buildInputs":["test/windows/gui-hidden-plan.json"],"leaves":[{"id":"smoke","script":"test/windows/interactive-win11-smoke.ps1"}]}')
+        [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\interactive-win11-wildcard-child.ps1'), '1')
+        foreach ($mini in @(
+                @{ Name = 'a wildcard edge, the child changed'; Leaf = '$p = Get-Command -Name (Join-Path $PSScriptRoot ''interactive-win11-wildcard-chil*'') -CommandType ExternalScript; & $p'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $true }
+                @{ Name = 'a literal edge, the child changed'; Leaf = '& (Join-Path $PSScriptRoot ''interactive-win11-wildcard-child.ps1'')'; Path = 'test/windows/interactive-win11-wildcard-child.ps1'; Expect = 'gui=true'; Fallback = $false }
+                @{ Name = 'a literal edge, an unrelated leaf changed'; Leaf = '& (Join-Path $PSScriptRoot ''interactive-win11-wildcard-child.ps1'')'; Path = 'test/windows/interactive-win11-key-input.ps1'; Expect = 'gui=false'; Fallback = $false }
+            )) {
+            [IO.File]::WriteAllText((Join-Path $miniRoot 'test\windows\interactive-win11-smoke.ps1'), $mini.Leaf)
+            if (Test-Path -LiteralPath $outputFile) { Remove-Item -LiteralPath $outputFile }
+            $said = @(& pwsh -NoProfile -NonInteractive -File (Join-Path $miniRoot 'scripts\ci-gui-selection.ps1') -Paths $mini.Path 3>&1 6>&1 | ForEach-Object { "$_" })
+            $code = $LASTEXITCODE
+            $lines = @(if (Test-Path -LiteralPath $outputFile) { Get-Content -LiteralPath $outputFile })
+            $fellBack = @($said | Where-Object { $_.Contains('selection unavailable') }).Count -gt 0
+            Assert-True ($code -eq 0 -and $lines.Count -eq 1 -and $lines[0] -ceq $mini.Expect -and $fellBack -eq $mini.Fallback) "The production selection on $($mini.Name) must exit 0, write $($mini.Expect) and fall back: $($mini.Fallback); wrote [$($lines -join ', ')], exit $code, fell back: $fellBack."
+        }
+    }
+    finally { Remove-Item -LiteralPath $miniRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
 finally {
     $env:GITHUB_OUTPUT = $savedOutput

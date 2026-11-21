@@ -761,6 +761,31 @@ try {
     if ($guiCode -ne 2 -or $null -eq $guiLoneSuite -or $guiLoneSuite.status -cne 'error' -or [string]$guiLoneSuite.failure.message -cne 'exit 2 (runner-init)' -or -not (& $guiHashMatches $guiLoneSuiteOut)) {
         throw 'A runner that cannot initialize must exit 2 with an error result (runner-init), followed by its hash.'
     }
+    # It keeps -Out's new-or-empty rule there too (CodeRabbit on #740): an -Out with an incomplete result is left alone.
+    $guiLoneFullOut = Join-Path $guiScratch 'out-lone-full'
+    [void](New-Item -ItemType Directory -Path $guiLoneFullOut)
+    [IO.File]::WriteAllText((Join-Path $guiLoneFullOut 'result.json'), '{')
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLoneRunner, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch 'lone-work-full'), '-Out', $guiLoneFullOut)
+    if ($guiCode -ne 2 -or @(Get-ChildItem -LiteralPath $guiLoneFullOut -Force).Count -ne 1 -or [IO.File]::ReadAllText((Join-Path $guiLoneFullOut 'result.json')) -cne '{') {
+        throw 'A runner that cannot initialize must leave a non-empty -Out as it was.'
+    }
+    # A taken archive name, a directory included, moves the incomplete result to the next number (CodeRabbit on #740).
+    $guiTakenOut = Join-Path $guiScratch 'out-taken'
+    [void](New-Item -ItemType Directory -Path (Join-Path $guiTakenOut 'result.incomplete.json'))
+    [IO.File]::WriteAllText((Join-Path $guiTakenOut 'result.json'), '{')
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiLonePublisher, '-Kind', 'suite-no-result', '-Out', $guiTakenOut)
+    if ($guiCode -ne 2 -or [IO.File]::ReadAllText((Join-Path $guiTakenOut 'result.incomplete-2.json')) -cne '{' -or -not (& $guiHashMatches $guiTakenOut)) {
+        throw 'The error publisher must keep an incomplete result under the next free name when a directory holds the first.'
+    }
+    # Its timestamps are Gregorian whatever the culture (CodeRabbit on #740: th-TH wrote a Buddhist year).
+    $guiCultureOut = Join-Path $guiScratch 'out-culture'
+    $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-Command', "[Globalization.CultureInfo]::CurrentCulture = 'th-TH'; & '$($guiLonePublisher.Replace("'", "''"))' -Kind suite-no-result -Out '$($guiCultureOut.Replace("'", "''"))'; exit `$LASTEXITCODE")
+    # Read as text: ConvertFrom-Json turns the timestamp into a DateTime.
+    $guiCultureText = $(if (Test-Path -LiteralPath (Join-Path $guiCultureOut 'result.json')) { [IO.File]::ReadAllText((Join-Path $guiCultureOut 'result.json')) } else { '' })
+    $guiCultureYear = [regex]::Match($guiCultureText, '"started_at":\s*"(\d{4})-')
+    if ($guiCode -ne 2 -or -not $guiCultureYear.Success -or $guiCultureYear.Groups[1].Value -cne [datetime]::UtcNow.Year.ToString([Globalization.CultureInfo]::InvariantCulture)) {
+        throw "The error publisher must write a Gregorian year under th-TH; wrote $($guiCultureYear.Value)."
+    }
     $guiAsciiOut = Join-Path $guiScratch 'out-ascii'
     $guiCode = Invoke-GuiContractChild $guiChild @('-NoProfile', '-NonInteractive', '-File', $guiRunnerPath, '-MeasureRepo', $repoRoot, '-Work', (Join-Path $guiScratch ('work-caf' + [char]0xE9)), '-Out', $guiAsciiOut)
     if ($guiCode -ne 2 -or (Test-Path -LiteralPath (Join-Path $guiScratch ('work-caf' + [char]0xE9)))) { throw 'The runner must refuse a non-ASCII -Work before it creates it.' }
@@ -939,9 +964,9 @@ $guiSavedDesktop = $env:NOCTTY_GUI_HIDDEN_DESKTOP
 try {
     [void](New-Item -ItemType Directory -Path $guiScratch)
     foreach ($case in @(
-            @{ Name = 'clean exit, module absent'; Load = $false; End = 'exit 0'; Loaded = $false }
-            @{ Name = 'clean exit, module loaded'; Load = $true; End = 'exit 0'; Loaded = $true }
-            @{ Name = 'a throw, module loaded'; Load = $true; End = 'throw ''leaf failed'''; Loaded = $true }
+            @{ Name = 'clean exit, module absent'; Load = $false; End = 'exit 0'; Loaded = $false; Code = 0 }
+            @{ Name = 'clean exit, module loaded'; Load = $true; End = 'exit 0'; Loaded = $true; Code = 0 }
+            @{ Name = 'a throw, module loaded'; Load = $true; End = 'throw ''leaf failed'''; Loaded = $true; Code = 1 }
         )) {
         $run = Join-Path $guiScratch ([guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $run)
@@ -952,6 +977,8 @@ try {
         $guiCode = Invoke-GuiContractChild $guiChildPwsh @('-NoProfile', '-NonInteractive', '-File', $script)
         $judged = Test-GuiHiddenLeafReceipt (Join-Path $run 'leaf-receipt.json')
         if (-not $judged.valid -or $judged.realInputLoaded -ne $case.Loaded) { throw "lib's receipt block misreported the module ($($case.Name))." }
+        # The child ended as the row says, so a receipt from a child that failed some other way cannot pass (CodeRabbit on #740).
+        if ($guiCode -ne $case.Code) { throw "The receipt fixture's child exited $guiCode, not $($case.Code) ($($case.Name))." }
     }
     $env:NOCTTY_GUI_HIDDEN_RUN = $guiSavedRun
     $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)

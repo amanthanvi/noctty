@@ -67,12 +67,14 @@ $resultPath = Join-Path $Out 'result.json'
 $replaced = $false
 if ([IO.File]::Exists($resultPath)) {
     # Kept, never deleted: an incomplete result is evidence of how the run ended.
+    # A name a file or a directory holds is taken (CodeRabbit on #740).
     $kept = Join-Path $Out 'result.incomplete.json'
-    for ($n = 2; [IO.File]::Exists($kept); $n++) { $kept = Join-Path $Out "result.incomplete-$n.json" }
+    for ($n = 2; [IO.File]::Exists($kept) -or [IO.Directory]::Exists($kept); $n++) { $kept = Join-Path $Out "result.incomplete-$n.json" }
     [IO.File]::Move($resultPath, $kept)
     $replaced = $true
 }
-$now = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+# The invariant culture's Gregorian calendar, whatever this machine's (CodeRabbit on #740: th-TH writes a Buddhist year).
+$now = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
 $hostedRun = $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted'
 $published = [ordered]@{
     hosted = $hostedRun; publishedError = $Kind; replacedIncomplete = $replaced

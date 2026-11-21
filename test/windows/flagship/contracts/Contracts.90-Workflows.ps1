@@ -2954,7 +2954,8 @@ $frozenSetSha256 = [ordered]@{
 function Get-FrozenSetRegion([string] $Text, [string] $Region) {
     if (-not $Region) { return $Text }
     if ($Region -ceq 'run_interactive_win11') {
-        $dispatch = [regex]::Match($Text, '(?m)^  workflow_dispatch:[^\r\n]*\r?\n(?:    [^\r\n]*\r?\n)*', 'None', [TimeSpan]::FromSeconds(5))
+        # Blank lines between the inputs are part of the block (CodeRabbit on #740).
+        $dispatch = [regex]::Match($Text, '(?m)^  workflow_dispatch:[^\r\n]*\r?\n(?:(?:    [^\r\n]*|[ \t]*)\r?\n)*', 'None', [TimeSpan]::FromSeconds(5))
         if (-not $dispatch.Success) { return $null }
         $inputs = @([regex]::Matches($dispatch.Value, '(?m)^      run_interactive_win11:[^\r\n]*\r?\n(?:        [^\r\n]*\r?\n)*', 'None', [TimeSpan]::FromSeconds(5)))
         return $(if ($inputs.Count -eq 1) { $inputs[0].Value } else { $null })
@@ -3055,14 +3056,15 @@ if (@($frozenLastProblems | Where-Object { $_.Contains('test.yml#windows-interac
 $frozenTestYml = $frozenSetTexts['.github/workflows/test.yml']
 $frozenInputNl = $(if ($frozenTestYml.Contains("`r`n")) { "`r`n" } else { "`n" })
 $frozenExtraInput = (@('      run_unrelated_check:', '        description: An unrelated manual input', '        required: false', '        default: false', '        type: boolean') -join $frozenInputNl) + $frozenInputNl
-foreach ($frozenPlace in @('before', 'after')) {
+foreach ($frozenPlace in @('before', 'after', 'a blank line before')) {
     $frozenSetInput = [ordered]@{}
     foreach ($path in $frozenSetTexts.Keys) { $frozenSetInput[$path] = $frozenSetTexts[$path] }
     $frozenInputs = [regex]::Match($frozenTestYml, '(?m)^    inputs:\r?\n', 'None', [TimeSpan]::FromSeconds(5))
     $frozenAfterInput = [regex]::Match($frozenTestYml, '(?m)^      run_interactive_win11:[^\r\n]*\r?\n(?:        [^\r\n]*\r?\n)*', 'None', [TimeSpan]::FromSeconds(5))
     if (-not $frozenInputs.Success -or -not $frozenAfterInput.Success) { throw 'The frozen-set input control found no dispatch input to place beside.' }
-    $frozenAt = $(if ($frozenPlace -ceq 'before') { $frozenInputs.Index + $frozenInputs.Length } else { $frozenAfterInput.Index + $frozenAfterInput.Length })
-    $frozenSetInput['.github/workflows/test.yml'] = $frozenTestYml.Insert($frozenAt, $frozenExtraInput)
+    $frozenAt = $(if ($frozenPlace -ceq 'after') { $frozenAfterInput.Index + $frozenAfterInput.Length } else { $frozenInputs.Index + $frozenInputs.Length })
+    $frozenInsert = $(if ($frozenPlace -ceq 'a blank line before') { $frozenExtraInput + $frozenInputNl } else { $frozenExtraInput })
+    $frozenSetInput['.github/workflows/test.yml'] = $frozenTestYml.Insert($frozenAt, $frozenInsert)
     $frozenInputProblems = Get-FrozenSetProblems $frozenSetInput
     if ($frozenInputProblems.Count -ne 0) { throw "The frozen-set pin refused an unrelated manual input placed $frozenPlace the one it freezes: $($frozenInputProblems -join ' ')" }
 }

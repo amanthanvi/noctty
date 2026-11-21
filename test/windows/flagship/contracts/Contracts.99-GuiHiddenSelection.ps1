@@ -70,6 +70,25 @@ $guiHiddenProblems = & {
         # A failed changes job keeps the suite from starting, so changes publishes and uploads the error result itself,
         # after its tests, through the standalone publisher (Sol on #740: a runner that did not parse failed the walk,
         # and nothing was uploaded).
+        # An upload step's `path: |` block scalar, its lines one pattern each: every line after it that is blank or
+        # indented past `path:`, so a path after a blank separator is read too (CodeRabbit on #740: the old pattern
+        # stopped at the first blank line). A folded `path: >` (one string) or none gives no paths. Both uploads.
+        $uploadPaths = {
+            param([string] $Step)
+            $found = [System.Collections.Generic.List[string]]::new()
+            if ($null -eq $Step) { return , $found.ToArray() }
+            $stepLines = @($Step -split '\r?\n')
+            $at = @(for ($i = 0; $i -lt $stepLines.Count; $i++) { if ($stepLines[$i] -match '\A          path: \|[+-]?\s*\z') { $i } })
+            if ($at.Count -eq 1) {
+                for ($i = $at[0] + 1; $i -lt $stepLines.Count; $i++) {
+                    $line = $stepLines[$i]
+                    if ($line.Trim().Length -eq 0) { continue }
+                    if (-not $line.StartsWith('           ', [StringComparison]::Ordinal)) { break }
+                    $found.Add($line.Trim())
+                }
+            }
+            return , $found.ToArray()
+        }
         $changesPublish = & $findStep $changes 'Publish an error result when the selection failed' 'changes'
         $changesUpload = & $findStep $changes 'Upload the selection''s error result' 'changes'
         $changesTestsAt = $changes.IndexOf('      - name: GUI selection tests (walker, selection)', [StringComparison]::Ordinal)
@@ -79,7 +98,7 @@ $guiHiddenProblems = & {
             $changesPublish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error\.ps1 -Kind gui-selection -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
             $null -eq $changesUpload -or $changesUpload -notmatch '(?m)^        if: failure\(\)\s*$' -or
             $changesUpload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
-            ((@([regex]::Matches($changesUpload, '(?m)^            \S[^\r\n]*') | ForEach-Object { $_.Value.Trim() })) -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**' -or
+            ((& $uploadPaths $changesUpload) -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**' -or
             $changesUpload -notmatch '(?m)^          retention-days: 90\s*$' -or
             $changesPublish -match '(?m)^        continue-on-error:' -or $changesUpload -match '(?m)^        continue-on-error:' -or
             $changesTestsAt -lt 0 -or $changesPublishAt -lt $changesTestsAt -or $changesUploadAt -lt $changesPublishAt) {
@@ -115,19 +134,7 @@ $guiHiddenProblems = & {
         if ($run -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -MeasureRepo \$env:GITHUB_WORKSPACE -Work \(Join-Path \$env:RUNNER_TEMP ''gui-hidden-work''\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\) -Build\s*$' -or
             $run -match '(?m)^        (?:if|continue-on-error):') { $found.Add('gui-hidden.yml: the suite step runs the runner with -Build into RUNNER_TEMP\gui-hidden, unconditionally') }
         $upload = Get-YamlStepBlock -Content $suite -Name 'Upload the suite''s result and receipts' -Source 'gui-hidden.yml :: suite'
-        # The whole `path: |` block scalar: every line after it that is blank or indented past `path:`, so a path
-        # after a blank separator is read too (CodeRabbit on #740: the old pattern stopped at the first blank line).
-        $paths = [System.Collections.Generic.List[string]]::new()
-        $uploadLines = @($upload -split '\r?\n')
-        $pathAt = @(for ($i = 0; $i -lt $uploadLines.Count; $i++) { if ($uploadLines[$i] -match '\A          path: \|[+-]?\s*\z') { $i } })
-        if ($pathAt.Count -eq 1) {
-            for ($i = $pathAt[0] + 1; $i -lt $uploadLines.Count; $i++) {
-                $line = $uploadLines[$i]
-                if ($line.Trim().Length -eq 0) { continue }
-                if (-not $line.StartsWith('           ', [StringComparison]::Ordinal)) { break }
-                $paths.Add($line.Trim())
-            }
-        }
+        $paths = & $uploadPaths $upload
         if (($paths -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**') { $found.Add('gui-hidden.yml: the upload holds exactly the result, its hash and the receipts (design §4.5 allowlist), no log directory') }
         if ($upload -notmatch '(?m)^        if: always\(\)\s*$' -or $upload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
             $upload -notmatch '(?m)^          if-no-files-found: warn\s*$') { $found.Add('gui-hidden.yml: the upload runs always, is named per run and attempt, and warns on no files') }
@@ -175,7 +182,9 @@ $guiHiddenProblems = & {
         @{ Name = 'the error result published only for a failed self-test (a suite that died without a result left none)'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure() && steps.selftest.outcome == 'failure'`n" }
         @{ Name = 'the error result published from cmd, which does not run its Join-Path'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n        shell: pwsh`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure()`n        shell: cmd`n" }
         @{ Name = 'the error result published through the runner, which a runner that does not parse cannot do'; Old = 'run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind '; New = 'run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError ' }
-        @{ Name = 'the result''s hash left out of the upload'; Old = "            `${{ runner.temp }}/gui-hidden/result.json.sha256`n"; New = '' }
+        @{ Name = 'the result''s hash left out of the suite''s upload'; Old = "            `${{ runner.temp }}/gui-hidden/result.json.sha256`n            `${{ runner.temp }}/gui-hidden/receipts/**`n          # Release evidence"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n          # Release evidence" }
+        @{ Name = 'the result''s hash left out of the selection''s upload'; Old = "            `${{ runner.temp }}/gui-hidden/result.json.sha256`n            `${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:" }
+        @{ Name = 'the selection''s upload paths folded into one string'; Old = "      - name: Upload the selection's error result`n        if: failure()`n        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2`n        with:`n          name: gui-hidden-`${{ github.run_id }}-`${{ github.run_attempt }}`n          path: |`n"; New = "      - name: Upload the selection's error result`n        if: failure()`n        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2`n        with:`n          name: gui-hidden-`${{ github.run_id }}-`${{ github.run_attempt }}`n          path: >`n" }
         @{ Name = 'no error result when the selection failed'; Old = "      - name: Publish an error result when the selection failed`n"; New = "      - name: Publish nothing when the selection failed`n" }
         @{ Name = 'the selection''s error result published through the runner'; Old = 'run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind gui-selection'; New = 'run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError gui-selection' }
         @{ Name = 'the selection''s upload run on every run'; Old = "      - name: Upload the selection's error result`n        if: failure()`n"; New = "      - name: Upload the selection's error result`n        if: always()`n" }

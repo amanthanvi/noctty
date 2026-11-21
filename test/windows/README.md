@@ -1618,8 +1618,9 @@ line: logFn writes the level as `std.log.Level.asText` spells it, and the
 contract takes each prefix from `process_shared.zig`'s `logPrefix` test), and
 so is `Direct3D11.zig`'s
 `initialized driver=`, logged when the device is made but before the rest of
-the candidate, which can still fail. So a hardware D3D11 failure followed by a
-WARP start reads `opengl:failed d3d11:failed d3d11-warp:started`, and the
+the candidate, which can still fail. So an OpenGL failure, then a hardware
+D3D11 failure, then a WARP start reads
+`opengl:failed d3d11:failed d3d11-warp:started`, and the
 backend `d3d11-warp`. A log whose attempts no start closes reads `unknown`. The
 contract pins each of those lines to its source.
 All are allowlisted values only: booleans, numbers and short strings without a
@@ -1650,11 +1651,14 @@ matches the result schema, names this scenario, and has a matching
 keeps as `result.incomplete.json` and replaces with an `error` result.
 
 The script walk's edge definition (design §4.3) covers the ways it lists to run
-a script, not every way PowerShell has. A name with a path separator, other
-than a cmdlet of a module PowerShell ships (`Microsoft.PowerShell.*\Verb-Noun`),
-is a path lookup in every form (`&`, `.`, a bare word, `Get-Command`), whatever
-its leaf: with no extension it is the `.ps1` beside it, as PowerShell looks it
-up first, and a missing one fails the walk; a relative one is unresolved.
+a script, not every way PowerShell has. A name with a path separator is a path
+lookup in every form (`&`, `.`, a bare word, `Get-Command`, cmd's `/C` and
+`call`), whatever its leaf, unless it is `Microsoft.PowerShell.*\Verb-Noun` and
+the walker's own session finds that module exporting that command. With no
+extension, a lookup names every sibling with `.ps1` or a PATHEXT extension
+(matched case-insensitively): the walk reads the `.ps1` and keeps the others
+as files, whatever `-CommandType` would pick, and fails when none exists; a
+relative one is unresolved.
 Known gaps, which no GUI member uses with a script target today:
 `[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
 runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of

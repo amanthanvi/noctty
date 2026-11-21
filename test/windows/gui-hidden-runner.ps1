@@ -520,9 +520,17 @@ catch {
     Write-Host "gui-hidden: the runner could not initialize ($($_.Exception.GetType().Name))"
     # The error publisher is a script of its own (Sol on #740), so a runner that fails here, or does not parse, still
     # leaves a result.
+    # -Out must be new or empty here as on every runner path (CodeRabbit on #740): the publisher's repair of a
+    # directory holding an incomplete result is for the workflow, which owns its output directory.
     if ($Out) {
-        try { & (Join-Path $PSScriptRoot 'gui-hidden-publish-error.ps1') -Kind 'runner-init' -Out $Out }
-        catch { Write-Host "gui-hidden: the error publisher failed ($($_.Exception.GetType().Name))" }
+        $initOut = [IO.Path]::GetFullPath($Out)
+        if ([IO.File]::Exists($initOut) -or ([IO.Directory]::Exists($initOut) -and @(Get-ChildItem -LiteralPath $initOut -Force).Count -gt 0)) {
+            Write-Host 'gui-hidden: -Out is not new or empty; no result written'
+        }
+        else {
+            try { & (Join-Path $PSScriptRoot 'gui-hidden-publish-error.ps1') -Kind 'runner-init' -Out $Out }
+            catch { Write-Host "gui-hidden: the error publisher failed ($($_.Exception.GetType().Name))" }
+        }
     }
     exit 2
 }
@@ -1409,8 +1417,8 @@ if ($outReady) {
         schema_version = 'noctty.verification.result.v1'
         scenario_id = 'windows.gui-hidden.suite'
         status = $status
-        started_at = $startedAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
-        finished_at = $finishedAt.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        started_at = $startedAt.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+        finished_at = $finishedAt.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
         duration_ms = [int64]($finishedAt - $startedAt).TotalMilliseconds
         baseline_commit = $null
         implementation_commit = $commit
