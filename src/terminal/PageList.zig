@@ -16044,7 +16044,6 @@ test "PageList resize reflow semantic prompt marks" {
         }
     }
 }
-}
 
 test "PageList resize reflow less cols no reflow preserves semantic prompt on first line" {
     const testing = std.testing;
