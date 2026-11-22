@@ -926,18 +926,40 @@ foreach ($bad in @(
             throw 'The role supervisor received the wrong identity, exit receipt, or seal.'
         }
     }
+    # Model a signalled exit whose code becomes readable after the first two polls.
+    $delayed = @{ Polls = 0 }
+    $readDelayed = [Func[Nullable[uint32]]]{
+        $delayed.Polls++
+        if ($delayed.Polls -ge 3) { return [uint32]0 }
+        return $null
+    }
+    $app.Exit = $readDelayed.Invoke()
+    $calls.Clear()
+    $refused = $false
+    try { Write-GuiHiddenRoleManifest @($app) $launcher 100 $run $logs }
+    catch { $refused = $_.Exception.Message -ceq 'The role-pairs copy has no unique, launcher-bound exit.' }
+    if (-not $refused -or $calls.Count -ne 0) { throw 'The old one-shot exit read did not reproduce the missing exit.' }
+    $app.Exit = [GuiHiddenRunnerNative]::WaitForRoleExit($readDelayed, 1000)
+    Write-GuiHiddenRoleManifest @($app) $launcher 100 $run $logs
+    if ($delayed.Polls -ne 3 -or $calls.Count -ne 3 -or $calls[1][7] -cne '0') {
+        throw 'A delayed normal exit did not produce a full zero exit receipt.'
+    }
+    $missing = [GuiHiddenRunnerNative]::WaitForRoleExit([Func[Nullable[uint32]]]{ return $null }, 60)
     foreach ($bad in @(
             @{ Start = 21; Exit = [uint32]0; Parent = 100 }
-            @{ Start = 20; Exit = $null; Parent = 100 }
+            @{ Start = 20; Exit = $missing; Parent = 100 }
             @{ Start = 20; Exit = [uint32]0; Parent = 101 }
+            @{ Start = 20; Exit = [uint32]0; Parent = 100; Duplicate = $true }
         )) {
         $calls.Clear()
         $launcher[200] = [long]$bad.Start
         $app.Exit = $bad.Exit
         $app.Parent = $bad.Parent
+        $rows = if ($bad.Duplicate) { @($app, $app) } else { @($app) }
         $refused = $false
-        try { Write-GuiHiddenRoleManifest @($app) $launcher 100 $run $logs } catch { $refused = $true }
-        if (-not $refused -or $calls.Count -ne 0) { throw 'A missing exit, mismatched launcher or wrong parent produced a role receipt.' }
+        try { Write-GuiHiddenRoleManifest $rows $launcher 100 $run $logs }
+        catch { $refused = $_.Exception.Message -ceq 'The role-pairs copy has no unique, launcher-bound exit.' }
+        if (-not $refused -or $calls.Count -ne 0) { throw 'A missing or duplicate exit, mismatched launcher or wrong parent produced a role receipt.' }
     }
 }
 
