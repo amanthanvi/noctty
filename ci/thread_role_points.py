@@ -20,12 +20,12 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   TEST-EDIT-POINT  in test code;
   FIXTURE-HELPER   a `fixture(` in a function of a container that only test code of its file names, the container
                    a file-level `const` that is not `pub` (`ClipboardReplyFixture.init`, `TestStream.init`);
-  MAIN-UI-SCOPE    `src/main_ghostty.zig` `main`, role ui, as its eager first statement (below);
+  MAIN-UI-SCOPE    `src/main_ghostty.zig` file-level `pub fn main`, role ui, as its eager first statement (below);
   ENTRY            in the function a counted registry entry's spawn names, with the entry's role, as the target's
                    eager first statement, so it runs before anything else the thread does;
   and otherwise fails UNREGISTERED-POINT. An EAGER FIRST STATEMENT (`File.scope_statement`) is the body's first
-  statement, beginning with the call itself (`const|var NAME [: T] = R.enter(`, `_ = R.enter(` or `R.enter(`, or
-  `fixture`) and ending with it (`...);`): a `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
+  statement, beginning with the call itself (`const|var NAME [: T] = R.enter(`, or
+  `fixture`) and ending with it (`...);`) followed by `defer NAME.exit();`: a `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
   wrapper never counts, since a deferred call runs at the exit and a guarded one may never run (stone round 4:
   Sol's Medium 1, Opus L1). Only `defer` and `errdefer` statements, which run nothing where they stand, may come
   before it (Surface.zig's `Click.run`). The scope must also set a role (`sets_role`): its receiver the module or
@@ -53,6 +53,7 @@ Exit 0 with RESULT PASS, 1 with RESULT FAIL, 2 on bad input.
 """
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 
@@ -163,11 +164,13 @@ class File:
                           "comptime", "and", "or", "return", "break", "continue", "suspend", "nosuspend"))
 
     def scope_statement(self, k, q):
-        """Whether the role call whose op is token q is the eager first statement of function k's body: the
-        statement right after the body's `{` begins with the call itself, as `const|var NAME [: T] = R.op(`,
-        `_ = R.op(` or `R.op(`, and ends with it (`...);`, so no `.exit()` chained on it). A `defer`, `errdefer`,
-        `if`, `while`, `orelse`, `catch` or any other wrapper, and any statement before it, makes it none: a deferred
-        call runs at the function's exit and a guarded one may never run (stone round 4: Sol's Medium 1, Opus L1)."""
+        """Whether the role call whose op is token q is the eager first statement of function k's body, a scope
+        that covers it: the statement right after the body's `{` begins with the call itself, as
+        `const|var NAME [: T] = R.op(`, and ends with it (`...);`, so no `.exit()` chained on it), and the next
+        statement is `defer NAME.exit();`. A `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
+        wrapper, and any statement before it, makes it none: a deferred call runs at the function's exit and a
+        guarded one may never run (stone round 4: Sol's Medium 1, Opus L1; round 5: Opus L4). Only `defer` and
+        `errdefer` statements may precede it (decision 15); they run after the scope's own exit, LIFO."""
         body = self.fns[k]["body"]
         toks, n = self.toks, len(self.toks)
         if body is None or q < 2 or not (body[0] < q <= body[1]) or not zigtok.is_op(toks[q - 1], ".") \
@@ -200,20 +203,20 @@ class File:
                 return False   # the call is inside the deferred statement
             s = r
         prefix = toks[s:q - 2]   # the statement's tokens before the receiver
-        if prefix:
-            if len(prefix) == 2 and prefix[0].kind == "identifier" and prefix[0].text == "_" \
-                    and zigtok.is_op(prefix[1], "="):
-                pass
-            elif (len(prefix) >= 3 and prefix[0].kind == "keyword" and prefix[0].text in ("const", "var")
-                  and prefix[1].kind == "identifier" and zigtok.is_op(prefix[-1], "=")
-                  and (len(prefix) == 3 or (zigtok.is_op(prefix[2], ":") and len(prefix) > 4
-                                            and not any(zigtok.is_op(t, "=", ";", "{", "}") or t.text in self.WRAPPERS
-                                                        for t in prefix[3:-1])))):
-                pass
-            else:
-                return False
+        if not (len(prefix) >= 3 and prefix[0].kind == "keyword" and prefix[0].text in ("const", "var")
+                and prefix[1].kind == "identifier" and zigtok.is_op(prefix[-1], "=")
+                and (len(prefix) == 3 or (zigtok.is_op(prefix[2], ":") and len(prefix) > 4
+                                          and not any(zigtok.is_op(t, "=", ";", "{", "}") or t.text in self.WRAPPERS
+                                                      for t in prefix[3:-1])))):
+            return False
         close = zigtok.match_paren(toks, q + 1)
-        return close + 1 < n and zigtok.is_op(toks[close + 1], ";")
+        if not (close + 1 < n and zigtok.is_op(toks[close + 1], ";")):
+            return False
+        # The scope covers the body: its exit is the very next statement, `defer NAME.exit();` (stone round 5, Opus
+        # L4), so no `NAME.exit();` ends it early and nothing runs between the enter and the defer.
+        name, r = prefix[1].text, close + 2
+        want = ("defer", name, ".", "exit", "(", ")", ";")
+        return r + len(want) <= n and all(toks[r + j].text == w for j, w in enumerate(want))
 
     def ident_index(self):
         """Each identifier's token positions, once."""
@@ -513,6 +516,17 @@ class Resolver:
         return None, f"{field} of a value the checker does not evaluate ({base[1] if base[0] != 'fn' else 'a function'})"
 
     @staticmethod
+    def trailing(f, close, ends):
+        """The member names after a value that ends at token `close` (a switch's or a container's `}`): `.a.b` up to
+        one of `ends`, [] when an end follows at once, None for anything else (stone round 5, Opus L3: the member
+        after `switch (...) {...}.Inner` names `Inner`'s declaration, never the arm itself)."""
+        toks, n, r, names = f.toks, len(f.toks), close + 1, []
+        while r + 1 < n and zigtok.is_op(toks[r], ".") and toks[r + 1].kind == "identifier":
+            names.append(toks[r + 1].text)
+            r += 2
+        return names if r < n and zigtok.is_op(toks[r], *ends) else None
+
+    @staticmethod
     def switch_arm(toks, open_, tag):
         """The first token of the value of the switch prong (its braces at open_) that holds `.tag`, else of its
         `else` prong; None when neither exists."""
@@ -569,7 +583,13 @@ class Resolver:
             arm = self.switch_arm(toks, c + 1, tag)
             if arm is None:
                 return ("ambiguous", f"{f.path}:{toks[r].line + 1}: a switch with no arm for .{tag}")
-            return self.expression(f, arm, at, (",", "}"), depth + 1)
+            names = self.trailing(f, zigtok.match_paren(toks, c + 1), ends)
+            if names is None:
+                return ("unresolved", f"{f.path}:{toks[r].line + 1}: what follows the switch the checker does not read")
+            b = self.expression(f, arm, at, (",", "}"), depth + 1)
+            for name in names:
+                b = self.member(b, name, depth + 1)
+            return b
         if zigtok.is_op(toks[r], ".") and r + 1 < n and zigtok.is_op(toks[r + 1], "{"):
             close = zigtok.match_paren(toks, r + 1)
             if close + 1 < n and zigtok.is_op(toks[close + 1], *ends):
@@ -597,7 +617,14 @@ class Resolver:
                 if h < n and zigtok.is_op(toks[h], "("):
                     h = zigtok.match_paren(toks, h) + 1
                 if h < n and zigtok.is_op(toks[h], "{"):
-                    return ("container", f, h)
+                    names = self.trailing(f, zigtok.match_paren(toks, h), ends)
+                    if names is None:
+                        return ("unresolved", f"{f.path}:{toks[h].line + 1}: what follows the container the checker "
+                                              f"does not read")
+                    b = ("container", f, h)
+                    for name in names:
+                        b = self.member(b, name, depth + 1)
+                    return b
         names = []
         if base is not None:
             while r + 1 < n and zigtok.is_op(toks[r], ".") and toks[r + 1].kind == "identifier":
@@ -636,6 +663,14 @@ class Resolver:
         return self.decl(g, ds[0], depth + 1)
 
 
+def is_entry_main(f, k):
+    """Whether function k of f is the entry file's own `main`: `pub fn main` at the file's level, not a `main` of a
+    container or one nested in a function (stone round 5, Opus L2)."""
+    d = f.fns[k]
+    return d["kind"] == "fn" and d["name"] == "main" and "pub" in d["quals"] and f.parent[k] is None \
+        and f.container_of(d["fn"]) is None
+
+
 def sets_role(pt):
     """Whether a required entry point's scope sets a role: the module's form or `Roles(.on)`, never `Roles(.off)`
     (which keeps no role even where the layer is on) or a form the checker cannot read, and a role that is not none
@@ -666,6 +701,34 @@ def spawn_targets(f, function, target):
             if len(runs) >= 2 and zigtok.spaced(runs[1], blank=True).replace(" ", "") == want:
                 out.append((q, runs[1], k))
     return out
+
+
+def check_window_procedures(files):
+    """Check source definitions with Win32 window or subclass callback signatures."""
+    count, failures = 0, []
+    for path, f in sorted(files.items()):
+        receivers = role_receivers(f)
+        for decl in f.fns:
+            if decl["kind"] != "fn" or decl["body"] is None:
+                continue
+            ret = f.toks[slice(*decl["ret"])]
+            signature = zigtok.spaced(ret).replace(" ", "")
+            if not re.fullmatch(r"callconv\(\.(?:winapi|WINAPI|c|stdcall)\)(?:\w+\.)*(?:LRESULT|isize)", signature):
+                continue
+            params, _ = zigtok.split_args(f.toks, decl["params"][0])
+            if len(params) not in (4, 6) or not params[0] or params[0][-1].text != "HWND":
+                continue
+            count += 1
+            first = decl["body"][0] + 1
+            head = f.toks[first:min(first + 6, decl["body"][1])]
+            if (len(head) == 6 and head[0].kind == "identifier" and receivers.get(head[0].text) == "module"
+                    and [t.text for t in head[1:]] == [".", "assertWindowProc", "(", ")", ";"]):
+                continue
+            container = f.container_of(decl["fn"])
+            name = ".".join((container["name"], decl["name"])) if container is not None else decl["name"]
+            failures.append(f"WINDOW-PROC-NO-ASSERT {path}:{f.toks[decl['fn']].line + 1} {name}: "
+                            "first statement must call thread_role.assertWindowProc()")
+    return count, failures
 
 
 def main(argv):
@@ -703,7 +766,8 @@ def main(argv):
     # is the test build's)
     test_rooted = reach["test"] - reach["outside-test-blocks"]
 
-    failures, report = [], []
+    procedure_count, failures = check_window_procedures(files)
+    report = [f"window and subclass procedures: {procedure_count}"]
 
     # role-setting points
     points = []   # dict(file, fn index, fn name, role, line, q, test, op)
@@ -887,7 +951,7 @@ def main(argv):
                 if c is not None and any(c is x for x in test_only_containers(f)):
                     kind = "FIXTURE-HELPER"
             if kind is None and pt["file"] == MAIN_FILE and pt["fn"] == "main" and pt["role"] == "ui" \
-                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and sets_role(pt) \
+                    and is_entry_main(f, pt["k"]) and pt["op"] in SCOPE_OPS and sets_role(pt) \
                     and f.scope_statement(pt["k"], pt["q"]):
                 kind = "MAIN-UI-SCOPE"
             if kind is None and (pt["file"], pt["q"]) in matched[art]:

@@ -1,0 +1,40 @@
+# file	function	receiver	count	why the acquisition is not the renderer-state mutex (r10; r30: keyed by receiver;
+# r31: with its approved count)
+# thread_gate12.py check fails on any UNCLASSIFIED acquisition whose (file, function, receiver) is not listed here,
+# and on a listed key a revision holds a different number of times than the count (ALLOW-COUNT, round 30's Opus L3);
+# test code too, keyed by its function, or `test:<name>` when the test block owns it (r29). The inventory is
+# default-deny by lexical scope (r30, r31), so an acquisition it cannot place by evidence is UNCLASSIFIED; a called
+# @field whose name is no literal is one too (r31), keyed by its @field text; and from r33 so is a lock-op name used with
+# no call whose chain's type the resolver cannot show declares it as a field, keyed `<chain>.<op> (no call)`; from r34
+# keyed `<chain>.<op> (no call; <root>: <type>)` when the chain's root has a declared type (round 33's L3), and a `var`
+# gives evidence only when it is explicitly typed (round 33's lead direction), so a receiver an untyped `var` binds is
+# UNCLASSIFIED, named here with its count (the user's decision on round 33).
+# Round 9's two stream_handler.zig test-helper entries are gone: the lock at stream_handler.zig:2178 (Feed.run) IS the
+# renderer mutex (Feed.mutex is set from &h.renderer_mutex at :2209, :2211, :2218), and lock_inventory4.py now classifies it.
+src/App.zig	needsModalWake	mailbox.mutex	1	the app mailbox queue's own mutex (mailbox.mutex at App.zig:527; Mailbox.Queue is a BlockingQueue)
+src/Command.zig	startWindows	windows.inheritable_spawn_lock	1	r30: the process-spawn lock, src/os/windows.zig's inheritable_spawn_lock (a value std.Thread.Mutex declared in another file, which the resolver does not follow), held around CreateProcessW; no renderer state
+src/Surface.zig	test:Surface: ending a search does not wait for room in a full app mailbox	app.mailbox.mutex	1	r30, test code: the app mailbox queue's own mutex (a BlockingQueue's, as App.zig's needsModalWake); App is declared in another file
+src/apprt/win32_jump_list.zig	readRemovedLinkText	@field(link.vtbl, getter)	1	r31: a COM vtable call through a comptime method name, not a mutex op (the user's census decision: a visible reflected call whose op cannot be known is unclassified, and named here)
+src/apprt/win32_terminal_accessibility.zig	proc	session.mutex	1	r30, test code: the accessibility session's own mutex (TerminalAccessibilitySession.mutex, a value std.Thread.Mutex at :71), read through `self.session.?`, which the resolver does not follow
+src/apprt/win32_toast_winrt.zig	applyTagAndGroup	@field(toast2.vtbl, pair[1])	1	r31: a COM vtable call through a comptime method name, not a mutex op (the user's census decision: a visible reflected call whose op cannot be known is unclassified, and named here)
+src/cli/ssh-cache/DiskCache.zig	add	file	1	r30: the cache file's own lock (std.fs.File.tryLock; std.Io.File's in 0.17) on a file a std open call returns, whose return type the resolver does not read; a file lock, no mutex
+src/cli/ssh-cache/DiskCache.zig	prune	file	1	r30: as add, the cache file's own lock
+src/cli/ssh-cache/DiskCache.zig	remove	file	1	r30: as add, the cache file's own lock
+src/font/discovery_windows.zig	test:windows refreshExisting never starts or waits for a scan	disco.scan_mutex	1	r31, test code: the font discovery's scan mutex (Windows.scan_mutex); the test binds `disco` twice, in a closed block and again after it, so by scope the resolver reads neither
+src/font/discovery_windows.zig	test:windows discovery iterator outlives a refresh that replaces the records	disco.mutex	1	r34, test code: the test's own fixture mutex (Windows.mutex, of the discovery the test builds; `var disco = try fixtureDiscovery(...)` has no explicit type, so from r34 it gives no evidence; discovery_windows.zig:2336 in the fork, 1A and 1B trees)
+src/font/face/freetype.zig	deinit	self.lib.mutex	1	the FreeType library's mutex (self.lib.mutex)
+src/font/face/freetype.zig	fontThickenSample	face.ft_mutex	1	the face's FreeType mutex (face.ft_mutex; fork only)
+src/font/face/freetype.zig	getMetrics	self.ft_mutex	4	the face's FreeType mutex (ft_mutex)
+src/font/face/freetype.zig	init	lib.mutex	1	the FreeType library's mutex (lib.mutex)
+src/font/face/freetype.zig	initFile	lib.mutex	1	the FreeType library's mutex (lib.mutex), shared by faces of one Library
+src/font/face/freetype.zig	isColorGlyph	self.ft_mutex	1	the face's FreeType mutex (ft_mutex)
+src/font/face/freetype.zig	renderGlyph	self.ft_mutex	1	the face's FreeType mutex (ft_mutex)
+src/font/shaper/harfbuzz.zig	shape	run.grid.lock	1	r30: the font grid's RwLock taken exclusive (SharedGrid.lock, std.Thread.RwLock; std.Io.RwLock in 0.17), through font.SharedGrid, declared in another file; no mutex
+src/lib/compat/thread.zig	waitTimeout	mutex	1	the mutex BlockingQueue passes (blocking_queue.zig:121 at v1.4.0, :152 in the 1B proxies); no caller passes the state mutex
+src/lib/tinyio/posix.zig	dirOpenFile	options.lock (no call; options: Dir.OpenFileOptions)	1	r33, re-keyed r34 with the parameter's declared type (round 33's L3): std.Io.Dir.OpenFileOptions's field `lock: File.Lock = .none` (0.17.1 lib/std/Io/Dir.zig:546), a file-lock mode (.none, .shared, .exclusive) the open compares, read with no call: `options` is a parameter of a std struct (`const Dir = Io.Dir;`), whose fields the resolver does not read, so it cannot show `lock` is a field; not a mutex op (the 1B trees and v1.4.0)
+src/lib/tinyio/windows.zig	dirOpenFile	options.lock (no call; options: Dir.OpenFileOptions)	1	r33, re-keyed r34 with the parameter's declared type (round 33's L3): std.Io.Dir.OpenFileOptions's field `lock: File.Lock = .none` (0.17.1 lib/std/Io/Dir.zig:546), a file-lock mode (.none, .shared, .exclusive) the open compares, read with no call: `options` is a parameter of a std struct (`const Dir = Io.Dir;`), whose fields the resolver does not read, so it cannot show `lock` is a field; not a mutex op (the 1B trees and v1.4.0)
+src/lib/tinyio/test.zig	worker	m	1	test code (r29; the 1B trees and v1.4.0): the Io.Mutex contention test's own mutex (m), shared by its worker threads; no renderer state in it
+src/pty.zig	test:handoff visibility resize and close share the signal lock	pty.control.handoff.signal_write_mutex	1	r34, test code: the test's own fixture mutex (the handoff's signal_write_mutex, of the pty the test builds; `var pty = handoffPtyForTest(signal_write)` has no explicit type, so from r34 it gives no evidence; pty.zig:1387 in the fork and 1A trees, :1389 in the 1B trees)
+src/renderer/Thread.zig	renderCallback	t.renderer.draw_mutex	1	v1.4.0 only: the renderer's draw mutex (t.renderer.draw_mutex at renderer/Thread.zig:560)
+src/renderer/Windows.zig	capture	v.draw_mutex	1	the active backend's draw mutex (v.draw_mutex at Windows.zig:417), not the state mutex
+src/termio/stream_handler.zig	stoppedWhileWaiting	queue.mutex	1	test code (r29): the test's own BlockingQueue's mutex (queue.mutex), which a stopped reader waits on; no renderer state in it

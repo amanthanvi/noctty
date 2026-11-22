@@ -300,6 +300,64 @@ control("G1: a production scope after a braceless block in an is_test branch is 
         "FAIL UNREGISTERED-POINT test src/worker.zig:26 stray: enter(renderer)",
         absent=("TEST-EDIT-POINT src/worker.zig:26",))
 
+WINDOW_PROC = """
+const W = struct {
+    fn wndProc(hwnd: HWND, msg: UINT, w: WPARAM, l: LPARAM) callconv(.winapi) LRESULT {
+        thread_role.assertWindowProc();
+        return 0;
+    }
+    fn hook(code: c_int, w: WPARAM, l: LPARAM) callconv(.winapi) LRESULT {
+        return 0;
+    }
+};
+"""
+control("a window procedure asserts first and a hook needs no assertion",
+        tree(**{"src/worker.zig": WORKER + WINDOW_PROC}), 0, "window and subclass procedures: 1", "RESULT PASS")
+control("a late assertion fails naming its window procedure",
+        tree(**{"src/worker.zig": WORKER + WINDOW_PROC.replace(
+            "        thread_role.assertWindowProc();", "        _ = msg;\n        thread_role.assertWindowProc();")}), 1,
+        "WINDOW-PROC-NO-ASSERT src/worker.zig:", "W.wndProc: first statement")
+
+control("a nested main's UI scope is not the entry file's main", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n', '') + (
+    'const Other = struct {\n    fn main() void {\n        const role_scope = thread_role.enter(.ui);\n'
+    '        defer role_scope.exit();\n    }\n};\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:8 main: enter(ui)",
+        absent=("POINT app MAIN-UI-SCOPE",))
+MEMBER_WORKER = WORKER + (
+    'const Scoped = struct {\n    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
+    '        defer role.exit();\n    }\n    const Inner = struct {\n        fn run() void {}\n    };\n};\n'
+    'pub fn startSelected() void {\n    const t = std.Thread.spawn(.{}, Target.run, .{}) catch return;\n    t.join();\n}\n')
+MEMBER_REGISTRY = REGISTRY + "src/worker.zig\tstartSelected\tThread.spawn\tTarget.run\tworker:probe\tthe selected target\n"
+control("a member after a switch names that member, not the arm", tree(**{"src/worker.zig": MEMBER_WORKER + (
+    'const selected = .{ .artifact = .ghostty };\n'
+    'const Target = switch (selected.artifact) {\n    .ghostty => Scoped,\n    .other => Scoped,\n}.Inner;\n')}), 1,
+        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:27) sets no role",
+        "FAIL UNREGISTERED-POINT app src/worker.zig:23 run: enter(worker:probe)",
+        registry=MEMBER_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
+control("a member after a container names that member, not the container", tree(**{
+    "src/worker.zig": MEMBER_WORKER + 'const Target = Scoped;\n'.replace('Scoped;', 'struct {\n'
+        '    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
+        '        defer role.exit();\n    }\n    const Inner = struct {\n        fn run() void {}\n    };\n}.Inner;')}), 1,
+        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:40) sets no role",
+        registry=MEMBER_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
+control("a scope exited before the target's work is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n    role.exit();\n'
+    '    std.debug.print("after\\n", .{});\n')}), 1,
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
+        absent=("ENTRY-OK app src/worker.zig start",))
+control("a scope exited before main's work is no UI scope", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n',
+    '    const role_scope = thread_role.enter(.ui);\n    role_scope.exit();\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:4 main: enter(ui)",
+        absent=("POINT app MAIN-UI-SCOPE",))
+control("a discarded scope (`_ = R.enter`) is no entry scope", tree(**{"src/worker.zig": WORKER.replace(
+    '    const role = thread_role.enter(.{ .worker = "probe" });\n    defer role.exit();\n',
+    '    _ = thread_role.enter(.{ .worker = "probe" });\n')}), 1,
+        "FAIL ENTRY-NOT-FIRST app src/worker.zig start -> workerMain: its role call (src/worker.zig:8)",
+        absent=("ENTRY-OK app src/worker.zig start",))
+
 if failures:
     for f in failures:
         print("FAIL " + f)

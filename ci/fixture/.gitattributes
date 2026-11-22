@@ -1,0 +1,5 @@
+# FIXTURE.tsv binds the exact bytes used in both self-test layouts.
+* text eol=lf
+*.bundle -text -diff
+# Empty final TSV columns are part of the fixture bytes.
+lock-inventory-threads*.tsv whitespace=-blank-at-eol

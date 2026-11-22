@@ -557,3 +557,16 @@ def containers_of_tokens(toks, fns):
         last_name = name
         out.append(dict(kind=x.text, name=name, naming=naming, head=head, open=r, close=min(match_paren(toks, r), n - 1)))
     return out
+
+
+def function_paths(fns, containers):
+    """Map declaration tokens to their named container and function path."""
+    paths = {}
+    for decl in fns:
+        if decl["kind"] != "fn" or decl["body"] is None:
+            continue
+        holders = sorted((c for c in containers if c["open"] < decl["fn"] < c["close"]),
+                         key=lambda c: c["open"])
+        if holders and all(c["naming"] == "declaration" for c in holders):
+            paths[decl["fn"]] = ".".join([c["name"] for c in holders] + [decl["name"]])
+    return paths
