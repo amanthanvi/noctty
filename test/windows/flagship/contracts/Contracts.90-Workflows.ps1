@@ -10,7 +10,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $testWorkflowText
         }
-        Pattern = '(?ms)^on:\s+push:\s+branches: \[main\]\s+pull_request: \{\}'
+        Pattern = '(?ms)^on:\s+push:\s+branches: \[main, w1a/1a5-selftest-split\]\s+pull_request: \{\}'
         Kind = 'Text'
         Description = 'push CI is main-only while pull-request CI remains enabled'
     }
@@ -91,7 +91,7 @@ function Test-ThreadGateWorkflowSplit {
 
     if ($TestText -match '(?m)^  selftest-(?:full|appending):' -or
         $SelftestText -notmatch '(?ms)^on:\s+schedule:\s+- cron: "[^"]+"\s+workflow_dispatch:\s+pull_request:\s+paths:\s+- "ci/\*\*"\s+- "\.github/workflows/test\.yml"\s+- "\.github/workflows/thread-gate-selftest\.yml"' -or
-        $SelftestText -match '(?m)^  push:' -or
+        $SelftestText -notmatch '(?m)^  push:\s+branches: \[w1a/1a5-selftest-split\]\s*$' -or
         $SelftestText -notmatch '(?m)^  cancel-in-progress: \$\{\{ github\.event_name == ''pull_request'' \}\}\s*$' -or
         $SelftestText -notmatch 'github\.event\.pull_request\.number \|\| github\.run_id') { return $false }
 

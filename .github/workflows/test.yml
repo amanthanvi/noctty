@@ -2,7 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, w1a/1a5-selftest-split]
   pull_request: {}
   schedule:
     - cron: "17 6 * * *"
