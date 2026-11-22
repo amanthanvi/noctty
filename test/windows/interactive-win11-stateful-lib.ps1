@@ -127,7 +127,7 @@ function Get-StatefulProcessName([uint32] $ProcessId) {
 function Show-StatefulHost([IntPtr] $HostHwnd) {
     [void][InteractiveWin11WindowNative]::ShowWindow($HostHwnd, 9)
     [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
-    [void][InteractiveWin11WindowNative]::SetForegroundWindow($HostHwnd)
+    [void][InteractiveWin11RealInput]::SetForegroundWindow($HostHwnd)
     $hostProcessId = [uint32]0
     [void][InteractiveWin11WindowNative]::GetWindowThreadProcessId($HostHwnd, [ref]$hostProcessId)
     $foregroundProcessId = Get-StatefulForegroundProcessId
@@ -139,7 +139,7 @@ function Show-StatefulHost([IntPtr] $HostHwnd) {
         # before it reads the foreground again, so a change in the few
         # milliseconds between this check and the tap is not covered.
         if ((Get-StatefulForegroundProcessId) -eq $foregroundProcessId) {
-            $taken = [InteractiveWin11WindowNative]::ForceForeground($HostHwnd, $true, $true)
+            $taken = [InteractiveWin11RealInput]::ForceForeground($HostHwnd, $true, $true)
             [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
             $outcome = if ($taken) { 'took it back' } else { 'did not take it back' }
             Microsoft.PowerShell.Utility\Write-Host "Show-StatefulHost: process '$foregroundProcessName' held the foreground; ForceForeground $outcome."
@@ -497,8 +497,15 @@ function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] 
     $stderr = Join-Path $Layout.Logs "$Name-stderr.log"
     $script:StatefulDiagnosticDirectory = $Layout.Logs
     $arguments = @((Get-InteractiveWin11LaunchArguments -Layout $Layout -UseConfiguredCommand:$UseConfiguredCommand)) + @($ExtraArguments)
-    $process = Start-Process -FilePath $Exe -ArgumentList $arguments `
-        -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    # Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+    $process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        Start-InteractiveWin11HostedProcess -FilePath $Exe -ArgumentList $arguments -WorkingDirectory $RepoRoot `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    }
+    else {
+        Start-Process -FilePath $Exe -ArgumentList $arguments `
+            -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    }
     return [pscustomobject]@{ Process = $process; Stdout = $stdout; Stderr = $stderr }
 }
 

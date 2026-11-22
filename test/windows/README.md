@@ -1485,6 +1485,264 @@ sequence of 0 before and after is recorded as unobservable
 as held, and does not fail the run. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
+## gui-hidden-runner.ps1 (the hidden-desktop GUI suite)
+
+The interactive offload's hosted lane (design §4; test-harnesses.md
+GUI-HIDDEN-DEFAULT-01). It runs each leaf in `gui-hidden-plan.json` on a
+private desktop of its own, against a fresh portable copy of the receipt-bound
+measurement build, through `.github/workflows/gui-hidden.yml`, and locally.
+In the workflow, the `gui-hidden-gate` job runs on every pull request and
+push; the suite itself runs on every push, scheduled and manual run, and on a
+pull request when the selection (`scripts/ci-gui-selection.ps1`) says its
+change needs it, or cannot decide. A docs-only pull request skips the suite
+and the gate still passes.
+
+```text
+pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <new or empty dir> [-Leaves smoke,undo]
+```
+
+A run that selects fewer than all the plan's leaves (`-Leaves smoke,undo`) is for
+diagnosis: when they pass, its result and its whole-plan assertions
+(`leaves-pass`, `launch-policy`, `real-input-absent`) are `skip`, never
+`pass`. Naming all six leaves is a full run. `-Work` must be a printable ASCII
+path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
+
+Until the gate switches, the interactive composite remains the release
+evidence; this lane runs beside it.
+
+**Where a GUI check runs.** In the lowest tier that can make its assertion:
+
+1. a private desktop in hosted CI, the default (this suite);
+2. a private desktop on a local machine with a GPU, for OpenGL and
+   custom-shader rendering read back offscreen with the test-tools build, and
+   GL-side traces;
+3. a visible run, for real `SendInput` through the message loop, foreground
+   acquisition, pixels as DWM composes them on screen (`CopyFromScreen`, a
+   D3D11 present), the production OpenGL path into the window's framebuffer,
+   and any present paced by vblank.
+
+Every gating GUI check, in any tier, has a positive oracle and a negative
+control that fails it.
+
+**The build.** Locally, prepare the measurement build first, outside any run
+and redirect, with `Invoke-InteractiveWin11MeasureBuild`
+(`scripts/interactive-win11-measure-lib.ps1`), and commit first: a generation
+is keyed by a clean HEAD. Never use a plain `zig build`: that is the
+product-AUMID `zig-out` build, which writes the real jump list
+(STANDALONE-LEAF-AUMID-01). `-Build` builds the generation and runs only on a
+GitHub-hosted runner. The runner validates the raw generation before staging
+and at the end, and stages one copy per leaf: everything but `noctty.ico`,
+`crash`, `ghostty` and the PDBs, plus `share`, with `noctty.portable` beside
+the exe. Both the app and the CLI are hashed against the receipt, and the
+ConPTY pair (`conpty.dll`, `OpenConsole.exe`) against the package pins in
+`dist/windows/conpty-redist.json` (the receipt names only the app and the
+CLI); at the end the generation must still match those hashes and the
+receipt's own bytes. While a leaf runs, its copy's ConPTY pair is held open
+with read sharing only and hashed through those handles, so nothing can write,
+rename or delete it before noctty loads it; a file that cannot be opened that
+way refuses the run. A hosted leaf never builds: lib's and measure-lib's build
+entry points throw in hosted mode. A passing
+leaf's copy is deleted at once, a failing one's at the end unless
+`-KeepFailedCopies`. The runner stops with 20 GB or less free.
+
+**A leaf in hosted mode.** The runner starts each leaf as
+`pwsh -NoProfile -NonInteractive -File <leaf>`, suspended, on its desktop
+(`WinSta0\noctty-gh-<32 hex>`, named in `lpDesktop`), in a job that permits no
+breakaway and kills every process when it closes. Its
+`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` ends a process that hits an
+unhandled exception at once, with no crash dialog, but that process only: the
+rest of the job stays alive until the runner ends it, so a leaf can still reach
+its timeout after a child crashes. It sets
+`NOCTTY_GUI_HIDDEN_DESKTOP`, `NOCTTY_GUI_HIDDEN_EXE` and
+`NOCTTY_GUI_HIDDEN_RUN`, which select the interactive library's hosted mode:
+
+- at load, `InteractiveWin11HostedDesktop.Assert` refuses any other station or
+  desktop, and the input desktop. An unreadable input desktop refuses too: keep
+  the session unlocked during a local run;
+- the leaf never bootstraps or builds;
+- its sandbox is `<run>\sandbox-<token>`, under its run directory, where
+  `<token>` is a fresh run token the runner draws for each leaf
+  (`staged.json`); every class it names ends in the token, so no two runs,
+  nor a run and the legacy route, share a sandbox or a single-instance pipe;
+- it starts noctty and the CLI only through
+  `Start-InteractiveWin11HostedProcess`, which checks the staged file's
+  identity, builds its own quoted command line, refuses `--command`, applies
+  the argument rule (`Get-InteractiveWin11HostedArgumentRefusal`: every
+  `--class` ends in the token; an app launch states `--single-instance`, and
+  `true` only in the IPC leaves; every action names the class except the
+  local ones, `+help`, `+version`, `+list-keybinds`, `+list-colors`,
+  `+list-themes` and `+vt-probe` (so `+list-windows` needs it); no
+  `--config-file`), reads the
+  started process's command line back and compares it, and records each PID
+  before it runs. `Start-Process` stays only in each leaf's default branch;
+- its config goes into the copy's `config.ghostty`
+  (`Write-InteractiveWin11HostedConfig`): its own lines, then
+  `command = direct:<System32>\cmd.exe /D`, the clipboard read and write
+  denied, `copy-on-select = false`, `auto-update = off`,
+  `desktop-notifications = false`, and `window-save-state = never` unless the
+  leaf sets it. A leaf's own lines cannot set `class`, `single-instance` or an
+  include;
+- a one-shot `/c` stimulus waits on `shell-read-<k>.flag` so the runner reads
+  its command line before it exits;
+- at exit it writes `leaf-receipt.json`, which says whether the real-input
+  module's type was ever loaded.
+
+**What the runner fails a leaf on.** A nonzero exit or a timeout. A joiner of
+its job left unread, its image included (the job's own `TotalProcesses`
+against the processes read). A `cmd.exe` whose loaded image is not System32's
+(path and identity), whose command line does not name it, or that has no `/D`
+before `/C`, `/R` or `/K`; or fewer shells than the plan's `expectedShells`. A
+`noctty.exe` or `noctty.com` outside the copy (image path and identity), one
+breaking the argument rule on its command line, or one not accounted for.
+Accounted means the launcher started it; or it is a `noctty.com` started by a
+shell that is the exact child of an accounted `noctty.exe` (shell-command's
+PATH lookup inside the terminal); or a `noctty.exe` an accounted `noctty.com`
+forwarded. A shell the leaf started itself vouches for nothing. A window of its
+job on Default, sampled every 500 ms and once more before the job is ended (a
+window that opens and closes between two samples is not seen). A reparse point
+under its run directory. A copy's `config.ghostty` that no longer holds the
+launch policy, read back when the leaf ends. A receipt that is missing,
+incomplete or mistyped, or says the module loaded. A staged file (app, CLI,
+ConPTY pair) changed.
+
+**The real-input module.** `scripts/interactive-win11-realinput.ps1`
+(`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib
+loads it only outside hosted mode, and it throws if loaded there. Screen
+capture stays behind `Save-StatefulScreenCapture`. In hosted mode, use posted
+`WM_KEYDOWN`/`WM_KEYUP` pairs (or sent `WM_KEYDOWN`/`WM_CHAR`/`WM_KEYUP`
+triples, never a posted triple), with `AttachThreadInput` and
+`SetKeyboardState` for modifiers, `SetFocus` and `GetGUIThreadInfo` for focus,
+and the foreground-free `WM_COMMAND` hooks 1901, 1904, 1907 and 1908.
+
+**What it uploads.** `-Out` must be new or empty, and holds only
+`result.json` (the flagship result schema, scenario
+`windows.gui-hidden.suite`), written whole and then followed by
+`result.json.sha256`, its hash, which marks it complete, and `receipts/`: one
+JSON object per leaf this run ran, plus `run.json`: the harness's own commit (`implementationSha`, this
+checkout's HEAD, with `implementationDirty`) and the measurement build's head
+and hashes, apart; the hosted image's name and version in their known shapes;
+whether an HKCU or HKLM `Command Processor\AutoRun` value exists, never the
+value; each guard's state, the clipboard sequence before and after, and the
+startup fingerprint (exists, SHA-256, last write) before and after. Each leaf
+records the renderer its copy's config names, and from its noctty logs the
+backends that started and the attempts before each. A start is
+`renderer/Windows.zig`'s `renderer started backend=<opengl|d3d11|d3d11-warp>`,
+in a scope of its own (`renderer_start`, so the `renderer_windows` lines #738's
+hosted probe counts are unchanged), logged once a candidate has fully started;
+a failed candidate's `startup failed` warning is an attempt (a `warning(...)`
+line: logFn writes the level as `std.log.Level.asText` spells it, and the
+contract takes each prefix from `process_shared.zig`'s `logPrefix` test), and
+so is `Direct3D11.zig`'s
+`initialized driver=`, logged when the device is made but before the rest of
+the candidate, which can still fail. So an OpenGL failure, then a hardware
+D3D11 failure, then a WARP start reads
+`opengl:failed d3d11:failed d3d11-warp:started`, and the
+backend `d3d11-warp`. A log whose attempts no start closes reads `unknown`. The
+contract pins each of those lines to its source.
+All are allowlisted values only: booleans, numbers and short strings without a
+path separator, quote or bracket. No path, command line, window title,
+environment value, screen capture or process listing; a failed leaf's receipt
+carries its failure kinds and its log's line counts, never a line. The
+console gets leaf ids and failure kinds. The logs, the runner's errors, the
+state guard's receipts and the copies stay under `-Work`.
+
+**Guards and exit codes.** The state guard (the product jump list,
+`startup-attempts.json`, the clipboard sequence) and the PSReadLine history
+guard span the run; a tripped one exits 3. Each is recorded `held`,
+`unobservable`, `tripped` or `not-run` (it never started, or its check never
+ran). The state guard is `unobservable` when it passed but its clipboard
+sequence read 0 before and after, which observes nothing (the guard's own
+verdict, test-harnesses.md 2026-11-21 STATE-GUARD-CLIPBOARD-01; the hosted
+runner reads 0); the result's `state-guards` assertion then says so, and the
+run can still pass. Only `held` and `unobservable` count: a guard that did not
+run makes the run an error, never a pass. A
+local run on `WinSta0` shares the user's clipboard, so the clipboard guard can
+trip on the user's own copy; don't copy during a run. 0 pass, 1 a leaf failed,
+2 a validation, staging, generation, guard or runner failure (with an `error`
+result when `-Out` could be opened, the runner's own initialization included),
+3 a tripped guard. When the job fails without a complete result (a failed
+self-test, or a suite step that died or did not parse first), the workflow's
+last step runs `test/windows/gui-hidden-publish-error.ps1`, a script of its
+own that loads nothing of the runner (the runner also runs it when its own
+initialization fails). A failed `changes` job (a runner that does not parse
+fails the walk) keeps the suite job from starting, so `changes` runs the same
+publisher and uploads the same artifact itself. It leaves a complete result alone: one that parses,
+matches the result schema, names this scenario, and has a matching
+`result.json.sha256`. Anything else, a truncated `result.json` included, it
+keeps as `result.incomplete.json` and replaces with an `error` result.
+
+The script walk's edge definition (design §4.3) covers the ways it lists to run
+a script, not every way PowerShell has. A name with a path separator is a path
+lookup in every form (`&`, `.`, a bare word, `Get-Command`), whatever its leaf,
+unless it is `Microsoft.PowerShell.*\Verb-Noun` and the walker's own session
+finds that module exporting that command. With no extension, a lookup resolves
+only when its `.ps1` is the one sibling with `.ps1` or a PATHEXT extension
+(matched case-insensitively), whatever `-CommandType` would pick; a native or
+batch sibling, or none, leaves it unresolved. A relative one is unresolved.
+
+cmd and batch files are refused: any invocation of `cmd` or of a `.cmd` or
+`.bat` file is unresolved, in every form (`&`, `.`, a bare path, `Start-Process`,
+a pipeline, a batch file's arguments), and fails the walk (see the two
+outcomes below). Every review round from 5 to 8 found a new silent hole in
+reading cmd's language or a batch file's forwarding (`%*`, a helper named by a
+plain word, a switch glued to `/C`), and no GUI member runs a resolvable cmd or
+batch line;
+only the anchored legacy-only lines (`$script:CiScriptClosureLegacyEdges`) are
+exempt. The PowerShell readers stay for `&`, `.` and bare launches, where
+PowerShell quotes each scalar argument: there the value after a valued option
+(`-ExecutionPolicy`) is read, and a variable or computed value passes only as
+one known string, since an array expands into several arguments; a literal
+passes, and `-File`'s value is read as a path. `Start-Process` of `pwsh` or
+`powershell` is refused (unresolved): it joins its arguments without quoting
+and PowerShell tokenizes them again, so no element rule is sound, and no GUI
+member starts PowerShell that way.
+
+Fixture results and real selection are separate. The walker tests'
+synthetic fixtures in `gui-hidden-scripts.ps1` only assert whether a walk
+fails; they set no selector output (its small-tree checks run the real
+selector on a synthetic tree, and see it fall back). In real selection, the
+selector walks the GUI closure (the plan's leaves and what they reach, over
+the head and the prior trees) and classifies the changed paths against it:
+a docs-only change still skips the suite, and a change to a member selects
+it. When a real GUI member gains an unresolved edge, an unlisted cmd call
+say, that walk fails: the selector falls back (`gui=true`, "selection
+unavailable"), but the `changes` job's next step, `gui-hidden-scripts.ps1`,
+walks the real closure and fails, so the suite job never starts, `changes`
+uploads a `gui-selection` error result, and `gui-hidden-gate` fails. Expect
+a selection error then, not suite results; fix it by removing the edge or,
+for a legacy-only line, listing it with its guard in
+`$script:CiScriptClosureLegacyEdges`.
+
+Known gaps, which no GUI member uses with a script target today:
+`[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
+runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
+a `Get-Command` result, an alias made through `New-Item` on the `alias:` drive
+with a path the walker cannot read, a repo folder added to `$env:PATH`, which
+makes a bare name run a `.ps1` there (the walk reads a bare name as a command
+on PATH), the arguments of a tracked executable other than a shell, which are
+not read (the repository tracks no executable), a command run outside cmd
+and PowerShell by another launcher such as `conhost.exe`, a variable launch
+target (`& $p`) that a dot-sourced helper rewrites after the leaf set it (the
+walk reads `$p` from the leaf's own assignments), a `*ExePath` or
+`*CliPath` helper named for ComSpec (`Get-ComSpecCliPath`), read as the
+program it names although it may return cmd, and a `Start-Process` FilePath
+given `-WorkingDirectory` that is a variable or a value the walker reads as a
+named program (a `Join-Path` or `Get-Command` leaf, such as session-restore's
+`$cli`, `noctty.com` beside the exe): it is not checked against that
+directory, while a bare literal name is unresolved unless it is a listed
+system program. A script a
+leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
+beyond it too: neither the closure nor the leaf's receipt sees that script, so
+a leaf must not run a repo script that way. The launch contract's scan for
+direct process starts on a hosted path (Contracts.99-GuiHiddenLaunch) does not
+count an instance `Process.Start()` whose `StartInfo` a leaf fills in itself;
+no hosted file starts a process that way.
+
+`gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
+and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1
+pin the rest. `flagship/measurements/gui-measurements.json` records the
+measurement outcomes later lanes depend on (Q0 and #738's P1-P5).
+
 ## bench-frame-pacing.ps1
 
 `bench-windows.ps1 -Metric frame-pacing` runs this harness: `frame_time_p95_ms`

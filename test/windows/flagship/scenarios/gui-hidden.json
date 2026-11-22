@@ -1,0 +1,30 @@
+{
+  "schema_version": "noctty.verification.scenario.v1",
+  "id": "windows.gui-hidden.suite",
+  "title": "Windows hidden-desktop GUI suite (hosted and local)",
+  "category": "interaction",
+  "runner": {
+    "os": "windows-server-2025-or-windows-11",
+    "architecture": "x86_64",
+    "capabilities": ["powershell", "zig", "private-desktop"]
+  },
+  "timeout_seconds": 3600,
+  "steps": [
+    { "id": "vt-probe", "description": "vt-probe metadata conformance (no terminal window)." },
+    { "id": "smoke", "description": "Start a portable measurement copy, see its shell start, close it with WM_CLOSE." },
+    { "id": "shell-command", "description": "Run -e cmd and PowerShell stimuli; the CLI resolves and prints its fixed strings." },
+    { "id": "cli-automation", "description": "Drive a single-instance copy through the CLI's IPC actions." },
+    { "id": "undo", "description": "Exact tab and pane counts across close, undo and redo." },
+    { "id": "session-restore", "description": "Saved tabs and selected tab, the session file unchanged across -e, restore and quarantine." }
+  ],
+  "assertions": [
+    { "id": "leaves-pass", "description": "Every leaf in the plan exits 0 on the private desktop." },
+    { "id": "launch-policy", "description": "Every declared shell is System32's cmd.exe with /D before its payload, and every noctty process was started by the launcher." },
+    { "id": "real-input-absent", "description": "No leaf loaded the real-input module." },
+    { "id": "state-guards", "description": "The real startup state, PSReadLine history, jump list and clipboard sequence are unchanged." }
+  ],
+  "artifacts": [
+    { "kind": "result", "path": "result.json" },
+    { "kind": "other", "path": "receipts" }
+  ]
+}

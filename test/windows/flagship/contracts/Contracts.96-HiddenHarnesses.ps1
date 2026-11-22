@@ -8,17 +8,8 @@ $hiddenScripts = @(
     Join-Path $repoRoot 'test\windows\hidden-win11-embedding-idle.ps1'
 )
 
-# The text of a script without its comments, so a comment cannot satisfy or trip a pattern.
-function Remove-PowerShellComments([string] $Text) {
-    $tokens = $null; $errors = $null
-    [void][Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    if ($errors.Count -ne 0) { throw 'A hidden harness does not parse.' }
-    $builder = [Text.StringBuilder]::new($Text)
-    foreach ($token in @($tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)) {
-        [void]$builder.Remove($token.Extent.StartOffset, $token.Extent.EndOffset - $token.Extent.StartOffset)
-    }
-    return $builder.ToString()
-}
+# Remove-PowerShellComments (ContractHelpers.ps1) gives a script's text without its comments, so a comment cannot
+# satisfy or trip a pattern.
 $hiddenForbidden = '(?s)\A(?!.*(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|Set-Clipboard|Get-Clipboard|SetClipboardData|Start-Process|Invoke-Item|Register-Default|Remove-Item\s+-Recurse))'
 $hiddenLibText = Remove-PowerShellComments (Get-Content -LiteralPath $hiddenLib -Raw)
 $hiddenContracts = @(

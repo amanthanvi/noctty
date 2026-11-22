@@ -321,14 +321,20 @@ function Invoke-DragFirstTabIntoActiveSurface {
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'undo' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
-$configDir = Join-Path $layout.LocalAppData 'noctty'
+$configDir = Get-InteractiveWin11StateRoot -Layout $layout
 $configPath = Join-Path $configDir 'config.ghostty'
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-[System.IO.File]::WriteAllText(
-    $configPath,
-    '',
-    [System.Text.UTF8Encoding]::new($false)
-)
+# Hosted mode writes the copy's config with the launch policy's lines after the leaf's (none here).
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    $null = Write-InteractiveWin11HostedConfig -Text ''
+}
+else {
+    [System.IO.File]::WriteAllText(
+        $configPath,
+        '',
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
@@ -345,13 +351,20 @@ Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
-$process = Start-Process `
-    -FilePath $exePath `
-    -ArgumentList $launchArgs `
-    -WorkingDirectory $repoRoot `
-    -RedirectStandardOutput $stdoutPath `
-    -RedirectStandardError $stderrPath `
-    -PassThru
+# Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+$process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    Start-InteractiveWin11HostedProcess -FilePath $exePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+}
+else {
+    Start-Process `
+        -FilePath $exePath `
+        -ArgumentList $launchArgs `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+}
 
 $successPattern = 'started subcommand path='
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

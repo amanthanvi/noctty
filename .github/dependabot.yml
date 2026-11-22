@@ -12,6 +12,10 @@ updates:
   # deploy-site.yml, or attest-build-provenance in release.yml, until the pins
   # in Contracts.90, Contracts.92 and Contracts.80 are moved too. That review
   # is intended (docs/agents/log/build-release-ci.md, DEPENDABOT-NEVER-RAN).
+  # A pin moved inside test.yml's windows-interactive job (checkout, setup-zig,
+  # upload-artifact there) also fails Contracts.90's frozen-set pin of that
+  # job until the interactive offload's design unfreezes it; pins elsewhere in
+  # test.yml do not.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

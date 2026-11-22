@@ -114,6 +114,7 @@ pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
                         result.setNotice("OpenGL: D3D11 startup failed ({s}).", .{@errorName(err)});
                     }
                 }
+                logStarted("opengl");
                 return result;
             } else |err| {
                 opengl_error = err;
@@ -157,6 +158,7 @@ pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
         // An OpenGL failure tried above is handled: neither the startup
         // dialog nor the recovery ledger may blame a later error on it.
         apprt.win32.clearOpenGLStartupFailure();
+        logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");
         return result;
     }
     // The startup dialog explains an OpenGL failure ahead of any other, and
@@ -166,6 +168,20 @@ pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
         return err;
     }
     return d3d11_error orelse error.OpenGLUnavailable;
+}
+
+/// The renderer a surface started with, once its candidate has fully started:
+/// `initialized driver=` (Direct3D11.zig) is logged when the device is made,
+/// before the rest of the candidate, which can still fail after it. The
+/// hidden-desktop GUI suite reads this line (gui-hidden-runner.ps1,
+/// Get-GuiHiddenRendererStartups), and its contract pins the text. It has a
+/// scope of its own: `renderer_windows` holds only notices and warnings, and
+/// #738's hosted probe counts that scope's lines (gui-hosted-probe.ps1,
+/// Test-WarpOnlyLog takes exactly one, the WARP notice).
+const start_log = std.log.scoped(.renderer_start);
+
+fn logStarted(backend: []const u8) void {
+    start_log.info("renderer started backend={s}", .{backend});
 }
 
 fn setNotice(self: *Windows, comptime fmt: []const u8, args: anytype) void {

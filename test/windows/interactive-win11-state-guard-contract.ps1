@@ -115,10 +115,28 @@ try {
     Assert-Control ($observed.state -eq 'held' -and $observed.clipboardObservable -eq $true) "The GUI probe's observed record is not held."
     $oldProbe = Get-ProbeGuardRecord '$record.stateGuard = [ordered]@{ held = $true }' { [uint32] 0 }
     Assert-Control (-not ($oldProbe.Contains('state') -and $oldProbe.state -eq 'unobservable')) 'The GUI probe''s old-record control shows nothing.'
+    # #740's hidden-desktop runner, a seventh caller (merged after #744): its guard state, from the runner's own
+    # Get-GuiHiddenGuardState over a 0/0 and an observed guard, is unobservable and held. The control: the runner's
+    # old two-argument call, which said held for a 0/0 guard.
+    $runnerText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'gui-hidden-runner.ps1') -Raw
+    $runnerAst = [System.Management.Automation.Language.Parser]::ParseInput($runnerText, [ref]$null, [ref]$null)
+    $runnerState = $runnerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-GuiHiddenGuardState' }, $true)
+    Assert-Control ($null -ne $runnerState -and $runnerText.Contains('state = Get-GuiHiddenGuardState ($null -ne $stateGuard) $checks.state $stateObservable')) 'The hidden-desktop runner no longer judges the shared guard where this contract reads it.'
+    . ([scriptblock]::Create($runnerState.Extent.Text))
+    function Get-RunnerGuardState([scriptblock] $Reader, [switch] $OldCall) {
+        $case = New-Control ('runner-' + [Guid]::NewGuid().ToString('N').Substring(0, 6)) $Reader
+        $stateGuard = Start-Control $case
+        Assert-InteractiveWin11StateGuard -Guard $stateGuard 6>$null
+        if ($OldCall) { return Get-GuiHiddenGuardState $true $true }
+        return Get-GuiHiddenGuardState $true $true $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $null })
+    }
+    Assert-Control ((Get-RunnerGuardState { [uint32] 0 }) -ceq 'unobservable') "The hidden-desktop runner's 0/0 guard state is not unobservable."
+    Assert-Control ((Get-RunnerGuardState { [uint32] 17 }) -ceq 'held') "The hidden-desktop runner's observed guard state is not held."
+    Assert-Control ((Get-RunnerGuardState { [uint32] 0 } -OldCall) -ceq 'held') 'The hidden-desktop runner''s old-call control shows nothing.'
     # Every caller of the shared guard (Sol on #744), found by name: none records a verdict of its own that says held
     # without the guard's clipboard verdict, and none reads the clipboard again for its report.
     $callers = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | Where-Object { $_.Name -notlike '*contract*' -and (Get-Content -LiteralPath $_.FullName -Raw).Contains('Start-InteractiveWin11StateGuard') } | ForEach-Object { $_.Name } | Sort-Object)
-    Assert-Control (($callers -join ' ') -ceq 'bench-frame-pacing.ps1 gui-hosted-probe.ps1 hidden-win11-tabgap.ps1 hidden-win11-working-set.ps1 interactive-win11-job.ps1 interactive-win11-validate.ps1') "The shared guard's callers changed: $($callers -join ' ')."
+    Assert-Control (($callers -join ' ') -ceq 'bench-frame-pacing.ps1 gui-hidden-runner.ps1 gui-hosted-probe.ps1 hidden-win11-tabgap.ps1 hidden-win11-working-set.ps1 interactive-win11-job.ps1 interactive-win11-validate.ps1') "The shared guard's callers changed: $($callers -join ' ')."
     foreach ($caller in $callers) {
         $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot $caller) -Raw
         Assert-Control (-not [regex]::IsMatch($text, 'Assert-InteractiveWin11StateGuard[^\r\n]*held\s*=\s*\$true')) "$caller records held = `$true beside the shared guard."
