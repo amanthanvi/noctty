@@ -1909,9 +1909,27 @@ Two modes:
   under 30% busy (the driver waits up to `-QuietWaitSeconds` and launches
   nothing when it never was) and again right before the window, with no
   screen saver then either; each reading is acted on at once.
-- The foreground: a zero-motion mouse input unlocks it, never an Alt tap,
-  then one `SetForegroundWindow`, which Windows allows the process that sent
-  the last input. There is no `AttachThreadInput` fallback, no
+- The foreground: a marked absolute mouse move to the cursor's own pixel
+  unlocks it, never an Alt tap, then one `SetForegroundWindow`, which Windows
+  allows the process that sent the last input. The worker reads the cursor
+  again after the gate's last check and sends nothing if it has moved
+  (`unlock-raced`), and reads it once more after the hook's signal
+  (`unlock-moved-cursor` if it is off the aimed pixel); that read normally, but
+  not always, follows the move, since the hook signals from inside its
+  callback, before Windows applies the move. No coordinate is recorded. A
+  failed switch to per-monitor DPI awareness aims nothing (`unlock-unaimed`).
+  An absolute move replaces motion rather than adding to it: any pointer
+  motion after the worker's last read of the pointer and before its move can
+  be undone, once, including motion Windows holds while a low-level hook runs.
+  The gap is normally microseconds, and longer only if Windows suspends the
+  worker's thread at that moment; the outer half closes the run's job as soon
+  as it observes the hook's latch (on observation, plus OS scheduling latency,
+  as above). The hook sees that motion as real, so the series is voided.
+  Normalized coordinates assume Windows' floor mapping. A zero-delta relative move also counts as input, but it never reaches a
+  low-level mouse hook, so the hook could not see the unlock (test-harnesses.md
+  UNLOCK-HOOK-01). The series' marker is a nonzero 31-bit value, since an
+  injected mouse event's extra info reaches the hook with only its low 32
+  bits. There is no `AttachThreadInput` fallback, no
   `BringWindowToTop` and no keyboard-state reset anywhere: attaching to the
   user's foreground thread resets its key state and could clear a modifier a
   returning user holds. The native worker checks the event right before its
@@ -1949,7 +1967,7 @@ Two modes:
   | Action | Checked right before | Worst case for a user who returns in the gap |
   | --- | --- | --- |
   | A launch on `Default` (the driver, `+version`, the copy, the grid probe) | the event, then the tick | A process starts. The copy's window may show, but its own activation is subject to the foreground lock (below); the copy is closed as soon as the outer half observes the input. |
-  | The unlock (`SendInput`, `MOUSEEVENTF_MOVE`, dx = dy = 0) | the event, on the worker | None visible: no motion, no button, no key. The session's last-input tick moves. |
+  | The unlock (`SendInput`, an absolute `MOUSEEVENTF_MOVE` to the cursor's own pixel) | the event, then the cursor still on that pixel, on the worker | Any pointer motion after the worker's last read of the pointer and before its move can be undone, once, including motion Windows holds while a low-level hook runs: the cursor goes back to the aimed pixel. The gap is normally microseconds, and longer only if Windows suspends the worker's thread then; the outer half closes the run's job as soon as it observes the hook's latch. The hook sees that motion as real, so the series is voided. No button, no key. The session's last-input tick moves. |
   | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd. Input the hooks see: until the outer half closes the copy on observing it. Input they cannot see: until the driver's next tick check, up to about 1 s here (the worker's `WM_NULL` round trip and activation poll, then the gate), and at most the per-step bounds above (about 7 s back to back) if the copy stops answering. |
   | The keyboard probe (`SendInput`, VK_NONAME down and up) | the copy in front, the tick, then the event, on the worker | If the user clicked elsewhere inside the gap, their app gets a key down and up for VK_NONAME, an unassigned key with no character. It is measured harmless only for cmd (the dry run); another application could act on any key-down, for example dismiss a press-any-key prompt. That is why the probe goes only to the copy, once it is in front, behind the gate and the worker's checks. |
   | F5, F6 and the dry run's VK_NONAME (`WM_KEYDOWN`/`WM_KEYUP` posted) | the event, then the tick | The key reaches the copy's own window only, never the user's application. |
