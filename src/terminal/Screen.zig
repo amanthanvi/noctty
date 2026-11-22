@@ -2151,13 +2151,11 @@ pub inline fn resize(
 
     // A prompt redraw clears the prompt after the fallible resize
     // (clearPromptForRedraw), but where the clear starts is read here, from
-    // the rows as the prompt wrote them. The reflow copies a row's prompt
-    // mark onto every row it wraps that row into (PageList's
-    // ReflowCursor.copyRowMetadata), so afterwards a wrapped piece reads as
-    // a prompt start of its own, and a widening can move this prompt's start
-    // into the middle of a row that an earlier prompt's line begins. A
-    // tracked pin follows the start through the resize. Track it before
-    // changing any state since tracking the pin can fail.
+    // the rows as the prompt wrote them. A widening can move this prompt's
+    // start into the middle of a row that an earlier prompt's line begins.
+    // A row mark cannot locate that column, but a tracked pin follows the
+    // start through the resize. Track it before changing any state since
+    // tracking the pin can fail.
     const redraw_pin: ?*Pin = redraw: {
         const start = self.promptRedrawStart(opts.prompt_redraw) orelse
             break :redraw null;
