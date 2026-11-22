@@ -11,6 +11,10 @@
 # Base follow-up for 1A.5: cli/ghostty.zig dispatches .ssh directly to ssh.run, and ssh.run reaches runInner with no Windows refusal. Plan 6.5 and decisions 16/23 require the interim refusal and a regression before depending on that gate.
 # Base follow-up for 1A.5: termio/stream_handler.zig initializes apc.Handler with every protocol enabled and dispatches glyph requests. Plan 6.5 calls for the app handler to drop glyph APCs; the lib-vt allocation cap remains independently applicable.
 # Phase 2a preserves the base-presence scores. Port commits and R1A hold decisions are appended to their rows.
+# Phase 2a verification on code at 59a5b4d711f5f8e97bac8eddcc7f52041a491a31 with Zig 0.15.2 through the Windows build slot.
+# test-lib-vt -Demit-lib-vt=true --summary all: exit 0, 6030 passed, 114 skipped, 0 failed (6144 total).
+# test -Demit-test-exe=true -Dtest-shards=4 --summary all: exit 1, 7156 passed, 77 skipped, 7 failed (7240 total). All seven failures are the expected PKG71 UIA row-numbering cases assigned to 1A.3.
+# A new quiet window began while lib-vt was queued, after its first quiet-window check. The Debug run rechecked the flag inside the slot before launching Zig. See the 2026-11-21 quiet-window entry in docs/agents/log/test-harnesses.md.
 upstream_commit	commit_date	cohort	present_lines	eligible_lines	presence	classification	hold	subject	missing_zig_lines_by_path	disposition_at_base
 00a19db51aeee5253c83fecc5b647c0358573b5f	2026-10-01	retained-166	3	39	0.08	defer to 1B	-	config: add vt-xt-checksum-extension	src/config/Config.zig=7; src/terminal/Terminal.zig=17; src/termio/Termio.zig=11; src/termio/stream_handler.zig=1	XTCHECKSUM configuration, default flags and handlers depend on the DECRQCRA feature in 9272a2f7c. Carry that feature as a unit in 1B.
 028af92ce3876ce1627163ce777f516b8218b410	2026-08-31	retained-166	0	0	1.00	not applicable	-	terminal: clarify page allocator fallback	-	Comment-only clarification of the caller-allocator fallback for native freestanding. 1A PageList.pageAllocator takes no caller allocator and uses the hosted/test selection, so that wording would describe an absent branch.
