@@ -993,7 +993,7 @@ if want(70): results.append(compare_control("70-L10-isolated-child-recorded-no-p
 if want(71): results.append(control("71-AH2-same-name-acquiring-function-in-one-file", overlay("c71", {S: append(
     "const R19SameName = struct {\n    fn keyCallback(s: *Surface) void {\n        s.renderer_state.mutex.lock();\n"
     "        defer s.renderer_state.mutex.unlock();\n    }\n};")}),
-    1, {"acquisitions": 1, "live": 1, "same_name": 1}, 1, {"CHANGED-SIGNATURE": 1}))
+    1, {"acquisitions": 1, "live": 1, "unreviewed": 1}, 1, {"UNREVIEWED": 1}))
 G710 = "launch\t710\t134070000000000710\tgui"
 G711 = "launch\t711\t134070000000000711\tgui"
 if want(72): results.append(compare_control("72-AH3-complete-launch-row-removed-required-pairs-kept", {"gui-710.pairs": GUI_ALL}, 1,
@@ -1407,12 +1407,12 @@ def table_plus(tag_, rows_):
 if want(144): results.append(control("144-M1-a-plain-and-a-quoted-declaration-of-one-name",
                        overlay("c144", {W32: append(fn_container("R26PlainA", "fn r26same() void") + "\n\n"
                                                     + fn_container("R26QuotedB", "fn @\"r26same\"() void"))}),
-                       1, {"acquisitions": 2, "live": 2, "carriers": 2, "unreviewed": 2, "same_name": 1}, 1,
+                       1, {"acquisitions": 2, "live": 2, "carriers": 2, "unreviewed": 2}, 1,
                        {"UNREVIEWED": 2}))
 if want(145): results.append(control("145-M1-a-plain-and-an-escaped-declaration-of-one-name",
                        overlay("c145", {W32: append(fn_container("R26PlainC", "fn r26same2() void") + "\n\n"
                                                     + fn_container("R26EscD", "fn @\"r26s\\x61me2\"() void"))}),
-                       1, {"acquisitions": 2, "live": 2, "carriers": 2, "unreviewed": 2, "same_name": 1}, 1,
+                       1, {"acquisitions": 2, "live": 2, "carriers": 2, "unreviewed": 2}, 1,
                        {"UNREVIEWED": 2}))
 if want(146): results.append(control("146-M1-a-reviewed-function-declared-quoted-passes-its-row",
                        overlay("c146", {TM: replace(
@@ -4551,6 +4551,44 @@ if want(884): results.append(process_exit_control("884-T2-valid-dumps-do-not-hid
 if want(885): results.append(process_exit_control("885-T2-the-same-dumps-with-normal-process-exits-pass", 0, {}))
 if want(886): results.append(process_exit_control("886-T2-the-run-spec-may-permit-an-exact-abnormal-outcome",
     -1073741819, {}, permit=True))
+
+
+def same_container_names_control(tag, left_role):
+    """A plain lock and try-lock in different containers share only the bare function spelling."""
+    ov = overlay(tag, {TW: append(
+        "const G1Left = struct {\n    fn g1Same(other: *TerminalWindow) void {\n"
+        "        " + RS + ".mutex.lock();\n    }\n};\n"
+        "const G1Right = struct {\n    fn g1Same(other: *TerminalWindow) void {\n"
+        "        _ = " + RS + ".mutex.tryLock();\n    }\n};\n")})
+    left_hop = "absent:G1NeverInvokes" if left_role == "never-on-win32" else f"{TW}:G1Left.g1Same:lock"
+    scope = {"fork": "fork", "1a": "merged", "1b": "merged-1b"}[SCOPE]
+    tbl = table_plus(tag, [
+        f"{TW}\tG1Left.g1Same\tda39a3ee5e@renderer-state.lock:1\t{left_role}\t{scope}\tfixture.zig:1\t{left_hop}",
+        f"{TW}\tG1Right.g1Same\tda39a3ee5e@renderer-state.tryLock:1\trenderer\t{scope}\tfixture.zig:1\t"
+        f"{TW}:G1Right.g1Same:tryLock",
+    ])
+    anch = os.path.join(logdir, tag + "-anchors.tsv")
+    with open(anchors, encoding="utf-8") as source, open(anch, "w", encoding="utf-8", newline="\n") as out:
+        out.write(source.read() + f"renderer\t{TW}\tG1Right.g1Same\t{TW}:G1Right.g1Same:tryLock\n")
+        if left_role == "renderer":
+            out.write(f"renderer\t{TW}\tG1Left.g1Same\t{TW}:G1Left.g1Same:lock\n")
+    if left_role == "renderer":
+        return control(tag, ov, 0, {"acquisitions": 2, "live": 2}, 1, {"RENDERER-PLAIN-LOCK": 1},
+                       tbl=tbl, anch=anch, gate_extra=("--arm-renderer-demand",))
+    return control(tag, ov, 0, {"acquisitions": 2, "live": 1, "never": 1}, 0, {},
+                   tbl=tbl, anch=anch, gate_extra=("--arm-renderer-demand",))
+
+
+if want(887): results.append(same_container_names_control("887-G1-distinct-containers-keep-their-own-operations",
+                                                         "never-on-win32"))
+if want(888): results.append(same_container_names_control("888-G1-only-the-plain-lock-fails-when-armed", "renderer"))
+G1_TABLE = f"{TW}:G1Left.g1Same\tui\n{TW}:G1Right.g1Same\trenderer\n"
+G1_CHILD = "# kind=child pid=801 start=134070000000000801\n"
+if want(889): results.append(compare_control("889-G1-compare-keeps-each-containers-role",
+    {"child.pairs": G1_CHILD + f"{TW}:G1Left.g1Same ui\n{TW}:G1Right.g1Same renderer\n"},
+    0, {}, isolated=True, table=G1_TABLE))
+if want(890): results.append(compare_control("890-G1-compare-refuses-an-ambiguous-bare-key",
+    {"child.pairs": G1_CHILD + f"{TW}:g1Same ui\n"}, 1, {"AMBIGUOUS-KEY": 1}, isolated=True, table=G1_TABLE))
 
 results = [r.result() if hasattr(r, "result") else r for r in results]
 POOL.shutdown()

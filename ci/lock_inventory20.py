@@ -1869,7 +1869,9 @@ for rev in revs:
     dist = []   # r32: the distinct acquisitions, for the independent binding check
     others, freads = [], []   # r35 (round 34's Opus M2): "other" acquisitions and field-read exemptions, for bindcheck
     acct = TOKENS[rev] = collections.Counter()   # r29: tokens, and the bucket each landed in
-    site_defs = collections.defaultdict(set)   # r19 (AH2): (file, bare name) -> the def lines of acquiring functions
+    site_defs = collections.defaultdict(set)   # (file, function identity) -> definition lines
+    production_sites = []
+    acquiring_decls = collections.defaultdict(set)
     acq_tests = set()   # r21 (AJ1): (file, test name) of test blocks that acquire directly
     nameless = set()    # r22, r24: (file, label, def line) of acquiring tests whose header gives no key
     headers = {}        # r35: (file, def index) -> the test header its tokens give
@@ -1888,6 +1890,9 @@ for rev in revs:
             continue
         src = ("(?:" + "|".join(sorted(alias[f])) + ")") if alias.get(f) else None
         toks_f = resolver._toks(f)
+        declarations = [d for _, _, d in def_toks_of[f]]
+        containers = zigtok.containers_of_tokens(toks_f, declarations)
+        function_paths = zigtok.function_paths(declarations, containers)
         ntypes = named_types(toks_f)
         dstat = decl_statements(toks_f)
         mtypes = {"Mutex"} | std_mutex_aliases_toks(dstat)
@@ -2062,8 +2067,8 @@ for rev in revs:
                               "UNREVIEWED")
                 if k is not None and fs[k][5]:
                     inl = "inline-fn"
-                elif fname in always_targets:
-                    inl = "always-inline@" + ",".join(always_targets[fname])
+                elif (bare_name := fname.rsplit(".", 1)[-1]) in always_targets:
+                    inl = "always-inline@" + ",".join(always_targets[bare_name])
                 else:
                     inl = "-"
                 tid = test_name(f, q) if in_test else "-"
@@ -2076,8 +2081,13 @@ for rev in revs:
                 else:
                     rows.append(row)
                     if k is not None and fs[k][0] != "(test)":
-                        # r20 (AI2): a fn nested in test code is keyed by its bare name too, so it counts
-                        site_defs[(f, fname)].add(fs[k][1] + 1)
+                        definition = fs[k][1] + 1
+                        if in_test:
+                            site_defs[(f, fname)].add(definition)
+                        else:
+                            path_name = function_paths.get(declarations[k]["fn"], fname)
+                            acquiring_decls[(f, fname)].add(definition)
+                            production_sites.append((len(rows) - 1, definition, path_name))
                     elif k is not None:
                         # r21 (AJ1): a test block's own acquisition is keyed file:test:<name>, and Zig keeps test
                         # names unique per container only, so every same-named test block of the file counts
@@ -2089,6 +2099,18 @@ for rev in revs:
                                       "unnamed": "(unnamed)"}[kind_]
                             nameless.add((f, label_, fs[k][1] + 1))
         resolver.forget(f)   # r32: the resolver reads only this file's text for this file's sites
+    for index, definition, path_name in production_sites:
+        row = rows[index]
+        file, bare = row[1], row[3]
+        path_role = next((REVIEWED[(file, untok(path_name), sc)] for sc in LOOKUP[SCOPE[rev]]
+                          if (file, untok(path_name), sc) in REVIEWED), None)
+        # The frozen table has bare rows for unique acquiring declarations.
+        # A second acquisition owner needs a separate reviewed container key.
+        if len(acquiring_decls[file, bare]) > 1 or path_role is not None:
+            rows[index] = (*row[:3], path_name, *row[4:6], path_role or "UNREVIEWED", *row[7:])
+            site_defs[file, path_name].add(definition)
+        else:
+            site_defs[file, bare].add(definition)
     for f_, n_ in acq_tests:
         defs_ = {funcs[f_][k_][1] + 1 for k_ in range(len(funcs[f_]))
                  if funcs[f_][k_][0] == "(test)" and block_name(f_, k_) == ("named", n_)}

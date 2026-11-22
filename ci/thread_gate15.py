@@ -358,6 +358,7 @@ clean_of = {f: [sc(x) for x in ls] for f, ls in lines_of.items()}   # false-edge
 # over lines, comments and strings included for the imports and the words).
 funcs, def_info = {}, {}
 bodies = collections.defaultdict(list)
+qualified_bodies = {}
 body_index = collections.defaultdict(set)
 stems = {f: f.rsplit("/", 1)[-1][:-4] for f in texts}
 types, imports, tokens, cconsts, aliases = {}, {}, {}, {}, {}
@@ -378,7 +379,9 @@ for f in texts:
     funcs[f] = defs
     def_info[f] = fds
     in_cont = [False] * n   # r35: tokens inside a container body (not the file's own level)
-    for c in zigtok.containers_of_tokens(toks, fds):
+    container_defs = zigtok.containers_of_tokens(toks, fds)
+    function_paths = zigtok.function_paths(fds, container_defs)
+    for c in container_defs:
         lo, hi = c["open"], min(c["close"], n - 1)
         if lo <= hi:
             in_cont[lo:hi + 1] = [True] * (hi - lo + 1)
@@ -409,7 +412,11 @@ for f in texts:
                 names.add(toks[q + 1].text)
             elif zigtok.payload_at(toks, q):
                 names.update(y.text for y in zigtok.payload_names(toks, q)[0])
-        add_runs((f, d["name"]), qs, names)
+        key = (f, d["name"])
+        first = len(bodies[key])
+        add_runs(key, qs, names)
+        if (function_path := function_paths.get(d["fn"])) is not None:
+            qualified_bodies.setdefault((f, function_path), []).extend(bodies[key][first:])
     for key in [(f, "(container)")] + [(f, d["name"]) for d in fds if d["kind"] == "fn"]:
         for a, b, _ in bodies.get(key, ()):
             for q in range(a, b + 1):
@@ -528,8 +535,10 @@ _detail_cache = {}
 
 def caller_detail(f, name):
     """{caller key: [(line number, normalised line)]} before false edges."""
-    name = retok(name)   # r28: a reviewed or reported name, as the normalized source spells it
     ck = (f, name)
+    # The fingerprint remains a census of possible mentions. A qualified
+    # acquisition chooses its own reviewed body and chain independently.
+    name = retok(name.rsplit(".", 1)[-1])
     if ck not in _detail_cache:
         out = {}
         for (g, cn) in body_index.get(name, ()):
@@ -606,7 +615,12 @@ def row_for(rows, f, name, scope):
 @functools.lru_cache(maxsize=None)
 def body_text(path, fn):
     """r35: each body run's cleaned lines (the lines its tokens stand on), joined: the text reviewed evidence reads."""
-    return tuple("\n".join(clean_of[path][i] for i in run_lines(path, a, b)) for a, b, _ in bodies.get((path, fn), []))
+    return tuple("\n".join(clean_of[path][i] for i in run_lines(path, a, b)) for a, b, _ in body_runs(path, fn))
+
+
+def body_runs(path, fn):
+    key = (path, fn)
+    return qualified_bodies[key] if key in qualified_bodies else bodies.get(key, ())
 
 
 def token_rx(token):
@@ -615,7 +629,7 @@ def token_rx(token):
 
 def token_line(path, fn, token):
     rx = token_rx(token)
-    for a, b, _ in bodies.get((path, fn), []):
+    for a, b, _ in body_runs(path, fn):
         for i in run_lines(path, a, b):
             if rx.search(clean_of[path][i]):
                 return i + 1
@@ -624,7 +638,7 @@ def token_line(path, fn, token):
 
 def regex_line(path, fn, rx):
     rx = re.compile(rx)
-    for a, b, _ in bodies.get((path, fn), []):
+    for a, b, _ in body_runs(path, fn):
         for i in run_lines(path, a, b):
             if rx.search(clean_of[path][i]):
                 return i + 1
@@ -740,7 +754,7 @@ def path_ok(site_file, name, thread, hops):
         child = re.findall(r"\w+", token)
         if child:
             by_child[child[-1]].append((path, fn))
-    seen, frontier = {name}, [name]
+    seen, frontier = {name}, [name.rsplit(".", 1)[-1]]
     while frontier:
         nxt = []
         for c in frontier:
@@ -749,7 +763,7 @@ def path_ok(site_file, name, thread, hops):
                     return True
                 if node[1] not in seen:
                     seen.add(node[1])
-                    nxt.append(node[1])
+                    nxt.append(node[1].rsplit(".", 1)[-1])
         frontier = nxt
     return False
 

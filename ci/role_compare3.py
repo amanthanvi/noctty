@@ -211,6 +211,7 @@ if not isolated:   # AH3: the supervisor's seal, checked against the launch rows
             failures.append(f"ABNORMAL-EXIT run {opts['--run']} pid {pid} start {start}: "
                             f"{kind} code 0x{code:08x}, layer marker {marker}")
 allowed, identity = set(), collections.defaultdict(list)
+container_names = collections.defaultdict(set)
 LOOKUP = {"fork": ("fork", "all"), "1a": ("merged", "fork", "all"), "1b": ("merged-1b", "merged", "fork", "all")}
 table_scope = opts.get("--table-scope")
 entries = []   # (function key, roles, table row number)
@@ -261,6 +262,9 @@ for fn, roles, n_ in entries:
         continue
     identity[key(fn)].append(n_)   # AJ1: by row occurrence, so two identical rows count as two
     allowed |= {(key(fn), r) for r in roles.split("|") if r}
+    if not bare and not TESTSYM.match(fn):
+        file, symbol = key(fn).rsplit(":", 1)
+        container_names[(file, symbol.rsplit(".", 1)[-1])].add(symbol)
 if not bare:   # under --bare-names the merge is the hazard being shown, not a table error
     for k_, rows_ in sorted(identity.items()):
         if len(rows_) > 1:
@@ -313,12 +317,22 @@ for name in sorted(os.listdir(dump_dir)):
     else:
         failures.append(f"UNEXPECTED-PROCESS {name}: pid {pid} start {start} is in no launch row (kind {kind})")
         continue
-    for fn, role in pairs:
+    for pair in pairs:
+        if len(pair) != 2:
+            failures.append(f"BAD-DUMP {name}: a pair has no role")
+            continue
+        fn, role = pair
         if not qualified(fn):
             failures.append(f"UNQUALIFIED-KEY {name}: ({fn}, {role}) names no .zig file")
             continue
-        seen.add((key(fn), role))
-        if (key(fn), role) not in allowed:
+        pair_key = key(fn)
+        if not bare and not TESTSYM.match(fn):
+            file, symbol = pair_key.rsplit(":", 1)
+            if "." not in symbol and len(container_names[(file, symbol)]) > 1:
+                failures.append(f"AMBIGUOUS-KEY {name}: {pair_key} names more than one reviewed function")
+                continue
+        seen.add((pair_key, role))
+        if (pair_key, role) not in allowed:
             failures.append(f"PAIR-OUTSIDE-TABLE {name}: ({fn}, {role})")
     if not isolated and (exits_required or exit_lines) and kind in groups and not pairs:
         failures.append(f"EMPTY-DUMP {name}: group process pid {pid} start {start} recorded no pair")

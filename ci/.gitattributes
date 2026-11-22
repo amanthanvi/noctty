@@ -1,2 +1,2 @@
 # A caller record can have an empty final column.
-lock-inventory-threads.callers.tsv text eol=lf whitespace=-blank-at-eol
+lock-inventory-threads*.tsv text eol=lf whitespace=-blank-at-eol
