@@ -6992,6 +6992,33 @@ test "Surface: a Ctrl+triple-click picks the output and a drag extends it by lin
     try expectSelectionText(surface, "cmd1\nout1a");
 }
 
+test "Surface: triple-click drag extends selection through blank line" {
+    const testing = std.testing;
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
+    const fixture = try TestMouseSurface.create(testing.allocator, .false, "alpha beta");
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    surface.config.mouse_interval = 500 * std.time.ns_per_ms;
+
+    _ = fixture.at(1, 0);
+    for (0..3) |click| {
+        _ = try surface.mouseButtonCallback(.press, .left, .{});
+        if (click < 2) _ = try surface.mouseButtonCallback(.release, .left, .{});
+    }
+    try testing.expectEqual(3, surface.mouse.left_click_count);
+    try surface.cursorPosCallback(fixture.at(2, 1), .{});
+
+    const screen = surface.io.terminal.screens.active;
+    const selection = screen.selection.?;
+    try testing.expectEqualDeep(screen.pages.pin(.{ .viewport = .{} }).?, selection.start());
+    try testing.expectEqualDeep(screen.pages.pin(.{ .viewport = .{
+        .x = 39,
+        .y = 1,
+    } }).?, selection.end());
+}
+
 const Link = struct {
     action: input.Link.Action,
     selection: terminal.Selection,
@@ -7600,9 +7627,10 @@ fn dragLeftClickTriple(
     const screen: *terminal.Screen = self.io.terminal.screens.active;
     const click_pin = (self.mouse.activeLeftClickPin(&self.io.terminal.screens) orelse return).*;
 
-    // Get the line selection under our current drag point. If there isn't a
-    // line, do nothing.
-    const line = screen.selectLine(.{ .pin = drag_pin }) orelse return;
+    // A blank line is still a valid endpoint for a line-wise drag.
+    const line = screen.selectLine(.{ .pin = drag_pin }) orelse
+        screen.selectLine(.{ .pin = drag_pin, .whitespace = null }) orelse
+        return;
 
     // Get the selection under our click point. We first try to trim
     // whitespace if we've selected a word. But if no word exists then
