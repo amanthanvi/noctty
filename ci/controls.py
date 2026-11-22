@@ -730,7 +730,9 @@ if want(31): results.append(control("31-Mb-debug-fix-surfaceMessageWriter-plain"
     "    inline fn surfaceMessageWriter(\n", "    fn surfaceMessageWriter(\n")}),
     0, {"inline_flagged": -1}, 1, {"INLINE-STALE": 1}))
 # -- M-c: the renderer demand check, armed
-if want(32): results.append(control("32-Mc-armed-at-fixture", None, 0, {}, 1, {"RENDERER-PLAIN-LOCK": 3},
+ARMED_FORK_FAILURES = 3  # the frozen fork precedes the renderer demand conversion
+if want(32): results.append(control("32-Mc-armed-at-fixture", None, 0, {}, 1,
+                                    {"RENDERER-PLAIN-LOCK": ARMED_FORK_FAILURES},
                        gate_extra=["--arm-renderer-demand"]))
 RT, GEN = "src/renderer/Thread.zig", "src/renderer/generic.zig"
 if want(33): results.append(control("33-Mc-armed-after-conversion", overlay("cMc2", {
@@ -4573,10 +4575,10 @@ def same_container_names_control(tag, left_role):
         if left_role == "renderer":
             out.write(f"renderer\t{TW}\tG1Left.g1Same\t{TW}:G1Left.g1Same:lock\n")
     if left_role == "renderer":
-        return control(tag, ov, 0, {"acquisitions": 2, "live": 2}, 1, {"RENDERER-PLAIN-LOCK": 1},
+        inherited = ARMED_FORK_FAILURES if SCOPE == "fork" else 0
+        return control(tag, ov, 0, {"acquisitions": 2, "live": 2}, 1, {"RENDERER-PLAIN-LOCK": inherited + 1},
                        tbl=tbl, anch=anch, gate_extra=("--arm-renderer-demand",))
-    return control(tag, ov, 0, {"acquisitions": 2, "live": 1, "never": 1}, 0, {},
-                   tbl=tbl, anch=anch, gate_extra=("--arm-renderer-demand",))
+    return control(tag, ov, 0, {"acquisitions": 2, "live": 1, "never": 1}, 0, {}, tbl=tbl, anch=anch)
 
 
 if want(887): results.append(same_container_names_control("887-G1-distinct-containers-keep-their-own-operations",
