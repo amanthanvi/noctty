@@ -4505,6 +4505,19 @@ if want(878): results.append(git_control45("878-directory-link-is-unreadable", D
 if want(879): results.append(git_control45("879-real-directory-passes-twin", {"linked/notes.txt": "text\n"}, 0, {},
     plain=True))
 
+if want(880): results.append(compare_control("880-T1-run-rejects-problem-header-with-allowed-pairs",
+    {**BASE_DUMPS, "test-exe-800.pairs": SUITE.replace("\n", " problem=append_failed\n", 1)},
+    1, {"BAD-DUMP": 1}))
+if want(881): results.append(compare_control("881-T1-run-rejects-problem-header-with-unqualified-key",
+    {**BASE_DUMPS, "test-exe-800.pairs": SUITE.replace("\n", " problem=append_failed\n", 1)
+        + "?append_failed:pairs-lost none\n"}, 1, {"BAD-DUMP": 1, "UNQUALIFIED-KEY": 1}))
+T1_CHILD = SUITE.replace("kind=test-exe", "kind=child").replace("\n", " problem=append_failed\n", 1)
+if want(882): results.append(compare_control("882-T1-isolated-rejects-problem-header-with-allowed-pairs",
+    {"child.pairs": T1_CHILD}, 1, {"BAD-DUMP": 1}, isolated=True))
+if want(883): results.append(compare_control("883-T1-isolated-rejects-problem-header-with-unqualified-key",
+    {"child.pairs": T1_CHILD + "?append_failed:pairs-lost none\n"},
+    1, {"BAD-DUMP": 1, "UNQUALIFIED-KEY": 1}, isolated=True))
+
 results = [r.result() if hasattr(r, "result") else r for r in results]
 POOL.shutdown()
 n_ok = sum(1 for ok, _ in results if ok)

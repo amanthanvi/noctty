@@ -245,6 +245,8 @@ for name in sorted(os.listdir(dump_dir)):
         failures.append(f"BAD-DUMP {name}: no header")
         continue
     kind, pid, start = h.groups()
+    if re.search(r"(?:^|\s)problem=", lines[0][h.end():]):
+        failures.append(f"BAD-DUMP {name}: the symbolised header reports a problem")
     pairs = [tuple(x.rsplit(" ", 1)) for x in lines[1:]]   # a test key holds spaces; the role is the last word
     row = launches.get((pid, start))
     if isolated:
