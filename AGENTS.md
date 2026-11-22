@@ -74,19 +74,19 @@ reading step under [Self-Correction Log](#self-correction-log).
   `scripts/interactive-win11-realinput.ps1` (`InteractiveWin11RealInput`),
   which window-lib loads only outside hosted mode and which throws if loaded
   there; a hosted leaf ends by checking that its type was never loaded.
-  Outside hosted closures, `bench-windows.ps1`, `bench-frame-pacing.ps1`,
+  Outside the suite's closure, `bench-windows.ps1`, `bench-frame-pacing.ps1`,
   `gui-hosted-probe.ps1` and `interactive-win11-hints.ps1` keep their own
   declarations, as do the leaf-local types until later offload PRs move
   them. Screen capture stays behind `Save-StatefulScreenCapture`
   (test-harnesses.md: 2026-10-25 EVIDENCE-SCREENSHOT-PRIVACY-01). A
   hidden-desktop suite run, local or hosted, starts only a fresh portable
-  copy, without `noctty.ico`, of the
-  receipt-bound measurement build, with `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`.
-  Other local GUI runs start either the raw measurement build
-  (test-harnesses.md: 2026-10-20 STANDALONE-LEAF-AUMID-01) or a portable copy
-  without `noctty.ico` (app-lifecycle.md: 2026-10-16 "A portable copy"),
-  never a non-portable `zig-out` build, which writes the product AUMID's
-  jump list and registration.
+  copy, without `noctty.ico`, of the receipt-bound measurement build, with
+  `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`. Other local GUI runs start either
+  the raw measurement build (test-harnesses.md: 2026-10-20
+  STANDALONE-LEAF-AUMID-01) or a portable copy without `noctty.ico`
+  (app-lifecycle.md: 2026-10-16 "A portable copy"), never a non-portable
+  `zig-out` build, which writes the product AUMID's jump list and
+  registration.
 - A GUI check runs in the lowest tier that can make its assertion: (1) a
   private desktop in hosted CI, the default; (2) a private desktop on a local
   machine with a GPU, for OpenGL and custom-shader rendering read back
@@ -694,7 +694,9 @@ that govern each symbol you change, or that none does.
   the overlay scrollbar) in the visible check `Invoke-VisibleD3D11Check.ps1`,
   the measure-AUMID builds an A/B compares
   (`Invoke-InteractiveWin11MeasureBuild` in
-  `scripts/interactive-win11-measure-lib.ps1`),
+  `scripts/interactive-win11-measure-lib.ps1`), the shared real-state guard
+  and its clipboard reading (`scripts/interactive-win11-state-guard.ps1`:
+  `Test-InteractiveWin11ClipboardObservable`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
   `origin/*-measurement-harness` branches), which steps of the release
   evidence job may raise a real toast (the job's order,

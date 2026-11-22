@@ -3001,9 +3001,11 @@ try {
     # Locally, the real state's own guard over the whole run (the product jump list, startup-attempts.json, the
     # clipboard sequence: scripts/interactive-win11-state-guard.ps1, STANDALONE-LEAF-AUMID-01).
     if ($stateGuard) {
-        try { Assert-InteractiveWin11StateGuard -Guard $stateGuard; $record.stateGuard = [ordered]@{ held = $true } }
+        # A clipboard sequence of 0 before and after is no observation (Sol on #744): the guard passed, but the record says
+        # unobservable, never held (test-harnesses.md: 2026-11-21 STATE-GUARD-CLIPBOARD-01).
+        try { Assert-InteractiveWin11StateGuard -Guard $stateGuard; $record.stateGuard = [ordered]@{ state = $(if ($stateGuard.ClipboardObservable) { 'held' } else { 'unobservable' }); clipboardObservable = [bool]$stateGuard.ClipboardObservable } }
         catch {
-            $record.stateGuard = [ordered]@{ held = $false }
+            $record.stateGuard = [ordered]@{ state = 'tripped'; clipboardObservable = $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $false }) }
             $script:GuardTripped = 'state-guard'; $record.guardTripped = 'state-guard'; $record.guardTrippedState = 'tripped'
             Write-Host "gui probe: the real state's guard did not hold: $($_.Exception.Message)"
         }

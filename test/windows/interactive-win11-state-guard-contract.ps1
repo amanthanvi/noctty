@@ -44,6 +44,7 @@ try {
     Assert-InteractiveWin11StateGuard $guard
     $receipt = Get-Content -LiteralPath (Join-Path $case.Logs 'state-after.json') -Raw | ConvertFrom-Json
     Assert-Control ($receipt.ClipboardBefore -eq 17 -and $receipt.ClipboardAfter -eq 17) 'No-op receipt lacks clipboard counters.'
+    Assert-Control ($receipt.ClipboardObservable -eq $true -and $guard.ClipboardObservable -eq $true -and $guard.ClipboardAfter -eq 17) 'An observed clipboard reading is not recorded as observable.'
     Assert-Control (Test-Path -LiteralPath (Join-Path $case.Logs 'state-before.json')) 'No-op lacks before receipt.'
     $passed++
 
@@ -73,6 +74,74 @@ try {
     Assert-GuardFails $guard 'Clipboard sequence changed'
     $receipt = Get-Content -LiteralPath (Join-Path $case.Logs 'state-after.json') -Raw | ConvertFrom-Json
     Assert-Control ($receipt.ClipboardBefore -eq 70 -and $receipt.ClipboardAfter -eq 71) 'Changed clipboard counters not retained.'
+    $passed++
+
+    # A clipboard the station cannot read (the lead on #741's follow-up): 0 before and after does not fail the guard,
+    # and the guard, its receipt and its console line say unobservable, never held. The helper's table: equal nonzero
+    # samples are the only observation; 0/0 and a missing sample are none; a change from 0 is still observed. The
+    # interactive runner (interactive-win11-job.ps1, interactive-win11-validate.ps1) reports through this guard.
+    $case = New-Control 'clipboard-unobservable' { [uint32] 0 }
+    $guard = Start-Control $case
+    $unobservableOut = Assert-InteractiveWin11StateGuard $guard 6>&1 | Out-String
+    $receipt = Get-Content -LiteralPath (Join-Path $case.Logs 'state-after.json') -Raw | ConvertFrom-Json
+    Assert-Control ($receipt.ClipboardObservable -eq $false -and $guard.ClipboardObservable -eq $false -and @($receipt.Failures).Count -eq 0) 'A 0/0 clipboard reading is not recorded as unobservable, or it failed the guard.'
+    Assert-Control ($unobservableOut.Contains('clipboard unobservable') -and -not $unobservableOut.Contains('clipboard sequence before=0 after=0')) 'The guard''s console line does not say the clipboard was unobservable.'
+    foreach ($row in @(@(17, 17, $true), @(0, 0, $false), @(0, 5, $true), @(5, $null, $false), @($null, $null, $false))) {
+        Assert-Control ((Test-InteractiveWin11ClipboardObservable $row[0] $row[1]) -eq $row[2]) "The clipboard observability of $($row[0]) then $($row[1]) is wrong."
+    }
+    $guardText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\scripts\interactive-win11-state-guard.ps1') -Raw
+    $observableControl = $guardText.Replace('-and -not ([uint64]$Before -eq 0 -and [uint64]$After -eq 0)', '')
+    Assert-Control (-not [string]::Equals($observableControl, $guardText, [StringComparison]::Ordinal)) 'The clipboard-observability control changed nothing.'
+    & { . ([scriptblock]::Create($observableControl)); Assert-Control (Test-InteractiveWin11ClipboardObservable 0 0) 'The clipboard-observability control did not take 0/0 as observed.' }
+    $passed++
+
+    # #738's GUI probe, a fourth caller (Sol on #744): its own record of the guard, run from the probe's source over a
+    # 0/0 guard, says unobservable, never held; an observed reading says held. The control: the probe's old record,
+    # held = $true on any passing guard.
+    $probeText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'gui-hosted-probe.ps1') -Raw
+    $probeMatch = [regex]::Match($probeText, 'try \{ Assert-InteractiveWin11StateGuard -Guard \$stateGuard; (\$record\.stateGuard = \[ordered\]@\{ state = [^\r\n]+\}) \}\r?\n')
+    Assert-Control $probeMatch.Success 'The GUI probe no longer records the shared guard where this contract reads it.'
+    function Get-ProbeGuardRecord([string] $Assignment, [scriptblock] $Reader) {
+        $case = New-Control ('probe-' + [Guid]::NewGuid().ToString('N').Substring(0, 6)) $Reader
+        $stateGuard = Start-Control $case
+        $record = [ordered]@{}
+        Assert-InteractiveWin11StateGuard -Guard $stateGuard 6>$null
+        . ([scriptblock]::Create($Assignment))
+        return $record.stateGuard
+    }
+    $unobserved = Get-ProbeGuardRecord $probeMatch.Groups[1].Value { [uint32] 0 }
+    $observed = Get-ProbeGuardRecord $probeMatch.Groups[1].Value { [uint32] 17 }
+    Assert-Control ($unobserved.state -eq 'unobservable' -and $unobserved.clipboardObservable -eq $false -and -not $unobserved.Contains('held')) "The GUI probe's 0/0 record is not unobservable."
+    Assert-Control ($observed.state -eq 'held' -and $observed.clipboardObservable -eq $true) "The GUI probe's observed record is not held."
+    $oldProbe = Get-ProbeGuardRecord '$record.stateGuard = [ordered]@{ held = $true }' { [uint32] 0 }
+    Assert-Control (-not ($oldProbe.Contains('state') -and $oldProbe.state -eq 'unobservable')) 'The GUI probe''s old-record control shows nothing.'
+    # #740's hidden-desktop runner, a seventh caller (merged after #744): its guard state, from the runner's own
+    # Get-GuiHiddenGuardState over a 0/0 and an observed guard, is unobservable and held. The control: the runner's
+    # old two-argument call, which said held for a 0/0 guard.
+    $runnerText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'gui-hidden-runner.ps1') -Raw
+    $runnerAst = [System.Management.Automation.Language.Parser]::ParseInput($runnerText, [ref]$null, [ref]$null)
+    $runnerState = $runnerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-GuiHiddenGuardState' }, $true)
+    Assert-Control ($null -ne $runnerState -and $runnerText.Contains('state = Get-GuiHiddenGuardState ($null -ne $stateGuard) $checks.state $stateObservable')) 'The hidden-desktop runner no longer judges the shared guard where this contract reads it.'
+    . ([scriptblock]::Create($runnerState.Extent.Text))
+    function Get-RunnerGuardState([scriptblock] $Reader, [switch] $OldCall) {
+        $case = New-Control ('runner-' + [Guid]::NewGuid().ToString('N').Substring(0, 6)) $Reader
+        $stateGuard = Start-Control $case
+        Assert-InteractiveWin11StateGuard -Guard $stateGuard 6>$null
+        if ($OldCall) { return Get-GuiHiddenGuardState $true $true }
+        return Get-GuiHiddenGuardState $true $true $(if ($null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $null })
+    }
+    Assert-Control ((Get-RunnerGuardState { [uint32] 0 }) -ceq 'unobservable') "The hidden-desktop runner's 0/0 guard state is not unobservable."
+    Assert-Control ((Get-RunnerGuardState { [uint32] 17 }) -ceq 'held') "The hidden-desktop runner's observed guard state is not held."
+    Assert-Control ((Get-RunnerGuardState { [uint32] 0 } -OldCall) -ceq 'held') 'The hidden-desktop runner''s old-call control shows nothing.'
+    # Every caller of the shared guard (Sol on #744), found by name: none records a verdict of its own that says held
+    # without the guard's clipboard verdict, and none reads the clipboard again for its report.
+    $callers = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' | Where-Object { $_.Name -notlike '*contract*' -and (Get-Content -LiteralPath $_.FullName -Raw).Contains('Start-InteractiveWin11StateGuard') } | ForEach-Object { $_.Name } | Sort-Object)
+    Assert-Control (($callers -join ' ') -ceq 'bench-frame-pacing.ps1 gui-hidden-runner.ps1 gui-hosted-probe.ps1 hidden-win11-tabgap.ps1 hidden-win11-working-set.ps1 interactive-win11-job.ps1 interactive-win11-validate.ps1') "The shared guard's callers changed: $($callers -join ' ')."
+    foreach ($caller in $callers) {
+        $text = Get-Content -LiteralPath (Join-Path $PSScriptRoot $caller) -Raw
+        Assert-Control (-not [regex]::IsMatch($text, 'Assert-InteractiveWin11StateGuard[^\r\n]*held\s*=\s*\$true')) "$caller records held = `$true beside the shared guard."
+        Assert-Control (-not [regex]::IsMatch($text, 'ClipboardSequenceAfter\s*=\s*\[\w+\]::GetClipboardSequenceNumber')) "$caller reads the clipboard again for its report."
+    }
     $passed++
 
     $case = New-Control 'created'

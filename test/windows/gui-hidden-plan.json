@@ -2,12 +2,18 @@
   "schemaVersion": 1,
   "scenario": "windows.gui-hidden.suite",
   "buildInputs": [
-    "dist/windows/conpty-redist.json",
+    "build.zig",
+    "build.zig.zon",
+    "dist/windows/**",
+    "include/**",
+    "pkg/**",
     "scripts/conpty-redist.ps1",
     "scripts/dev-windows.cmd",
     "scripts/interactive-win11-measure-lib.ps1",
     "scripts/stage-conpty-redist.ps1",
-    "scripts/windows-architecture.ps1"
+    "scripts/windows-architecture.ps1",
+    "src/**",
+    "vendor/**"
   ],
   "leaves": [
     { "id": "vt-probe", "script": "test/windows/vt-probe-win32-conformance.ps1", "sandbox": "vt-conformance", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 0, "timeoutSeconds": 180 },

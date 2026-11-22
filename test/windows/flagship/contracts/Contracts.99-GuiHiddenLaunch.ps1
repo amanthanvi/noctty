@@ -625,17 +625,28 @@ try {
         if ($judged.Status -cne $case.Status -or $judged.Leaves -cne $case.Leaves) { throw "The result status misjudged exit $($case.Exit), subset $($case.Subset), all passed $($case.All), guards held $($case.Guards)." }
     }
     foreach ($case in @(
-            @{ Started = $true; Held = $true; State = 'held' }
-            @{ Started = $true; Held = $false; State = 'tripped' }
-            @{ Started = $true; Held = $null; State = 'not-run' }
-            @{ Started = $false; Held = $null; State = 'not-run' }
-            @{ Started = $false; Held = $true; State = 'not-run' }
+            @{ Started = $true; Held = $true; Observable = $true; State = 'held' }
+            # The shared guard's 0/0 clipboard reading, or no verdict at all, is unobservable, never held (#744,
+            # STATE-GUARD-CLIPBOARD-01).
+            @{ Started = $true; Held = $true; Observable = $false; State = 'unobservable' }
+            @{ Started = $true; Held = $true; Observable = $null; State = 'unobservable' }
+            @{ Started = $true; Held = $false; Observable = $false; State = 'tripped' }
+            @{ Started = $true; Held = $false; Observable = $true; State = 'tripped' }
+            @{ Started = $true; Held = $null; Observable = $true; State = 'not-run' }
+            @{ Started = $false; Held = $null; Observable = $true; State = 'not-run' }
+            @{ Started = $false; Held = $true; Observable = $true; State = 'not-run' }
         )) {
-        if ((Get-GuiHiddenGuardState $case.Started $case.Held) -cne $case.State) { throw "The guard state misjudged started $($case.Started), held $($case.Held)." }
+        if ((Get-GuiHiddenGuardState $case.Started $case.Held $case.Observable) -cne $case.State) { throw "The guard state misjudged started $($case.Started), held $($case.Held), observable $($case.Observable)." }
     }
-    # The runner says the guards are held only when all three are `held`: no started-only or default `$true`.
+    # The runner passes the shared guard's own verdict, read from the guard, not a second reading.
     $guiRunnerText = [IO.File]::ReadAllText($guiRunnerPath)
-    if (-not $guiRunnerText.Contains('$runRecord.stateGuardsHeld = @($runRecord.guards.Values | Where-Object { $_ -cne ''held'' }).Count -eq 0') -or
+    if (-not $guiRunnerText.Contains('state = Get-GuiHiddenGuardState ($null -ne $stateGuard) $checks.state $stateObservable') -or
+        -not $guiRunnerText.Contains('[bool]$stateGuard.ClipboardObservable') -or $guiRunnerText.Contains('GetClipboardSequenceNumber')) {
+        throw 'The runner must judge the state guard from the guard''s own ClipboardObservable, with no clipboard reading of its own.'
+    }
+    # The runner says the guards are held only when all three are `held` or `unobservable`: no started-only or default
+    # `$true`.
+    if (-not $guiRunnerText.Contains('$runRecord.stateGuardsHeld = @($runRecord.guards.Values | Where-Object { $_ -cne ''held'' -and $_ -cne ''unobservable'' }).Count -eq 0') -or
         [regex]::Matches($guiRunnerText, '\$runRecord\.stateGuardsHeld = ').Count -ne 2 -or -not $guiRunnerText.Contains('$runRecord.stateGuardsHeld = $false')) {
         throw 'The runner must hold the guards only when all three are held, false until then.'
     }

@@ -429,19 +429,31 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
     # ---- (d) build inputs, (e) the plan and the scenario ----------------------------------------------------------
     $script:GuiHiddenTrackedPaths = [System.Collections.Generic.HashSet[string]]::new([string[]]@(git -C $repoRoot ls-files), [StringComparer]::Ordinal)
     if ($script:GuiHiddenTrackedPaths.Count -eq 0) { throw 'git ls-files listed nothing; the build-input check needs the tracked paths.' }
+    # Every directory that holds a tracked file, spelled as Git tracks it: what a `<dir>/**` build input may name.
+    $script:GuiHiddenTrackedDirectories = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($trackedPath in $script:GuiHiddenTrackedPaths) {
+        for ($cut = $trackedPath.LastIndexOf('/'); $cut -gt 0; $cut = $trackedPath.LastIndexOf('/', $cut - 1)) {
+            if (-not $script:GuiHiddenTrackedDirectories.Add($trackedPath.Substring(0, $cut))) { break }
+        }
+    }
     function Get-GuiHiddenPlanProblems($Plan, $Scenario) {
         $found = [System.Collections.Generic.List[string]]::new()
         if ($Plan.schemaVersion -ne 1 -or $Plan.scenario -cne 'windows.gui-hidden.suite' -or $Scenario.id -cne 'windows.gui-hidden.suite') { $found.Add('the plan is version 1 and names the scenario windows.gui-hidden.suite, which the flagship scenario is') }
-        foreach ($required in @('scripts/dev-windows.cmd', 'scripts/interactive-win11-measure-lib.ps1')) {
+        # What the build preparation runs, and the measurement build's whole input set by tree (Sol on #740, round 12).
+        foreach ($required in @('scripts/dev-windows.cmd', 'scripts/interactive-win11-measure-lib.ps1', 'build.zig', 'build.zig.zon', 'src/**', 'pkg/**', 'vendor/**', 'include/**', 'dist/windows/**', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1')) {
             if (@($Plan.buildInputs) -cnotcontains $required) { $found.Add("the plan's buildInputs name $required, which the hosted build preparation reads") }
         }
         foreach ($buildInput in @($Plan.buildInputs)) {
+            # A `<dir>/**` entry names every file under a tracked directory; the rules below apply to <dir>.
+            $tree = ([string]$buildInput).EndsWith('/**', [StringComparison]::Ordinal)
+            $path = $(if ($tree) { ([string]$buildInput).Substring(0, ([string]$buildInput).Length - 3) } else { [string]$buildInput })
             # A canonical repo path (slashes, no `.` or `..` segment, no leading separator), the spelling the changed-path
             # list uses, so the selection's ordinal lookup cannot miss it (CodeRabbit on #740).
-            if ([string]$buildInput -cnotmatch '\A(?!\.{1,2}/)[A-Za-z0-9_-][A-Za-z0-9_.-]*(/(?!\.{1,2}(/|\z))[A-Za-z0-9_.-]+)*\z') { $found.Add("build input $buildInput is a canonical repo path") }
+            if ($path -cnotmatch '\A(?!\.{1,2}/)[A-Za-z0-9_-][A-Za-z0-9_.-]*(/(?!\.{1,2}(/|\z))[A-Za-z0-9_.-]+)*\z') { $found.Add("build input $buildInput is a canonical repo path") }
             # Spelled as Git tracks it, ordinally: a case-only variant exists on a case-insensitive checkout but misses the
             # changed-path list's ordinal lookup (CodeRabbit on #740).
-            elseif (-not $script:GuiHiddenTrackedPaths.Contains([string]$buildInput)) { $found.Add("build input $buildInput is a tracked path, spelled as Git tracks it") }
+            elseif ($tree -and -not $script:GuiHiddenTrackedDirectories.Contains($path)) { $found.Add("build input $buildInput names a tracked directory, spelled as Git tracks it") }
+            elseif (-not $tree -and -not $script:GuiHiddenTrackedPaths.Contains($path)) { $found.Add("build input $buildInput is a tracked path, spelled as Git tracks it") }
         }
         $ids = @($Plan.leaves | ForEach-Object { [string]$_.id })
         if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { $found.Add('the plan''s leaf ids are unique') }
@@ -466,6 +478,10 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         @{ Name = 'a build input spelled with ./'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('./scripts/dev-windows.cmd') } }
         @{ Name = 'a build input spelled with a backslash'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts\dev-windows.cmd') } }
         @{ Name = 'a build input differing from the tracked path in case only'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts/Dev-windows.cmd') } }
+        @{ Name = 'buildInputs without src/**'; Change = { param($p) $p.buildInputs = @($p.buildInputs | Where-Object { $_ -cne 'src/**' }) } }
+        @{ Name = 'a build tree differing from the tracked directory in case only'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('Src/**') } }
+        @{ Name = 'a build tree that is no tracked directory'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('no-such-dir/**') } }
+        @{ Name = 'a build tree spelled with one star'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('src/*') } }
     )
     foreach ($control in $planControls) {
         $mutated = $planText | ConvertFrom-Json

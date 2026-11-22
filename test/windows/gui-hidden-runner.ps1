@@ -59,7 +59,9 @@ item (6)).
 
 The state guards, around the whole run: scripts/interactive-win11-state-guard.ps1 (the product jump list,
 startup-attempts.json, the clipboard sequence) and the PSReadLine history guard. A tripped guard exits 3; each guard is
-recorded held, tripped or not-run, and one that did not run makes the run an error (exit 2), never a pass. Keep the
+recorded held, unobservable (the state guard passed, but its clipboard read 0 before and after, which observes
+nothing: test-harnesses.md 2026-11-21 STATE-GUARD-CLIPBOARD-01), tripped or not-run; unobservable does not fail the run,
+and one that did not run makes the run an error (exit 2), never a pass. Keep the
 session unlocked during a local run: OpenInputDesktop fails on a locked workstation, and the leaf refuses to start.
 
 -Out must be new or empty. It receives only result.json (the flagship result schema, scenario
@@ -1069,13 +1071,16 @@ function ConvertTo-GuiHiddenStartupFacts($Fingerprint) {
     }
 }
 
-# A guard's state: `held` when it started and its check ran and passed, `tripped` when its check failed, `not-run` when
-# it never started or its check never ran. Only `held` counts as held: a guard that never ran read as passed before
-# (Greptile on #740).
-function Get-GuiHiddenGuardState([bool] $Started, $Held) {
+# A guard's state: `held` when it started and its check ran and passed, `unobservable` when it passed without observing
+# (the shared state guard's own verdict, -Observable: a clipboard sequence of 0 before and after, test-harnesses.md
+# 2026-11-21 STATE-GUARD-CLIPBOARD-01, #744), `tripped` when its check failed, `not-run` when it never started or its
+# check never ran. `held` and `unobservable` let a run pass; a guard that never ran read as passed before (Greptile on
+# #740). Only an explicit $true is observable, so a guard without its verdict is never `held`.
+function Get-GuiHiddenGuardState([bool] $Started, $Held, $Observable = $true) {
     if (-not $Started -or $Held -isnot [bool]) { return 'not-run' }
-    if ($Held) { return 'held' }
-    return 'tripped'
+    if (-not $Held) { return 'tripped' }
+    if ($Observable -isnot [bool] -or -not $Observable) { return 'unobservable' }
+    return 'held'
 }
 
 # A whole-plan assertion's status (launch-policy, real-input-absent): an observed violation fails it; without a record
@@ -1342,6 +1347,10 @@ if ($exit -eq 0) {
         # receipt, and the startup fingerprint before and after.
         $runRecord.clipboardSequenceBefore = $(if ($null -ne $stateGuard) { [int64]$stateGuard.ClipboardBefore } else { $null })
         $runRecord.clipboardSequenceAfter = $null
+        # The shared guard's own clipboard verdict, which its check sets on it (STATE-GUARD-CLIPBOARD-01): no second
+        # reading here.
+        $stateObservable = $(if ($null -ne $stateGuard -and $null -ne $stateGuard.PSObject.Properties['ClipboardObservable']) { [bool]$stateGuard.ClipboardObservable } else { $null })
+        $runRecord.clipboardObservable = $stateObservable
         if ($null -ne $stateGuard) {
             try {
                 $stateAfter = [IO.File]::ReadAllText((Join-Path $guardDirectory 'state-after.json')) | ConvertFrom-Json
@@ -1351,11 +1360,11 @@ if ($exit -eq 0) {
         $runRecord.startupBefore = ConvertTo-GuiHiddenStartupFacts $startupBefore
         $runRecord.startupAfter = ConvertTo-GuiHiddenStartupFacts $startupAfter
         $runRecord.guards = [ordered]@{
-            state = Get-GuiHiddenGuardState ($null -ne $stateGuard) $checks.state
+            state = Get-GuiHiddenGuardState ($null -ne $stateGuard) $checks.state $stateObservable
             history = Get-GuiHiddenGuardState ($null -ne $historyGuard) $checks.history
             startup = Get-GuiHiddenGuardState ($null -ne $startupBefore) $checks.startup
         }
-        $runRecord.stateGuardsHeld = @($runRecord.guards.Values | Where-Object { $_ -cne 'held' }).Count -eq 0
+        $runRecord.stateGuardsHeld = @($runRecord.guards.Values | Where-Object { $_ -cne 'held' -and $_ -cne 'unobservable' }).Count -eq 0
         $tripped = @($runRecord.guards.Keys | Where-Object { $runRecord.guards[$_] -ceq 'tripped' })
         if ($tripped.Count -gt 0) { Write-Host "gui-hidden: a state guard tripped ($($tripped -join ', ')); details under -Work"; $exit = 3; $failureKind = 'state-guard' }
         elseif (-not $runRecord.stateGuardsHeld) {
@@ -1438,7 +1447,7 @@ if ($outReady) {
             [ordered]@{ id = 'leaves-pass'; status = $leafStatus; message = $(if ($subset) { "subset run: $($selected.Count) of $($runRecord.leavesPlanned) leaves" } else { $null }) }
             [ordered]@{ id = 'launch-policy'; status = (Get-GuiHiddenAssertionStatus $policyViolated $covered $subset); message = $null }
             [ordered]@{ id = 'real-input-absent'; status = (Get-GuiHiddenAssertionStatus $inputViolated $covered $subset); message = $null }
-            [ordered]@{ id = 'state-guards'; status = $(if ($runRecord.stateGuardsHeld) { 'pass' } else { 'fail' }); message = $null }
+            [ordered]@{ id = 'state-guards'; status = $(if ($runRecord.stateGuardsHeld) { 'pass' } else { 'fail' }); message = $(if ($runRecord.guards -and $runRecord.guards.state -ceq 'unobservable') { 'clipboard unobservable' } else { $null }) }
         )
         artifacts = $receipts
         failure = $(if ($exit -eq 0) { $null } else { [ordered]@{ message = "exit $exit ($failureKind)"; type = $status } })

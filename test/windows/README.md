@@ -899,6 +899,11 @@ jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the
 product jump list, the real `startup-attempts.json` or the clipboard sequence
 fails it, and its receipts go to `flagship/artifacts/interactive-win11/job-state`.
+A clipboard sequence of 0 before and after is no observation
+(`GetClipboardSequenceNumber` returns 0 when the station's clipboard cannot be
+read): it does not fail the guard, its receipt records `ClipboardObservable`
+false and its console line says the clipboard was unobservable, never that it
+held.
 
 When a screen-pixel wait (`Get-StatefulPixel` inside `Wait-InteractiveWin11Until`)
 times out, the harness writes `pixel-diagnostic-*.json` to its sandbox `logs`
@@ -1306,7 +1311,10 @@ probe checks this before it creates anything.
 - `-Part All` refuses to start off a hosted runner, and needs
   `-TestToolsBin`.
 - Locally, the run also:
-  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`);
+  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`),
+    and records it as `stateGuard.state`: `held`, `unobservable` (a passing
+    guard with a clipboard sequence of 0 before and after, which is no
+    observation) or `tripped`, with the guard's own `clipboardObservable`;
   - reads only the measurement identity's toast facts;
   - gives each noctty child a `TEMP` and `TMP` under its run directory;
   - deletes the copies it made under `-Work` once the record is written
@@ -1470,7 +1478,11 @@ entry and trap 6 of the 2026-11-18 SOAK-01 entry). The real startup ledger,
 the product jump list and the clipboard sequence number go through the shared
 state guard (`scripts/interactive-win11-state-guard.ps1`), the PowerShell
 history through `scripts/windows-harness-history.ps1`, and the real
-`session-state.json` is compared by metadata. Contracts.98-WorkingSet pins the
+`session-state.json` is compared by metadata. `guards.json` takes the shared
+guard's own clipboard samples and verdict, with no second reading. A clipboard
+sequence of 0 before and after is recorded as unobservable
+(`ClipboardObservable` false in `guards.json`, and the console says so), never
+as held, and does not fail the run. Contracts.98-WorkingSet pins the
 harness, its workload and its run-time checks.
 
 ## gui-hidden-runner.ps1 (the hidden-desktop GUI suite)
@@ -1632,9 +1644,14 @@ state guard's receipts and the copies stay under `-Work`.
 
 **Guards and exit codes.** The state guard (the product jump list,
 `startup-attempts.json`, the clipboard sequence) and the PSReadLine history
-guard span the run; a tripped one exits 3. Each is recorded `held`, `tripped`
-or `not-run` (it never started, or its check never ran), and only `held`
-counts: a guard that did not run makes the run an error, never a pass. A
+guard span the run; a tripped one exits 3. Each is recorded `held`,
+`unobservable`, `tripped` or `not-run` (it never started, or its check never
+ran). The state guard is `unobservable` when it passed but its clipboard
+sequence read 0 before and after, which observes nothing (the guard's own
+verdict, test-harnesses.md 2026-11-21 STATE-GUARD-CLIPBOARD-01; the hosted
+runner reads 0); the result's `state-guards` assertion then says so, and the
+run can still pass. Only `held` and `unobservable` count: a guard that did not
+run makes the run an error, never a pass. A
 local run on `WinSta0` shares the user's clipboard, so the clipboard guard can
 trip on the user's own copy; don't copy during a run. 0 pass, 1 a leaf failed,
 2 a validation, staging, generation, guard or runner failure (with an `error`
@@ -1765,7 +1782,8 @@ Two modes:
   preconditions on its own desktop, records why they fail, and never takes the
   foreground. Its intervals check the pipeline and are not a measurement, since
   nothing composes a private desktop. The summary gives their p95 as
-  `dry_run_p95_ms`, never as `frame_time_p95_ms`.
+  `dry_run_p95_ms`, never as `frame_time_p95_ms`, and only for a clean dry
+  run (exit 0).
 - `-Visible` is the measurement. Run it only while the machine's user is
   away. The copy runs on `Default`, which must be the caller's desktop and the
   input desktop, composed by DWM, in a local session, with the shell accepting
@@ -1829,7 +1847,13 @@ Two modes:
   which its file wait, polled, can take up to 10 s more; the display-power
   reading, at once in practice and at most 2 s; and the bounded foreground
   and keyboard-probe workers, milliseconds in practice and at most 5 s each,
-  which read the tick right before each action. These are per step, and two
+  which read the tick right before each action. A worker that runs past its
+  5 s bound returns "timeout", and an input outcome it reaches after that is
+  not returned, so the run does not latch it from the worker (a residual,
+  recorded): once the unlock or the probe was sent, the moved tick still
+  voids the series at the after-run check, and before it a loss needs the
+  worker's thread starved for about 5 s and input the hooks cannot see that
+  returns the tick to the exact baseline. These are per step, and two
   can run back to back: the keyboard-probe worker (up to 2 s after its
   input) and then a trace request's message call (5 s) make about 7 s. So
   input the hooks cannot see reaches the copy for at most about 7 s, and only
@@ -1965,8 +1989,8 @@ there. The series stops at the first run that does not complete. The exit
 code, by precedence (`Get-FramePacingExitCode`): 3 when a guard tripped, else
 1 when a run failed or the runs differ in build or workload, else 2 when a run
 was inconclusive or the runs differ in environment, else 0. A series that both
-trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` holds each
-run's status and statistics, each comparability group's (`Groups`), the pooled
+trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` of a
+passing series holds each run's status and statistics, each comparability group's (`Groups`), the pooled
 p95 and, in a visible series, how many real and injected input events the
 hooks saw (`RealInputsSeen`, `InjectedInputsSeen`, the latter every injected
 event, the harness's own marked ones and any other program's). Each `run-<n>` holds
@@ -1983,26 +2007,50 @@ window, where a change makes the run inconclusive), DPI and grid (a difference
 pools none and exits 2). Each group of runs alike in all nine of those fields
 is reported on its own in `Groups`, never combined across any of them.
 `frame_time_p95_ms` and its median are published only for a visible series
-with no real input the hooks saw (`RealInputsSeen` 0) and a session tick
-still at the series' baseline (`TickMovedFromBaseline` false), whose every
-run completed and whose runs are comparable; otherwise both are null, input
-makes the series inconclusive (exit 2 unless a guard or a failure ranks
-higher), and the console says no measurement was published. A series that
-input voided writes `pacing.json` from an allowlist, not by scrubbing: the
-schema, `Verdict` (`voided`), `ExitCode`, `Reasons`, `RealInputsSeen`,
+that passes (exit 0): no real input the hooks saw (`RealInputsSeen` 0), a
+session tick still at the series' baseline (`TickMovedFromBaseline` false),
+every run completed and the runs comparable. A passing dry run has both null.
+A series that does not pass has neither field, since its `pacing.json` is the
+allowlisted verdict (below); input makes the series inconclusive (exit 2
+unless a guard or a failure ranks higher), and the console says no
+measurement was published. The outer half
+and each driver hash the script text they loaded and are executing, never the
+file on disk: the outer half at series start, each driver as it starts. The
+grid and cursor probes a driver starts run the same file and hash nothing; they
+produce no timing. A driver whose hash
+differs voids the series as `harness-changed` (exit 1), in either mode, and so
+does a series with no hash of its own (it fails closed); the series' start
+hash is the `HarnessSha256` it reports. The hash covers
+`bench-frame-pacing.ps1` alone, not the scripts it dot-sources: it catches an
+accidental change to `bench-frame-pacing.ps1`, and is not a seal against
+tampering. A series writes a timing statistic only when its verdict is a
+pass (exit 0). Every other verdict, a failure (exit 1, a changed harness
+among them), an inconclusive series (exit 2, input among them) or a tripped
+guard (exit 3), writes `pacing.json` from an allowlist, not by scrubbing: the
+schema, `Verdict` (`voided` for input or a changed harness, otherwise
+`failed`, `inconclusive` or `guard-tripped`), `ExitCode`, `Reasons`, `RealInputsSeen`,
 `InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
 `MeasureHead` and `ExeSHA256`, and nothing else. It carries no number but
 the input counts and the exit code, and no free text: `Reasons` are codes
 from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
 `watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
-`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`).
-Everything else goes to `diagnostics.json` beside it: every message (the
+`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`,
+`harness-changed`).
+Everything else goes to `diagnostics.json` beside it, written after
+`pacing.json`, whether or not that write succeeded (a `pacing.json` that cannot
+be written still fails the series), so the verdict and exit code stand when
+`diagnostics.json` cannot be written (the console line then warns that it was
+not) and the series' record stands when `pacing.json` cannot, with no
+`dry_run_p95_ms` (a dry run
+has one only when it is clean): every message (the
 staging, lock-shortfall and tick-stop lines among them), every duration,
 each run and each group, and `Inconclusive`, which names what voided the
 series (the hook count, with "tick also moved (may be the same input)" when
 the tick moved too, since one input can do both; a tick that moved or could
-not be read; a watch that did not stop; or the runs that saw input). A
-series input did not void keeps the full `pacing.json` and writes no
+not be read; a watch that did not stop; or the runs that saw input). So a
+series whose last driver failed after a good run, even one that ran changed
+text and left no readable `run.json`, publishes none of the good run's timing.
+A passing series keeps the full `pacing.json` and writes no
 `diagnostics.json`. Input seen is a latch for the series: every read sets it
 (a hook count above 0, any tick mismatch at a driver gate, a poll, the
 driver's session facts, the outer half's checks or the final read, an unread
@@ -2012,10 +2060,13 @@ and nothing clears it, so a later read that returns the expected tick
 poll that reads a mismatch stops the step at once and never reads again.
 Every PowerShell read of the tick goes through one function
 (`Read-FramePacingInputTick`), which latches a mismatch before it returns,
-and the contract fails on any other. Each run's own `run.json` keeps its
-evidence for debugging. A clipboard sequence of 0 before and after is no
-observation (the clipboard could not be read): `guards.json` records
-`ClipboardObservable` false and the console says the clipboard was
+and the contract fails on any other read in the plain forms it scans for; a
+computed method name, reflection whose name is built up or a concatenated
+native `EntryPoint` gets past that scan. Each run's own `run.json` keeps its
+evidence for debugging. `guards.json` takes the shared guard's own clipboard
+samples and verdict, with no second reading. A clipboard sequence of 0 before
+and after is no observation (the clipboard could not be read): `guards.json`
+records `ClipboardObservable` false and the console says the clipboard was
 unobservable, never that it held. The series ends
 in this order: every run has ended and its job, with its copy, is closed;
 the watch stops, which unhooks; the final real-input count and the tick are
@@ -2028,12 +2079,15 @@ marked input fails the run, as Windows may have removed it: a count that did
 not move, or the driver's refusal when a hook did not see the unlock or the
 probe. Such a run stays failed whatever input stop follows, and the tick the
 unlock or the probe moved is kept as the harness's own even when the hook
-missed it, so it is never read as a user's input. A
+missed it, so it is never read as a user's input. After a keyboard-hook miss
+the probe was sent, so no line calls it "not sent"; after a mouse-hook miss
+the foreground was never taken and the probe really was not sent, and the
+line says so. A
 `run.json` the job's close cut short reads as no record: a run stopped for
 real input is then inconclusive, any other run failed, and the series still
 writes `pacing.json`. A staging failure is a
-failed run before any launch, and the summary still records the runs before
-it. What runs is the run's own copy: its path is checked before any launch
+failed run before any launch, and the series still writes `diagnostics.json`
+with the runs before it. What runs is the run's own copy: its path is checked before any launch
 and its image read back by PID, and the driver runs in the run's own job,
 checked before it resumes and again by the outer half. The shared state guard
 owns the measurement-identity jump list by its timestamps: it deletes the file
