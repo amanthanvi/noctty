@@ -146,7 +146,7 @@ Build mode refuses existing releases and never overwrites assets with
 `--clobber`. To resume verification or multiple package managers after a failed
 or cancelled Release run, use **Release**, `mode=promote`, from main with the
 tag, peeled
-candidate SHA, Test/evidence IDs, original Release run ID and
+candidate SHA, Test run ID, original Release run ID and
 `manifest_sha256`. Its `PublishedReleaseResume` path requires successful
 publication in one of that run's attempt-specific jobs records and matching
 immutable assets. It resumes
@@ -165,9 +165,8 @@ new accepted build. Preserve the tag; never delete a tag a published release
 uses, and never use `--cleanup-tag`. A tagless draft needs no tag deletion. `LegacyReleaseWithoutManifest`
 and `IncompletePublishedRelease` preserve the published release and tag; older
 releases can use this verified manual Chocolatey entry point without a digest.
-`EvidenceExpired` requires a Test dispatch on the candidate tag with
-`run_interactive_win11=true`, followed by promote with those fresh Test/evidence
-IDs. Exact commands are in the [release runbook](../PACKAGING.md#release-runbook).
+`EvidenceExpired` asks for a Test dispatch on the candidate tag, followed by
+promote with that fresh Test run ID; no interactive run is needed. Exact commands are in the [release runbook](../PACKAGING.md#release-runbook).
 No recovery automatically deletes a release, replaces assets or rebuilds a
 published candidate. Older workflow revisions may still replace assets on a
 rerun; use main's recovery entry points.

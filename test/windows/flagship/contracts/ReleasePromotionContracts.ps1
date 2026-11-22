@@ -8,7 +8,6 @@ function Test-ReleasePromotionWorkflow {
         '          ref: main', '          ref: ${{ inputs.tag }}', '          path: candidate',
         '          RELEASE_CANDIDATE_SHA: ${{ github.sha }}',
         '          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}',
-        '          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}',
         '          RELEASE_RUN_ID: ${{ github.run_id }}',
         '          RELEASE_MANIFEST_SHA256: ${{ steps.manifest.outputs.manifest_sha256 }}',
         "        if: steps.promote.outputs.publish_chocolatey == 'true' && vars.CHOCOLATEY_PUBLISH != 'off'"
@@ -50,7 +49,6 @@ foreach ($target in @(
     '          ref: main', '          ref: ${{ inputs.tag }}', '          path: candidate',
     '          RELEASE_CANDIDATE_SHA: ${{ github.sha }}',
     '          RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}',
-    '          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}',
     '      attestations: read',
     '          RELEASE_RUN_ID: ${{ github.run_id }}',
     '          RELEASE_MANIFEST_SHA256: ${{ steps.manifest.outputs.manifest_sha256 }}',
@@ -59,10 +57,33 @@ foreach ($target in @(
     if (Test-ReleasePromotionWorkflow ($releaseWorkflowText.Replace($target, '# removed by contract control'))) { throw 'Promotion workflow accepted a missing requirement.' }
 }
 $testWorkflowText = Get-Content -LiteralPath (Join-Path $repoRoot '.github/workflows/test.yml') -Raw
-foreach ($name in @('Upload portable smoke evidence', 'Upload interactive evidence')) {
+foreach ($name in @('Upload portable smoke evidence')) {
     $step = Get-YamlStepBlock -Content $testWorkflowText -Name $name -Source 'Test workflow'
     if ($step -notmatch '(?m)^          retention-days: 90\r?$') { throw 'Promotion evidence must be retained for 90 days.' }
 }
+# No release requires an interactive run (the maintainer's decision, 2026-11-22): the Release workflow and promotion
+# (release-promote.ps1 and the evidence check it calls) name neither the interactive composite job nor its artifact.
+# The control adds the old lookup back to release.yml.
+function Get-ReleaseInteractiveRequirements([System.Collections.IDictionary] $Files) {
+    $found = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $Files.Keys) {
+        foreach ($name in @('Windows 11 Interactive Composite', 'flagship-interactive-win11')) {
+            if ($Files[$path].IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $found.Add("$path names $name") }
+        }
+    }
+    return , $found.ToArray()
+}
+$releaseNoInteractiveFiles = [ordered]@{
+    '.github/workflows/release.yml' = $releaseWorkflowText
+    'scripts/release-promote.ps1' = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-promote.ps1') -Raw
+    'scripts/release-evidence.ps1' = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-evidence.ps1') -Raw
+}
+$releaseInteractiveFound = Get-ReleaseInteractiveRequirements $releaseNoInteractiveFiles
+if ($releaseInteractiveFound.Count -ne 0) { throw "A release must require no interactive run: $($releaseInteractiveFound -join '; ')." }
+$releaseInteractiveControl = [ordered]@{}
+foreach ($path in $releaseNoInteractiveFiles.Keys) { $releaseInteractiveControl[$path] = $releaseNoInteractiveFiles[$path] }
+$releaseInteractiveControl['.github/workflows/release.yml'] += "`n            `$interactive = @(`$jobs.jobs | Where-Object { `$_.name -eq 'Windows 11 Interactive Composite' -and `$_.conclusion -eq 'success' })`n"
+if ((Get-ReleaseInteractiveRequirements $releaseInteractiveControl).Count -eq 0) { throw 'The no-interactive release check accepted the interactive lookup added back to release.yml.' }
 $promoteText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/release-promote.ps1') -Raw
 if ($promoteText -match '(?m)^\s*& gh release (upload|create)\b|--clobber' -or
     $promoteText -notmatch '(?m)^\s*& gh release edit \$Tag --repo \$Repository --prerelease=false --latest\r?$' -or

@@ -239,8 +239,8 @@ command-finished path fired.
 With delivery enabled it raises a real toast, on the visible desktop even
 when noctty runs on a private one, and the banner can cover or take the
 foreground from a later harness. Run nothing that reads screen pixels or
-needs the foreground while that banner is up; the release evidence job runs
-this leaf last for that reason.
+needs the foreground while that banner is up; the interactive composite job
+runs this leaf last for that reason.
 
 Run with:
 
@@ -310,7 +310,7 @@ with `-Dcustom-shaders=true`, loads a deterministic solid-magenta ShaderToy
 fixture, takes a screenshot of the terminal surface child window (through the
 screenshot gate), and fails unless the dominant sampled surface color is
 magenta. With `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`
-(the release job), `-Rebuild` rebuilds the measurement generation instead, which
+(the interactive composite job), `-Rebuild` rebuilds the measurement generation instead, which
 always carries custom shaders.
 
 Run with:
@@ -330,7 +330,7 @@ animation keeps presenting at the paced rate. The bug it guards against is
 timing-dependent, so one run on a regressed build can still pass.
 It needs an executable built with custom shaders, for example the one
 `interactive-win11-shaders.ps1 -Rebuild` leaves behind, or the measurement
-build in the release job.
+build in the interactive composite job.
 
 Run with:
 
@@ -545,7 +545,7 @@ Contrast is active. High Contrast mutation is opt-in with
 original system setting in `finally`. Before its first screen-pixel check it
 proves that a fresh process presents the Dracula background (two attempts),
 because the accessibility harness turns High Contrast off just before it in the
-release job.
+interactive composite job.
 
 Run with:
 
@@ -1507,8 +1507,9 @@ diagnosis: when they pass, its result and its whole-plan assertions
 `pass`. Naming all six leaves is a full run. `-Work` must be a printable ASCII
 path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
 
-Until the gate switches, the interactive composite remains the release
-evidence; this lane runs beside it.
+No release or check requires the interactive composite (the maintainer's
+decision, 2026-11-22): it stays dispatchable and optional, and this lane runs
+on every pull request.
 
 **Where a GUI check runs.** In the lowest tier that can make its assertion:
 

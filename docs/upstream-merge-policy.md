@@ -220,17 +220,18 @@ When scripts or validation harnesses change, also run:
 pwsh -NoProfile -File test/windows/flagship/Test-VerificationContracts.ps1
 ```
 
-Renderer or input picks also require the interactive Windows 11 composite
-validator, plus the harnesses covering the affected surface (for example
-`interactive-win11-ime-candidate.ps1` for preedit changes and
-`interactive-win11-key-input.ps1` for key-encoding changes):
+Renderer or input picks can also be checked with the interactive Windows 11
+composite validator and the harnesses covering the affected surface (for
+example `interactive-win11-ime-candidate.ps1` for preedit changes and
+`interactive-win11-key-input.ps1` for key-encoding changes). These runs are
+optional: no pick requires a visible or interactive run (the maintainer's
+decision, 2026-11-22), and a multi-agent council review takes their place:
 
 ```powershell
 pwsh -NoProfile -File test/windows/interactive-win11-validate.ps1 -ResetState
 ```
 
-A pick in those areas is not certified until the relevant interactive result is
-recorded in the window's drift report.
+When such a run is made, record its result in the window's drift report.
 
 **The baseline is zero failures, not a pass count.** Every branch adds its own
 tests, so the passing total legitimately differs between windows and proves

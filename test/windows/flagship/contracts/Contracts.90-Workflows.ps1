@@ -2792,36 +2792,6 @@ Invoke-ContractTable -Contracts @(
         Description = 'accessibility evidence timestamp is semantically validated'
     }
     @{
-        File = $accessibilityChecker
-        Pattern = '\$provenance\.runner_name -ne \$result\.environment\.runner_name'
-        Kind = 'Workflow'
-        Description = 'runner provenance is bound to the interactive result'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = '\$provenance\.runner_name -ne \$interactiveJob\[0\]\.runner_name'
-        Kind = 'Workflow'
-        Description = 'runner provenance is bound to the GitHub job'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = '(?ms)gh run download \$runId.*?--repo \$repository.*?\$provenance\.repository -ne \$repository'
-        Kind = 'Workflow'
-        Description = 'accessibility artifact download and provenance validation use the configured repository'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = '\$provenanceRunAttempt -ne \[int\]\$run\.run_attempt'
-        Kind = 'Workflow'
-        Description = 'runner provenance is bound to the GitHub run attempt'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = '\[string\]\$provenance\.user -match .*SYSTEM'
-        Kind = 'Workflow'
-        Description = 'service-account runner provenance is rejected'
-    }
-    @{
         File = $runnerProvenanceChecker
         Pattern = "(?m)^\`$minimumRunnerVersion = \[version\]'2\.327\.1'\s*$"
         Kind = 'Workflow'
@@ -2835,33 +2805,9 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $accessibilityChecker
-        Pattern = "(?m)^\s*\`$minimumRunnerVersion = \[version\]'2\.327\.1'\s*$"
-        Kind = 'Workflow'
-        Description = 'accessibility evidence pins the upload-artifact runner floor'
-    }
-    @{
-        File = $accessibilityChecker
         Pattern = '(?m)^#requires -Version 7\.1\s*$'
         Kind = 'Workflow'
         Description = 'accessibility evidence requires PowerShell 7.1 or newer'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = '\$provenance = Get-Content -LiteralPath \$provenancePaths\[0\]\.FullName -Raw \| ConvertFrom-Json -NoEnumerate'
-        Kind = 'Workflow'
-        Description = 'accessibility evidence preserves the JSON root kind'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = '\$provenance\.GetType\(\) -ne \[System\.Management\.Automation\.PSCustomObject\]'
-        Kind = 'Workflow'
-        Description = 'accessibility evidence requires runner provenance to be a JSON object'
-    }
-    @{
-        File = $accessibilityChecker
-        Pattern = "schema_version -ne 'noctty\.interactive-runner-provenance\.v1'"
-        Kind = 'Workflow'
-        Description = 'accessibility evidence rejects unsupported runner provenance schemas'
     }
     @{
         File = $runnerProvenanceChecker
@@ -2911,12 +2857,6 @@ Invoke-ContractTable -Contracts @(
         Kind = 'Workflow'
         Description = 'interactive evidence rejects outdated runners'
     }
-    @{
-        File = $accessibilityChecker
-        Pattern = '\$provenanceRunnerVersion -lt \$minimumRunnerVersion'
-        Kind = 'Workflow'
-        Description = 'accessibility evidence rejects outdated interactive runners'
-    }
 )
 $objectRoot = ConvertFrom-Json -InputObject '{"value":1}' -NoEnumerate
 $arrayRoot = ConvertFrom-Json -InputObject '[{"value":1}]' -NoEnumerate
@@ -2925,29 +2865,31 @@ if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
     throw 'PowerShell JSON root-kind preservation does not satisfy the evidence contract.'
 }
 
-# Design v7 §2.1 checks 1 and 2 (interactive offload; Opus on #740): the frozen set. Until the visible core's
-# readers switch (offload PRs 2-6), the visible composite, its evidence readers and the workflows that run them stay
-# as they are: (1) each file's canonical-text SHA-256 (Get-CanonicalTextSha256, so CRLF and LF checkouts agree) is
-# pinned here, and changing one is a deliberate re-pin reviewed against the design (release.yml's value is also
-# Contracts.80's $releaseWorkflowSha256); (2) no frozen entry point names NOCTTY_GUI_LAUNCH_POLICY or a
+# Design v7 §2.1 checks 1 and 2 (interactive offload; Opus on #740): the frozen set, the visible composite, the release
+# readers and the workflows that run them: (1) each file's canonical-text SHA-256 (Get-CanonicalTextSha256, so CRLF and
+# LF checkouts agree) is pinned here, and changing one is a deliberate re-pin reviewed against the design (release.yml's
+# value is also Contracts.80's $releaseWorkflowSha256); (2) no frozen entry point names NOCTTY_GUI_LAUNCH_POLICY or a
 # NOCTTY_GUI_HIDDEN_ variable, so none sets the hidden-desktop route's variables or passes a switch named for them.
+# Since the maintainer's decision of 2026-11-22 no release or check requires an interactive run: the release readers
+# are pinned in the form that reads no interactive evidence (ReleasePromotionContracts.ps1 refuses one that names it),
+# and the composite stays dispatchable but optional.
 # Of test.yml, §2.1 freezes only the `windows-interactive` job and the `run_interactive_win11` dispatch input it reads
 # (`path#region` keys, Get-FrozenSetRegion), so an edit elsewhere in test.yml, a Dependabot pin bump or a scheduled
 # job change, needs no re-pin (Opus on #740: the whole-file pin failed every such edit), and neither does another
 # manual input beside it (Sol on #740: the pin covered the whole `workflow_dispatch` block).
 $frozenSetSha256 = [ordered]@{
-    '.github/workflows/test.yml#windows-interactive' = 'c8b16be3241dd4c7d37d45d46b8e56f264c593ffc65c74620730259f3fe65ff2'
+    '.github/workflows/test.yml#windows-interactive' = '44c05e4dac25e44cefaffa5922d191a8674dc4c349af08c18151bb3979adef70'
     '.github/workflows/test.yml#run_interactive_win11' = '8110a2478d5a88e5efbb6abeb16b4da1a44255ff7489b1f18c2e99ef8820750f'
-    '.github/workflows/release.yml' = '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
-    'test/windows/interactive-win11-job.ps1' = 'f18b3783ba14cc9c5c25281662ebe639a753b965cad6404c0712f349c84176cc'
+    '.github/workflows/release.yml' = '8406a9b12a15982f44f1b8a97b42c7f79ba40d902438edb87ddba9031a6dfcbd'
+    'test/windows/interactive-win11-job.ps1' = '8cf5b41cba40803748b193c09a9e19d42b47e5ece2e0262cd2c9f497a2cb0253'
     'test/windows/interactive-win11-validate.ps1' = 'cf24651acd8cf091201fc2f81ad1286f389543502c76124c8d2d08d97d0d4d66'
     'test/windows/flagship/Invoke-InteractiveWin11.ps1' = '189560bc3bc0f67fd26937fd31084176dafe60352703505e26eea5f39459e7ff'
     'test/windows/flagship/scenarios/interactive-win11.json' = '7c0ffbf3a98781a96d2ff0b4e158f0d0aaebd5bb58adfa8fec9418a8766a214a'
-    'scripts/release-evidence.ps1' = 'd978e56b0388ed0597e647645856e67e428a53ecd7bb5a0d660c7ee8bfaab777'
-    'scripts/release-manifest.ps1' = 'fbb3e079169990b20b77fd5737c7aad10473572523f9b3aeb1daddae2e355bd9'
-    'scripts/release-write-manifest.ps1' = '02e8e8c95be91ac55234b97bee212ecf660e44fad9b89586e7648417362b1e41'
-    'scripts/release-promote.ps1' = '95417cd5f4f5b9d2a6c91014a214a9fde56a72dc81def7ced41888db0ea4c256'
-    'scripts/check-accessibility-evidence.ps1' = '6e3c5c9643bd44b040025686771d0be133d9bce7ce884f6dfbecf148820a2ee8'
+    'scripts/release-evidence.ps1' = '1388d6d3f3d68a2665c2fec2f8ec27342f3b77626cfeeb3362683dffb5670998'
+    'scripts/release-manifest.ps1' = 'c28c3af0a2880652ceacccad439e2a989717e6c2ee54327395bf8e231b01e3a7'
+    'scripts/release-write-manifest.ps1' = '2871cce6d6a06bcae5f547726738822847a2247abd200225efe8a2c121e91e78'
+    'scripts/release-promote.ps1' = '3eef9bae7c13f4f04221a46639eeb4398e006da15c6a23ef053126a49c881d80'
+    'scripts/check-accessibility-evidence.ps1' = '22433132e0cd0052f7ad31ba01079a8ad32dc918aa46d122041109d8f10d32e2'
 }
 # The frozen part of a file: the whole text, or for test.yml one job (Get-YamlJobText) or the one dispatch input the
 # job reads: its line under `workflow_dispatch:` `inputs:` and the lines indented below it, never the other inputs.

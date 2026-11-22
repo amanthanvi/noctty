@@ -36,7 +36,7 @@ $releasePreflightStep = Get-YamlStepBlock `
     -Content $normalizedReleasePreflightActionText `
     -Name 'Validate release configuration' `
     -Source $releasePreflightAction
-$releaseInteractiveEvidenceStep = Get-YamlStepBlock `
+$releaseTestRunGateStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Require successful Test workflow for release SHA' `
     -Source $releaseWorkflow
@@ -52,16 +52,16 @@ $releasePreflightActionStepSha256 =
     '5b73f14d716a39ebb15737ae9e3ec7e00645ffa1822355e1b50d3f5cd1c6a8ea'
 $releasePreflightActionSha256 =
     'df0d1ff83a0279bdea87435a84a07c5971d66e1cb4240a28081a97af8ae30c3b'
-$releaseInteractiveEvidenceScriptSha256 =
-    '848819d6d2d0d45d90d467607e050dbd4341605ca2d9a8c72646b0236dad3b87'
-$releaseInteractiveEvidenceStepSha256 =
-    '0ab6aa8ad70b32e4ca4d46cb650a8f865c3e2f2f697d63fe01efaef3b05acc84'
+$releaseTestRunGateScriptSha256 =
+    'f87e78ebd23f021c55aa9717875c06042058abde6abdc4b05f70f18ea61a635f'
+$releaseTestRunGateStepSha256 =
+    '647b60e0e59858a7456ecc50e6d5903c3b68978aa3f18e7bb3ffa572a3c409e9'
 $releasePreflightStepSha256 =
     'd3af932ec3bf2369351ac7c9d70eac3f94ee4de13110f8277e0aa8e85e992fec'
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '86a295b04def1f1546fc7882a0f1ba1fffd225e19b4da0119e10b458f7f69058'
+    '8406a9b12a15982f44f1b8a97b42c7f79ba40d902438edb87ddba9031a6dfcbd'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -209,8 +209,8 @@ $protectedWorkflowSpecs = @(
         ProtectedSteps = @(
             @{
                 Name = 'Require successful Test workflow for release SHA'
-                StepSha256 = $releaseInteractiveEvidenceStepSha256
-                BodySha256 = $releaseInteractiveEvidenceScriptSha256
+                StepSha256 = $releaseTestRunGateStepSha256
+                BodySha256 = $releaseTestRunGateScriptSha256
             },
             @{
                 Name = 'Release preflight'
@@ -297,8 +297,8 @@ $protectedStepEnvelopeSpecs = @(
     [pscustomobject]@{
         Name = 'Require successful Test workflow for release SHA'
         Context = "$releaseWorkflow :: Require successful Test workflow for release SHA"
-        StepText = $releaseInteractiveEvidenceStep
-        ExpectedSha256 = $releaseInteractiveEvidenceStepSha256
+        StepText = $releaseTestRunGateStep
+        ExpectedSha256 = $releaseTestRunGateStepSha256
         Mutations = @(
             @{
                 Label = 'GH_REPOSITORY redirect'
@@ -734,500 +734,42 @@ foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     }
 }
 
-$releaseInteractiveEvidenceScript = Get-YamlLiteralRunScript `
-    -Content $releaseInteractiveEvidenceStep `
+$releaseTestRunGateScript = Get-YamlLiteralRunScript `
+    -Content $releaseTestRunGateStep `
     -Source "$releaseWorkflow :: Require successful Test workflow for release SHA"
-if (-not (Test-ReleaseInteractiveResultSelectionContract `
-    -ScriptText $releaseInteractiveEvidenceScript)) {
-    throw 'Release interactive evidence must select one composite result without arbitrary first-match fallback.'
+# The release gate takes the hosted Test run of the exact SHA. No release requires an interactive run (the maintainer's
+# decision, 2026-11-22). The reviewed body is the invariant (its canonical SHA-256), parsed, with no mutation node and
+# no splat, so a dropped or inverted predicate, a decoy or a forged run fails it.
+if (-not (Test-ReleaseTestRunGateScript `
+    -ScriptText $releaseTestRunGateScript `
+    -ExpectedScriptSha256 $releaseTestRunGateScriptSha256)) {
+    throw 'Release Test-run gate must be the reviewed exact-SHA successful Test run selection.'
 }
-$countGateText = 'if ($resultFiles.Count -ne 1) { continue }'
-$countGateIndex = $releaseInteractiveEvidenceScript.IndexOf(
-    $countGateText,
-    [StringComparison]::Ordinal
-)
-if ($countGateIndex -lt 0) {
-    throw 'Release result-selection count gate mutation target is missing.'
+$testRunSelectionTarget = '$testRun = $matching[0]'
+if (-not $releaseTestRunGateScript.Contains($testRunSelectionTarget)) {
+    throw "Release Test-run gate mutation target is missing: $testRunSelectionTarget"
 }
-$countBeforeFilterScript = $releaseInteractiveEvidenceScript.Remove(
-    $countGateIndex,
-    $countGateText.Length
-)
-$resultFilterIndex = $countBeforeFilterScript.IndexOf(
-    '$resultFiles = @(',
-    [StringComparison]::Ordinal
-)
-if ($resultFilterIndex -lt 0) {
-    throw 'Release result-selection filter mutation target is missing.'
+$invalidTestRunGateMutants = [ordered]@{
+    'forged Test run' =
+        $releaseTestRunGateScript.Replace(
+            $testRunSelectionTarget,
+            "$testRunSelectionTarget`nif (`$true) { `$testRun = [pscustomobject]@{ databaseId = 1 } }"
+        )
+    'Add-Type mutation' =
+        $releaseTestRunGateScript +
+            "`nAdd-Type -TypeDefinition 'public static class EvidenceMutator { public static void Set() {} }'`n[EvidenceMutator]::Set()"
+    'member dispatch mutation' =
+        $releaseTestRunGateScript +
+            "`n[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'"
 }
-$countBeforeFilterScript = $countBeforeFilterScript.Insert(
-    $resultFilterIndex,
-    "$countGateText`n"
-)
-$filterAfterCountScript = @'
-$resultFiles = @(
-    Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse
-)
-if ($resultFiles.Count -ne 1) { continue }
-$resultFiles = @(
-    $resultFiles | Where-Object {
-        try {
-            (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
-        }
-        catch { $false }
-    }
-)
-$resultPath = $resultFiles[0].FullName
-$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-'@
-$noCatchScript = [regex]::Replace(
-    $releaseInteractiveEvidenceScript,
-    '(?ms)try\s*\{\s*(?<predicate>\(Get-Content -LiteralPath \$_\.FullName -Raw \| ConvertFrom-Json\)\.scenario_id -eq ''windows\.interactive-win11\.composite'')\s*\}\s*catch\s*\{\s*\$false\s*\}',
-    '${predicate}'
-)
-$invalidResultSelectionMutants = @{
-    'zero-only count' = $releaseInteractiveEvidenceScript.Replace(
-        '$resultFiles.Count -ne 1',
-        '$resultFiles.Count -eq 0'
-    )
-    'wrong scenario' = $releaseInteractiveEvidenceScript.Replace(
-        'windows.interactive-win11.composite',
-        'windows.interactive-win11.other'
-    )
-    # A disconnected Select-Object statement has no effect on result selection;
-    # the executed fixture below rejects actual non-unique selection behavior.
-    'count before filter' = $countBeforeFilterScript
-    'filter after count' = $filterAfterCountScript
-    'missing catch' = $noCatchScript
-    'fail-open catch' = $releaseInteractiveEvidenceScript.Replace(
-        'catch { $false }',
-        'catch { $true }'
-    )
-    'nested count gate' = $releaseInteractiveEvidenceScript.Replace(
-        'if ($resultFiles.Count -ne 1) { continue }',
-        'if ($false) { if ($resultFiles.Count -ne 1) { continue } }'
-    )
-    'nested result path' = $releaseInteractiveEvidenceScript.Replace(
-        '$resultPath = $resultFiles[0].FullName',
-        'if ($false) { $resultPath = $resultFiles[0].FullName }'
-    )
-    'nested result parse' = $releaseInteractiveEvidenceScript.Replace(
-        '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json',
-        'if ($false) { $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }'
-    )
-}
-foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
-    if (Test-ReleaseInteractiveResultSelectionContract -ScriptText $mutant.Value) {
-        throw "Release result-selection contract accepted mutant: $($mutant.Key)"
-    }
-}
-if (-not (Test-ReleaseInteractiveSuccessPredicates `
-    -ScriptText $releaseInteractiveEvidenceScript `
-    -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256)) {
-    throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
-}
-$runsSourceTarget = '$runs = @($runsJson | ConvertFrom-Json)'
-$otherJsonSourceScript = $releaseInteractiveEvidenceScript.Replace(
-    $runsSourceTarget,
-    '$runs = @($otherJson | ConvertFrom-Json)'
-)
-$matchingSourceTarget = '$matching = @($runs | Where-Object {'
-$otherRunsSourceScript = $releaseInteractiveEvidenceScript.Replace(
-    $matchingSourceTarget,
-    '$matching = @($otherRuns | Where-Object {'
-)
-$matchingCountTarget = 'if ($matching.Count -eq 0) {'
-$shaAssignmentTarget = '$sha = (git rev-parse HEAD).Trim()'
-$resultAssignmentTarget =
-    '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
-$artifactFloorTarget =
-    'if (@($result.artifacts).Count -eq 0) { continue }'
-$hashAcceptanceTarget = 'if ($result.status -eq ''pass'' -and'
-$evidenceGuardTarget = 'if (-not $evidenceRun) {'
-$resultDirAssignmentTarget =
-    '$resultDir = Split-Path -Parent $resultPath'
-$resultDirJoinTarget =
-    'Join-Path $resultDir ([string]$artifact.path)'
-$evidenceWriteTarget =
-    'Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."'
-$missingMetadataGuardTarget =
-    'if (-not $artifact.sha256 -or -not $artifact.path) {'
-$containmentGuardTarget =
-    'if (-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or' +
-        "`n" +
-        '        -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {'
-$hashMismatchGuardTarget =
-    'if ($actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()) {'
-if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
-    $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript -or
-    -not $releaseInteractiveEvidenceScript.Contains($matchingCountTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($shaAssignmentTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($resultAssignmentTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($artifactFloorTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($hashAcceptanceTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($evidenceGuardTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($resultDirAssignmentTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($resultDirJoinTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($evidenceWriteTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($missingMetadataGuardTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($containmentGuardTarget) -or
-    -not $releaseInteractiveEvidenceScript.Contains($hashMismatchGuardTarget)) {
-    throw 'Release success-predicate source-binding mutation target is missing.'
-}
-$addTypeEvidenceMutation =
-    "Add-Type -TypeDefinition 'public static class EvidenceMutator { public static void Set() {} }'`n[EvidenceMutator]::Set()"
-$memberDispatchEvidenceMutation =
-    "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'"
-$invalidSuccessSourceMutants = @{
-    'runs JSON source substitution' = $otherJsonSourceScript
-    'runs JSON source comment decoy' =
-        $otherJsonSourceScript + "`n# $runsSourceTarget"
-    'runs JSON source dead-code decoy' =
-        $otherJsonSourceScript +
-            "`n" +
-            'if ($false) { $runs = @($runsJson | ConvertFrom-Json) }'
-    'matching source substitution' = $otherRunsSourceScript
-    'matching source comment decoy' =
-        $otherRunsSourceScript + "`n# $matchingSourceTarget"
-    'matching source dead-code decoy' =
-        $otherRunsSourceScript +
-            "`n" +
-            'if ($false) { $matching = @($runs | Where-Object { $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success" }) }'
-    'live nested runs JSON reassignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "if (`$true) { `$runsJson = `$otherJson }`n$runsSourceTarget"
-        )
-    'dead nested runs JSON reassignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "if (`$false) { `$runsJson = `$otherJson }`n$runsSourceTarget"
-        )
-    'live nested runs reassignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "$runsSourceTarget`nif (`$true) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
-        )
-    'dead nested runs reassignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "$runsSourceTarget`nif (`$false) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
-        )
-    'live nested matching reassignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "if (`$true) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
-        )
-    'dead nested matching reassignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "if (`$false) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
-        )
-    'indexed runs JSON mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "`$runsJson[0] = 'x'`n$runsSourceTarget"
-        )
-    'indexed runs mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "$runsSourceTarget`n`$runs[0] = `$otherRun"
-        )
-    'indexed matching mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$matching[0] = `$otherRun`n$matchingCountTarget"
-        )
-    'runs method mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "$runsSourceTarget`n`$runs.Clear()"
-        )
-    'matching member decoy' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$null = `$matching.Count`n$matchingCountTarget"
-        )
-    'runs JSON unexpected read' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "`$null = `$runsJson`n$runsSourceTarget"
-        )
-    'Set-Variable runs mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "$runsSourceTarget`nSet-Variable -Name runs -Value @(`$otherRun)"
-        )
-    'SessionState PSVariable runs mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $runsSourceTarget,
-            "$runsSourceTarget`n`$ExecutionContext.SessionState.PSVariable.Set('runs', @(`$otherRun))"
-        )
-    'qualified Set-Variable mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nMicrosoft.PowerShell.Utility\Set-Variable -Name runs -Value @(`$otherRun)"
-    'Set-Variable alias mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nsv -Name runs -Value @(`$otherRun)"
-    'Set-Variable set alias mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nset -Name runs -Value @(`$otherRun)"
-    'New-Variable mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nNew-Variable -Name runs -Value @(`$otherRun)"
-    'New-Variable alias mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nnv -Name runs -Value @(`$otherRun)"
-    'Remove-Variable mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nRemove-Variable -Name runs"
-    'Remove-Variable alias mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nrv -Name runs"
-    'Clear-Variable mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nClear-Variable -Name runs"
-    'Clear-Variable alias mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`nclv -Name runs"
-    'Invoke-Expression mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`niex '`$runs = @(`$otherRun)'"
-    'ScriptBlock Create mutation' =
-        $releaseInteractiveEvidenceScript +
-            "`n[ScriptBlock]::Create('`$runs = @(`$otherRun)').Invoke()"
-    'dynamic Set-Variable call mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$mutator = 'Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
-        )
-    'Get-Command call mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "& (Get-Command Set-Variable) -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
-        )
-    'module-qualified stored command mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$mutator = 'Microsoft.PowerShell.Utility\Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
-        )
-    'static dot-source mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            ". ./scripts/replace-release-evidence.ps1`n$matchingCountTarget"
-        )
-    'static call-operator mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "& Write-Output harmless`n$matchingCountTarget"
-        )
-    'stored reflection mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$scriptBlockType = {}.GetType()`n`$createMethod = `$scriptBlockType.GetMethod('Create', [type[]]@([string]))`n`$payload = `$createMethod.Invoke(`$null, @('Set-Variable -Scope 1 -Name matching -Value @()'))`n`$payload.Invoke()`n$matchingCountTarget"
-        )
-    'DefaultRunspace state proxy mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('matching', @(`$otherRun))`n$matchingCountTarget"
-        )
-    'Tee-Object variable mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) | Tee-Object -Variable matching | Out-Null`n$matchingCountTarget"
-        )
-    'OutVariable mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutVariable matching | Out-Null`n$matchingCountTarget"
-        )
-    'OutVariable prefix mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutV matching | Out-Null`n$matchingCountTarget"
-        )
-    'PipelineVariable mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineVariable matching | Out-Null`n$matchingCountTarget"
-        )
-    'PipelineVariable prefix mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineV matching | Out-Null`n$matchingCountTarget"
-        )
-    'ErrorVariable mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "Write-Error forged -ErrorVariable matching -ErrorAction SilentlyContinue`n$matchingCountTarget"
-        )
-    'PSObject member dispatch mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name matching -Value @() } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$matchingCountTarget"
-        )
-    'Add-Type static method mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            $addTypeEvidenceMutation + "`n" + $matchingCountTarget
-        )
-    'Assembly Load mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$matchingCountTarget"
-        )
-    'ForEach-Object MemberName dispatch mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            $memberDispatchEvidenceMutation + "`n" + $matchingCountTarget
-        )
-    'PSCmdlet session-state mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "function Invoke-EvidenceMutation {`n    [CmdletBinding()]`n    param()`n    `$PSCmdlet.SessionState.PSVariable.Set('script:matching', @())`n}`nInvoke-EvidenceMutation`n$matchingCountTarget"
-        )
-    'splatted OutVariable mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$writeParams = @{ OutVariable = 'matching' }`nWrite-Output ([pscustomobject]@{ databaseId = 4242 }) @writeParams`n$matchingCountTarget"
-        )
-    'stored provider path Set-Item mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$providerPath = 'variable:matching'`nSet-Item -Path `$providerPath -Value @(`$otherRun)`n$matchingCountTarget"
-        )
-    'stored provider path Get-Item access' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Item -Path `$providerPath`n$matchingCountTarget"
-        )
-    'Clear-Item alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "cli -Path variable:matching`n$matchingCountTarget"
-        )
-    'Remove-Item alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "ri -Path variable:matching`n$matchingCountTarget"
-        )
-    'Copy-Item alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "cpi -Path variable:matching -Destination variable:other`n$matchingCountTarget"
-        )
-    'Move-Item alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "mv -Path variable:matching -Destination variable:other`n$matchingCountTarget"
-        )
-    'Rename-Item alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "rni -Path variable:matching -NewName other`n$matchingCountTarget"
-        )
-    'ItemProperty alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "sp -Path variable:matching -Name Value -Value @(`$otherRun)`n$matchingCountTarget"
-        )
-    'Content alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "sc -Path variable:matching -Value 'forged'`n$matchingCountTarget"
-        )
-    'extra New-Item alias mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "ni -Path variable:matching -Value @(`$otherRun) -Force`n$matchingCountTarget"
-        )
-    'module-qualified New-Item stored provider path' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$providerPath = 'variable:matching'`nMicrosoft.PowerShell.Management\New-Item -Path `$providerPath -Value @(`$otherRun) -Force`n$matchingCountTarget"
-        )
-    'Get-ChildItem alias stored provider mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$providerPath = 'variable:matching'`n`$providerItem = gci -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
-        )
-    'Get-Content stored provider mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Content -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
-        )
-    'wrapped ExecutionContext mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $matchingCountTarget,
-            "`$ec = @(`$ExecutionContext)[0]`n`$ec.SessionState.PSVariable.Set('matching', @(`$otherRun))`n$matchingCountTarget"
-        )
-    'count-preserving evidenceRun ref substitution' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $evidenceWriteTarget,
-            "`$evidenceRunRef = [ref]`$evidenceRun`nWrite-Host `"Release SHA `$sha is covered by an interactive Test run.`""
-        )
-    'count-preserving resultDir ref substitution' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $resultDirAssignmentTarget,
-            "$resultDirAssignmentTarget`n`$resultDirRef = [ref]`$resultDir"
-        ).Replace(
-            $resultDirJoinTarget,
-            'Join-Path $artifactRoot ([string]$artifact.path)'
-        )
-    'missing metadata guard neutralized' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $missingMetadataGuardTarget,
-            'if ($false) {'
-        )
-    'containment guard neutralized' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $containmentGuardTarget,
-            'if ($false) {'
-        )
-    'hash mismatch guard neutralized' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $hashMismatchGuardTarget,
-            'if ($false) {'
-        )
-    'forged result assignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $resultAssignmentTarget,
-            "$resultAssignmentTarget`nif (`$true) { `$result = [pscustomobject]@{ status = 'pass'; implementation_commit = `$sha; workflow_run_id = `$run.databaseId; artifacts = @() } }"
-        )
-    'forged SHA assignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $shaAssignmentTarget,
-            "$shaAssignmentTarget`nif (`$true) { `$sha = 'forged' }"
-        )
-    'forged hashes-bound assignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $hashAcceptanceTarget,
-            "if (`$true) { `$hashesBound = `$true }`n$hashAcceptanceTarget"
-        )
-    'forged evidence-run assignment' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $evidenceGuardTarget,
-            "if (`$true) { `$evidenceRun = [pscustomobject]@{ databaseId = 1 } }`n$evidenceGuardTarget"
-        )
-    'result member mutation' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $resultAssignmentTarget,
-            "$resultAssignmentTarget`n`$result.status = 'pass'"
-        )
-    'vacuous artifact floor' =
-        $releaseInteractiveEvidenceScript.Replace(
-            $artifactFloorTarget,
-            'if (@($result.artifacts).Count -lt 0) { continue }'
-        )
-}
-foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
-    if (Test-ReleaseInteractiveSuccessPredicates `
+foreach ($mutant in $invalidTestRunGateMutants.GetEnumerator()) {
+    if (Test-ReleaseTestRunGateScript `
         -ScriptText $mutant.Value `
-        -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
-        throw "Release success-predicate contract accepted source mutant: $($mutant.Key)"
+        -ExpectedScriptSha256 $releaseTestRunGateScriptSha256) {
+        throw "Release Test-run gate contract accepted mutant: $($mutant.Key)"
     }
 }
-$successPredicateMutationSpecs = @(
+$testRunPredicateMutationSpecs = @(
     [pscustomobject]@{
         Label = 'GitHub success filter'
         Active = '--status success'
@@ -1255,49 +797,18 @@ $successPredicateMutationSpecs = @(
         Removed = '$true'
         Inverted = '$_.conclusion -ne "success"'
         Dead = 'if ($false) { $_.conclusion -eq "success" }'
-    },
-    [pscustomobject]@{
-        Label = 'passing result'
-        Active = '$result.status -eq ''pass'''
-        Removed = '$true'
-        Inverted = '$result.status -ne ''pass'''
-        Dead = 'if ($false) { $result.status -eq ''pass'' }'
-    },
-    [pscustomobject]@{
-        Label = 'evidence implementation SHA'
-        Active = '$result.implementation_commit -eq $sha'
-        Removed = '$true'
-        Inverted = '$result.implementation_commit -ne $sha'
-        Dead = 'if ($false) { $result.implementation_commit -eq $sha }'
-    },
-    [pscustomobject]@{
-        Label = 'evidence workflow run'
-        Active =
-            '[string]$result.workflow_run_id -eq [string]$run.databaseId'
-        Removed = '$true'
-        Inverted =
-            '[string]$result.workflow_run_id -ne [string]$run.databaseId'
-        Dead =
-            'if ($false) { [string]$result.workflow_run_id -eq [string]$run.databaseId }'
-    },
-    [pscustomobject]@{
-        Label = 'evidence artifact hashes'
-        Active = '$hashesBound'
-        Removed = '$true'
-        Inverted = '-not $hashesBound'
-        Dead = 'if ($false) { $hashesBound }'
     }
 )
-foreach ($spec in $successPredicateMutationSpecs) {
-    $targetIndex = $releaseInteractiveEvidenceScript.LastIndexOf(
+foreach ($spec in $testRunPredicateMutationSpecs) {
+    $targetIndex = $releaseTestRunGateScript.LastIndexOf(
         $spec.Active,
         [StringComparison]::Ordinal
     )
     if ($targetIndex -lt 0) {
-        throw "Release success-predicate mutation target is missing: $($spec.Label)"
+        throw "Release Test-run predicate mutation target is missing: $($spec.Label)"
     }
-    $prefix = $releaseInteractiveEvidenceScript.Substring(0, $targetIndex)
-    $suffix = $releaseInteractiveEvidenceScript.Substring(
+    $prefix = $releaseTestRunGateScript.Substring(0, $targetIndex)
+    $suffix = $releaseTestRunGateScript.Substring(
         $targetIndex + $spec.Active.Length
     )
     $removedScript = $prefix + $spec.Removed + $suffix
@@ -1317,10 +828,10 @@ foreach ($spec in $successPredicateMutationSpecs) {
         }
     )
     foreach ($mutant in $mutants) {
-        if (Test-ReleaseInteractiveSuccessPredicates `
+        if (Test-ReleaseTestRunGateScript `
             -ScriptText $mutant.Script `
-            -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
-            throw "Release success-predicate contract accepted mutant: $($mutant.Label)"
+            -ExpectedScriptSha256 $releaseTestRunGateScriptSha256) {
+            throw "Release Test-run predicate contract accepted mutant: $($mutant.Label)"
         }
     }
 }
@@ -1328,11 +839,11 @@ Invoke-ContractTable -Contracts @(
     @{
         File = "$releaseWorkflow :: Require successful Test workflow for release SHA"
         Content = {
-            $releaseInteractiveEvidenceStep
+            $releaseTestRunGateStep
         }
-        Pattern = '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence'
+        Pattern = '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?--status success.*?\$_\.headSha -eq \$sha -and \$_\.status -eq "completed" -and \$_\.conclusion -eq "success".*?has no completed successful Test workflow run.*?\$testRun = \$matching\[0\].*?"test_run_id=\$\(\$testRun\.databaseId\)"'
         Kind = 'Text'
-        Description = 'release remains gated on successful exact-SHA hash-bound interactive evidence'
+        Description = 'release is gated on a completed successful Test run of the exact SHA, and requires no interactive run'
     }
     @{
         File = "$releaseWorkflow :: Release preflight"
@@ -1448,7 +959,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '3c976387b3412be90583c1d84d681cd9c7948f9a89d326203e3ab8ed94698cb5'
+            '164920dfc7f5bd657c20a8f9c2d6973ec8e496f540b133d917054c3dd465a4a9'
         CriticalStatement = '$existing = Get-ReleaseByTag -Repository $Repository -Tag $Tag -AllowMissing'
     }
     [pscustomobject] @{

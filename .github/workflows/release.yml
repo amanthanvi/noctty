@@ -20,9 +20,6 @@ on:
       test_run_id:
         description: Promote only - successful Test run on the candidate
         type: string
-      evidence_run_id:
-        description: Promote only - successful interactive evidence run on the candidate
-        type: string
       release_run_id:
         description: Promote only - original build run (success, or failure after successful publication)
         type: string
@@ -128,68 +125,12 @@ jobs:
           if ($matching.Count -eq 0) {
             throw "Release SHA $sha has no completed successful Test workflow run."
           }
-          $evidenceRun = $null
-          foreach ($run in $matching) {
-            $jobs = gh api "repos/$env:GH_REPOSITORY/actions/runs/$($run.databaseId)/jobs?per_page=100" |
-              ConvertFrom-Json
-            $interactive = @($jobs.jobs | Where-Object {
-              $_.name -eq 'Windows 11 Interactive Composite' -and $_.conclusion -eq 'success'
-            })
-            if ($interactive.Count -eq 0) { continue }
-
-            $artifactName = "flagship-interactive-win11-$($run.databaseId)"
-            $artifactRoot = Join-Path $env:RUNNER_TEMP "flagship-release-evidence-$($run.databaseId)"
-            New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
-            gh run download $run.databaseId --repo $env:GH_REPOSITORY --name $artifactName --dir $artifactRoot
-            if ($LASTEXITCODE -ne 0) { continue }
-            $resultFiles = @(
-              Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse |
-                Where-Object {
-                  try {
-                    (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
-                  }
-                  catch { $false }
-                }
-            )
-            if ($resultFiles.Count -ne 1) { continue }
-            $resultPath = $resultFiles[0].FullName
-            $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-            if (@($result.artifacts).Count -eq 0) { continue }
-            $artifactRootFull = [IO.Path]::GetFullPath($artifactRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-            $resultDir = Split-Path -Parent $resultPath
-            $hashesBound = $true
-            foreach ($artifact in @($result.artifacts)) {
-              if (-not $artifact.sha256 -or -not $artifact.path) {
-                $hashesBound = $false
-                break
-              }
-              $artifactPath = [IO.Path]::GetFullPath((Join-Path $resultDir ([string]$artifact.path)))
-              if (-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or
-                  -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
-                $hashesBound = $false
-                break
-              }
-              $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
-              if ($actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()) {
-                $hashesBound = $false
-                break
-              }
-            }
-            if ($result.status -eq 'pass' -and
-                $result.implementation_commit -eq $sha -and
-                [string]$result.workflow_run_id -eq [string]$run.databaseId -and
-                $hashesBound) {
-              $evidenceRun = $run
-              break
-            }
-          }
-          if (-not $evidenceRun) {
-            throw "Release SHA $sha has no successful interactive Win11 Test run with exact-SHA, hash-bound evidence. Dispatch Test with run_interactive_win11=true first."
-          }
-          Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."
+          # No release requires an interactive run (the maintainer's decision, 2026-11-22): the hosted Test run of the
+          # exact SHA is the evidence, and promotion checks its portable smoke artifact.
+          $testRun = $matching[0]
+          Write-Host "Release SHA $sha is covered by Test run $($testRun.databaseId)."
           if ($env:GITHUB_OUTPUT) {
-            "test_run_id=$($evidenceRun.databaseId)" >> $env:GITHUB_OUTPUT
-            "evidence_run_id=$($evidenceRun.databaseId)" >> $env:GITHUB_OUTPUT
+            "test_run_id=$($testRun.databaseId)" >> $env:GITHUB_OUTPUT
           }
 
       - name: Resolve release metadata
@@ -392,14 +333,13 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           MANIFEST_CANDIDATE_SHA: ${{ github.sha }}
           RELEASE_TEST_RUN_ID: ${{ steps.evidence.outputs.test_run_id }}
-          RELEASE_EVIDENCE_RUN_ID: ${{ steps.evidence.outputs.evidence_run_id }}
           RELEASE_RUN_ID: ${{ github.run_id }}
         shell: pwsh
         run: |
           ./scripts/release-write-manifest.ps1 `
             -Tag $env:RELEASE_TAG -Version $env:RELEASE_VERSION `
             -CandidateSha $env:MANIFEST_CANDIDATE_SHA `
-            -TestRunId $env:RELEASE_TEST_RUN_ID -EvidenceRunId $env:RELEASE_EVIDENCE_RUN_ID `
+            -TestRunId $env:RELEASE_TEST_RUN_ID `
             -ReleaseRunId $env:RELEASE_RUN_ID
 
       - name: Publish GitHub Release
@@ -550,13 +490,12 @@ jobs:
           PROMOTE_TAG: ${{ inputs.tag }}
           PROMOTE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           PROMOTE_TEST_RUN_ID: ${{ inputs.test_run_id }}
-          PROMOTE_EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
           PROMOTE_RELEASE_RUN_ID: ${{ inputs.release_run_id }}
           PROMOTE_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
         run: >
           ./scripts/release-promote.ps1
           -Tag $env:PROMOTE_TAG -CandidateSha $env:PROMOTE_CANDIDATE_SHA
-          -TestRunId $env:PROMOTE_TEST_RUN_ID -EvidenceRunId $env:PROMOTE_EVIDENCE_RUN_ID
+          -TestRunId $env:PROMOTE_TEST_RUN_ID
           -ReleaseRunId $env:PROMOTE_RELEASE_RUN_ID -ManifestSha256 $env:PROMOTE_MANIFEST_SHA256
           -CandidateDirectory (Join-Path $PWD 'candidate')
 

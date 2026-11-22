@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param()
 
-# The Test workflow's windows-interactive job, the release evidence: the
+# The Test workflow's windows-interactive job, an optional dispatch that no
+# release or check requires (the maintainer's decision, 2026-11-22): the
 # composite, then the standalone leaves. Every launch in the job runs the
 # measure-AUMID build the composite makes (#492), because the Shell keeps a
 # jump list per AUMID in the real profile, which a redirected APPDATA does not

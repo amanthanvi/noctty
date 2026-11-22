@@ -299,22 +299,11 @@ Recommended order:
 2. Configure or rotate the `release` environment signing secrets.
 3. Run the **Release Readiness** workflow with the target plain semver
    version, for example `1.3.107`.
-4. Produce interactive evidence for the release SHA: register the
-   self-hosted interactive runner ephemerally, then dispatch the **Test**
-   workflow with `run_interactive_win11=true`. The interactive job runs
-   only on this opted-in dispatch, and the **Release** workflow refuses
-   to publish without its hash-bound evidence at the exact release SHA.
-   The job uses the visible desktop for about 20 to 25 minutes (60 at most)
-   and reads screen pixels, so a window or notification banner over the
-   windows it tests can fail the run. Before dispatching, turn on Do Not
-   Disturb, close any open shell flyout, and minimize every other window,
-   your own noctty windows included. Then leave the machine alone until the
-   job finishes.
-5. After readiness passes, either:
+4. After readiness passes, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>` and
      `prerelease=false`.
-6. Confirm the workflow published artifacts for both x64 and ARM64:
+5. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
    - `noctty-<version>-windows-x64-portable.manifest.ps1`
@@ -323,8 +312,8 @@ Recommended order:
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
-7. Confirm build provenance for the eleven non-icon assets.
-8. Confirm follow-on publishes:
+6. Confirm build provenance for the eleven non-icon assets.
+7. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
    - Chocolatey package push (the step is skipped while the repository
@@ -334,6 +323,19 @@ A release does not require a manual Windows 10 pass. The
 [Windows 10 manual checklist](docs/windows10-release-checklist.md) is an
 optional pass for a change that needs Windows 10 evidence, not a release step.
 The scheduled **Windows 10 branches** workflow is a non-required check.
+
+A release does not require an interactive or visible-desktop run either (the
+maintainer's decision, 2026-11-22). The **Release** workflow gates on a
+completed, successful **Test** run of the exact release SHA, which the push to
+`main` gives, and promotion reads no interactive evidence; multi-agent council
+review takes the place of a visible run. The interactive composite stays an
+optional dispatch, started only on the maintainer's explicit go: register the
+self-hosted interactive runner ephemerally, then dispatch **Test** with
+`run_interactive_win11=true`. It uses the visible desktop for about 20 to 25
+minutes (60 at most) and reads screen pixels, so a window or notification banner
+over the windows it tests can fail the run. Before dispatching, turn on Do Not
+Disturb, close any open shell flyout, and minimize every other window, your own
+noctty windows included. Then leave the machine alone until the job finishes.
 
 Build mode creates a draft targeting the accepted candidate, uploads each asset
 with at most three attempts, checks every uploaded digest against
@@ -348,7 +350,7 @@ For a soaked prerelease, land the stable-copy update to README and the site on
 `main` first, then dispatch **Release** from `main` with `mode=promote`:
 
 ```powershell
-gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=promote -f tag=<tag> -f candidate_sha=<peeled-sha> -f test_run_id=<test-run> -f evidence_run_id=<interactive-run> -f release_run_id=<original-build-run> -f manifest_sha256=<summary-sha256>
+gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=promote -f tag=<tag> -f candidate_sha=<peeled-sha> -f test_run_id=<test-run> -f release_run_id=<original-build-run> -f manifest_sha256=<summary-sha256>
 ```
 
 Promotion runs main's scripts, checks out the candidate for its pinned data and
@@ -428,7 +430,8 @@ gh workflow run release.yml --repo amanthanvi/noctty --ref main -f mode=build -f
 ```
 
 This is manual draft recovery only, never automatic deletion or promotion.
-It creates a new run/manifest and requires renewed evidence and a new soak.
+It creates a new run/manifest and requires a successful Test run of the new
+commit and a new soak.
 Every published release and its tag must be preserved.
 
 `LegacyReleaseWithoutManifest` identifies any published release from
@@ -448,13 +451,14 @@ for channel preflight. Local metadata generation also works under an outer
 three `*_PUBLISH=off` switches compare case-insensitively in build, promote,
 preflight and direct publisher scripts.
 
-Test evidence is retained for 90 days. `EvidenceExpired` identifies the run,
-artifact and expiry time. Dispatch fresh exact-candidate evidence, then pass
-the new Test/evidence run IDs to promote, retaining the original Release run
-ID and manifest digest:
+Test evidence (the portable smoke artifact) is retained for 90 days.
+`EvidenceExpired` identifies the run, artifact and expiry time. Dispatch a
+fresh Test run on the candidate tag, then pass its run ID as `test_run_id` to
+promote, retaining the original Release run ID and manifest digest. No
+interactive run is needed:
 
 ```powershell
-gh workflow run test.yml --repo amanthanvi/noctty --ref <tag> -f run_interactive_win11=true
+gh workflow run test.yml --repo amanthanvi/noctty --ref <tag>
 ```
 
 For read-only verification of historical v1.3.124, pass `-AllowPrerelease`

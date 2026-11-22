@@ -115,7 +115,7 @@ foreach ($asset in $assets) {
 $assertInputs = @{
     Path = $manifestPath; ExpectedSha256 = $manifestDigest; ArtifactRoot = $ArtifactRoot
     DownloadDirectory = $primary; Tag = $Tag; CandidateSha = $CandidateSha
-    TestRunId = [string]$manifest.testRunId; EvidenceRunId = [string]$manifest.evidenceRunId; ReleaseRunId = [string]$manifest.releaseRunId
+    TestRunId = [string]$manifest.testRunId; ReleaseRunId = [string]$manifest.releaseRunId
 }
 $state = Invoke-ReleaseGhJson @('api', "repos/$Repository/releases/$releaseId")
 [void](Assert-ReleaseManifest @assertInputs -Release $state)

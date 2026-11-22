@@ -39,13 +39,14 @@ function Invoke-ReleaseGhJson {
 function Assert-ReleaseEvidence {
     param(
         [string] $Repository, [string] $Tag, [string] $CandidateSha,
-        [string] $TestRunId, [string] $EvidenceRunId, [string] $ReleaseRunId,
+        [string] $TestRunId, [string] $ReleaseRunId,
         [string] $WorkDirectory
     )
     $resumeFrom = 0
+    # The hosted Test run of the candidate (its portable smoke artifact) and the Release run. No release requires an
+    # interactive run (the maintainer's decision, 2026-11-22), so none is read here.
     foreach ($spec in @(
         @{ Id = $TestRunId; Workflow = 'test.yml'; Artifact = "flagship-portable-x64-$TestRunId" },
-        @{ Id = $EvidenceRunId; Workflow = 'test.yml'; Artifact = "flagship-interactive-win11-$EvidenceRunId" },
         @{ Id = $ReleaseRunId; Workflow = 'release.yml'; Artifact = $null }
     )) {
         $run = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)")
@@ -103,38 +104,13 @@ function Assert-ReleaseEvidence {
             $artifact = @($records.artifacts | Where-Object { $_.name -ceq $spec.Artifact })
             if ($artifact.Count -ne 1) { throw "EvidenceMissing: run $($spec.Id), artifact $($spec.Artifact)." }
             if ($artifact[0].expired -or [datetimeoffset]$artifact[0].expires_at -le [datetimeoffset]::UtcNow) {
-                $recovery = "gh workflow run test.yml --repo $Repository --ref $Tag -f run_interactive_win11=true"
+                $recovery = "gh workflow run test.yml --repo $Repository --ref $Tag"
                 $expiresAt = ([datetimeoffset]$artifact[0].expires_at).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'")
                 throw "EvidenceExpired: run $($spec.Id), artifact $($spec.Artifact), expires_at $expiresAt. Recovery: $recovery"
             }
         }
     }
-    $jobs = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$EvidenceRunId/jobs?per_page=100")
-    if ($jobs.total_count -gt @($jobs.jobs).Count -or @($jobs.jobs | Where-Object {
-        $_.name -ceq 'Windows 11 Interactive Composite' -and $_.status -ceq 'completed' -and $_.conclusion -ceq 'success'
-    }).Count -ne 1) { throw 'EvidenceJobInvalid: named interactive job is not successful.' }
-    $root = Join-Path $WorkDirectory "evidence-$EvidenceRunId"
-    [void][IO.Directory]::CreateDirectory($root)
-    & gh run download $EvidenceRunId --repo $Repository --name "flagship-interactive-win11-$EvidenceRunId" --dir $root
-    if ($LASTEXITCODE -ne 0) { throw 'EvidenceDownloadFailed: fresh artifact could not be downloaded.' }
-    $results = @(Get-ChildItem -LiteralPath $root -Filter result.json -File -Recurse | Where-Object {
-        (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -ceq 'windows.interactive-win11.composite'
-    })
-    if ($results.Count -ne 1) { throw 'EvidenceInvalid: expected exactly one composite result.' }
-    $result = Get-Content -LiteralPath $results[0].FullName -Raw | ConvertFrom-Json
-    if ($result.status -cne 'pass' -or $result.implementation_commit -cne $CandidateSha -or
-        [string]$result.workflow_run_id -cne $EvidenceRunId -or @($result.artifacts).Count -eq 0) {
-        throw 'EvidenceInvalid: composite result is not a candidate-bound pass.'
-    }
-    $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    foreach ($artifact in @($result.artifacts)) {
-        if (-not $artifact.path -or $artifact.sha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'EvidenceHashMismatch: incomplete artifact record.' }
-        $path = [IO.Path]::GetFullPath((Join-Path $results[0].DirectoryName ([string]$artifact.path)))
-        if (-not $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
-            -not (Test-Path -LiteralPath $path -PathType Leaf) -or
-            (Get-FileSha256Lower $path) -cne $artifact.sha256) { throw 'EvidenceHashMismatch: interactive artifact is not hash-bound.' }
-    }
-    Write-Host "Evidence: PASS (Test $TestRunId, interactive $EvidenceRunId, Release $ReleaseRunId)."
+    Write-Host "Evidence: PASS (Test $TestRunId, Release $ReleaseRunId)."
     # Successful original builds and ordinary promote retries start at verification.
     if ($null -eq $resumeFrom) { $resumeFrom = 0 }
     return [int]$resumeFrom

@@ -52,9 +52,10 @@ response and mutation.
   suffixes. Publisher outcome markers distinguish completion from credential skips;
   missing old markers conservatively resume. Wrong attempt SHA and no successful publish refuse resume.
 - Recorded historical Test/job metadata is projected to the consumed fields.
-  Downloaded interactive evidence is a small, locally generated hash-bound
-  object; payload/evidence tamper and identity cases deliberately violate those
-  records. Fixed future expiry timestamps and renewed run IDs are synthetic.
+  The recorded run also lists an interactive job and artifact; promotion reads
+  neither since 2026-11-22. Payload tamper and identity cases deliberately
+  violate those records. Fixed future expiry timestamps and renewed run IDs are
+  synthetic.
   Release artifact records are empty because no release artifact is consumed.
 
 ## Publishers and remaining boundaries
