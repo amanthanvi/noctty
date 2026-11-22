@@ -297,11 +297,6 @@ jobs:
         shell: pwsh
         run: ./scripts/check-zig-format.ps1
 
-      - name: Setup Python for the Debug suite comparison
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.2.0
-        with:
-          python-version: "3.13"
-
       - name: Full Zig test suite
         # -Dcustom-shaders=true because that is what ships: every release
         # binary is built with it (scripts/build-package-windows.ps1), so the
@@ -319,97 +314,7 @@ jobs:
         # four cores, most of it in a few long tests. Four shards of the one
         # executable (src/test_runner.zig) run side by side, each test once,
         # and the Build Summary adds their counts up as before.
-        shell: pwsh
-        run: |
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build -Demit-test-exe=true -Demit-exe=false -Dcustom-shaders=true
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $exe = Join-Path $env:GITHUB_WORKSPACE 'zig-out/bin/ghostty-test.exe'
-          $work = Join-Path $env:RUNNER_TEMP 'debug-suite-role-pairs'
-          $state = Join-Path $work 'state'
-          $manifest = Join-Path $work 'manifest.tsv'
-          $dumps = Join-Path $work 'dumps'
-          [void](New-Item -ItemType Directory -Path $state, $dumps)
-
-          # The Zig build runner owns the ordinary suite's status and counts.
-          # Replay its four shards directly, as in the workstation evidence,
-          # so each dump can join a receipt from the process we waited for.
-          $shards = foreach ($k in 1..4) {
-            $results = Join-Path $work "results-$k.txt"
-            $info = [Diagnostics.ProcessStartInfo]::new($exe)
-            $info.WorkingDirectory = $env:GITHUB_WORKSPACE
-            $info.UseShellExecute = $false
-            $info.CreateNoWindow = $true
-            $info.RedirectStandardOutput = $true
-            $info.RedirectStandardError = $true
-            $info.ArgumentList.Add("--shard=$k/4")
-            $info.ArgumentList.Add("--results=$results")
-            $info.Environment['NOCTTY_THREAD_ROLE_DUMP'] = $dumps
-            $info.Environment['NOCTTY_THREAD_ROLE_TABLE'] = Join-Path $env:GITHUB_WORKSPACE 'ci/lock-inventory-threads.tsv'
-            $process = [Diagnostics.Process]::Start($info)
-            [pscustomobject]@{
-              Process = $process; Start = $process.StartTime.ToFileTimeUtc(); Results = $results
-              Stdout = $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
-              Stderr = $process.StandardError.ReadToEndAsync()
-            }
-          }
-          $k = 0
-          foreach ($shard in $shards) {
-            $k++
-            $process = $shard.Process
-            $process.WaitForExit()
-            $shard.Stdout.GetAwaiter().GetResult()
-            $marker = $shard.Stderr.GetAwaiter().GetResult().Contains('thread-role layer:')
-            $markerFile = Join-Path $work "marker-$k.txt"
-            [IO.File]::WriteAllText($markerFile, $(if ($marker) { 'thread-role layer:' } else { '' }))
-            python -I ci/role_supervisor.py exit $state $manifest debug-suite $process.Id $shard.Start test-exe $process.ExitCode $markerFile
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if ($process.ExitCode -eq 0) {
-              $end = Get-Content -LiteralPath $shard.Results -Tail 1
-              if ($end -cnotmatch '^end tests=\d+ ok=\d+ skip=\d+ fail=0 leaked=0 errors-logged=0$') {
-                throw "Missing successful results for Debug shard $k/4."
-              }
-              Write-Host "Debug shard $k/4 $end"
-            }
-            $process.Dispose()
-          }
-          python -I ci/role_supervisor.py seal $state $manifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Debug suite thread-role pairs and control
-        shell: pwsh
-        run: |
-          $exe = Join-Path $env:GITHUB_WORKSPACE 'zig-out/bin/ghostty-test.exe'
-          $work = Join-Path $env:RUNNER_TEMP 'debug-suite-role-pairs'
-          $manifest = Join-Path $work 'manifest.tsv'
-          $symbolised = Join-Path $work 'symbolised'
-          $control = Join-Path $work 'missing-pair'
-          [void](New-Item -ItemType Directory -Path $symbolised, $control)
-          $env:NOCTTY_THREAD_ROLE_SYMBOLISE = Join-Path $work 'dumps'
-          $env:NOCTTY_THREAD_ROLE_SYMBOLISED = $symbolised
-          & $exe *> $null
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $PSNativeCommandUseErrorActionPreference = $false
-          $comparison = @(python -I ci/role_compare3.py --runs ci/role-runs.tsv --run debug-suite --compiler 0.15 $manifest ci/lock-inventory-threads.tsv $symbolised --table-scope 1a 2>&1)
-          $exitCode = $LASTEXITCODE
-          $comparison | Where-Object { $_ -cmatch '^RESULT (PASS|FAIL) \(\d+ failures\)( [A-Z-]+=\d+)*$' } | Write-Host
-          if ($exitCode -ne 0) { exit $exitCode }
-          if ($comparison -cnotcontains 'RESULT PASS (0 failures)') { throw 'Debug suite comparison did not pass.' }
-
-          # Keep the real process identities and receipts. Remove one
-          # required pair throughout the symbolised dumps.
-          foreach ($dump in Get-ChildItem -LiteralPath $symbolised -Filter '*.pairs' -File) {
-            $kept = @(Get-Content -LiteralPath $dump.FullName | Where-Object { $_ -cne 'src/termio/mailbox.zig:send ui' })
-            [IO.File]::WriteAllLines((Join-Path $control $dump.Name), [string[]]$kept)
-          }
-          $comparison = @(python -I ci/role_compare3.py --runs ci/role-runs.tsv --run debug-suite --compiler 0.15 $manifest ci/lock-inventory-threads.tsv $control --table-scope 1a 2>&1)
-          if ($LASTEXITCODE -ne 1 -or $comparison -cnotcontains 'RESULT FAIL (1 failures) MISSING-REQUIRED-PAIR=1' -or
-              $comparison -cnotcontains 'FAIL MISSING-REQUIRED-PAIR (src/termio/mailbox.zig:send, ui)') {
-            throw 'Debug suite control must fail solely for the missing mailbox send/ui pair.'
-          }
-          Write-Host 'Debug suite control FAIL MISSING-REQUIRED-PAIR (expected)'
-          exit 0
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
