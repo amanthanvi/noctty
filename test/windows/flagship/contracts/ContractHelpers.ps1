@@ -169,7 +169,7 @@ function Assert-DeferredZigFixtureExecution {
             '(?m)^        uses: mlugg/setup-zig@[^\s]+(?:\s+#.*)?\s*$' -or
         $setupStep -match $conditionalStepPattern -or
         $fullSuiteStep -notmatch
-            '(?m)^        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all\s*$' -or
+            '(?m)^        shell: pwsh\r?\n        run: \|\r?\n          zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all\r?\n          if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}\s*$' -or
         $fullSuiteStep -match $conditionalStepPattern -or
         $setupIndex -lt 0 -or
         $fullSuiteIndex -le $setupIndex) {

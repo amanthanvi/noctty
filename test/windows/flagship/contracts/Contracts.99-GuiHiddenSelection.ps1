@@ -151,6 +151,14 @@ $guiHiddenProblems = & {
             $compare -notmatch '-Leaves role-pairs -RoleControl \$case') {
             $found.Add('gui-hidden.yml: the suite builds its symboliser, uses the measurement images and gates the composite comparison and both controls')
         }
+        $scope = & $findStep $suite 'Record result scope' 'suite'
+        $scopeAt = $suite.IndexOf('      - name: Record result scope', [StringComparison]::Ordinal)
+        if ($scopeAt -le $publishAt -or $scopeAt -ge $uploadAt -or
+            $scope -notmatch '(?m)^        if: always\(\)\s*$' -or
+            $scope -notmatch 'hidden-desktop runner result only\. See the Actions job for the thread-role comparison and controls\.' -or
+            $scope -notmatch 'Set-Content -LiteralPath \(Join-Path \$receipts ''scope\.txt''\)') {
+            $found.Add('gui-hidden.yml: the uploaded suite receipts state the scope of the runner result')
+        }
         $upload = Get-YamlStepBlock -Content $suite -Name 'Upload the suite''s result and receipts' -Source 'gui-hidden.yml :: suite'
         $paths = & $uploadPaths $upload
         if (($paths -join "`n") -cne $expectedUpload) { $found.Add('gui-hidden.yml: the upload holds exactly the result, its hash and the receipts (design §4.5 allowlist), no log directory') }
@@ -200,6 +208,7 @@ $guiHiddenProblems = & {
         @{ Name = 'the role comparison with a source prefix ending before the separator'; Old = '$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source + ''\'''; New = '$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source' }
         @{ Name = 'the role comparison without its no-key control'; Old = "            NoKey = 'gui-hidden-role-no-key'`n"; New = '' }
         @{ Name = 'the role comparison without its no-launch control'; Old = "            NoLaunch = 'gui-hidden-role-no-launch'`n"; New = '' }
+        @{ Name = 'the runner scope statement left out of the receipts'; Old = "      - name: Record result scope`n"; New = "      - name: Do not record result scope`n" }
         @{ Name = 'no error result for a job that failed without one'; Old = "      - name: Publish an error result when the job failed without one`n"; New = "      - name: Publish nothing`n" }
         @{ Name = 'the error result published on every run'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: always()`n" }
         @{ Name = 'the error result published only for a failed self-test (a suite that died without a result left none)'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure() && steps.selftest.outcome == 'failure'`n" }
