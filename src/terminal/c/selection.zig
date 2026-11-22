@@ -393,7 +393,7 @@ pub fn equal(
 }
 
 test "selection_format_alloc empty output" {
-    const failing: CAllocator = .fromZig(&std.mem.Allocator.failing);
+    const failing: CAllocator = .fromZig(&testing.failing_allocator);
     var t: terminal_c.Terminal = null;
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
