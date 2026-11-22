@@ -53,7 +53,7 @@ See also:
   - The run stopped inconclusive (exit 2) with "the copy took the foreground from another window before the harness's unlock, which the foreground lock should have prevented". No unlock was sent (0 injected events), and the state guard held.
   - The same refusal stopped attempts d (02:31:57Z) and e (02:55:02Z) at the same head, with the foreground owner after each run `explorer.exe`.
   - Attempts a and b (2026-11-22 00:56Z and 01:02Z, from `main` at 71ecb4c4a, after about 38 minutes of the maintainer's idle) did not self-activate: `ForegroundBeforeUnlock` read false, and each reached the unlock. Nothing recorded which window was in front in a, b, d or e.
-  - The records are kept under `H:\scratch\w13-perf-63ba\runs\pacing-visible-smoke-a` to `-f`.
+  - The six attempts' run records are kept outside the repo.
   - Inferred, not measured: why d, e and f self-activated and a and b did not. Retry f disproves the explanation that the window in front must belong to the harness's own process tree (explorer, T3 Code, claude, the shells, the harness). One explanation still fits all six attempts: a foreground right granted down the launch chain when the chain was created while T3 Code, where the maintainer had just typed, was in front. That is item (7)(e)'s third path. A read at 03:23:15Z, shortly before retry f's wrapper chain was started, found `T3 Code (Nightly).exe` in front. The exact gap is not recorded. In a and b the maintainer had been idle for 38 minutes. It was not tested.
   - This qualifies the 2026-11-20 FRAME-PACING-01 entry below in this file (`docs/agents/log/test-harnesses.md`):
     - item (6): its inference from Microsoft's page that noctty's own `SetForegroundWindow` fails while the user's input is recent;
