@@ -53,6 +53,7 @@ Exit 0 with RESULT PASS, 1 with RESULT FAIL, 2 on bad input.
 """
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 
@@ -668,6 +669,34 @@ def spawn_targets(f, function, target):
     return out
 
 
+def check_window_procedures(files):
+    """Check source definitions with Win32 window or subclass callback signatures."""
+    count, failures = 0, []
+    for path, f in sorted(files.items()):
+        receivers = role_receivers(f)
+        for decl in f.fns:
+            if decl["kind"] != "fn" or decl["body"] is None:
+                continue
+            ret = f.toks[slice(*decl["ret"])]
+            signature = zigtok.spaced(ret).replace(" ", "")
+            if not re.fullmatch(r"callconv\(\.(?:winapi|WINAPI|c|stdcall)\)(?:\w+\.)*(?:LRESULT|isize)", signature):
+                continue
+            params, _ = zigtok.split_args(f.toks, decl["params"][0])
+            if len(params) not in (4, 6) or not params[0] or params[0][-1].text != "HWND":
+                continue
+            count += 1
+            first = decl["body"][0] + 1
+            head = f.toks[first:min(first + 6, decl["body"][1])]
+            if (len(head) == 6 and head[0].kind == "identifier" and receivers.get(head[0].text) == "module"
+                    and [t.text for t in head[1:]] == [".", "assertWindowProc", "(", ")", ";"]):
+                continue
+            container = f.container_of(decl["fn"])
+            name = ".".join((container["name"], decl["name"])) if container is not None else decl["name"]
+            failures.append(f"WINDOW-PROC-NO-ASSERT {path}:{f.toks[decl['fn']].line + 1} {name}: "
+                            "first statement must call thread_role.assertWindowProc()")
+    return count, failures
+
+
 def main(argv):
     verbose = "--verbose" in argv
     argv = [a for a in argv if a != "--verbose"]
@@ -703,7 +732,8 @@ def main(argv):
     # is the test build's)
     test_rooted = reach["test"] - reach["outside-test-blocks"]
 
-    failures, report = [], []
+    procedure_count, failures = check_window_procedures(files)
+    report = [f"window and subclass procedures: {procedure_count}"]
 
     # role-setting points
     points = []   # dict(file, fn index, fn name, role, line, q, test, op)

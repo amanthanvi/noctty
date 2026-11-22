@@ -300,6 +300,24 @@ control("G1: a production scope after a braceless block in an is_test branch is 
         "FAIL UNREGISTERED-POINT test src/worker.zig:26 stray: enter(renderer)",
         absent=("TEST-EDIT-POINT src/worker.zig:26",))
 
+WINDOW_PROC = """
+const W = struct {
+    fn wndProc(hwnd: HWND, msg: UINT, w: WPARAM, l: LPARAM) callconv(.winapi) LRESULT {
+        thread_role.assertWindowProc();
+        return 0;
+    }
+    fn hook(code: c_int, w: WPARAM, l: LPARAM) callconv(.winapi) LRESULT {
+        return 0;
+    }
+};
+"""
+control("a window procedure asserts first and a hook needs no assertion",
+        tree(**{"src/worker.zig": WORKER + WINDOW_PROC}), 0, "window and subclass procedures: 1", "RESULT PASS")
+control("a late assertion fails naming its window procedure",
+        tree(**{"src/worker.zig": WORKER + WINDOW_PROC.replace(
+            "        thread_role.assertWindowProc();", "        _ = msg;\n        thread_role.assertWindowProc();")}), 1,
+        "WINDOW-PROC-NO-ASSERT src/worker.zig:", "W.wndProc: first statement")
+
 if failures:
     for f in failures:
         print("FAIL " + f)
