@@ -2288,6 +2288,10 @@ pub inline fn resize(
     // state is correct.
     self.cursorReload();
 
+    // Erasing history can mark the cursor pin garbage even though the
+    // cursor is still live at the remapped position.
+    self.cursor.page_pin.garbage = false;
+
     // If resize moved a cursor with pending wrap away from the right edge,
     // advance to the next cell instead of wrapping on the next print.
     if (self.cursor.pending_wrap and self.cursor.x != opts.cols - 1) {
@@ -4240,6 +4244,21 @@ test "Screen reset cursor pin is not garbage" {
     // born garbage and reaped.
     s.reset();
     try testing.expect(!s.cursor.page_pin.garbage);
+}
+
+test "Screen resize erasing the cursor row leaves its pin not garbage" {
+    const alloc = std.testing.allocator;
+    var s = try Screen.init(alloc, .{ .cols = 12, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // The bottom row has content, so shrinking pushes the top and its
+    // cursor into history instead of trimming blank rows off the bottom.
+    s.cursorAbsolute(0, 5);
+    try s.testWriteString("x");
+    s.cursorAbsolute(0, 0);
+
+    try s.resize(.{ .cols = 12, .rows = 3 });
+    try std.testing.expect(!s.cursor.page_pin.garbage);
 }
 
 test "Screen read and write" {
