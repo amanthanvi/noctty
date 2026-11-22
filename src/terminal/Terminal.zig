@@ -2655,7 +2655,10 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // discarded rows first, as Terminal.index does for a linefeed (f030fa954;
     // terminal-core.md KITTY2 part 2, rule (4)). Before upstream 77190bd02
     // this route went through cursorScrollAbove, which moved the rows into
-    // history with their pins. Inside left and right margins no row is
+    // history with their pins. Full width, the rows below the discarded ones
+    // move too, under pins that stay, so the whole region is invalidated:
+    // a command or a pending prompt there would land on another row. Inside
+    // left and right margins no row is
     // discarded: on one page only the cells between the margins move and
     // every row keeps its metadata, so only a command whose cells that
     // changes is dropped. A row it copies across a page boundary takes the
@@ -2671,7 +2674,7 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
                 screen.semantic_command.invalidateRange(
                     &screen.pages,
                     .{ .active = .{} },
-                    .{ .active = .{ .y = @intCast(discarded - 1) } },
+                    .{ .active = .{ .y = self.scrolling_region.bottom } },
                 );
             } else if (!self.lineMoveCopiesAcrossPage(
                 self.scrolling_region.top,
@@ -12858,6 +12861,96 @@ test "Terminal: an erase after a full-width insert leaves a command's prompt row
     }
     t.eraseDisplay(.below, false);
     try testing.expect(s.semantic_command.completed == null);
+}
+
+/// On a 30x6 screen without scrollback: "PS> one" completed with no output
+/// on row 1, and the next prompt on rows 2 and 3 with "two" typed but not
+/// submitted; with `padded`, both prompts' first rows are filled to the end
+/// with prompt cells, as a right-aligned segment writes them. Then DECSTBM
+/// 1;5 and either SU 1 or a linefeed at the region's bottom. Returns the
+/// last command read afterwards (the caller frees it) and whether input is
+/// still pending.
+fn testShortRegionScroll(padded: bool, by_linefeed: bool) !struct { ?[:0]const u8, bool } {
+    const alloc = testing.allocator;
+    const cols = 30;
+    var t = try init(alloc, .{ .cols = cols, .rows = 6, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    s.cursorAbsolute(0, 1);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("one");
+    if (padded) {
+        s.cursorSetSemanticContent(.{ .prompt = .right });
+        try s.testWriteString(" " ** (cols - 7));
+        s.cursor.pending_wrap = false;
+    }
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+    s.cursorAbsolute(0, 2);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS C:/src");
+    if (padded) {
+        s.cursorSetSemanticContent(.{ .prompt = .right });
+        try s.testWriteString(" " ** (cols - 9));
+        s.cursor.pending_wrap = false;
+    }
+    s.cursorAbsolute(0, 3);
+    s.cursorSetSemanticContent(.{ .prompt = .continuation });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("two");
+    {
+        const command = (try s.lastCommandString(alloc)) orelse
+            return error.TestExpectedCommand;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+        try testing.expect(s.semanticPromptInputPending());
+    }
+
+    t.setTopAndBottomMargin(1, 5);
+    if (by_linefeed) {
+        s.cursorAbsolute(0, 4);
+        try t.index();
+    } else {
+        try t.scrollUp(1);
+    }
+    return .{ try s.lastCommandString(alloc), s.semanticPromptInputPending() };
+}
+
+/// SU 1 in rows 1-5 moves rows 1-4 up under pins that stay: the record
+/// would read row 2's next prompt (its unsubmitted "two", with prompt rows
+/// padded) or nothing, and the pending prompt would point at its own
+/// continuation. The whole region is invalidated instead.
+fn testShortRegionScrollUpDrops(padded: bool) !void {
+    const command, const pending = try testShortRegionScroll(padded, false);
+    defer if (command) |c| testing.allocator.free(c);
+    try testing.expect(command == null);
+    try testing.expect(!pending);
+}
+
+test "Terminal: a full-width scrollUp in a top-anchored region without scrollback drops what it-shifts under a padded-prompt" {
+    try testShortRegionScrollUpDrops(true);
+}
+
+test "Terminal: a full-width scrollUp in a top-anchored region without scrollback drops what it-shifts under a plain-prompt" {
+    try testShortRegionScrollUpDrops(false);
+}
+
+test "Terminal: a linefeed in a top-anchored region without scrollback keeps what it-shifts" {
+    // The same layout scrolled by a linefeed at the region's bottom, which
+    // moves the pins with their rows (cursorScrollRegionUp).
+    for ([_]bool{ true, false }) |padded| {
+        const command, const pending = try testShortRegionScroll(padded, true);
+        defer if (command) |c| testing.allocator.free(c);
+        try testing.expectEqualStrings("one", command orelse return error.TestCommandDropped);
+        try testing.expect(pending);
+    }
 }
 
 test "Terminal: alt screen scroll up recycled row has default metadata" {
