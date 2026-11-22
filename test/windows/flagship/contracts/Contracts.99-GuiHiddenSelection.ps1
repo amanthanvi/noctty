@@ -144,7 +144,8 @@ $guiHiddenProblems = & {
             $symboliser -notmatch '(?m)^        run: \./scripts/dev-windows\.cmd zig build -Demit-exe=false -Demit-test-exe=true --summary all\s*$' -or
             $symboliser -match '(?m)^        (?:if|continue-on-error):' -or $compare -match '(?m)^        (?:if|continue-on-error):' -or
             $compare -notmatch '(?m)^          \$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent \$measure\.Exe\s*$' -or
-            $compare -notmatch 'python -I ci/role_compare3\.py --runs ci/role-runs\.tsv --run composite --compiler 0\.15 \$manifest ci/lock-inventory-threads\.tsv \$symbolised --table-scope 1a\)' -or
+            -not $compare.Contains('$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source + ''\''') -or
+            $compare -notmatch 'python -I ci/role_compare3\.py --runs ci/role-runs\.tsv --run composite --compiler 0\.15 \$manifest ci/lock-inventory-threads\.tsv \$symbolised --table-scope 1a 2>&1\)' -or
             $compare -notmatch "(?m)^            NoKey = 'gui-hidden-role-no-key'\s*$" -or
             $compare -notmatch "(?m)^            NoLaunch = 'gui-hidden-role-no-launch'\s*$" -or
             $compare -notmatch '-Leaves role-pairs -RoleControl \$case') {
@@ -196,6 +197,7 @@ $guiHiddenProblems = & {
         @{ Name = 'the self-test without the id the error step reads'; Old = "        id: selftest`n"; New = '' }
         @{ Name = 'the role comparison outside the gate'; Old = "      - name: Composite thread-role pairs and controls`n"; New = "      - name: Composite thread-role pairs and controls`n        continue-on-error: true`n" }
         @{ Name = 'the role comparison against non-measurement images'; Old = '$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent $measure.Exe'; New = '$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent $symboliser' }
+        @{ Name = 'the role comparison with a source prefix ending before the separator'; Old = '$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source + ''\'''; New = '$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source' }
         @{ Name = 'the role comparison without its no-key control'; Old = "            NoKey = 'gui-hidden-role-no-key'`n"; New = '' }
         @{ Name = 'the role comparison without its no-launch control'; Old = "            NoLaunch = 'gui-hidden-role-no-launch'`n"; New = '' }
         @{ Name = 'no error result for a job that failed without one'; Old = "      - name: Publish an error result when the job failed without one`n"; New = "      - name: Publish nothing`n" }
