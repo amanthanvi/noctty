@@ -739,6 +739,20 @@ metadata, and, where the harness asks, the clipboard sequence number), the
 small helpers those harnesses had copied, and, from `hidden-win11-embedding-guard.ps1`,
 the `-Embedding` delegation guard.
 
+## Hidden CLI and UIA checks
+
+Use a clean measurement-build checkout as `-MeasureRepo` and a fresh evidence
+directory as `-Run`. The checks start on private desktops, stage portable copies
+without `noctty.ico`, and record startup, clipboard and history guards.
+
+- `hidden-win11-cli-automation.ps1 -Check ssh-cache` checks a positional miss,
+  a portable cache write through `--add`, and a positional hit.
+- `hidden-win11-cli-automation.ps1 -Check quick-terminal` starts two isolated
+  instances and checks the visible window owner after toggling each class.
+- `hidden-win11-uia-rows.ps1` reads TextPattern through a five-line scroll,
+  history erasure and a multi-page append. It compares the numbered rows and
+  rejects a held snapshot with the same oracle used for the fresh viewport.
+
 ## PowerShell history isolation
 
 `scripts/windows-harness-history.ps1` resolves the real history paths through
