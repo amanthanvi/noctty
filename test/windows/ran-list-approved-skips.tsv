@@ -205,3 +205,5 @@ ghostty-vt-c-test	terminal.search.terminal.test.initPattern lends one Pattern to
 ghostty-vt-c-test	terminal.stream_terminal.test.kitty graphics APC cancelled or aborted is discarded	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
 ghostty-vt-c-test	terminal.stream_terminal.test.kitty graphics APC response	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
 ghostty-vt-c-test	terminal.stream_terminal.test.kitty graphics via APC	-	The lib-vt build has no Kitty graphics (`build_options.kitty_graphics`)
+ghostty-test	terminal.compress.lz4_differential.test.lz4 differential exhaustive	-	runs only with GHOSTTY_LZ4_SLOW set (upstream 9a4bd2120); skips by design
+ghostty-test	terminal.kitty.graphics_image.test.image load: windows file path that is not drive-absolute is refused	cwd-on-temp-drive=false	needs the temporary directory on the current directory's drive
