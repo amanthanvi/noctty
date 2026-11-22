@@ -220,6 +220,7 @@ Usage: python -I controls.py [--scope fork] <repo> <logdir>
            <entries.tsv> <anchors.tsv> <logdir>
            control 00 and the appending controls at <rev>, with the table approved there in that scope
        python -I controls.py --check-layout
+       python -I controls.py --quick <repo> <logdir>
            check the installed files and the fixture's digests, then run one compare with the fixture's run spec on
            the fixture's table in the fixture's scope (r30), and the soak judge on a clean and a kill fixture
 """
@@ -346,10 +347,10 @@ if "--scope" in args:
     del args[_i:_i + 2]
     if SCOPE not in SCOPES:
         sys.exit(f"--scope takes one of {', '.join(SCOPES)}")
-CHECK_LAYOUT, APPEND_MODE = args[:1] == ["--check-layout"], args[:1] == ["--appending"]
-if CHECK_LAYOUT or APPEND_MODE:
+CHECK_LAYOUT, APPEND_MODE, QUICK = (args[:1] == [flag] for flag in ("--check-layout", "--appending", "--quick"))
+if CHECK_LAYOUT or APPEND_MODE or QUICK:
     args = args[1:]
-FULL = not (CHECK_LAYOUT or APPEND_MODE)
+FULL = not (CHECK_LAYOUT or APPEND_MODE or QUICK)
 if CHECK_LAYOUT:
     import tempfile
     missing = [n for n in INSTALL if not os.path.exists(os.path.join(here, n))]
@@ -397,7 +398,7 @@ if APPEND_MODE:   # r28 (round 27's Opus M2): control 00 and the appending contr
     FIX = None
 else:   # the full self-test, pinned to its frozen fixture
     if len(args) != 2:
-        sys.exit("usage: controls.py [--scope fork] <repo> <logdir> (the full self-test, pinned to its fixture), or "
+        sys.exit("usage: controls.py [--quick] [--scope fork] <repo> <logdir> (pinned to its fixture), or "
                  "controls.py --appending --scope fork|1a|1b <repo> <rev> <table> <allow> <entries> <anchors> <logdir>")
     repo, logdir = args
     FIX = find_fixture()
@@ -458,11 +459,12 @@ APPENDING = frozenset((1, 6, 7, 8, 9, 10, 11, 12, 14, 19, 20, 22, 34, 38, 85, 86
 #                                                   token-stream, evidence and
 #                                                   structure shapes, each appended
 OVERLAY_KINDS = {}
+QUICK_CONTROLS = frozenset((81, 82, 191, 192, 633, 634, 635, *range(880, 887), *range(889, 894)))
 
 
 def want(n):
     """r28: whether control n runs: every control in the full self-test; with --appending, the appending ones."""
-    return FULL or n in APPENDING
+    return FULL or n in (QUICK_CONTROLS if QUICK else APPENDING)
 
 
 def show(path):
@@ -571,9 +573,11 @@ def control_now(tag, ov, inv_exit, inv_delta, gate_exit, gate_kinds, tbl, tamper
 
 
 BASE = None
-ok0, l0 = control("00-base", None, 0, {}, 0, {})
-BASE = summary_of(os.path.join(logdir, "inv-00-base"))
-results = [(ok0, l0)]
+results = []
+if not QUICK:
+    ok0, l0 = control("00-base", None, 0, {}, 0, {})
+    BASE = summary_of(os.path.join(logdir, "inv-00-base"))
+    results.append((ok0, l0))
 if APPEND_MODE and not ok0:   # r28 (round 27's Opus M2): with no clean base, no appending control can be judged
     _msg = (f"control 00 failed at {rev} in scope {SCOPE}: the inventory and the gate do not pass the table given, so "
             f"no appending control ran (approve the table at this revision, in this scope, first)")
@@ -961,10 +965,10 @@ if want(62): results.append(compare_control("62-AF2-isolated-child-left-no-dump"
 # -- r18 (round 17): AG2, expectations from the run spec, not the manifest; Opus L10, an isolated child with no pair
 # r28 (round 27's Opus M2): the fixture's run spec and table, frozen with the revision they were approved at; r26 and
 # r27 read the live ones, which a branch's re-approved table would change under these controls' expectations
-DRAFT_RUNS = open(os.path.join(FIX, "role-runs.tsv"), encoding="utf-8").read() if FULL else None
+DRAFT_RUNS = open(os.path.join(FIX, "role-runs.tsv"), encoding="utf-8").read() if FULL or QUICK else None
 # r26 (round 25's Kimi M1): these controls read the reviewed seven-column table itself, in the fork scope; r18 to r25
 # used a seven-row two-column stand-in (DRAFT_TABLE), which hid that the compare could not read the real table
-REVIEWED_TABLE = os.path.join(FIX, "lock-inventory-threads.tsv") if FULL else None
+REVIEWED_TABLE = os.path.join(FIX, "lock-inventory-threads.tsv") if FULL or QUICK else None
 SUITE_ALL = ("# kind=test-exe pid=810 start=134070000000000810\n"
              "src/termio/stream_handler.zig:surfaceMessageWriter reader\n"
              "src/termio/mailbox.zig:send ui\nsrc/termio/mailbox.zig:send reader\n"
@@ -4599,13 +4603,19 @@ if want(889): results.append(compare_control("889-G1-compare-keeps-each-containe
 if want(890): results.append(compare_control("890-G1-compare-refuses-an-ambiguous-bare-key",
     {"child.pairs": G1_CHILD + f"{TW}:g1Same ui\n"}, 1, {"AMBIGUOUS-KEY": 1}, isolated=True, table=G1_TABLE))
 if want(891): results.append(process_exit_control("891-T2-forwarded-launch-can-leave-a-cli-dump", 0, {}, forwarded=True))
+if want(892): results.append(jobs_control("892-a-workflow-change-selects-both-self-test-jobs",
+    [".github/workflows/thread-gate-selftest.yml"], "full appending"))
+if want(893): results.append(jobs_control("893-a-nested-ci-input-selects-both-self-test-jobs",
+    ["ci/inputs/example.tsv"], "full appending"))
 
 results = [r.result() if hasattr(r, "result") else r for r in results]
 POOL.shutdown()
+if QUICK and len(results) != len(QUICK_CONTROLS):
+    sys.exit(f"QUICK-CONTROL-COUNT: ran {len(results)} controls, expected {len(QUICK_CONTROLS)}")
 n_ok = sum(1 for ok, _ in results if ok)
 with open(os.path.join(logdir, "summary.txt"), "w", encoding="utf-8", newline="\n") as fh:
     mode_ = (f"appending: control 00 and {len(results) - 1} appending controls at {rev}, scope {SCOPE}" if APPEND_MODE
-             else f"full: the fixture's revision {rev}, scope {SCOPE}")
+             else f"{'quick' if QUICK else 'full'}: the fixture's revision {rev}, scope {SCOPE}")
     fh.write("\n".join(l for _, l in results) + f"\n{mode_}\n{n_ok} of {len(results)} as expected\n")
 print(f"{n_ok} of {len(results)} as expected")
 sys.exit(0 if n_ok == len(results) else 1)
