@@ -1548,7 +1548,11 @@ leaf's copy is deleted at once, a failing one's at the end unless
 **A leaf in hosted mode.** The runner starts each leaf as
 `pwsh -NoProfile -NonInteractive -File <leaf>`, suspended, on its desktop
 (`WinSta0\noctty-gh-<32 hex>`, named in `lpDesktop`), in a job that permits no
-breakaway and kills on close and on an unhandled exception. It sets
+breakaway and kills every process when it closes. Its
+`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` ends a process that hits an
+unhandled exception at once, with no crash dialog, but that process only: the
+rest of the job stays alive until the runner ends it, so a leaf can still reach
+its timeout after a child crashes. It sets
 `NOCTTY_GUI_HIDDEN_DESKTOP`, `NOCTTY_GUI_HIDDEN_EXE` and
 `NOCTTY_GUI_HIDDEN_RUN`, which select the interactive library's hosted mode:
 

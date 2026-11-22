@@ -774,25 +774,47 @@ foreach ($buildInput in @('dist/windows/conpty-redist.json', 'scripts/stage-conp
 # A `<dir>/**` build input is every tracked file under it, from the index on the working-tree route and from the
 # ref's tree on a ref route, and nothing else; the plan names the measurement build's whole input set that way (Sol on
 # #740, round 12). Each route is compared with its own tracked set, so an ignored or untracked local file, or a staged
-# change, cannot fail this (Greptile on #740).
+# change, cannot fail this (Greptile on #740). The references are git's raw `-z` paths, decoded from bytes as UTF-8
+# here, apart from the selection's own reader, and each listing's exit code is checked: git's default quoting
+# (core.quotePath) would have failed a tracked non-ASCII path (CodeRabbit on #740).
+function Get-FixtureGitPaths([string] $Root, [string[]] $Arguments) {
+    $info = [System.Diagnostics.ProcessStartInfo]::new('git')
+    foreach ($argument in @('-C', $Root) + $Arguments) { $info.ArgumentList.Add($argument) }
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $errors = $process.StandardError.ReadToEndAsync()
+        $bytes = [IO.MemoryStream]::new()
+        $process.StandardOutput.BaseStream.CopyTo($bytes)
+        $process.WaitForExit()
+        [void]$errors.Result
+        if ($process.ExitCode -ne 0) { throw "The fixture's git $($Arguments[0]) failed with exit code $($process.ExitCode)." }
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes.ToArray())
+    }
+    finally { $process.Dispose() }
+    return , [string[]]@($text.Split([char]0) | Where-Object { $_ } | Sort-Object -CaseSensitive)
+}
 foreach ($buildTree in @('src', 'pkg', 'vendor', 'include', 'dist/windows')) {
     Assert-True (@($plan.buildInputs) -ccontains "$buildTree/**") "The plan's buildInputs must name $buildTree/**."
-    $inIndex = [string[]]@(git -C $repoRoot ls-files -- "$buildTree/" | Sort-Object)
-    $inHead = [string[]]@(git -C $repoRoot ls-tree -r --name-only --full-tree HEAD -- "$buildTree/" | Sort-Object)
+    $inIndex = Get-FixtureGitPaths $repoRoot @('ls-files', '-z', '--full-name', '--', "$buildTree/")
+    $inHead = Get-FixtureGitPaths $repoRoot @('ls-tree', '-r', '-z', '--name-only', '--full-tree', 'HEAD', '--', "$buildTree/")
     # Assigned before sorting: the function returns its paths as one array object.
     $working = Get-CiGuiTreeFiles -RepoRoot $repoRoot -Directory $buildTree
-    $working = [string[]]@($working | Sort-Object)
+    $working = [string[]]@($working | Sort-Object -CaseSensitive)
     $atHead = Get-CiGuiTreeFiles -RepoRoot $repoRoot -Ref 'HEAD' -Directory $buildTree
-    $atHead = [string[]]@($atHead | Sort-Object)
+    $atHead = [string[]]@($atHead | Sort-Object -CaseSensitive)
     Assert-True ($inIndex.Count -gt 0 -and ($working -join '|') -ceq ($inIndex -join '|') -and ($atHead -join '|') -ceq ($inHead -join '|')) "$buildTree/** must expand to its tracked files: the index ($($working.Count) of $($inIndex.Count)) and HEAD ($($atHead.Count) of $($inHead.Count))."
     foreach ($file in $inIndex) { if (-not ($list -ccontains $file)) { Assert-True $false "The GUI list must hold $file, under $buildTree/**." ; break } }
 }
-# Sol on #740 (round 13): an ignored file under a build tree is no member on either route, on a small git tree.
+# Sol on #740 (round 13): an ignored file under a build tree is no member on either route, on a small git tree; and a
+# tracked non-ASCII name comes back as it is spelled, on both routes (CodeRabbit on #740).
 $ignoredRoot = Join-Path ([IO.Path]::GetTempPath()) ("noctty-gui-build-tree-$([guid]::NewGuid().ToString('N'))")
 try {
     [void](New-Item -ItemType Directory -Path (Join-Path $ignoredRoot 'src\.zig-cache'))
     [IO.File]::WriteAllText((Join-Path $ignoredRoot '.gitignore'), ".zig-cache/`n*.orig`n")
     [IO.File]::WriteAllText((Join-Path $ignoredRoot 'src\main.zig'), 'pub fn main() void {}')
+    $nonAscii = 'src/caf' + [char]0xE9 + '.zig'
+    [IO.File]::WriteAllText((Join-Path $ignoredRoot $nonAscii.Replace('/', '\')), 'const x = 1;')
     & git -C $ignoredRoot init -q 2>$null | Out-Null
     & git -C $ignoredRoot add -A 2>$null | Out-Null
     & git -C $ignoredRoot -c user.name=fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -q -m fixture 2>$null | Out-Null
@@ -803,8 +825,13 @@ try {
     $global:LASTEXITCODE = 0
     Assert-True ($ignoredCheck.Count -eq 2) "The ignored-file fixture's two files must be ignored by its .gitignore (the precondition): $($ignoredCheck -join ', ')"
     $ignoredWorking = Get-CiGuiTreeFiles -RepoRoot $ignoredRoot -Directory 'src'
+    $ignoredWorking = [string[]]@($ignoredWorking | Sort-Object -CaseSensitive)
     $ignoredHead = Get-CiGuiTreeFiles -RepoRoot $ignoredRoot -Ref 'HEAD' -Directory 'src'
-    Assert-True (($ignoredWorking -join '|') -ceq 'src/main.zig' -and ($ignoredHead -join '|') -ceq 'src/main.zig') "An ignored file under src/ must not be listed: the index gave [$($ignoredWorking -join ', ')], HEAD gave [$($ignoredHead -join ', ')]."
+    $ignoredHead = [string[]]@($ignoredHead | Sort-Object -CaseSensitive)
+    $expectedTree = [string[]]@(@($nonAscii, 'src/main.zig') | Sort-Object -CaseSensitive) -join '|'
+    Assert-True (($ignoredWorking -join '|') -ceq $expectedTree -and ($ignoredHead -join '|') -ceq $expectedTree) "An ignored file under src/ must not be listed, and the non-ASCII name must be: the index gave [$($ignoredWorking -join ', ')], HEAD gave [$($ignoredHead -join ', ')]."
+    $nonAsciiRefs = Get-FixtureGitPaths $ignoredRoot @('ls-files', '-z', '--full-name', '--', 'src/')
+    Assert-True ($nonAsciiRefs -ccontains $nonAscii) "The fixture's own reference must read the non-ASCII name raw: [$($nonAsciiRefs -join ', ')]."
 }
 finally { Remove-Item -LiteralPath $ignoredRoot -Recurse -Force -ErrorAction SilentlyContinue }
 foreach ($file in @('build.zig', 'build.zig.zon')) { Assert-True ($list -ccontains $file) "The GUI list must hold the build input $file." }

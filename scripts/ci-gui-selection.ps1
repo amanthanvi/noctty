@@ -119,12 +119,35 @@ function Get-CiGuiTreeFiles {
     #>
     param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Ref, [Parameter(Mandatory)] [string] $Directory)
     $arguments = $(if ([string]::IsNullOrWhiteSpace($Ref)) { @('ls-files', '-z', '--full-name', '--', "$Directory/") } else { @('ls-tree', '-r', '-z', '--name-only', '--full-tree', $Ref, '--', "$Directory/") })
-    $output = & git -C $RepoRoot @arguments 2>$null
-    $code = $LASTEXITCODE
-    # A handled failure must not leave Actions' implicit `exit $LASTEXITCODE` failing the step (PKG-65).
-    $global:LASTEXITCODE = 0
-    if ($code -ne 0) { throw "git $($arguments[0]) for $(if ($Ref) { $Ref } else { 'the index' }) failed with exit code $code." }
-    return , [string[]]@((@($output) -join "`n").Split([char]0) | Where-Object { $_ })
+    return , (Invoke-CiGuiGitPaths -RepoRoot $RepoRoot -Arguments $arguments -What $(if ($Ref) { $Ref } else { 'the index' }))
+}
+
+function Invoke-CiGuiGitPaths {
+    <#
+    .SYNOPSIS
+    The NUL-separated paths a git listing (-z) writes, decoded as UTF-8 whatever the console's code page: PowerShell
+    reads a native command's output through [Console]::OutputEncoding, and under code page 437 a tracked
+    `src/caf<e-acute>.zig` came back garbled, naming no changed path (CodeRabbit on #740). Throws when git fails.
+    #>
+    param([Parameter(Mandatory)] [string] $RepoRoot, [Parameter(Mandatory)] [string[]] $Arguments, [string] $What)
+    $info = [System.Diagnostics.ProcessStartInfo]::new('git')
+    foreach ($argument in @('-C', $RepoRoot) + $Arguments) { $info.ArgumentList.Add($argument) }
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        # Standard error is drained alongside, so a full pipe cannot stall git.
+        $errors = $process.StandardError.ReadToEndAsync()
+        $text = $process.StandardOutput.ReadToEnd()
+        $process.WaitForExit()
+        [void]$errors.Result
+        if ($process.ExitCode -ne 0) { throw "git $($Arguments[0]) for $What failed with exit code $($process.ExitCode)." }
+    }
+    finally { $process.Dispose() }
+    return , [string[]]@($text.Split([char]0) | Where-Object { $_ })
 }
 
 function Get-CiGuiList {

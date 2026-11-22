@@ -32,7 +32,8 @@ deleted at once; a failing one's at the end unless -KeepFailedCopies.
 
 The launch (design §4.1). Each leaf is its own `pwsh -NoProfile -NonInteractive -File <leaf>`, started suspended on
 a private desktop created for it (`WinSta0\noctty-gh-<32 hex>`, named in lpDesktop), inside a job that permits no
-breakaway (PROBE-JOB-BREAKAWAY-01) and kills on close and on an unhandled exception (SOAK-01), with
+breakaway (PROBE-JOB-BREAKAWAY-01) and kills every process when it closes; a process that hits an unhandled exception
+ends at once with no crash dialog (SOAK-01), but only that process, so a leaf can still reach its timeout. With
 NOCTTY_GUI_HIDDEN_DESKTOP, NOCTTY_GUI_HIDDEN_EXE and NOCTTY_GUI_HIDDEN_RUN set: the leaf's libraries refuse any other
 desktop and never bootstrap or build. The copy's config sets the shell (`command = direct:<System32>\cmd.exe /D`),
 the clipboard denied, no copy on select, no update check, no desktop notification and `window-save-state = never`.
@@ -260,7 +261,8 @@ public static class GuiHiddenRunnerNative {
         } finally { LocalFree(argv); }
     }
 
-    // The run's job: kill on close (0x2000) and on an unhandled exception (0x400, SOAK-01), and no breakaway flag, so
+    // The run's job: kill every process on close (0x2000), end a process that hits an unhandled exception without a
+    // crash dialog (0x400, SOAK-01; that process only, not the job), and no breakaway flag, so
     // no descendant can leave it (PROBE-JOB-BREAKAWAY-01) and its own list and accounting are the record.
     public static IntPtr CreateRunJob() {
         IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
