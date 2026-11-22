@@ -90,8 +90,10 @@ function Test-ThreadGateWorkflowSplit {
     param([string] $TestText, [string] $SelftestText)
 
     if ($TestText -match '(?m)^  selftest-(?:full|appending):' -or
-        $SelftestText -notmatch '(?ms)^on:\s+schedule:\s+- cron: "[^"]+"\s+workflow_dispatch:\s+pull_request:\s+paths:\s+- "ci/\*\*"\s+- "\.github/workflows/test\.yml"\s+- "\.github/workflows/thread-gate-selftest\.yml"' -or
+        $SelftestText -notmatch '(?ms)^on:\s+workflow_dispatch:\s+pull_request:\s+paths:\s+- "ci/\*\*"\s+- "\.github/workflows/test\.yml"\s+- "\.github/workflows/thread-gate-selftest\.yml"' -or
         $SelftestText -match '(?m)^  push:' -or
+        # No schedule until the jobs are sharded: neither finishes within a hosted job's limit (lead, 2026-11-22).
+        $SelftestText -match '(?m)^\s*(?:schedule:|- cron:)' -or
         $SelftestText -notmatch '(?m)^  cancel-in-progress: \$\{\{ github\.event_name == ''pull_request'' \}\}\s*$' -or
         $SelftestText -notmatch 'github\.event\.pull_request\.number \|\| github\.run_id') { return $false }
 
@@ -137,6 +139,8 @@ $selftestSplitControls = @(
     @{ TestText = $testWorkflowText.Replace('python -I ci/thread_gate_smoke.py', 'python ci/thread_gate_smoke.py'); SelftestText = $selftestWorkflowText },
     @{ TestText = $testWorkflowText.Replace('timeout-minutes: 8', 'timeout-minutes: 12'); SelftestText = $selftestWorkflowText },
     @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('  workflow_dispatch:', "  push: {}`n  workflow_dispatch:") },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('  workflow_dispatch:', "  schedule:`n    - cron: `"47 6 * * *`"`n  workflow_dispatch:") },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('      - ".github/workflows/thread-gate-selftest.yml"', "      - `".github/workflows/thread-gate-selftest.yml`"`n  schedule:`n    - cron: `"47 6 * * *`"") },
     @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('github.event.pull_request.number', 'github.ref_name') },
     @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548', 'actions/setup-python@v6') },
     @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('timeout-minutes: 185', 'timeout-minutes: 8') },

@@ -1,8 +1,8 @@
 name: Thread Gate Self-test
 
+# No schedule: neither job finishes within a hosted job's limit (run 44983555494), so a nightly could only be
+# cancelled. The schedule returns with the sharding follow-up.
 on:
-  schedule:
-    - cron: "47 6 * * *"
   workflow_dispatch:
   pull_request:
     paths:

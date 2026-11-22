@@ -267,8 +267,13 @@ On the hosted Windows runner, the fast step completed in 10 seconds. The
 Python suites and the live gate run in their existing steps.
 [Test run 45002393799](https://github.com/amanthanvi/noctty/actions/runs/45002393799)
 
-`Thread Gate Self-test` runs the full and appending modes on its nightly
-schedule, on dispatch and on selected pull requests. The appending job alone
+`Thread Gate Self-test` runs the full and appending modes on dispatch and on
+selected pull requests. It has no schedule: neither job finishes within a
+hosted job's limit (run 44983555494 cancelled the appending job at its
+185-minute limit and both full jobs at five hours), so a nightly could only
+be cancelled. The schedule returns with the sharding follow-up; until then
+the exhaustive modes are evidence only from a workstation run, and a hosted
+run of these jobs that is cancelled measured nothing. The appending job alone
 is selected for a change confined to the live thread table, sidecars, allow-list
 or registry. That workflow has its own job budgets and PR concurrency group.
 The release reader uses Test's full-matrix result at the exact SHA, so the
