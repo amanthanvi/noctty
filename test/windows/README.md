@@ -1663,14 +1663,16 @@ D3D11 failure, then a WARP start reads
 `opengl:failed d3d11:failed d3d11-warp:started`, and the
 backend `d3d11-warp`. A log whose attempts no start closes reads `unknown`. The
 contract pins each of those lines to its source.
-The hosted suite upload also includes `receipts/scope.txt`, which directs
-readers to the Actions job for the thread-role comparison and controls.
 All are allowlisted values only: booleans, numbers and short strings without a
 path separator, quote or bracket. No path, command line, window title,
 environment value, screen capture or process listing; a failed leaf's receipt
 carries its failure kinds and its log's line counts, never a line. The
 console gets leaf ids and failure kinds. The logs, the runner's errors, the
 state guard's receipts and the copies stay under `-Work`.
+Beside the receipts, the hosted suite upload carries `receipts/scope.txt`, a
+fixed sentence from `gui-hidden.yml` (no run value) saying the artifact covers
+the runner's result only and pointing to the Actions job for the thread-role
+comparison and controls.
 
 **Guards and exit codes.** The state guard (the product jump list,
 `startup-attempts.json`, the clipboard sequence) and the PSReadLine history

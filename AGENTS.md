@@ -637,7 +637,9 @@ that govern each symbol you change, or that none does.
   identity and refcounts, BSTR and VARIANT ownership, `events.zig`); terminal
   text (`win32_terminal_accessibility.zig`, TextPattern, ScrollIntoView, the
   echo queue, and the output transport that feeds it:
-  `TerminalOutputTransport` in `apprt/surface.zig`), palette and tab-list
+  `TerminalOutputTransport` in `apprt/surface.zig`; the viewport a range's
+  `GetBoundingRectangles` reads: `terminalAccessibilityViewport`'s try-lock in
+  `src/apprt/win32.zig`, `handleViewportRefresh`, `providerViewport`), palette and tab-list
   UIA (a tab's name: `uiaName` and `Key.sameUiaName` in
   `win32/tab_label.zig`).
 - [config.md](docs/agents/log/config.md): config loading and reload outside
