@@ -1199,7 +1199,7 @@ pub fn clone(
             const last = result.pages.last.?;
             const page = last.page();
             const row = &page.rows.ptr(page.memory)[last.rows() - 1];
-            page.clearCells(row, 0, result.cols);
+            page.clearCells(row, 0, page.size.cols);
         }
 
         // Update our total rows to be our row size.
@@ -2434,6 +2434,7 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                 var it = self.pageIterator(.right_down, .{ .screen = .{} }, null);
                 while (it.next()) |chunk| {
                     const page = chunk.node.page();
+                    if (page.size.cols <= cols) continue;
                     defer page.assertIntegrity();
                     const rows = page.rows.ptr(page.memory);
                     for (0..page.size.rows) |i| {
@@ -2441,7 +2442,7 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                         // If the cut splits a wide char, clear its head too.
                         const cells = row.cells.ptr(page.memory);
                         const start = if (cells[cols - 1].wide == .wide) cols - 1 else cols;
-                        page.clearCells(row, start, self.cols);
+                        page.clearCells(row, start, page.size.cols);
                     }
 
                     page.size.cols = cols;
@@ -13226,6 +13227,18 @@ test "PageList clone less than active" {
     });
     defer s2.deinit();
     try testing.expectEqual(@as(usize, s.rows), s2.totalRows());
+}
+
+test "PageList clone less than active on a narrower page" {
+    const alloc = std.testing.allocator;
+    var s = try init(alloc, 4, 3, null);
+    defer s.deinit();
+    s.pages.first.?.page().size.cols = 2;
+
+    var copy = try s.clone(alloc, .{ .top = .{ .active = .{ .y = 2 } } });
+    defer copy.deinit();
+    try std.testing.expectEqual(@as(usize, s.rows), copy.totalRows());
+    try std.testing.expectEqual(2, copy.pages.last.?.cols());
 }
 
 test "PageList clone remap tracked pin" {
