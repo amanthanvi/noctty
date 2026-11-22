@@ -9678,7 +9678,7 @@ test "Screen: resize more rows, less cols pulls scrollback like separate resizes
     const alloc = testing.allocator;
 
     for ([_]bool{ true, false }) |pull| {
-        var s = try init(alloc, .{ .cols = 5, .rows = 2, .max_scrollback = null });
+        var s = try init(alloc, .{ .cols = 5, .rows = 2, .max_scrollback = 1000 });
         defer s.deinit();
         try s.testWriteString("1A\n2B\n3C\n");
         try testing.expectEqual(1, s.cursor.y);
