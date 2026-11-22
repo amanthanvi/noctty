@@ -761,8 +761,9 @@ public static class FramePacingNative {
             try {
                 // The unlock aimed at the cursor's own pixel, before the gate (UNLOCK-HOOK-01). The cursor is read
                 // again after the gate's last check, and the unlock goes only if it is still on that pixel
-                // ("unlock-raced"); after the hook's sight of it, the cursor must still be there
-                // ("unlock-moved-cursor"). No coordinate leaves this worker.
+                // ("unlock-raced"); after the hook's signal it is read once more ("unlock-moved-cursor"), a read that
+                // normally, but not always, follows the move: the hook signals from inside its callback, before
+                // Windows applies the move. No coordinate leaves this worker.
                 CursorPoint aim;
                 var unlock = UnlockHere(marker, out aim);
                 if (unlock == null) { outcome = "unlock-unaimed"; return; }
@@ -870,10 +871,13 @@ public static class FramePacingNative {
     // MOUSEEVENTF_VIRTUALDESK, at the normalized coordinates nx, ny) with the series' marker in its extra info, aimed
     // at the pixel the cursor is on. A zero-delta relative move registers as session input but never reaches a
     // low-level mouse hook, so the hook could never prove itself alive with it (test-harnesses.md UNLOCK-HOOK-01,
-    // measured on the visible desktop). An absolute move replaces motion rather than adding to it: input Windows has
-    // not yet processed when the unlock is sent (hardware latency, milliseconds) can be undone by it, and the hook
-    // then sees that input as real, which voids the series. Never a key, which can leave the window in a menu loop
-    // (PROBE-ALT-TAP-01), and never a relative motion.
+    // measured on the visible desktop). An absolute move replaces motion rather than adding to it: any pointer motion
+    // after the worker's last read of the pointer and before its move can be undone, once, including motion Windows
+    // holds while a low-level hook runs. The gap is normally microseconds, and longer only if Windows suspends the
+    // worker's thread at that moment; the outer half closes the run's job as soon as it observes the hook's latch
+    // (the supervision bound: on observation, plus OS scheduling latency). The hook sees that motion as real, so the
+    // series is voided. Never a key, which can leave the window in a menu loop (PROBE-ALT-TAP-01), and never a
+    // relative motion.
     static Input[] UnlockInput(IntPtr marker, int nx, int ny) {
         var unlock = new Input[] { new Input { type = 0 } };
         unlock[0].mouse.dx = nx; unlock[0].mouse.dy = ny;
@@ -884,8 +888,9 @@ public static class FramePacingNative {
     // A pixel's normalized absolute coordinate on the virtual desktop (origin and size from SM_XVIRTUALSCREEN and
     // SM_CXVIRTUALSCREEN, or their Y pair): the smallest value that Windows' floor mapping, pixel = floor(n * size /
     // 65536), sends back to that pixel (the mapping the harness assumes; Wine's `>> 16` is the prior art). Nearest
-    // rounding agrees only on an axis of at most 32,768 pixels: on 38,400, offset 3 normalizes to 6, which floor maps
-    // to 3 and nearest to 4 (Sol on #746). Public so the contract can table it.
+    // rounding is guaranteed to agree on an axis of up to 32,768 pixels; above that it can fail, though not at every
+    // width (half-up rounding first misses at 32,769; on 38,400, offset 3 normalizes to 6, which floor maps to 3 and
+    // nearest to 4; Sol and Opus on #746). Public so the contract can table it.
     public static int Normalize(int pixel, int origin, int size) { return (int)Math.Ceiling((pixel - origin) * 65536.0 / size); }
     [StructLayout(LayoutKind.Sequential)] struct CursorPoint { public int x, y; }
     [DllImport("user32.dll")] static extern bool GetCursorPos(out CursorPoint p);
@@ -893,7 +898,8 @@ public static class FramePacingNative {
     // The unlock aimed at the cursor's own pixel (`aim`), read in physical pixels (per-monitor DPI awareness on the
     // calling worker thread, so the cursor and the virtual desktop agree on a scaled display), or null when the switch
     // to that awareness, the cursor or the virtual desktop cannot be read (Opus on #746: an unaware read aims at
-    // another row). Measured at one pixel: the cursor ended on it (UNLOCK-HOOK-01); CursorAway checks every run.
+    // another row). Measured at one pixel: the cursor ended on it (UNLOCK-HOOK-01). Each run reads it again after the
+    // hook's signal (CursorAway), which normally, but not always, follows the move.
     static Input[] UnlockHere(IntPtr marker, out CursorPoint aim) {
         aim = new CursorPoint();
         if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero) return null; // PER_MONITOR_AWARE_V2
