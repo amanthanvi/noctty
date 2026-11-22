@@ -2264,6 +2264,9 @@ pub const ReadThread = struct {
             const process_started = traceInstant(self.trace);
             @call(process_output_modifier, termio.Termio.processOutput, .{ self.io, data });
             self.io.noteWindowsProcessOutput(traceElapsedNs(process_started));
+            // Between chunks, with the renderer-state mutex released. Keep
+            // the wait outside the processOutput timing sample.
+            self.io.renderer_state.yieldToDemand();
         }
     };
 

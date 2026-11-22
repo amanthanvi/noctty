@@ -1763,8 +1763,8 @@ fn noteSubmittedInput(
 }
 
 fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState, lines: u32) void {
-    if (mutex == .unlocked) self.renderer_state.mutex.lock();
-    defer if (mutex == .unlocked) self.renderer_state.mutex.unlock();
+    if (mutex == .unlocked) self.renderer_state.lockDemand();
+    defer if (mutex == .unlocked) self.renderer_state.unlockDemand();
     self.io.terminal.screens.active.semanticPromptLinesSubmitted(lines);
 }
 
@@ -1928,6 +1928,105 @@ const RoleSiteSurface = struct {
         alloc.destroy(self.surface);
     }
 };
+
+fn expectKeyDemandPairs(
+    src: std.builtin.SourceLocation,
+    expected: []const struct { key: []const u8, count: usize },
+) !void {
+    const testing = std.testing;
+    const isolated = @import("sync/isolated.zig");
+    var child = try isolated.run(src, .own);
+    defer child.deinit();
+    try testing.expect(!child.timed_out);
+    try testing.expectEqual(isolated.exit_passed, child.exit_code);
+
+    const raw = try child.dir.?.read();
+    defer testing.allocator.free(raw);
+    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
+    _ = lines.next(); // header
+    var count: usize = 0;
+    while (lines.next()) |line| : (count += 1) {
+        try testing.expect(std.mem.endsWith(u8, line, " demand ui"));
+    }
+    var total: usize = 0;
+    for (expected) |site| total += site.count;
+    try testing.expectEqual(total, count);
+
+    if (@import("sync/symbolise.zig").names_checked) {
+        var result = try isolated.compareChild(&child);
+        defer result.deinit();
+        try testing.expect(result.report.passed());
+        try testing.expectEqual(@as(usize, 1), result.dumps.len);
+        for (expected) |site| {
+            try testing.expectEqual(site.count, std.mem.count(u8, result.dumps[0].text, site.key));
+        }
+    }
+}
+
+test "isolated: surface key demand records every key callback acquisition from .ui" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (@import("sync/isolated.zig").inChild()) {
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const surface = fixture.surface;
+        var runtime: apprt.runtime.Surface = .{ .app = undefined, .cursor_pos = .{ .x = -1, .y = -1 } };
+        surface.rt_surface = &runtime;
+        surface.alloc = std.testing.allocator;
+        surface.config.keybind = .{};
+        surface.config.key_remaps = .empty;
+        surface.config.vt_kam_allowed = true;
+        surface.size = .{
+            .screen = .{ .width = 100, .height = 30 },
+            .cell = .{ .width = 10, .height = 10 },
+            .padding = .{},
+        };
+        // Exercise the KAM read, modifier and hover update, encoder read
+        // and post-encode typing path without writing to a child process.
+        surface.readonly = true;
+        try std.testing.expectEqual(.consumed, try surface.keyCallback(.{
+            .key = .key_a,
+            .mods = .{ .shift = true },
+            .utf8 = "A",
+        }));
+        try std.testing.expectEqual(@as(u32, 5), surface.renderer_state.handoff_gen.load(.monotonic));
+        return;
+    }
+    try expectKeyDemandPairs(@src(), &.{
+        .{ .key = "src/Surface.zig:keyCallback ui\n", .count = 3 },
+        .{ .key = "src/Surface.zig:encodeKeyOpts ui\n", .count = 1 },
+        .{ .key = "src/Surface.zig:modsChanged ui\n", .count = 1 },
+    });
+}
+
+test "isolated: surface key demand records preedit, IME position and input submissions from .ui" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (@import("sync/isolated.zig").inChild()) {
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const surface = fixture.surface;
+        var runtime: apprt.runtime.Surface = .{ .app = undefined };
+        surface.rt_surface = &runtime;
+        surface.renderer_thread.wakeup = try @TypeOf(surface.renderer_thread.wakeup).init();
+        defer surface.renderer_thread.wakeup.deinit();
+
+        try surface.preeditCaretCallback(null, null, null);
+        _ = surface.imePoint();
+        surface.markInputSubmitted(.unlocked, 1);
+        try std.testing.expectEqual(@as(u32, 3), surface.renderer_state.handoff_gen.load(.monotonic));
+        return;
+    }
+    try expectKeyDemandPairs(@src(), &.{
+        .{ .key = "src/Surface.zig:preeditCaretCallback ui\n", .count = 1 },
+        .{ .key = "src/Surface.zig:imePoint ui\n", .count = 1 },
+        .{ .key = "src/Surface.zig:markInputSubmitted ui\n", .count = 1 },
+    });
+}
 
 test "isolated: a UI-only site driven from a .termio thread is recorded, and its compare fails one PAIR-OUTSIDE-TABLE (acceptance test 4)" {
     if (thread_role.layer == .off) return error.SkipZigTest;
@@ -2695,8 +2794,8 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
         // highlight links. Additionally, mark the screen as dirty so
         // that the highlight state of all links is properly updated.
         const redraw = redraw: {
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
+            self.renderer_state.lockDemand();
+            defer self.renderer_state.unlockDemand();
             self.renderer_state.mouse.mods = self.mouseModsWithCapture(self.mouse.mods);
 
             // A frame no link can change would present for every Shift or
@@ -3414,12 +3513,12 @@ test "only a pane that is not WSL reads /c/x as C:\\x (#514)" {
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
 /// keyboard should be rendered.
-pub fn imePoint(self: *const Surface) apprt.IMEPos {
+pub fn imePoint(self: *Surface) apprt.IMEPos {
     // Our sizes are all scaled so we need to send the unscaled values back.
     const content_scale = self.rt_surface.getContentScale() catch .{ .x = 1, .y = 1 };
 
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.lockDemand();
+    defer self.renderer_state.unlockDemand();
     // TODO: need to handle when scrolling and the cursor is not
     // in the visible portion of the screen.
     const cursor = self.renderer_state.terminal.screens.active.cursor;
@@ -4210,8 +4309,8 @@ pub fn preeditCaretCallback(
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.lockDemand();
+    defer self.renderer_state.unlockDemand();
 
     // We clear our selection when ANY OF:
     // 1. We have an existing preedit
@@ -4573,8 +4672,8 @@ pub fn keyCallback(
     }
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        self.renderer_state.lockDemand();
+        defer self.renderer_state.unlockDemand();
         if (self.io.terminal.modes.get(.disable_keyboard)) return .consumed;
     }
 
@@ -4605,8 +4704,8 @@ pub fn keyCallback(
         {
             // Refresh our link state
             const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
+            self.renderer_state.lockDemand();
+            defer self.renderer_state.unlockDemand();
             self.mouseRefreshLinks(
                 pos,
                 self.posToViewport(pos.x, pos.y),
@@ -4711,8 +4810,8 @@ pub fn keyCallback(
     // some data to send to the pty, then we move the viewport down to the
     // bottom. We also clear the selection for any key other then modifiers.
     if (keyWriteIsTyping(event)) {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        self.renderer_state.lockDemand();
+        defer self.renderer_state.unlockDemand();
         try self.dropSelectionAndScrollForTyping(event.key == .escape);
     }
 
@@ -5449,9 +5548,9 @@ fn encodeKey(
     return write_req;
 }
 
-fn encodeKeyOpts(self: *const Surface) input.key_encode.Options {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+fn encodeKeyOpts(self: *Surface) input.key_encode.Options {
+    self.renderer_state.lockDemand();
+    defer self.renderer_state.unlockDemand();
     const t = &self.io.terminal;
     var opts: input.key_encode.Options = .fromTerminal(t);
     opts.windows_legacy = builtin.os.tag == .windows;
