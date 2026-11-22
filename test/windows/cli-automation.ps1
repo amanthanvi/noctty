@@ -30,13 +30,19 @@ Assert-InteractiveWin11ExeExists -ExePath $exe
 $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing automation CLI shim: $cli" }
 
-$stateDir = Join-Path $layout.LocalAppData 'noctty'
+$stateDir = Get-InteractiveWin11StateRoot -Layout $layout
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-[IO.File]::WriteAllText(
-    (Join-Path $stateDir 'config.ghostty'),
-    "confirm-close-surface = false`r`nwindow-save-state = never`r`n",
-    [Text.UTF8Encoding]::new($false)
-)
+# Hosted mode writes the copy's config with the launch policy's lines after the leaf's.
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    $null = Write-InteractiveWin11HostedConfig -Text "confirm-close-surface = false`r`nwindow-save-state = never`r`n"
+}
+else {
+    [IO.File]::WriteAllText(
+        (Join-Path $stateDir 'config.ghostty'),
+        "confirm-close-surface = false`r`nwindow-save-state = never`r`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+}
 
 $instanceClass = "noctty-automation-$($layout.SandboxId)"
 $serverStdout = Join-Path $layout.Logs 'server.stdout.log'
@@ -64,8 +70,16 @@ function Invoke-AutomationCli {
     $originalErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = @(& $cli @Arguments 2> $stderr)
-        $exitCode = $LASTEXITCODE
+        # Hosted mode runs the CLI through the hosted launcher (scripts/interactive-win11-lib.ps1), never `&`.
+        if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+            $hostedRun = Invoke-InteractiveWin11HostedProcess -FilePath $cli -ArgumentList $Arguments -WorkingDirectory $repoRoot -StandardErrorPath $stderr
+            $output = @($hostedRun.Output)
+            $exitCode = $hostedRun.ExitCode
+        }
+        else {
+            $output = @(& $cli @Arguments 2> $stderr)
+            $exitCode = $LASTEXITCODE
+        }
     }
     finally {
         $ErrorActionPreference = $originalErrorActionPreference
@@ -137,13 +151,23 @@ function Wait-AutomationState {
 }
 
 try {
-    $server = Start-Process -FilePath $exe -ArgumentList @(
-        Get-InteractiveWin11ContainmentArguments
-        '--single-instance=true'
-        "--class=$instanceClass"
-        '--command=cmd.exe'
-    ) -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout `
-        -RedirectStandardError $serverStderr -PassThru
+    # Hosted mode starts the server through the hosted launcher, its shell set by the copy's config, never in argv.
+    $server = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        Start-InteractiveWin11HostedProcess -FilePath $exe -ArgumentList @(
+            Get-InteractiveWin11ContainmentArguments
+            '--single-instance=true'
+            "--class=$instanceClass"
+        ) -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout -RedirectStandardError $serverStderr
+    }
+    else {
+        Start-Process -FilePath $exe -ArgumentList @(
+            Get-InteractiveWin11ContainmentArguments
+            '--single-instance=true'
+            "--class=$instanceClass"
+            '--command=cmd.exe'
+        ) -WorkingDirectory $repoRoot -RedirectStandardOutput $serverStdout `
+            -RedirectStandardError $serverStderr -PassThru
+    }
     $serverPid = $server.Id
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
@@ -217,7 +241,8 @@ try {
     )
     Assert-AutomationExit -Description '+send-text printable text' -Result $result -Expected 0
 
-    $unusedClass = "noctty-unused-$([Guid]::NewGuid().ToString('N'))"
+    # Ends in the sandbox id, so in hosted mode it carries the run token the argument rule requires.
+    $unusedClass = "noctty-unused-$([Guid]::NewGuid().ToString('N'))-$($layout.SandboxId)"
     $result = Invoke-AutomationCli @('+list-windows', "--class=$unusedClass", '--timeout=0')
     Assert-AutomationExit -Description '+list-windows unused class' -Result $result -Expected 2
 }

@@ -78,13 +78,20 @@ function Invoke-AppShellRun {
         '-e'
     ) + $ShellArgs
 
-    $process = Start-Process `
-        -FilePath $exePath `
-        -ArgumentList $launchArgs `
-        -WorkingDirectory $repoRoot `
-        -RedirectStandardOutput $StdoutPath `
-        -RedirectStandardError $StderrPath `
-        -PassThru
+    # Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+    $process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+        Start-InteractiveWin11HostedProcess -FilePath $exePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+    }
+    else {
+        Start-Process `
+            -FilePath $exePath `
+            -ArgumentList $launchArgs `
+            -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $StdoutPath `
+            -RedirectStandardError $StderrPath `
+            -PassThru
+    }
     $processHandle = $process.Handle
 
     try {
@@ -124,7 +131,8 @@ if ($launchAction -eq 'build') {
 Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 $exeDir = Split-Path -Parent $exePath
-$expectedCommandPath = Join-Path $exeDir 'noctty.com'
+# Canonical (Test-InteractiveWin11SamePath): an 8.3 spelling of the copy's directory must not change the verdict.
+$expectedCommandPath = Get-InteractiveWin11CanonicalPath (Join-Path $exeDir 'noctty.com')
 
 $cmdResolvedPath = Join-Path $layout.Temp 'cmd-resolved.txt'
 $cmdHelpPath = Join-Path $layout.Temp 'cmd-help.txt'
@@ -138,9 +146,39 @@ $cmdStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-cmd-std
 
 Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdKeybindsPath, $cmdColorsPath, $cmdThemesPath, $cmdPayloadPath, $cmdStdoutPath, $cmdStderrPath -ErrorAction SilentlyContinue
 
+# Hosted mode: the payload first waits (at most 30 s) until the runner has read this cmd's command line (its
+# `shell-read-1.flag`), so a one-shot shell cannot exit unread (design §4.1, barriers).
+$cmdBarrier = @()
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    $cmdBarrierFlag = Join-Path $env:NOCTTY_GUI_HIDDEN_RUN 'shell-read-1.flag'
+    $cmdBarrier = @(
+        'set /a gui_hidden_wait=0'
+        ':gui_hidden_barrier'
+        "if exist `"$cmdBarrierFlag`" goto gui_hidden_go"
+        'set /a gui_hidden_wait+=1'
+        'if %gui_hidden_wait% geq 30 goto gui_hidden_go'
+        'ping -n 2 127.0.0.1 >nul'
+        'goto gui_hidden_barrier'
+        ':gui_hidden_go'
+    )
+}
+# Hosted mode: the payload refuses to run `noctty` unless its first PATH match is the staged copy's CLI, so a wrong
+# resolution stops before anything runs (H2 on #740), not after the driver reads the resolution file.
+$cmdResolutionGuard = @()
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    if ($expectedCommandPath -match '[%^&|<>"!]') { throw 'The staged CLI''s path holds a character cmd would interpret.' }
+    # cmd compares text only: `where` prints the PATH entry noctty put first (the copy's directory, as the launcher
+    # started noctty from its canonical path), so a different spelling there refuses; it never admits.
+    $cmdResolutionGuard = @(
+        "set /p gui_hidden_first=<`"$cmdResolvedPath`""
+        "if /i not `"%gui_hidden_first%`"==`"$expectedCommandPath`" exit /b 3"
+    )
+}
 @(
     '@echo off'
+    $cmdBarrier
     "where noctty > `"$cmdResolvedPath`" || exit /b 1"
+    $cmdResolutionGuard
     "noctty +help > `"$cmdHelpPath`" || exit /b 1"
     "noctty +version > `"$cmdVersionPath`" || exit /b 1"
     "noctty +list-keybinds > `"$cmdKeybindsPath`" || exit /b 1"
@@ -148,9 +186,11 @@ Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdKe
     "noctty +list-themes > `"$cmdThemesPath`" || exit /b 1"
 ) | Set-Content -LiteralPath $cmdPayloadPath -Encoding ASCII
 
+# Hosted mode names System32's cmd.exe absolutely, so the runner can check the shell it observes.
+$cmdShell = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe' } else { 'cmd.exe' }
 $null = Invoke-AppShellRun `
     -Name 'cmd' `
-    -ShellArgs @('cmd.exe', '/d', '/c', $cmdPayloadPath) `
+    -ShellArgs @($cmdShell, '/d', '/c', $cmdPayloadPath) `
     -StdoutPath $cmdStdoutPath `
     -StderrPath $cmdStderrPath
 
@@ -158,7 +198,7 @@ $cmdResolved = @(Get-Content -LiteralPath $cmdResolvedPath | Where-Object { -not
 if ($cmdResolved.Count -lt 1) {
     throw "cmd run produced no command resolution output ($cmdResolvedPath)"
 }
-if (-not $cmdResolved[0].Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not (Test-InteractiveWin11SamePath $cmdResolved[0] $expectedCommandPath)) {
     throw "cmd resolved unexpected first noctty command: $($cmdResolved[0])"
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'cmd +help'
@@ -185,9 +225,15 @@ $psThemesLiteral = Get-EscapedPowerShellLiteralPath -Path $psThemesPath
 
 Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psKeybindsPath, $psColorsPath, $psThemesPath, $psPayloadPath, $psStdoutPath, $psStderrPath -ErrorAction SilentlyContinue
 
+$psResolutionGuard = @()
+if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    $psExpectedLiteral = Get-EscapedPowerShellLiteralPath -Path $expectedCommandPath
+    $psResolutionGuard = @("if (-not `$resolved -or -not [string]::Equals([IO.Path]::GetFullPath([string]`$resolved), '$psExpectedLiteral', [StringComparison]::OrdinalIgnoreCase)) { exit 3 }")
+}
 @(
     '$resolved = (Get-Command noctty).Source'
-    "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding ASCII"
+    "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding UTF8"
+    $psResolutionGuard
     '$help = noctty +help | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psHelpLiteral' -Value `$help -Encoding UTF8"
@@ -203,7 +249,11 @@ Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psKeybin
     '$themes = noctty +list-themes | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psThemesLiteral' -Value `$themes -Encoding UTF8"
-) | Set-Content -LiteralPath $psPayloadPath -Encoding UTF8
+) | ForEach-Object -Begin { $psPayloadLines = [System.Collections.Generic.List[string]]::new() } -Process { $psPayloadLines.Add($_) } -End {
+    # UTF-8 with a BOM: the payload runs under Windows PowerShell, which reads a BOM-less file in the ANSI code page,
+    # so a non-ASCII path in it would change (CodeRabbit on #740). The resolution it writes is UTF-8 for the same reason.
+    [IO.File]::WriteAllText($psPayloadPath, (($psPayloadLines -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($true))
+}
 
 $null = Invoke-AppShellRun `
     -Name 'powershell' `
@@ -212,7 +262,7 @@ $null = Invoke-AppShellRun `
     -StderrPath $psStderrPath
 
 $psResolved = (Get-RequiredTextFile -Path $psResolvedPath).Trim()
-if (-not $psResolved.Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not (Test-InteractiveWin11SamePath $psResolved $expectedCommandPath)) {
     throw "PowerShell resolved unexpected noctty command: $psResolved"
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $psHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'PowerShell +help'

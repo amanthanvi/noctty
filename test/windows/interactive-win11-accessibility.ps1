@@ -831,7 +831,7 @@ function Assert-AccessibilityInputOwner(
             return
         }
 
-        [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
+        [void][InteractiveWin11RealInput]::ForceForeground($Process.MainWindowHandle, $true, $true)
         if ($attempts -lt $maxAttempts -and [DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
         }
@@ -2005,7 +2005,7 @@ function Wait-AccessibilityTerminalCommandEcho(
                 )
             }
             $diagnostic.focus_recovery_count++
-            [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
+            [void][InteractiveWin11RealInput]::ForceForeground($Process.MainWindowHandle, $true, $true)
             $recoveredForegroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
             $recoveredFocusedHwnd =
                 [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
@@ -2678,7 +2678,7 @@ function Open-AccessibilitySettingsProbe {
             }
         }
         elseif (-not $sentForCurrentNoWindowState) {
-            [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
+            [void][InteractiveWin11RealInput]::ForceForeground($Process.MainWindowHandle, $true, $true)
             $terminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren(
                 $Process.MainWindowHandle
             ))
@@ -3860,7 +3860,7 @@ function Get-AccessibilitySettingsCloseActionInvoke {
         [Parameter(Mandatory)][string] $Description
     )
 
-    if (-not [InteractiveWin11WindowNative]::ForceForeground($SettingsProbe.Hwnd, $true, $true)) {
+    if (-not [InteractiveWin11RealInput]::ForceForeground($SettingsProbe.Hwnd, $true, $true)) {
         throw "Unable to foreground $Description before its dirty-close request."
     }
     if (-not [NocttyAccessibilityNative]::PostMessageW(
@@ -4350,7 +4350,7 @@ try {
         }
         $themeDiagnosticDocument = $script:themeDiagnosticDocuments[0]
         $themeDiagnosticTerminalHwnd = [IntPtr]$themeDiagnosticDocument.Current.NativeWindowHandle
-        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+        [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
         $themeDiagnosticDocument.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'theme diagnostic terminal focus' -Condition {
             return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
@@ -4467,7 +4467,7 @@ try {
             [Convert]::ToBase64String($themeDiagnosticConfigBytes)) {
             throw 'Targeted theme preview changed config.ghostty bytes.'
         }
-        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+        [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
         $themeDiagnosticDocument.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'theme diagnostic pre-HC terminal focus' -Condition {
             return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
@@ -4519,7 +4519,7 @@ try {
         )) {
             throw 'Cold diagnostic terminal Text element does not expose TextPattern.'
         }
-        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+        [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
         $document.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'cold diagnostic terminal focus' -Condition {
             return [NocttyAccessibilityNative]::GetForegroundWindow() -eq $process.MainWindowHandle -and
@@ -4771,7 +4771,7 @@ try {
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
         -Description 'window to restore after the caption Minimize invoke' `
         -Condition { return -not [NocttyAccessibilityNative]::IsIconic($process.MainWindowHandle) }
-    [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+    [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_TREE_SETTLE_MS
     Assert-AccessibilityInputOwner -Process $process -Description 'caption minimize round trip'
     Wait-AccessibilityCondition `
@@ -4826,7 +4826,7 @@ try {
 
         if ($focusActivationAttempts -ge $focusActivationMaxAttempts) { break }
         $focusActivationAttempts++
-        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+        [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
         try { $document.SetFocus() } catch { $documentFocusError = $_.Exception.Message }
 
         $bounds = $document.Current.BoundingRectangle
@@ -5315,7 +5315,7 @@ try {
                 $paletteNativeFocusElement.Current.Name -ne 'Command palette query') {
                 throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocus)."
             }
-            [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+            [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
             return $false
         }
         $script:paletteFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -5483,7 +5483,7 @@ try {
                     if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
                         throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
                     }
-                    [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+                    [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
                     return $false
                 }
                 if ($null -eq $script:palette) {
@@ -5609,7 +5609,7 @@ try {
                     if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
                         throw "Recovered command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
                     }
-                    [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+                    [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
                     return $false
                 }
                 $script:paletteRecovered = @($root.FindAll(
@@ -5811,7 +5811,7 @@ try {
             if ($searchNativeFocusBeforeRecovery -ne $searchNativeHwnd) {
                 throw "Docked search query lost native focus before foreground recovery (focused=$searchNativeFocusBeforeRecovery expected=$searchNativeHwnd)."
             }
-            [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+            [void][InteractiveWin11RealInput]::ForceForeground($process.MainWindowHandle, $true, $true)
             return $false
         }
         $script:searchFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -6595,7 +6595,7 @@ try {
         try {
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus and selection ownership' -Condition {
                 if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $settingsHwnd) {
-                    [void][InteractiveWin11WindowNative]::ForceForeground($settingsHwnd, $true, $true)
+                    [void][InteractiveWin11RealInput]::ForceForeground($settingsHwnd, $true, $true)
                     return $false
                 }
                 $focusSection.SetFocus()
@@ -7034,7 +7034,7 @@ try {
             if ($saveNativeFocusBeforeRecovery -ne $ownerSaveHwnd) {
                 throw "Settings Save lost native focus before foreground recovery (focused=$saveNativeFocusBeforeRecovery expected=$ownerSaveHwnd)."
             }
-            [void][InteractiveWin11WindowNative]::ForceForeground($ownerSettingsHwnd, $true, $true)
+            [void][InteractiveWin11RealInput]::ForceForeground($ownerSettingsHwnd, $true, $true)
             return $false
         }
         $script:ownerSaveFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -7056,7 +7056,7 @@ try {
     }
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTINGS_SETTLE_MS
     if ([NocttyAccessibilityNative]::IsWindow($ownerProbeHost)) {
-        if (-not [InteractiveWin11WindowNative]::ForceForeground($ownerProbeHost, $true, $true) -or
+        if (-not [InteractiveWin11RealInput]::ForceForeground($ownerProbeHost, $true, $true) -or
             -not [NocttyAccessibilityNative]::SendChord(@([uint16]0x0D))) {
             throw 'Unable to confirm settings owner host close.'
         }
@@ -7087,7 +7087,7 @@ try {
     )
     [System.Windows.Automation.Automation]::AddAutomationFocusChangedEventHandler($settingsFocusHandler)
     $settingsFocusRegistered = $true
-    if (-not [InteractiveWin11WindowNative]::ForceForeground($ownerSettingsHwnd, $true, $true)) {
+    if (-not [InteractiveWin11RealInput]::ForceForeground($ownerSettingsHwnd, $true, $true)) {
         throw 'Unable to foreground surviving Settings before its dirty-close request.'
     }
     if (-not [NocttyAccessibilityNative]::PostMessageW(
@@ -7712,8 +7712,8 @@ try {
             throw "Settings window was destroyed during UIA idle soak at ${second}s."
         }
         if ($IdleSoakSeconds -gt 1 -and $second -eq [Math]::Floor($IdleSoakSeconds / 2)) {
-            if (-not [InteractiveWin11WindowNative]::ForceForeground($idleSettingsHwnd, $true, $true) -or
-                -not [InteractiveWin11WindowNative]::ForceForeground($idleTerminalHostHwnd, $true, $true)) {
+            if (-not [InteractiveWin11RealInput]::ForceForeground($idleSettingsHwnd, $true, $true) -or
+                -not [InteractiveWin11RealInput]::ForceForeground($idleTerminalHostHwnd, $true, $true)) {
                 throw "Settings/main-window focus round trip failed during UIA idle soak at ${second}s."
             }
         }
@@ -7732,7 +7732,7 @@ try {
     if ($idleSettingsElement.Current.Name -ne $idleSettingsName) {
         throw "Settings UIA root changed after idle soak; before='$idleSettingsName', after='$($idleSettingsElement.Current.Name)'."
     }
-    if (-not [InteractiveWin11WindowNative]::ForceForeground($idleSettingsHwnd, $true, $true)) {
+    if (-not [InteractiveWin11RealInput]::ForceForeground($idleSettingsHwnd, $true, $true)) {
         throw 'Unable to reacquire Settings foreground ownership after the idle soak.'
     }
     try {

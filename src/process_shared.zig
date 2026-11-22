@@ -211,6 +211,16 @@ extern "user32" fn MessageBoxW(
     flags: u32,
 ) callconv(.winapi) c_int;
 
+/// What a log line starts with: the level as `std.log.Level.asText` writes it
+/// (`.warn` is `warning`), then the scope. The hidden-desktop GUI suite reads
+/// renderer lines by these prefixes (gui-hidden-runner.ps1); the test below
+/// names the ones it reads, and its contract takes them from there.
+fn logPrefix(comptime level: std.log.Level, comptime scope: @TypeOf(.EnumLiteral)) []const u8 {
+    const level_txt = comptime level.asText();
+    const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    return level_txt ++ prefix;
+}
+
 fn logFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
@@ -225,11 +235,23 @@ fn logFn(
         const stderr = std.debug.lockStderrWriter(&buf);
         defer std.debug.unlockStderrWriter();
 
-        const level_txt = comptime level.asText();
-        const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-        nosuspend stderr.print(level_txt ++ prefix ++ format ++ "\n", args) catch break :stderr;
+        nosuspend stderr.print(comptime logPrefix(level, scope) ++ format ++ "\n", args) catch break :stderr;
         nosuspend stderr.flush() catch break :stderr;
     }
+}
+
+// The prefixes of the renderer lines the hidden-desktop GUI suite reads
+// (gui-hidden-runner.ps1, Get-GuiHiddenRendererStartups), and the start line
+// #738's hosted probe reads for its log control (gui-hosted-probe.ps1);
+// Contracts.99-GuiHiddenLaunch.ps1 takes each from this test, checks the
+// runner's matchers start with it, and builds its log fixtures from them. A
+// warning is `warning(...)`, not `warn(...)`.
+test "log prefixes the hidden-desktop suite reads" {
+    try std.testing.expectEqualStrings("info(renderer_start): ", comptime logPrefix(.info, .renderer_start));
+    try std.testing.expectEqualStrings("warning(renderer_windows): ", comptime logPrefix(.warn, .renderer_windows));
+    try std.testing.expectEqualStrings("debug(opengl): ", comptime logPrefix(.debug, .opengl));
+    try std.testing.expectEqualStrings("info(d3d11): ", comptime logPrefix(.info, .d3d11));
+    try std.testing.expectEqualStrings("info(win32): ", comptime logPrefix(.info, .win32));
 }
 
 pub const std_options: std.Options = .{

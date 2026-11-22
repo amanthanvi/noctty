@@ -3,6 +3,42 @@
 # toast notifier stays unchanged to retain the command-finish release gate.
 # Generations are keyed by HEAD; stale/failed trees and old evidence are preserved.
 
+# One spelling of a path for comparison: full, with every existing 8.3 component expanded, without a trailing
+# separator. [IO.Path]::GetFullPath expands an 8.3 component of a path that exists (it calls GetLongPathNameW for a
+# `~` component; measured under pwsh 7.6 and Windows PowerShell 5.1), while Join-Path, Split-Path, Resolve-Path and
+# $env:TEMP keep the short spelling: on the hosted runner TEMP is C:\Users\RUNNER~1\... (#740's first hosted run).
+function Get-InteractiveWin11CanonicalPath {
+    param([Parameter(Mandatory)] [string] $Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($full)
+    if ($full.Length -gt $root.Length) { $full = $full.TrimEnd('\', '/') }
+    # GetFullPath expands an existing 8.3 component, but Windows PowerShell 5.1's (.NET Framework) leaves the deepest
+    # existing one short when the path below it does not exist yet (`...\INNER-~1\not-yet\x.txt`; the composite's
+    # helper self-test, #740 run 44968184431; pwsh 7 expands it). So the deepest existing ancestor is expanded on its
+    # own, which both runtimes do, and the part that does not exist yet is appended as written.
+    $existing = $full
+    $tail = [System.Collections.Generic.List[string]]::new()
+    while ($existing.Length -gt $root.Length -and -not ([IO.Directory]::Exists($existing) -or [IO.File]::Exists($existing))) {
+        $tail.Insert(0, [IO.Path]::GetFileName($existing))
+        $existing = [IO.Path]::GetDirectoryName($existing)
+    }
+    if ($tail.Count -eq 0) { return $full }
+    # Trimmed even at a root (`C:\` to `C:`), so the join puts exactly one separator before the tail.
+    $expanded = [IO.Path]::GetFullPath($existing).TrimEnd('\', '/')
+    return (@($expanded) + $tail.ToArray()) -join '\'
+}
+
+# Whether two paths name the same place: both canonical (Get-InteractiveWin11CanonicalPath), compared ordinally
+# without regard to case, as Windows compares them. Every path equality check in the harness goes through this, so a
+# short or differently cased spelling neither refuses nor admits on a string difference.
+function Test-InteractiveWin11SamePath {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Left, [Parameter(Mandatory)] [AllowEmptyString()] [string] $Right)
+
+    if ([string]::IsNullOrEmpty($Left) -or [string]::IsNullOrEmpty($Right)) { return $false }
+    return [string]::Equals((Get-InteractiveWin11CanonicalPath $Left), (Get-InteractiveWin11CanonicalPath $Right), [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-InteractiveWin11MeasureLayout {
     param([Parameter(Mandatory)] [string] $RepoRoot, [string] $Head)
 
@@ -257,7 +293,7 @@ function Assert-InteractiveWin11MeasureSource {
 function Assert-InteractiveWin11MeasureBuildCore {
     param([Parameter(Mandatory)] $Layout, [Parameter(Mandatory)] [string] $ExePath)
 
-    if (-not ([IO.Path]::GetFullPath($ExePath)).Equals($Layout.Exe, [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not (Test-InteractiveWin11SamePath $ExePath $Layout.Exe)) {
         throw 'Measurement validation requires the raw measurement prefix executable.'
     }
     $head = Get-InteractiveWin11MeasureHead $Layout.Repo
@@ -278,8 +314,9 @@ function Assert-InteractiveWin11MeasureBuildCore {
         $receipt.OriginalNotifierSHA256 -cne $source.OriginalNotifierSHA256 -or
         $receipt.MeasuredNotifierSHA256 -cne $source.MeasuredNotifierSHA256 -or
         $receipt.SourceReceiptSHA256 -cne (Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($Layout.SourceReceipt))) -or
-        $receipt.RepoRoot -cne $Layout.Repo -or $receipt.ExePath -cne $Layout.Exe -or
-        $receipt.CliPath -cne $Layout.Cli -or
+        -not (Test-InteractiveWin11SamePath ([string] $receipt.RepoRoot) $Layout.Repo) -or
+        -not (Test-InteractiveWin11SamePath ([string] $receipt.ExePath) $Layout.Exe) -or
+        -not (Test-InteractiveWin11SamePath ([string] $receipt.CliPath) $Layout.Cli) -or
         $receipt.CliSHA256 -cne (Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($Layout.Cli))) -or
         $receipt.ExeSHA256 -cne (Get-InteractiveWin11MeasureHash ([IO.File]::ReadAllBytes($Layout.Exe)))) {
         throw 'Measurement build receipt does not match HEAD, source patch, or executable.'
@@ -307,6 +344,9 @@ function Invoke-InteractiveWin11MeasureBuild {
         [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')] [string] $Optimize = 'Debug'
     )
 
+    # A hosted leaf never builds (design §4.2; Opus on #740): the runner builds before any leaf runs, with the hosted
+    # variables unset, and a leaf only ever reaches this through lib's own tripwired Invoke-InteractiveWin11Build.
+    if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) { throw 'gui-hidden: a hosted leaf never builds.' }
     $layout = Get-InteractiveWin11MeasureLayout $RepoRoot
     # These paths enter a cmd wrapper. Reject shell syntax rather than attempt
     # several layers of escaping, including percent/delayed expansion.

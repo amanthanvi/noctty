@@ -420,7 +420,7 @@ function Send-UnicodeInput {
     Start-Sleep -Milliseconds $script:KEY_INPUT_FOCUS_SETTLE_MS
     if (
         [Win11KeyInputNative]::GetForegroundWindow() -ne $Hwnd -and
-        -not [InteractiveWin11WindowNative]::ForceForeground($Hwnd, $false, $false)
+        -not [InteractiveWin11RealInput]::ForceForeground($Hwnd, $false, $false)
     ) {
         throw "Failed to foreground terminal before Unicode input"
     }
@@ -574,7 +574,7 @@ try {
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
     [void] [Win11KeyInputNative]::ShowWindow($hostHwnd, $SW_RESTORE)
-    [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
+    [void] [InteractiveWin11RealInput]::ForceForeground($hostHwnd, $false, $false)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
@@ -596,10 +596,10 @@ try {
     $inputSentAtUtc = [DateTime]::UtcNow
     $inputStopwatch = [Diagnostics.Stopwatch]::StartNew()
     if ($useSequentialRead) {
-        [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
+        [void] [InteractiveWin11RealInput]::ForceForeground($hostHwnd, $false, $false)
         Wait-InteractiveWin11Until -Deadline $deadline -Description 'focused terminal surface' -Process $process -Condition {
             if ([Win11KeyInputNative]::GetForegroundWindow() -ne $hostHwnd) {
-                [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
+                [void] [InteractiveWin11RealInput]::ForceForeground($hostHwnd, $false, $false)
                 return $false
             }
             $info = Get-GuiThreadInfo -Hwnd $hostHwnd
@@ -607,7 +607,7 @@ try {
                 $info.FocusHwnd -ne [IntPtr]::Zero -and
                 (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'noctty.win32'
             if (-not $focused) {
-                [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
+                [void] [InteractiveWin11RealInput]::ForceForeground($hostHwnd, $false, $false)
             }
             return $focused
         }

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "description": "Measurement outcomes the interactive offload's lanes depend on (design §5.1, §9). Each entry cites the run that measured it. PR 6's inventory contract reads the destinations; until then this file is a record.",
+  "measurements": [
+    {
+      "id": "Q0",
+      "outcome": "pass",
+      "pr": 738,
+      "workflow": "gui-probe.yml",
+      "runId": 44835461408,
+      "attempt": 1,
+      "summary": "Started under a private-desktop driver, noctty keeps every process and window on that desktop in all three arms (bundled ConPTY, in-box ConPTY, the noctty.com CLI), with the positive, negative and enumeration controls; also a local run at #738's final head.",
+      "governs": [
+        { "obligation": "gui-hidden lane: leaves run on a private desktop", "destinations": [ { "kind": "hosted", "workflow": "gui-hidden.yml", "receipt": "measurement", "gate": "gui-hidden-gate", "owner": ["vt-probe", "smoke", "shell-command", "cli-automation", "undo", "session-restore"] } ] }
+      ]
+    },
+    {
+      "id": "P1",
+      "outcome": "pass",
+      "pr": 738,
+      "workflow": "gui-probe.yml",
+      "runId": 44835461408,
+      "attempt": 1,
+      "summary": "On the hosted runner's own desktop, SendInput's KEYEVENTF_UNICODE input reached the probe's in-process EDIT (14/14 events, 7 units exact) and a measurement copy of noctty (186/186 events, the nonce and Unicode units exact); each cover took its own keys.",
+      "governs": [
+        { "obligation": "provisional lane: real input", "destinations": [ { "kind": "hosted:provisional", "workflow": "the provisional lane's own workflow, not created yet (design §5)", "receipt": "measurement", "gate": "the provisional lane's own plan", "owner": "design §5: the provisional interactive-desktop lane's plan if the lead opens it; until then these rows stay in visible-core.json (PR 6)" } ] }
+      ]
+    },
+    {
+      "id": "P2",
+      "outcome": "pass",
+      "pr": 738,
+      "workflow": "gui-probe.yml",
+      "runId": 44835461408,
+      "attempt": 1,
+      "summary": "A #FF00FF window read back from the screen as shown (1.0), not when covered or minimised (0.0).",
+      "governs": [
+        { "obligation": "provisional lane: on-screen pixels", "destinations": [ { "kind": "hosted:provisional", "workflow": "the provisional lane's own workflow, not created yet (design §5)", "receipt": "measurement", "gate": "the provisional lane's own plan", "owner": "design §5: the provisional interactive-desktop lane's plan if the lead opens it; until then these rows stay in visible-core.json (PR 6)" } ] }
+      ]
+    },
+    {
+      "id": "P3",
+      "outcome": "pass",
+      "pr": 738,
+      "workflow": "gui-probe.yml",
+      "runId": 44835461408,
+      "attempt": 1,
+      "summary": "The test-tools build with renderer = d3d11-warp presented the seeded frame on the hosted desktop (8 swaps, the last carrying 1629 bytes against a 1320-byte seed; withheld 327); on a private desktop it rendered the seeded frame offscreen with 0 swaps.",
+      "governs": [
+        { "obligation": "provisional lane: a composed D3D11 present", "destinations": [ { "kind": "hosted:provisional", "workflow": "the provisional lane's own workflow, not created yet (design §5)", "receipt": "measurement", "gate": "the provisional lane's own plan", "owner": "design §5: the provisional interactive-desktop lane's plan if the lead opens it; until then these rows stay in visible-core.json (PR 6)" } ] }
+      ]
+    },
+    {
+      "id": "P4",
+      "outcome": "pass",
+      "pr": 738,
+      "workflow": "gui-probe.yml",
+      "runId": 44835461408,
+      "attempt": 1,
+      "summary": "ITaskbarList3::HrInit returned S_OK on the hosted desktop and E_NOTIMPL (0x80004001) on a private one.",
+      "governs": [
+        { "obligation": "progress: the live smoke", "destinations": [ { "kind": "disposition", "owner": null, "reason": "none added; P4 records only, and the unit seam is the oracle (design §6)" } ] }
+      ]
+    },
+    {
+      "id": "P5",
+      "outcome": "inconclusive",
+      "pr": 738,
+      "workflow": "gui-probe.yml",
+      "runId": 44835461408,
+      "attempt": 1,
+      "summary": "ToastNotifier.Setting read back null for both identities on both desktops, before and after a normal exit; history 0 throughout. No toast was raised.",
+      "governs": [
+        { "obligation": "command-finish: the native toast", "destinations": [ { "kind": "disposition", "owner": null, "reason": "an inconclusive measurement takes the fail set: the desktop-notification claim is downgraded to what the fallback oracle proves (round-2 decision 4), unless a later product-identity measurement passes" } ] }
+      ]
+    }
+  ]
+}

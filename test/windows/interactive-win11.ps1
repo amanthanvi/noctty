@@ -84,6 +84,102 @@ $launchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
 Assert-Equal $launchArgs.Count 6 'launch args should include containment, isolation and cmd overrides'
 Assert-True ($launchArgs -contains '--command=cmd.exe') 'shell-agnostic harnesses must not inherit PowerShell history'
 Assert-True (@(Get-InteractiveWin11LaunchArguments -Layout $layout -UseConfiguredCommand) -notcontains '--command=cmd.exe') 'shell-specific fixtures must retain their configured command'
+
+# Paths compare canonically (#740's first hosted run: TEMP is C:\Users\RUNNER~1\... there, so a raw TEMP path and the
+# same path through GetFullPath differ as strings). The control takes a real 8.3 spelling of a directory, from the
+# file system object, and needs both spellings to be the same path, and another directory not to be.
+$shortScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-short-name-control-' + [guid]::NewGuid().ToString('N'))
+try {
+    [void](New-Item -ItemType Directory -Path (Join-Path $shortScratch 'inner-directory-long-name'))
+    $longInner = [IO.Path]::GetFullPath((Join-Path $shortScratch 'inner-directory-long-name'))
+    $shortInner = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($longInner).ShortPath
+    if ([string]::Equals($shortInner, $longInner, [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host 'interactive-win11 short-name control: SKIPPED (this volume keeps no 8.3 names)'
+    }
+    else {
+        Assert-True (Test-InteractiveWin11SamePath $shortInner $longInner) 'an 8.3 spelling and the long spelling of one directory are the same path'
+        Assert-True (Test-InteractiveWin11SamePath (Join-Path $shortInner 'not-yet\x.txt') (Join-Path $longInner 'not-yet\x.txt')) 'an 8.3 parent of a path that does not exist yet still compares as the same path'
+        Assert-True (Test-InteractiveWin11SamePath $shortInner $longInner.ToUpperInvariant()) 'paths compare without regard to case'
+        Assert-True (-not (Test-InteractiveWin11SamePath $shortInner $shortScratch)) 'a different directory is not the same path'
+        $shortRepo = Join-Path $shortInner 'repo'
+        $shortExe = Join-Path $shortRepo ('.sandbox\interactive-measure\' + ('a' * 40) + '\prefix\bin\noctty.exe')
+        Assert-True (Test-InteractiveWin11SamePath (Get-InteractiveWin11MeasureRepoForExe $shortExe) (Join-Path $longInner 'repo')) 'the measurement repository recovered from an 8.3 spelling is the long one'
+    }
+} finally { Remove-Item -LiteralPath $shortScratch -Recurse -Force -ErrorAction SilentlyContinue }
+
+# Hosted mode (the hidden-desktop suite, design §4.1): the shell is the portable copy's config line, never argv, and
+# a hosted leaf never bootstraps nor builds. The functions read the variable when called, so setting it here, after
+# the library loaded, tests them without the desktop check the library's load would run.
+$savedHostedEnvironment = @{}
+foreach ($name in @('NOCTTY_GUI_HIDDEN_DESKTOP', 'NOCTTY_GUI_HIDDEN_EXE', 'NOCTTY_GUI_HIDDEN_RUN', 'GHOSTTY_RESOURCES_DIR')) {
+    $savedHostedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+$hostedScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-hosted-selftest-' + [guid]::NewGuid().ToString('N'))
+try {
+    [void](New-Item -ItemType Directory -Path $hostedScratch)
+    $hostedExe = Join-Path $hostedScratch 'noctty.exe'
+    $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)
+    $env:NOCTTY_GUI_HIDDEN_EXE = $hostedExe
+    $env:NOCTTY_GUI_HIDDEN_RUN = $hostedScratch
+    $hostedLaunchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
+    Assert-Equal $hostedLaunchArgs.Count 5 'hosted launch args keep containment and isolation only'
+    Assert-Equal @($hostedLaunchArgs | Where-Object { $_.StartsWith('--command', [StringComparison]::Ordinal) }).Count 0 'hosted launch args carry no --command'
+    $hostedCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+    foreach ($leafText in @('', "window-save-state = always`r`nconfirm-close-surface = false`r`n")) {
+        $hostedConfigPath = Write-InteractiveWin11HostedConfig -Text $leafText
+        Assert-True (Test-InteractiveWin11SamePath $hostedConfigPath (Join-Path $hostedScratch 'config.ghostty')) 'hosted config goes beside the copy'
+        $hostedLines = @([IO.File]::ReadAllLines($hostedConfigPath))
+        Assert-Equal @($hostedLines | Where-Object { [string]::Equals($_, "command = direct:$hostedCmd /D", [StringComparison]::Ordinal) }).Count 1 'hosted config sets System32 cmd with /D once'
+        Assert-Equal @($hostedLines | Where-Object { $_.StartsWith('command', [StringComparison]::Ordinal) }).Count 1 'hosted config sets the shell once'
+        foreach ($policyLine in @('clipboard-read = deny', 'clipboard-write = deny', 'copy-on-select = false', 'auto-update = off', 'desktop-notifications = false')) {
+            Assert-Equal @($hostedLines | Where-Object { [string]::Equals($_, $policyLine, [StringComparison]::Ordinal) }).Count 1 "hosted config keeps '$policyLine'"
+        }
+        $saveLines = @($hostedLines | Where-Object { $_.StartsWith('window-save-state', [StringComparison]::Ordinal) })
+        $expectedSave = if ($leafText) { 'window-save-state = always' } else { 'window-save-state = never' }
+        Assert-Equal ($saveLines -join '|') $expectedSave 'hosted config keeps a leaf''s save state, else never'
+    }
+    Assert-True (Test-InteractiveWin11SamePath (Get-InteractiveWin11ExePath -RepoRoot $repoRoot) $hostedExe) 'hosted mode routes the executable to the staged copy'
+    Assert-True (Test-InteractiveWin11SamePath (Get-InteractiveWin11StateRoot -Layout $layout) $hostedScratch) 'hosted state lives at the portable copy''s root'
+    $hostedThrows = { param([scriptblock] $Action) try { & $Action; $false } catch { $true } }
+    Assert-True (& $hostedThrows { Get-InteractiveWin11LaunchAction -ExePath $hostedExe }) 'a hosted leaf with its copy missing must throw, not build'
+    Set-Content -LiteralPath $hostedExe -Value 'stub'
+    Assert-Equal (Get-InteractiveWin11LaunchAction -ExePath $hostedExe) 'launch' 'a hosted leaf launches its staged copy'
+    Assert-True (& $hostedThrows { Get-InteractiveWin11LaunchAction -ExePath $hostedExe -Rebuild }) 'a hosted leaf with -Rebuild must throw, not build'
+    Assert-True (& $hostedThrows { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }) 'the build tripwire must throw in hosted mode'
+    # Against a repository that does not exist, so nothing could build even without the tripwire; the message names it.
+    $measureTripwire = $null
+    try { Invoke-InteractiveWin11MeasureBuild -RepoRoot (Join-Path $hostedScratch 'no-such-repo') } catch { $measureTripwire = $_.Exception.Message }
+    Assert-True ([string]$measureTripwire -like '*a hosted leaf never builds*') 'measure-lib''s build tripwire must throw in hosted mode, before it reads anything'
+    Assert-True (& $hostedThrows { Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED' }) 'the bootstrap tripwire must throw in hosted mode'
+    $hostedHarnessMain = Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $hostedExe -EnvironmentVariable 'NOCTTY_HOSTED_SELFTEST_UNUSED'
+    Assert-True ($null -eq $hostedHarnessMain) 'a hosted leaf skips the bootstrap'
+    Assert-True ($null -eq [Environment]::GetEnvironmentVariable('NOCTTY_HOSTED_SELFTEST_UNUSED', 'Process')) 'the hosted bypass sets no bootstrap sentinel'
+    # The run token (H1 on #740): the hosted sandbox sits under the run directory, named by the token, and its id
+    # (so every class built from it) ends in the token; a second run's token gives another sandbox and class.
+    $hostedToken = [guid]::NewGuid().ToString('N')
+    Set-Content -LiteralPath (Join-Path $hostedScratch 'staged.json') -Value (@{ runToken = $hostedToken } | ConvertTo-Json)
+    Assert-Equal (Get-InteractiveWin11HostedRunToken) $hostedToken 'hosted mode reads the run token the runner staged'
+    $hostedLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'smoke'
+    Assert-True (Test-InteractiveWin11SamePath $hostedLayout.SandboxRoot (Join-Path $hostedScratch "sandbox-$hostedToken")) 'a hosted sandbox sits under the run directory, named by its token'
+    Assert-True ($hostedLayout.SandboxId.EndsWith("-$hostedToken", [StringComparison]::Ordinal)) 'a hosted sandbox id ends in the run token'
+    $hostedClassArgs = @(Get-InteractiveWin11LaunchArguments -Layout $hostedLayout)
+    Assert-True ($null -eq (Get-InteractiveWin11HostedArgumentRefusal -Arguments $hostedClassArgs -Token $hostedToken)) 'the hosted launch arguments keep the argument rule'
+    $hostedSecondToken = [guid]::NewGuid().ToString('N')
+    Set-Content -LiteralPath (Join-Path $hostedScratch 'staged.json') -Value (@{ runToken = $hostedSecondToken } | ConvertTo-Json)
+    $hostedSecondLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'smoke'
+    Assert-True ($hostedSecondLayout.SandboxRoot -ne $hostedLayout.SandboxRoot -and $hostedSecondLayout.SandboxId -ne $hostedLayout.SandboxId) 'two runs share no sandbox and no class'
+    Assert-True ($null -ne (Get-InteractiveWin11HostedArgumentRefusal -Arguments $hostedClassArgs -Token $hostedSecondToken)) 'one run''s class fails another run''s rule'
+    Assert-True ($null -ne (Get-InteractiveWin11HostedArgumentRefusal -Arguments @("--class=noctty-interactive-$($hostedLayout.SandboxId)") -Token $hostedToken)) 'an app launch without --single-instance is refused'
+    Assert-True (& $hostedThrows { Write-InteractiveWin11HostedConfig -Text "class = noctty-elsewhere`r`n" }) 'a leaf''s config cannot set the class'
+    Set-Content -LiteralPath (Join-Path $hostedScratch 'staged.json') -Value '{}'
+    Assert-True (& $hostedThrows { Get-InteractiveWin11HostedRunToken }) 'a run without a token is refused'
+    Assert-True (& $hostedThrows { ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('--command=cmd.exe') }) 'the hosted launcher refuses --command in argv'
+    Assert-True (& $hostedThrows { ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('a"b') }) 'the hosted launcher refuses a quote in an argument'
+    Assert-Equal (ConvertTo-InteractiveWin11HostedCommandLine -FilePath $hostedExe -ArgumentList @('-e', 'a b', '/D')) ('"' + $hostedExe + '" -e "a b" /D') 'the hosted launcher quotes whitespace only'
+} finally {
+    foreach ($entry in $savedHostedEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
+    Remove-Item -LiteralPath $hostedScratch -Recurse -Force -ErrorAction SilentlyContinue
+}
 Assert-True ($launchArgs -contains '--linux-cgroup=always') 'launch args should enable Windows Job Object containment'
 Assert-True ($launchArgs -contains '--linux-cgroup-hard-fail=true') 'launch args should fail when Job Object attachment fails'
 Assert-True ($launchArgs -contains '--windows-job-object-kill-on-close=true') 'launch args should terminate contained descendants when the host exits'
@@ -274,7 +370,14 @@ Assert-Equal (Get-InteractiveWin11ProcessAumid) 'io.github.amanthanvi.noctty.mea
 Assert-Equal (Get-InteractiveWin11ToastAumid) 'io.github.amanthanvi.noctty' 'measurement mode must retain the product notifier gate'
 $measureExe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 Assert-Equal $measureExe (Get-InteractiveWin11MeasureExePath $repoRoot) 'measurement mode should route the executable'
-Assert-Equal (Get-InteractiveWin11MeasureRepoForExe $measureExe) $repoRoot 'raw measurement executable should recover its repository'
+Assert-True (Test-InteractiveWin11SamePath (Get-InteractiveWin11MeasureRepoForExe $measureExe) $repoRoot) 'raw measurement executable should recover its repository'
+# Hosted mode routes to the staged portable copy instead (design §4.2), in measurement mode too.
+$savedHostedExe = $env:NOCTTY_GUI_HIDDEN_EXE; $savedHostedDesktop = $env:NOCTTY_GUI_HIDDEN_DESKTOP
+try {
+    $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)
+    $env:NOCTTY_GUI_HIDDEN_EXE = Join-Path ([IO.Path]::GetTempPath()) 'noctty-hosted-route\noctty.exe'
+    Assert-True (Test-InteractiveWin11SamePath (Get-InteractiveWin11ExePath -RepoRoot $repoRoot) $env:NOCTTY_GUI_HIDDEN_EXE) 'hosted measurement mode routes to the staged copy, not the raw prefix'
+} finally { $env:NOCTTY_GUI_HIDDEN_EXE = $savedHostedExe; $env:NOCTTY_GUI_HIDDEN_DESKTOP = $savedHostedDesktop }
 
 # Mock only the build/receipt boundary. These checks must never run a compiler
 # or require a real measurement executable in the helper self-test.
@@ -290,8 +393,8 @@ function Get-InteractiveWin11MeasureHead {
 }
 function Assert-InteractiveWin11MeasureBuild {
     param([string] $RepoRoot, [string] $ExePath)
-    Assert-Equal $RepoRoot $measureRoutingRepo 'measurement receipt validation should use the executable repository'
-    Assert-Equal $ExePath $measureRoutingExe 'measurement receipt validation should use the exact raw executable'
+    Assert-True (Test-InteractiveWin11SamePath $RepoRoot $measureRoutingRepo) 'measurement receipt validation should use the executable repository'
+    Assert-True (Test-InteractiveWin11SamePath $ExePath $measureRoutingExe) 'measurement receipt validation should use the exact raw executable'
     $script:measureRoutingAssertCount++
     if ($script:measureRoutingRejectReceipt) { throw 'Synthetic invalid measurement receipt.' }
 }
@@ -314,7 +417,7 @@ $foreignRejected = $false
 try { Get-InteractiveWin11LaunchAction -ExePath $existingExe | Out-Null } catch { $foreignRejected = $true }
 Assert-True $foreignRejected 'measurement mode must reject product executable paths'
 Invoke-InteractiveWin11Build -RepoRoot $measureRoutingRepo -Optimize ReleaseFast
-Assert-Equal $script:measureRoutingBuild[0] $measureRoutingRepo 'build routing must preserve repository'
+Assert-True (Test-InteractiveWin11SamePath $script:measureRoutingBuild[0] $measureRoutingRepo) 'build routing must preserve repository'
 Assert-Equal $script:measureRoutingBuild[1] 'ReleaseFast' 'build routing must preserve optimization'
 Invoke-InteractiveWin11Build -RepoRoot $measureRoutingRepo
 Assert-Equal $script:measureRoutingBuild[1] '' 'unspecified optimization must leave the measurement builder default intact'
@@ -330,6 +433,15 @@ try {
     Assert-Equal $env:GHOSTTY_RESOURCES_DIR (Join-Path (Get-InteractiveWin11MeasureLayout $measureRoutingRepo).Prefix 'share\ghostty') 'measurement resources must come from the same generation prefix'
     Assert-Equal $env:NOCTTY_INTERACTIVE_MEASURE_AUMID '1' 'sandbox redirection must retain inherited measurement mode'
     Assert-True (-not [IO.File]::Exists((Join-Path (Split-Path -Parent $measureRoutingExe) 'noctty.portable'))) 'measurement routing must not add a shared portable config root'
+    # Hosted mode: the resources are the portable copy's own (design §4.2); its config root is the copy (xdg.zig).
+    $savedHostedRouting = @($env:NOCTTY_GUI_HIDDEN_DESKTOP, $env:NOCTTY_GUI_HIDDEN_EXE)
+    try {
+        $env:NOCTTY_GUI_HIDDEN_DESKTOP = 'WinSta0\noctty-gh-' + ('0' * 32)
+        $env:NOCTTY_GUI_HIDDEN_EXE = Join-Path ([IO.Path]::GetTempPath()) 'noctty-hosted-route\noctty.exe'
+        [void] (Set-InteractiveWin11Environment -Layout $routingLayout -IncludeResourcesDir)
+        Assert-Equal $env:GHOSTTY_RESOURCES_DIR (Join-Path (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE) 'share\ghostty') 'hosted resources must come from the staged copy'
+        Assert-True (Test-InteractiveWin11SamePath (Get-InteractiveWin11StateRoot -Layout $routingLayout) (Split-Path -Parent $env:NOCTTY_GUI_HIDDEN_EXE)) 'hosted config and state live at the copy''s root'
+    } finally { $env:NOCTTY_GUI_HIDDEN_DESKTOP = $savedHostedRouting[0]; $env:NOCTTY_GUI_HIDDEN_EXE = $savedHostedRouting[1] }
 } finally {
     foreach ($entry in $savedRoutingEnvironment.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
 }
