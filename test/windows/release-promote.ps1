@@ -111,7 +111,7 @@ if (($filesA | ConvertTo-Json -Depth 4 -Compress) -cne ($filesB | ConvertTo-Json
 [IO.File]::WriteAllText((Join-Path $resultDirectory 'determinism.json'), ($filesA | ConvertTo-Json -Depth 4) + "`n")
 # The writer must repair a stale alias before hashing; the publisher cannot.
 [IO.File]::WriteAllText((Join-Path $primaryArtifact 'SHA256SUMS.txt'), 'stale alias')
-$manifestPath = Write-ReleaseManifest -Tag v1.3.136 -Version 1.3.136 -CandidateSha $sha -TestRunId 42344250161 -EvidenceRunId 42344250161 -ReleaseRunId 42346135091 -ArtifactRoot (Join-Path $primary 'dist/artifacts') -CandidateDirectory $candidate
+$manifestPath = Write-ReleaseManifest -Tag v1.3.136 -Version 1.3.136 -CandidateSha $sha -TestRunId 42344250161 -ReleaseRunId 42346135091 -ArtifactRoot (Join-Path $primary 'dist/artifacts') -CandidateDirectory $candidate
 $manifestBytes = [IO.File]::ReadAllText($manifestPath)
 # Main's generator changes during the soak. Its replacement cannot regenerate
 # anything: a passing promotion therefore proves it ran the candidate copy.
@@ -121,7 +121,7 @@ Invoke-FixtureGit -C $primary -c user.name=release-fixture -c user.email=release
 Invoke-FixtureGit -C $primary update-ref refs/remotes/origin/main HEAD
 $global:NocttyReleaseFixtureB.Candidate = $candidate
 $global:NocttyReleaseFixtureB.Inputs = @{
-    Tag = 'v1.3.136'; CandidateSha = $sha; TestRunId = '42344250161'; EvidenceRunId = '42344250161'; ReleaseRunId = '42346135091'
+    Tag = 'v1.3.136'; CandidateSha = $sha; TestRunId = '42344250161'; ReleaseRunId = '42346135091'
     CandidateDirectory = $candidate
 }
 $global:NocttyReleaseFixtureB.Calls = [Collections.Generic.List[string]]::new()
@@ -296,7 +296,7 @@ function Invoke-FixtureGh {
                 $expiration = if ($expired) { '2026-11-21T06:07:57Z' } else { '2099-01-01T00:00:00Z' }
                 return (@{ total_count = 2; artifacts = @(
                     @{ name = "flagship-portable-x64-$runId"; expired = $expired; expires_at = $expiration },
-                    @{ name = "flagship-interactive-win11-$runId"; expired = ($expired -or $global:NocttyReleaseFixtureB.Case -eq 'expired-interactive'); expires_at = $expiration }
+                    @{ name = "flagship-interactive-win11-$runId"; expired = $expired; expires_at = $expiration }
                 ) } | ConvertTo-Json -Depth 5)
             }
             if ($runId -ceq '42346135091') {
@@ -336,20 +336,6 @@ function Invoke-FixtureGh {
             $run.id = [long]$runId
             return ($run | ConvertTo-Json -Depth 5)
         }
-    }
-    if ($operation[0] -ceq 'run' -and $operation[1] -ceq 'download') {
-        $destination = $operation[[array]::IndexOf($operation, '--dir') + 1]
-        [IO.File]::WriteAllText((Join-Path $destination 'bound.txt'), 'candidate-bound evidence')
-        $hash = Get-FileSha256Lower (Join-Path $destination 'bound.txt')
-        $evidence = @{
-            scenario_id = 'windows.interactive-win11.composite'; status = 'pass'
-            implementation_commit = $global:NocttyReleaseFixtureB.Inputs.CandidateSha; workflow_run_id = $operation[2]
-            artifacts = @(@{ path = 'bound.txt'; sha256 = $hash })
-        }
-        if ($global:NocttyReleaseFixtureB.Case -eq 'evidence-hash') { $evidence.artifacts[0].sha256 = '0' * 64 }
-        if ($global:NocttyReleaseFixtureB.Case -eq 'evidence-sha') { $evidence.implementation_commit = '0' * 40 }
-        [IO.File]::WriteAllText((Join-Path $destination 'result.json'), ($evidence | ConvertTo-Json -Depth 5))
-        return
     }
     if ($operation[0] -ceq 'release' -and $operation[1] -ceq 'download') {
         $destination = $operation[[array]::IndexOf($operation, '--dir') + 1]
@@ -415,8 +401,9 @@ $cases = [ordered]@{
     asset = 'AssetDigestMismatch'; 'github-digest' = 'AssetDigestMismatch'; digest = 'ManifestDigestMismatch'; self = 'ManifestPayloadInvalid'
     extra = 'AssetSetMismatch'; missing = 'IncompletePublishedRelease'; metadata = 'PackageManagerMismatch'
     generator = 'package-manager generator differs from the prerelease'; 'generator-missing' = 'package-manager generator differs from the prerelease'
-    identity = 'ManifestIdentityMismatch'; expired = 'EvidenceExpired'; recovery = $null; 'expired-interactive' = 'EvidenceExpired'; run = 'ReleasePublishNotSuccessful'
-    job = 'EvidenceJobInvalid'; 'evidence-hash' = 'EvidenceHashMismatch'; 'evidence-sha' = 'EvidenceInvalid'
+    identity = 'ManifestIdentityMismatch'; expired = 'EvidenceExpired'; recovery = $null; run = 'ReleasePublishNotSuccessful'
+    # A successful pull_request Test run at the candidate is no promotion evidence: its path filter can skip lanes.
+    'pull-request-test-run' = 'RunIdentityMismatch'
     copy = 'StableCopyMismatch'; verification = 'PublishedVerificationFailed'
 }
 try {
@@ -446,6 +433,7 @@ try {
         $global:NocttyReleaseFixtureB.TestRun = ($record.testRun | ConvertTo-Json | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.ReleaseRun = ($record.releaseRun | ConvertTo-Json | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.TestRun.head_sha = $sha
+        if ($case -eq 'pull-request-test-run') { $global:NocttyReleaseFixtureB.TestRun.event = 'pull_request' }
         $global:NocttyReleaseFixtureB.ReleaseRun.head_sha = $sha
         $global:NocttyReleaseFixtureB.ReleaseRun | Add-Member -NotePropertyName run_attempt -NotePropertyValue $(if($case -in @('rerun','rerun-no-publish')){2}else{1}) -Force
         $global:NocttyReleaseFixtureB.Jobs = ($record.jobs | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
@@ -467,11 +455,9 @@ try {
         if ($case -eq 'manifest-missing') { $global:NocttyReleaseFixtureB.Release.assets = @($global:NocttyReleaseFixtureB.Release.assets | Where-Object { $_.name -cne 'release-manifest.json' }) }
         if ($case -eq 'run' -or $case -like 'failed-*' -or $case -in @('rerun','rerun-no-publish','attempt-sha')) { $global:NocttyReleaseFixtureB.ReleaseRun.conclusion = 'failure' }
         if ($case -like 'cancelled-*') { $global:NocttyReleaseFixtureB.ReleaseRun.conclusion = 'cancelled' }
-        if ($case -eq 'job') { $global:NocttyReleaseFixtureB.Jobs.jobs = @() }
         $global:NocttyReleaseFixtureB.Inputs.ManifestSha256 = if ($case -in @('digest','failed-digest')) { '0' * 64 } else { $digest }
         $global:NocttyReleaseFixtureB.Inputs.CandidateSha = if ($case -eq 'tag') { '0' * 40 } else { $sha }
         $global:NocttyReleaseFixtureB.Inputs.TestRunId = if ($case -eq 'recovery') { '99999999999' } else { '42344250161' }
-        $global:NocttyReleaseFixtureB.Inputs.EvidenceRunId = $global:NocttyReleaseFixtureB.Inputs.TestRunId
         if ($case -eq 'generator-missing') { Rename-Item -LiteralPath (Join-Path $candidate 'scripts/package-package-managers.ps1') -NewName 'generator.saved' }
         $invokeInputs = $global:NocttyReleaseFixtureB.Inputs
         $generatorScopeSentinel = 'parent-only-fixture-value'
@@ -490,7 +476,7 @@ try {
             if ($case -in @('draft','cancelled-before','tagless-draft') -and ($errorMessage -notmatch 'sole match' -or $errorMessage -notmatch 'tagless draft' -or $errorMessage -notmatch 'gh api --method DELETE' -or $errorMessage -match 'gh release delete')) { throw 'Manual recovery did not guard shared/tagless drafts.' }
             if ($case -in @('manifest-missing','missing') -and $errorMessage -match 'gh release delete') { throw 'Published refusal gave destructive advice.' }
             if ($case -eq 'expired' -and ($errorMessage -notmatch '42344250161.*flagship-portable-x64-42344250161.*2026-11-21T06:07:57' -or
-                $errorMessage -notmatch 'gh workflow run test.yml --repo amanthanvi/noctty --ref v1.3.136 -f run_interactive_win11=true')) { throw 'Expiry omitted its identity or recovery command.' }
+                $errorMessage -notmatch 'Recovery: gh workflow run test\.yml --repo amanthanvi/noctty --ref v1\.3\.136, then retry promotion with the new Test run ID, the original Release run ID 42346135091 and the original manifest digest\z')) { throw 'Expiry omitted its identity or recovery command.' }
         } else {
             if ($errorMessage) { throw "Fixture $case unexpectedly failed: $errorMessage" }
             $edits = @($global:NocttyReleaseFixtureB.Calls | Where-Object { $_ -ceq 'edit' }).Count

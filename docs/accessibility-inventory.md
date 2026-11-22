@@ -59,8 +59,9 @@ container/item selection semantics, named chrome and search controls
 with their patterns, scrollbar range, palette selection/focus
 semantics, non-overlapping native settings controls, settings
 owner-close survival, idle resource bounds, normal-path graceful close/reopen, and
-clean Explorer/WER postflight. Pull requests run the quick interactive
-lane; release candidates run the full default-branch interactive lane.
+clean Explorer/WER postflight. The interactive lanes are optional: no
+pull request or release candidate requires them (the maintainer's decision,
+2026-11-22).
 Provider unit tests cover the chrome provider patterns, the scrolled-back
 caret, terminal selection with its active end, and the degenerate
 TextPattern2 caret range plus its ABI and semantics. Deferred-disconnect tests

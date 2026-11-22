@@ -7,11 +7,12 @@ been heard through a screen reader.
 The three screen-reader columns record measured speech, not intent. `pass`,
 `partial`, and `fail` are measured results for the exact build named in the
 current record; `not yet measured` means no reader measurement exists. A
-release record must use the exact release build, while the current unreleased
-record labels its Debug pre-release evidence explicitly.
+record names the exact build it measured, and the current unreleased record
+labels its Debug pre-release evidence explicitly. No release requires a new
+record or a reader run (the maintainer's decision, 2026-11-22).
 
 `docs/accessibility-inventory.md` describes the provider architecture.
-This file is the per-release record. The trust page cites it as the
+This file is the record of what has been measured. The trust page cites it as the
 accessibility claim — link to this file rather than restating results,
 so a stale claim cannot outlive the record.
 
@@ -194,7 +195,7 @@ this has been measured through a screen reader.
 
 ## How we test
 
-Automated. Intended to run on every pull request and release candidate:
+Automated, optional. No pull request or release requires it:
 
 ```powershell
 pwsh -NoProfile -File .\test\windows\interactive-win11-accessibility.ps1
@@ -207,7 +208,7 @@ tree, so it cannot run on a headless or service-session runner.
 the harness pins `window-save-state = never` in its own sandbox config —
 but it remains the quickest way to rule the sandbox out when a run fails.
 
-Manual, per release, for each of Narrator, NVDA, and JAWS:
+Manual, optional, for each of Narrator, NVDA, and JAWS:
 
 1. Install the release build and note the Windows build number.
 2. Start the reader, then start noctty. Do not start noctty first — some
@@ -251,11 +252,12 @@ recorded pass — a Debug rather than release build, 150% scale only, High
 Contrast off only, Narrator and JAWS not run — are stated in the current
 record and must not be quietly upgraded to `pass`.
 
-## Per-release update rule
+## Updating this file
 
-Every release updates this file:
+No release requires an update or a run behind it. When the harness or the
+manual procedure is run:
 
-1. Re-run the automated harness against the exact release commit.
+1. Run the automated harness against the exact commit being recorded.
 2. Run the manual procedure with whichever readers are available.
 3. Replace the "Current record" block with the release version, the
    Windows build, and the per-reader result.
@@ -282,9 +284,9 @@ is correct.** Three independent reasons, any one of which is sufficient:
 
 Independently of the matrix, the checker also requires a successful
 `Test` workflow run on the default branch whose head SHA equals
-`tested_commit`, with a passing `Windows 11 Interactive Composite` job and
-a matching runner-provenance artifact. A feature branch cannot satisfy
-that, so the file is unproducible here even if every cell had passed.
+`tested_commit`; it requires no interactive run. A feature branch cannot
+satisfy that, so the file is unproducible here even if every cell had
+passed.
 
 ## History
 

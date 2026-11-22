@@ -155,7 +155,7 @@ jobs:
             ${{ runner.temp }}/gui-hidden/result.json
             ${{ runner.temp }}/gui-hidden/result.json.sha256
             ${{ runner.temp }}/gui-hidden/receipts/**
-          # Release evidence outlives the promotion soak (PLAN §8.1).
+          # Kept 90 days, longer than the promotion soak (PLAN §8.1).
           retention-days: 90
           if-no-files-found: warn
 

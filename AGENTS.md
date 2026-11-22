@@ -49,6 +49,18 @@ reading step under [Self-Correction Log](#self-correction-log).
   `scripts/dev-windows.cmd` and raw `zig test`; 2026-05-01 direct
   `zig test src/apprt.zig`.)
 
+## No required interactive tests
+
+- No change, check, review, merge or release requires an interactive or
+  visible-desktop test (the maintainer's decision, 2026-11-22). Evidence
+  comes from hosted CI, private- and hidden-desktop tests, and multi-agent
+  review.
+- Never block, defer or fail work for want of a visible run, and never make
+  one a prerequisite. A visible run (the interactive composite, a tier-3
+  check) is optional: it starts only on the maintainer's explicit go, only
+  while the maintainer is away, and never touches their real state; the
+  rules below say how.
+
 ## Running noctty
 
 - Run noctty on a private desktop (`CreateDesktopW`), and pass
@@ -66,7 +78,8 @@ reading step under [Self-Correction Log](#self-correction-log).
   window menu; renderer.md: 2026-10-14 LAT-01; input.md: 2026-09-19 #250;
   test-harnesses.md: 2026-09-23 #261 trap 3.) What a private desktop cannot
   show (a D3D11 present, which needs a composed, visible desktop; real input)
-  needs a visible run, and a visible run starts only once the user is away.
+  only a visible run shows; such a run is optional and starts only on the
+  maintainer's explicit go, once the user is away.
   (search-scrollbar.md: 2026-10-16 D3D11-IFLIP-01; window-frame.md:
   2026-10-16 real DPI drag, last trap.) In a hosted closure (the
   hidden-desktop suite, `test/windows/gui-hidden-runner.ps1`), real-input and
@@ -97,8 +110,10 @@ reading step under [Self-Correction Log](#self-correction-log).
   paced by vblank. Tier 2's readback never sees the production framebuffer,
   and a hidden `SwapBuffers` is never vblank-paced (renderer.md: 2026-10-19
   #408 trap (4), 2026-10-14 LAT-01 trap (1)). Every gating GUI check, in any
-  tier, has a positive oracle and a negative control that fails it. Until
-  the gate switches, the interactive composite remains the release evidence.
+  tier, has a positive oracle and a negative control that fails it. No
+  release, merge or check requires a visible or interactive run (the
+  maintainer's decision, 2026-11-22): tier 3 and the interactive composite
+  stay available, and a multi-agent council review takes their place.
   (test-harnesses.md: 2026-11-20 GUI-HIDDEN-DEFAULT-01.)
 - Run a scratch portable copy (`noctty.portable` beside the exe) with
   `--window-save-state=never` and `LOCALAPPDATA` redirected for that noctty;
@@ -698,8 +713,8 @@ that govern each symbol you change, or that none does.
   and its clipboard reading (`scripts/interactive-win11-state-guard.ps1`:
   `Test-InteractiveWin11ClipboardObservable`),
   the PKG-37, LAT-01 and LAT-02 measurement harnesses on the
-  `origin/*-measurement-harness` branches), which steps of the release
-  evidence job may raise a real toast (the job's order,
+  `origin/*-measurement-harness` branches), which steps of the optional
+  interactive composite job may raise a real toast (the job's order,
   `Get-InteractiveWin11JobPlan`, the composite's `-DeferCommandFinish`,
   `$settingsSaveNotificationArguments` in the accessibility leaf and its
   run-time checks of each saving launch's command line and sandbox,

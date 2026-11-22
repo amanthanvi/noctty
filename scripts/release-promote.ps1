@@ -3,7 +3,6 @@ param(
     [ValidatePattern('\Av[0-9]+\.[0-9]+\.[0-9]+\z')] [string] $Tag,
     [ValidatePattern('\A[0-9a-f]{40}\z')] [string] $CandidateSha,
     [ValidatePattern('\A[0-9]+\z')] [string] $TestRunId,
-    [ValidatePattern('\A[0-9]+\z')] [string] $EvidenceRunId,
     [ValidatePattern('\A[0-9]+\z')] [string] $ReleaseRunId,
     [ValidatePattern('\A[0-9a-f]{64}\z')] [string] $ManifestSha256,
     [string] $CandidateDirectory,
@@ -24,11 +23,10 @@ if ($Fixture -eq 'historical') {
     $Tag = 'v1.3.136'
     $CandidateSha = 'e629842e9c4ddef133ab4d4ad27d37e0e9718e09'
     $TestRunId = '42344250161'
-    $EvidenceRunId = '42344250161'
     $ReleaseRunId = '42346135091'
     Write-Host 'Historical fixture: all mutations disabled; old absolute-path metadata comparison is skipped.'
 }
-foreach ($field in @('Tag', 'CandidateSha', 'TestRunId', 'EvidenceRunId', 'ReleaseRunId')) {
+foreach ($field in @('Tag', 'CandidateSha', 'TestRunId', 'ReleaseRunId')) {
     if (-not (Get-Variable $field -ValueOnly)) { throw "Required promote input missing: $field." }
 }
 if (-not $Fixture -and -not $ManifestSha256) { throw 'Required promote input missing: ManifestSha256.' }
@@ -69,7 +67,7 @@ if ($LASTEXITCODE -ne 0) { throw 'CandidateNotAncestor: candidate is not an ance
 # API ref resolution independently checks a moved remote tag, including annotated tags.
 Assert-RemoteReleaseTag -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha
 $resume = -not $release.prerelease
-$resumeFrom = Assert-ReleaseEvidence -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -EvidenceRunId $EvidenceRunId -ReleaseRunId $ReleaseRunId -WorkDirectory $WorkDirectory
+$resumeFrom = Assert-ReleaseEvidence -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -ReleaseRunId $ReleaseRunId -WorkDirectory $WorkDirectory
 # After a prerelease flip verification always runs, even if its build verified it.
 if (-not $resume) { $resumeFrom = 0 }
 $version = $Tag.Substring(1)
@@ -89,13 +87,13 @@ if ($Fixture) {
     }
     $historicalManifest = [ordered]@{
         schemaVersion = 1; tag = $Tag; version = $version; candidateSha = $CandidateSha
-        testRunId = $TestRunId; evidenceRunId = $EvidenceRunId; releaseRunId = $ReleaseRunId
+        testRunId = $TestRunId; releaseRunId = $ReleaseRunId
         payload = @($release.assets | ForEach-Object { Get-ReleaseFileRecord -Path (Join-Path $download $_.name) -Name $_.name })
     }
     [IO.File]::WriteAllText($manifestPath, ($historicalManifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     $ManifestSha256 = Get-FileSha256Lower $manifestPath
 }
-$manifest = Assert-ReleaseManifest -Path $manifestPath -ExpectedSha256 $ManifestSha256 -Release $release -DownloadDirectory $download -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -EvidenceRunId $EvidenceRunId -ReleaseRunId $ReleaseRunId -Historical:([bool]$Fixture)
+$manifest = Assert-ReleaseManifest -Path $manifestPath -ExpectedSha256 $ManifestSha256 -Release $release -DownloadDirectory $download -Tag $Tag -CandidateSha $CandidateSha -TestRunId $TestRunId -ReleaseRunId $ReleaseRunId -Historical:([bool]$Fixture)
 Write-Host "Assets: PASS ($(@($release.assets).Count) assets; manifest $ManifestSha256)."
 $artifactRoot = Join-Path $WorkDirectory 'artifacts'
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
@@ -142,7 +140,7 @@ if (-not $resume -and -not $Fixture -and $PSCmdlet.ShouldProcess($Tag, 'promote 
     $flipExit = $LASTEXITCODE
     $confirmation = @{
         Path=$manifestPath; ExpectedSha256=$ManifestSha256; DownloadDirectory=$download
-        Tag=$Tag; CandidateSha=$CandidateSha; TestRunId=$TestRunId; EvidenceRunId=$EvidenceRunId; ReleaseRunId=$ReleaseRunId
+        Tag=$Tag; CandidateSha=$CandidateSha; TestRunId=$TestRunId; ReleaseRunId=$ReleaseRunId
     }
     [void](Confirm-ReleasePublication -Repository $Repository -Tag $Tag -CandidateSha $CandidateSha -ReleaseId ([string]$release.id) -Prerelease $false -ManifestInputs $confirmation)
     if ($flipExit -ne 0) { Write-Host 'Promote response was lost; authenticated the completed stable flip.' }
