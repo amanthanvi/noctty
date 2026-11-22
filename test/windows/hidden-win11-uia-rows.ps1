@@ -155,12 +155,14 @@ try {
         $script:lastText.Contains('|erased') -and $script:lastRows.First -eq $before.First -and $script:lastRows.Last -eq $beforeLast
     } 10)) { throw 'History erase did not leave exactly the active numbered rows.' }
     $samples.ErasedDocument = $script:lastRows
+    $hasGeometry = { param([int] $RectangleValues) $RectangleValues -gt 0 }
     $erasedRectangles = $script:erasedDocument.GetBoundingRectangles().Length
-    Check 'fresh document range has geometry after erase' ($erasedRectangles -gt 0) 'nonempty' $erasedRectangles
+    Check 'fresh document range has geometry after erase' (& $hasGeometry $erasedRectangles) 'nonempty' $erasedRectangles
     # The held document starts at absolute row zero, so it would still
     # intersect the new viewport if its old row numbering were accepted.
+    # Pass it through the same oracle as the fresh post-erase range.
     $staleRectangles = $heldDocument.GetBoundingRectangles().Length
-    Check 'held document range loses geometry after erase' ($staleRectangles -eq 0) 0 $staleRectangles
+    Check 'held document range fails the fresh geometry oracle' (-not (& $hasGeometry $staleRectangles)) 0 $staleRectangles
 
     $stage = 'append'
     [IO.File]::WriteAllText((Join-Path $Run 'append.go'), '')
@@ -174,14 +176,15 @@ try {
     $freshRange = Get-VisibleTextRange $pattern
     $fresh = Get-FixtureRows ($freshRange.GetText(-1)) 'after'
     $samples.AppendedVisible = $fresh
-    Check 'fresh viewport maps to the appended tail' ($fresh.First -eq $afterFirstVisible -and $fresh.Last -eq $afterLast) `
+    $isAppendedTail = { param($Rows) $Rows.First -eq $afterFirstVisible -and $Rows.Last -eq $afterLast }
+    Check 'fresh viewport maps to the appended tail' (& $isAppendedTail $fresh) `
         @{ First = $afterFirstVisible; Last = $afterLast } $fresh
     $freshRectangles = @($freshRange.GetBoundingRectangles()).Count
     Check 'fresh appended range has geometry' ($freshRectangles -gt 0) 'nonempty' $freshRectangles
-    # Feed the held snapshot through the same post-append oracle. A stale
-    # read cannot pass merely because it is still nonempty or has valid text.
-    $stale = Get-FixtureRows ($script:held.GetText(-1)) 'after'
-    Check 'stale control fails the fresh row oracle' (-not ($stale.First -eq $afterFirstVisible -and $stale.Last -eq $afterLast)) `
+    # Relabel the held fixture rows so the tail check has to reject their
+    # numbers. Require parsing to succeed before crediting that rejection.
+    $stale = Get-FixtureRows ($script:held.GetText(-1).Replace(' before', ' after')) 'after'
+    Check 'stale control fails the fresh row oracle' ($null -ne $stale -and -not (& $isAppendedTail $stale)) `
         'rejected' $stale
     [IO.File]::WriteAllText((Join-Path $Run 'stop.go'), '')
 } catch {

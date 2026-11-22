@@ -114,11 +114,11 @@ const handoff_timeout_ns = 1 * std.time.ns_per_ms;
 /// where a plain `lock` panics (PLAN.md §2.7 PN3, RQ4). It must stay an
 /// `inline fn` (RQ11, the one intended inline site): the layer records the
 /// function whose code takes the demand acquire's return address, which
-/// inlined here is this forwarder's caller, the frame snapshot; the thread
-/// gate fails FORWARDER-NOT-INLINE otherwise.
+/// inlined here is this forwarder's caller. The thread gate fails
+/// FORWARDER-NOT-INLINE otherwise.
 ///
-/// Only a `*State` caller, the frame snapshot, signals demand. A caller
-/// that only reads passes a `*const State` (the Pacer's reads,
+/// A `*State` caller (the frame snapshot or a UI input site) signals
+/// demand. Other callers pass a `*const State` (the Pacer's reads,
 /// `Thread.Frame.screen` and `cursorBlinking`): it takes the demand acquire
 /// alone, with no demand count, no handoff generation and no wake, since
 /// those write State's own counters. With the layer off the demand acquire
