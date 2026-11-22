@@ -1042,8 +1042,8 @@ test "a pair line round-trips, a worker's name escaped" {
     }
 
     // A name too long for a line is cut: still one line, the role wrong.
-    const long = "n" ** (pair_line_max * 2);
-    const cut = formatPair(&buf, 1, .{ .worker = long }, .lock);
+    const long: [pair_line_max * 2]u8 = @splat('n');
+    const cut = formatPair(&buf, 1, .{ .worker = &long }, .lock);
     try testing.expectEqual(pair_line_max, cut.len);
     try testing.expectEqual('\n', cut[cut.len - 1]);
     try testing.expect(std.mem.indexOfScalar(u8, cut[0 .. cut.len - 1], '\n') == null);

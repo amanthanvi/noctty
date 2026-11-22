@@ -1,0 +1,20 @@
+# Zig 0.17 migration lint baseline (ci/zig017_lint.py; occurrence-bound: path, form, allowance, the stripped exact line).
+# Lead decision 2026-11-22 (stone-1a, 1A): merged upstream lines only, each kept as upstream wrote it until 1B ports it to
+# 0.17; fork code is rewritten, never baselined. The fork parent is main at the decision.
+# fork-parent: 358ce0f6ae360750388747ff0633297a68a09270
+# upstream d8f56b790 "font: add glyf entry decoder to outline" (new at the stone, 74d0c72fd)
+src/font/opentype/glyf.zig	stackFallback	1	var flags_stack = std.heap.stackFallback(4096, alloc);
+# upstream 2055bb6dd "terminal: glyph request glyf decode" (new at the stone)
+src/terminal/apc/glyph/request.zig	stackFallback	1	var data_stack = std.heap.stackFallback(
+# upstream 14c829883 "terminal: report OSC color queries in lib-vt" (two identical lines, :752 and :870)
+src/terminal/stream_terminal.zig	stackFallback	2	var stack = std.heap.stackFallback(1024, self.terminal.gpa());
+# upstream aea63d71f "libghostty: fix utf-8 grapheme length overflow" (its regression test)
+src/terminal/c/render.zig	**	1	var small = [_]u8{'x'} ** 32;
+# upstream aea63d71f, the same test
+src/terminal/c/render.zig	**	1	try testing.expectEqualSlices(u8, &([_]u8{'x'} ** 32), &small);
+# upstream aa6943da3 "libghostty: add log callback configuration" (its test fixtures, :359)
+src/terminal/c/sys.zig	**	1	const fill: [3000]u8 = .{0x41} ** 3000;
+# upstream aa6943da3, :387
+src/terminal/c/sys.zig	**	1	const fill: [2048]u8 = .{0x42} ** 2048;
+# upstream aa6943da3, :415
+src/terminal/c/sys.zig	**	1	const fill: [4096]u8 = .{0x43} ** 4096;

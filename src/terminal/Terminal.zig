@@ -12885,7 +12885,7 @@ fn testShortRegionScroll(padded: bool, by_linefeed: bool) !struct { ?[:0]const u
     try s.testWriteString("one");
     if (padded) {
         s.cursorSetSemanticContent(.{ .prompt = .right });
-        try s.testWriteString(" " ** (cols - 7));
+        try s.testWriteString(&@as([cols - 7]u8, @splat(' ')));
         s.cursor.pending_wrap = false;
     }
     s.cursorSetSemanticContent(.output);
@@ -12896,7 +12896,7 @@ fn testShortRegionScroll(padded: bool, by_linefeed: bool) !struct { ?[:0]const u
     try s.testWriteString("PS C:/src");
     if (padded) {
         s.cursorSetSemanticContent(.{ .prompt = .right });
-        try s.testWriteString(" " ** (cols - 9));
+        try s.testWriteString(&@as([cols - 9]u8, @splat(' ')));
         s.cursor.pending_wrap = false;
     }
     s.cursorAbsolute(0, 3);
