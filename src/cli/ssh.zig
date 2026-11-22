@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const cli_args = @import("args.zig");
@@ -6,6 +7,7 @@ const diagnostics = @import("diagnostics.zig");
 const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
 const internal_os = @import("../os/main.zig");
+const redact = @import("../os/redact.zig");
 const ghostty_terminfo = @import("../terminfo/main.zig").ghostty;
 
 const log = std.log.scoped(.ssh);
@@ -177,6 +179,19 @@ pub const Options = struct {
 ///
 /// Available since: 1.4.0
 pub fn run(alloc_gpa: Allocator) !u8 {
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
+    return runWithStderr(alloc_gpa, stderr);
+}
+
+fn runWithStderr(alloc_gpa: Allocator, stderr: *std.Io.Writer) !u8 {
+    if (comptime builtin.os.tag == .windows) {
+        try stderr.writeAll("+ssh is not supported on Windows. Use ssh directly from your shell.\n");
+        return 1;
+    }
+
     var opts: Options = .{};
     defer opts.deinit();
 
@@ -185,11 +200,6 @@ pub fn run(alloc_gpa: Allocator) !u8 {
         defer iter.deinit();
         try cli_args.parse(Options, alloc_gpa, &opts, &iter);
     }
-
-    var stderr_buffer: [1024]u8 = undefined;
-    var stderr_file: std.fs.File = .stderr();
-    var stderr_writer = stderr_file.writer(&stderr_buffer);
-    const stderr = &stderr_writer.interface;
 
     // Any diagnostic from the arg parser is an unknown flag or bad
     // value. Reject loudly — silently forwarding `--typo` to ssh would
@@ -206,14 +216,22 @@ pub fn run(alloc_gpa: Allocator) !u8 {
             }
         }
         stderr.print("\n{s}", .{usage}) catch {};
-        stderr.flush() catch {};
         return 2;
     }
 
-    const result = runInner(alloc_gpa, &opts, stderr);
+    return runInner(alloc_gpa, &opts, stderr);
+}
 
-    stderr.flush() catch {};
-    return result;
+test "ssh CLI refuses Windows before parsing arguments" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [128]u8 = undefined;
+    var stderr: std.Io.Writer = .fixed(&buf);
+    try std.testing.expectEqual(@as(u8, 1), try runWithStderr(std.testing.failing_allocator, &stderr));
+    try std.testing.expectEqualStrings(
+        "+ssh is not supported on Windows. Use ssh directly from your shell.\n",
+        stderr.buffered(),
+    );
 }
 
 fn runInner(
@@ -242,8 +260,8 @@ fn runInner(
         };
 
         const cache: ?DiskCache = if (opts.cache) cache: {
-            const path = DiskCache.defaultPath(alloc, "ghostty") catch |err| {
-                warnPrint(stderr, "ghostty terminfo cache unavailable: {}", .{err});
+            const path = DiskCache.defaultPath(alloc, "noctty") catch |err| {
+                warnPrint(stderr, "noctty terminfo cache unavailable: {}", .{err});
                 break :session .{ .term = "xterm-256color" };
             };
             break :cache .{ .path = path };
@@ -251,13 +269,13 @@ fn runInner(
 
         if (cache) |c| {
             if (c.contains(alloc, dest) catch false) {
-                verbosePrint(opts, stderr, "dest: {s} (cached, skipping install)", .{dest});
+                verbosePrint(opts, stderr, "destination cached, skipping install", .{});
                 break :session .{ .term = "xterm-ghostty" };
             } else {
-                verbosePrint(opts, stderr, "dest: {s} (not cached, will install)", .{dest});
+                verbosePrint(opts, stderr, "destination not cached, will install", .{});
             }
         } else {
-            verbosePrint(opts, stderr, "dest: {s} (cache disabled, will install)", .{dest});
+            verbosePrint(opts, stderr, "cache disabled, will install", .{});
         }
 
         stderr.print("Setting up xterm-ghostty terminfo on {s}...\n", .{dest}) catch {};
@@ -292,7 +310,7 @@ fn runInner(
         env_opts,
         opts._ssh_args.items,
     });
-    verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
+    verbosePrint(opts, stderr, "connecting over SSH: {f}", .{redact.argv(argv)});
 
     const exit_code = childExec(alloc, argv) catch |err| {
         try stderr.print("Error: failed to run {s}: {}\n", .{ argv[0], err });
@@ -303,9 +321,9 @@ fn runInner(
     // Attempt to cache (if needed) on a successful ssh execution.
     if (exit_code == 0) if (session.to_cache) |entry| {
         if (entry.cache.add(alloc, entry.dest, std.time.timestamp())) |_| {
-            verbosePrint(opts, stderr, "cache: wrote {s}", .{entry.dest});
+            verbosePrint(opts, stderr, "cache: added destination", .{});
         } else |err| {
-            log.debug("cache add failed for '{s}': {}", .{ entry.dest, err });
+            log.debug("cache add failed: {}", .{err});
         }
     };
 
@@ -335,38 +353,6 @@ fn warnPrint(
     stderr.print("Warning: " ++ fmt ++ "\n", args) catch return;
     stderr.flush() catch return;
 }
-
-/// Space-joined items, formattable as `{f}`.
-const Joined = struct {
-    items: []const []const u8,
-
-    pub fn format(self: Joined, writer: *std.Io.Writer) !void {
-        for (self.items, 0..) |a, i| {
-            if (i > 0) try writer.writeByte(' ');
-            try writer.writeAll(a);
-        }
-    }
-
-    test {
-        const testing = std.testing;
-        var buf: [128]u8 = undefined;
-        {
-            var w: std.Io.Writer = .fixed(&buf);
-            try w.print("{f}", .{Joined{ .items = &.{} }});
-            try testing.expectEqualStrings("", buf[0..w.end]);
-        }
-        {
-            var w: std.Io.Writer = .fixed(&buf);
-            try w.print("{f}", .{Joined{ .items = &.{"only"} }});
-            try testing.expectEqualStrings("only", buf[0..w.end]);
-        }
-        {
-            var w: std.Io.Writer = .fixed(&buf);
-            try w.print("{f}", .{Joined{ .items = &.{ "a", "b", "c" } }});
-            try testing.expectEqualStrings("a b c", buf[0..w.end]);
-        }
-    }
-};
 
 fn checkExit(term: std.process.Child.Term, label: []const u8) error{ChildFailed}!void {
     switch (term) {
@@ -489,7 +475,7 @@ fn installRemoteTerminfo(
         opts._ssh_args.items,
         &.{remote_script},
     });
-    verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
+    verbosePrint(opts, stderr, "installing remote terminfo: {f}", .{redact.argv(argv)});
 
     var child: std.process.Child = .init(argv, alloc);
     child.stdin_behavior = .Pipe;

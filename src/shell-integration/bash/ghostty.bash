@@ -173,7 +173,7 @@ if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
         [[ -n "$ssh_user" ]] && ssh_target="${ssh_user}@${ssh_hostname}"
 
         # Check if terminfo is already cached
-        if __ghostty_ssh_cache --host="$ssh_target" >/dev/null 2>&1; then
+        if __ghostty_ssh_cache "$ssh_target" >/dev/null 2>&1; then
           ssh_term="xterm-ghostty"
         elif builtin command -v infocmp >/dev/null 2>&1; then
           builtin local ssh_terminfo ssh_cpath_dir ssh_cpath
