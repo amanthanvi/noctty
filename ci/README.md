@@ -263,6 +263,9 @@ The fast step runs `--check-layout` and 19 controls in both the installed
 and scratch layouts, with an eight-minute step timeout. These controls cover
 fixture integrity, path selection, dump headers, container names and sealed
 process exits. The live armed gate checks the current source and table.
+On the hosted Windows runner, the fast step completed in 10 seconds. The
+Python suites and the live gate run in their existing steps.
+[Test run 45002393799](https://github.com/amanthanvi/noctty/actions/runs/45002393799)
 
 `Thread Gate Self-test` runs the full and appending modes on its nightly
 schedule, on dispatch and on selected pull requests. The appending job alone
