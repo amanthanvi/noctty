@@ -514,6 +514,17 @@ class Resolver:
         return None, f"{field} of a value the checker does not evaluate ({base[1] if base[0] != 'fn' else 'a function'})"
 
     @staticmethod
+    def trailing(f, close, ends):
+        """The member names after a value that ends at token `close` (a switch's or a container's `}`): `.a.b` up to
+        one of `ends`, [] when an end follows at once, None for anything else (stone round 5, Opus L3: the member
+        after `switch (...) {...}.Inner` names `Inner`'s declaration, never the arm itself)."""
+        toks, n, r, names = f.toks, len(f.toks), close + 1, []
+        while r + 1 < n and zigtok.is_op(toks[r], ".") and toks[r + 1].kind == "identifier":
+            names.append(toks[r + 1].text)
+            r += 2
+        return names if r < n and zigtok.is_op(toks[r], *ends) else None
+
+    @staticmethod
     def switch_arm(toks, open_, tag):
         """The first token of the value of the switch prong (its braces at open_) that holds `.tag`, else of its
         `else` prong; None when neither exists."""
@@ -570,7 +581,13 @@ class Resolver:
             arm = self.switch_arm(toks, c + 1, tag)
             if arm is None:
                 return ("ambiguous", f"{f.path}:{toks[r].line + 1}: a switch with no arm for .{tag}")
-            return self.expression(f, arm, at, (",", "}"), depth + 1)
+            names = self.trailing(f, zigtok.match_paren(toks, c + 1), ends)
+            if names is None:
+                return ("unresolved", f"{f.path}:{toks[r].line + 1}: what follows the switch the checker does not read")
+            b = self.expression(f, arm, at, (",", "}"), depth + 1)
+            for name in names:
+                b = self.member(b, name, depth + 1)
+            return b
         if zigtok.is_op(toks[r], ".") and r + 1 < n and zigtok.is_op(toks[r + 1], "{"):
             close = zigtok.match_paren(toks, r + 1)
             if close + 1 < n and zigtok.is_op(toks[close + 1], *ends):
@@ -598,7 +615,14 @@ class Resolver:
                 if h < n and zigtok.is_op(toks[h], "("):
                     h = zigtok.match_paren(toks, h) + 1
                 if h < n and zigtok.is_op(toks[h], "{"):
-                    return ("container", f, h)
+                    names = self.trailing(f, zigtok.match_paren(toks, h), ends)
+                    if names is None:
+                        return ("unresolved", f"{f.path}:{toks[h].line + 1}: what follows the container the checker "
+                                              f"does not read")
+                    b = ("container", f, h)
+                    for name in names:
+                        b = self.member(b, name, depth + 1)
+                    return b
         names = []
         if base is not None:
             while r + 1 < n and zigtok.is_op(toks[r], ".") and toks[r + 1].kind == "identifier":

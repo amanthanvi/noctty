@@ -324,6 +324,23 @@ control("a nested main's UI scope is not the entry file's main", tree(**{"src/ma
     '        defer role_scope.exit();\n    }\n};\n')}), 1,
         "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:8 main: enter(ui)",
         absent=("POINT app MAIN-UI-SCOPE",))
+MEMBER_WORKER = WORKER + (
+    'const Scoped = struct {\n    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
+    '        defer role.exit();\n    }\n    const Inner = struct {\n        fn run() void {}\n    };\n};\n'
+    'pub fn startSelected() void {\n    const t = std.Thread.spawn(.{}, Target.run, .{}) catch return;\n    t.join();\n}\n')
+MEMBER_REGISTRY = REGISTRY + "src/worker.zig\tstartSelected\tThread.spawn\tTarget.run\tworker:probe\tthe selected target\n"
+control("a member after a switch names that member, not the arm", tree(**{"src/worker.zig": MEMBER_WORKER + (
+    'const selected = .{ .artifact = .ghostty };\n'
+    'const Target = switch (selected.artifact) {\n    .ghostty => Scoped,\n    .other => Scoped,\n}.Inner;\n')}), 1,
+        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:27) sets no role",
+        "FAIL UNREGISTERED-POINT app src/worker.zig:23 run: enter(worker:probe)",
+        registry=MEMBER_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
+control("a member after a container names that member, not the container", tree(**{
+    "src/worker.zig": MEMBER_WORKER + 'const Target = Scoped;\n'.replace('Scoped;', 'struct {\n'
+        '    fn run() void {\n        const role = thread_role.enter(.{ .worker = "probe" });\n'
+        '        defer role.exit();\n    }\n    const Inner = struct {\n        fn run() void {}\n    };\n}.Inner;')}), 1,
+        "FAIL ENTRY-NO-ROLE app src/worker.zig startSelected -> Target.run: its target (src/worker.zig:40) sets no role",
+        registry=MEMBER_REGISTRY, absent=("ENTRY-OK app src/worker.zig startSelected",))
 if failures:
     for f in failures:
         print("FAIL " + f)
