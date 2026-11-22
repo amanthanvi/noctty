@@ -1,0 +1,30 @@
+# file	function	api	target	runtime role	why (r11 review at 31796f5d0: the static thread-entry inventory, Z2)
+src/Surface.zig	click	Thread.spawn	Click.run	ui	the left-release tests' click helper (TestMouseSurface.click, f42dc3272): it presses and releases on a worker (Surface.zig:6458) so a deadlock panics instead of hanging; Click.run calls mouseButtonCallback (Surface.zig:6469-6475), which takes the renderer lock, so it stands for the UI thread and enters .ui (1A.2), as the hidden-desktop runners do (L-d); test builds only
+src/Surface.zig	init	Thread.spawn	rendererpkg.Thread.threadMain	renderer	the renderer thread (Surface.zig:1252-1254)
+src/Surface.zig	init	Thread.spawn	termio.Thread.threadMain	termio	the termio thread (Surface.zig:1273-1275)
+src/Surface.zig	setSearchQuery	Thread.spawn	terminal.search.Thread.threadMain	search	the search thread (Surface.zig:8276-8280)
+src/apprt/win32/app.zig	scheduleUpdateCheck	Thread.spawn	updateCheckThreadMain	worker:update-check	the update check
+src/apprt/win32/app.zig	showRecoverySafeModeNotice	Thread.spawn	recoverySafeModeNoticeThread	worker:safe-mode-notice	the safe-mode notice box
+src/apprt/win32/app.zig	startJumpListRebuild	Thread.spawn	jumpListRebuildThreadMain	worker:jump-list	the jump list rebuild
+src/apprt/win32/app.zig	startProfileDiscovery	Thread.spawn	profileDiscoveryThreadMain	worker:profile-discovery	profile discovery
+src/apprt/win32/host.zig	runOnPrivateDesktop	Thread.spawn	Desktop.run	ui	a hidden-desktop test helper; L-d: it is that hidden desktop's UI thread, so it enters .ui
+src/apprt/win32/ipc_server.zig	startIpcServer	Thread.spawn	ipcServerMain	worker:ipc	the single-instance IPC server
+src/apprt/win32/test_support.zig	runOnHiddenDesktop	Thread.spawn	Desktop.run	ui	a hidden-desktop test helper; L-d: it is that hidden desktop's UI thread, so it enters .ui
+src/apprt/win32_bell.zig	startPlayThread	Thread.spawn	playThread	worker:bell	the bell sound
+src/apprt/win32_powershell_install.zig	runWithDeadline	Thread.spawn	TestProcessDeadline.run	test_support	a test deadline helper; a test helper thread that takes no renderer lock (any acquisition from it fails the compare)
+src/apprt/win32_settings.zig	onHiddenDesktop	Thread.spawn	run	ui	the Settings tests' hidden desktop; L-d: it is that hidden desktop's UI thread, so it enters .ui
+src/bench/search_stream.zig	streamLocked	Thread.spawn	SearchThread.threadMain	search	the search benchmark's search thread (terminal.search.Thread.threadMain, bench binary only)
+src/config/windows_shell.zig	listWslDistrosIn	Thread.spawn	WslOutputDrain.run	worker:wsl-drain	draining wsl.exe output while listing distributions
+src/config/windows_shell.zig	testJoinWithin	Thread.spawn	Joiner.run	test_support	a test join helper; a test helper thread that takes no renderer lock (any acquisition from it fails the compare)
+src/config/windows_ssh_hosts.zig	readSshConfigFileBounded	Thread.spawn	AsyncSshConfigRead.run	worker:ssh-config	the bounded ssh config read
+src/conpty_host.zig	attach	Thread.spawn	attachInput	worker:conpty-host	the bundled ConPTY host helper
+src/conpty_host.zig	serve	Thread.spawn	drainConpty	worker:conpty-host	the bundled ConPTY host helper
+src/conpty_host.zig	serve	Thread.spawn	reportRingStats	worker:conpty-host	the bundled ConPTY host helper
+src/crash/sentry.zig	init	Thread.spawn	initThread	worker:sentry	crash reporter start-up
+src/font/SharedGridSet.zig	startDiscoveryPrefetch	Thread.spawn	discoveryPrefetchMain	worker:font-prefetch	font discovery prefetch
+src/os/flatpak.zig	spawn	Thread.spawn	threadMain	worker:flatpak	flatpak host commands; Linux only; not built for Windows (outside acceptance test 9's count)
+src/os/open.zig	open	Thread.spawn	openThread	worker:open	the URL and file opener's wait
+src/sync/isolated.zig	run	Thread.spawn	Deadline.run	test_support	1A.2's isolated parent's deadline watcher (isolated.zig:256): it waits on the child process's handle and terminates the child at child_deadline_ms; a test helper thread that takes no renderer lock (any acquisition from it fails the compare) [approved: lead decision 6 on 1A.2(d), 2026-11-21]
+src/termio/Exec.zig	threadEnter	Thread.spawn	ReadThread.threadMainPosix	reader	the POSIX reader; the comptime else branch, never built for Windows; not built for Windows (outside acceptance test 9's count)
+src/termio/Exec.zig	threadEnter	Thread.spawn	ReadThread.threadMainWindows	reader	the ConPTY reader (Exec.zig:319-321)
+src/termio/Exec.zig	threadMainPosix	Thread.spawn	gatherMainPosix	worker:io-gather	upstream's POSIX gather stage (Exec.zig:1894-1897 at b16452cdc, a clean hunk, tier A): it drains the pty into the pipeline's buffers and takes pipeline.mutex only, no renderer lock; spawned by the POSIX reader, the comptime else branch, never built for Windows; not built for Windows (outside acceptance test 9's count)

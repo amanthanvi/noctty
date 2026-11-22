@@ -1,0 +1,37 @@
+# r28 (round 27's Opus M2), r29 (round 28's Opus M2, L2), r30 (round 29's Opus M3), r31 to r34: the full self-test's
+# frozen fixture. controls.py reads these files, never the live ones, and checks each digest first; the revision
+# (its full SHA) and the scope are the ones the table was approved at. r30 re-froze the allow-list (keyed by
+# receiver, default-deny's new rows) and added the residue controls' allowance; r31 re-froze both (the allow-list's
+# approved counts and its scope and census rows; the allowance's feature-test rows); r32 re-froze the allowance
+# (its counts for the bundle r32 installs); r33 re-froze both (tinyio's two allow-list rows; the allowance's counts
+# for the bundle r33 installs); r34 re-froze both (the allow-list's two test rows and tinyio's re-keyed rows; the
+# allowance's tool names for the bundle r34 installs);
+# r35 re-froze the allowance (its derived-tests rows, the fork's Key among them, and its tool names for the
+# bundle r35 installs);
+# r36 re-froze the allowance (its default-deny rows: the measured derived-tests and unresolved-origin rows, the
+# version printer's zig-version-string-use row, and its tool names for the bundle r36 installs);
+# r37 re-froze the allowance (its rows for r37's trusted set, measured on the seven trees before any row, and
+# its tool names for the bundle r37 installs);
+# r38 re-froze the allowance (its rows for r38's machinery under the trusted set, measured on the seven trees
+# before any row, and its tool names for the bundle r38 installs);
+# r39 re-froze the allowance (its rows read from Zig's own parse, measured on the seven trees before any row,
+# and its tool names for the bundle r39 installs);
+# r40 re-froze it (the gate's and the self-test's counts for the bundle r40 installs; every row r39's,
+# re-measured on the seven trees);
+# r41 re-froze it (the gate's and the self-test's counts for the bundle r41 installs, the fixture's pin and
+# the self-test's 1A step) and added the fixture revision's build.zig.zon;
+# r42 re-froze it (the gate's and the self-test's counts for the bundle r42 installs, ci/astdump.zig's two
+# rows, and one setup-zig-step row per self-test job, bound to its producer step's sha256);
+# r43 re-froze it (the gate's and the self-test's counts for the bundle r43 installs; every other row r42's);
+# r44 re-froze it (the gate's and the self-test's counts for the bundle r44 installs; every other row r43's);
+# r45 re-froze it (the gate's and the self-test's counts for the bundle r45 installs; every other row r44's).
+rev	31796f5d093fce41446411c5c381b602c1c55757
+scope	fork
+file	lock-inventory-threads.tsv	67c921379cd88ee26889bc2e84b3b652d3abd8092dd838160b1aad87efee7fd1
+file	lock-inventory-threads.callers.tsv	4cf1ac6e14e1d07ffc331d4295b360a421a213b561e63f139faef5c80b916a27
+file	lock-inventory-allow.txt	262ab32cd8441cda6f74c08c719953005654e25e445cfd7ff0ecc7a0be965f3c
+file	thread-entries.tsv	138a4a4d2eeac026acd9df5f2772aca78efefe25913dcb94729ae5fe7e5a59a8
+file	role-runs.tsv	d79d8360898aeac627bb7655fad2574c8c288a36bec1be60912dbf49b43f0495
+file	thread-anchors.tsv	7fe52cd06d7d4a1608ac041f7096df1e70c76efee1f8af2fc9ff5ae786121031
+file	residue-allow.tsv	294a1494355e5f932e9ec44b9671989752b4a84fe80ac11e63a17afe8cb4b036
+file	build.zig.zon	484419e1c6d97147b9bdf9ad548a8469a4b8562bb2cd5ad3540448a2a65dc765

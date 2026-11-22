@@ -216,6 +216,8 @@ foreach ($coverage in @(
                 'Setup Python',
                 'Migration lint controls',
                 'Migration diff lints',
+                'Armed renderer-state thread gate',
+                'Thread role source checks',
                 'PowerShell shell integration tests (PowerShell 7)',
                 'PowerShell shell integration tests (Windows PowerShell 5.1)',
                 'Harness provenance and state controls (PowerShell 7)',

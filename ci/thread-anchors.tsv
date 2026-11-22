@@ -1,0 +1,11 @@
+# r29 (round 28's Opus M2): the gate's thread anchors, reviewed data: each thread's anchor node (file, function)
+# and the hop that proves it (file:function:token). thread_gate10.py reads this file, passed like the thread
+# entries; re-reviewed at the re-pin and at the 1A.1 and 1B.5 re-reads. The frozen fixture holds the copy
+# approved at 31796f5d0, so a re-pinned live copy cannot break the pinned full self-test.
+thread	file	function	proof
+renderer	src/renderer/Thread.zig	threadMain	src/Surface.zig:init:rendererpkg.Thread.threadMain
+termio	src/termio/Thread.zig	threadMain	src/Surface.zig:init:termio.Thread.threadMain
+reader	src/termio/Exec.zig	threadMainWindows	src/termio/Exec.zig:threadEnter:ReadThread.threadMainWindows
+search	src/terminal/search/Thread.zig	threadMain	src/Surface.zig:setSearchQuery:terminal.search.Thread.threadMain
+ui	src/apprt/win32/app.zig	run	src/apprt/win32/app.zig:run:routeLoopMessage=>src/apprt/win32/app.zig:routeLoopMessage:DispatchMessageW
+reader	src/bench/search_stream.zig	streamLocked	src/bench/search_stream.zig:streamLocked:thread_role.fixture(.reader)
