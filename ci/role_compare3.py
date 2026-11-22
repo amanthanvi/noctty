@@ -295,7 +295,10 @@ for name in sorted(os.listdir(dump_dir)):
         process_exit = exits.get((pid, start))
         if process_exit is None:
             failures.append(f"MISSING-EXIT {name}: pid {pid} start {start} has no recorded exit")
-        elif process_exit[0] != kind:
+        # A launcher classifies the request (including "forwarded"); the
+        # recorder classifies the executable. Only group processes use a
+        # recorder kind as their supervisor kind.
+        elif row is None and process_exit[0] != kind:
             failures.append(f"BAD-EXIT {name}: pid {pid} start {start} does not match its recorded exit kind")
     if isolated:
         if kind != "child":

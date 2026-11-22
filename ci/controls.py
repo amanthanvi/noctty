@@ -4521,7 +4521,7 @@ if want(883): results.append(compare_control("883-T1-isolated-rejects-problem-he
     1, {"BAD-DUMP": 1, "UNQUALIFIED-KEY": 1}, isolated=True))
 
 
-def process_exit_control(tag, code, exp_kinds, permit=False):
+def process_exit_control(tag, code, exp_kinds, permit=False, forwarded=False):
     """Run five valid dump packets through the supervisor's actual exit and seal entry points."""
     state = os.path.join(logdir, tag)
     os.makedirs(state)
@@ -4538,6 +4538,13 @@ def process_exit_control(tag, code, exp_kinds, permit=False):
             stream.write(b"thread-role layer: synthetic failure\n" if outcome else b"")
         subprocess.run([py, "-I", script, "exit", state, manifest_path, "fixture", str(pid), start,
                         "test-exe", str(outcome), stderr_path], check=True, capture_output=True)
+    if forwarded:
+        pid, start = "900", "134070000000000900"
+        subprocess.run([py, "-I", script, "launch", state, manifest_path, pid, start, "forwarded"],
+                       check=True, capture_output=True)
+        subprocess.run([py, "-I", script, "exit", state, manifest_path, "fixture", pid, start, "forwarded",
+                        "0", stderr_path], check=True, capture_output=True)
+        dumps["cli-900.pairs"] = f"# kind=cli pid={pid} start={start}\nsrc/Surface.zig:keyCallback ui\n"
     subprocess.run([py, "-I", script, "seal", state, manifest_path], check=True, capture_output=True)
     with open(manifest_path, encoding="utf-8") as stream:
         manifest_text = stream.read()
@@ -4591,6 +4598,7 @@ if want(889): results.append(compare_control("889-G1-compare-keeps-each-containe
     0, {}, isolated=True, table=G1_TABLE))
 if want(890): results.append(compare_control("890-G1-compare-refuses-an-ambiguous-bare-key",
     {"child.pairs": G1_CHILD + f"{TW}:g1Same ui\n"}, 1, {"AMBIGUOUS-KEY": 1}, isolated=True, table=G1_TABLE))
+if want(891): results.append(process_exit_control("891-T2-forwarded-launch-can-leave-a-cli-dump", 0, {}, forwarded=True))
 
 results = [r.result() if hasattr(r, "result") else r for r in results]
 POOL.shutdown()
