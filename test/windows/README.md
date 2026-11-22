@@ -752,6 +752,8 @@ without `noctty.ico`, and record startup, clipboard and history guards.
 - `hidden-win11-uia-rows.ps1` reads TextPattern through a five-line scroll,
   history erasure and a multi-page append. It compares the numbered rows and
   rejects a held snapshot with the same oracle used for the fresh viewport.
+  It records rectangle counts as observations. The provider unit test checks
+  fresh and held geometry against the same available post-erase viewport.
 
 ## PowerShell history isolation
 
@@ -1661,6 +1663,8 @@ D3D11 failure, then a WARP start reads
 `opengl:failed d3d11:failed d3d11-warp:started`, and the
 backend `d3d11-warp`. A log whose attempts no start closes reads `unknown`. The
 contract pins each of those lines to its source.
+The hosted suite upload also includes `receipts/scope.txt`, which directs
+readers to the Actions job for the thread-role comparison and controls.
 All are allowlisted values only: booleans, numbers and short strings without a
 path separator, quote or bracket. No path, command line, window title,
 environment value, screen capture or process listing; a failed leaf's receipt
