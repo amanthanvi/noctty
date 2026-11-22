@@ -1318,8 +1318,8 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
             var cols_opts = opts;
             if (cols_opts.cursor) |*c| {
                 if (c.pin) |p| {
-                    if (self.pointFromPin(.active, p.*)) |point| {
-                        c.y = @intCast(point.active.y);
+                    if (self.pointFromPin(.active, p.*)) |active| {
+                        c.y = @intCast(active.active.y);
                     }
                 } else {
                     const screen_y = old_active_top + c.y;
