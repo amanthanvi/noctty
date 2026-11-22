@@ -16,12 +16,19 @@ if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
 }
 
+# The hidden-desktop suite runs only the metadata route: -Runtime starts command-finish and progress, which hold
+# real input and toasts, so it refuses before building their arguments (design §4.3, the legacy-only edge).
+if ($Runtime -and $env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    throw 'vt-probe-win32-conformance: -Runtime never runs in the hidden-desktop suite.'
+}
+
 $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
+# A hosted leaf never bootstraps: it already runs in the runner's pwsh (the bootstrap's tripwire is the backstop).
+if (-not $env:NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED -and -not $env:NOCTTY_GUI_HIDDEN_DESKTOP) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -54,14 +61,21 @@ if ($launchAction -eq 'build') {
 Assert-InteractiveWin11ExeExists -ExePath $exePath -AllowInboxConPty
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
-$process = Start-Process `
-    -FilePath $exePath `
-    -ArgumentList '+vt-probe' `
-    -WorkingDirectory $repoRoot `
-    -RedirectStandardOutput $stdoutPath `
-    -RedirectStandardError $stderrPath `
-    -WindowStyle Hidden `
-    -PassThru
+# Hosted mode starts the copy through the hosted launcher (scripts/interactive-win11-lib.ps1), never Start-Process.
+$process = if ($env:NOCTTY_GUI_HIDDEN_DESKTOP) {
+    Start-InteractiveWin11HostedProcess -FilePath $exePath -ArgumentList @('+vt-probe') -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+}
+else {
+    Start-Process `
+        -FilePath $exePath `
+        -ArgumentList '+vt-probe' `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -WindowStyle Hidden `
+        -PassThru
+}
 $processHandle = $process.Handle
 
 try {

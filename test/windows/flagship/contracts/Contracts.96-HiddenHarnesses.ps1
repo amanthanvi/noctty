@@ -8,17 +8,8 @@ $hiddenScripts = @(
     Join-Path $repoRoot 'test\windows\hidden-win11-embedding-idle.ps1'
 )
 
-# The text of a script without its comments, so a comment cannot satisfy or trip a pattern.
-function Remove-PowerShellComments([string] $Text) {
-    $tokens = $null; $errors = $null
-    [void][Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    if ($errors.Count -ne 0) { throw 'A hidden harness does not parse.' }
-    $builder = [Text.StringBuilder]::new($Text)
-    foreach ($token in @($tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)) {
-        [void]$builder.Remove($token.Extent.StartOffset, $token.Extent.EndOffset - $token.Extent.StartOffset)
-    }
-    return $builder.ToString()
-}
+# Remove-PowerShellComments (ContractHelpers.ps1) gives a script's text without its comments, so a comment cannot
+# satisfy or trip a pattern.
 $hiddenForbidden = '(?s)\A(?!.*(?:SendInput|keybd_event|mouse_event|SetForegroundWindow|Set-Clipboard|Get-Clipboard|SetClipboardData|Start-Process|Invoke-Item|Register-Default|Remove-Item\s+-Recurse))'
 $hiddenLibText = Remove-PowerShellComments (Get-Content -LiteralPath $hiddenLib -Raw)
 $hiddenContracts = @(
@@ -1549,8 +1540,8 @@ function Test-SkipNightlyWorkflow([string] $Code) {
         $timing -notmatch ('(?m)^' + [regex]::Escape($nightly) + '\r?$')) {
         throw 'The nightly timing run must leave its per-test log in test-timing.'
     }
-    # The nightly, and a dispatch other than the release evidence run, whose
-    # Test run the Release workflow requires to succeed.
+    # The nightly, and a dispatch other than the optional interactive composite's
+    # (no release requires that run since 2026-11-22; a budget drift still must not fail it).
     $budgetWhen = "        if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))"
     $budget = Get-YamlStepBlock -Content $job -Name 'Skip budget (windows-2025)' -Source 'test.yml tests'
     if ($budget -notmatch '(?m)^        run: \./scripts/check-test-skips\.ps1 -TestLog test-timing/ghostty-test\.log -Runner windows-2025\r?$' -or
@@ -1565,7 +1556,7 @@ foreach ($mutation in @(
         @{ Name = 'nightly budget reporting only'; Code = $skipNightlyWorkflow.Replace('-Runner windows-2025', '-Runner windows-2025 -Report') }
         @{ Name = 'nightly budget removed'; Code = $skipNightlyWorkflow.Replace('      - name: Skip budget (windows-2025)', '      - name: Skip budget (windows-2025, disabled)') }
         @{ Name = 'nightly budget never runs'; Code = $skipNightlyWorkflow.Replace("        if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "        if: false`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
-        @{ Name = 'nightly budget blocks the release evidence run'; Code = $skipNightlyWorkflow.Replace("(github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "github.event_name == 'workflow_dispatch')`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
+        @{ Name = 'nightly budget blocks the interactive composite dispatch'; Code = $skipNightlyWorkflow.Replace("(github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "github.event_name == 'workflow_dispatch')`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
         @{ Name = 'nightly budget widened by an appended clause'; Code = $skipNightlyWorkflow.Replace("!inputs.run_interactive_win11))`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1", "!inputs.run_interactive_win11)) || github.event_name == 'workflow_dispatch'`n        shell: pwsh`n        run: ./scripts/check-test-skips.ps1") }
         @{ Name = 'nightly budget ignores failure'; Code = $skipNightlyWorkflow.Replace("      - name: Skip budget (windows-2025)`n", "      - name: Skip budget (windows-2025)`n        continue-on-error: true`n") }
         @{ Name = 'nightly budget reads another log'; Code = $skipNightlyWorkflow.Replace('-TestLog test-timing/ghostty-test.log', '-TestLog ghostty-test.log') }

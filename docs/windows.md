@@ -89,7 +89,9 @@ background translucent. While the notice banner is on screen (about
 non-layered child over the pane, which the measurement points to as the
 cause. Once it was gone the pane's presents were `Hardware Composed:
 Independent Flip`, whether the overlay scrollbar was shown, hidden or absent. Overlay ordering, opacity,
-and visible OpenGL handoff require the maintainer desktop check below. GPU loss injection in
+and visible OpenGL handoff can be seen only in the maintainer desktop check below, which is optional: no
+change or release requires it (the maintainer's decision, 2026-11-22), and the hidden-desktop readback,
+the hidden-desktop GUI suite and multi-agent review are the evidence. GPU loss injection in
 the automated harness tests the recovery path, rather than a physical GPU
 reset. Hidden-desktop readback proves rendered pixels, and does not prove DWM
 composition, scanout, unoccluded frame latency, monitor hotplug, or RDP behavior.

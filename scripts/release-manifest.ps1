@@ -38,7 +38,7 @@ function Get-PackageManagerFileRecords {
 function Write-ReleaseManifest {
     param(
         [string] $Tag, [string] $Version, [string] $CandidateSha,
-        [string] $TestRunId, [string] $EvidenceRunId, [string] $ReleaseRunId,
+        [string] $TestRunId, [string] $ReleaseRunId,
         [string] $ArtifactRoot, [string] $CandidateDirectory
     )
     $generatorBlob = & git -C $CandidateDirectory rev-parse "${CandidateSha}:scripts/package-package-managers.ps1"
@@ -54,7 +54,6 @@ function Write-ReleaseManifest {
         version = $Version
         candidateSha = $CandidateSha
         testRunId = $TestRunId
-        evidenceRunId = $EvidenceRunId
         releaseRunId = $ReleaseRunId
         payload = @(Get-ReleasePayloadPaths -ArtifactRoot $ArtifactRoot -Version $Version | ForEach-Object {
             Get-ReleaseFileRecord -Path $_ -Name ([IO.Path]::GetFileName($_))
@@ -82,7 +81,7 @@ function Assert-ReleaseManifest {
         [Parameter(Mandatory)] $Release,
         [Parameter(Mandatory)] [string] $DownloadDirectory,
         [string] $Tag, [string] $CandidateSha, [string] $TestRunId,
-        [string] $EvidenceRunId, [string] $ReleaseRunId,
+        [string] $ReleaseRunId,
         [string] $ArtifactRoot,
         [switch] $Historical
     )
@@ -94,10 +93,12 @@ function Assert-ReleaseManifest {
     if ($manifest.schemaVersion -ne 1 -or $manifest.tag -cne $Tag -or
         $manifest.version -cne $Tag.Substring(1) -or $manifest.candidateSha -cne $CandidateSha -or
         $CandidateSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'ManifestIdentityMismatch: tag, version or candidate differs.' }
-    foreach ($run in @('Test', 'Evidence', 'Release')) {
+    # A manifest written before 2026-11-22 also records an interactive evidence run; nothing requires one now, so
+    # that field is not read.
+    foreach ($run in @('Test', 'Release')) {
         $name = $run.ToLowerInvariant() + 'RunId'
         $expected = Get-Variable -Name ($run + 'RunId') -ValueOnly
-        # Test/interactive inputs may be fresh same-SHA evidence after expiry.
+        # The Test input may be fresh same-SHA evidence after expiry.
         # The manifest retains the original accepted runs; release identity is
         # immutable. Assert-ReleaseEvidence authenticates every supplied run.
         if ([string]$manifest.$name -cnotmatch '\A[0-9]+\z' -or $expected -cnotmatch '\A[0-9]+\z' -or

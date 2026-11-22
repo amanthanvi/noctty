@@ -239,8 +239,8 @@ command-finished path fired.
 With delivery enabled it raises a real toast, on the visible desktop even
 when noctty runs on a private one, and the banner can cover or take the
 foreground from a later harness. Run nothing that reads screen pixels or
-needs the foreground while that banner is up; the release evidence job runs
-this leaf last for that reason.
+needs the foreground while that banner is up; the interactive composite job
+runs this leaf last for that reason.
 
 Run with:
 
@@ -310,7 +310,7 @@ with `-Dcustom-shaders=true`, loads a deterministic solid-magenta ShaderToy
 fixture, takes a screenshot of the terminal surface child window (through the
 screenshot gate), and fails unless the dominant sampled surface color is
 magenta. With `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`
-(the release job), `-Rebuild` rebuilds the measurement generation instead, which
+(the interactive composite job), `-Rebuild` rebuilds the measurement generation instead, which
 always carries custom shaders.
 
 Run with:
@@ -330,7 +330,7 @@ animation keeps presenting at the paced rate. The bug it guards against is
 timing-dependent, so one run on a regressed build can still pass.
 It needs an executable built with custom shaders, for example the one
 `interactive-win11-shaders.ps1 -Rebuild` leaves behind, or the measurement
-build in the release job.
+build in the interactive composite job.
 
 Run with:
 
@@ -545,7 +545,7 @@ Contrast is active. High Contrast mutation is opt-in with
 original system setting in `finally`. Before its first screen-pixel check it
 proves that a fresh process presents the Dracula background (two attempts),
 because the accessibility harness turns High Contrast off just before it in the
-release job.
+interactive composite job.
 
 Run with:
 
@@ -727,8 +727,9 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, and the soak,
-`interactive-win11-soak.ps1`, for its desktop, job and driver launch); each dot-sources it and still runs on
+`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, the soak,
+`interactive-win11-soak.ps1`, for its desktop, job and driver launch, and `hidden-win11-working-set.ps1`
+for its desktop and guards); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
 explicit-desktop launches (`Launch` for the driver, `Spawn` for a case),
 `Invoke-LocalHiddenDriver` (the outer half: run the harness again as its driver
@@ -898,6 +899,11 @@ jump list (the Shell keeps one per AUMID in the real profile, which a redirected
 `APPDATA` does not move). One state guard spans the whole job: a change to the
 product jump list, the real `startup-attempts.json` or the clipboard sequence
 fails it, and its receipts go to `flagship/artifacts/interactive-win11/job-state`.
+A clipboard sequence of 0 before and after is no observation
+(`GetClipboardSequenceNumber` returns 0 when the station's clipboard cannot be
+read): it does not fail the guard, its receipt records `ClipboardObservable`
+false and its console line says the clipboard was unobservable, never that it
+held.
 
 When a screen-pixel wait (`Get-StatefulPixel` inside `Wait-InteractiveWin11Until`)
 times out, the harness writes `pixel-diagnostic-*.json` to its sandbox `logs`
@@ -1060,6 +1066,1069 @@ the 5 s response bound after it, fails `LATE-SAMPLE`; one that starts before it
 fails `EARLY-SAMPLE`; times that do not increase are `MALFORMED`. The driver
 never waits on the copy without a bound. `ci/test_soak_judge.py` holds the judge's controls
 and runs in the checks job; Contracts.98 pins the harness.
+
+## gui-hosted-probe.ps1
+
+A record-only diagnostic: it measures, and nothing gates on it. It shows where
+noctty's processes and windows land, and what a GitHub-hosted runner's own
+interactive desktop allows a GUI test. It runs from
+`.github/workflows/gui-probe.yml`, which only `workflow_dispatch` starts, on
+two builds of the same source, both prepared before the run. Q0 runs the
+measurement build (`Invoke-InteractiveWin11MeasureBuild`). On a hosted runner,
+P3 to P5 run a `-Drenderer-test-tools=true` build (`-TestToolsBin`) on both
+desktops: one build and one fixture.
+
+Every copy uses #727's launch policy:
+
+- a portable copy without `noctty.ico`, with its own `LOCALAPPDATA` and
+  `APPDATA`;
+- every shell `direct:<System32>\cmd.exe /D`;
+- the clipboard read and write denied, and `copy-on-select = false`;
+- `renderer = d3d11-warp` and a seeded background (#1f6f8b).
+
+These settings, the shell among them, go in the copy's portable
+`config.ghostty`. The command line carries only the launch helper's isolation:
+a shell passed there would travel as one argument with a space in it, which a
+caller that splits arguments can cut before `/D`. Each run records the policy
+as named fields. It also reads its shell's real command line by PID, and
+records, never the text, that the shell is System32's `cmd.exe` with `/D`
+ahead of any payload. Staging copies the build the way #727's soak does,
+and refuses the run unless both the app (`noctty.exe`) and the CLI
+(`noctty.com`) match the build: the measurement receipt's `ExeSHA256` and
+`CliSHA256`, or the test-tools prefix's own files.
+Nothing in a run builds or runs `dev-windows.cmd` or `cmd /c`.
+
+**The launcher's gate.** `Get-ProbeLaunchRefusal` runs before every noctty
+start, in measurement mode (`NOCTTY_INTERACTIVE_MEASURE_AUMID=1`, which the
+probe sets for itself and its drivers). It allows only a portable copy (`noctty.portable` beside it, no
+`noctty.ico`, the profile folders under `-Work`) of two builds:
+
+- the receipt-bound measurement build;
+- on a hosted runner only, the test-tools build.
+
+A stock build shares the product AUMID and can rewrite the installed app's
+per-user registration (app-lifecycle.md 2026-10-16), so locally only the
+measurement build starts. The gate's control runs first and starts nothing.
+It must refuse each of these for its own reason:
+
+- a copy without the marker;
+- a copy with the icon;
+- another binary;
+- the test-tools build off a hosted runner;
+- an unredirected `LOCALAPPDATA`;
+- measurement mode unset;
+- a missing or mismatched `noctty.com` beside the app.
+
+**Q0**, run locally and hosted, in three arms (design §9: "the CLI, either
+ConPTY host"):
+
+- the copy with its bundled ConPTY host (`OpenConsole.exe`);
+- the same with the in-box host (`NOCTTY_CONPTY=inbox`, `conhost.exe`);
+- the copy's CLI as PR 1's leaves run it: `noctty.com +version`, and
+  `+list-windows --class=<fresh class> --format=json --timeout=1000`. The
+  single-instance pipe is named only from `--class`, so the CLI arm reaches
+  no other noctty, and it runs locally too. Its tree is sampled at every poll
+  until the tree is done, and so are its windows: the same two-desktop
+  inventory, with its sentinel and Default > 0 control, over the tree's
+  processes. The walk keeps only the census's windows, so after it the job's
+  members are read again: a member outside the census (it joined during the
+  poll) that owns a window the walk dropped, on any desktop but the private
+  one, is recorded as a job window there (`late-joiner`), and the arm cannot
+  pass. A late joiner with no such window is only counted
+  (`lateJoinersAfterWalk`); the GUI arms do the same. The probe starts
+  `noctty.com` with
+  `CREATE_NO_WINDOW`, so this arm does not test whether a console window
+  would reach Default. Each invocation runs in a job of the driver's own,
+  watched on a completion port, and each process that joins it (the forwarded
+  `noctty.exe`, its console host) is read when the job reports it. The reader
+  opens first: while a message waits it opens that process at once, and it
+  reads one opened process only when none waits, on a thread above normal
+  priority (test-harnesses.md 2026-11-20 PROBE-JOB-WATCH-OPEN-FIRST-01). That
+  read is best effort. Windows does not guarantee `JOB_OBJECT_MSG_NEW_PROCESS`,
+  a child can exit before it is opened (counted as `unopenedJoins`), and a PID
+  is recorded only when the process opened is a member of the job created no
+  later than the message was taken (else it is `unpinned` and left unread). A
+  fault on the reader ends the reading, not the driver (`watchFaulted`). These
+  counts are recorded only; what gates is `notSeenInJob`. A process that exits between
+  polls but was read at its report keeps its startup desktop, which is then
+  its only evidence: its row is `sampledAlive: false`, as its threads were
+  never read. The arm is inconclusive unless:
+  - every process the job counted was read (`notSeenInJob` 0);
+  - every startup desktop was read;
+  - each tree drained in time and the poll after the drain ran
+    (`treeDoneInTime`);
+  - each watched job closed (no `watchJobCloseFailed`).
+
+Each arm:
+
+- A driver created by name on a private desktop (`Invoke-LocalHiddenDriver`)
+  starts the copy.
+- It records the desktop of every process in the job, plus every descendant
+  of the launched root whose link was verified on pinned handles. Each
+  candidate is opened first, and its parent is read from the process itself,
+  its creation time from the same handle, with every ancestor's handle held.
+  A descendant outside the job is `leftJob`: it is judged like the rest and
+  stopped by its exact PID and creation time. A link that cannot be verified
+  is counted, never stopped.
+- The bundled arm must see the copy's own `OpenConsole.exe`; a fall back to
+  System32's `conhost.exe` fails it. The in-box arm must see `conhost.exe`.
+- It reads each process's startup desktop (PEB `DesktopInfo`, taken as an
+  offset into the parameter block until the child's loader normalizes it) and
+  its threads' desktops while holding read-only handles to Default and the
+  private desktop. A startup desktop that could not be read is recorded as
+  `none`, the same as an empty name (PowerShell binds a null to `[string]` as
+  an empty string); every gate treats `none` and `unreadable` alike, as
+  unresolved. `GetThreadDesktop` names another process's thread desktop
+  only while the caller holds a handle to that desktop (test-harnesses.md
+  2026-11-20 PROBE-THREAD-DESKTOP-01).
+- It records every top-level window found on the private desktop and on
+  Default. Both inventories must be complete:
+  - every `FALSE` from `EnumDesktopWindows` counts as unavailable;
+  - a hidden sentinel window of the driver must appear on the private
+    desktop;
+  - Default must show at least one window.
+- It then stops each process by exact PID, and counts what still runs: the
+  same PID and creation time, not exited. A held handle keeps an exited
+  process's creation time readable, so creation alone is no proof of life.
+- Its claim is "every process and window alive at the sample". It holds only
+  when the sample has the app, the ConPTY host (the copy's own
+  `OpenConsole.exe`, or `conhost`) and the shell, and every desktop read in
+  it resolved. A thread with no USER desktop is kept apart from an unreadable
+  one, and an unreadable one leaves Q0 inconclusive. The growth of the job's
+  `TotalProcesses` since the copy started is recorded beside the sample, so a
+  descendant that joined and exited before it (cmd's `chcp`) is counted. It is
+  outside the claim and does not fail Q0.
+- An incomplete census also leaves Q0 inconclusive:
+  - a descendant candidate the walk could not verify, unless it is gone, its
+    PID now names another process, or it predates the ancestor it names
+    (`unresolvedDescendantLinks` must be 0). Unresolved is not the only way
+    the walk can miss a live process: when an intermediate's PID is reused by
+    a newer child of the same ancestor, the intermediate's live child reads
+    as older. The arm's job still holds such a grandchild, since it permits no
+    breakaway (test-harnesses.md 2026-11-20 PROBE-JOB-BREAKAWAY-01), so the
+    GUI census counts it and the CLI watch reads it or leaves the arm
+    inconclusive. The walk is a cross-check;
+  - a running child of a gone or reused candidate that is not in the arm's
+    job (the walk does not pass through such a PID; it counts as unresolved);
+  - more live processes in the job, by its active count right after the
+    sample, than in-job rows (a GUI arm);
+  - a member of the job's process list read at that same moment that is not
+    a census row with the same PID and creation time, so an exit and a join
+    cannot balance out (a GUI arm; the list is recorded as
+    `jobMembersAtBoundary`, and a record without it is inconclusive). The
+    list is read inside a bracket: the job's accounting before and after it
+    must show the same total (nothing joined; the total only grows, and the
+    job permits no breakaway) and the same active count, equal to the list's
+    length (nothing left). An unstable bracket is retried up to 5 times and
+    recorded (`boundaryBracket`); a stable one proves no member exited inside
+    it, so every member must match by PID and creation time.
+- Each walk also checks, on a handle held open, whether the owner of a
+  window off the private desktop that is outside the census belongs to the
+  arm's job (the CLI's watched job, or the GUI driver's own). A member's
+  window counts as a job window there, so the arm cannot pass. An owner that
+  cannot be opened is counted (`windowOwnersUnreadable`, beside
+  `windowOwnersTotal`, the owners checked). An owner that exits
+  between the walk and its open, taking its windows with it, is outside this
+  check.
+- Positive control: a child started without a desktop name reports the private
+  desktop.
+- Negative control: a thread moved to a second desktop with `SetThreadDesktop`
+  starts a child that reports Default. While the child waits, Q0's own reader
+  must name Default for both its startup desktop and its thread desktops.
+  Desktop names compare case-insensitively, and a startup desktop the reader
+  names neither way is recorded by its leaf.
+- The enumeration classifier's own control runs in the bundled arm's driver:
+  a fresh empty desktop, walked through the handle that created it, comes
+  back with the empty walk's own signature (FALSE with no error), a walk
+  through a handle that
+  is not a desktop (an event of the driver's) comes back unavailable with a
+  Win32 error, and the desktop holding the sentinel lists it. Anything else
+  leaves Q0 inconclusive. A desktop handle without some access right is no
+  such failure: on the Windows builds measured, `EnumDesktopWindows` walked
+  every narrowed desktop handle tried, though Microsoft documents
+  `DESKTOP_READOBJECTS` as required (test-harnesses.md 2026-11-20
+  PROBE-ENUM-ACCESS-01).
+- The CLI arm polls until its root has exited and its watched job holds no
+  live process, then once more for what joined after the last snapshot.
+- Q0 passes only when all three arms and every control pass. Its claim is
+  "every process and window alive at a sample".
+
+**D3**, run hosted only (`GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` checked).
+On the runner's own Default desktop, each item has a control:
+
+- **P1:** `SendInput` text reaches the script's own window, once that
+  window's EDIT has the focus and it is in no menu loop. The foreground is
+  unlocked by a zero-motion mouse input, not an Alt tap, which opens the menu
+  loop and swallows the next key. Control: another window in front takes the
+  input, and the probe's text is unchanged. Then the noctty arm: the
+  measurement copy, foreground, is typed `echo <nonce>>"<file>"` and Enter,
+  and the file must hold the nonce. Control: the same with a probe window in
+  front, whose EDIT takes the line while no file appears. P1 passes only with
+  both arms, and every stimulus counts only when `SendInput` inserted every
+  event.
+- **P2:** a #FF00FF window is read back one pixel at a time. Controls: the
+  window covered, and the window minimised.
+- **P3:** the fixture's shell prints a seed of known size: 20 lines of 64
+  characters, 1320 bytes (`/K type <seed file>`).
+  - In every arm, the backend is shown by the existing
+    `initialized driver=WARP` line, the `renderer_windows` scope's one line
+    (the WARP notice), and no logged backend switch.
+  - On Default, a fresh render-trace snapshot (`NOCTTY_RENDER_TRACE_LIVE`,
+    WM_APP + 8) shows a swap whose `last_swap_process_output_bytes` is at
+    least the seed's bytes.
+  - Control: the same run with the seed withheld stays below that.
+  - Control: on a private desktop, a fresh `WM_PRINTCLIENT` readback of the
+    pane (the test tools' `renderer.capture`) is the seeded frame, and a
+    snapshot taken after it counts no swap.
+  - Control: a private withheld-seed readback misses the seed text's pixel
+    floor.
+  - A failed readback, a missing snapshot, or a snapshot that lacks a counter
+    is "inconclusive". The withheld readback counts only as the fixture's own
+    background with a measured ink fraction below the floor.
+- **P4:** `ITaskbarList3::HrInit`'s HRESULT on both desktops.
+- **P5:** the toast setting and history count for the build's identities.
+  The after-exit samples are taken only after a normal exit: `WM_CLOSE`
+  posted, the process ended inside the wait, and exit code 0.
+
+P4 reads the copy's own record. `NOCTTY_GUI_PROBE_TRACE=1`
+(`src/os/gui_probe_trace.zig`) turns it on, and it needs `GHOSTTY_LOG=stderr`.
+
+```powershell
+pwsh -NoProfile -File test/windows/gui-hosted-probe.ps1 -Bin <measurement prefix>\bin `
+    -MeasureRepo <repo> -Work <new dir> -Out <record.json> -Part Q0
+```
+
+`-Part` takes `Q0`, `Local` or `All`. `All` needs
+`-TestToolsBin <test-tools prefix>\bin`; with `Local` it only feeds the gate's
+control, which must refuse it. `-Work` must lie outside
+`-MeasureRepo`, or in a folder git ignores there: copies staged in the
+checkout would dirty it, and the driver's admission refuses a dirty one. The
+probe checks this before it creates anything.
+
+- `-Part Local` runs the gate's control, Q0, and the private-desktop facts of
+  P4 and P5 on the measurement build. Given `-TestToolsBin`, it only feeds the
+  gate's control, which must refuse it.
+- `-Part All` refuses to start off a hosted runner, and needs
+  `-TestToolsBin`.
+- Locally, the run also:
+  - keeps the real state's guard (`scripts/interactive-win11-state-guard.ps1`),
+    and records it as `stateGuard.state`: `held`, `unobservable` (a passing
+    guard with a clipboard sequence of 0 before and after, which is no
+    observation) or `tripped`, with the guard's own `clipboardObservable`;
+  - reads only the measurement identity's toast facts;
+  - gives each noctty child a `TEMP` and `TMP` under its run directory;
+  - deletes the copies it made under `-Work` once the record is written
+    (`-KeepCopies` keeps them);
+  - exits 3 after a tripped guard and 2 after a failed stage. The record
+    names the guard (`guardTripped`) and its state (`guardTrippedState`,
+    `tripped` or `unreadable`).
+- On a hosted runner the probe is record-only and exits 0.
+- A clipboard sequence sample of 0 cannot be read. Locally it stops the run,
+  as a tripped guard does. On a hosted runner it is recorded
+  (`guardUnreadable`) and gates no verdict: the guard protects the user's
+  clipboard, and the runner's clipboard is not theirs.
+- The record holds only values and HRESULTs. `Write-ProbeRecord` writes any
+  other string, and any other type, as `rejected-value`, and leaves out an
+  entry under any other key. No screen image, path, window title or command
+  line enters it, nor any environment value but the hosted runner's image
+  name and version, each kept only in its known shape (else `unknown`). The record is still written: it
+  counts the replacements (`rejectedValues`) and lists where they were
+  (`rejectedAt`, a left-out key as `#key<n>`, which no allowed key can
+  match). A driver record with any replacement
+  leaves the verdicts that read it inconclusive.
+- Readbacks stay in `-Work`, and only their counts reach the record.
+
+## hidden-win11-working-set.ps1
+
+`PLAN.md` §3.5's working-set workloads: one portable copy of the
+receipt-bound measurement build on a private desktop runs one fixed workload,
+and the harness samples it through the handle it holds from `CreateProcess`.
+It launches only the measurement generation of `-MeasureRepo`
+(`Invoke-InteractiveWin11MeasureBuild`): `Assert-InteractiveWin11MeasureBuild`
+admits it and the copied `noctty.exe` and `noctty.com` must match the
+receipt's hashes, so a plain `zig-out` build is refused before anything
+starts. Each run is a fresh copy, private desktop, job and `LOCALAPPDATA`, one
+run at a time (a session-wide mutex refuses a second). The driver re-proves
+its isolation before it starts anything (a job; its own desktop, neither
+`Default` nor the input desktop; `LOCALAPPDATA`, `APPDATA`, `TEMP` and `TMP`
+inside the run; the staged copy, its marker, no `noctty.ico`, the harness's
+config and the receipt's bytes). Every process the harness creates directly
+names the private desktop, and the native launches refuse any other: a child
+only on the driver's own desktop, the driver never on the caller's, `Default`
+or the input desktop. The driver's re-admission runs git through the measure
+library, which names no desktop; per `CreateProcess` such a child inherits its
+parent's desktop, the driver's private one (read, not measured). The staged
+config must be byte for byte the harness's own for the run
+(`New-WorkingSetConfigText`), so an `initial-command` or a second `command`
+cannot change the first pane's shell, and only its settings take effect. The
+copy is launched with exactly the expected argument list (the launch
+helper's arguments, then the harness's, in order and nothing else), among
+them `--config-default-files=false` and `--config-file=<copy>\config.ghostty`:
+the final command line before the launch, and the copy's own command line by
+PID after it, must each split into exactly that list. noctty still reads its
+default config files, then discards their settings because default files are
+off (`Config.loadCliArgs`), so the settings in effect are the command line's
+and the `--config-file` file's; a staged copy holding a legacy
+`ghostty\config` or `winghostty\config.ghostty` is refused as well. The run's
+path appears in the config only as
+`working-directory`: F5 types `.\flood.cmd`, relative to the pane's working
+directory, so a `%USERNAME%`, `^` or `&` in the path never reaches cmd's
+parser. `NOCTTY_CONPTY` must be unset (both
+halves refuse it), the copy's `conpty.dll` and `OpenConsole.exe` must match
+the build's, and the record keeps the transport the copy's own log names
+(`using bundled ConPTY: <copy>\conpty.dll`); a run on any other transport
+fails. The copy starts through
+`Get-InteractiveWin11LaunchArguments` (its own class) after its build mode is
+checked through `+version`, with its config's
+`command = direct:<System32>\cmd.exe /D`, the clipboard denied, no
+`noctty.ico`, `SEM_NOGPFAULTERRORBOX` and a job that ends a process on an
+unhandled exception, the driver and the copy at normal priority. The grid is
+read from the base pane's pseudoconsole before `start` and must be 140 x 43:
+on the measurement machine (144 DPI) the config's `window-width = 140` and
+`window-height = 45` give 43 rows, measured on the 0a build and on this
+harness's, so the harness pins that grid (`$script:GridRows`), not the
+configured 45. The flagship configured-size leaf
+(`interactive-win11-configured-size.ps1`) likewise accepts a configured size
+with a tolerance (its 140 x 45 needs at least 120 x 35).
+
+Each sample holds `private_bytes` (`PrivateUsage`, what Windows calls the
+process's commit charge), `working_set`, `peak_working_set`,
+`private_plus_shared_commit` (`PrivateUsage + SharedCommitUsage`), the pane
+count and whether it is the base pane alone, and the handle, GDI and USER
+counts (null when their query failed). A stage settles once the last 10
+samples, 500 ms apart, hold private bytes within 0.5% and working set within
+1% of their mean (range over mean); its value is its last sample. A stage
+that has not settled after 90 s, or that is not at the base pane alone, fails
+the run. The scrollback workloads' `block-<n>` entries are the exception, by
+design: one immediate sample each, right after its block, not settled and
+exempt from both checks (the comparison uses the settled `after`). The workloads, on the 140 x 43 grid, in blocks of 25,000 lines; a block
+counts once the batch file acknowledged it and the copy's window title shows
+`ws-block-<n>`, which the batch file sets after the block, so the pane parsed
+through its end:
+
+- `fixed`: one block, then 20 cycles of a new tab and its close; `after` 7 s
+  later (undo-timeout prunes closed panes after 5 s) and once the copy is back
+  to its base pane alone.
+- `scrollback-default`: 4 blocks at the default `scrollback-limit`
+  (10,000,000 bytes), about ten times what it retains at this width.
+- `scrollback-max`: 1.25 times what `-ScrollbackMaxBytes` holds at 1,120
+  bytes a row (about twice the limit, measured), with that limit. noctty has
+  no maximum; the default, 1 GiB, is the baseline's large scrollback point.
+  Settings' up-down stops at 2,147,483,647, which caps the parameter; that
+  value is not measured (a 2 GiB working set adds nothing the 1 GiB point's
+  growth does not show).
+- `uia-walk`: `scrollback-default`'s output, then a UIA client reads the
+  pane's whole `DocumentRange` and walks it line by line to its end, the pane
+  found from the copy's own window handle. It reads only what UIA exposes at
+  the bottom of the scrollback, 329 lines at 140 columns (measured), not a
+  scrolling walk of the whole scrollback: `accessibleHistoryRows` in
+  `src/apprt/win32_uia/text.zig` exposes min(40,000 cells / columns, 500)
+  history rows plus the viewport (285 + 43 rows here), and the window slides
+  only with a scrolled viewport (`snapshotDocumentWindow`), which this
+  workload never scrolls. The walk counts only when the document holds the
+  last block's last line and the walk counted the whole document: the history
+  rows, the viewport and the one line more a walk counts, 329 lines at
+  140 x 43 (`Get-ExpectedUiaLines`); a 285-line document, the history rows
+  alone, fails. Its `after`
+  stage is sampled with the UIA client still connected: about 20 more handles
+  than `start` in every Phase 0a run (595-599 against 575-579).
+- `session-capture`: `scrollback-default`'s output with
+  `window-save-state = always` and `window-save-state-scrollback = 10000`,
+  then 10 checkpoints, each a new tab and its close; a checkpoint counts only
+  when the copy's own `session-state.json` then holds a new snapshot of the
+  base pane with the fixture's lines, its `captured_at_unix_ms` later than
+  both the close (timed right before the close key) and the last snapshot
+  counted, so a display-change or deferred save from before the close does
+  not count, and only a snapshot of exactly the lines its budget gives
+  (`Get-ExpectedSessionLines`, 3,717 at 140 columns), so a halved slice from
+  the formatter's retry (1,858 lines) does not count either; the record keeps
+  each checkpoint's times and line counts. The
+  512 KiB snapshot budget pre-limits a capture to (budget - 96 bytes of
+  snapshot overhead) / (columns + 1) lines, 3,717 at 140 columns (counted), so the 10,000-line cap is not
+  reached at this width. This is the only workload that saves session state,
+  an exception to AGENTS.md's `--window-save-state=never`: the file stays in
+  the portable copy, and the real `session-state.json` is guarded.
+- `tab-churn`: 50 cycles of a new tab and its close.
+
+```powershell
+pwsh -NoProfile -File test/windows/hidden-win11-working-set.ps1 `
+    -MeasureRepo <checkout with a measurement build> -Run <new dir> -Workload fixed
+```
+
+`-Run` is a new directory outside `-MeasureRepo`, or one git ignores there: a
+run directory inside the checkout would leave untracked files that the
+measurement build's provenance check refuses, so the harness refuses it
+before it creates anything.
+
+A later phase compares its working set with Phase 0a's by running the 0a
+measurement build and the new one interleaved, under the same harness
+version, one copy at a time on a quiet machine, and comparing each workload's
+median `after`; the stored 0a numbers are the reference level, not the
+comparison. Only completed runs count (the outer half checks each
+`workingset.json` with `Get-WorkingSetRecordProblems` before it says
+"complete") with the same `WorkloadSha256` (the workload, its scrollback limit
+and planned blocks, the constants, the output block, the flood batch file and
+the config) and grid, and both arms on the same transport and bundle: the
+bundled ConPTY, with the same `conpty.dll` and `OpenConsole.exe` digests in
+their records. One copy at a time, 9 Phase 0a copies' settled `start`
+levels had IQRs of 0.1-1.6 MiB and their `after` levels up to 2.7 MiB (7.5 MiB
+at the 1 GiB limit), with one unexplained low run, while copies run together
+differed by tens of MiB (test-harnesses.md, the 2026-11-20 WORKING-SET-01
+entry and trap 6 of the 2026-11-18 SOAK-01 entry). The real startup ledger,
+the product jump list and the clipboard sequence number go through the shared
+state guard (`scripts/interactive-win11-state-guard.ps1`), the PowerShell
+history through `scripts/windows-harness-history.ps1`, and the real
+`session-state.json` is compared by metadata. `guards.json` takes the shared
+guard's own clipboard samples and verdict, with no second reading. A clipboard
+sequence of 0 before and after is recorded as unobservable
+(`ClipboardObservable` false in `guards.json`, and the console says so), never
+as held, and does not fail the run. Contracts.98-WorkingSet pins the
+harness, its workload and its run-time checks.
+
+## gui-hidden-runner.ps1 (the hidden-desktop GUI suite)
+
+The interactive offload's hosted lane (design §4; test-harnesses.md
+GUI-HIDDEN-DEFAULT-01). It runs each leaf in `gui-hidden-plan.json` on a
+private desktop of its own, against a fresh portable copy of the receipt-bound
+measurement build, through `.github/workflows/gui-hidden.yml`, and locally.
+In the workflow, the `gui-hidden-gate` job runs on every pull request and
+push; the suite itself runs on every push, scheduled and manual run, and on a
+pull request when the selection (`scripts/ci-gui-selection.ps1`) sets
+`gui=true`: its change needs the suite, or the selection cannot decide. A
+docs-only pull request skips the suite and the gate still passes.
+
+```text
+pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <new or empty dir> [-Leaves smoke,undo]
+```
+
+A run that selects fewer than all the plan's leaves (`-Leaves smoke,undo`) is for
+diagnosis: when they pass, its result and its whole-plan assertions
+(`leaves-pass`, `launch-policy`, `real-input-absent`) are `skip`, never
+`pass`. Naming all six leaves is a full run. `-Work` must be a printable ASCII
+path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
+
+No release or check requires the interactive composite (the maintainer's
+decision, 2026-11-22): it stays dispatchable and optional. This lane's gate
+runs on every pull request; its suite runs on a pull request only when the
+selector sets `gui=true` (above).
+
+**Where a GUI check runs.** In the lowest tier that can make its assertion:
+
+1. a private desktop in hosted CI, the default (this suite);
+2. a private desktop on a local machine with a GPU, for OpenGL and
+   custom-shader rendering read back offscreen with the test-tools build, and
+   GL-side traces;
+3. a visible run, for real `SendInput` through the message loop, foreground
+   acquisition, pixels as DWM composes them on screen (`CopyFromScreen`, a
+   D3D11 present), the production OpenGL path into the window's framebuffer,
+   and any present paced by vblank.
+
+Every gating GUI check, in any tier, has a positive oracle and a negative
+control that fails it.
+
+**The build.** Locally, prepare the measurement build first, outside any run
+and redirect, with `Invoke-InteractiveWin11MeasureBuild`
+(`scripts/interactive-win11-measure-lib.ps1`), and commit first: a generation
+is keyed by a clean HEAD. Never use a plain `zig build`: that is the
+product-AUMID `zig-out` build, which writes the real jump list
+(STANDALONE-LEAF-AUMID-01). `-Build` builds the generation and runs only on a
+GitHub-hosted runner. The runner validates the raw generation before staging
+and at the end, and stages one copy per leaf: everything but `noctty.ico`,
+`crash`, `ghostty` and the PDBs, plus `share`, with `noctty.portable` beside
+the exe. Both the app and the CLI are hashed against the receipt, and the
+ConPTY pair (`conpty.dll`, `OpenConsole.exe`) against the package pins in
+`dist/windows/conpty-redist.json` (the receipt names only the app and the
+CLI); at the end the generation must still match those hashes and the
+receipt's own bytes. While a leaf runs, its copy's ConPTY pair is held open
+with read sharing only and hashed through those handles, so nothing can write,
+rename or delete it before noctty loads it; a file that cannot be opened that
+way refuses the run. A hosted leaf never builds: lib's and measure-lib's build
+entry points throw in hosted mode. A passing
+leaf's copy is deleted at once, a failing one's at the end unless
+`-KeepFailedCopies`. The runner stops with 20 GB or less free.
+
+**A leaf in hosted mode.** The runner starts each leaf as
+`pwsh -NoProfile -NonInteractive -File <leaf>`, suspended, on its desktop
+(`WinSta0\noctty-gh-<32 hex>`, named in `lpDesktop`), in a job that permits no
+breakaway and kills every process when it closes. Its
+`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` ends a process that hits an
+unhandled exception at once, with no crash dialog, but that process only: the
+rest of the job stays alive until the runner ends it, so a leaf can still reach
+its timeout after a child crashes. It sets
+`NOCTTY_GUI_HIDDEN_DESKTOP`, `NOCTTY_GUI_HIDDEN_EXE` and
+`NOCTTY_GUI_HIDDEN_RUN`, which select the interactive library's hosted mode:
+
+- at load, `InteractiveWin11HostedDesktop.Assert` refuses any other station or
+  desktop, and the input desktop. An unreadable input desktop refuses too: keep
+  the session unlocked during a local run;
+- the leaf never bootstraps or builds;
+- its sandbox is `<run>\sandbox-<token>`, under its run directory, where
+  `<token>` is a fresh run token the runner draws for each leaf
+  (`staged.json`); every class it names ends in the token, so no two runs,
+  nor a run and the legacy route, share a sandbox or a single-instance pipe;
+- it starts noctty and the CLI only through
+  `Start-InteractiveWin11HostedProcess`, which checks the staged file's
+  identity, builds its own quoted command line, refuses `--command`, applies
+  the argument rule (`Get-InteractiveWin11HostedArgumentRefusal`: every
+  `--class` ends in the token; an app launch states `--single-instance`, and
+  `true` only in the IPC leaves; every action names the class except the
+  local ones, `+help`, `+version`, `+list-keybinds`, `+list-colors`,
+  `+list-themes` and `+vt-probe` (so `+list-windows` needs it); no
+  `--config-file`), reads the
+  started process's command line back and compares it, and records each PID
+  before it runs. `Start-Process` stays only in each leaf's default branch;
+- its config goes into the copy's `config.ghostty`
+  (`Write-InteractiveWin11HostedConfig`): its own lines, then
+  `command = direct:<System32>\cmd.exe /D`, the clipboard read and write
+  denied, `copy-on-select = false`, `auto-update = off`,
+  `desktop-notifications = false`, and `window-save-state = never` unless the
+  leaf sets it. A leaf's own lines cannot set `class`, `single-instance` or an
+  include;
+- a one-shot `/c` stimulus waits on `shell-read-<k>.flag` so the runner reads
+  its command line before it exits;
+- at exit it writes `leaf-receipt.json`, which says whether the real-input
+  module's type was ever loaded.
+
+**What the runner fails a leaf on.** A nonzero exit or a timeout. A joiner of
+its job left unread, its image included (the job's own `TotalProcesses`
+against the processes read). A `cmd.exe` whose loaded image is not System32's
+(path and identity), whose command line does not name it, or that has no `/D`
+before `/C`, `/R` or `/K`; or fewer shells than the plan's `expectedShells`. A
+`noctty.exe` or `noctty.com` outside the copy (image path and identity), one
+breaking the argument rule on its command line, or one not accounted for.
+Accounted means the launcher started it; or it is a `noctty.com` started by a
+shell that is the exact child of an accounted `noctty.exe` (shell-command's
+PATH lookup inside the terminal); or a `noctty.exe` an accounted `noctty.com`
+forwarded. A shell the leaf started itself vouches for nothing. A window of its
+job on Default, sampled every 500 ms and once more before the job is ended (a
+window that opens and closes between two samples is not seen). A reparse point
+under its run directory. A copy's `config.ghostty` that no longer holds the
+launch policy, read back when the leaf ends. A receipt that is missing,
+incomplete or mistyped, or says the module loaded. A staged file (app, CLI,
+ConPTY pair) changed.
+
+**The real-input module.** `scripts/interactive-win11-realinput.ps1`
+(`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib
+loads it only outside hosted mode, and it throws if loaded there. Screen
+capture stays behind `Save-StatefulScreenCapture`. In hosted mode, use posted
+`WM_KEYDOWN`/`WM_KEYUP` pairs (or sent `WM_KEYDOWN`/`WM_CHAR`/`WM_KEYUP`
+triples, never a posted triple), with `AttachThreadInput` and
+`SetKeyboardState` for modifiers, `SetFocus` and `GetGUIThreadInfo` for focus,
+and the foreground-free `WM_COMMAND` hooks 1901, 1904, 1907 and 1908.
+
+**What it uploads.** `-Out` must be new or empty, and holds only
+`result.json` (the flagship result schema, scenario
+`windows.gui-hidden.suite`), written whole and then followed by
+`result.json.sha256`, its hash, which marks it complete, and `receipts/`: one
+JSON object per leaf this run ran, plus `run.json`: the harness's own commit (`implementationSha`, this
+checkout's HEAD, with `implementationDirty`) and the measurement build's head
+and hashes, apart; the hosted image's name and version in their known shapes;
+whether an HKCU or HKLM `Command Processor\AutoRun` value exists, never the
+value; each guard's state, the clipboard sequence before and after, and the
+startup fingerprint (exists, SHA-256, last write) before and after. Each leaf
+records the renderer its copy's config names, and from its noctty logs the
+backends that started and the attempts before each. A start is
+`renderer/Windows.zig`'s `renderer started backend=<opengl|d3d11|d3d11-warp>`,
+in a scope of its own (`renderer_start`, so the `renderer_windows` lines #738's
+hosted probe counts are unchanged), logged once a candidate has fully started;
+a failed candidate's `startup failed` warning is an attempt (a `warning(...)`
+line: logFn writes the level as `std.log.Level.asText` spells it, and the
+contract takes each prefix from `process_shared.zig`'s `logPrefix` test), and
+so is `Direct3D11.zig`'s
+`initialized driver=`, logged when the device is made but before the rest of
+the candidate, which can still fail. So an OpenGL failure, then a hardware
+D3D11 failure, then a WARP start reads
+`opengl:failed d3d11:failed d3d11-warp:started`, and the
+backend `d3d11-warp`. A log whose attempts no start closes reads `unknown`. The
+contract pins each of those lines to its source.
+All are allowlisted values only: booleans, numbers and short strings without a
+path separator, quote or bracket. No path, command line, window title,
+environment value, screen capture or process listing; a failed leaf's receipt
+carries its failure kinds and its log's line counts, never a line. The
+console gets leaf ids and failure kinds. The logs, the runner's errors, the
+state guard's receipts and the copies stay under `-Work`.
+
+**Guards and exit codes.** The state guard (the product jump list,
+`startup-attempts.json`, the clipboard sequence) and the PSReadLine history
+guard span the run; a tripped one exits 3. Each is recorded `held`,
+`unobservable`, `tripped` or `not-run` (it never started, or its check never
+ran). The state guard is `unobservable` when it passed but its clipboard
+sequence read 0 before and after, which observes nothing (the guard's own
+verdict, test-harnesses.md 2026-11-21 STATE-GUARD-CLIPBOARD-01; the hosted
+runner reads 0); the result's `state-guards` assertion then says so, and the
+run can still pass. Only `held` and `unobservable` count: a guard that did not
+run makes the run an error, never a pass. A
+local run on `WinSta0` shares the user's clipboard, so the clipboard guard can
+trip on the user's own copy; don't copy during a run. 0 pass, 1 a leaf failed,
+2 a validation, staging, generation, guard or runner failure (with an `error`
+result when `-Out` could be opened, the runner's own initialization included),
+3 a tripped guard. When the job fails without a complete result (a failed
+self-test, or a suite step that died or did not parse first), the workflow's
+last step runs `test/windows/gui-hidden-publish-error.ps1`, a script of its
+own that loads nothing of the runner (the runner also runs it when its own
+initialization fails). A failed `changes` job (a runner that does not parse
+fails the walk) keeps the suite job from starting, so `changes` runs the same
+publisher and uploads the same artifact itself. It leaves a complete result alone: one that parses,
+matches the result schema, names this scenario, and has a matching
+`result.json.sha256`. Anything else, a truncated `result.json` included, it
+keeps as `result.incomplete.json` and replaces with an `error` result.
+
+The script walk's edge definition (design §4.3) covers the ways it lists to run
+a script, not every way PowerShell has. A name with a path separator is a path
+lookup in every form (`&`, `.`, a bare word, `Get-Command`), whatever its leaf,
+unless it is `Microsoft.PowerShell.*\Verb-Noun` and the walker's own session
+finds that module exporting that command. With no extension, a lookup resolves
+only when its `.ps1` is the one sibling with `.ps1` or a PATHEXT extension
+(matched case-insensitively), whatever `-CommandType` would pick; a native or
+batch sibling, or none, leaves it unresolved. A relative one is unresolved.
+
+cmd and batch files are refused: any invocation of `cmd` or of a `.cmd` or
+`.bat` file is unresolved, in every form (`&`, `.`, a bare path, `Start-Process`,
+a pipeline, a batch file's arguments), and fails the walk (see the two
+outcomes below). Every review round from 5 to 8 found a new silent hole in
+reading cmd's language or a batch file's forwarding (`%*`, a helper named by a
+plain word, a switch glued to `/C`), and no GUI member runs a resolvable cmd or
+batch line;
+only the anchored legacy-only lines (`$script:CiScriptClosureLegacyEdges`) are
+exempt. The PowerShell readers stay for `&`, `.` and bare launches, where
+PowerShell quotes each scalar argument: there the value after a valued option
+(`-ExecutionPolicy`) is read, and a variable or computed value passes only as
+one known string, since an array expands into several arguments; a literal
+passes, and `-File`'s value is read as a path. `Start-Process` of `pwsh` or
+`powershell` is refused (unresolved): it joins its arguments without quoting
+and PowerShell tokenizes them again, so no element rule is sound, and no GUI
+member starts PowerShell that way.
+
+Fixture results and real selection are separate. The walker tests'
+synthetic fixtures in `gui-hidden-scripts.ps1` only assert whether a walk
+fails; they set no selector output (its small-tree checks run the real
+selector on a synthetic tree, and see it fall back). In real selection, the
+selector walks the GUI closure (the plan's leaves and what they reach, over
+the head and the prior trees) and classifies the changed paths against it:
+a docs-only change still skips the suite, and a change to a member selects
+it. When a real GUI member gains an unresolved edge, an unlisted cmd call
+say, that walk fails: the selector falls back (`gui=true`, "selection
+unavailable"), but the `changes` job's next step, `gui-hidden-scripts.ps1`,
+walks the real closure and fails, so the suite job never starts, `changes`
+uploads a `gui-selection` error result, and `gui-hidden-gate` fails. Expect
+a selection error then, not suite results; fix it by removing the edge or,
+for a legacy-only line, listing it with its guard in
+`$script:CiScriptClosureLegacyEdges`.
+
+Known gaps, which no GUI member uses with a script target today:
+`[Diagnostics.Process]::Start` and `Invoke-Item` of a script or batch file, a
+runspace's `CreatePipeline` or `Pipeline.Commands`, `.ScriptBlock.Invoke()` of
+a `Get-Command` result, an alias made through `New-Item` on the `alias:` drive
+with a path the walker cannot read, a repo folder added to `$env:PATH`, which
+makes a bare name run a `.ps1` there (the walk reads a bare name as a command
+on PATH), the arguments of a tracked executable other than a shell, which are
+not read (the repository tracks no executable), a command run outside cmd
+and PowerShell by another launcher such as `conhost.exe`, a variable launch
+target (`& $p`) that a dot-sourced helper rewrites after the leaf set it (the
+walk reads `$p` from the leaf's own assignments), a `*ExePath` or
+`*CliPath` helper named for ComSpec (`Get-ComSpecCliPath`), read as the
+program it names although it may return cmd, and a `Start-Process` FilePath
+given `-WorkingDirectory` that is a variable or a value the walker reads as a
+named program (a `Join-Path` or `Get-Command` leaf, such as session-restore's
+`$cli`, `noctty.com` beside the exe): it is not checked against that
+directory, while a bare literal name is unresolved unless it is a listed
+system program. A script a
+leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
+beyond it too: neither the closure nor the leaf's receipt sees that script, so
+a leaf must not run a repo script that way. The launch contract's scan for
+direct process starts on a hosted path (Contracts.99-GuiHiddenLaunch) does not
+count an instance `Process.Start()` whose `StartInfo` a leaf fills in itself;
+no hosted file starts a process that way.
+
+`gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
+and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1
+pin the rest. `flagship/measurements/gui-measurements.json` records the
+measurement outcomes later lanes depend on (Q0 and #738's P1-P5).
+
+## bench-frame-pacing.ps1
+
+`bench-windows.ps1 -Metric frame-pacing` runs this harness: `frame_time_p95_ms`
+under the per-copy rules (AGENTS.md "Running noctty"). Each run is a fresh
+portable copy of `-MeasureRepo`'s receipt-bound measurement build
+(`noctty.portable` beside it, no `noctty.ico`, its own `LOCALAPPDATA`,
+`APPDATA`, `TEMP` and `TMP`), admitted as `hidden-win11-working-set.ps1`
+admits it. The admission, the no-follow receipt read, the copy check, the run
+placement, the stray-config check and the argv comparison are that harness's
+functions, copied byte for byte; Contracts.99-FramePacing fails if either copy
+changes alone, and holds the bench's statistics and payload generator and the
+native members #739 hardened the same way. The copy's shell is its config's
+`command = direct:<System32>\cmd.exe /D`. Nothing on its command line sets
+one: the final command line and the copy's own, read back by PID, must each
+split into exactly the expected list, `--config-default-files=false` and
+`--config-file=<copy>\config.ghostty` among it. The clipboard is denied, and
+no PowerShell runs under the copy (checked at the end of each run). Its
+environment adds only `GHOSTTY_LOG`, `NOCTTY_RENDER_TRACE_FILE`,
+`NOCTTY_RENDER_TRACE_LIVE` and `NOCTTY_BENCH_END_MARKER`; an inherited
+`NOCTTY_` or `GHOSTTY_` variable is refused.
+
+The workload is the bench's `stream` payload (4 MiB of printable ASCII from
+its own generator, seed 121) and end marker, written by cmd's own `type`. F5
+types `type stream.bin & echo.>done.flag`. The driver waits for the echo to go
+quiet, then arms the render trace for the first swap that presents the end
+marker (`WM_APP + 9` with 0), and F6 sends the carriage return. Nothing is sent
+to the pane inside the window, because noctty writes a trace snapshot on the
+presenting thread: the driver polls `done.flag` as a file, waits 1 s, then
+requests one snapshot at a time until one shows the end marker's swap. A
+snapshot that still shows the target armed landed inside the window, is
+counted (`SnapshotsInWindow`), and makes the run inconclusive. The samples
+are the trace's intervals between consecutive successful swaps, from the arm
+through that swap, kept in memory by the trace, at most 2,048 a run. `frame_time_p95_ms` is their nearest-rank p95,
+pooled over the completed runs, as the bench aggregates its own. cmd's `type`
+delivers the payload at about 2.4 MB/s, a tenth of the bench's PowerShell
+producer (26 MB/s in the 2026-08-27 table in
+`docs/windows-benchmark-methodology.md`), so a run's window is about 1.8 s
+with about 420 intervals, and its numbers are not comparable with that table.
+`copy /b stream.bin con` is fast but loses the end marker (test-harnesses.md,
+FRAME-PACING-01).
+
+Two modes:
+
+- The dry run (the default) runs everything on a fresh private desktop and
+  refuses the visible part: the driver evaluates the visible run's
+  preconditions on its own desktop, records why they fail, and never takes the
+  foreground. Its intervals check the pipeline and are not a measurement, since
+  nothing composes a private desktop. The summary gives their p95 as
+  `dry_run_p95_ms`, never as `frame_time_p95_ms`, and only for a clean dry
+  run (exit 0).
+- `-Visible` is the measurement. Run it only while the machine's user is
+  away. The copy runs on `Default`, which must be the caller's desktop and the
+  input desktop, composed by DWM, in a local session, with the shell accepting
+  notifications (no full-screen app or presentation mode), the display on, no
+  screen saver running, and Windows' foreground lock
+  (`SPI_GETFOREGROUNDLOCKTIMEOUT`) longer than the series needs. There must be
+  no keyboard or mouse input for 300 s before the series (a pinned constant).
+  The lock counts from the user's last input, so it must outlast the idle
+  time seen at admission (at least 300 s) plus every run's longest duration
+  (`Get-FramePacingLockNeedMs`: 2,100,000 ms a run, the driver's 30 min
+  deadline plus 5 min for staging and the guards). With the default
+  200,000 ms the lock has expired before the first copy starts, so
+  `-Visible` is refused. The admission prints both values, and each run
+  records them (`ForegroundLockTimeoutMs`, `ForegroundLockNeededMs`). The lock
+  is read again before each run's driver starts and right before each copy's
+  launch, after `+version`'s wait (`ForegroundLockTimeoutAtLaunchMs`), so a
+  setting changed during the series stops it.
+  "Away" means only that: a gamepad, or a video watched without input, is not
+  seen. The series holds the display and the system on.
+- Real input is detected by the injected flag, not inferred from ticks.
+  `GetLastInputInfo` cannot tell the harness's own unlock from the user's
+  input. From admission to the series' end the outer half holds low-level
+  keyboard and mouse hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`) on a thread with
+  its own message loop. Any event without `LLKHF_INJECTED` or `LLMHF_INJECTED`
+  is real input and sets the series' event, which every driver opens. The
+  callbacks read two words of each event, its flags and its extra info, never
+  a key code or a position; they keep counts, set an event and pass the event
+  on. Hooks that do not install refuse `-Visible`; there is no fallback to the
+  tick alone. Contracts.99-FramePacing pins the callbacks, the watch's start,
+  stop and wait, and both workers by the SHA-256 of their text.
+- Each hook's proof of life is the harness's own input of its kind. Windows
+  removes a low-level hook whose callback runs past `LowLevelHooksTimeout`
+  without notice, and a removed hook would leave the real-input event clear
+  for good. The callbacks are trivial, so a timeout needs a long pause of the
+  outer half. The harness's own injected input carries a random marker drawn
+  for the series in its extra info, and only an event carrying it counts as
+  proof: another program's injected event (a jiggler, a script, a KVM) is
+  counted and proves nothing. The mouse hook's proof is the unlock: the worker
+  waits for the marked mouse event before it takes the foreground. The
+  keyboard hook's proof is the keyboard probe below: the probe's worker waits
+  for the marked key. The outer half also checks that each kind's marked count
+  moved after each run. Any miss refuses the run, and the series stops. The
+  keyboard proof comes after the foreground step, so until then a
+  keyboard-only return is caught by the tick, apart from the millisecond race
+  at the unlock. Between one run's proofs and the next nothing is injected, so
+  the later gates rely on them.
+- What the injected flag cannot see (read from Microsoft's documentation,
+  not measured): keystrokes into an elevated window, which a non-elevated
+  low-level hook does not get, and input that a software KVM or a
+  remote-input tool delivers through `SendInput`, which carries the injected
+  flag. Both still move the session's last-input tick, which the gate checks
+  second, except within a few milliseconds of the harness's own injected
+  input (the unlock and the keyboard probe). For that input the outer half
+  never wakes: the copy ends at the driver's next tick check. Every wait the
+  driver makes reads the gate at each 100 ms: the waits on the copy's
+  window, its quiet and its quit, on `+version` and the probes, the quiet
+  machine wait, the load readings (sampled around the polls) and a
+  render-trace snapshot's wait for its file. What does not poll, with its
+  worst case: a render-trace request's window-message call (each snapshot and
+  the arm), up to 5 s (`ResponseBoundMs`) if the copy stops answering, after
+  which its file wait, polled, can take up to 10 s more; the display-power
+  reading, at once in practice and at most 2 s; and the bounded foreground
+  and keyboard-probe workers, milliseconds in practice and at most 5 s each,
+  which read the tick right before each action. A worker that runs past its
+  5 s bound returns "timeout", and an input outcome it reaches after that is
+  not returned, so the run does not latch it from the worker (a residual,
+  recorded): once the unlock or the probe was sent, the moved tick still
+  voids the series at the after-run check, and before it a loss needs the
+  worker's thread starved for about 5 s and input the hooks cannot see that
+  returns the tick to the exact baseline. These are per step, and two
+  can run back to back: the keyboard-probe worker (up to 2 s after its
+  input) and then a trace request's message call (5 s) make about 7 s. So
+  input the hooks cannot see reaches the copy for at most about 7 s, and only
+  if the copy stops answering; normally until the next 100 ms poll or the end
+  of the step under way (up to about 1 s at the foreground step: its worker's
+  `WM_NULL` round trip and activation poll, which read only the hooks' event,
+  then the gate). Before the foreground
+  step two more calls do not poll: the WMI read of the copy's command line
+  right after its launch (`Get-CimInstance`, with no bound of its own) and
+  the foreground's `WM_NULL` check before its worker (up to 5 s). Under the
+  foreground lock the copy is not in front then, so they matter only on the
+  startup-activation path below. Input the gate finds
+  after the window, or right before the quit, ends the copy at once. After
+  each run the outer half reads the tick against the last tick the harness's
+  own marked input left (the probe's, else the unlock's, else the series'):
+  a moved tick makes the run inconclusive like hook-seen input, and at the
+  series' end the same reading against the series' baseline voids the
+  series (below).
+- The input gate (`Test-FramePacingInputGate`) reads that event first. The
+  session's last-input tick is the second line: it must be the series' tick
+  until the unlock and the harness's own latest tick after it. The gate runs
+  right before each launch on `Default` (the visible driver's included), the
+  unlock, right after the copy is in front, the keyboard probe, each workload
+  key (F5 and F6) and the measured window, and at each 100 ms poll of every
+  wait the driver makes, inside the window and before it. On real input the
+  run stops at once: nothing further starts, takes the foreground or sends
+  input, the catch ends the copy, and input inside the window makes the run
+  inconclusive, never a timeout's failure. The outer half waits on the
+  hooks' real-input latch and the driver together (the latch first, so input
+  that arrives as the driver ends still counts) and closes the run's job, and
+  with it the copy, the moment it observes the latch, inside the same native
+  call and with no grace: immediately on observation, plus OS scheduling
+  latency. That holds even while the driver is busy in a step that does not
+  poll (the copy's launch, a 2 s load reading). Each run records the delay
+  from that observation until job accounting shows no active process and
+  `StopOwnedJob` has closed the job's handle (its return; `LatchToKillMs` in
+  `guards.json` only, from QueryPerformanceCounter: it is guard telemetry, and
+  `pacing.json` carries no duration of a voided series). The driver's own process handle can signal a
+  millisecond or so later; its threads have already ended.
+  This bound and the per-poll gate apply to input the hooks see; input they
+  cannot see is bounded by the driver's tick checks (above). Real input the
+  hooks see at any point in a series makes the series inconclusive and
+  publishes no metric, whatever any driver's own exit says. The machine must be
+  under 30% busy (the driver waits up to `-QuietWaitSeconds` and launches
+  nothing when it never was) and again right before the window, with no
+  screen saver then either; each reading is acted on at once.
+- The foreground: a marked absolute mouse move to the cursor's own pixel
+  unlocks it, never an Alt tap, then one `SetForegroundWindow`, which Windows
+  allows the process that sent the last input. The worker reads the cursor
+  again after the gate's last check and sends nothing if it has moved
+  (`unlock-raced`), and reads it once more after the hook's signal
+  (`unlock-moved-cursor` if it is off the aimed pixel); that read normally, but
+  not always, follows the move, since the hook signals from inside its
+  callback, before Windows applies the move. No coordinate is recorded. A
+  failed switch to per-monitor DPI awareness aims nothing (`unlock-unaimed`).
+  An absolute move replaces motion rather than adding to it: any pointer
+  motion after the worker's last read of the pointer and before its move can
+  be undone, once, including motion Windows holds while a low-level hook runs.
+  The gap is normally microseconds, and longer only if Windows suspends the
+  worker's thread at that moment; the outer half closes the run's job as soon
+  as it observes the hook's latch (on observation, plus OS scheduling latency,
+  as above). The hook sees that motion as real, so the series is voided.
+  Normalized coordinates assume Windows' floor mapping. A zero-delta relative move also counts as input, but it never reaches a
+  low-level mouse hook, so the hook could not see the unlock (test-harnesses.md
+  UNLOCK-HOOK-01). The series' marker is a nonzero 31-bit value, since an
+  injected mouse event's extra info reaches the hook with only its low 32
+  bits. There is no `AttachThreadInput` fallback, no
+  `BringWindowToTop` and no keyboard-state reset anywhere: attaching to the
+  user's foreground thread resets its key state and could clear a modifier a
+  returning user holds. The native worker checks the event right before its
+  input, refuses the unlock unless a valid tick moved and the mouse hook saw
+  it, reads the tick again and checks the event right before the foreground
+  call, then lets the copy's queue take the activation (a bounded `WM_NULL`
+  round trip and up to 500 ms of polling, reading the event each time) before
+  it reports "refused". It works on its own copies of the event handles and
+  runs joined within 5 s; a timeout cancels any step it has not taken. A run
+  whose foreground, pane focus, display power or session input changed is
+  inconclusive, never a sample.
+- The keyboard probe: once the copy is in front and the gate has run again,
+  one `SendInput` of VK_NONAME (0xFC) down and up, marked, behind the same
+  stop check; the copy must still be in front, and the keyboard hook must see
+  the marked key. It reaches only the copy's own pseudoconsole. What noctty
+  writes for it, from the test in `src/apprt/win32/input.zig` that runs it
+  through noctty's key message builder and encoder:
+
+  | Win32 input mode (9001) | Key down writes | Key up writes |
+  | --- | --- | --- |
+  | Off | nothing | nothing |
+  | On | `ESC[252;0;0;1;0;1_` | `ESC[252;0;0;0;0;1_` |
+
+  Each record is a `KEY_EVENT_RECORD` with virtual key 252, scan code 0 and
+  no character. That cmd ignores it is measured in every dry run: the driver
+  posts the same down and up to the copy's pane before F5, reads cmd's console
+  through the pseudoconsole before and after, from its top-left cell through
+  the cursor so a prompt or command that wraps is read whole, and requires it
+  unchanged (`DryProbePromptUnchanged`), then requires it to be exactly the
+  console before plus F5's command (`DryProbeCommandIntact`).
+- A check cannot be closed against the action right after it: input can land
+  in the sub-millisecond gap between them. What each guarded action can do to
+  a user whose input lands in that gap:
+
+  | Action | Checked right before | Worst case for a user who returns in the gap |
+  | --- | --- | --- |
+  | A launch on `Default` (the driver, `+version`, the copy, the grid probe) | the event, then the tick | A process starts. The copy's window may show, but its own activation is subject to the foreground lock (below); the copy is closed as soon as the outer half observes the input. |
+  | The unlock (`SendInput`, an absolute `MOUSEEVENTF_MOVE` to the cursor's own pixel) | the event, then the cursor still on that pixel, on the worker | Any pointer motion after the worker's last read of the pointer and before its move can be undone, once, including motion Windows holds while a low-level hook runs: the cursor goes back to the aimed pixel. The gap is normally microseconds, and longer only if Windows suspends the worker's thread then; the outer half closes the run's job as soon as it observes the hook's latch. The hook sees that motion as real, so the series is voided. No button, no key. The session's last-input tick moves. |
+  | `SetForegroundWindow` on the copy | the timeout's cancellation, the tick, then the event, on the worker | The copy comes in front once, or Windows refuses it because the user's input now came last. Keys the user types go to the copy's cmd. Input the hooks see: until the outer half closes the copy on observing it. Input they cannot see: until the driver's next tick check, up to about 1 s here (the worker's `WM_NULL` round trip and activation poll, then the gate), and at most the per-step bounds above (about 7 s back to back) if the copy stops answering. |
+  | The keyboard probe (`SendInput`, VK_NONAME down and up) | the copy in front, the tick, then the event, on the worker | If the user clicked elsewhere inside the gap, their app gets a key down and up for VK_NONAME, an unassigned key with no character. It is measured harmless only for cmd (the dry run); another application could act on any key-down, for example dismiss a press-any-key prompt. That is why the probe goes only to the copy, once it is in front, behind the gate and the worker's checks. |
+  | F5, F6 and the dry run's VK_NONAME (`WM_KEYDOWN`/`WM_KEYUP` posted) | the event, then the tick | The key reaches the copy's own window only, never the user's application. |
+
+- What the foreground lock covers, and what it does not. noctty's own first
+  show (`Host.present`: `ShowWindow`, then `SetForegroundWindow`) is not the
+  harness's call, and only a default-terminal handoff reads a launch's show
+  state: the harness cannot stop that call. It relies on the lock to keep the
+  call from taking the foreground, and closes the copy as soon as it observes
+  any real input. Under Microsoft's documented rules a background process that is
+  not in front, was not started by the foreground process and did not receive
+  the last input cannot take the foreground until the lock's timeout has
+  passed since the last input. That leaves three paths uncovered: no window
+  holds the foreground at all (each run closes its own copy, and Windows may
+  activate nothing after it), the returning user's first input lands on the
+  copy's newly shown window, and a foreground right passed down the launch
+  chain (outer pwsh, driver, copy), which the documentation does not address.
+  The first path includes this interleaving: the user's foreground window
+  disappears while the copy is starting (the user closes it, or it closes
+  itself), and the user's real input arrives during that startup. With no
+  foreground window when the copy first shows, its activation can take the
+  foreground despite the lock. The harness accepts this as a residual, with no
+  mechanism of its own: the hooks' latch is set by that input and the outer
+  half closes the copy immediately on observing it, which bounds how long the
+  copy holds the foreground. All of this is inferred from the documentation,
+  not measured with a returning user. Each visible run records whether a window held the
+  foreground right before the copy's launch (`ForegroundBeforeLaunch`) and
+  whether the copy held it right before the harness's unlock
+  (`ForegroundBeforeUnlock`). A copy in front after no window was is recorded
+  (`ForegroundTakenFromNone`) and allowed, since that path is harmless while
+  the user is away; a copy that took the foreground from another window
+  contradicts the lock claim, so the run is inconclusive and the series
+  stops. That check tests the lock only while the lock is in force: before
+  each launch the harness requires the lock to outlast the idle time since
+  the user's last input plus the remaining runs' budget, and a visible run's
+  staging and guard setup that ran past their 300,000 ms bound launches no
+  driver; either way the series stops inconclusive.
+
+```powershell
+pwsh -NoProfile -File test/windows/bench-windows.ps1 -Metric frame-pacing `
+    -MeasureRepo <checkout with a measurement build> -RunRoot <new dir> [-Runs 5] [-Visible]
+```
+
+`-RunRoot` is a new directory outside `-MeasureRepo`, or one git ignores
+there. The series stops at the first run that does not complete. The exit
+code, by precedence (`Get-FramePacingExitCode`): 3 when a guard tripped, else
+1 when a run failed or the runs differ in build or workload, else 2 when a run
+was inconclusive or the runs differ in environment, else 0. A series that both
+trips a guard and differs in build exits 3. `<RunRoot>\pacing.json` of a
+passing series holds each run's status and statistics, each comparability group's (`Groups`), the pooled
+p95 and, in a visible series, how many real and injected input events the
+hooks saw (`RealInputsSeen`, `InjectedInputsSeen`, the latter every injected
+event, the harness's own marked ones and any other program's). Each `run-<n>` holds
+`run.json` (the build,
+config, receipt and ConPTY digests, the transport and renderer the copy's log
+names, the grid, the window's DPI and monitor mode, the busy share and timer
+resolution before and after, every interval and the visible part's facts), the
+copy's log, the driver's log, the copy's last trace snapshot and
+`guards.json`. The summary pools only comparable runs: the same
+`WorkloadSha256`, app, renderer, transport and ConPTY digests (a difference
+fails the series, exit 1), and the same display mode (the window's monitor's
+width, height and refresh, read at the start of each run and again after its
+window, where a change makes the run inconclusive), DPI and grid (a difference
+pools none and exits 2). Each group of runs alike in all nine of those fields
+is reported on its own in `Groups`, never combined across any of them.
+`frame_time_p95_ms` and its median are published only for a visible series
+that passes (exit 0): no real input the hooks saw (`RealInputsSeen` 0), a
+session tick still at the series' baseline (`TickMovedFromBaseline` false),
+every run completed and the runs comparable. A passing dry run has both null.
+A series that does not pass has neither field, since its `pacing.json` is the
+allowlisted verdict (below); input makes the series inconclusive (exit 2
+unless a guard or a failure ranks higher), and the console says no
+measurement was published. The outer half
+and each driver hash the script text they loaded and are executing, never the
+file on disk: the outer half at series start, each driver as it starts. The
+grid and cursor probes a driver starts run the same file and hash nothing; they
+produce no timing. A driver whose hash
+differs voids the series as `harness-changed` (exit 1), in either mode, and so
+does a series with no hash of its own (it fails closed); the series' start
+hash is the `HarnessSha256` it reports. The hash covers
+`bench-frame-pacing.ps1` alone, not the scripts it dot-sources: it catches an
+accidental change to `bench-frame-pacing.ps1`, and is not a seal against
+tampering. A series writes a timing statistic only when its verdict is a
+pass (exit 0). Every other verdict, a failure (exit 1, a changed harness
+among them), an inconclusive series (exit 2, input among them) or a tripped
+guard (exit 3), writes `pacing.json` from an allowlist, not by scrubbing: the
+schema, `Verdict` (`voided` for input or a changed harness, otherwise
+`failed`, `inconclusive` or `guard-tripped`), `ExitCode`, `Reasons`, `RealInputsSeen`,
+`InjectedInputsSeen`, `SeriesId` (the run root's name), `HarnessSha256`,
+`MeasureHead` and `ExeSHA256`, and nothing else. It carries no number but
+the input counts and the exit code, and no free text: `Reasons` are codes
+from a fixed set (`hook-count`, `tick-moved`, `tick-unread`,
+`watch-not-stopped`, `run-saw-input`, `guard-tripped`, `run-failed`,
+`run-inconclusive`, `incomplete`, `mixed-build`, `mixed-environment`,
+`harness-changed`).
+Everything else goes to `diagnostics.json` beside it, written after
+`pacing.json`, whether or not that write succeeded (a `pacing.json` that cannot
+be written still fails the series), so the verdict and exit code stand when
+`diagnostics.json` cannot be written (the console line then warns that it was
+not) and the series' record stands when `pacing.json` cannot, with no
+`dry_run_p95_ms` (a dry run
+has one only when it is clean): every message (the
+staging, lock-shortfall and tick-stop lines among them), every duration,
+each run and each group, and `Inconclusive`, which names what voided the
+series (the hook count, with "tick also moved (may be the same input)" when
+the tick moved too, since one input can do both; a tick that moved or could
+not be read; a watch that did not stop; or the runs that saw input). So a
+series whose last driver failed after a good run, even one that ran changed
+text and left no readable `run.json`, publishes none of the good run's timing.
+A passing series keeps the full `pacing.json` and writes no
+`diagnostics.json`. Input seen is a latch for the series: every read sets it
+(a hook count above 0, any tick mismatch at a driver gate, a poll, the
+driver's session facts, the outer half's checks or the final read, an unread
+tick, a watch that did not stop), each run carries its own to the series,
+and nothing clears it, so a later read that returns the expected tick
+(`GetLastInputInfo` is not incremental) never undoes an earlier mismatch; a
+poll that reads a mismatch stops the step at once and never reads again.
+Every PowerShell read of the tick goes through one function
+(`Read-FramePacingInputTick`), which latches a mismatch before it returns,
+and the contract fails on any other read in the plain forms it scans for; a
+computed method name, reflection whose name is built up or a concatenated
+native `EntryPoint` gets past that scan. Each run's own `run.json` keeps its
+evidence for debugging. `guards.json` takes the shared guard's own clipboard
+samples and verdict, with no second reading. A clipboard sequence of 0 before
+and after is no observation (the clipboard could not be read): `guards.json`
+records `ClipboardObservable` false and the console says the clipboard was
+unobservable, never that it held. The series ends
+in this order: every run has ended and its job, with its copy, is closed;
+the watch stops, which unhooks; the final real-input count and the tick are
+read; then the summary. Input after the unhook reaches no copy. A visible
+run is never complete without the keyboard probe's "ok": a run whose
+foreground was taken without one stops the series as inconclusive, never
+failed, and its line names the cause the driver recorded (a refusal, or
+input the hooks did not see). Only a hook that missed the harness's own
+marked input fails the run, as Windows may have removed it: a count that did
+not move, or the driver's refusal when a hook did not see the unlock or the
+probe. Such a run stays failed whatever input stop follows, and the tick the
+unlock or the probe moved is kept as the harness's own even when the hook
+missed it, so it is never read as a user's input. After a keyboard-hook miss
+the probe was sent, so no line calls it "not sent"; after a mouse-hook miss
+the foreground was never taken and the probe really was not sent, and the
+line says so. A
+`run.json` the job's close cut short reads as no record: a run stopped for
+real input is then inconclusive, any other run failed, and the series still
+writes `pacing.json`. A staging failure is a
+failed run before any launch, and the series still writes `diagnostics.json`
+with the runs before it. What runs is the run's own copy: its path is checked before any launch
+and its image read back by PID, and the driver runs in the run's own job,
+checked before it resumes and again by the outer half. The shared state guard
+owns the measurement-identity jump list by its timestamps: it deletes the file
+only when it did not exist before the run and both its creation and last-write
+times fall inside the run. It keeps one that existed before, and keeps one
+whose times fall outside the run (NTFS tunnelling can keep an old creation
+time) and reports that as a failure. Another measurement workload's jump list
+written during a run would pass that test and be deleted, so run one
+measurement workload at a time; the frame-pacing mutex covers only this
+harness. Each run keeps the shared state
+guard, the PowerShell history guard and the real `session-state.json`'s
+metadata, and logs the clipboard sequence number before and after.
 
 ## Style
 

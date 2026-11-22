@@ -13,5 +13,5 @@ on. Every cell exercises tab and pane navigation, terminal reading,
 command-palette invocation/filtering, settings editing, and dismissal of
 transient UI. A code change after the tested commit invalidates the report;
 only the report itself may change afterward. The validator also queries GitHub
-to require a successful `Test` run for that exact commit, its successful
-interactive job, and its unexpired evidence artifact.
+to require a successful `Test` run for that exact commit on the default branch;
+it requires no interactive run.

@@ -42,8 +42,9 @@ bugs don't get buried.
 - If you use AI assistance, you are responsible for understanding and
   reviewing the final change. See [AI_POLICY.md](AI_POLICY.md).
 - If the change touches input, rendering, window chrome, or process
-  startup, do the manual Windows checks in
-  [HACKING.md](HACKING.md#manual-validation) as well.
+  startup, the manual Windows checks in
+  [HACKING.md](HACKING.md#manual-validation) are available. They are
+  optional: no pull request requires a visible or interactive run.
 - If it touches packaging or update behavior, follow the release runbook
   in [PACKAGING.md](PACKAGING.md#release-runbook) instead; the manual
   checks above don't cover that path.

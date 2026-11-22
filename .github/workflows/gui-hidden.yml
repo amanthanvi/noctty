@@ -1,0 +1,183 @@
+name: GUI Hidden Desktop
+
+# The hidden-desktop GUI suite (interactive offload PR 1; design v7 §4.5). The leaves in
+# test/windows/gui-hidden-plan.json run on a private desktop of the hosted runner, each on its own
+# portable copy of the receipt-bound measurement build, through test/windows/gui-hidden-runner.ps1.
+# Nothing here uses the runner's own interactive desktop, real input or the foreground.
+#
+# Job layout, as test.yml's: `changes` decides from the changed files whether the suite is needed
+# (scripts/ci-gui-selection.ps1: any path the Zig graph reads, or any path in the computed GUI list),
+# `suite` runs only then, and `gui-hidden-gate` always runs and fails when a needed job did not succeed
+# or a job ran or was skipped against its flag (scripts/ci-gate.ps1). A job skipped by an `if:`
+# reports success, so no workflow-level `paths:` filter is used: a skipped workflow would leave a
+# required check pending (build-release-ci.md 2026-10-17 PKG-65). Push, schedule and manual runs
+# run the suite.
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Idle-soak length in seconds (reserved for the second batch; this suite has no soak yet)
+        required: false
+        default: "600"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: GUI suite paths
+    # Windows, like the suite: the walker reads Windows paths, and one image keeps it and its
+    # fixtures comparable.
+    runs-on: windows-2025
+    timeout-minutes: 10
+    outputs:
+      gui: ${{ steps.filter.outputs.gui }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff needs the merge base, and the base walk reads the base tree.
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Decide whether the change needs the GUI suite
+        id: filter
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: ./scripts/ci-gui-selection.ps1 -EventName $env:EVENT_NAME -BaseSha $env:BASE_SHA -HeadSha $env:HEAD_SHA
+
+      - name: GUI selection tests (walker, selection)
+        shell: pwsh
+        run: ./test/windows/gui-hidden-scripts.ps1
+
+      # A failed selection or walker step (a runner that does not parse fails the walk) keeps the
+      # suite job from starting, so its publisher never runs: publish the error result here, with
+      # the same standalone publisher and artifact name (Sol on #740). The job and the gate still fail.
+      - name: Publish an error result when the selection failed
+        if: failure()
+        shell: pwsh
+        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind gui-selection -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
+
+      - name: Upload the selection's error result
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gui-hidden-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gui-hidden/result.json
+            ${{ runner.temp }}/gui-hidden/result.json.sha256
+            ${{ runner.temp }}/gui-hidden/receipts/**
+          retention-days: 90
+          if-no-files-found: warn
+
+  suite:
+    name: Windows Server 2025 Hidden-Desktop GUI
+    needs: changes
+    if: needs.changes.outputs.gui == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # The build and the leaves run this ref's code, and no later step needs an
+          # authenticated git operation.
+          persist-credentials: false
+
+      # The interactive harness helpers' self-test (design v7 §3 row 0, §11), before the suite:
+      # the hosted arms' tripwires and refusals, exe and state routing, the config writer and the
+      # hosted launcher's quoting. It launches no noctty.
+      - name: Interactive harness helper self-test
+        id: selftest
+        shell: pwsh
+        run: pwsh -NoProfile -NonInteractive -File test/windows/interactive-win11.ps1
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      # setup-zig exports its own global cache even with use-cache disabled.
+      - name: Configure Zig package cache
+        shell: pwsh
+        run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+
+      # Reuse only verified dependency packages, never compiler/build outputs.
+      - name: Cache Zig dependency packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.zig-global-cache/p
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+
+      # The runner builds the measurement build once (-Build, hosted only), stages a fresh portable
+      # copy of it for each leaf, and writes only allowlisted values to the output directory.
+      - name: Hidden-desktop GUI suite
+        shell: pwsh
+        timeout-minutes: 75
+        run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo $env:GITHUB_WORKSPACE -Work (Join-Path $env:RUNNER_TEMP 'gui-hidden-work') -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden') -Build
+
+      # A job that failed without a complete result (a failed helper self-test, which stops the job before the suite
+      # step, or a suite step that died or did not parse before it wrote one) would leave the upload empty or partial:
+      # publish an error result instead. The publisher is a script of its own, apart from the runner; it writes only
+      # allowlisted values, keeps an incomplete result beside its own, and leaves a complete one (its hash written
+      # last) alone; the job still fails.
+      - name: Publish an error result when the job failed without one
+        if: failure()
+        shell: pwsh
+        env:
+          SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
+        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind $(if ($env:SELFTEST_OUTCOME -ceq 'failure') { 'helper-self-test' } else { 'suite-no-result' }) -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
+
+      # The result and the receipts only (design v7 §4.5's allowlist): no log directory, screen
+      # capture, process listing, path, command line or environment value.
+      - name: Upload the suite's result and receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gui-hidden-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gui-hidden/result.json
+            ${{ runner.temp }}/gui-hidden/result.json.sha256
+            ${{ runner.temp }}/gui-hidden/receipts/**
+          # Kept 90 days, longer than the promotion soak (PLAN §8.1).
+          retention-days: 90
+          if-no-files-found: warn
+
+  gui-hidden-gate:
+    name: gui-hidden-gate
+    needs: [changes, suite]
+    # always(), not !cancelled(): under !cancelled() a cancelled run skips the gate, and a skipped
+    # required check counts as passing (build-release-ci.md 2026-11-11 CI-GATES-REQUIRED).
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the gate script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          sparse-checkout: scripts/ci-gate.ps1
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Every needed job succeeded and every skipped job was not needed
+        shell: pwsh
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: ./scripts/ci-gate.ps1 -NeedsJson $env:NEEDS_JSON -Expect changes:always,suite:gui

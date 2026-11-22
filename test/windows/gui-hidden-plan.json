@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "scenario": "windows.gui-hidden.suite",
+  "buildInputs": [
+    "build.zig",
+    "build.zig.zon",
+    "dist/windows/**",
+    "include/**",
+    "pkg/**",
+    "scripts/conpty-redist.ps1",
+    "scripts/dev-windows.cmd",
+    "scripts/interactive-win11-measure-lib.ps1",
+    "scripts/stage-conpty-redist.ps1",
+    "scripts/windows-architecture.ps1",
+    "src/**",
+    "vendor/**"
+  ],
+  "leaves": [
+    { "id": "vt-probe", "script": "test/windows/vt-probe-win32-conformance.ps1", "sandbox": "vt-conformance", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 0, "timeoutSeconds": 180 },
+    { "id": "smoke", "script": "test/windows/interactive-win11-smoke.ps1", "sandbox": "smoke", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 1, "timeoutSeconds": 240 },
+    { "id": "shell-command", "script": "test/windows/interactive-win11-shell-command.ps1", "sandbox": "shell-command", "arguments": ["-TimeoutSeconds", "60", "-ResetState"], "expectedShells": 1, "timeoutSeconds": 300 },
+    { "id": "cli-automation", "script": "test/windows/cli-automation.ps1", "sandbox": "cli-automation", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 4, "timeoutSeconds": 300 },
+    { "id": "undo", "script": "test/windows/interactive-win11-undo.ps1", "sandbox": "undo", "arguments": ["-ResetState"], "expectedShells": 3, "timeoutSeconds": 300 },
+    { "id": "session-restore", "script": "test/windows/interactive-win11-session-restore.ps1", "sandbox": "session-restore", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 10, "timeoutSeconds": 300 }
+  ]
+}

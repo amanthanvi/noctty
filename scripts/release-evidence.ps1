@@ -39,13 +39,14 @@ function Invoke-ReleaseGhJson {
 function Assert-ReleaseEvidence {
     param(
         [string] $Repository, [string] $Tag, [string] $CandidateSha,
-        [string] $TestRunId, [string] $EvidenceRunId, [string] $ReleaseRunId,
+        [string] $TestRunId, [string] $ReleaseRunId,
         [string] $WorkDirectory
     )
     $resumeFrom = 0
+    # The hosted Test run of the candidate (its portable smoke artifact) and the Release run. No release requires an
+    # interactive run (the maintainer's decision, 2026-11-22), so none is read here.
     foreach ($spec in @(
         @{ Id = $TestRunId; Workflow = 'test.yml'; Artifact = "flagship-portable-x64-$TestRunId" },
-        @{ Id = $EvidenceRunId; Workflow = 'test.yml'; Artifact = "flagship-interactive-win11-$EvidenceRunId" },
         @{ Id = $ReleaseRunId; Workflow = 'release.yml'; Artifact = $null }
     )) {
         $run = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)")
@@ -54,6 +55,10 @@ function Assert-ReleaseEvidence {
             ($run.conclusion -cne 'success' -and -not ($spec.Workflow -ceq 'release.yml' -and $run.conclusion -in @('failure','cancelled'))) -or
             $run.path -cne ".github/workflows/$($spec.Workflow)") {
             throw "RunIdentityMismatch: run $($spec.Id) must be completed and successful on the candidate in $($spec.Workflow)."
+        }
+        # The Test run must be a full-matrix run: a pull_request run's path filter can skip lanes.
+        if ($spec.Workflow -ceq 'test.yml' -and [string]$run.event -cnotin @('push', 'schedule', 'workflow_dispatch')) {
+            throw "RunIdentityMismatch: Test run $($spec.Id) is a '$($run.event)' run; promotion needs a push, schedule or workflow_dispatch run."
         }
         if ($spec.Workflow -ceq 'release.yml') {
             $attemptCount = $run.run_attempt
@@ -100,41 +105,17 @@ function Assert-ReleaseEvidence {
         $records = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)/artifacts?per_page=100")
         if ($records.total_count -gt @($records.artifacts).Count) { throw 'Incomplete evidence artifact records.' }
         if ($spec.Artifact) {
+            # A missing or expired portable smoke artifact keeps promotion blocked until a fresh Test run's validates.
+            $recovery = "gh workflow run test.yml --repo $Repository --ref $Tag, then retry promotion with the new Test run ID, the original Release run ID $ReleaseRunId and the original manifest digest"
             $artifact = @($records.artifacts | Where-Object { $_.name -ceq $spec.Artifact })
-            if ($artifact.Count -ne 1) { throw "EvidenceMissing: run $($spec.Id), artifact $($spec.Artifact)." }
+            if ($artifact.Count -ne 1) { throw "EvidenceMissing: run $($spec.Id), artifact $($spec.Artifact). Recovery: $recovery" }
             if ($artifact[0].expired -or [datetimeoffset]$artifact[0].expires_at -le [datetimeoffset]::UtcNow) {
-                $recovery = "gh workflow run test.yml --repo $Repository --ref $Tag -f run_interactive_win11=true"
                 $expiresAt = ([datetimeoffset]$artifact[0].expires_at).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'")
                 throw "EvidenceExpired: run $($spec.Id), artifact $($spec.Artifact), expires_at $expiresAt. Recovery: $recovery"
             }
         }
     }
-    $jobs = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$EvidenceRunId/jobs?per_page=100")
-    if ($jobs.total_count -gt @($jobs.jobs).Count -or @($jobs.jobs | Where-Object {
-        $_.name -ceq 'Windows 11 Interactive Composite' -and $_.status -ceq 'completed' -and $_.conclusion -ceq 'success'
-    }).Count -ne 1) { throw 'EvidenceJobInvalid: named interactive job is not successful.' }
-    $root = Join-Path $WorkDirectory "evidence-$EvidenceRunId"
-    [void][IO.Directory]::CreateDirectory($root)
-    & gh run download $EvidenceRunId --repo $Repository --name "flagship-interactive-win11-$EvidenceRunId" --dir $root
-    if ($LASTEXITCODE -ne 0) { throw 'EvidenceDownloadFailed: fresh artifact could not be downloaded.' }
-    $results = @(Get-ChildItem -LiteralPath $root -Filter result.json -File -Recurse | Where-Object {
-        (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -ceq 'windows.interactive-win11.composite'
-    })
-    if ($results.Count -ne 1) { throw 'EvidenceInvalid: expected exactly one composite result.' }
-    $result = Get-Content -LiteralPath $results[0].FullName -Raw | ConvertFrom-Json
-    if ($result.status -cne 'pass' -or $result.implementation_commit -cne $CandidateSha -or
-        [string]$result.workflow_run_id -cne $EvidenceRunId -or @($result.artifacts).Count -eq 0) {
-        throw 'EvidenceInvalid: composite result is not a candidate-bound pass.'
-    }
-    $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    foreach ($artifact in @($result.artifacts)) {
-        if (-not $artifact.path -or $artifact.sha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'EvidenceHashMismatch: incomplete artifact record.' }
-        $path = [IO.Path]::GetFullPath((Join-Path $results[0].DirectoryName ([string]$artifact.path)))
-        if (-not $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
-            -not (Test-Path -LiteralPath $path -PathType Leaf) -or
-            (Get-FileSha256Lower $path) -cne $artifact.sha256) { throw 'EvidenceHashMismatch: interactive artifact is not hash-bound.' }
-    }
-    Write-Host "Evidence: PASS (Test $TestRunId, interactive $EvidenceRunId, Release $ReleaseRunId)."
+    Write-Host "Evidence: PASS (Test $TestRunId, Release $ReleaseRunId)."
     # Successful original builds and ordinary promote retries start at verification.
     if ($null -eq $resumeFrom) { $resumeFrom = 0 }
     return [int]$resumeFrom

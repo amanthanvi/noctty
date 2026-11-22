@@ -181,7 +181,7 @@ try {
         $identity = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
         $candidateCommit = & git -C $candidateDataRoot rev-parse HEAD
         if ($LASTEXITCODE -ne 0 -or $candidateCommit -cne $identity.candidateSha) { throw 'Candidate data checkout differs from release-manifest.json.' }
-        [void](Assert-ReleaseManifest -Path $releaseManifestPath -ExpectedSha256 $ManifestSha256 -Release $release -DownloadDirectory $DownloadDirectory -Tag $tag -CandidateSha $identity.candidateSha -TestRunId ([string]$identity.testRunId) -EvidenceRunId ([string]$identity.evidenceRunId) -ReleaseRunId ([string]$identity.releaseRunId))
+        [void](Assert-ReleaseManifest -Path $releaseManifestPath -ExpectedSha256 $ManifestSha256 -Release $release -DownloadDirectory $DownloadDirectory -Tag $tag -CandidateSha $identity.candidateSha -TestRunId ([string]$identity.testRunId) -ReleaseRunId ([string]$identity.releaseRunId))
         if (-not $ManifestSha256) { Write-Warning 'Manifest is unanchored: no independent run-summary digest supplied. Payload and manifest bytes match GitHub digests; this does not authenticate the manifest against its build summary.' }
         else { Write-Host 'Manifest: anchored to the supplied run-summary digest.' }
     }

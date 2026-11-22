@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'throughput', 'cold-start', 'memory', 'idle', 'conpty-rtt', 'key-to-pixel-proxy')]
+    [ValidateSet('all', 'throughput', 'cold-start', 'memory', 'idle', 'conpty-rtt', 'key-to-pixel-proxy', 'frame-pacing')]
     [string] $Metric = 'all',
     [ValidateSet('noctty', 'alacritty', 'windows-terminal', 'tabby', 'wave')]
     [string] $Target = 'noctty',
@@ -18,8 +18,38 @@ param(
     [ValidateRange(1, [uint32]::MaxValue)] [uint32] $Seed = 121,
     [ValidateRange(10, 300)] [int] $IdleSeconds = 10,
     [ValidateRange(1, 5)] [int] $MemoryCycles = 1,
-    [switch] $ProfileThroughput
+    [switch] $ProfileThroughput,
+    # -Metric frame-pacing only (bench-frame-pacing.ps1): the checkout with the measurement build, a new directory
+    # for the runs, and the visible measurement instead of the private-desktop dry run.
+    [string] $MeasureRepo,
+    [string] $RunRoot,
+    [switch] $Visible
 )
+
+# -Metric frame-pacing is frame_time_p95_ms under the per-copy rules (AGENTS.md "Running noctty"): each run a fresh
+# portable copy of the receipt-bound measurement build, its shell the copy's config's cmd.exe, no PowerShell fixture,
+# the clipboard denied. bench-frame-pacing.ps1 runs it whole, before anything of this script starts (no bootstrap,
+# build, sandbox or fixture); only -Runs, -MeasureRepo, -RunRoot and -Visible reach it, since its workload is fixed.
+# It is not part of -Metric all.
+if ($Metric -eq 'frame-pacing') {
+    if ($Target -ne 'noctty') { throw '-Metric frame-pacing measures noctty only.' }
+    $pacingParameters = @('Metric', 'Target', 'Runs', 'MeasureRepo', 'RunRoot', 'Visible')
+    $foreignParameters = @($PSBoundParameters.Keys | Where-Object { $pacingParameters -notcontains $_ })
+    if ($foreignParameters.Count -ne 0) { throw "-Metric frame-pacing takes only -Runs, -MeasureRepo, -RunRoot and -Visible (its workload is fixed), not -$($foreignParameters -join ', -')." }
+    # The harness takes 1 to 50 runs; this script's -Runs allows 100 for the other metrics (CodeRabbit on #741).
+    if ($Runs -gt 50) { throw '-Metric frame-pacing takes -Runs 1 to 50.' }
+    $pacingArguments = @{ MeasureRepo = $MeasureRepo; RunRoot = $RunRoot; Runs = $Runs; Visible = $Visible }
+    # A harness that never ran (a binding error, a throw) exits 1, never with an earlier command's code
+    # (CodeRabbit on #741); otherwise its own exit code is this script's.
+    $global:LASTEXITCODE = -1
+    try { & (Join-Path $PSScriptRoot 'bench-frame-pacing.ps1') @pacingArguments -ErrorAction Stop }
+    catch { Write-Host "frame-pacing: $($_.Exception.Message)"; exit 1 }
+    if ($LASTEXITCODE -lt 0) { exit 1 }
+    exit $LASTEXITCODE
+}
+if (-not [string]::IsNullOrEmpty($MeasureRepo) -or -not [string]::IsNullOrEmpty($RunRoot) -or $Visible) {
+    throw '-MeasureRepo, -RunRoot and -Visible belong to -Metric frame-pacing.'
+}
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
 $windowsHarnessHistoryGuard = Start-WindowsHarnessHistoryGuard -Harness 'bench-windows.ps1'

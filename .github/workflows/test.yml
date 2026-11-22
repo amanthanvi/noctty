@@ -511,10 +511,9 @@ jobs:
       # skipping here, a font shaping test above all, fails the nightly instead
       # of passing as green CI. `zig build test` prints only a skip total, so
       # this needs the run above. Not report-only: a missing or cut-off log
-      # fails it too. Not on the release evidence dispatch
-      # (run_interactive_win11), whose Test run the Release workflow requires
-      # to succeed: a budget that drifted since the last nightly would block
-      # the release, and fixing it would mean a new SHA and new evidence.
+      # fails it too. Not on the optional interactive composite dispatch
+      # (run_interactive_win11): a budget that drifted since the last nightly
+      # must not fail that run. No release requires it (2026-11-22).
       - name: Skip budget (windows-2025)
         if: success() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.run_interactive_win11))
         shell: pwsh
@@ -969,10 +968,11 @@ jobs:
 
   windows-interactive:
     name: Windows 11 Interactive Composite
-    # Dispatch-only: the interactive runner is registered ephemerally for
-    # release validation, so no standing runner exists to serve queued jobs.
-    # Dispatch Test with run_interactive_win11=true and arm the runner to
-    # produce release evidence.
+    # Dispatch-only and optional: no release or check requires it (the
+    # maintainer's decision, 2026-11-22). The interactive runner is registered
+    # ephemerally when someone chooses to run it, so no standing runner exists
+    # to serve queued jobs. Dispatch Test with run_interactive_win11=true and
+    # arm the runner to run it.
     if: github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11
     runs-on: [self-hosted, Windows, X64, noctty-interactive]
     timeout-minutes: 60

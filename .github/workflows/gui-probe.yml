@@ -1,0 +1,94 @@
+name: Windows GUI Probe
+
+# PR 0 of the interactive offload: a record-only diagnostic of what a GitHub-hosted
+# runner allows a GUI test (test/windows/gui-hosted-probe.ps1). Q0: where noctty's
+# processes and windows land when it is started from a driver created on a private
+# desktop. D3, on the runner's own interactive desktop: real SendInput, single-pixel
+# screen reads, a D3D11 WARP present (against a private desktop's offscreen readback
+# with no present), ITaskbarList3::HrInit and the toast setting, each with a positive
+# record and a negative control.
+#
+# Dispatch only: no push or pull_request trigger, so it never runs on, or reports
+# to, a pull request's checks. It measures and gates nothing.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Windows Server 2025 GUI probe (record only)
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build and the probe run this ref's code, and no later step needs
+          # an authenticated git operation.
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Configure Zig package cache
+        shell: pwsh
+        run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+
+      - name: Cache Zig dependency packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.zig-global-cache/p
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+
+      # The measurement build (this ref plus its AUMID isolation), through
+      # scripts/dev-windows.cmd, which finds the image's Visual Studio.
+      - name: Build the measurement build
+        shell: pwsh
+        run: |
+          . ./scripts/interactive-win11-lib.ps1
+          Invoke-InteractiveWin11MeasureBuild -RepoRoot $env:GITHUB_WORKSPACE -Optimize Debug
+
+      # The same source with the renderer test tools, which P3, P4 and P5 run on both
+      # desktops (one build, one fixture): P3's control reads the pane's offscreen frame
+      # back through them. It has the product AUMID, so the probe's launcher gate starts it
+      # only on a GitHub-hosted runner, and only as a portable copy without noctty.ico,
+      # which keeps no jump list and registers nothing.
+      - name: Build the renderer test-tools build
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          & ./scripts/dev-windows.cmd zig build -Demit-exe=true -Dd3d11=true -Drenderer-test-tools=true -Doptimize=Debug --prefix (Join-Path $env:RUNNER_TEMP 'gui-probe-test-tools')
+          if ($LASTEXITCODE -ne 0) { throw "The test-tools build failed (exit $LASTEXITCODE)." }
+
+      # The record is the only file written to the uploaded directory; the
+      # copies, logs and traces stay in the work directory, which is not uploaded.
+      - name: Probe
+        shell: pwsh
+        timeout-minutes: 30
+        env:
+          # Measurement mode (scripts/interactive-win11-lib.ps1); the probe sets it too.
+          NOCTTY_INTERACTIVE_MEASURE_AUMID: '1'
+        run: |
+          . ./scripts/interactive-win11-lib.ps1
+          $bin = Split-Path -Parent (Get-InteractiveWin11MeasureExePath -RepoRoot $env:GITHUB_WORKSPACE)
+          $out = Join-Path $env:RUNNER_TEMP 'gui-probe'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          ./test/windows/gui-hosted-probe.ps1 -Bin $bin -MeasureRepo $env:GITHUB_WORKSPACE -Work (Join-Path $env:RUNNER_TEMP 'gui-probe-work') -Out (Join-Path $out 'gui-probe-record.json') -Part All `
+            -TestToolsBin (Join-Path $env:RUNNER_TEMP 'gui-probe-test-tools\bin')
+
+      # One JSON record of values and HRESULTs (the script's allowlist): no screen
+      # image or readback, path, environment value, window title or command line.
+      - name: Upload the record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gui-probe-record-${{ github.run_id }}
+          path: ${{ runner.temp }}/gui-probe/gui-probe-record.json
+          # PR 1 cites this record (gui-measurements.json), and it may wait on the W13 baselines.
+          retention-days: 90
+          if-no-files-found: warn

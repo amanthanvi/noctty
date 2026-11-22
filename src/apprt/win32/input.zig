@@ -2502,6 +2502,47 @@ test "win32 VK_PACKET key up authorizes no units or text" {
     try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
 }
 
+// test/windows/bench-frame-pacing.ps1 proves its keyboard hook alive with one injected VK_NONAME (0xFC) down and up,
+// sent once the copy is in front (KeyProbeInput, scan code 0). What the copy writes to its pseudoconsole for it, with
+// Win32 input mode (9001) off and on: no character in either. With 9001 off the ConPTY-path encoder writes nothing;
+// with it on, one `KEY_EVENT_RECORD` each way with no character (Uc 0), which ConPTY turns into a key event that types
+// nothing, as every key reaches it in that mode.
+test "win32 VK_NONAME, the frame-pacing keyboard probe, writes no character to the pseudoconsole" {
+    const keyboard = TestingKeyboard.pinNone();
+    defer keyboard.release();
+
+    const cases = [_]struct { msg: UINT, lParam: LPARAM, action: input.Action, win32: []const u8 }{
+        .{ .msg = c.WM_KEYDOWN, .lParam = 1, .action = .press, .win32 = "\x1b[252;0;0;1;0;1_" },
+        .{ .msg = c.WM_KEYUP, .lParam = @bitCast(@as(usize, 0xC0000001)), .action = .release, .win32 = "\x1b[252;0;0;0;0;1_" },
+    };
+    for (cases) |case| {
+        // The key message as dispatchKeyMessage builds it: without Win32 input records while 9001 is off, with them
+        // while it is on, its translated text bound as dispatch binds it (CodeRabbit on #741: an unbound message
+        // reads the empty placeholder, which would hide a printable character in VK_NONAME's translated text).
+        var plain = keyMessage(case.msg, 0xFC, case.lParam, false, null, false, false).?;
+        plain.bindText();
+        var recorded = keyMessage(case.msg, 0xFC, case.lParam, false, null, true, false).?;
+        recorded.bindText();
+        for ([_]*const Win32KeyMessage{ &plain, &recorded }) |message| {
+            try std.testing.expectEqual(case.action, message.event.action);
+            try std.testing.expectEqual(input.Key.unidentified, message.event.key);
+            try std.testing.expectEqual(@as(usize, 0), message.text_len);
+            try std.testing.expectEqualStrings("", message.event.utf8);
+            try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
+        }
+
+        var legacy_buf: [64]u8 = undefined;
+        var legacy: std.Io.Writer = .fixed(&legacy_buf);
+        try input.key_encode.encode(&legacy, plain.event, .{ .windows_legacy = true });
+        try std.testing.expectEqualStrings("", legacy.buffered());
+
+        var win32_buf: [64]u8 = undefined;
+        var win32: std.Io.Writer = .fixed(&win32_buf);
+        try input.key_encode.encode(&win32, recorded.event, .{ .windows_legacy = true, .win32_input_mode = true });
+        try std.testing.expectEqualStrings(case.win32, win32.buffered());
+    }
+}
+
 test "win32 authorized char commit preserves packet control characters" {
     var utf8_buf: [8]u8 = undefined;
     const fixtures = [_]struct { codepoint: u21, expected: []const u8 }{

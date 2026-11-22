@@ -252,7 +252,7 @@ try {
         -PollMilliseconds $script:SHADER_PACING_POLL_MS `
         -Condition {
         if ([InteractiveWin11WindowNative]::GetForegroundWindow() -eq $script:ShaderPacingHost) { return $true }
-        [void] [InteractiveWin11WindowNative]::ForceForeground($script:ShaderPacingHost, $true, $true)
+        [void] [InteractiveWin11RealInput]::ForceForeground($script:ShaderPacingHost, $true, $true)
         return $false
     }
 
