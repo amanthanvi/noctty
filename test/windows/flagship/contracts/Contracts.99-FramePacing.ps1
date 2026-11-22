@@ -425,7 +425,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the foreground is unlocked by one marked absolute mouse move to the cursor''s own pixel, built in one place and aimed before the gate, never an Alt tap (PROBE-ALT-TAP-01) nor a zero-delta move the mouse hook never sees (UNLOCK-HOOK-01), and only when SendInput inserted it'
-        Pattern = '(?s)var unlock = UnlockHere\(marker\);\s+if \(unlock == null\) \{ outcome = "unlock-unaimed"; return; \}\s+long before = LastInputTick\(\);.*?if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}.*?static Input\[\] UnlockInput\(IntPtr marker, int nx, int ny\) \{\s+var unlock = new Input\[\] \{ new Input \{ type = 0 \} \};\s+unlock\[0\]\.mouse\.dx = nx; unlock\[0\]\.mouse\.dy = ny;\s+unlock\[0\]\.mouse\.flags = 0xC001;[^\r\n]*\s+unlock\[0\]\.mouse\.extra = marker;\s+return unlock;\s+\}.*?static Input\[\] UnlockHere\(IntPtr marker\) \{\s+SetThreadDpiAwarenessContext\(new IntPtr\(-4\)\);[^\r\n]*\s+CursorPoint p;\s+if \(!GetCursorPos\(out p\)\) return null;\s+int left = GetSystemMetrics\(76\), top = GetSystemMetrics\(77\), width = GetSystemMetrics\(78\), height = GetSystemMetrics\(79\);\s+if \(width <= 0 \|\| height <= 0\) return null;\s+return UnlockInput\(marker, Normalize\(p\.x, left, width\), Normalize\(p\.y, top, height\)\);\s+\}'
+        Pattern = '(?s)CursorPoint aim;\s+var unlock = UnlockHere\(marker, out aim\);\s+if \(unlock == null\) \{ outcome = "unlock-unaimed"; return; \}\s+long before = LastInputTick\(\);.*?if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}.*?static Input\[\] UnlockInput\(IntPtr marker, int nx, int ny\) \{\s+var unlock = new Input\[\] \{ new Input \{ type = 0 \} \};\s+unlock\[0\]\.mouse\.dx = nx; unlock\[0\]\.mouse\.dy = ny;\s+unlock\[0\]\.mouse\.flags = 0xC001;[^\r\n]*\s+unlock\[0\]\.mouse\.extra = marker;\s+return unlock;\s+\}.*?static Input\[\] UnlockHere\(IntPtr marker, out CursorPoint aim\) \{\s+aim = new CursorPoint\(\);\s+if \(SetThreadDpiAwarenessContext\(new IntPtr\(-4\)\) == IntPtr\.Zero\) return null;[^\r\n]*\s+if \(!GetCursorPos\(out aim\)\) return null;\s+int left = GetSystemMetrics\(76\), top = GetSystemMetrics\(77\), width = GetSystemMetrics\(78\), height = GetSystemMetrics\(79\);\s+if \(width <= 0 \|\| height <= 0\) return null;\s+return UnlockInput\(marker, Normalize\(aim\.x, left, width\), Normalize\(aim\.y, top, height\)\);\s+\}'
         Mutation = @('new Input { type = 0 }', 'new Input { type = 1 }')
     }
     @{
@@ -435,8 +435,28 @@ $framePacingRules = @(
     }
     @{
         Description = 'the native foreground checks the series'' tick (valid, and the series'') and the input watch on its worker right before its one input, and sends nothing when either moved (Sol, Opus and the lead on #741)'
-        Pattern = 'long before = LastInputTick\(\);\s+if \(before < 0 \|\| before != expectedTick\) \{ outcome = "input-before-unlock"; return; \}\s+WaitForSingleObject\(mouse, 0\);[^\r\n]*\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-unlock"\)\) != null\) return;\s+if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\)'
+        Pattern = 'long before = LastInputTick\(\);\s+if \(before < 0 \|\| before != expectedTick\) \{ outcome = "input-before-unlock"; return; \}\s+WaitForSingleObject\(mouse, 0\);[^\r\n]*\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-unlock"\)\) != null\) return;\s+if \(\(outcome = CursorAway\(aim, "unlock-raced"\)\) != null\) return;\s+if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\)'
         Mutation = @('if (before < 0 || before != expectedTick) { outcome = "input-before-unlock"; return; }', '')
+    }
+    @{
+        Description = 'the cursor is read again between the gate''s last check and the unlock''s SendInput, and the unlock is sent only if it is still on the aimed pixel (Sol and the lead on #746: an absolute move replaces motion)'
+        Pattern = 'if \(\(outcome = Halt\(cancel, real, "real-input-before-unlock"\)\) != null\) return;\s+if \(\(outcome = CursorAway\(aim, "unlock-raced"\)\) != null\) return;\s+if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\)'
+        Mutation = @('                if ((outcome = CursorAway(aim, "unlock-raced")) != null) return;' + "`n", '')
+    }
+    @{
+        Description = 'after the hook''s sight of the unlock the cursor is read once more, and a cursor off the aimed pixel stops the run before the foreground (Opus on #746)'
+        Pattern = 'if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+if \(\(outcome = CursorAway\(aim, "unlock-moved-cursor"\)\) != null\) return;\s+if \(LastInputTick\(\) != now\)'
+        Mutation = @('                if ((outcome = CursorAway(aim, "unlock-moved-cursor")) != null) return;' + "`n", '')
+    }
+    @{
+        Description = 'the cursor check fails closed on a failed read and compares both coordinates, keeping nothing (Sol and Opus on #746)'
+        Pattern = 'static string CursorAway\(CursorPoint aim, string why\) \{\s+CursorPoint now;\s+return GetCursorPos\(out now\) && now\.x == aim\.x && now\.y == aim\.y \? null : why;\s+\}'
+        Mutation = @('return GetCursorPos(out now) && now.x == aim.x && now.y == aim.y ? null : why;', 'return GetCursorPos(out now) || now.x == aim.x ? null : why;')
+    }
+    @{
+        Description = 'a failed switch to per-monitor DPI awareness aims nothing, so the run fails with unlock-unaimed (Opus on #746)'
+        Pattern = 'if \(SetThreadDpiAwarenessContext\(new IntPtr\(-4\)\) == IntPtr\.Zero\) return null;'
+        Mutation = @('if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero) return null;', 'SetThreadDpiAwarenessContext(new IntPtr(-4));')
     }
     @{
         Description = 'a visible run counts only with the foreground and the pane''s focus unchanged from the arm to the end marker''s swap'
@@ -485,7 +505,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the unlock must be seen twice before the foreground: a valid tick that moved, and the mouse hook''s sight of the marked event; then the tick is read again and the watch and cancellation checked, and activation is waited for before "refused" (CodeRabbit, Sol and the lead on #741)'
-        Pattern = '(?s)if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+if \(LastInputTick\(\) != now\) \{ outcome = "input-before-foreground"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-foreground"\)\) != null\) return;\s+SetForegroundWindow\(hwnd\);\s+Responsive\(hwnd, 500\);\s+var activation = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+while \(GetForegroundWindow\(\) != hwnd && activation\.ElapsedMilliseconds < 500\) \{\s+if \(\(outcome = Halt\(cancel, real, "real-input-during-activation"\)\) != null\) return;\s+Thread\.Sleep\(10\);\s+\}\s+outcome = GetForegroundWindow\(\) == hwnd \? "ok" : "refused";'
+        Pattern = '(?s)if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+if \(\(outcome = CursorAway\(aim, "unlock-moved-cursor"\)\) != null\) return;\s+if \(LastInputTick\(\) != now\) \{ outcome = "input-before-foreground"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-foreground"\)\) != null\) return;\s+SetForegroundWindow\(hwnd\);\s+Responsive\(hwnd, 500\);\s+var activation = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+while \(GetForegroundWindow\(\) != hwnd && activation\.ElapsedMilliseconds < 500\) \{\s+if \(\(outcome = Halt\(cancel, real, "real-input-during-activation"\)\) != null\) return;\s+Thread\.Sleep\(10\);\s+\}\s+outcome = GetForegroundWindow\(\) == hwnd \? "ok" : "refused";'
         Mutation = @('if ((outcome = ProbeSeen("unlock", before, now, hookSaw)) != null) return;', '')
     }
     @{
@@ -988,6 +1008,12 @@ function Get-FramePacingUnguardedCalls([string] $Text) {
         $previousEnd = [Math]::Max(0, $lineStart - 1)
         $previousStart = $code.LastIndexOf("`n", [Math]::Max(0, $previousEnd - 1)) + 1
         $previous = $code.Substring($previousStart, $previousEnd - $previousStart).Trim()
+        # The unlock's race re-read may sit between the gate and its call (Sol and the lead on #746), and only it.
+        if ($previous -match '^if \(\(outcome = CursorAway\(aim, +\)\) != null\) return;$') {
+            $previousEnd = [Math]::Max(0, $previousStart - 1)
+            $previousStart = $code.LastIndexOf("`n", [Math]::Max(0, $previousEnd - 1)) + 1
+            $previous = $code.Substring($previousStart, $previousEnd - $previousStart).Trim()
+        }
         if ($previous -notmatch '^if \(\(outcome = Halt\(cancel, real, +\)\) != null\) return;$') { "unguarded: $($call.Value)" }
     }
     if ($count -ne 3) { "$count input or foreground calls, not 3" }
@@ -1193,7 +1219,7 @@ $framePacingMemberPins = @(
         @{ Signature = 'public static IntPtr OpenMouseWatch(string eventName)'; Sha256 = '159b7ce4c47631883241b4759dc41fbe53a4ce168e17e07be1aa13b63e6c34ed' }
         @{ Signature = 'public static IntPtr OpenKeyWatch(string eventName)'; Sha256 = '73d5af8719166d57a9bd0fb47a3045750b85fb82f33d37b69cbbaf5f05c19c15' }
         @{ Signature = 'public static bool RealInputSignalled(IntPtr watch)'; Sha256 = '1921ddf3bf09c7aea7a5b5710f7f16f4006b309ed7b9206a0bb8940c49c065fc' }
-        @{ Signature = 'public static string Foreground(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr mouseWatch, IntPtr marker, out long unlockTick)'; Sha256 = '27fa38214ae279608835e24a8f833fb50851f5d6be2db419996f3d6aef1888e2' }
+        @{ Signature = 'public static string Foreground(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr mouseWatch, IntPtr marker, out long unlockTick)'; Sha256 = '2abe5aaf10459725c421fb8fac674c7342fdb22e6a3e880d721da7af4d6727fe' }
         @{ Signature = 'public static string KeyProbe(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr keyWatch, IntPtr marker, out long probeTick)'; Sha256 = 'd54a1c5579311d2b943f36453928d790aca899f364952249faebf760ed515548' }
         @{ Signature = 'static string Halt(ManualResetEvent cancel, IntPtr watch, string why)'; Sha256 = '42855e03813a7961e466546f15dcf67d8d454dd028bff3a74af4ee7aaf6a62b6' }
         @{ Signature = 'static long WaitTickMove(long before, int ms)'; Sha256 = '32ee3d13b32a364382c9b7165f6ce063514f2e25f4ed0074966adcae16476b3c' }
@@ -1201,7 +1227,8 @@ $framePacingMemberPins = @(
         @{ Signature = 'public static bool IsForeground(IntPtr hwnd)'; Sha256 = '1b0c0e41083dc1ad1ab7b3a6f0f0e6cc7328e4b53b9580b86cb1431fe50d29ec' }
         @{ Signature = 'public static bool AnyForeground()'; Sha256 = '78b4b2029bf02381ef0c9518f62c7f7fc739f903e7f8f8330a407d9fb7680984' }
         @{ Signature = 'static Input[] UnlockInput(IntPtr marker, int nx, int ny)'; Sha256 = '333e7eae95bfba81ad231d91df0f87b305821189d1a9af33a5bb79d8e205ae76' }
-        @{ Signature = 'static Input[] UnlockHere(IntPtr marker)'; Sha256 = '56932270c69ed34c94583e95e4b791bec99f1487970c05812b7d26b8fe1fd893' }
+        @{ Signature = 'static Input[] UnlockHere(IntPtr marker, out CursorPoint aim)'; Sha256 = 'a534bdaa2b6eb36260638c25af34855a9df72607ad1f414da702960c9c3f4a3d' }
+        @{ Signature = 'static string CursorAway(CursorPoint aim, string why)'; Sha256 = '63e229e124aec12dd1e663d8d2660b9f5fb0bb664ad653978090c7dff03e3706' }
         @{ Signature = 'static KeyInput[] KeyProbeInput(IntPtr marker)'; Sha256 = '70a417192acfcb6532d6d12c5f8fbe515e101fee13054cff88f83bfe586eda91' }
         @{ Signature = 'public static void PostKey(IntPtr h, int pid, int vk)'; Sha256 = '9cf7bc2816f4492123db1ed2270c65433a0c337cad627c2f128059d7a190e505' }
         @{ Signature = 'public static int DisplayPower(int ms)'; Sha256 = '2c687c50bea3d35f78d113c2481753582d52c27cddb3cb6a3a760d9f9a18fab7' }
@@ -3090,17 +3117,20 @@ if ([string]::Equals($payloadControl, $framePacingNative[0].Value, [StringCompar
 $payloadClass = 'FramePacingPayloadControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 Add-Type -TypeDefinition ($payloadControl.Replace('public static class FramePacingNative', "public static class $payloadClass"))
 if (Test-FramePacingOrdinal (($payloadClass -as [type])::UnlockPayload($framePacingMarker, 1234, 5678)) $framePacingPayloadWanted) { throw 'The unlock-payload check accepted the zero-delta relative move.' }
-# The unlock's aim (UNLOCK-HOOK-01): Normalize gives each pixel the smallest normalized value that Windows maps back to
-# it, whether it floors or rounds n * size / 65536, on a single display and on a virtual desktop with a negative
-# origin, and 0 at the origin. The control: a plain floor of pixel * 65536 / size, which misses under floor mapping.
+# The unlock's aim (UNLOCK-HOOK-01): Normalize gives each pixel the smallest normalized value that Windows' floor
+# mapping, floor(n * size / 65536), sends back to it, on a single display, on a virtual desktop with a negative origin
+# and on a 38,400-pixel axis, and 0 at the origin. Nearest rounding agrees only up to 32,768 pixels an axis (Sol on
+# #746: on 38,400, offset 3 normalizes to 6, which nearest maps to 4), so it is checked only there. The control: a
+# plain floor of pixel * 65536 / size, which misses under floor mapping.
 function Get-FramePacingNormalizeMiss([type] $Class) {
-    foreach ($desk in @(@{ Origin = 0; Size = 3840 }, @{ Origin = 0; Size = 2160 }, @{ Origin = -1920; Size = 5760 }, @{ Origin = 0; Size = 1366 })) {
+    if ($Class::Normalize(-15357, -15360, 38400) -ne 6 -or [Math]::Floor(6 * 38400 / 65536.0) -ne 3 -or [Math]::Round(6 * 38400 / 65536.0) -ne 4) { return "Sol's 38,400-pixel case: offset 3 is $($Class::Normalize(-15357, -15360, 38400))" }
+    foreach ($desk in @(@{ Origin = 0; Size = 3840 }, @{ Origin = 0; Size = 2160 }, @{ Origin = -1920; Size = 5760 }, @{ Origin = 0; Size = 1366 }, @{ Origin = -15360; Size = 38400 })) {
         if ($Class::Normalize($desk.Origin, $desk.Origin, $desk.Size) -ne 0) { return "origin of $($desk.Size)" }
         for ($pixel = $desk.Origin; $pixel -lt $desk.Origin + $desk.Size; $pixel += 7) {
             $n = $Class::Normalize($pixel, $desk.Origin, $desk.Size)
             if ($n -lt 0 -or $n -gt 65535) { return "pixel $pixel of $($desk.Size): $n out of range" }
             $floored = $desk.Origin + [Math]::Floor($n * $desk.Size / 65536.0); $rounded = $desk.Origin + [Math]::Round($n * $desk.Size / 65536.0)
-            if ($floored -ne $pixel -or $rounded -ne $pixel) { return "pixel $pixel of $($desk.Size): $n maps to $floored (floor) or $rounded (round)" }
+            if ($floored -ne $pixel -or ($desk.Size -le 32768 -and $rounded -ne $pixel)) { return "pixel $pixel of $($desk.Size): $n maps to $floored (floor) or $rounded (round)" }
         }
     }
     return $null
@@ -3253,4 +3283,4 @@ if ($framePacingPwsh) {
     if (Test-Path -LiteralPath $missingRepo) { throw 'The refused frame-pacing run created its run root.' }
     $framePacingBenchCase = 'bench exits (-Runs 51 refused by the wrapper; a refused measure repo exits 1 and names the repo after frame-pacing:)'
 } else { $framePacingBenchCase = 'bench exits skipped (no pwsh.exe)' }
-Write-Host "Frame-pacing harness contract: $framePacingMutations rules, each with a rejected mutation; $framePacingSharedCount shared pieces identical to #739's and bench-windows.ps1's; input discipline (controls: a second foreground, a third SendInput; $($framePacingInputApis.Count) other input APIs, each caught); every native input and foreground call behind the worker's stop check, found in the comment- and string-free C# with any spacing, with no attach, key-state reset or raise (Opus's N1, a same-line second call, a dropped check, an added attach, an added raise and a spaced call in IsForeground as controls); each worker's tick set once (control); every posted key behind a gate (Opus's R6 as the control); the keyboard probe's encoder test in win32/input.zig; the hooks reading only flags and extra info, unhooked in a finally and started only on the visible path (Sol's three mutations among the controls); $($framePacingMemberPins.Count) hook and foreground members pinned, with both gates' RealInputSeen ($($framePacingHookControls.Count) mutations as controls: Opus's ten, R1 and the marker ignored); forbidden forms ($($framePacingForbidden.Count), each caught); trace protocol against consts.zig, render_trace.zig and bench_marker.zig; constants pinned; $($framePacingCases -join '; '); native layout $framePacingLayout (7 controls); the native foreground without a watch (control); the outer half's supervision (the latch terminates the job as the next action, checked on the source with a 250 ms grace as the control, and returns with a driver that never ends inside a 10 s watchdog, its close $([Math]::Round([double]$script:framePacingSupervisionCloseMs, 3)) ms after the observation here, reported not judged; the latch wins over a driver that ended, with the latch after the driver as the control; a dry run waits on the driver alone); one tick read (no PowerShell code names a native tick read but Read-FramePacingInputTick, called, invoked or by reflection; GetLastInputInfo declared once and named only in its two native wrappers, with no string, EntryPoint or loaded address naming it; a direct, an .Invoke() and a reflection read, a third wrapper, an EntryPoint alias and a method group as the controls); every driver wait polled (a scan for any class's waits, Thread.Sleep, WaitOne, sleeps and load readings over 100 ms, the old quit wait, Opus's P9 and P10, an unbounded WaitOne and a positional sleep as its controls; the process wait stops within the wait on a stand-in gate's input, a wait without its poll as the control); desktop assignments (control); DesktopRefusal ($($framePacingRefusalCases.Count) cases; Opus's M4, M5/M6 and M21 compiled as controls); unlock and key-probe payloads, the unlock's aim on four desktops and the marker's 31-bit width (UNLOCK-HOOK-01; the zero-delta move, a plain floor and the 64-bit marker among the controls); $framePacingJobCase; $framePacingDesktopCase; $framePacingBenchCase"
+Write-Host "Frame-pacing harness contract: $framePacingMutations rules, each with a rejected mutation; $framePacingSharedCount shared pieces identical to #739's and bench-windows.ps1's; input discipline (controls: a second foreground, a third SendInput; $($framePacingInputApis.Count) other input APIs, each caught); every native input and foreground call behind the worker's stop check, found in the comment- and string-free C# with any spacing, with no attach, key-state reset or raise (Opus's N1, a same-line second call, a dropped check, an added attach, an added raise and a spaced call in IsForeground as controls); each worker's tick set once (control); every posted key behind a gate (Opus's R6 as the control); the keyboard probe's encoder test in win32/input.zig; the hooks reading only flags and extra info, unhooked in a finally and started only on the visible path (Sol's three mutations among the controls); $($framePacingMemberPins.Count) hook and foreground members pinned, with both gates' RealInputSeen ($($framePacingHookControls.Count) mutations as controls: Opus's ten, R1 and the marker ignored); forbidden forms ($($framePacingForbidden.Count), each caught); trace protocol against consts.zig, render_trace.zig and bench_marker.zig; constants pinned; $($framePacingCases -join '; '); native layout $framePacingLayout (7 controls); the native foreground without a watch (control); the outer half's supervision (the latch terminates the job as the next action, checked on the source with a 250 ms grace as the control, and returns with a driver that never ends inside a 10 s watchdog, its close $([Math]::Round([double]$script:framePacingSupervisionCloseMs, 3)) ms after the observation here, reported not judged; the latch wins over a driver that ended, with the latch after the driver as the control; a dry run waits on the driver alone); one tick read (no PowerShell code names a native tick read but Read-FramePacingInputTick, called, invoked or by reflection; GetLastInputInfo declared once and named only in its two native wrappers, with no string, EntryPoint or loaded address naming it; a direct, an .Invoke() and a reflection read, a third wrapper, an EntryPoint alias and a method group as the controls); every driver wait polled (a scan for any class's waits, Thread.Sleep, WaitOne, sleeps and load readings over 100 ms, the old quit wait, Opus's P9 and P10, an unbounded WaitOne and a positional sleep as its controls; the process wait stops within the wait on a stand-in gate's input, a wait without its poll as the control); desktop assignments (control); DesktopRefusal ($($framePacingRefusalCases.Count) cases; Opus's M4, M5/M6 and M21 compiled as controls); unlock and key-probe payloads, the unlock's aim on five desktops under floor mapping (nearest up to 32,768 pixels an axis; Sol's 38,400-pixel case) and the marker's 31-bit width (UNLOCK-HOOK-01; the zero-delta move, a plain floor and the 64-bit marker among the controls); the cursor read again between the gate and the unlock (unlock-raced) and after the hook's sight of it (unlock-moved-cursor), and a failed DPI switch unaimed (#746); $framePacingJobCase; $framePacingDesktopCase; $framePacingBenchCase"

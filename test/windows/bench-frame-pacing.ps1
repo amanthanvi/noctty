@@ -37,8 +37,9 @@ Two modes.
           (WH_KEYBOARD_LL, WH_MOUSE_LL) on a thread with its own message loop, any event without LLKHF_INJECTED or
           LLMHF_INJECTED sets the series' event (the callbacks read only each event's flags and extra info and keep
           counts), and hooks that do not install refuse -Visible. Each hook's proof of life is the harness's own
-          input of its kind, marked with a random nonzero 31-bit marker drawn for the series (an injected event's extra
-          info reaches a low-level hook with only its low 32 bits; UNLOCK-HOOK-01): the mouse hook must see the unlock
+          input of its kind, marked with a random nonzero 31-bit marker drawn for the series (an injected mouse event's
+          extra info was measured reaching a low-level hook with only its low 32 bits, UNLOCK-HOOK-01; a key's width is
+          unmeasured, and a 31-bit marker fits either): the mouse hook must see the unlock
           before the foreground is taken, the keyboard hook a VK_NONAME probe sent once the copy is in front, and the
           outer half's marked counts must show both after each run; Windows removes a low-level hook that times out
           without notice. Keystrokes into an elevated window and input a software KVM injects escape the flag; the
@@ -758,19 +759,25 @@ public static class FramePacingNative {
         long tick = -1;
         var worker = new Thread(() => {
             try {
-                // The unlock aimed at the cursor's own pixel, before the gate (UNLOCK-HOOK-01).
-                var unlock = UnlockHere(marker);
+                // The unlock aimed at the cursor's own pixel, before the gate (UNLOCK-HOOK-01). The cursor is read
+                // again after the gate's last check, and the unlock goes only if it is still on that pixel
+                // ("unlock-raced"); after the hook's sight of it, the cursor must still be there
+                // ("unlock-moved-cursor"). No coordinate leaves this worker.
+                CursorPoint aim;
+                var unlock = UnlockHere(marker, out aim);
                 if (unlock == null) { outcome = "unlock-unaimed"; return; }
                 long before = LastInputTick();
                 if (before < 0 || before != expectedTick) { outcome = "input-before-unlock"; return; }
                 WaitForSingleObject(mouse, 0); // an earlier marked event's signal: the next one must be this unlock's
                 if ((outcome = Halt(cancel, real, "real-input-before-unlock")) != null) return;
+                if ((outcome = CursorAway(aim, "unlock-raced")) != null) return;
                 if (SendInput(1, unlock, Marshal.SizeOf<Input>()) != 1) { outcome = "unlock-not-inserted"; return; }
                 long now = WaitTickMove(before, 1000);
                 // The unlock's tick is the harness's own even when the hook missed it (Greptile on #741, as the probe).
                 if (now >= 0 && now != before) tick = now;
                 bool hookSaw = WaitForSingleObject(mouse, 1000) == 0;
                 if ((outcome = ProbeSeen("unlock", before, now, hookSaw)) != null) return;
+                if ((outcome = CursorAway(aim, "unlock-moved-cursor")) != null) return;
                 if (LastInputTick() != now) { outcome = "input-before-foreground"; return; }
                 if ((outcome = Halt(cancel, real, "real-input-before-foreground")) != null) return;
                 SetForegroundWindow(hwnd);
@@ -860,11 +867,13 @@ public static class FramePacingNative {
     // Whether any window holds the foreground (Opus on #741: read right before the copy's launch).
     public static bool AnyForeground() { return GetForegroundWindow() != IntPtr.Zero; }
     // The unlock: one absolute mouse move to the cursor's own pixel (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
-    // MOUSEEVENTF_VIRTUALDESK, at the normalized coordinates nx, ny) with the series' marker in its extra info, so the
-    // cursor stays where it is. A zero-delta relative move registers as session input but never reaches a low-level
-    // mouse hook, so the hook could never prove itself alive with it (test-harnesses.md UNLOCK-HOOK-01, measured on
-    // the visible desktop). Never a key, which can leave the window in a menu loop (PROBE-ALT-TAP-01), and never a
-    // motion.
+    // MOUSEEVENTF_VIRTUALDESK, at the normalized coordinates nx, ny) with the series' marker in its extra info, aimed
+    // at the pixel the cursor is on. A zero-delta relative move registers as session input but never reaches a
+    // low-level mouse hook, so the hook could never prove itself alive with it (test-harnesses.md UNLOCK-HOOK-01,
+    // measured on the visible desktop). An absolute move replaces motion rather than adding to it: input Windows has
+    // not yet processed when the unlock is sent (hardware latency, milliseconds) can be undone by it, and the hook
+    // then sees that input as real, which voids the series. Never a key, which can leave the window in a menu loop
+    // (PROBE-ALT-TAP-01), and never a relative motion.
     static Input[] UnlockInput(IntPtr marker, int nx, int ny) {
         var unlock = new Input[] { new Input { type = 0 } };
         unlock[0].mouse.dx = nx; unlock[0].mouse.dy = ny;
@@ -873,22 +882,31 @@ public static class FramePacingNative {
         return unlock;
     }
     // A pixel's normalized absolute coordinate on the virtual desktop (origin and size from SM_XVIRTUALSCREEN and
-    // SM_CXVIRTUALSCREEN, or their Y pair): the smallest value Windows maps back to that pixel, whether it floors or
-    // rounds n * size / 65536. Public so the contract can table it.
+    // SM_CXVIRTUALSCREEN, or their Y pair): the smallest value that Windows' floor mapping, pixel = floor(n * size /
+    // 65536), sends back to that pixel (the mapping the harness assumes; Wine's `>> 16` is the prior art). Nearest
+    // rounding agrees only on an axis of at most 32,768 pixels: on 38,400, offset 3 normalizes to 6, which floor maps
+    // to 3 and nearest to 4 (Sol on #746). Public so the contract can table it.
     public static int Normalize(int pixel, int origin, int size) { return (int)Math.Ceiling((pixel - origin) * 65536.0 / size); }
     [StructLayout(LayoutKind.Sequential)] struct CursorPoint { public int x, y; }
     [DllImport("user32.dll")] static extern bool GetCursorPos(out CursorPoint p);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
-    // The unlock aimed at the cursor's own pixel, read in physical pixels (per-monitor DPI awareness on the calling
-    // worker thread, so the cursor and the virtual desktop agree on a scaled display), or null when either cannot be
-    // read. Measured: the cursor ends where it started (UNLOCK-HOOK-01).
-    static Input[] UnlockHere(IntPtr marker) {
-        SetThreadDpiAwarenessContext(new IntPtr(-4)); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-        CursorPoint p;
-        if (!GetCursorPos(out p)) return null;
+    // The unlock aimed at the cursor's own pixel (`aim`), read in physical pixels (per-monitor DPI awareness on the
+    // calling worker thread, so the cursor and the virtual desktop agree on a scaled display), or null when the switch
+    // to that awareness, the cursor or the virtual desktop cannot be read (Opus on #746: an unaware read aims at
+    // another row). Measured at one pixel: the cursor ended on it (UNLOCK-HOOK-01); CursorAway checks every run.
+    static Input[] UnlockHere(IntPtr marker, out CursorPoint aim) {
+        aim = new CursorPoint();
+        if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero) return null; // PER_MONITOR_AWARE_V2
+        if (!GetCursorPos(out aim)) return null;
         int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);
         if (width <= 0 || height <= 0) return null;
-        return UnlockInput(marker, Normalize(p.x, left, width), Normalize(p.y, top, height));
+        return UnlockInput(marker, Normalize(aim.x, left, width), Normalize(aim.y, top, height));
+    }
+    // `why` when the cursor is not on the aimed pixel or cannot be read, else null; on the aiming worker thread, so in
+    // the same physical pixels. Nothing about the position leaves it.
+    static string CursorAway(CursorPoint aim, string why) {
+        CursorPoint now;
+        return GetCursorPos(out now) && now.x == aim.x && now.y == aim.y ? null : why;
     }
     // The keyboard probe: VK_NONAME (0xFC) down, then up (flags 2), scan code 0, the series' marker in each.
     static KeyInput[] KeyProbeInput(IntPtr marker) {
