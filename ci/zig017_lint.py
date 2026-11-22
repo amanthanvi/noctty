@@ -159,7 +159,11 @@ def check(repo, base, head, baseline_path):
     before = sources(repo, comparison, names & paths(repo, comparison))
     after = sources(repo, head, names)
     tip = sources(repo, base, names & paths(repo, base)) if base != comparison else before
-    fork = sources(repo, parent, names & paths(repo, parent)) if baseline else {}
+    # The fork parent is read only for changed paths the baseline names: a path with no row has no allowance,
+    # so its fork count cannot change a finding. A repository without the parent (the controls' scratch
+    # repositories) can then still lint paths the baseline does not name.
+    baselined = names & {name for name, _, _ in baseline}
+    fork = sources(repo, parent, baselined & paths(repo, parent)) if baselined else {}
     findings = []
     for name in sorted(names):
         findings.extend(check_file(name, before.get(name, ""), after[name], added[name],
