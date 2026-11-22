@@ -136,6 +136,20 @@ $guiHiddenProblems = & {
         $run = Get-YamlStepBlock -Content $suite -Name 'Hidden-desktop GUI suite' -Source 'gui-hidden.yml :: suite'
         if ($run -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-runner\.ps1 -MeasureRepo \$env:GITHUB_WORKSPACE -Work \(Join-Path \$env:RUNNER_TEMP ''gui-hidden-work''\) -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\) -Build\s*$' -or
             $run -match '(?m)^        (?:if|continue-on-error):') { $found.Add('gui-hidden.yml: the suite step runs the runner with -Build into RUNNER_TEMP\gui-hidden, unconditionally') }
+        $symboliser = & $findStep $suite 'Build the thread-role symboliser' 'suite'
+        $compare = & $findStep $suite 'Composite thread-role pairs and controls' 'suite'
+        $symboliserAt = $suite.IndexOf('      - name: Build the thread-role symboliser', [StringComparison]::Ordinal)
+        $compareAt = $suite.IndexOf('      - name: Composite thread-role pairs and controls', [StringComparison]::Ordinal)
+        if ($symboliserAt -le $runnerAt -or $compareAt -le $symboliserAt -or $compareAt -ge $publishAt -or
+            $symboliser -notmatch '(?m)^        run: \./scripts/dev-windows\.cmd zig build -Demit-exe=false -Demit-test-exe=true --summary all\s*$' -or
+            $symboliser -match '(?m)^        (?:if|continue-on-error):' -or $compare -match '(?m)^        (?:if|continue-on-error):' -or
+            $compare -notmatch '(?m)^          \$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent \$measure\.Exe\s*$' -or
+            $compare -notmatch 'python -I ci/role_compare3\.py --runs ci/role-runs\.tsv --run composite --compiler 0\.15 \$manifest ci/lock-inventory-threads\.tsv \$symbolised --table-scope 1a\)' -or
+            $compare -notmatch "(?m)^            NoKey = 'gui-hidden-role-no-key'\s*$" -or
+            $compare -notmatch "(?m)^            NoLaunch = 'gui-hidden-role-no-launch'\s*$" -or
+            $compare -notmatch '-Leaves role-pairs -RoleControl \$case') {
+            $found.Add('gui-hidden.yml: the suite builds its symboliser, uses the measurement images and gates the composite comparison and both controls')
+        }
         $upload = Get-YamlStepBlock -Content $suite -Name 'Upload the suite''s result and receipts' -Source 'gui-hidden.yml :: suite'
         $paths = & $uploadPaths $upload
         if (($paths -join "`n") -cne $expectedUpload) { $found.Add('gui-hidden.yml: the upload holds exactly the result, its hash and the receipts (design §4.5 allowlist), no log directory') }
@@ -180,6 +194,10 @@ $guiHiddenProblems = & {
         @{ Name = 'the helper self-test limited to pushes'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        if: github.event_name == 'push'`n" }
         @{ Name = 'the helper self-test allowed to fail'; Old = "      - name: Interactive harness helper self-test`n"; New = "      - name: Interactive harness helper self-test`n        continue-on-error: true`n" }
         @{ Name = 'the self-test without the id the error step reads'; Old = "        id: selftest`n"; New = '' }
+        @{ Name = 'the role comparison outside the gate'; Old = "      - name: Composite thread-role pairs and controls`n"; New = "      - name: Composite thread-role pairs and controls`n        continue-on-error: true`n" }
+        @{ Name = 'the role comparison against non-measurement images'; Old = '$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent $measure.Exe'; New = '$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent $symboliser' }
+        @{ Name = 'the role comparison without its no-key control'; Old = "            NoKey = 'gui-hidden-role-no-key'`n"; New = '' }
+        @{ Name = 'the role comparison without its no-launch control'; Old = "            NoLaunch = 'gui-hidden-role-no-launch'`n"; New = '' }
         @{ Name = 'no error result for a job that failed without one'; Old = "      - name: Publish an error result when the job failed without one`n"; New = "      - name: Publish nothing`n" }
         @{ Name = 'the error result published on every run'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: always()`n" }
         @{ Name = 'the error result published only for a failed self-test (a suite that died without a result left none)'; Old = "      - name: Publish an error result when the job failed without one`n        if: failure()`n"; New = "      - name: Publish an error result when the job failed without one`n        if: failure() && steps.selftest.outcome == 'failure'`n" }
@@ -445,7 +463,7 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         $found = [System.Collections.Generic.List[string]]::new()
         if ($Plan.schemaVersion -ne 1 -or $Plan.scenario -cne 'windows.gui-hidden.suite' -or $Scenario.id -cne 'windows.gui-hidden.suite') { $found.Add('the plan is version 1 and names the scenario windows.gui-hidden.suite, which the flagship scenario is') }
         # What the build preparation runs, and the measurement build's whole input set by tree (Sol on #740, round 12).
-        foreach ($required in @('scripts/dev-windows.cmd', 'scripts/interactive-win11-measure-lib.ps1', 'build.zig', 'build.zig.zon', 'src/**', 'pkg/**', 'vendor/**', 'include/**', 'dist/windows/**', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1')) {
+        foreach ($required in @('scripts/dev-windows.cmd', 'scripts/interactive-win11-measure-lib.ps1', 'build.zig', 'build.zig.zon', 'src/**', 'pkg/**', 'vendor/**', 'include/**', 'dist/windows/**', 'scripts/stage-conpty-redist.ps1', 'scripts/conpty-redist.ps1', 'scripts/windows-architecture.ps1', 'ci/role_supervisor.py', 'ci/role_compare3.py', 'ci/role-runs.tsv', 'ci/lock-inventory-threads.tsv')) {
             if (@($Plan.buildInputs) -cnotcontains $required) { $found.Add("the plan's buildInputs name $required, which the hosted build preparation reads") }
         }
         foreach ($buildInput in @($Plan.buildInputs)) {
@@ -462,9 +480,19 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         }
         $ids = @($Plan.leaves | ForEach-Object { [string]$_.id })
         if (@($ids | Sort-Object -Unique).Count -ne $ids.Count) { $found.Add('the plan''s leaf ids are unique') }
+        if ($ids -cnotcontains 'role-pairs') { $found.Add('the plan includes the role-pairs leaf') }
         $steps = @($Scenario.steps | ForEach-Object { [string]$_.id })
         if (($ids -join ',') -cne ($steps -join ',')) { $found.Add("the plan's leaf ids ($($ids -join ',')) are the flagship scenario's step ids ($($steps -join ',')), in order") }
         foreach ($leaf in @($Plan.leaves)) {
+            if ($leaf.id -ceq 'role-pairs') {
+                if ($leaf.script -cne 'test/windows/gui-hidden-role-pairs.ps1' -or $leaf.sandbox -cne 'role-pairs' -or
+                    $leaf.roleDump -isnot [bool] -or -not $leaf.roleDump -or $leaf.expectedShells -ne 1 -or
+                    @($leaf.arguments) -icontains '-NoKey') {
+                    $found.Add('role-pairs runs its leaf with a Boolean roleDump opt-in, one expected shell and the key enabled')
+                }
+            } elseif ($leaf.PSObject.Properties.Name -ccontains 'roleDump') {
+                $found.Add("leaf $($leaf.id): only role-pairs may specify roleDump")
+            }
             if ([string]$leaf.script -cnotmatch '\Atest/windows/[A-Za-z0-9-]+\.ps1\z' -or -not (Test-Path -LiteralPath (Join-Path $repoRoot ([string]$leaf.script).Replace('/', '\')) -PathType Leaf)) { $found.Add("leaf $($leaf.id): its script is an existing test/windows/*.ps1") }
             if ($leaf.expectedShells -isnot [long] -and $leaf.expectedShells -isnot [int] -or $leaf.expectedShells -lt 0) { $found.Add("leaf $($leaf.id): expectedShells is a whole number") }
             if ($leaf.timeoutSeconds -isnot [long] -and $leaf.timeoutSeconds -isnot [int] -or $leaf.timeoutSeconds -le 0) { $found.Add("leaf $($leaf.id): timeoutSeconds is positive") }
@@ -480,6 +508,9 @@ if (-not $ok) { throw 'SendInput failed for the fixture' }
         @{ Name = 'a leaf the scenario does not list'; Change = { param($p) $p.leaves[0].id = 'not-in-the-scenario' } }
         @{ Name = 'buildInputs without dev-windows.cmd'; Change = { param($p) $p.buildInputs = @($p.buildInputs | Where-Object { $_ -cne 'scripts/dev-windows.cmd' }) } }
         @{ Name = 'a missing leaf script'; Change = { param($p) $p.leaves[0].script = 'test/windows/no-such-leaf.ps1' } }
+        @{ Name = 'role-pairs without a dump'; Change = { param($p) ($p.leaves | Where-Object id -CEQ 'role-pairs').roleDump = $false } }
+        @{ Name = 'a dump on another leaf'; Change = { param($p) $p.leaves[0] | Add-Member -NotePropertyName roleDump -NotePropertyValue $true } }
+        @{ Name = 'role-pairs without an expected shell'; Change = { param($p) ($p.leaves | Where-Object id -CEQ 'role-pairs').expectedShells = 0 } }
         @{ Name = 'a build input spelled with ./'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('./scripts/dev-windows.cmd') } }
         @{ Name = 'a build input spelled with a backslash'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts\dev-windows.cmd') } }
         @{ Name = 'a build input differing from the tracked path in case only'; Change = { param($p) $p.buildInputs = @($p.buildInputs) + @('scripts/Dev-windows.cmd') } }

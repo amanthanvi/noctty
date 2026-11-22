@@ -11,7 +11,7 @@
       "attempt": 1,
       "summary": "Started under a private-desktop driver, noctty keeps every process and window on that desktop in all three arms (bundled ConPTY, in-box ConPTY, the noctty.com CLI), with the positive, negative and enumeration controls; also a local run at #738's final head.",
       "governs": [
-        { "obligation": "gui-hidden lane: leaves run on a private desktop", "destinations": [ { "kind": "hosted", "workflow": "gui-hidden.yml", "receipt": "measurement", "gate": "gui-hidden-gate", "owner": ["vt-probe", "smoke", "shell-command", "cli-automation", "undo", "session-restore"] } ] }
+        { "obligation": "gui-hidden lane: leaves run on a private desktop", "destinations": [ { "kind": "hosted", "workflow": "gui-hidden.yml", "receipt": "measurement", "gate": "gui-hidden-gate", "owner": ["vt-probe", "smoke", "shell-command", "cli-automation", "undo", "session-restore", "role-pairs"] } ] }
       ]
     },
     {

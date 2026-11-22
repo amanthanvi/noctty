@@ -9,6 +9,7 @@ job gained a noctty process the launcher did not start, that left a reparse poin
 .DESCRIPTION
   pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new directory>
        -Out <new or empty directory> [-Build] [-Leaves <id>,...] [-KeepFailedCopies]
+       [-RoleControl NoKey|NoLaunch]
 
 A job that failed without a complete result (a failed helper self-test, or a runner that died or did not parse) gets
 an `error` result from test/windows/gui-hidden-publish-error.ps1, a script of its own that loads nothing of this one;
@@ -83,7 +84,8 @@ param(
     [string] $Out,
     [switch] $Build,
     [string[]] $Leaves = @(),
-    [switch] $KeepFailedCopies
+    [switch] $KeepFailedCopies,
+    [ValidateSet('NoKey', 'NoLaunch')] [string] $RoleControl
 )
 $ErrorActionPreference = 'Stop'
 
@@ -403,7 +405,7 @@ public static class GuiHiddenRunnerNative {
     // (`Argv`) stays in memory for the argument rule and is never written.
     public sealed class JoinedProcess {
         public int Pid; public long Taken; public IntPtr Handle; public bool OpenFailed; public bool Unpinned;
-        public long Creation; public int Parent; public string Image;
+        public long Creation; public int Parent; public string Image; public uint? Exit;
         public bool IsCmd; public bool CmdRead; public bool CmdSystem; public bool CmdImageSystem; public bool CmdAutoRunOff; public int CmdOrdinal;
         public bool IsNoctty; public bool InCopy; public string[] Argv;
     }
@@ -414,6 +416,7 @@ public static class GuiHiddenRunnerNative {
     public sealed class JobWatch : IDisposable {
         readonly IntPtr port; readonly IntPtr job; readonly Thread reader; readonly string systemCmd; readonly string flagDirectory;
         readonly string systemCmdId, appPath, appId, cliPath, cliId;
+        readonly bool captureAppExit;
         volatile bool stopping; int cmdCount; int taken;
         public volatile bool Faulted;
         // How many joiners the reader has taken from the port (each gets a row, opened or not).
@@ -423,9 +426,10 @@ public static class GuiHiddenRunnerNative {
         readonly List<JoinedProcess> opened = new List<JoinedProcess>();
         // `appPath` and `cliPath` are the staged copy's noctty.exe and noctty.com; a noctty joiner is in the copy only
         // when its image is one of them by path and identity.
-        public JobWatch(IntPtr job, string systemCmd, string flagDirectory, string appPath, string cliPath) {
+        public JobWatch(IntPtr job, string systemCmd, string flagDirectory, string appPath, string cliPath, bool captureAppExit) {
             this.job = job; this.systemCmd = systemCmd; this.flagDirectory = flagDirectory;
             this.appPath = appPath; this.cliPath = cliPath;
+            this.captureAppExit = captureAppExit;
             systemCmdId = FileId(systemCmd); appId = FileId(appPath); cliId = FileId(cliPath);
             if (systemCmdId == null || appId == null || cliId == null) throw new Exception("The watch could not read System32's cmd.exe or the copy's identity.");
             port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
@@ -494,7 +498,13 @@ public static class GuiHiddenRunnerNative {
         public JoinedProcess[] Snapshot() { lock (joined) return joined.ToArray(); }
         public void Dispose() {
             stopping = true; Stopped = reader.Join(5000);
-            lock (joined) foreach (var r in joined) if (r.Handle != IntPtr.Zero) { CloseHandle(r.Handle); r.Handle = IntPtr.Zero; }
+            lock (joined) foreach (var r in joined) if (r.Handle != IntPtr.Zero) {
+                // Read a full exit code only from the held, signalled handle of a verified copy.
+                uint code;
+                if (captureAppExit && r.InCopy && string.Equals(r.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) &&
+                    WaitForSingleObject(r.Handle, 0) == 0 && GetExitCodeProcess(r.Handle, out code)) r.Exit = code;
+                CloseHandle(r.Handle); r.Handle = IntPtr.Zero;
+            }
             if (Stopped) foreach (var r in opened) if (r.Handle != IntPtr.Zero) CloseHandle(r.Handle);
             CloseHandle(port);
         }
@@ -677,6 +687,36 @@ function Get-GuiHiddenLauncherRecords([string] $Path) {
     return $records
 }
 
+function Get-GuiHiddenRoleDumpDirectory($Leaf, [string] $Run) {
+    if ($Leaf.id -ceq 'role-pairs' -and $Leaf.roleDump -is [bool] -and $Leaf.roleDump) {
+        return Join-Path $Run 'role-dump'
+    }
+    return $null
+}
+
+function Invoke-GuiHiddenRoleSupervisor([string[]] $Arguments) {
+    $supervisor = Join-Path $repoRoot 'ci\role_supervisor.py'
+    python -I $supervisor @Arguments 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'The thread-role supervisor could not write its receipt.' }
+}
+
+function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPid, [string] $Run, [string] $Logs, [switch] $NoLaunch) {
+    $app = @($Rows | Where-Object {
+        $_.InCopy -and $_.Image -ieq 'noctty.exe' -and $_.Parent -eq $LeafPid -and
+            $Launcher.ContainsKey($_.Pid) -and $Launcher[$_.Pid] -eq $_.Creation
+    })
+    if ($Launcher.Count -ne 1 -or $app.Count -ne 1 -or $null -eq $app[0].Exit) {
+        throw 'The role-pairs copy has no unique, launcher-bound exit.'
+    }
+    $state = Join-Path $Run 'role-supervisor'
+    $manifest = Join-Path $Run 'role-manifest.tsv'
+    $identity = @([string]$app[0].Pid, [string]$Launcher[$app[0].Pid], 'gui')
+    if (-not $NoLaunch) { Invoke-GuiHiddenRoleSupervisor (@('launch', $state, $manifest) + $identity) }
+    Invoke-GuiHiddenRoleSupervisor (@('exit', $state, $manifest, 'composite') + $identity +
+        @([string]$app[0].Exit, (Join-Path $Logs 'role-pairs-stderr.log')))
+    Invoke-GuiHiddenRoleSupervisor @('seal', $state, $manifest)
+}
+
 # The leaf's verdict on its job's processes (design §4.1): every joiner read; every cmd read, System32's (its loaded
 # image by path and identity, and its command line) and with /D before its payload, at least `ExpectedShells` of them;
 # every noctty.exe or noctty.com in the copy (image path and identity), keeping the argument rule
@@ -853,7 +893,7 @@ function Get-GuiHiddenFailureKinds($Record) {
 }
 
 # Runs one leaf on its own private desktop and returns its record (allowlisted values only).
-function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDictionary] $Build, [string] $RunRoot) {
+function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDictionary] $Build, [string] $RunRoot, [string] $RoleControl) {
     $id = [string]$Leaf.id
     $run = Join-Path $RunRoot $id
     [void](New-Item -ItemType Directory -Path $run)
@@ -861,6 +901,7 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
     $record = [ordered]@{ leaf = $id; passed = $false; stage = 'staging' }
     $desktop = [IntPtr]::Zero; $job = [IntPtr]::Zero; $watch = $null; $pi = $null; $heldConpty = @()
     $saved = @{}
+    $roleDump = Get-GuiHiddenRoleDumpDirectory $Leaf $run
     try {
         New-GuiHiddenCopy -Bin $Bin -Copy $copy -Build $Build
         # The ConPTY pair is held open (read sharing only) and hashed through those handles until the job has ended.
@@ -876,7 +917,7 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
         $job = [GuiHiddenRunnerNative]::CreateRunJob()
         $systemCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
-        $watch = [GuiHiddenRunnerNative+JobWatch]::new($job, $systemCmd, $run, (Join-Path $copy 'noctty.exe'), (Join-Path $copy 'noctty.com'))
+        $watch = [GuiHiddenRunnerNative+JobWatch]::new($job, $systemCmd, $run, (Join-Path $copy 'noctty.exe'), (Join-Path $copy 'noctty.com'), [bool]$roleDump)
         $leafEnvironment = [ordered]@{
             NOCTTY_GUI_HIDDEN_DESKTOP = "WinSta0\$desktopName"
             NOCTTY_GUI_HIDDEN_EXE = (Join-Path $copy 'noctty.exe')
@@ -884,17 +925,25 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
             NOCTTY_INTERACTIVE_MEASURE_AUMID = '1'
             LOCALAPPDATA = (Join-Path $run 'localappdata')
             APPDATA = (Join-Path $run 'appdata')
+            NOCTTY_THREAD_ROLE_DUMP = $roleDump
         }
-        foreach ($name in $leafEnvironment.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $leafEnvironment[$name]) }
+        # Clear inherited dumps for every other leaf. The recorder requires an existing directory.
+        if ($roleDump) { [void](New-Item -ItemType Directory -Path $roleDump) }
+        $nullString = [System.Management.Automation.Language.NullString]::Value
+        foreach ($name in $leafEnvironment.Keys) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name)
+            [Environment]::SetEnvironmentVariable($name, ($leafEnvironment[$name] ?? $nullString))
+        }
         $pwsh = (Get-Command pwsh.exe).Source
         $script = Join-Path $repoRoot ([string]$Leaf.script)
         $arguments = @($Leaf.arguments | ForEach-Object { [string]$_ })
+        if ($roleDump -and $RoleControl -eq 'NoKey') { $arguments += '-NoKey' }
         foreach ($argument in $arguments) { if ($argument -match '[\s"]') { throw 'A plan argument cannot hold whitespace or a quote.' } }
         $line = ('"{0}" -NoProfile -NonInteractive -File "{1}"' -f $pwsh, $script) + $(if ($arguments.Count) { ' ' + ($arguments -join ' ') } else { '' })
         $started = [datetime]::UtcNow
         $pi = [GuiHiddenRunnerNative]::Launch($pwsh, $line, $repoRoot, "WinSta0\$desktopName", $job, (Join-Path $run 'leaf.log'))
         $leafPid = $pi.pid
-        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, ($saved[$name] ?? $nullString)) }
         $saved = @{}
         $deadline = $started.AddSeconds([int]$Leaf.timeoutSeconds)
         $defaultWindows = 0; $defaultWalkFailed = $false; $timedOut = $false
@@ -935,7 +984,6 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         $watch = $null
         $launcher = Get-GuiHiddenLauncherRecords (Join-Path $run 'launcher-pids.txt')
         $record.processes = Get-GuiHiddenProcessVerdict $rows $launcher $total ([int]$Leaf.expectedShells) $token $leafPid
-        $rows = $null
         $record.defaultWindows = $defaultWindows
         $record.defaultWalkFailed = $defaultWalkFailed
         $record.receipt = Test-GuiHiddenLeafReceipt (Join-Path $run 'leaf-receipt.json')
@@ -961,6 +1009,10 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         # A run directory that holds a reparse point already fails the leaf, and its logs are not read, so the runner
         # never reads through a link the leaf made (CodeRabbit on #740).
         $logs = Join-Path $run "sandbox-$token\logs"
+        if ($roleDump -and $record.reparsePoints -eq 0) {
+            Write-GuiHiddenRoleManifest $rows $launcher $leafPid $run $logs -NoLaunch:($RoleControl -eq 'NoLaunch')
+        }
+        $rows = $null
         $logTexts = @(if ($record.reparsePoints -eq 0) { Get-ChildItem -LiteralPath $logs -Filter '*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { [IO.File]::ReadAllText($_.FullName) } })
         $record.rendererFallbackLogs = @($logTexts | Where-Object { $_.Contains('; trying the Direct3D 11 beta') }).Count
         $rendererStartups = Get-GuiHiddenRendererStartups $logTexts
@@ -980,7 +1032,7 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         try { [IO.File]::AppendAllText((Join-Path $run 'runner-error.txt'), ($_ | Out-String)) } catch { }
     }
     finally {
-        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, ($saved[$name] ?? $nullString)) }
         if ($null -ne $watch) { $watch.Dispose() }
         if ($job -ne [IntPtr]::Zero) {
             try { [void][GuiHiddenRunnerNative]::StopRunJob($job) } catch { $record.passed = $false; $record.jobCleanupFailed = $true }
@@ -1233,6 +1285,9 @@ try {
     $Leaves = @($Leaves | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $selected = @($plan.leaves | Where-Object { $Leaves.Count -eq 0 -or $_.id -in $Leaves })
     if ($Leaves.Count -gt 0 -and $selected.Count -ne $Leaves.Count) { throw 'An -Leaves id is not in the plan.' }
+    if ($RoleControl -and ($selected.Count -ne 1 -or $selected[0].id -cne 'role-pairs')) {
+        throw '-RoleControl requires -Leaves role-pairs.'
+    }
     # A subset run is for diagnosis: its result never passes the full scenario (CodeRabbit on #740).
     $subset = $selected.Count -lt @($plan.leaves).Count
 }
@@ -1295,7 +1350,7 @@ if ($exit -eq 0) {
             [void](New-Item -ItemType Directory -Path $runRoot)
             foreach ($leaf in $selected) {
                 Write-Host "gui-hidden: $($leaf.id)"
-                $leafRecord = Invoke-GuiHiddenLeaf -Leaf $leaf -Bin $bin -Build $binding -RunRoot $runRoot
+                $leafRecord = Invoke-GuiHiddenLeaf -Leaf $leaf -Bin $bin -Build $binding -RunRoot $runRoot -RoleControl $RoleControl
                 $leafRecords.Add($leafRecord)
                 # The record writer applies its rejections (and the failed verdict they mean) before it writes, so the
                 # receipt and the result carry one verdict (CodeRabbit on #740).

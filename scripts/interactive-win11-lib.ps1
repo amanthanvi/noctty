@@ -345,8 +345,19 @@ public static class InteractiveWin11HostedLaunch {
 
     public delegate bool EnumWindow(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out int pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr window, StringBuilder name, int length);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, StringBuilder text, int length);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKeyW(uint code, uint mapType);
+
+    static bool IsWindowOf(IntPtr window, int pid, string className) {
+        int owner; GetWindowThreadProcessId(window, out owner);
+        if (owner != pid) return false;
+        var name = new StringBuilder(64);
+        return GetClassNameW(window, name, name.Capacity) > 0 && name.ToString() == className;
+    }
 
     // The noctty host windows of `pid` on the caller's desktop, by class. On a private desktop a process's
     // MainWindowHandle can be the system's input-indicator overlay (UAC_InputIndicatorOverlayWnd), not the host:
@@ -354,14 +365,27 @@ public static class InteractiveWin11HostedLaunch {
     public static IntPtr[] HostWindows(int pid) {
         var found = new System.Collections.Generic.List<IntPtr>();
         EnumWindows((w, p) => {
-            int owner; GetWindowThreadProcessId(w, out owner);
-            if (owner == pid) {
-                var name = new StringBuilder(64); GetClassNameW(w, name, 64);
-                if (name.ToString() == "noctty.win32.host") found.Add(w);
-            }
+            if (IsWindowOf(w, pid, "noctty.win32.host")) found.Add(w);
             return true;
         }, IntPtr.Zero);
         return found.ToArray();
+    }
+
+    public static IntPtr[] SurfaceWindows(IntPtr host, int pid) {
+        var found = new System.Collections.Generic.List<IntPtr>();
+        if (IsWindowOf(host, pid, "noctty.win32.host")) {
+            EnumChildWindows(host, (w, p) => {
+                if (IsWindowOf(w, pid, "noctty.win32") && IsWindowVisible(w)) found.Add(w);
+                return true;
+            }, IntPtr.Zero);
+        }
+        return found.ToArray();
+    }
+
+    public static bool HostTitleContains(IntPtr host, int pid, string marker) {
+        if (!IsWindowOf(host, pid, "noctty.win32.host")) return false;
+        var text = new StringBuilder(256);
+        return GetWindowTextW(host, text, text.Capacity) > 0 && text.ToString().IndexOf(marker, StringComparison.Ordinal) >= 0;
     }
 
     static IntPtr OpenLog(string path) {
@@ -828,6 +852,24 @@ function Invoke-InteractiveWin11PostMessage {
         $detail = if ($lastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $lastError" }
         throw "PostMessageW failed for $Description hwnd=$Hwnd $detail."
     }
+}
+
+function Invoke-InteractiveWin11PostLetter {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [ValidateRange(0x41, 0x5A)] [uint32] $VirtualKey,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+    )
+
+    $scan = [InteractiveWin11HostedLaunch]::MapVirtualKeyW($VirtualKey, 0)
+    if ($scan -eq 0) { throw 'The posted letter has no scan code.' }
+    $down = ([long]$scan -shl 16) -bor 1
+    $up = $down -bor 3221225472L # Previous key state and transition bits.
+    Invoke-InteractiveWin11PostMessage -Hwnd $Hwnd -Message 0x0100 -WParam ([UIntPtr]$VirtualKey) -LParam ([IntPtr]$down) `
+        -Deadline $Deadline -Description 'letter key down' -Process $Process
+    Invoke-InteractiveWin11PostMessage -Hwnd $Hwnd -Message 0x0101 -WParam ([UIntPtr]$VirtualKey) -LParam ([IntPtr]$up) `
+        -Deadline $Deadline -Description 'letter key up' -Process $Process
 }
 
 function Get-InteractiveWin11ContainmentArguments {
