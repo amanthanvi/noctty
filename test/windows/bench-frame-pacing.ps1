@@ -37,7 +37,8 @@ Two modes.
           (WH_KEYBOARD_LL, WH_MOUSE_LL) on a thread with its own message loop, any event without LLKHF_INJECTED or
           LLMHF_INJECTED sets the series' event (the callbacks read only each event's flags and extra info and keep
           counts), and hooks that do not install refuse -Visible. Each hook's proof of life is the harness's own
-          input of its kind, marked with a random marker drawn for the series: the mouse hook must see the unlock
+          input of its kind, marked with a random nonzero 31-bit marker drawn for the series (an injected event's extra
+          info reaches a low-level hook with only its low 32 bits; UNLOCK-HOOK-01): the mouse hook must see the unlock
           before the foreground is taken, the keyboard hook a VK_NONAME probe sent once the copy is in front, and the
           outer half's marked counts must show both after each run; Windows removes a low-level hook that times out
           without notice. Keystrokes into an elevated window and input a software KVM injects escape the flag; the
@@ -57,11 +58,13 @@ Two modes.
           the driver together and closes the run's job the moment it observes the latch, with no grace (immediately
           on observation, plus OS scheduling latency; guards.json's LatchToKillMs records the delay). Input seen at
           any point in a series, by the hooks or the tick at any read, latches: the series is inconclusive and
-          publishes nothing, whatever a driver's exit or a later matching read says. The copy takes the foreground through a bounded call: a zero-motion mouse input unlocks it,
-          never an Alt tap (PROBE-ALT-TAP-01), then one SetForegroundWindow, with no AttachThreadInput fallback, no
-          BringWindowToTop and no keyboard-state reset; the native worker checks the event right before its input and
-          its foreground call, waits for the activation before it reports a refusal, and runs joined within 5 s, a
-          timeout cancelling what it has not done (VISIBLE-PACING-CERT-01 trap (1)). noctty's own startup activation
+          publishes nothing, whatever a driver's exit or a later matching read says. The copy takes the foreground
+          through a bounded call: a marked absolute mouse move to the cursor's own pixel unlocks it (a zero-delta move
+          never reaches the mouse hook; UNLOCK-HOOK-01), never an Alt tap (PROBE-ALT-TAP-01), then one
+          SetForegroundWindow, with no AttachThreadInput fallback, no BringWindowToTop and no keyboard-state reset; the
+          native worker checks the event right before its input and its foreground call, waits for the activation before
+          it reports a refusal, and runs joined within 5 s, a timeout cancelling what it has not done
+          (VISIBLE-PACING-CERT-01 trap (1)). noctty's own startup activation
           (Host.present) is not the harness's call and it cannot stop it: the foreground lock holds it back from a
           returning user under Microsoft's documented rules, except when no window holds the foreground, the user's
           input lands on the copy, or a right passes down the launch chain (inferred, not measured). The first
@@ -132,10 +135,11 @@ Its shell is the config's `command = direct:<System32>\cmd.exe /D`, the only com
 the driver checks none runs under the copy at the end). The config denies the clipboard, clears every default
 binding and binds nothing that copies. The copy's environment adds only GHOSTTY_LOG, NOCTTY_RENDER_TRACE_FILE,
 NOCTTY_RENDER_TRACE_LIVE and NOCTTY_BENCH_END_MARKER, never logged. Input is posted, never SendInput, except the
-visible run's zero-motion unlock and its VK_NONAME keyboard probe, each marked and behind the gate, and nothing
-attaches to another thread's input or resets key state; the visible series' hooks read only each event's flags and
-extra info, count it and pass it on. The outer half compares the real startup-attempts.json's, session-state.json's
-and the product jump list's size and time and the PSReadLine history's metadata before and after each run, and
+visible run's unlock (an absolute move to the cursor's own pixel) and its VK_NONAME keyboard probe, each marked and
+behind the gate, and nothing attaches to another thread's input or resets key state; the visible series' hooks read only
+each event's flags and extra info, count it and pass it on. The outer half compares the real startup-attempts.json's,
+session-state.json's and the product jump list's size and time and the PSReadLine history's metadata before and after
+each run, and
 records the clipboard sequence number before and after. The shared state guard deletes a measurement-identity jump
 list that did not exist before a run and whose creation and write times both fall inside it, whoever wrote it; run
 one measurement workload at a time (the frame-pacing mutex covers only this harness).
@@ -725,8 +729,9 @@ public static class FramePacingNative {
     // The visible run's foreground, bounded (test-harnesses.md VISIBLE-PACING-CERT-01 trap (1): these cross-thread
     // calls can wait on the target's UI thread with no bound). The window must be this copy's, not hung, and answer
     // WM_NULL within the bound first; the calls then run on a worker thread joined within the bound, and a timeout is
-    // an environment failure, never retried. The unlock is a zero-motion mouse input, not an Alt tap, which can leave
-    // the window in a menu loop that takes the next key (PROBE-ALT-TAP-01). The foreground is then one
+    // an environment failure, never retried. The unlock is a marked absolute mouse move to the cursor's own pixel
+    // (test-harnesses.md UNLOCK-HOOK-01: a zero-delta move never reaches the mouse hook), not an Alt tap, which can
+    // leave the window in a menu loop that takes the next key (PROBE-ALT-TAP-01). The foreground is then one
     // SetForegroundWindow, which Windows allows the process that sent the last input. There is no attach fallback
     // and no raising call: the lead on #741 had both removed, since attaching to the user's foreground thread resets
     // its key state and could clear a modifier a returning user holds.
@@ -753,11 +758,14 @@ public static class FramePacingNative {
         long tick = -1;
         var worker = new Thread(() => {
             try {
+                // The unlock aimed at the cursor's own pixel, before the gate (UNLOCK-HOOK-01).
+                var unlock = UnlockHere(marker);
+                if (unlock == null) { outcome = "unlock-unaimed"; return; }
                 long before = LastInputTick();
                 if (before < 0 || before != expectedTick) { outcome = "input-before-unlock"; return; }
                 WaitForSingleObject(mouse, 0); // an earlier marked event's signal: the next one must be this unlock's
                 if ((outcome = Halt(cancel, real, "real-input-before-unlock")) != null) return;
-                if (SendInput(1, UnlockInput(marker), Marshal.SizeOf<Input>()) != 1) { outcome = "unlock-not-inserted"; return; }
+                if (SendInput(1, unlock, Marshal.SizeOf<Input>()) != 1) { outcome = "unlock-not-inserted"; return; }
                 long now = WaitTickMove(before, 1000);
                 // The unlock's tick is the harness's own even when the hook missed it (Greptile on #741, as the probe).
                 if (now >= 0 && now != before) tick = now;
@@ -851,13 +859,36 @@ public static class FramePacingNative {
     public static bool IsForeground(IntPtr hwnd) { return GetForegroundWindow() == hwnd; }
     // Whether any window holds the foreground (Opus on #741: read right before the copy's launch).
     public static bool AnyForeground() { return GetForegroundWindow() != IntPtr.Zero; }
-    // The unlock: one zero-motion mouse input, MOUSEEVENTF_MOVE with every other field zero but the series' marker in
-    // its extra info; never a key, which can leave the window in a menu loop (PROBE-ALT-TAP-01), and never a motion.
-    static Input[] UnlockInput(IntPtr marker) {
+    // The unlock: one absolute mouse move to the cursor's own pixel (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
+    // MOUSEEVENTF_VIRTUALDESK, at the normalized coordinates nx, ny) with the series' marker in its extra info, so the
+    // cursor stays where it is. A zero-delta relative move registers as session input but never reaches a low-level
+    // mouse hook, so the hook could never prove itself alive with it (test-harnesses.md UNLOCK-HOOK-01, measured on
+    // the visible desktop). Never a key, which can leave the window in a menu loop (PROBE-ALT-TAP-01), and never a
+    // motion.
+    static Input[] UnlockInput(IntPtr marker, int nx, int ny) {
         var unlock = new Input[] { new Input { type = 0 } };
-        unlock[0].mouse.flags = 0x0001; // MOUSEEVENTF_MOVE, dx = dy = 0
+        unlock[0].mouse.dx = nx; unlock[0].mouse.dy = ny;
+        unlock[0].mouse.flags = 0xC001; // MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE
         unlock[0].mouse.extra = marker;
         return unlock;
+    }
+    // A pixel's normalized absolute coordinate on the virtual desktop (origin and size from SM_XVIRTUALSCREEN and
+    // SM_CXVIRTUALSCREEN, or their Y pair): the smallest value Windows maps back to that pixel, whether it floors or
+    // rounds n * size / 65536. Public so the contract can table it.
+    public static int Normalize(int pixel, int origin, int size) { return (int)Math.Ceiling((pixel - origin) * 65536.0 / size); }
+    [StructLayout(LayoutKind.Sequential)] struct CursorPoint { public int x, y; }
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out CursorPoint p);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    // The unlock aimed at the cursor's own pixel, read in physical pixels (per-monitor DPI awareness on the calling
+    // worker thread, so the cursor and the virtual desktop agree on a scaled display), or null when either cannot be
+    // read. Measured: the cursor ends where it started (UNLOCK-HOOK-01).
+    static Input[] UnlockHere(IntPtr marker) {
+        SetThreadDpiAwarenessContext(new IntPtr(-4)); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        CursorPoint p;
+        if (!GetCursorPos(out p)) return null;
+        int left = GetSystemMetrics(76), top = GetSystemMetrics(77), width = GetSystemMetrics(78), height = GetSystemMetrics(79);
+        if (width <= 0 || height <= 0) return null;
+        return UnlockInput(marker, Normalize(p.x, left, width), Normalize(p.y, top, height));
     }
     // The keyboard probe: VK_NONAME (0xFC) down, then up (flags 2), scan code 0, the series' marker in each.
     static KeyInput[] KeyProbeInput(IntPtr marker) {
@@ -868,8 +899,8 @@ public static class FramePacingNative {
     }
     // Every field of what the unlock and the probe give SendInput, for the contract (Sol on #741: the payload, not a
     // text pattern).
-    public static string UnlockPayload(IntPtr marker) {
-        var u = UnlockInput(marker);
+    public static string UnlockPayload(IntPtr marker, int nx, int ny) {
+        var u = UnlockInput(marker, nx, ny);
         return "count=" + u.Length + " type=" + u[0].type + " dx=" + u[0].mouse.dx + " dy=" + u[0].mouse.dy + " data=" + u[0].mouse.data +
             " flags=" + u[0].mouse.flags + " time=" + u[0].mouse.time + " extra=" + u[0].mouse.extra;
     }
@@ -1358,10 +1389,12 @@ function Get-FramePacingLockShortfall([long] $LockMs, [long] $NeedMs) {
     return $null
 }
 
-# The series' random marker for its own injected input (Opus on #741): nonzero, so a zero extra info never matches.
+# The series' random marker for its own injected input (Opus on #741): nonzero, so a zero extra info never matches,
+# and within 31 bits (test-harnesses.md UNLOCK-HOOK-01): an injected mouse event's extra info reaches a low-level hook
+# with only its low 32 bits, so a wider marker never matches the harness's own unlock.
 function New-FramePacingInputMarker {
-    $bytes = [byte[]]::new(8)
-    do { [Security.Cryptography.RandomNumberGenerator]::Fill($bytes); $marker = [BitConverter]::ToInt64($bytes, 0) } while ($marker -eq 0)
+    $bytes = [byte[]]::new(4)
+    do { [Security.Cryptography.RandomNumberGenerator]::Fill($bytes); $marker = [long]([BitConverter]::ToUInt32($bytes, 0) -band 0x7FFFFFFF) } while ($marker -eq 0)
     return $marker
 }
 

@@ -134,8 +134,8 @@ $framePacingRules = @(
         Mutation = @('if ($refusal) { throw', 'if ($false) { throw')
     }
     @{
-        Description = 'the series'' marker is random and nonzero (Opus on #741: a zero extra info must never match)'
-        Pattern = 'function New-FramePacingInputMarker \{\s+\$bytes = \[byte\[\]\]::new\(8\)\s+do \{ \[Security\.Cryptography\.RandomNumberGenerator\]::Fill\(\$bytes\); \$marker = \[BitConverter\]::ToInt64\(\$bytes, 0\) \} while \(\$marker -eq 0\)\s+return \$marker\s+\}'
+        Description = 'the series'' marker is random, nonzero (Opus on #741: a zero extra info must never match) and within 31 bits (UNLOCK-HOOK-01: an injected mouse event''s extra info reaches the hook with only its low 32 bits)'
+        Pattern = 'function New-FramePacingInputMarker \{\s+\$bytes = \[byte\[\]\]::new\(4\)\s+do \{ \[Security\.Cryptography\.RandomNumberGenerator\]::Fill\(\$bytes\); \$marker = \[long\]\(\[BitConverter\]::ToUInt32\(\$bytes, 0\) -band 0x7FFFFFFF\) \} while \(\$marker -eq 0\)\s+return \$marker\s+\}'
         Mutation = @(' } while ($marker -eq 0)', ' } while ($false)')
     }
     @{
@@ -424,8 +424,8 @@ $framePacingRules = @(
         Mutation = @('if (IsHungAppWindow(hwnd) || !Responsive(hwnd, (uint)boundMs)) return "hung";', '')
     }
     @{
-        Description = 'the foreground is unlocked by one zero-motion mouse input built in one place, marked with the series'' marker, never an Alt tap (PROBE-ALT-TAP-01), and only when SendInput inserted it'
-        Pattern = '(?s)if \(SendInput\(1, UnlockInput\(marker\), Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}.*?static Input\[\] UnlockInput\(IntPtr marker\) \{\s+var unlock = new Input\[\] \{ new Input \{ type = 0 \} \};\s+unlock\[0\]\.mouse\.flags = 0x0001;[^\r\n]*\s+unlock\[0\]\.mouse\.extra = marker;\s+return unlock;\s+\}'
+        Description = 'the foreground is unlocked by one marked absolute mouse move to the cursor''s own pixel, built in one place and aimed before the gate, never an Alt tap (PROBE-ALT-TAP-01) nor a zero-delta move the mouse hook never sees (UNLOCK-HOOK-01), and only when SendInput inserted it'
+        Pattern = '(?s)var unlock = UnlockHere\(marker\);\s+if \(unlock == null\) \{ outcome = "unlock-unaimed"; return; \}\s+long before = LastInputTick\(\);.*?if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}.*?static Input\[\] UnlockInput\(IntPtr marker, int nx, int ny\) \{\s+var unlock = new Input\[\] \{ new Input \{ type = 0 \} \};\s+unlock\[0\]\.mouse\.dx = nx; unlock\[0\]\.mouse\.dy = ny;\s+unlock\[0\]\.mouse\.flags = 0xC001;[^\r\n]*\s+unlock\[0\]\.mouse\.extra = marker;\s+return unlock;\s+\}.*?static Input\[\] UnlockHere\(IntPtr marker\) \{\s+SetThreadDpiAwarenessContext\(new IntPtr\(-4\)\);[^\r\n]*\s+CursorPoint p;\s+if \(!GetCursorPos\(out p\)\) return null;\s+int left = GetSystemMetrics\(76\), top = GetSystemMetrics\(77\), width = GetSystemMetrics\(78\), height = GetSystemMetrics\(79\);\s+if \(width <= 0 \|\| height <= 0\) return null;\s+return UnlockInput\(marker, Normalize\(p\.x, left, width\), Normalize\(p\.y, top, height\)\);\s+\}'
         Mutation = @('new Input { type = 0 }', 'new Input { type = 1 }')
     }
     @{
@@ -435,7 +435,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the native foreground checks the series'' tick (valid, and the series'') and the input watch on its worker right before its one input, and sends nothing when either moved (Sol, Opus and the lead on #741)'
-        Pattern = 'long before = LastInputTick\(\);\s+if \(before < 0 \|\| before != expectedTick\) \{ outcome = "input-before-unlock"; return; \}\s+WaitForSingleObject\(mouse, 0\);[^\r\n]*\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-unlock"\)\) != null\) return;\s+if \(SendInput\(1, UnlockInput\(marker\), Marshal\.SizeOf<Input>\(\)\) != 1\)'
+        Pattern = 'long before = LastInputTick\(\);\s+if \(before < 0 \|\| before != expectedTick\) \{ outcome = "input-before-unlock"; return; \}\s+WaitForSingleObject\(mouse, 0\);[^\r\n]*\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-unlock"\)\) != null\) return;\s+if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\)'
         Mutation = @('if (before < 0 || before != expectedTick) { outcome = "input-before-unlock"; return; }', '')
     }
     @{
@@ -485,7 +485,7 @@ $framePacingRules = @(
     }
     @{
         Description = 'the unlock must be seen twice before the foreground: a valid tick that moved, and the mouse hook''s sight of the marked event; then the tick is read again and the watch and cancellation checked, and activation is waited for before "refused" (CodeRabbit, Sol and the lead on #741)'
-        Pattern = '(?s)if \(SendInput\(1, UnlockInput\(marker\), Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+if \(LastInputTick\(\) != now\) \{ outcome = "input-before-foreground"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-foreground"\)\) != null\) return;\s+SetForegroundWindow\(hwnd\);\s+Responsive\(hwnd, 500\);\s+var activation = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+while \(GetForegroundWindow\(\) != hwnd && activation\.ElapsedMilliseconds < 500\) \{\s+if \(\(outcome = Halt\(cancel, real, "real-input-during-activation"\)\) != null\) return;\s+Thread\.Sleep\(10\);\s+\}\s+outcome = GetForegroundWindow\(\) == hwnd \? "ok" : "refused";'
+        Pattern = '(?s)if \(SendInput\(1, unlock, Marshal\.SizeOf<Input>\(\)\) != 1\) \{ outcome = "unlock-not-inserted"; return; \}\s+long now = WaitTickMove\(before, 1000\);(?:\s+//[^\r\n]*)*\s+if \(now >= 0 && now != before\) tick = now;\s+bool hookSaw = WaitForSingleObject\(mouse, 1000\) == 0;\s+if \(\(outcome = ProbeSeen\("unlock", before, now, hookSaw\)\) != null\) return;\s+if \(LastInputTick\(\) != now\) \{ outcome = "input-before-foreground"; return; \}\s+if \(\(outcome = Halt\(cancel, real, "real-input-before-foreground"\)\) != null\) return;\s+SetForegroundWindow\(hwnd\);\s+Responsive\(hwnd, 500\);\s+var activation = System\.Diagnostics\.Stopwatch\.StartNew\(\);\s+while \(GetForegroundWindow\(\) != hwnd && activation\.ElapsedMilliseconds < 500\) \{\s+if \(\(outcome = Halt\(cancel, real, "real-input-during-activation"\)\) != null\) return;\s+Thread\.Sleep\(10\);\s+\}\s+outcome = GetForegroundWindow\(\) == hwnd \? "ok" : "refused";'
         Mutation = @('if ((outcome = ProbeSeen("unlock", before, now, hookSaw)) != null) return;', '')
     }
     @{
@@ -915,7 +915,7 @@ foreach ($rule in $framePacingRules) {
 }
 
 # The foreground is taken in one place only and the keyboard probe sent from one, and the native layer sends two inputs,
-# the zero-motion unlock and the VK_NONAME probe (the lead on #741), each from its one SendInput declaration: no Alt
+# the unlock (an absolute move to the cursor's own pixel, UNLOCK-HOOK-01) and the VK_NONAME probe (the lead on #741), each from its one SendInput declaration: no Alt
 # (VK_MENU) and nothing typed through SendInput anywhere in the harness. Controls: a second call, and another input
 # added to the source, are both caught.
 function Test-FramePacingInputDiscipline([string] $Text) {
@@ -924,9 +924,9 @@ function Test-FramePacingInputDiscipline([string] $Text) {
     $sendInputs = [regex]::Matches($Text, '\bSendInput\(').Count
     return $foregroundCalls -eq 1 -and $probeCalls -eq 1 -and $sendInputs -eq 4 -and -not $Text.Contains('KEYEVENTF') -and -not $Text.Contains('VK_MENU') -and -not $Text.Contains('SendUnicodeText') -and -not $Text.Contains('SendKeys')
 }
-if (-not (Test-FramePacingInputDiscipline $framePacingText)) { throw 'The harness must take the foreground in one place and send no input but the one zero-motion unlock.' }
+if (-not (Test-FramePacingInputDiscipline $framePacingText)) { throw 'The harness must take the foreground in one place and send no input but the one unlock and the key probe.' }
 if (Test-FramePacingInputDiscipline ($framePacingText + "`n[FramePacingNative]::Foreground(`$h, 1, 1)")) { throw 'The input discipline check accepted a second foreground call.' }
-if (Test-FramePacingInputDiscipline ($framePacingText.Replace('if (SendInput(1, UnlockInput(marker),', 'SendInput(1, keys, 40); if (SendInput(1, UnlockInput(marker),'))) { throw 'The input discipline check accepted a third SendInput.' }
+if (Test-FramePacingInputDiscipline ($framePacingText.Replace('if (SendInput(1, unlock,', 'SendInput(1, keys, 40); if (SendInput(1, unlock,'))) { throw 'The input discipline check accepted a third SendInput.' }
 # No other input API at all (Opus on #741: a declared keybd_event with a numeric VK passed the old check): neither
 # keybd_event nor mouse_event, no cursor placement, no BlockInput, no key code for Alt. Each appended to the source
 # is caught.
@@ -1193,14 +1193,15 @@ $framePacingMemberPins = @(
         @{ Signature = 'public static IntPtr OpenMouseWatch(string eventName)'; Sha256 = '159b7ce4c47631883241b4759dc41fbe53a4ce168e17e07be1aa13b63e6c34ed' }
         @{ Signature = 'public static IntPtr OpenKeyWatch(string eventName)'; Sha256 = '73d5af8719166d57a9bd0fb47a3045750b85fb82f33d37b69cbbaf5f05c19c15' }
         @{ Signature = 'public static bool RealInputSignalled(IntPtr watch)'; Sha256 = '1921ddf3bf09c7aea7a5b5710f7f16f4006b309ed7b9206a0bb8940c49c065fc' }
-        @{ Signature = 'public static string Foreground(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr mouseWatch, IntPtr marker, out long unlockTick)'; Sha256 = '736b46b6c11c9e3faa5c7dd32776b200c37d67df60f6cc246d2dadd997de40af' }
+        @{ Signature = 'public static string Foreground(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr mouseWatch, IntPtr marker, out long unlockTick)'; Sha256 = '27fa38214ae279608835e24a8f833fb50851f5d6be2db419996f3d6aef1888e2' }
         @{ Signature = 'public static string KeyProbe(IntPtr hwnd, int pid, int boundMs, long expectedTick, IntPtr watch, IntPtr keyWatch, IntPtr marker, out long probeTick)'; Sha256 = 'd54a1c5579311d2b943f36453928d790aca899f364952249faebf760ed515548' }
         @{ Signature = 'static string Halt(ManualResetEvent cancel, IntPtr watch, string why)'; Sha256 = '42855e03813a7961e466546f15dcf67d8d454dd028bff3a74af4ee7aaf6a62b6' }
         @{ Signature = 'static long WaitTickMove(long before, int ms)'; Sha256 = '32ee3d13b32a364382c9b7165f6ce063514f2e25f4ed0074966adcae16476b3c' }
         @{ Signature = 'public static string ProbeSeen(string what, long before, long now, bool hookSaw)'; Sha256 = '3f9f59b1e4ce02d654024eb96be86aabf2ff85ae1df0a9fa462086583da1380c' }
         @{ Signature = 'public static bool IsForeground(IntPtr hwnd)'; Sha256 = '1b0c0e41083dc1ad1ab7b3a6f0f0e6cc7328e4b53b9580b86cb1431fe50d29ec' }
         @{ Signature = 'public static bool AnyForeground()'; Sha256 = '78b4b2029bf02381ef0c9518f62c7f7fc739f903e7f8f8330a407d9fb7680984' }
-        @{ Signature = 'static Input[] UnlockInput(IntPtr marker)'; Sha256 = 'bec16efdc1aebd7b05f19e8701e652d4a37dff70c1943a7cbb6e4ea0031eae71' }
+        @{ Signature = 'static Input[] UnlockInput(IntPtr marker, int nx, int ny)'; Sha256 = '333e7eae95bfba81ad231d91df0f87b305821189d1a9af33a5bb79d8e205ae76' }
+        @{ Signature = 'static Input[] UnlockHere(IntPtr marker)'; Sha256 = '56932270c69ed34c94583e95e4b791bec99f1487970c05812b7d26b8fe1fd893' }
         @{ Signature = 'static KeyInput[] KeyProbeInput(IntPtr marker)'; Sha256 = '70a417192acfcb6532d6d12c5f8fbe515e101fee13054cff88f83bfe586eda91' }
         @{ Signature = 'public static void PostKey(IntPtr h, int pid, int vk)'; Sha256 = '9cf7bc2816f4492123db1ed2270c65433a0c337cad627c2f128059d7a190e505' }
         @{ Signature = 'public static int DisplayPower(int ms)'; Sha256 = '2c687c50bea3d35f78d113c2481753582d52c27cddb3cb6a3a760d9f9a18fab7' }
@@ -3071,11 +3072,12 @@ Add-Type -TypeDefinition ($noWatchControl.Replace('public static class FramePaci
 if (Test-FramePacingOrdinal (($noWatchClass -as [type])::Foreground([IntPtr]::Zero, 0, 1000, 0, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero, [ref]$framePacingUnlock)) 'no-input-watch') { throw 'The no-watch control still returned no-input-watch.' }
 
 # The unlock's and the keyboard probe's payloads, read back from the arrays the workers send (Sol's mutation on #741:
-# a motion added to the zero-motion input), with the series' marker in each. The controls: dx = 20 added to the unlock,
-# and the probe's key changed to A, give other payloads.
+# a motion added to the input), with the series' marker in each. The unlock is one marked absolute move at the
+# coordinates it is given (UNLOCK-HOOK-01). The controls: the old zero-delta relative move, and the probe's key changed
+# to A, give other payloads.
 $framePacingMarker = [IntPtr]0x5EED
-$framePacingPayloadWanted = 'count=1 type=0 dx=0 dy=0 data=0 flags=1 time=0 extra=24301'
-if (-not (Test-FramePacingOrdinal ($framePacingProbe::UnlockPayload($framePacingMarker)) $framePacingPayloadWanted)) { throw "The unlock payload is $($framePacingProbe::UnlockPayload($framePacingMarker)), not one marked zero-motion MOUSEEVENTF_MOVE." }
+$framePacingPayloadWanted = 'count=1 type=0 dx=1234 dy=5678 data=0 flags=49153 time=0 extra=24301'
+if (-not (Test-FramePacingOrdinal ($framePacingProbe::UnlockPayload($framePacingMarker, 1234, 5678)) $framePacingPayloadWanted)) { throw "The unlock payload is $($framePacingProbe::UnlockPayload($framePacingMarker, 1234, 5678)), not one marked absolute MOUSEEVENTF_MOVE at its coordinates." }
 $framePacingProbeWanted = 'count=2 type=1 vk=252 scan=0 flags=0 time=0 extra=24301; type=1 vk=252 scan=0 flags=2 time=0 extra=24301'
 if (-not (Test-FramePacingOrdinal ($framePacingProbe::KeyProbePayload($framePacingMarker)) $framePacingProbeWanted)) { throw "The key probe's payload is $($framePacingProbe::KeyProbePayload($framePacingMarker)), not a marked VK_NONAME down and up." }
 $probeControl = $framePacingNative[0].Value.Replace('probe[0].keybd.vk = 0xFC;', 'probe[0].keybd.vk = 0x41;')
@@ -3083,11 +3085,46 @@ if ([string]::Equals($probeControl, $framePacingNative[0].Value, [StringComparis
 $probeClass = 'FramePacingProbeControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 Add-Type -TypeDefinition ($probeControl.Replace('public static class FramePacingNative', "public static class $probeClass"))
 if (Test-FramePacingOrdinal (($probeClass -as [type])::KeyProbePayload($framePacingMarker)) $framePacingProbeWanted) { throw 'The probe-payload check accepted another key.' }
-$payloadControl = $framePacingNative[0].Value.Replace('unlock[0].mouse.flags = 0x0001; // MOUSEEVENTF_MOVE, dx = dy = 0', 'unlock[0].mouse.flags = 0x0001; unlock[0].mouse.dx = 20;')
+$payloadControl = $framePacingNative[0].Value.Replace("unlock[0].mouse.dx = nx; unlock[0].mouse.dy = ny;`n        unlock[0].mouse.flags = 0xC001;", "unlock[0].mouse.flags = 0x0001;")
 if ([string]::Equals($payloadControl, $framePacingNative[0].Value, [StringComparison]::Ordinal)) { throw 'The unlock-payload control changed nothing.' }
 $payloadClass = 'FramePacingPayloadControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 Add-Type -TypeDefinition ($payloadControl.Replace('public static class FramePacingNative', "public static class $payloadClass"))
-if (Test-FramePacingOrdinal (($payloadClass -as [type])::UnlockPayload($framePacingMarker)) $framePacingPayloadWanted) { throw 'The unlock-payload check accepted a motion.' }
+if (Test-FramePacingOrdinal (($payloadClass -as [type])::UnlockPayload($framePacingMarker, 1234, 5678)) $framePacingPayloadWanted) { throw 'The unlock-payload check accepted the zero-delta relative move.' }
+# The unlock's aim (UNLOCK-HOOK-01): Normalize gives each pixel the smallest normalized value that Windows maps back to
+# it, whether it floors or rounds n * size / 65536, on a single display and on a virtual desktop with a negative
+# origin, and 0 at the origin. The control: a plain floor of pixel * 65536 / size, which misses under floor mapping.
+function Get-FramePacingNormalizeMiss([type] $Class) {
+    foreach ($desk in @(@{ Origin = 0; Size = 3840 }, @{ Origin = 0; Size = 2160 }, @{ Origin = -1920; Size = 5760 }, @{ Origin = 0; Size = 1366 })) {
+        if ($Class::Normalize($desk.Origin, $desk.Origin, $desk.Size) -ne 0) { return "origin of $($desk.Size)" }
+        for ($pixel = $desk.Origin; $pixel -lt $desk.Origin + $desk.Size; $pixel += 7) {
+            $n = $Class::Normalize($pixel, $desk.Origin, $desk.Size)
+            if ($n -lt 0 -or $n -gt 65535) { return "pixel $pixel of $($desk.Size): $n out of range" }
+            $floored = $desk.Origin + [Math]::Floor($n * $desk.Size / 65536.0); $rounded = $desk.Origin + [Math]::Round($n * $desk.Size / 65536.0)
+            if ($floored -ne $pixel -or $rounded -ne $pixel) { return "pixel $pixel of $($desk.Size): $n maps to $floored (floor) or $rounded (round)" }
+        }
+    }
+    return $null
+}
+$normalizeMiss = Get-FramePacingNormalizeMiss $framePacingProbe
+if ($normalizeMiss) { throw "The unlock's aim misses: $normalizeMiss." }
+$normalizeControl = $framePacingNative[0].Value.Replace('return (int)Math.Ceiling((pixel - origin) * 65536.0 / size);', 'return (int)Math.Floor((pixel - origin) * 65536.0 / size);')
+if ([string]::Equals($normalizeControl, $framePacingNative[0].Value, [StringComparison]::Ordinal)) { throw 'The aim control changed nothing.' }
+$normalizeClass = 'FramePacingAimControl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+Add-Type -TypeDefinition ($normalizeControl.Replace('public static class FramePacingNative', "public static class $normalizeClass"))
+if ($null -eq (Get-FramePacingNormalizeMiss ($normalizeClass -as [type]))) { throw 'The aim cases accepted a plain floor.' }
+# The marker's width (UNLOCK-HOOK-01): 2,000 markers from the harness's own generator, each nonzero and within 31 bits.
+# The control: the old 64-bit generator, whose markers a low-level mouse hook never sees whole.
+function Get-FramePacingMarkerMiss([string] $GeneratorText) {
+    . ([scriptblock]::Create($GeneratorText))
+    for ($i = 0; $i -lt 2000; $i++) { $m = New-FramePacingInputMarker; if ($m -le 0 -or $m -gt 0x7FFFFFFF) { return "marker $m" } }
+    return $null
+}
+$markerText = Get-FramePacingFunctionText $framePacingAst 'New-FramePacingInputMarker' 'bench-frame-pacing.ps1'
+$markerMiss = Get-FramePacingMarkerMiss $markerText
+if ($markerMiss) { throw "The series' marker is not a nonzero 31-bit value: $markerMiss." }
+$markerControl = $markerText.Replace('$bytes = [byte[]]::new(4)', '$bytes = [byte[]]::new(8)').Replace('$marker = [long]([BitConverter]::ToUInt32($bytes, 0) -band 0x7FFFFFFF)', '$marker = [BitConverter]::ToInt64($bytes, 0)')
+if ([string]::Equals($markerControl, $markerText, [StringComparison]::Ordinal)) { throw 'The marker-width control changed nothing.' }
+if ($null -eq (Get-FramePacingMarkerMiss $markerControl)) { throw 'The marker cases accepted the old 64-bit marker.' }
 
 # The owned job, run for real (Sol's mutation on #741: the driver resumed without its job): LaunchDriver starts
 # System32's cmd.exe /D /C exit 0, suspended, on a private desktop of this check's own, and it must come back a member
@@ -3216,4 +3253,4 @@ if ($framePacingPwsh) {
     if (Test-Path -LiteralPath $missingRepo) { throw 'The refused frame-pacing run created its run root.' }
     $framePacingBenchCase = 'bench exits (-Runs 51 refused by the wrapper; a refused measure repo exits 1 and names the repo after frame-pacing:)'
 } else { $framePacingBenchCase = 'bench exits skipped (no pwsh.exe)' }
-Write-Host "Frame-pacing harness contract: $framePacingMutations rules, each with a rejected mutation; $framePacingSharedCount shared pieces identical to #739's and bench-windows.ps1's; input discipline (controls: a second foreground, a third SendInput; $($framePacingInputApis.Count) other input APIs, each caught); every native input and foreground call behind the worker's stop check, found in the comment- and string-free C# with any spacing, with no attach, key-state reset or raise (Opus's N1, a same-line second call, a dropped check, an added attach, an added raise and a spaced call in IsForeground as controls); each worker's tick set once (control); every posted key behind a gate (Opus's R6 as the control); the keyboard probe's encoder test in win32/input.zig; the hooks reading only flags and extra info, unhooked in a finally and started only on the visible path (Sol's three mutations among the controls); $($framePacingMemberPins.Count) hook and foreground members pinned, with both gates' RealInputSeen ($($framePacingHookControls.Count) mutations as controls: Opus's ten, R1 and the marker ignored); forbidden forms ($($framePacingForbidden.Count), each caught); trace protocol against consts.zig, render_trace.zig and bench_marker.zig; constants pinned; $($framePacingCases -join '; '); native layout $framePacingLayout (7 controls); the native foreground without a watch (control); the outer half's supervision (the latch terminates the job as the next action, checked on the source with a 250 ms grace as the control, and returns with a driver that never ends inside a 10 s watchdog, its close $([Math]::Round([double]$script:framePacingSupervisionCloseMs, 3)) ms after the observation here, reported not judged; the latch wins over a driver that ended, with the latch after the driver as the control; a dry run waits on the driver alone); one tick read (no PowerShell code names a native tick read but Read-FramePacingInputTick, called, invoked or by reflection; GetLastInputInfo declared once and named only in its two native wrappers, with no string, EntryPoint or loaded address naming it; a direct, an .Invoke() and a reflection read, a third wrapper, an EntryPoint alias and a method group as the controls); every driver wait polled (a scan for any class's waits, Thread.Sleep, WaitOne, sleeps and load readings over 100 ms, the old quit wait, Opus's P9 and P10, an unbounded WaitOne and a positional sleep as its controls; the process wait stops within the wait on a stand-in gate's input, a wait without its poll as the control); desktop assignments (control); DesktopRefusal ($($framePacingRefusalCases.Count) cases; Opus's M4, M5/M6 and M21 compiled as controls); unlock and key-probe payloads (controls); $framePacingJobCase; $framePacingDesktopCase; $framePacingBenchCase"
+Write-Host "Frame-pacing harness contract: $framePacingMutations rules, each with a rejected mutation; $framePacingSharedCount shared pieces identical to #739's and bench-windows.ps1's; input discipline (controls: a second foreground, a third SendInput; $($framePacingInputApis.Count) other input APIs, each caught); every native input and foreground call behind the worker's stop check, found in the comment- and string-free C# with any spacing, with no attach, key-state reset or raise (Opus's N1, a same-line second call, a dropped check, an added attach, an added raise and a spaced call in IsForeground as controls); each worker's tick set once (control); every posted key behind a gate (Opus's R6 as the control); the keyboard probe's encoder test in win32/input.zig; the hooks reading only flags and extra info, unhooked in a finally and started only on the visible path (Sol's three mutations among the controls); $($framePacingMemberPins.Count) hook and foreground members pinned, with both gates' RealInputSeen ($($framePacingHookControls.Count) mutations as controls: Opus's ten, R1 and the marker ignored); forbidden forms ($($framePacingForbidden.Count), each caught); trace protocol against consts.zig, render_trace.zig and bench_marker.zig; constants pinned; $($framePacingCases -join '; '); native layout $framePacingLayout (7 controls); the native foreground without a watch (control); the outer half's supervision (the latch terminates the job as the next action, checked on the source with a 250 ms grace as the control, and returns with a driver that never ends inside a 10 s watchdog, its close $([Math]::Round([double]$script:framePacingSupervisionCloseMs, 3)) ms after the observation here, reported not judged; the latch wins over a driver that ended, with the latch after the driver as the control; a dry run waits on the driver alone); one tick read (no PowerShell code names a native tick read but Read-FramePacingInputTick, called, invoked or by reflection; GetLastInputInfo declared once and named only in its two native wrappers, with no string, EntryPoint or loaded address naming it; a direct, an .Invoke() and a reflection read, a third wrapper, an EntryPoint alias and a method group as the controls); every driver wait polled (a scan for any class's waits, Thread.Sleep, WaitOne, sleeps and load readings over 100 ms, the old quit wait, Opus's P9 and P10, an unbounded WaitOne and a positional sleep as its controls; the process wait stops within the wait on a stand-in gate's input, a wait without its poll as the control); desktop assignments (control); DesktopRefusal ($($framePacingRefusalCases.Count) cases; Opus's M4, M5/M6 and M21 compiled as controls); unlock and key-probe payloads, the unlock's aim on four desktops and the marker's 31-bit width (UNLOCK-HOOK-01; the zero-delta move, a plain floor and the 64-bit marker among the controls); $framePacingJobCase; $framePacingDesktopCase; $framePacingBenchCase"

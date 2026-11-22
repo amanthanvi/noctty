@@ -1651,9 +1651,14 @@ Two modes:
   under 30% busy (the driver waits up to `-QuietWaitSeconds` and launches
   nothing when it never was) and again right before the window, with no
   screen saver then either; each reading is acted on at once.
-- The foreground: a zero-motion mouse input unlocks it, never an Alt tap,
-  then one `SetForegroundWindow`, which Windows allows the process that sent
-  the last input. There is no `AttachThreadInput` fallback, no
+- The foreground: a marked absolute mouse move to the cursor's own pixel
+  unlocks it, never an Alt tap, then one `SetForegroundWindow`, which Windows
+  allows the process that sent the last input. The cursor stays where it is.
+  A zero-delta relative move also counts as input, but it never reaches a
+  low-level mouse hook, so the hook could not see the unlock (test-harnesses.md
+  UNLOCK-HOOK-01). The series' marker is a nonzero 31-bit value, since an
+  injected mouse event's extra info reaches the hook with only its low 32
+  bits. There is no `AttachThreadInput` fallback, no
   `BringWindowToTop` and no keyboard-state reset anywhere: attaching to the
   user's foreground thread resets its key state and could clear a modifier a
   returning user holds. The native worker checks the event right before its
