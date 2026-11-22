@@ -217,6 +217,14 @@ jobs:
           SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
         run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind $(if ($env:SELFTEST_OUTCOME -ceq 'failure') { 'helper-self-test' } else { 'suite-no-result' }) -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden')
 
+      - name: Record result scope
+        if: always()
+        shell: pwsh
+        run: |
+          $receipts = Join-Path $env:RUNNER_TEMP 'gui-hidden/receipts'
+          [void][IO.Directory]::CreateDirectory($receipts)
+          'This artifact covers the hidden-desktop runner result only. See the Actions job for the thread-role comparison and controls.' | Set-Content -LiteralPath (Join-Path $receipts 'scope.txt')
+
       # The result and the receipts only (design v7 §4.5's allowlist): no log directory, screen
       # capture, process listing, path, command line or environment value.
       - name: Upload the suite's result and receipts
