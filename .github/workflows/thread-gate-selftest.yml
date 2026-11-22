@@ -9,8 +9,6 @@ on:
       - "ci/**"
       - ".github/workflows/test.yml"
       - ".github/workflows/thread-gate-selftest.yml"
-  push:
-    branches: [w1a/1a5-selftest-split]
 
 permissions:
   contents: read
