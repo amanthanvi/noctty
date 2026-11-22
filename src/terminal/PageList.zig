@@ -1306,11 +1306,13 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
         },
 
         .lt => {
+            const row_change = std.math.order(opts.rows orelse self.rows, self.rows);
+            const old_active_top: ?usize = if (row_change == .lt) self.total_rows - self.rows else null;
             var cols_opts = opts;
             // Growing rows can prune whole history pages, so even an
             // absolute row number cannot identify the same cursor afterward.
             const temporary_cursor_pin = track: {
-                if ((opts.rows orelse self.rows) == self.rows) break :track null;
+                if (row_change != .gt) break :track null;
                 const cursor = if (cols_opts.cursor) |*c| c else break :track null;
                 if (cursor.pin != null) break :track null;
                 const pin_value = self.pin(.{ .active = .{
@@ -1332,11 +1334,19 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
             });
 
             // Reflow counts rows below the cursor in the new active area.
-            if (cols_opts.cursor) |*c| if (c.pin) |p| {
-                if (self.pointFromPin(.active, p.*)) |active| {
-                    c.y = @intCast(active.active.y);
+            if (cols_opts.cursor) |*c| {
+                if (c.pin) |p| {
+                    if (self.pointFromPin(.active, p.*)) |active| {
+                        c.y = @intCast(active.active.y);
+                    }
+                } else if (old_active_top) |top| {
+                    // Keep the coordinate remap on shrink. Tracking the old
+                    // row would let reflow recover it by discarding rows below.
+                    const screen_y = top + c.y;
+                    const new_active_top = self.total_rows - self.rows;
+                    if (screen_y >= new_active_top) c.y = @intCast(screen_y - new_active_top);
                 }
-            };
+            }
 
             try self.resizeCols(cols, cols_opts);
         },
@@ -16947,6 +16957,27 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
     try testing.expect(page.getCells(end_row)[s.cols - 1].wide != .spacer_head);
     try testing.expectEqual(@as(usize, 0), page.styles.count());
     try page.verifyIntegrity(alloc);
+}
+
+test "PageList resize preserves populated rows when shrinking with a coordinate-only cursor" {
+    const testing = std.testing;
+    var s = try init(testing.allocator, 4, 3, null);
+    defer s.deinit();
+
+    for ("ABC", 0..) |mark, y| {
+        s.getCell(.{ .active = .{ .y = @intCast(y) } }).?.cell.* = .init(mark);
+    }
+
+    try s.resize(.{
+        .cols = 3,
+        .rows = 2,
+        .pull_scrollback = false,
+        .cursor = .{ .x = 0, .y = 0 },
+    });
+
+    try testing.expectEqual(@as(u21, 'A'), s.getCell(.{ .history = .{} }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'B'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{ .y = 1 } }).?.cell.content.codepoint);
 }
 
 test "PageList resize keeps a coordinate-only cursor when height growth prunes history" {
