@@ -54,6 +54,7 @@ pub const RequestKind = enum(u8) {
     focus_timed = 13,
     send_text_timed = 14,
     launch_layout_timed = 15,
+    toggle_quick_terminal_timed = 16,
 };
 
 pub const PerformActionPayload = struct {
@@ -240,11 +241,19 @@ pub fn encodeNewWindowRequest(
 }
 
 pub fn encodeListWindowsRequest(alloc: Allocator, deadline_ms: u64) ![]u8 {
+    return encodeDeadlineOnlyRequest(alloc, .list_windows_timed, deadline_ms);
+}
+
+pub fn encodeToggleQuickTerminalRequest(alloc: Allocator, deadline_ms: u64) ![]u8 {
+    return encodeDeadlineOnlyRequest(alloc, .toggle_quick_terminal_timed, deadline_ms);
+}
+
+fn encodeDeadlineOnlyRequest(alloc: Allocator, kind: RequestKind, deadline_ms: u64) ![]u8 {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(RequestKind.list_windows_timed));
+    try encoded.append(alloc, @intFromEnum(kind));
     try appendU64(&encoded, alloc, deadline_ms);
 
     return try encoded.toOwnedSlice(alloc);
@@ -449,6 +458,10 @@ pub fn decodeListWindowsDeadline(pipe: Pipe, timed: bool) !u64 {
     try readExactUntil(pipe, &trailer, io_deadline_ms);
     if (readU32(&trailer) != 0) return error.InvalidIpcRequest;
     return std.math.maxInt(u64);
+}
+
+pub fn decodeToggleQuickTerminalDeadline(pipe: Pipe) !u64 {
+    return decodeAutomationDeadline(pipe, true, deadline());
 }
 
 pub fn decodePerformActionPayload(
@@ -1223,6 +1236,26 @@ test "win32 IPC deadline patching stays codec-owned" {
         error.InvalidIpcRequest,
         setAutomationRequestDeadline(request[0..12], test_deadline_ms),
     );
+}
+
+test "win32 toggle-quick-terminal IPC encodes and decodes the deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const request = try encodeToggleQuickTerminalRequest(alloc, 0);
+    defer alloc.free(request);
+    try setAutomationRequestDeadline(request, test_deadline_ms);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("toggle-quick-terminal.bin", .{ .read = true });
+    defer file.close();
+    try file.writeAll(request);
+    try file.seekTo(0);
+
+    const pipe: Pipe = .{ .handle = file.handle };
+    try std.testing.expectEqual(RequestKind.toggle_quick_terminal_timed, try decodeRequestKind(pipe));
+    try std.testing.expectEqual(test_deadline_ms, try decodeToggleQuickTerminalDeadline(pipe));
 }
 
 test "win32 launch-layout IPC encode decode round trip" {

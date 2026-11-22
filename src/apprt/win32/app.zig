@@ -5167,11 +5167,12 @@ pub const App = struct {
                 return try spawnWindowProcess(alloc, target, value);
             },
 
-            // Upstream's +toggle-quick-terminal (apprt/ipc.zig at 74d0c72fd).
-            // Forwarding it to the running instance is adaptation C2 (PLAN.md
-            // §6.5, step 1A.5: an IPC server arm that calls the existing Win32
-            // action); until then the CLI reports it as unsupported here.
-            .toggle_quick_terminal => return false,
+            .toggle_quick_terminal => {
+                const elevated = try win32_elevation.isProcessElevated();
+                const pipe_name = try resolveIpcPipeNameForTarget(alloc, target, elevated);
+                defer alloc.free(pipe_name);
+                return ipc_server.sendToggleQuickTerminalIpc(alloc, pipe_name, elevated, response_timeout_ms);
+            },
         }
     }
 
@@ -5275,6 +5276,7 @@ pub const App = struct {
 
     pub fn performAutomationCommand(self: *App, command: apprt.ipc.AutomationCommand) !void {
         switch (command) {
+            .toggle_quick_terminal => _ = try self.performAction(.app, .toggle_quick_terminal, {}),
             .new_tab => |value| {
                 if (value.working_directory) |cwd| {
                     if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
