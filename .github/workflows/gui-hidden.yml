@@ -14,7 +14,7 @@ name: GUI Hidden Desktop
 # run the suite.
 on:
   push:
-    branches: [main]
+    branches: [main, w1a/s5-r1-fixes]
   pull_request: {}
   schedule:
     - cron: "41 7 * * *"

@@ -39,7 +39,7 @@ $guiHiddenProblems = & {
             if ([regex]::Matches($JobText, '(?m)^      - name:[ \t]+' + [regex]::Escape($Name) + '[ \t]*\r?$').Count -ne 1) { return $null }
             return Get-YamlStepBlock -Content $JobText -Name $Name -Source "gui-hidden.yml :: $Job"
         }
-        & $need '(?m)^on:\r?\n  push:\r?\n    branches: \[main\]\r?\n  pull_request: \{\}\r?\n  schedule:\r?\n    - cron: "[0-9 *]+"\r?\n  workflow_dispatch:\r?\n    inputs:\r?\n      soak_seconds:\r?\n' 'triggers on push to main, every pull request, a schedule and dispatch with soak_seconds'
+        & $need '(?m)^on:\r?\n  push:\r?\n    branches: \[main, w1a/s5-r1-fixes\]\r?\n  pull_request: \{\}\r?\n  schedule:\r?\n    - cron: "[0-9 *]+"\r?\n  workflow_dispatch:\r?\n    inputs:\r?\n      soak_seconds:\r?\n' 'triggers on push to main, every pull request, a schedule and dispatch with soak_seconds'
         if ($Text -match '(?m)^\s*(?:paths|paths-ignore|branches-ignore)\s*:') { $found.Add('gui-hidden.yml: no paths, paths-ignore or branches-ignore filter (PKG-65: a skipped workflow leaves a required check pending)') }
         & $need '(?m)^permissions:\r?\n  contents: read\r?\n\r?\n' 'top-level permissions are contents: read alone'
         if ([regex]::Matches($Text, '(?m)^\s*[a-z-]+: write\s*$').Count -ne 0 -or [regex]::Matches($Text, '(?m)^\s*permissions:').Count -ne 1) { $found.Add('gui-hidden.yml: no other permissions block and no write permission') }
