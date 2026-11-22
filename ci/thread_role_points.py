@@ -24,8 +24,8 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   ENTRY            in the function a counted registry entry's spawn names, with the entry's role, as the target's
                    eager first statement, so it runs before anything else the thread does;
   and otherwise fails UNREGISTERED-POINT. An EAGER FIRST STATEMENT (`File.scope_statement`) is the body's first
-  statement, beginning with the call itself (`const|var NAME [: T] = R.enter(`, `_ = R.enter(` or `R.enter(`, or
-  `fixture`) and ending with it (`...);`): a `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
+  statement, beginning with the call itself (`const|var NAME [: T] = R.enter(`, or
+  `fixture`) and ending with it (`...);`) followed by `defer NAME.exit();`: a `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
   wrapper never counts, since a deferred call runs at the exit and a guarded one may never run (stone round 4:
   Sol's Medium 1, Opus L1). Only `defer` and `errdefer` statements, which run nothing where they stand, may come
   before it (Surface.zig's `Click.run`). The scope must also set a role (`sets_role`): its receiver the module or
@@ -164,11 +164,13 @@ class File:
                           "comptime", "and", "or", "return", "break", "continue", "suspend", "nosuspend"))
 
     def scope_statement(self, k, q):
-        """Whether the role call whose op is token q is the eager first statement of function k's body: the
-        statement right after the body's `{` begins with the call itself, as `const|var NAME [: T] = R.op(`,
-        `_ = R.op(` or `R.op(`, and ends with it (`...);`, so no `.exit()` chained on it). A `defer`, `errdefer`,
-        `if`, `while`, `orelse`, `catch` or any other wrapper, and any statement before it, makes it none: a deferred
-        call runs at the function's exit and a guarded one may never run (stone round 4: Sol's Medium 1, Opus L1)."""
+        """Whether the role call whose op is token q is the eager first statement of function k's body, a scope
+        that covers it: the statement right after the body's `{` begins with the call itself, as
+        `const|var NAME [: T] = R.op(`, and ends with it (`...);`, so no `.exit()` chained on it), and the next
+        statement is `defer NAME.exit();`. A `defer`, `errdefer`, `if`, `while`, `orelse`, `catch` or any other
+        wrapper, and any statement before it, makes it none: a deferred call runs at the function's exit and a
+        guarded one may never run (stone round 4: Sol's Medium 1, Opus L1; round 5: Opus L4). Only `defer` and
+        `errdefer` statements may precede it (decision 15); they run after the scope's own exit, LIFO."""
         body = self.fns[k]["body"]
         toks, n = self.toks, len(self.toks)
         if body is None or q < 2 or not (body[0] < q <= body[1]) or not zigtok.is_op(toks[q - 1], ".") \
@@ -201,20 +203,20 @@ class File:
                 return False   # the call is inside the deferred statement
             s = r
         prefix = toks[s:q - 2]   # the statement's tokens before the receiver
-        if prefix:
-            if len(prefix) == 2 and prefix[0].kind == "identifier" and prefix[0].text == "_" \
-                    and zigtok.is_op(prefix[1], "="):
-                pass
-            elif (len(prefix) >= 3 and prefix[0].kind == "keyword" and prefix[0].text in ("const", "var")
-                  and prefix[1].kind == "identifier" and zigtok.is_op(prefix[-1], "=")
-                  and (len(prefix) == 3 or (zigtok.is_op(prefix[2], ":") and len(prefix) > 4
-                                            and not any(zigtok.is_op(t, "=", ";", "{", "}") or t.text in self.WRAPPERS
-                                                        for t in prefix[3:-1])))):
-                pass
-            else:
-                return False
+        if not (len(prefix) >= 3 and prefix[0].kind == "keyword" and prefix[0].text in ("const", "var")
+                and prefix[1].kind == "identifier" and zigtok.is_op(prefix[-1], "=")
+                and (len(prefix) == 3 or (zigtok.is_op(prefix[2], ":") and len(prefix) > 4
+                                          and not any(zigtok.is_op(t, "=", ";", "{", "}") or t.text in self.WRAPPERS
+                                                      for t in prefix[3:-1])))):
+            return False
         close = zigtok.match_paren(toks, q + 1)
-        return close + 1 < n and zigtok.is_op(toks[close + 1], ";")
+        if not (close + 1 < n and zigtok.is_op(toks[close + 1], ";")):
+            return False
+        # The scope covers the body: its exit is the very next statement, `defer NAME.exit();` (stone round 5, Opus
+        # L4), so no `NAME.exit();` ends it early and nothing runs between the enter and the defer.
+        name, r = prefix[1].text, close + 2
+        want = ("defer", name, ".", "exit", "(", ")", ";")
+        return r + len(want) <= n and all(toks[r + j].text == w for j, w in enumerate(want))
 
     def ident_index(self):
         """Each identifier's token positions, once."""
