@@ -958,8 +958,10 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         # The renderer the copies used: the number of the leaf's noctty log files that hold the OpenGL-to-D3D11 fallback
         # (renderer/Windows.zig's warning; counted, never copied), and the backends that started and the attempts
         # before them, read from the same logs (Get-GuiHiddenRendererStartups).
+        # A run directory that holds a reparse point already fails the leaf, and its logs are not read, so the runner
+        # never reads through a link the leaf made (CodeRabbit on #740).
         $logs = Join-Path $run "sandbox-$token\logs"
-        $logTexts = @(Get-ChildItem -LiteralPath $logs -Filter '*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { [IO.File]::ReadAllText($_.FullName) })
+        $logTexts = @(if ($record.reparsePoints -eq 0) { Get-ChildItem -LiteralPath $logs -Filter '*.log' -File -ErrorAction SilentlyContinue | ForEach-Object { [IO.File]::ReadAllText($_.FullName) } })
         $record.rendererFallbackLogs = @($logTexts | Where-Object { $_.Contains('; trying the Direct3D 11 beta') }).Count
         $rendererStartups = Get-GuiHiddenRendererStartups $logTexts
         $record.rendererObserved = @($rendererStartups.observed)

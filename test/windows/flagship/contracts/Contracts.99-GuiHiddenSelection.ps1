@@ -89,6 +89,9 @@ $guiHiddenProblems = & {
             }
             return , $found.ToArray()
         }
+        # Both uploads list exactly these three patterns, one per line: the upload action reads one pattern a line, so a
+        # line that holds all three joined by '|' matches nothing (CodeRabbit on #740: a '|' join accepted that line).
+        $expectedUpload = @('${{ runner.temp }}/gui-hidden/result.json', '${{ runner.temp }}/gui-hidden/result.json.sha256', '${{ runner.temp }}/gui-hidden/receipts/**') -join "`n"
         $changesPublish = & $findStep $changes 'Publish an error result when the selection failed' 'changes'
         $changesUpload = & $findStep $changes 'Upload the selection''s error result' 'changes'
         $changesTestsAt = $changes.IndexOf('      - name: GUI selection tests (walker, selection)', [StringComparison]::Ordinal)
@@ -98,7 +101,7 @@ $guiHiddenProblems = & {
             $changesPublish -notmatch '(?m)^        run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error\.ps1 -Kind gui-selection -Out \(Join-Path \$env:RUNNER_TEMP ''gui-hidden''\)\s*$' -or
             $null -eq $changesUpload -or $changesUpload -notmatch '(?m)^        if: failure\(\)\s*$' -or
             $changesUpload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
-            ((& $uploadPaths $changesUpload) -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**' -or
+            ((& $uploadPaths $changesUpload) -join "`n") -cne $expectedUpload -or
             $changesUpload -notmatch '(?m)^          retention-days: 90\s*$' -or
             $changesPublish -match '(?m)^        continue-on-error:' -or $changesUpload -match '(?m)^        continue-on-error:' -or
             $changesTestsAt -lt 0 -or $changesPublishAt -lt $changesTestsAt -or $changesUploadAt -lt $changesPublishAt) {
@@ -135,7 +138,7 @@ $guiHiddenProblems = & {
             $run -match '(?m)^        (?:if|continue-on-error):') { $found.Add('gui-hidden.yml: the suite step runs the runner with -Build into RUNNER_TEMP\gui-hidden, unconditionally') }
         $upload = Get-YamlStepBlock -Content $suite -Name 'Upload the suite''s result and receipts' -Source 'gui-hidden.yml :: suite'
         $paths = & $uploadPaths $upload
-        if (($paths -join '|') -cne '${{ runner.temp }}/gui-hidden/result.json|${{ runner.temp }}/gui-hidden/result.json.sha256|${{ runner.temp }}/gui-hidden/receipts/**') { $found.Add('gui-hidden.yml: the upload holds exactly the result, its hash and the receipts (design §4.5 allowlist), no log directory') }
+        if (($paths -join "`n") -cne $expectedUpload) { $found.Add('gui-hidden.yml: the upload holds exactly the result, its hash and the receipts (design §4.5 allowlist), no log directory') }
         if ($upload -notmatch '(?m)^        if: always\(\)\s*$' -or $upload -notmatch '(?m)^          name: gui-hidden-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\s*$' -or
             $upload -notmatch '(?m)^          if-no-files-found: warn\s*$') { $found.Add('gui-hidden.yml: the upload runs always, is named per run and attempt, and warns on no files') }
         if ([regex]::Matches($upload, '(?m)^          retention-days: 90\s*$').Count -ne 1 -or [regex]::Matches($Text, 'retention-days:').Count -ne 2 -or
@@ -185,6 +188,8 @@ $guiHiddenProblems = & {
         @{ Name = 'the result''s hash left out of the suite''s upload'; Old = "            `${{ runner.temp }}/gui-hidden/result.json.sha256`n            `${{ runner.temp }}/gui-hidden/receipts/**`n          # Release evidence"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n          # Release evidence" }
         @{ Name = 'the result''s hash left out of the selection''s upload'; Old = "            `${{ runner.temp }}/gui-hidden/result.json.sha256`n            `${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:"; New = "            `${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:" }
         @{ Name = 'the selection''s upload paths folded into one string'; Old = "      - name: Upload the selection's error result`n        if: failure()`n        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2`n        with:`n          name: gui-hidden-`${{ github.run_id }}-`${{ github.run_attempt }}`n          path: |`n"; New = "      - name: Upload the selection's error result`n        if: failure()`n        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2`n        with:`n          name: gui-hidden-`${{ github.run_id }}-`${{ github.run_attempt }}`n          path: >`n" }
+        @{ Name = 'the suite''s upload paths on one line joined by |'; Old = "            `${{ runner.temp }}/gui-hidden/result.json`n            `${{ runner.temp }}/gui-hidden/result.json.sha256`n            `${{ runner.temp }}/gui-hidden/receipts/**`n          # Release evidence"; New = "            `${{ runner.temp }}/gui-hidden/result.json|`${{ runner.temp }}/gui-hidden/result.json.sha256|`${{ runner.temp }}/gui-hidden/receipts/**`n          # Release evidence" }
+        @{ Name = 'the selection''s upload paths on one line joined by |'; Old = "            `${{ runner.temp }}/gui-hidden/result.json`n            `${{ runner.temp }}/gui-hidden/result.json.sha256`n            `${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:"; New = "            `${{ runner.temp }}/gui-hidden/result.json|`${{ runner.temp }}/gui-hidden/result.json.sha256|`${{ runner.temp }}/gui-hidden/receipts/**`n          retention-days: 90`n          if-no-files-found: warn`n`n  suite:" }
         @{ Name = 'no error result when the selection failed'; Old = "      - name: Publish an error result when the selection failed`n"; New = "      - name: Publish nothing when the selection failed`n" }
         @{ Name = 'the selection''s error result published through the runner'; Old = 'run: pwsh -NoProfile -File test/windows/gui-hidden-publish-error.ps1 -Kind gui-selection'; New = 'run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -PublishError gui-selection' }
         @{ Name = 'the selection''s upload run on every run'; Old = "      - name: Upload the selection's error result`n        if: failure()`n"; New = "      - name: Upload the selection's error result`n        if: always()`n" }
