@@ -9675,6 +9675,25 @@ test "Screen: resize more rows, less cols with reflow with scrollback" {
     }
 }
 
+test "Screen: resize more rows, less cols pulls scrollback like separate resizes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]bool{ true, false }) |pull| {
+        var s = try init(alloc, .{ .cols = 5, .rows = 2, .max_scrollback = null });
+        defer s.deinit();
+        try s.testWriteString("1A\n2B\n3C\n");
+        try testing.expectEqual(1, s.cursor.y);
+
+        try s.resize(.{ .cols = 4, .rows = 4, .pull_scrollback = pull });
+
+        const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings(if (pull) "1A\n2B\n3C" else "3C", contents);
+        try testing.expectEqual(if (pull) @as(size.CellCountInt, 3) else 1, s.cursor.y);
+    }
+}
+
 // This seems like it should work fine but for some reason in practice
 // in the initial implementation I found this bug! This is a regression
 // test for that.
