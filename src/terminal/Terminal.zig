@@ -2658,8 +2658,8 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     // history with their pins. Inside left and right margins no row is
     // discarded: on one page only the cells between the margins move and
     // every row keeps its metadata, so only a command whose cells that
-    // changes is dropped. Across a page boundary the move copies whole rows,
-    // metadata included, and deleteLines drops the record before it.
+    // changes is dropped. A row it copies across a page boundary takes the
+    // source row's metadata, and deleteLines drops the record before that.
     const screen = self.screens.active;
     if (screen.no_scrollback and self.scrolling_region.top == 0) {
         const region_height: usize = @as(usize, self.scrolling_region.bottom) + 1;
@@ -2673,9 +2673,10 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
                     .{ .active = .{} },
                     .{ .active = .{ .y = @intCast(discarded - 1) } },
                 );
-            } else if (!self.lineMoveCrossesPage(
+            } else if (!self.lineMoveCopiesAcrossPage(
                 self.scrolling_region.top,
                 self.scrolling_region.bottom,
+                discarded,
             )) {
                 screen.semantic_command.invalidateMarginShift(&screen.pages, .{
                     .top = self.scrolling_region.top,
@@ -2692,12 +2693,21 @@ pub fn scrollUp(self: *Terminal, count: usize) !void {
     self.deleteLines(count);
 }
 
-/// Whether the active rows `top` to `bottom` of a line move lie on more than
-/// one page. Inside left and right margins such a move copies the source
-/// row onto the destination through Page.clonePartialRowFrom, metadata and
-/// all, where within one page moveCells moves only the cells between the
-/// margins and leaves each row's prompt mark.
-fn lineMoveCrossesPage(self: *const Terminal, top: usize, bottom: usize) bool {
+/// Whether a line move of `count` rows over active rows `top` to `bottom`
+/// copies a row across a page boundary. Inside left and right margins such a
+/// copy goes through Page.clonePartialRowFrom, metadata and all, where a copy
+/// within one page (moveCells) or a clear in place leaves each row's prompt
+/// mark. A move of at least as many rows as it spans copies nothing and only
+/// clears them. A smaller one shifts rows, and if the rows lie on more than
+/// one page some source row and its destination straddle the boundary: for
+/// a boundary just before row j, the pair from max(top, j - count) does.
+fn lineMoveCopiesAcrossPage(
+    self: *const Terminal,
+    top: usize,
+    bottom: usize,
+    count: usize,
+) bool {
+    if (count >= bottom - top + 1) return false;
     const pages = &self.screens.active.pages;
     const first = pages.pin(.{ .active = .{ .y = @intCast(top) } }) orelse return false;
     const last = pages.pin(.{ .active = .{ .y = @intCast(bottom) } }) orelse return false;
@@ -2705,14 +2715,20 @@ fn lineMoveCrossesPage(self: *const Terminal, top: usize, bottom: usize) bool {
 }
 
 /// Drop the last-command record before a left/right-margin line move that
-/// crosses a page boundary (lineMoveCrossesPage): the move copies whole rows,
-/// prompt marks included, which the record's checks do not model, so it
-/// fails closed. A move within one page, or a full-width one, is left to the
+/// copies a row across a page boundary (lineMoveCopiesAcrossPage): the copy
+/// takes the source row's metadata, prompt mark included, which the record's
+/// checks do not model, so it fails closed. A move that copies within one
+/// page or only clears in place, or a full-width one, is left to the
 /// callers' own rules.
-fn dropCommandBeforeCrossPageMarginMove(self: *Terminal, top: usize, bottom: usize) void {
+fn dropCommandBeforeCrossPageMarginMove(
+    self: *Terminal,
+    top: usize,
+    bottom: usize,
+    count: usize,
+) void {
     if (self.scrolling_region.left == 0 and
         self.scrolling_region.right == self.cols - 1) return;
-    if (!self.lineMoveCrossesPage(top, bottom)) return;
+    if (!self.lineMoveCopiesAcrossPage(top, bottom, count)) return;
     const screen = self.screens.active;
     screen.semantic_command.dropCompleted(&screen.pages);
 }
@@ -2978,11 +2994,12 @@ pub fn insertLines(self: *Terminal, count: usize) void {
     const left_right = self.scrolling_region.left > 0 or
         self.scrolling_region.right < self.cols - 1;
 
-    // Across a page boundary that path copies whole rows, prompt marks
-    // included, so the last-command record fails closed before it.
+    // A row that path copies across a page boundary takes the source row's
+    // prompt mark, so the last-command record fails closed before it.
     self.dropCommandBeforeCrossPageMarginMove(
         self.screens.active.cursor.y,
         self.scrolling_region.bottom,
+        count,
     );
 
     // Remaining rows from our cursor to the bottom of the scroll region.
@@ -3160,11 +3177,12 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
     const left_right = self.scrolling_region.left > 0 or
         self.scrolling_region.right < self.cols - 1;
 
-    // Across a page boundary that path copies whole rows, prompt marks
-    // included, so the last-command record fails closed before it.
+    // A row that path copies across a page boundary takes the source row's
+    // prompt mark, so the last-command record fails closed before it.
     self.dropCommandBeforeCrossPageMarginMove(
         self.screens.active.cursor.y,
         self.scrolling_region.bottom,
+        count,
     );
 
     // Remaining rows from our cursor to the bottom of the scroll region.
@@ -12724,6 +12742,60 @@ test "Terminal: a page-crossing margin insert or delete drops a command without 
         s.cursorAbsolute(7, @intCast(k - 1));
         if (insert) t.insertLines(1) else t.deleteLines(1);
         t.eraseDisplay(.below, false);
+        try testing.expect(s.semantic_command.completed == null);
+        try testing.expect((try s.lastCommandString(alloc)) == null);
+    }
+}
+
+/// The line moves the cross-page tests run, each over the margin region
+/// testCrossPageNoOutputCommand sets: DL and IL from row 0, column 8.
+const TestMarginMove = enum { su, sd, dl, il };
+
+fn testMarginMove(t: *Terminal, op: TestMarginMove, count: usize) !void {
+    switch (op) {
+        .su => try t.scrollUp(count),
+        .sd => t.scrollDown(count),
+        .dl, .il => {
+            t.screens.active.cursorAbsolute(7, 0);
+            if (op == .dl) t.deleteLines(count) else t.insertLines(count);
+        },
+    }
+}
+
+test "Terminal: a full-region margin clear across pages copies no row and keeps a command" {
+    const alloc = testing.allocator;
+    for ([_]TestMarginMove{ .su, .sd, .dl, .il }) |op| {
+        var t = try init(alloc, .{ .cols = 480, .rows = 135, .max_scrollback = 0 });
+        defer t.deinit(alloc);
+        const s = t.screens.active;
+
+        // "PS> one" with no output on row 0, left of the margins. The region
+        // (rows 0 to k) holds the page boundary, but a move of all its rows
+        // copies none: it clears the cells between the margins in place, so
+        // the rules for a move within one page apply and keep the command.
+        const k = try testCrossPageNoOutputCommand(&t, 0);
+        try testMarginMove(&t, op, k + 1);
+        const row0 = s.pages.pin(.{ .active = .{ .y = 0 } }).?.rowAndCell().row;
+        try testing.expectEqual(.prompt, row0.semantic_prompt);
+        const command = (try s.lastCommandString(alloc)) orelse
+            return error.TestCommandDropped;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("one", command);
+    }
+}
+
+test "Terminal: a margin insert or scroll down that copies a row across pages drops a command" {
+    const alloc = testing.allocator;
+    for ([_]TestMarginMove{ .sd, .il }) |op| {
+        var t = try init(alloc, .{ .cols = 480, .rows = 135, .max_scrollback = 0 });
+        defer t.deinit(alloc);
+        const s = t.screens.active;
+
+        // One row down: row k-1's cells between the margins are copied onto
+        // row k on the second page, with row k-1's metadata, so the record
+        // fails closed.
+        _ = try testCrossPageNoOutputCommand(&t, 0);
+        try testMarginMove(&t, op, 1);
         try testing.expect(s.semantic_command.completed == null);
         try testing.expect((try s.lastCommandString(alloc)) == null);
     }

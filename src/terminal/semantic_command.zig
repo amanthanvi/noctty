@@ -324,10 +324,10 @@ pub const MarginRegion = struct {
 /// completed command keeps reading what it read unless one of those cells,
 /// as the move leaves it, falls in its recovered span.
 ///
-/// Only for a move within one page. Across a page boundary the move copies
-/// whole rows, prompt marks included (Page.clonePartialRowFrom), which this
-/// does not model: Terminal.deleteLines and insertLines drop the record
-/// before such a move instead (dropCompleted).
+/// Not for a move that copies a row across a page boundary: that copy takes
+/// the source row's metadata, prompt mark included (Page.clonePartialRowFrom),
+/// which this does not model, so Terminal.deleteLines and insertLines drop
+/// the record before such a move instead (dropCompleted).
 pub fn invalidateMarginShift(
     self: *SemanticCommand,
     pages: *PageList,
@@ -418,9 +418,10 @@ fn incomingIsRead(
 }
 
 /// Drop the completed command. Terminal calls this before a left/right
-/// margin line move that crosses a page boundary, which copies whole rows,
-/// prompt marks included (Page.clonePartialRowFrom): the record's checks
-/// model a move within one page only, so that case fails closed.
+/// margin line move that copies a row across a page boundary, which takes
+/// the source row's metadata, prompt mark included
+/// (Page.clonePartialRowFrom): the record's checks do not model that copy,
+/// so it fails closed.
 pub fn dropCompleted(self: *SemanticCommand, pages: *PageList) void {
     self.clearCompleted(pages);
 }
@@ -430,8 +431,8 @@ pub fn dropCompleted(self: *SemanticCommand, pages: *PageList) void {
 /// its span cannot be found either, since highlightSemanticContent asserts
 /// that it starts on a prompt row. A move this file does not model leaves
 /// such a record: a full-width insertLines or deleteLines shifts rows under
-/// a pin that stays put, and a margin move across a page boundary copies
-/// another row's mark onto the prompt row.
+/// a pin that stays put, and a margin move that copies a row across a page
+/// boundary puts another row's mark on the prompt row.
 fn dropUnreadable(self: *SemanticCommand, pages: *PageList) void {
     const command = self.completed orelse return;
     if (!pinIsValid(command.prompt)) self.clearCompleted(pages);
