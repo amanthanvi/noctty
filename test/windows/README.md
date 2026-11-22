@@ -1548,7 +1548,11 @@ leaf's copy is deleted at once, a failing one's at the end unless
 **A leaf in hosted mode.** The runner starts each leaf as
 `pwsh -NoProfile -NonInteractive -File <leaf>`, suspended, on its desktop
 (`WinSta0\noctty-gh-<32 hex>`, named in `lpDesktop`), in a job that permits no
-breakaway and kills on close and on an unhandled exception. It sets
+breakaway and kills every process when it closes. Its
+`JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION` ends a process that hits an
+unhandled exception at once, with no crash dialog, but that process only: the
+rest of the job stays alive until the runner ends it, so a leaf can still reach
+its timeout after a child crashes. It sets
 `NOCTTY_GUI_HIDDEN_DESKTOP`, `NOCTTY_GUI_HIDDEN_EXE` and
 `NOCTTY_GUI_HIDDEN_RUN`, which select the interactive library's hosted mode:
 
@@ -1717,7 +1721,9 @@ with a path the walker cannot read, a repo folder added to `$env:PATH`, which
 makes a bare name run a `.ps1` there (the walk reads a bare name as a command
 on PATH), the arguments of a tracked executable other than a shell, which are
 not read (the repository tracks no executable), a command run outside cmd
-and PowerShell by another launcher such as `conhost.exe`, a `*ExePath` or
+and PowerShell by another launcher such as `conhost.exe`, a variable launch
+target (`& $p`) that a dot-sourced helper rewrites after the leaf set it (the
+walk reads `$p` from the leaf's own assignments), a `*ExePath` or
 `*CliPath` helper named for ComSpec (`Get-ComSpecCliPath`), read as the
 program it names although it may return cmd, and a `Start-Process` FilePath
 given `-WorkingDirectory` that is a variable or a value the walker reads as a
@@ -1727,7 +1733,10 @@ directory, while a bare literal name is unresolved unless it is a listed
 system program. A script a
 leaf passes to noctty for its terminal to run (`-e pwsh -File <script>`) is
 beyond it too: neither the closure nor the leaf's receipt sees that script, so
-a leaf must not run a repo script that way.
+a leaf must not run a repo script that way. The launch contract's scan for
+direct process starts on a hosted path (Contracts.99-GuiHiddenLaunch) does not
+count an instance `Process.Start()` whose `StartInfo` a leaf fills in itself;
+no hosted file starts a process that way.
 
 `gui-hidden-scripts.ps1` holds the path-selection and script-walk fixtures,
 and Contracts.99-GuiHiddenLaunch.ps1 and Contracts.99-GuiHiddenSelection.ps1

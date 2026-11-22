@@ -13,7 +13,20 @@ function Get-InteractiveWin11CanonicalPath {
     $full = [IO.Path]::GetFullPath($Path)
     $root = [IO.Path]::GetPathRoot($full)
     if ($full.Length -gt $root.Length) { $full = $full.TrimEnd('\', '/') }
-    return $full
+    # GetFullPath expands an existing 8.3 component, but Windows PowerShell 5.1's (.NET Framework) leaves the deepest
+    # existing one short when the path below it does not exist yet (`...\INNER-~1\not-yet\x.txt`; the composite's
+    # helper self-test, #740 run 44968184431; pwsh 7 expands it). So the deepest existing ancestor is expanded on its
+    # own, which both runtimes do, and the part that does not exist yet is appended as written.
+    $existing = $full
+    $tail = [System.Collections.Generic.List[string]]::new()
+    while ($existing.Length -gt $root.Length -and -not ([IO.Directory]::Exists($existing) -or [IO.File]::Exists($existing))) {
+        $tail.Insert(0, [IO.Path]::GetFileName($existing))
+        $existing = [IO.Path]::GetDirectoryName($existing)
+    }
+    if ($tail.Count -eq 0) { return $full }
+    # Trimmed even at a root (`C:\` to `C:`), so the join puts exactly one separator before the tail.
+    $expanded = [IO.Path]::GetFullPath($existing).TrimEnd('\', '/')
+    return (@($expanded) + $tail.ToArray()) -join '\'
 }
 
 # Whether two paths name the same place: both canonical (Get-InteractiveWin11CanonicalPath), compared ordinally
