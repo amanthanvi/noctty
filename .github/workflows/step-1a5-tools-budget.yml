@@ -1,0 +1,220 @@
+name: 1A.5 thread gate budget (temporary)
+
+# Branch-only timing run for 1A.5. The next commit removes this trigger.
+on:
+  push:
+    branches: [w1a/1a5-tools]
+    paths:
+      - .github/workflows/step-1a5-tools-budget.yml
+
+permissions:
+  contents: read
+
+jobs:
+  selftest-full:
+    name: Thread gate self-test (full, ${{ matrix.layout }})
+    runs-on: windows-2022
+    timeout-minutes: 295
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [installed, scratch]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Select self-test mode
+        id: select
+        shell: pwsh
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -ne 'pull_request') {
+            'enabled=true' >> $env:GITHUB_OUTPUT
+            return
+          }
+          $paths = Join-Path $env:RUNNER_TEMP 'thread-selftest-paths.txt'
+          git -c core.quotePath=false diff --name-only --no-renames "$env:PR_BASE...${env:PR_HEAD}" | Set-Content -Encoding utf8 $paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $selected = python -I ci/selftest_jobs.py $paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "enabled=$((($selected -split ' ') -contains 'full').ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Fetch frozen revisions
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin 31796f5d093fce41446411c5c381b602c1c55757
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git fetch --no-tags https://github.com/ghostty-org/ghostty.git 83fb95624b0439ee660c2679b43b38c8b63769cd:refs/tags/v1.4.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash ci/fixture/residue-proxies.bundle).Hash -ne 'EB2A0C0765E2C13B38F689DF8F1D8D0268C4F479A2B8BB8C664575A435A6B957') {
+            throw 'Residue proxy fixture digest does not match.'
+          }
+          git fetch --no-tags ./ci/fixture/residue-proxies.bundle refs/heads/trial-hybrid-140:refs/heads/trial-hybrid-140 refs/heads/trial-ours-140:refs/heads/trial-ours-140
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Read the 1A compiler's version from the frozen fixture
+        id: pin-1a
+        shell: pwsh
+        run: |
+          $m = Select-String -Path ci/fixture/build.zig.zon -Pattern '\.minimum_zig_version\s*=\s*"([^"]+)"'
+          "version=$($m.Matches[0].Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Set up the 1A compiler, for the 1A astdump
+        id: zig-1a
+        if: steps.select.outputs.enabled == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.pin-1a.outputs.version }}
+          use-cache: false
+
+      - name: Build the 1A astdump
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          zig build-exe ci/astdump.zig -lc -O ReleaseSafe "-femit-bin=$env:RUNNER_TEMP/astdump-1a.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Set up the 1B compiler, for the 1B astdump
+        if: steps.select.outputs.enabled == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+          use-cache: false
+
+      - name: Build the 1B astdump
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          zig build-exe ci/astdump.zig -lc -O ReleaseSafe "-femit-bin=$env:RUNNER_TEMP/astdump-1b.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run the full self-test
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $opts = @('--astdump-1a', "$env:RUNNER_TEMP/astdump-1a.exe", '--astdump-1b', "$env:RUNNER_TEMP/astdump-1b.exe")
+          $tool = 'ci/controls.py'
+          if ('${{ matrix.layout }}' -eq 'scratch') {
+            $layout = Join-Path $env:RUNNER_TEMP 'scratch-layout'
+            New-Item -ItemType Directory -Path "$layout/tools", "$layout/ci-draft" | Out-Null
+            $installed = @('controls.py', 'role_compare3.py', 'role_supervisor.py', 'lock_inventory20.py',
+              'thread_gate15.py', 'soak_judge4.py', 'residue_gate17.py', 'zigtok.py',
+              'bindcheck41.py', 'zigast.py', 'astdump.zig', 'selftest_jobs.py', 'ciyaml.py')
+            foreach ($file in $installed) { Copy-Item "ci/$file" "$layout/tools" }
+            Copy-Item ci/fixture "$layout/ci-draft/fixture" -Recurse
+            Copy-Item ci/lock-inventory-threads.tsv,ci/role-runs.tsv "$layout/ci-draft"
+            $tool = "$layout/tools/controls.py"
+          }
+          python -I $tool --check-layout
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I $tool @opts . "$env:RUNNER_TEMP/role-control-full"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain self-test summary
+        if: always() && steps.select.outputs.enabled == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: role-control-full-${{ matrix.layout }}
+          path: ${{ runner.temp }}/role-control-full/summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  selftest-appending:
+    name: Thread gate self-test (appending)
+    runs-on: windows-2022
+    timeout-minutes: 185
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Select self-test mode
+        id: select
+        shell: pwsh
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -ne 'pull_request') {
+            'enabled=true' >> $env:GITHUB_OUTPUT
+            return
+          }
+          $paths = Join-Path $env:RUNNER_TEMP 'thread-selftest-paths.txt'
+          git -c core.quotePath=false diff --name-only --no-renames "$env:PR_BASE...${env:PR_HEAD}" | Set-Content -Encoding utf8 $paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $selected = python -I ci/selftest_jobs.py $paths
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "enabled=$((($selected -split ' ') -contains 'appending').ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Read the 1A compiler's version from the frozen fixture
+        id: pin-1a
+        shell: pwsh
+        run: |
+          $m = Select-String -Path ci/fixture/build.zig.zon -Pattern '\.minimum_zig_version\s*=\s*"([^"]+)"'
+          "version=$($m.Matches[0].Groups[1].Value)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Set up the 1A compiler, for the 1A astdump
+        id: zig-1a
+        if: steps.select.outputs.enabled == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.pin-1a.outputs.version }}
+          use-cache: false
+
+      - name: Build the 1A astdump
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          zig build-exe ci/astdump.zig -lc -O ReleaseSafe "-femit-bin=$env:RUNNER_TEMP/astdump-1a.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Set up the 1B compiler, for the 1B astdump
+        if: steps.select.outputs.enabled == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+          use-cache: false
+
+      - name: Build the 1B astdump
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          zig build-exe ci/astdump.zig -lc -O ReleaseSafe "-femit-bin=$env:RUNNER_TEMP/astdump-1b.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run the appending self-test
+        if: steps.select.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $opts = @('--astdump-1a', "$env:RUNNER_TEMP/astdump-1a.exe", '--astdump-1b', "$env:RUNNER_TEMP/astdump-1b.exe")
+          python -I ci/controls.py @opts --appending --scope 1a . HEAD ci/lock-inventory-threads.tsv ci/lock-inventory-allow.txt ci/thread-entries.tsv ci/thread-anchors.tsv "$env:RUNNER_TEMP/role-control-appending"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain self-test summary
+        if: always() && steps.select.outputs.enabled == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: role-control-appending
+          path: ${{ runner.temp }}/role-control-appending/summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
