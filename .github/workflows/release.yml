@@ -114,20 +114,41 @@ jobs:
             --commit $sha `
             --status success `
             --limit 20 `
-            --json databaseId,headSha,conclusion,status
+            --json databaseId,headSha,conclusion,status,event
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to query Test workflow runs for $sha."
           }
           $runs = @($runsJson | ConvertFrom-Json)
+          # Only a full-matrix Test run (push, schedule or workflow_dispatch) counts: a pull_request run's path filter
+          # can skip lanes.
           $matching = @($runs | Where-Object {
-            $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success"
+            $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success" -and
+              $_.event -in @("push", "schedule", "workflow_dispatch")
           })
           if ($matching.Count -eq 0) {
-            throw "Release SHA $sha has no completed successful Test workflow run."
+            throw "Release SHA $sha has no completed successful full-matrix Test workflow run (push, schedule or workflow_dispatch)."
           }
           # No release requires an interactive run (the maintainer's decision, 2026-11-22): the hosted Test run of the
-          # exact SHA is the evidence, and promotion checks its portable smoke artifact.
-          $testRun = $matching[0]
+          # exact SHA is the evidence. Promotion reads its portable smoke artifact, so the gate records the newest
+          # matching run whose artifact still exists and has not expired.
+          $testRun = $null
+          foreach ($run in $matching) {
+            $artifactsJson = gh api "repos/$env:GH_REPOSITORY/actions/runs/$($run.databaseId)/artifacts?per_page=100"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to read the artifacts of Test run $($run.databaseId)."
+            }
+            $portable = @(($artifactsJson | ConvertFrom-Json).artifacts | Where-Object {
+              $_.name -eq "flagship-portable-x64-$($run.databaseId)" -and -not $_.expired -and
+                [datetimeoffset]$_.expires_at -gt [datetimeoffset]::UtcNow
+            })
+            if ($portable.Count -eq 1) {
+              $testRun = $run
+              break
+            }
+          }
+          if (-not $testRun) {
+            throw "Release SHA $sha has no successful Test run with an unexpired portable smoke artifact (flagship-portable-x64-<run id>). Recovery: dispatch Test on the default branch, which is at this SHA (gh workflow run test.yml --repo $env:GH_REPOSITORY --ref main), then rerun this release."
+          }
           Write-Host "Release SHA $sha is covered by Test run $($testRun.databaseId)."
           if ($env:GITHUB_OUTPUT) {
             "test_run_id=$($testRun.databaseId)" >> $env:GITHUB_OUTPUT

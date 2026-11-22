@@ -51,7 +51,8 @@ response and mutation.
   prerelease build has skipped channel steps; failed/cancelled jobs have skipped
   suffixes. Publisher outcome markers distinguish completion from credential skips;
   missing old markers conservatively resume. Wrong attempt SHA and no successful publish refuse resume.
-- Recorded historical Test/job metadata is projected to the consumed fields.
+- Recorded historical Test/job metadata is projected to the consumed fields,
+  the Test run's `event` (`workflow_dispatch`) included.
   The recorded run also lists an interactive job and artifact; promotion reads
   neither since 2026-11-22. Payload tamper and identity cases deliberately
   violate those records. Fixed future expiry timestamps and renewed run IDs are

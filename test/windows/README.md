@@ -1493,9 +1493,9 @@ private desktop of its own, against a fresh portable copy of the receipt-bound
 measurement build, through `.github/workflows/gui-hidden.yml`, and locally.
 In the workflow, the `gui-hidden-gate` job runs on every pull request and
 push; the suite itself runs on every push, scheduled and manual run, and on a
-pull request when the selection (`scripts/ci-gui-selection.ps1`) says its
-change needs it, or cannot decide. A docs-only pull request skips the suite
-and the gate still passes.
+pull request when the selection (`scripts/ci-gui-selection.ps1`) sets
+`gui=true`: its change needs the suite, or the selection cannot decide. A
+docs-only pull request skips the suite and the gate still passes.
 
 ```text
 pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Work <new dir> -Out <new or empty dir> [-Leaves smoke,undo]
@@ -1508,8 +1508,9 @@ diagnosis: when they pass, its result and its whole-plan assertions
 path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
 
 No release or check requires the interactive composite (the maintainer's
-decision, 2026-11-22): it stays dispatchable and optional, and this lane runs
-on every pull request.
+decision, 2026-11-22): it stays dispatchable and optional. This lane's gate
+runs on every pull request; its suite runs on a pull request only when the
+selector sets `gui=true` (above).
 
 **Where a GUI check runs.** In the lowest tier that can make its assertion:
 

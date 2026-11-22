@@ -68,6 +68,7 @@
   },
   "testRun": {
     "conclusion": "success",
+    "event": "workflow_dispatch",
     "head_sha": "e629842e9c4ddef133ab4d4ad27d37e0e9718e09",
     "id": 42344250161,
     "path": ".github/workflows/test.yml",

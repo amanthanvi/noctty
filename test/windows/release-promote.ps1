@@ -402,6 +402,8 @@ $cases = [ordered]@{
     extra = 'AssetSetMismatch'; missing = 'IncompletePublishedRelease'; metadata = 'PackageManagerMismatch'
     generator = 'package-manager generator differs from the prerelease'; 'generator-missing' = 'package-manager generator differs from the prerelease'
     identity = 'ManifestIdentityMismatch'; expired = 'EvidenceExpired'; recovery = $null; run = 'ReleasePublishNotSuccessful'
+    # A successful pull_request Test run at the candidate is no promotion evidence: its path filter can skip lanes.
+    'pull-request-test-run' = 'RunIdentityMismatch'
     copy = 'StableCopyMismatch'; verification = 'PublishedVerificationFailed'
 }
 try {
@@ -431,6 +433,7 @@ try {
         $global:NocttyReleaseFixtureB.TestRun = ($record.testRun | ConvertTo-Json | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.ReleaseRun = ($record.releaseRun | ConvertTo-Json | ConvertFrom-Json)
         $global:NocttyReleaseFixtureB.TestRun.head_sha = $sha
+        if ($case -eq 'pull-request-test-run') { $global:NocttyReleaseFixtureB.TestRun.event = 'pull_request' }
         $global:NocttyReleaseFixtureB.ReleaseRun.head_sha = $sha
         $global:NocttyReleaseFixtureB.ReleaseRun | Add-Member -NotePropertyName run_attempt -NotePropertyValue $(if($case -in @('rerun','rerun-no-publish')){2}else{1}) -Force
         $global:NocttyReleaseFixtureB.Jobs = ($record.jobs | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
@@ -473,7 +476,7 @@ try {
             if ($case -in @('draft','cancelled-before','tagless-draft') -and ($errorMessage -notmatch 'sole match' -or $errorMessage -notmatch 'tagless draft' -or $errorMessage -notmatch 'gh api --method DELETE' -or $errorMessage -match 'gh release delete')) { throw 'Manual recovery did not guard shared/tagless drafts.' }
             if ($case -in @('manifest-missing','missing') -and $errorMessage -match 'gh release delete') { throw 'Published refusal gave destructive advice.' }
             if ($case -eq 'expired' -and ($errorMessage -notmatch '42344250161.*flagship-portable-x64-42344250161.*2026-11-21T06:07:57' -or
-                $errorMessage -notmatch 'gh workflow run test.yml --repo amanthanvi/noctty --ref v1.3.136')) { throw 'Expiry omitted its identity or recovery command.' }
+                $errorMessage -notmatch 'Recovery: gh workflow run test\.yml --repo amanthanvi/noctty --ref v1\.3\.136, then retry promotion with the new Test run ID, the original Release run ID 42346135091 and the original manifest digest\z')) { throw 'Expiry omitted its identity or recovery command.' }
         } else {
             if ($errorMessage) { throw "Fixture $case unexpectedly failed: $errorMessage" }
             $edits = @($global:NocttyReleaseFixtureB.Calls | Where-Object { $_ -ceq 'edit' }).Count

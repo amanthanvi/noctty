@@ -53,15 +53,15 @@ $releasePreflightActionStepSha256 =
 $releasePreflightActionSha256 =
     'df0d1ff83a0279bdea87435a84a07c5971d66e1cb4240a28081a97af8ae30c3b'
 $releaseTestRunGateScriptSha256 =
-    'f87e78ebd23f021c55aa9717875c06042058abde6abdc4b05f70f18ea61a635f'
+    '1bb1cea148e2c44fed6ee1b1744c5eb16b18c0f91a429d8ca98f64d2f3c75189'
 $releaseTestRunGateStepSha256 =
-    '647b60e0e59858a7456ecc50e6d5903c3b68978aa3f18e7bb3ffa572a3c409e9'
+    'b8b815f91cec4fbc0ca015c12c901936541d1e28a11bbbb00364c30241b82e02'
 $releasePreflightStepSha256 =
     'd3af932ec3bf2369351ac7c9d70eac3f94ee4de13110f8277e0aa8e85e992fec'
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '8406a9b12a15982f44f1b8a97b42c7f79ba40d902438edb87ddba9031a6dfcbd'
+    '0d204a0cde96d60e5a38eb2294d1030c6b2cc67b8b3baeee66706a99216871d2'
 $readinessWorkflowSha256 =
     '2eb792be279e5119aa2d63a44401d5bbd435af31e66e59b60fd61444439540ff'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -745,7 +745,7 @@ if (-not (Test-ReleaseTestRunGateScript `
     -ExpectedScriptSha256 $releaseTestRunGateScriptSha256)) {
     throw 'Release Test-run gate must be the reviewed exact-SHA successful Test run selection.'
 }
-$testRunSelectionTarget = '$testRun = $matching[0]'
+$testRunSelectionTarget = '$testRun = $run'
 if (-not $releaseTestRunGateScript.Contains($testRunSelectionTarget)) {
     throw "Release Test-run gate mutation target is missing: $testRunSelectionTarget"
 }
@@ -797,6 +797,13 @@ $testRunPredicateMutationSpecs = @(
         Removed = '$true'
         Inverted = '$_.conclusion -ne "success"'
         Dead = 'if ($false) { $_.conclusion -eq "success" }'
+    },
+    [pscustomobject]@{
+        Label = 'full-matrix event'
+        Active = '$_.event -in @("push", "schedule", "workflow_dispatch")'
+        Removed = '$true'
+        Inverted = '$_.event -notin @("push", "schedule", "workflow_dispatch")'
+        Dead = 'if ($false) { $_.event -in @("push", "schedule", "workflow_dispatch") }'
     }
 )
 foreach ($spec in $testRunPredicateMutationSpecs) {
@@ -841,9 +848,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $releaseTestRunGateStep
         }
-        Pattern = '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?--status success.*?\$_\.headSha -eq \$sha -and \$_\.status -eq "completed" -and \$_\.conclusion -eq "success".*?has no completed successful Test workflow run.*?\$testRun = \$matching\[0\].*?"test_run_id=\$\(\$testRun\.databaseId\)"'
+        Pattern = '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?--status success.*?--json databaseId,headSha,conclusion,status,event.*?\$_\.headSha -eq \$sha -and \$_\.status -eq "completed" -and \$_\.conclusion -eq "success" -and\s+\$_\.event -in @\("push", "schedule", "workflow_dispatch"\).*?has no completed successful full-matrix Test workflow run.*?foreach \(\$run in \$matching\).*?"flagship-portable-x64-\$\(\$run\.databaseId\)" -and -not \$_\.expired.*?\$testRun = \$run.*?if \(-not \$testRun\).*?Recovery: dispatch Test.*?"test_run_id=\$\(\$testRun\.databaseId\)"'
         Kind = 'Text'
-        Description = 'release is gated on a completed successful Test run of the exact SHA, and requires no interactive run'
+        Description = 'release is gated on a completed successful full-matrix Test run of the exact SHA with an unexpired portable smoke artifact, and requires no interactive run'
     }
     @{
         File = "$releaseWorkflow :: Release preflight"

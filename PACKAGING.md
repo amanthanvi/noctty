@@ -299,7 +299,8 @@ Recommended order:
 2. Configure or rotate the `release` environment signing secrets.
 3. Run the **Release Readiness** workflow with the target plain semver
    version, for example `1.3.107`.
-4. After readiness passes, either:
+4. After readiness passes and the **Test** run of that commit's push to
+   `main` has succeeded, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>` and
      `prerelease=false`.
@@ -460,6 +461,9 @@ interactive run is needed:
 ```powershell
 gh workflow run test.yml --repo amanthanvi/noctty --ref <tag>
 ```
+
+That dispatch also runs the `windows-2025` skip budget, so a budget that drifted
+since the candidate fails it; the path then is a new prerelease.
 
 For read-only verification of historical v1.3.124, pass `-AllowPrerelease`
 explicitly: it is still marked as a prerelease on GitHub. Its portable archives

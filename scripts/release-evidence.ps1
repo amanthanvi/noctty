@@ -56,6 +56,10 @@ function Assert-ReleaseEvidence {
             $run.path -cne ".github/workflows/$($spec.Workflow)") {
             throw "RunIdentityMismatch: run $($spec.Id) must be completed and successful on the candidate in $($spec.Workflow)."
         }
+        # The Test run must be a full-matrix run: a pull_request run's path filter can skip lanes.
+        if ($spec.Workflow -ceq 'test.yml' -and [string]$run.event -cnotin @('push', 'schedule', 'workflow_dispatch')) {
+            throw "RunIdentityMismatch: Test run $($spec.Id) is a '$($run.event)' run; promotion needs a push, schedule or workflow_dispatch run."
+        }
         if ($spec.Workflow -ceq 'release.yml') {
             $attemptCount = $run.run_attempt
             if ($attemptCount -isnot [long] -and $attemptCount -isnot [int]) { throw 'ReleaseAttemptsIncomplete: run_attempt is missing.' }
@@ -101,10 +105,11 @@ function Assert-ReleaseEvidence {
         $records = Invoke-ReleaseGhJson @('api', "repos/$Repository/actions/runs/$($spec.Id)/artifacts?per_page=100")
         if ($records.total_count -gt @($records.artifacts).Count) { throw 'Incomplete evidence artifact records.' }
         if ($spec.Artifact) {
+            # A missing or expired portable smoke artifact keeps promotion blocked until a fresh Test run's validates.
+            $recovery = "gh workflow run test.yml --repo $Repository --ref $Tag, then retry promotion with the new Test run ID, the original Release run ID $ReleaseRunId and the original manifest digest"
             $artifact = @($records.artifacts | Where-Object { $_.name -ceq $spec.Artifact })
-            if ($artifact.Count -ne 1) { throw "EvidenceMissing: run $($spec.Id), artifact $($spec.Artifact)." }
+            if ($artifact.Count -ne 1) { throw "EvidenceMissing: run $($spec.Id), artifact $($spec.Artifact). Recovery: $recovery" }
             if ($artifact[0].expired -or [datetimeoffset]$artifact[0].expires_at -le [datetimeoffset]::UtcNow) {
-                $recovery = "gh workflow run test.yml --repo $Repository --ref $Tag"
                 $expiresAt = ([datetimeoffset]$artifact[0].expires_at).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'")
                 throw "EvidenceExpired: run $($spec.Id), artifact $($spec.Artifact), expires_at $expiresAt. Recovery: $recovery"
             }

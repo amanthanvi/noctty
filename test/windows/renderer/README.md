@@ -180,9 +180,12 @@ Streaming during 80 alternating live resizes per binary also kept advancing:
 These are one sequential comparison on a shared host, including snapshot work;
 they show continued progress and bounded UI response, without a speedup claim.
 
-The maintainer runs `Invoke-VisibleD3D11Check.ps1 -Binary <production exe>` on
-their own desktop for palette, paste preview/Allow/Cancel, scrollbar, quick-select,
+The visible check is optional: no change or release requires it (the maintainer's
+decision, 2026-11-22), and the offscreen readback above, the hidden-desktop GUI
+suite and multi-agent review are the evidence. When the maintainer chooses to run
+it, `Invoke-VisibleD3D11Check.ps1 -Binary <production exe>` runs on their own
+desktop for palette, paste preview/Allow/Cancel, scrollbar, quick-select,
 opacity, and Kitty-to-GL presentation. It records individual pass/fail/skip ratings
 and offers an optional cropped screen capture per step. `-PrepareOnly` performs
 staging without launching; agents must use that switch. A skipped visible step
-stays incomplete, and readback is never substituted for displayed content.
+stays unrated, and readback is never reported as displayed content.
