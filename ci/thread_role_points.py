@@ -20,7 +20,7 @@ What it reads, from zigtok.py's token stream (installed beside it), so a comment
   TEST-EDIT-POINT  in test code;
   FIXTURE-HELPER   a `fixture(` in a function of a container that only test code of its file names, the container
                    a file-level `const` that is not `pub` (`ClipboardReplyFixture.init`, `TestStream.init`);
-  MAIN-UI-SCOPE    `src/main_ghostty.zig` `main`, role ui, as its eager first statement (below);
+  MAIN-UI-SCOPE    `src/main_ghostty.zig` file-level `pub fn main`, role ui, as its eager first statement (below);
   ENTRY            in the function a counted registry entry's spawn names, with the entry's role, as the target's
                    eager first statement, so it runs before anything else the thread does;
   and otherwise fails UNREGISTERED-POINT. An EAGER FIRST STATEMENT (`File.scope_statement`) is the body's first
@@ -637,6 +637,14 @@ class Resolver:
         return self.decl(g, ds[0], depth + 1)
 
 
+def is_entry_main(f, k):
+    """Whether function k of f is the entry file's own `main`: `pub fn main` at the file's level, not a `main` of a
+    container or one nested in a function (stone round 5, Opus L2)."""
+    d = f.fns[k]
+    return d["kind"] == "fn" and d["name"] == "main" and "pub" in d["quals"] and f.parent[k] is None \
+        and f.container_of(d["fn"]) is None
+
+
 def sets_role(pt):
     """Whether a required entry point's scope sets a role: the module's form or `Roles(.on)`, never `Roles(.off)`
     (which keeps no role even where the layer is on) or a form the checker cannot read, and a role that is not none
@@ -917,7 +925,7 @@ def main(argv):
                 if c is not None and any(c is x for x in test_only_containers(f)):
                     kind = "FIXTURE-HELPER"
             if kind is None and pt["file"] == MAIN_FILE and pt["fn"] == "main" and pt["role"] == "ui" \
-                    and f.parent[pt["k"]] is None and pt["op"] in SCOPE_OPS and sets_role(pt) \
+                    and is_entry_main(f, pt["k"]) and pt["op"] in SCOPE_OPS and sets_role(pt) \
                     and f.scope_statement(pt["k"], pt["q"]):
                 kind = "MAIN-UI-SCOPE"
             if kind is None and (pt["file"], pt["q"]) in matched[art]:

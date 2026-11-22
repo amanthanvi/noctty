@@ -318,6 +318,12 @@ control("a late assertion fails naming its window procedure",
             "        thread_role.assertWindowProc();", "        _ = msg;\n        thread_role.assertWindowProc();")}), 1,
         "WINDOW-PROC-NO-ASSERT src/worker.zig:", "W.wndProc: first statement")
 
+control("a nested main's UI scope is not the entry file's main", tree(**{"src/main_ghostty.zig": GHOSTTY.replace(
+    '    const role_scope = thread_role.enter(.ui);\n    defer role_scope.exit();\n', '') + (
+    'const Other = struct {\n    fn main() void {\n        const role_scope = thread_role.enter(.ui);\n'
+    '        defer role_scope.exit();\n    }\n};\n')}), 1,
+        "FAIL NO-MAIN-UI-SCOPE app", "FAIL UNREGISTERED-POINT app src/main_ghostty.zig:8 main: enter(ui)",
+        absent=("POINT app MAIN-UI-SCOPE",))
 if failures:
     for f in failures:
         print("FAIL " + f)
