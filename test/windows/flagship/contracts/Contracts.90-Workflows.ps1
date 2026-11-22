@@ -85,6 +85,68 @@ if ($releaseWindowsJob -match 'FORCE_JAVASCRIPT_ACTIONS_TO_NODE24') {
 $windowsArmWorkflow = Join-Path $repoRoot '.github\workflows\windows-arm64.yml'
 $windowsArmWorkflowText = Get-Content -LiteralPath $windowsArmWorkflow -Raw
 $checksJob = Get-YamlJobText -Content $testWorkflowText -Name 'checks' -Source $testWorkflow
+
+function Test-ThreadGateWorkflowSplit {
+    param([string] $TestText, [string] $SelftestText)
+
+    if ($TestText -match '(?m)^  selftest-(?:full|appending):' -or
+        $SelftestText -notmatch '(?ms)^on:\s+schedule:\s+- cron: "[^"]+"\s+workflow_dispatch:\s+pull_request:\s+paths:\s+- "ci/\*\*"\s+- "\.github/workflows/test\.yml"\s+- "\.github/workflows/thread-gate-selftest\.yml"' -or
+        $SelftestText -match '(?m)^  push:' -or
+        $SelftestText -notmatch '(?m)^  cancel-in-progress: \$\{\{ github\.event_name == ''pull_request'' \}\}\s*$' -or
+        $SelftestText -notmatch 'github\.event\.pull_request\.number \|\| github\.run_id') { return $false }
+
+    $pins = @(
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+        'actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548',
+        'mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29',
+        'mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29',
+        'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'
+    )
+    try {
+        $job = Get-YamlJobText -Content $TestText -Name 'checks' -Source 'Test thread gate'
+        $fastStep = Get-YamlStepBlock -Content $job -Name 'Fast thread-gate self-test' -Source 'Test thread gate'
+        if ($fastStep -notmatch '(?m)^        timeout-minutes: 8\s*$' -or
+            $fastStep -notmatch 'if \(\$selected -eq ''none''\) \{ return \}' -or
+            $fastStep -notmatch 'python -I ci/selftest_jobs\.py \$paths' -or
+            $fastStep -notmatch 'python -I ci/thread_gate_smoke\.py \$work\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}') { return $false }
+
+        foreach ($mode in 'full', 'appending') {
+            $longJob = Get-YamlJobText -Content $SelftestText -Name "selftest-$mode" -Source 'Thread Gate Self-test'
+            $minutes = if ($mode -eq 'full') { 295 } else { 185 }
+            $uses = @([regex]::Matches($longJob, '(?m)^        uses: (\S+)') | ForEach-Object { $_.Groups[1].Value })
+            if (($uses -join '|') -cne ($pins -join '|') -or
+                $longJob -notmatch "(?m)^    timeout-minutes: $minutes\s*$" -or
+                $longJob -notmatch 'python -I ci/selftest_jobs\.py \$paths') { return $false }
+            $longStep = Get-YamlStepBlock -Content $longJob -Name "Run the $mode self-test" -Source 'Thread Gate Self-test'
+            if ($longStep -notmatch '(?m)^        if: steps\.select\.outputs\.enabled == ''true''\s*$' -or
+                $longStep -notmatch 'python -I ci/controls\.py @opts ') { return $false }
+        }
+    }
+    catch {
+        return $false
+    }
+    return $true
+}
+
+$selftestWorkflowText = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\thread-gate-selftest.yml') -Raw
+if (-not (Test-ThreadGateWorkflowSplit $testWorkflowText $selftestWorkflowText)) {
+    throw 'Test must gate its fast self-test and keep both long jobs in the independent workflow with their pinned actions.'
+}
+$selftestSplitControls = @(
+    @{ TestText = $testWorkflowText + "`n  selftest-full:`n"; SelftestText = $selftestWorkflowText },
+    @{ TestText = $testWorkflowText.Replace('python -I ci/thread_gate_smoke.py', 'python ci/thread_gate_smoke.py'); SelftestText = $selftestWorkflowText },
+    @{ TestText = $testWorkflowText.Replace('timeout-minutes: 8', 'timeout-minutes: 12'); SelftestText = $selftestWorkflowText },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('  workflow_dispatch:', "  push: {}`n  workflow_dispatch:") },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('github.event.pull_request.number', 'github.ref_name') },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548', 'actions/setup-python@v6') },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace('timeout-minutes: 185', 'timeout-minutes: 8') },
+    @{ TestText = $testWorkflowText; SelftestText = $selftestWorkflowText.Replace("if: steps.select.outputs.enabled == 'true'", 'if: always()') }
+)
+foreach ($mutation in $selftestSplitControls) {
+    if (Test-ThreadGateWorkflowSplit @mutation) { throw 'The thread gate workflow split contract accepted a mutation.' }
+}
+Write-Host "Thread gate workflow split: $($selftestSplitControls.Count)/$($selftestSplitControls.Count) mutations rejected"
+
 # Pin the interpreter, isolated invocation, event inputs and the one Phase 0b
 # switch. Compare whole steps so extra arguments cannot override enforcement.
 function Test-MigrationLintSteps {
@@ -218,6 +280,7 @@ foreach ($coverage in @(
                 'Migration diff lints',
                 'Armed renderer-state thread gate',
                 'Thread role source checks',
+                'Fast thread-gate self-test',
                 'PowerShell shell integration tests (PowerShell 7)',
                 'PowerShell shell integration tests (Windows PowerShell 5.1)',
                 'Harness provenance and state controls (PowerShell 7)',
