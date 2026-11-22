@@ -10,7 +10,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $testWorkflowText
         }
-        Pattern = '(?ms)^on:\s+push:\s+branches: \[main, w1a/s5-r1-fixes\]\s+pull_request: \{\}'
+        Pattern = '(?ms)^on:\s+push:\s+branches: \[main\]\s+pull_request: \{\}'
         Kind = 'Text'
         Description = 'push CI is main-only while pull-request CI remains enabled'
     }
