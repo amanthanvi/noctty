@@ -44,6 +44,10 @@ public static class HiddenLocal {
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h, EnumWindow cb, IntPtr p);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out int p);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr h, uint message, IntPtr w, IntPtr l);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint tid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformationW(IntPtr h,int index,StringBuilder value,int length,out int needed);
     [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
@@ -111,13 +115,28 @@ public static class HiddenLocal {
     }
     // The name of the desktop of the thread that owns `h`.
     public static string WindowDesktop(IntPtr h) {
-        int pid; int tid=GetWindowThreadProcessId(h,out pid); var name=new StringBuilder(256); int needed;
-        if(tid==0 || !GetUserObjectInformationW(GetThreadDesktop((uint)tid),2,name,512,out needed)) throw new Exception("Window desktop query failed");
+        int pid; int tid=GetWindowThreadProcessId(h,out pid);
+        return DesktopName((uint)tid);
+    }
+    static string DesktopName(uint tid) {
+        var name=new StringBuilder(256); int needed;
+        if(tid==0 || !GetUserObjectInformationW(GetThreadDesktop(tid),2,name,512,out needed)) throw new Exception("Thread desktop query failed");
         return name.ToString();
     }
+    public static string CurrentDesktopName() {
+        if(GetDesktopWindow()==IntPtr.Zero) throw new Exception("Cannot connect to driver desktop");
+        return DesktopName(GetCurrentThreadId());
+    }
+    public static void PostSurfaceKey(IntPtr h, int pid, string desktop, int key) {
+        int owner;
+        if(GetWindowThreadProcessId(h,out owner)==0 || owner!=pid || Class(h)!="noctty.win32" || WindowDesktop(h)!=desktop)
+            throw new Exception("Key target is not the owned terminal surface on the private desktop");
+        if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1)) ||
+           !PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key post failed");
+    }
     // Starts a process on the named desktop, with no console window.
-    public static ProcessInfo Spawn(string app,string command,string cwd,string desktop) {
-        var si=new Startup { cb=Marshal.SizeOf<Startup>(),desktop=desktop,flags=1,show=0 }; ProcessInfo pi;
+    public static ProcessInfo Spawn(string app,string command,string cwd,string desktop,short show=0) {
+        var si=new Startup { cb=Marshal.SizeOf<Startup>(),desktop=desktop,flags=1,show=show }; ProcessInfo pi;
         if(!CreateProcessW(app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x08000000,IntPtr.Zero,cwd,ref si,out pi))
             throw new Exception("CreateProcess failed: "+Marshal.GetLastWin32Error());
         return pi;
@@ -153,9 +172,10 @@ function Jump-List-Files {
 
 # A portable copy: every file of the source bin directory, the share directory beside it, and
 # the `noctty.portable` marker that keeps the copy's state inside its own directory.
-function Copy-Portable([string] $Source, [string] $Destination) {
+function Copy-Portable([string] $Source, [string] $Destination, [switch] $OmitIcon) {
     [void](New-Item -ItemType Directory -Path $Destination)
-    Get-ChildItem -LiteralPath $Source -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $Destination }
+    Get-ChildItem -LiteralPath $Source -File | Where-Object { -not $OmitIcon -or $_.Name -ine 'noctty.ico' } |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $Destination }
     $share = Join-Path (Split-Path -Parent $Source) 'share'
     if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination (Join-Path (Split-Path -Parent $Destination) 'share') -Recurse }
     Set-Content -LiteralPath (Join-Path $Destination 'noctty.portable') -Value '' -NoNewline
@@ -188,7 +208,8 @@ function Invoke-LocalHiddenDriver {
         [Parameter(Mandatory)] [string] $Script, [Parameter(Mandatory)] [string] $Bin, [Parameter(Mandatory)] [string] $Run,
         [Parameter(Mandatory)] [string] $DesktopPrefix, [Parameter(Mandatory)] [int] $TimeoutSeconds, [Parameter(Mandatory)] [string] $Label,
         [string] $ExpectedStartupHash, [string] $ExpectedStartupModified,
-        [switch] $PassDesktopName, [string[]] $DriverArguments = @(), [hashtable] $RunFiles = @{}, [switch] $GuardClipboard
+        [switch] $PassDesktopName, [string[]] $DriverArguments = @(), [hashtable] $RunFiles = @{}, [switch] $GuardClipboard,
+        [switch] $OmitIcon
     )
     $Bin = (Resolve-Path -LiteralPath $Bin).Path
     $Run = [IO.Path]::GetFullPath($Run)
@@ -200,7 +221,7 @@ function Invoke-LocalHiddenDriver {
     if (($ExpectedStartupHash -and $before.Hash -ne $ExpectedStartupHash) -or ($ExpectedStartupModified -and $before.Modified -ne $ExpectedStartupModified)) { throw 'Real startup state differs from supplied baseline; no launches performed.' }
     [void](New-Item -ItemType Directory -Path $Run)
     foreach ($file in $RunFiles.GetEnumerator()) { [IO.File]::WriteAllText((Join-Path $Run $file.Key), $file.Value) }
-    Copy-Portable $Bin (Join-Path $Run 'source\bin')
+    Copy-Portable $Bin (Join-Path $Run 'source\bin') -OmitIcon:$OmitIcon
     foreach ($name in @('localappdata','appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
     $desktopName = $DesktopPrefix + [guid]::NewGuid().ToString('N')
     $desktop = [HiddenLocal]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
@@ -245,4 +266,17 @@ function Invoke-LocalHiddenDriver {
     }
     if($code -ne 0) { throw "Hidden driver failed with exit $code; inspect sanitized results in $Run." }
     Write-Host "${Label}: PASS"
+}
+
+# These leaves accept a receipt-validated input build in their outer process.
+# In their driver, admit only the fresh portable copy and the named desktop.
+function Assert-LocalHiddenFixture([string] $Bin, [string] $Run, [string] $DesktopName, [string] $DesktopPrefix) {
+    if ($DesktopName -cnotmatch ('\A' + [regex]::Escape($DesktopPrefix) + '[0-9a-f]{32}\z') -or
+        [HiddenLocal]::CurrentDesktopName() -cne $DesktopName -or
+        $Bin -ine (Join-Path $Run 'source\bin') -or
+        $env:LOCALAPPDATA -ine (Join-Path $Run 'localappdata') -or $env:APPDATA -ine (Join-Path $Run 'appdata') -or
+        -not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.portable') -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $Bin 'noctty.ico'))) {
+        throw 'Expected the fresh portable fixture on its named private desktop with redirected state.'
+    }
 }

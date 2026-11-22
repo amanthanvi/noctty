@@ -76,6 +76,17 @@ foreach ($script in $hiddenScripts) {
 }
 Invoke-ContractTable -Contracts $hiddenContracts
 
+# The developer-machine first-live leaves use the local driver's owned job and
+# receipt-bound measurement copy. They are separate from the hosted leaf plan.
+foreach ($name in @('hidden-win11-cli-automation.ps1', 'hidden-win11-uia-rows.ps1')) {
+    $path = Join-Path $repoRoot "test\windows\$name"
+    $text = Remove-PowerShellComments (Get-Content -LiteralPath $path -Raw)
+    if ($text -notmatch $hiddenForbidden -or
+        $text -notmatch '(?s)Assert-InteractiveWin11MeasureBuild.*?Invoke-LocalHiddenDriver.*?-PassDesktopName -GuardClipboard -OmitIcon.*?Assert-LocalHiddenFixture.*?\[HiddenLocal\]::Spawn') {
+        throw "$name must validate the measurement copy and launch via the guarded private-desktop driver."
+    }
+}
+
 # Exercise extracted functions with managed native-call stand-ins, plus bounded native
 # observations of this process and an empty job. No child, window, registry write or real state read.
 function Get-HiddenFunction([string] $Text, [string] $Name) {
