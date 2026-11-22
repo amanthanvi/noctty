@@ -399,16 +399,14 @@ page_serial: u64,
 /// checked against the live list before its coordinates are used.
 page_serial_epoch: u64,
 
-/// The fork's earlier name for `page_serial_epoch`, kept only for its readers
-/// outside this file (UIA `RowNumbering` in `apprt/win32_uia/text.zig` and
-/// search's `LiveNodes` in `search/screen.zig`) until step 1A.3 of the Ghostty
-/// 1.4.0 catch-up moves them onto the epoch. It is not a second source: only
-/// `reset` writes it, right after the epoch, so the two are always equal.
-page_serial_min: u64 = 0,
-
-/// Generation of row coordinates after structural edits that can keep page
-/// serials unchanged. Viewport motion and appending rows leave it unchanged.
+/// Document-wide invalidation for absolute row coordinates, including layout
+/// renewals on later pages. Viewport motion and appending rows without pruning
+/// leave it unchanged.
 row_generation: u64 = 0,
+
+/// During Screen.resize, the original cursor page owns temporary references.
+/// Clearing or destroying that storage clears this pointer.
+resize_cursor_page: ?*List.Node = null,
 
 /// Byte size of the raw backing mappings owned by active page nodes. This is
 /// logical scrollback accounting and does not change while a mapping is
@@ -946,7 +944,6 @@ pub fn reset(self: *PageList) void {
     // Every old reference now has a serial below the epoch and can be rejected
     // in O(1), even if the node pool later reuses its pointer address.
     self.page_serial_epoch = self.page_serial;
-    self.page_serial_min = self.page_serial_epoch;
 
     // We need enough pages/nodes to keep our active area. This should
     // never fail since we by definition have allocated a page already
@@ -2833,6 +2830,7 @@ fn eraseTrailingRows(self: *PageList, n: usize) void {
         const page = node.page();
         const take: size.CellCountInt = @intCast(@min(remaining, page.size.rows));
         const keep = page.size.rows - take;
+        if (keep > 0) self.invalidateNodeLayout(node);
 
         const dest_node, const dest_y = if (keep > 0)
             .{ node, keep - 1 }
@@ -3295,11 +3293,10 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
 /// the meaning of page coordinates do not require a new generation solely for
 /// that reason.
 ///
-/// The only state changed here is `node.serial` and the next-generation counter
-/// `page_serial`. Consequently, every previously captured pointer-plus-serial
-/// pair for this node becomes invalid while new references can capture the new
-/// generation. This does not advance `page_serial_epoch`: only `reset` starts a
-/// new whole-list validity epoch.
+/// Every previously captured pointer-plus-serial pair for this node becomes
+/// invalid. Advance `row_generation` too, so absolute row consumers can
+/// detect renewals anywhere in the list without walking it. Only `reset`
+/// advances `page_serial_epoch`.
 ///
 /// This also does not mutate the page, update tracked pins or viewport state,
 /// adjust row or memory accounting, mark cells dirty, or notify incremental
@@ -3308,6 +3305,7 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
 pub fn invalidateNodeLayout(self: *PageList, node: *List.Node) void {
     node.serial = self.page_serial;
     self.page_serial += 1;
+    self.row_generation +%= 1;
 }
 
 /// Compact a page to use the minimum required memory for the contents
@@ -3756,6 +3754,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         }
 
         // Reset our memory
+        self.discardResizeCursorPage(first);
         const buf = first.restore(.discard).memory;
         @memset(buf, 0);
         assert(buf.len <= std_size);
@@ -4474,7 +4473,12 @@ fn compressPage(self: *PageList, node: *List.Node) bool {
 /// responsible for accounting for the removed rows. This function only
 /// updates `page_size` (byte accounting), not row accounting.
 fn destroyNode(self: *PageList, node: *List.Node) void {
+    self.discardResizeCursorPage(node);
     destroyNodeExt(&self.pool, node, &self.page_size);
+}
+
+fn discardResizeCursorPage(self: *PageList, node: *List.Node) void {
+    if (self.resize_cursor_page == node) self.resize_cursor_page = null;
 }
 
 fn destroyNodeExt(
@@ -4578,9 +4582,6 @@ pub fn eraseRow(
 ) !void {
     defer self.assertIntegrity();
     const pn = self.pin(pt).?;
-    // Row rotation changes absolute anchors even when page serials survive.
-    // Invalidate before mutation, including a later clone allocation failure.
-    self.row_generation +%= 1;
 
     var node = pn.node;
     var page = node.page();
@@ -4701,7 +4702,6 @@ pub fn eraseRowBounded(
     // this function are for where it differs from eraseRow.
 
     const pn = self.pin(pt).?;
-    self.row_generation +%= 1;
 
     var node: *List.Node = pn.node;
     var page = node.page();
@@ -4961,6 +4961,7 @@ fn eraseRows(
             if (chunk.node.next == null and chunk.node.prev == null) {
                 // Reinitializing the sole page invalidates every coordinate in it.
                 self.invalidateNodeLayout(chunk.node);
+                self.discardResizeCursorPage(chunk.node);
                 const page = chunk.node.page();
                 erased += page.size.rows;
                 page.reinit();
@@ -4972,6 +4973,9 @@ fn eraseRows(
             if (discard) for (self.tracked_pins.keys()) |p| {
                 if (p.node == chunk.node) p.garbage = true;
             };
+            // A whole-page erase can leave the first page unchanged, and a
+            // later append can restore the old row count.
+            self.row_generation +%= 1;
             self.erasePage(chunk.node);
             continue;
         }
@@ -5029,10 +5033,6 @@ fn eraseRows(
 
     // Update our total row count
     self.total_rows -= erased;
-
-    // Partial-page erasure shifts rows without changing the page serial.
-    // Keep this independent of total_rows, which later output can regrow.
-    if (erased != 0) self.row_generation +%= 1;
 
     // If we deleted active, we need to regrow because one of our invariants
     // is that we always have full active space.
@@ -16733,11 +16733,15 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
     s.viewport_pin.* = doomed.*;
 
     // Erase every row of the last page and one more.
+    const retained = s.pages.first.?;
+    const serial = retained.serial;
     const last_rows = s.pages.last.?.rows();
     const total = s.totalRows();
     s.eraseTrailingRows(last_rows + 1);
     try testing.expectEqual(total - last_rows - 1, s.totalRows());
+    try testing.expectEqual(retained, s.pages.last.?);
     try testing.expect(s.pages.first == s.pages.last);
+    try testing.expect(!s.nodeIsValid(retained, serial));
 
     // The pin moved to the new last row, marked garbage because its own
     // row is gone. That row no longer wraps and lost its spacer head; the
