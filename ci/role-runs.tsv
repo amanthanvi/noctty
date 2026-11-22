@@ -7,17 +7,23 @@
 # or 0.17) and then applies only to it. r19 (round 18's AH2): a function key is the file and the bare symbol name, at
 # 31796f5d0; round 18's L3: the soak's pairs; r20 (round 19's L8): those pairs are required on 0.17.1; on 0.15.2 the
 # soak's pair checks are advisory (§19.2), and its launch, dump and seal still gate.
+# run <TAB> exits <TAB> required: require the supervisor's sealed process exits.
+# run <TAB> exit <TAB> kind <TAB> unsigned code <TAB> yes|no: permit that abnormal outcome and layer marker.
+debug-suite	exits	required
 debug-suite	group	test-exe	1
 debug-suite	required	src/termio/stream_handler.zig:surfaceMessageWriter	reader
 debug-suite	required	src/termio/mailbox.zig:send	ui
 debug-suite	required	src/termio/mailbox.zig:send	reader
 debug-suite	required	src/termio/Termio.zig:focusGained	termio
 debug-suite	required	src/terminal/search/query_search.zig:stop	search
+composite	exits	required
 composite	launch	gui	1
 composite	required	src/renderer/generic.zig:updateFrame	renderer
 composite	required	src/termio/Termio.zig:processOutput	reader
 composite	required	src/Surface.zig:keyCallback	ui
+app-start	exits	required
 app-start	launch	gui	1
+soak-releasesafe	exits	required
 soak-releasesafe	launch	gui	1
 soak-releasesafe	required	src/renderer/generic.zig:updateFrame	renderer	0.17
 soak-releasesafe	required	src/termio/Termio.zig:processOutput	reader	0.17

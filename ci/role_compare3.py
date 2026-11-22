@@ -79,9 +79,16 @@ Usage: python -I role_compare3.py --runs <run-spec> --run <name> --compiler 0.15
        (--table-scope: <table> is the reviewed seven-column table, read in that phase's scope)"""
 import collections
 import hashlib
+import importlib.util
 import os
 import re
 import sys
+
+sys.dont_write_bytecode = True
+_supervisor_spec = importlib.util.spec_from_file_location(
+    "role_supervisor", os.path.join(os.path.dirname(os.path.abspath(__file__)), "role_supervisor.py"))
+supervisor = importlib.util.module_from_spec(_supervisor_spec)
+_supervisor_spec.loader.exec_module(supervisor)
 
 for _stream in (sys.stdout, sys.stderr):   # r23: the report in UTF-8 whatever the console's code page
     _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -125,6 +132,7 @@ def key(k):
 
 failures = []
 groups, launch_min, required, advisory = {}, {}, [], False
+exits_required, expected_exits = False, set()
 if not isolated:
     spec_rows = 0
     for l in open(opts["--runs"], encoding="utf-8"):
@@ -134,7 +142,7 @@ if not isolated:
         if p[0] != opts["--run"]:
             continue
         spec_rows += 1
-        width = 3 if p[1:2] == ["advisory"] else 4
+        width = 3 if p[1:2] in (["advisory"], ["exits"]) else 5 if p[1:2] == ["exit"] else 4
         if len(p) == width + 1 and p[width] in ("0.15", "0.17"):
             if p[width] != opts["--compiler"]:
                 continue
@@ -147,6 +155,11 @@ if not isolated:
             required.append((key(p[2]), p[3]))
         elif p[1:2] == ["advisory"] and len(p) == 3 and p[2] in ("0.15", "0.17"):
             advisory = advisory or p[2] == opts["--compiler"]
+        elif p[1:] == ["exits", "required"]:
+            exits_required = True
+        elif (p[1:2] == ["exit"] and len(p) == 5 and re.fullmatch(r"[1-9][0-9]{0,9}", p[3])
+              and int(p[3]) <= 0xffffffff and p[4] in ("yes", "no")):
+            expected_exits.add((p[2], int(p[3]), p[4]))
         else:
             failures.append(f"BAD-RUN-SPEC run {opts['--run']}: a malformed row")
     if not required and not any(n > 0 for n in [*groups.values(), *launch_min.values()]):
@@ -157,6 +170,7 @@ if not isolated:
         print(f"RESULT FAIL ({len(failures)} failures) BAD-RUN-SPEC={len(failures)}")
         sys.exit(1)
 launches, bad_rows, seals, launch_lines = {}, [], [], []
+exits, exit_seals, exit_lines = {}, [], []
 for n_, l in enumerate(open(manifest, encoding="utf-8") if not isolated else [], 1):
     if not l.strip():
         continue
@@ -166,6 +180,15 @@ for n_, l in enumerate(open(manifest, encoding="utf-8") if not isolated else [],
         launch_lines.append("\t".join(p))
     elif p[0] == "seal" and len(p) == 3 and p[1].isdigit() and re.fullmatch(r"[0-9a-f]{64}", p[2]):
         seals.append((int(p[1]), p[2]))
+    elif p[0] == "exit-seal" and len(p) == 3 and p[1].isdigit() and re.fullmatch(r"[0-9a-f]{64}", p[2]):
+        exit_seals.append(l.rstrip("\n") + "\n")
+    elif p[0] == "exit" and (e := supervisor.parse_exit(l.rstrip("\n"))) is not None:
+        run, pid, start, kind, code, marker = e
+        if run != opts["--run"] or (pid, start) in exits:
+            failures.append(f"BAD-EXIT row {n_}: exit belongs to another run or duplicates a process")
+        else:
+            exits[pid, start] = kind, code, marker
+        exit_lines.append(l.rstrip("\n"))
     else:
         bad_rows.append(n_)
 if not isolated:   # AH3: the supervisor's seal, checked against the launch rows read
@@ -177,6 +200,16 @@ if not isolated:   # AH3: the supervisor's seal, checked against the launch rows
     elif seals[0] != (len(launch_lines), digest):
         failures.append(f"BAD-SEAL the seal says {seals[0][0]} launches, the manifest has {len(launch_lines)} launch rows"
                         + ("" if seals[0][1] == digest else "; the rows' digest differs"))
+    if exits_required or exit_lines or exit_seals:
+        if exit_seals != [supervisor.seal_row(exit_lines, "exit-seal")]:
+            failures.append("BAD-EXIT-SEAL exit rows lack one matching supervisor seal")
+    for (pid, start), (kind, code, marker) in sorted(exits.items()):
+        launch = launches.get((pid, start))
+        if (launch is not None and launch != kind) or (launch is None and kind not in groups):
+            failures.append(f"UNEXPECTED-EXIT pid {pid} start {start}: exit kind {kind} does not match a process of the run")
+        if code and (kind, code, marker) not in expected_exits:
+            failures.append(f"ABNORMAL-EXIT run {opts['--run']} pid {pid} start {start}: "
+                            f"{kind} code 0x{code:08x}, layer marker {marker}")
 allowed, identity = set(), collections.defaultdict(list)
 LOOKUP = {"fork": ("fork", "all"), "1a": ("merged", "fork", "all"), "1b": ("merged-1b", "merged", "fork", "all")}
 table_scope = opts.get("--table-scope")
@@ -235,6 +268,7 @@ if not bare:   # under --bare-names the merge is the hazard being shown, not a t
 failures += [f"BAD-MANIFEST row {n_}: not a well-formed launch row (expectations come from the run spec)"
              for n_ in bad_rows]
 seen, matched = set(), set()
+dump_processes = set()
 with_pairs = collections.Counter()
 for name in sorted(os.listdir(dump_dir)):
     if not name.endswith(".pairs") or not os.path.isfile(os.path.join(dump_dir, name)):
@@ -249,6 +283,16 @@ for name in sorted(os.listdir(dump_dir)):
         failures.append(f"BAD-DUMP {name}: the symbolised header reports a problem")
     pairs = [tuple(x.rsplit(" ", 1)) for x in lines[1:]]   # a test key holds spaces; the role is the last word
     row = launches.get((pid, start))
+    if not isolated and (exits_required or exit_lines):
+        if (pid, start) in dump_processes:
+            failures.append(f"BAD-DUMP {name}: duplicate process dump")
+            continue
+        dump_processes.add((pid, start))
+        process_exit = exits.get((pid, start))
+        if process_exit is None:
+            failures.append(f"MISSING-EXIT {name}: pid {pid} start {start} has no recorded exit")
+        elif process_exit[0] != kind:
+            failures.append(f"BAD-EXIT {name}: pid {pid} start {start} does not match its recorded exit kind")
     if isolated:
         if kind != "child":
             failures.append(f"NOT-CHILD-DUMP {name}: kind {kind} in an isolated child's directory (pid {pid})")
@@ -276,9 +320,17 @@ for name in sorted(os.listdir(dump_dir)):
         seen.add((key(fn), role))
         if (key(fn), role) not in allowed:
             failures.append(f"PAIR-OUTSIDE-TABLE {name}: ({fn}, {role})")
+    if not isolated and (exits_required or exit_lines) and kind in groups and not pairs:
+        failures.append(f"EMPTY-DUMP {name}: group process pid {pid} start {start} recorded no pair")
 for (pid, start), kind in sorted(launches.items()):
     if kind == "gui" and (pid, start) not in matched:
         failures.append(f"MISSING-DUMP launched gui process pid {pid} start {start}: no dump")
+    if (exits_required or exit_lines) and (pid, start) not in exits and (pid, start) not in dump_processes:
+        failures.append(f"MISSING-EXIT launched {kind} process pid {pid} start {start}: no recorded exit")
+for pid_start, (kind, _, _) in sorted(exits.items()):
+    if kind in groups and pid_start not in dump_processes:
+        pid, start = pid_start
+        failures.append(f"MISSING-DUMP {kind} process pid {pid} start {start}: no dump")
 for kind, n in sorted(launch_min.items()):
     have = sum(1 for k in launches.values() if k == kind)
     if have < n:

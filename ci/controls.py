@@ -4518,6 +4518,40 @@ if want(883): results.append(compare_control("883-T1-isolated-rejects-problem-he
     {"child.pairs": T1_CHILD + "?append_failed:pairs-lost none\n"},
     1, {"BAD-DUMP": 1, "UNQUALIFIED-KEY": 1}, isolated=True))
 
+
+def process_exit_control(tag, code, exp_kinds, permit=False):
+    """Run five valid dump packets through the supervisor's actual exit and seal entry points."""
+    state = os.path.join(logdir, tag)
+    os.makedirs(state)
+    manifest_path = os.path.join(state, "manifest.tsv")
+    stderr_path = os.path.join(state, "stderr")
+    script = os.path.join(here, "role_supervisor.py")
+    dumps = {}
+    for pid in range(800, 805):
+        start = str(134070000000000000 + pid)
+        dumps[f"test-exe-{pid}.pairs"] = SUITE.replace("pid=800", f"pid={pid}").replace("start=134070000000000800",
+                                                                                      f"start={start}")
+        outcome = code if pid == 804 else 0
+        with open(stderr_path, "wb") as stream:
+            stream.write(b"thread-role layer: synthetic failure\n" if outcome else b"")
+        subprocess.run([py, "-I", script, "exit", state, manifest_path, "fixture", str(pid), start,
+                        "test-exe", str(outcome), stderr_path], check=True, capture_output=True)
+    subprocess.run([py, "-I", script, "seal", state, manifest_path], check=True, capture_output=True)
+    with open(manifest_path, encoding="utf-8") as stream:
+        manifest_text = stream.read()
+    fixture_runs = CMP_RUNS + "fixture\texits\trequired\n"
+    if permit:
+        fixture_runs += f"fixture\texit\ttest-exe\t{code & 0xffffffff}\tyes\n"
+    return compare_control(tag, dumps, int(bool(exp_kinds)), exp_kinds, manifest=manifest_text, seal=None,
+                           runs=fixture_runs)
+
+
+if want(884): results.append(process_exit_control("884-T2-valid-dumps-do-not-hide-an-abnormal-process-exit",
+    -1073741819, {"ABNORMAL-EXIT": 1}))
+if want(885): results.append(process_exit_control("885-T2-the-same-dumps-with-normal-process-exits-pass", 0, {}))
+if want(886): results.append(process_exit_control("886-T2-the-run-spec-may-permit-an-exact-abnormal-outcome",
+    -1073741819, {}, permit=True))
+
 results = [r.result() if hasattr(r, "result") else r for r in results]
 POOL.shutdown()
 n_ok = sum(1 for ok, _ in results if ok)
