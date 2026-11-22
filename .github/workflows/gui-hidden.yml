@@ -113,6 +113,11 @@ jobs:
           version: 0.15.2
           use-cache: false
 
+      - name: Setup Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
       # setup-zig exports its own global cache even with use-cache disabled.
       - name: Configure Zig package cache
         shell: pwsh
@@ -131,6 +136,74 @@ jobs:
         shell: pwsh
         timeout-minutes: 75
         run: pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo $env:GITHUB_WORKSPACE -Work (Join-Path $env:RUNNER_TEMP 'gui-hidden-work') -Out (Join-Path $env:RUNNER_TEMP 'gui-hidden') -Build
+
+      - name: Build the thread-role symboliser
+        shell: pwsh
+        run: ./scripts/dev-windows.cmd zig build -Demit-exe=false -Demit-test-exe=true --summary all
+
+      - name: Composite thread-role pairs and controls
+        shell: pwsh
+        run: |
+          . ./scripts/interactive-win11-measure-lib.ps1
+          $measure = Get-InteractiveWin11MeasureLayout $env:GITHUB_WORKSPACE
+          $env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent $measure.Exe
+          # The source prefix must include the separator before src.
+          $env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source + '\'
+          $symboliser = Join-Path $env:GITHUB_WORKSPACE 'zig-out/bin/ghostty-test.exe'
+          $cases = [ordered]@{
+            Composite = 'gui-hidden-work'
+            NoKey = 'gui-hidden-role-no-key'
+            NoLaunch = 'gui-hidden-role-no-launch'
+          }
+          foreach ($case in $cases.Keys) {
+            $work = Join-Path $env:RUNNER_TEMP $cases[$case]
+            if ($case -ne 'Composite') {
+              pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo $env:GITHUB_WORKSPACE -Work $work -Out "$work-out" -Leaves role-pairs -RoleControl $case
+              if ($LASTEXITCODE -ne 0) { throw "$case runner failed." }
+            }
+            $leaf = Join-Path $work 'leaves/role-pairs'
+            $manifest = Join-Path $leaf 'role-manifest.tsv'
+            $env:NOCTTY_THREAD_ROLE_SYMBOLISE = Join-Path $leaf 'role-dump'
+            $symbolised = Join-Path $leaf 'role-symbolised'
+            [void](New-Item -ItemType Directory -Path $symbolised)
+            $env:NOCTTY_THREAD_ROLE_SYMBOLISED = $symbolised
+            $symbolise = @(& $symboliser 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "$case symbolisation failed." }
+            if (@(Get-ChildItem -LiteralPath $symbolised -Filter '*.pairs' -File).Count -ne 1) {
+              throw "$case must symbolise exactly one app dump."
+            }
+            $PSNativeCommandUseErrorActionPreference = $false
+            $compare = @(python -I ci/role_compare3.py --runs ci/role-runs.tsv --run composite --compiler 0.15 $manifest ci/lock-inventory-threads.tsv $symbolised --table-scope 1a 2>&1)
+            $code = $LASTEXITCODE
+            $failures = @($compare | Where-Object { $_ -clike 'FAIL *' })
+            $summary = ($compare | Where-Object { $_ -cmatch '^RESULT (PASS|FAIL|ADVISORY) \(\d+ failures\)( [A-Z-]+=\d+)*$' }) -join ' '
+            switch ($case) {
+              Composite {
+                if ($code -ne 0 -or $compare -cnotcontains 'RESULT PASS (0 failures)') {
+                  throw "Composite must pass the thread-role comparison. $summary"
+                }
+                Write-Host 'Composite PASS'
+              }
+              NoKey {
+                if ($code -ne 1 -or $failures.Count -ne 1 -or
+                    $failures[0] -cne 'FAIL MISSING-REQUIRED-PAIR (src/Surface.zig:keyCallback, ui)') {
+                  throw "NoKey must fail solely for the missing keyCallback/ui pair. $summary"
+                }
+                Write-Host 'NoKey FAIL MISSING-REQUIRED-PAIR (expected)'
+              }
+              NoLaunch {
+                # The exit receipt still exists, so the missing launch also leaves an unexpected exit.
+                $kinds = @($failures | ForEach-Object { ($_ -split ' ', 3)[1] })
+                if ($code -ne 1 -or
+                    ($kinds -join ',') -cne 'UNEXPECTED-EXIT,UNEXPECTED-PROCESS,MISSING-LAUNCH,MISSING-REQUIRED-PAIR,MISSING-REQUIRED-PAIR,MISSING-REQUIRED-PAIR') {
+                  throw "NoLaunch must fail because the dump has no matching launch row. $summary"
+                }
+                Write-Host 'NoLaunch FAIL UNEXPECTED-EXIT, UNEXPECTED-PROCESS and MISSING-LAUNCH (expected)'
+              }
+            }
+          }
+          # The last native invocation is the deliberate failing control.
+          exit 0
 
       # A job that failed without a complete result (a failed helper self-test, which stops the job before the suite
       # step, or a suite step that died or did not parse before it wrote one) would leave the upload empty or partial:

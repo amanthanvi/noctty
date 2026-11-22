@@ -1518,8 +1518,14 @@ pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Wo
 A run that selects fewer than all the plan's leaves (`-Leaves smoke,undo`) is for
 diagnosis: when they pass, its result and its whole-plan assertions
 (`leaves-pass`, `launch-policy`, `real-input-absent`) are `skip`, never
-`pass`. Naming all six leaves is a full run. `-Work` must be a printable ASCII
+`pass`. Naming every leaf in the plan is a full run. `-Work` must be a printable ASCII
 path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
+
+The `role-pairs` leaf waits for a cmd prompt, posts one letter to the terminal
+surface and closes the copy. Its dump and sealed process manifest stay under
+`-Work`. The workflow compares the symbolised dump against the composite role
+specification and requires two failures in separate control runs. `NoKey`
+omits the letter and `NoLaunch` omits the role manifest's launch row.
 
 No release or check requires the interactive composite (the maintainer's
 decision, 2026-11-22): it stays dispatchable and optional. This lane's gate
