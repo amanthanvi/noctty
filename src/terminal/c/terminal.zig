@@ -191,14 +191,8 @@ const Effects = struct {
 
         for (contents, write.contents) |*c_content, content| {
             c_content.* = .{
-                .mime = .{
-                    .ptr = content.mime.ptr,
-                    .len = content.mime.len,
-                },
-                .data = .{
-                    .ptr = content.data.ptr,
-                    .len = content.data.len,
-                },
+                .mime = .init(content.mime),
+                .data = .init(content.data),
             };
         }
 
@@ -933,14 +927,8 @@ fn getTyped(
             t.modes.get(.mouse_event_normal) or
             t.modes.get(.mouse_event_button) or
             t.modes.get(.mouse_event_any),
-        .title => {
-            const title = t.getTitle() orelse "";
-            out.* = .{ .ptr = title.ptr, .len = title.len };
-        },
-        .pwd => {
-            const pwd = t.getPwd() orelse "";
-            out.* = .{ .ptr = pwd.ptr, .len = pwd.len };
-        },
+        .title => out.* = .init(t.getTitle() orelse ""),
+        .pwd => out.* = .init(t.getPwd() orelse ""),
         .total_rows => out.* = t.screens.active.pages.total_rows,
         .scrollback_rows => out.* = t.screens.active.pages.total_rows - t.rows,
         .width_px => out.* = t.width_px,

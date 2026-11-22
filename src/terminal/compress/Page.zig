@@ -106,6 +106,11 @@ pub fn init(
     if (scratch.len < required) return error.OutputTooSmall;
     if (required == 0) return null;
 
+    // Compression preserves the opaque page bytes, including addressable
+    // struct padding that Memcheck may mark undefined.
+    if (std.valgrind.runningOnValgrind() > 0)
+        std.valgrind.memcheck.makeMemDefined(source.memory);
+
     const encoded_len = lz4.compress(
         source.memory,
         scratch[0..required],
@@ -209,6 +214,8 @@ test "compressed Page retained mapping round trip" {
 
     const expected = try testing.allocator.dupe(u8, resident.memory);
     defer testing.allocator.free(expected);
+    if (std.valgrind.runningOnValgrind() > 0)
+        std.valgrind.memcheck.makeMemDefined(expected);
     const memory_ptr = resident.memory.ptr;
     const memory_len = resident.memory.len;
 

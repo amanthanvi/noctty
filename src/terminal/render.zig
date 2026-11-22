@@ -388,9 +388,8 @@ pub const RenderState = struct {
             }
 
             // If our viewport pin changed, we do a full rebuild.
-            if (self.viewport_pin) |old| {
-                if (!old.eql(viewport_pin)) break :redraw true;
-            }
+            const old = self.viewport_pin orelse break :redraw true;
+            if (!old.eql(viewport_pin)) break :redraw true;
 
             break :redraw false;
         };
@@ -399,6 +398,11 @@ pub const RenderState = struct {
         self.rows = s.pages.rows;
         self.cols = s.pages.cols;
         self.viewport_pin = viewport_pin;
+        // Geometry and the viewport are recorded before the fallible work.
+        // If a redraw fails, force the next update to rebuild every chunk.
+        errdefer if (redraw) {
+            self.viewport_pin = null;
+        };
         self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
         self.cursor.cell = s.cursor.page_cell.*;
         self.cursor.style = s.cursor.style;
@@ -604,24 +608,29 @@ pub const RenderState = struct {
 
                     for (page_rows[i..][0..RowDirtyMask.group_len], i..) |*page_row, j| {
                         if (!page_row.dirty) continue;
-                        page_row.dirty = false;
                         any_dirty = true;
                         try builder.row(p, page_row, y + j);
+                        page_row.dirty = false;
                     }
                 }
                 while (i < take) : (i += 1) {
                     const page_row = &page_rows[i];
                     if (!page_row.dirty) continue;
-                    page_row.dirty = false;
                     any_dirty = true;
                     try builder.row(p, page_row, y + i);
+                    page_row.dirty = false;
                 }
             } else {
                 // Rebuild every row in the chunk.
                 any_dirty = true;
                 for (page_rows, 0..) |*page_row, i| {
+                    builder.row(p, page_row, y + i) catch |err| {
+                        // The page dirty flag was consumed above. Preserve
+                        // the work for the failed row and the rest of the chunk.
+                        for (page_rows[i..]) |*remaining| remaining.dirty = true;
+                        return err;
+                    };
                     page_row.dirty = false;
-                    try builder.row(p, page_row, y + i);
                 }
             }
 
@@ -1068,8 +1077,9 @@ const RowBuilder = struct {
         // Get all our cells in the page.
         const page_cells: []const page.Cell = page_row.cells.ptr(p.memory)[0..b.cols];
 
-        // Copy our raw row data
+        // The terminal row stays dirty until the build succeeds.
         b.raws[vy] = page_row.*;
+        b.raws[vy].dirty = false;
 
         // Note: our cells MultiArrayList uses our general allocator.
         // We do this on purpose because as rows become dirty, we do
@@ -1704,6 +1714,54 @@ test "grapheme" {
         try testing.expectEqual(0, cell.raw.codepoint());
         try testing.expectEqual(.spacer_tail, cell.raw.wide);
     }
+}
+
+test "render update retries a full redraw after OOM" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try Terminal.init(alloc, .{ .cols = 2, .rows = 2 });
+    defer t.deinit(alloc);
+    try t.print('x');
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+
+    // Allow row metadata to allocate, then fail building the first row.
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
+    try testing.expectError(error.OutOfMemory, state.update(failing.allocator(), &t));
+    try testing.expect(state.viewport_pin == null);
+    try state.update(alloc, &t);
+
+    const rows = state.row_data.items(.cells);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqual(@as(usize, 2), rows[1].len);
+    try testing.expectEqual('x', rows[0].items(.raw)[0].codepoint());
+    try testing.expectEqual(.full, state.dirty);
+}
+
+test "render update retries rows after OOM" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("x");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+    state.dirty = .false;
+    stream.nextSlice("e\xcc\x81");
+
+    // The next render-state allocation is the grapheme copy.
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, state.update(failing.allocator(), &t));
+    try state.update(alloc, &t);
+
+    const cells = state.row_data.items(.cells)[0].slice();
+    try testing.expectEqualSlices(u21, &.{0x301}, cells.items(.grapheme)[1]);
 }
 
 test "cursor state in viewport" {

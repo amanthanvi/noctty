@@ -1199,7 +1199,7 @@ pub fn clone(
             const last = result.pages.last.?;
             const page = last.page();
             const row = &page.rows.ptr(page.memory)[last.rows() - 1];
-            page.clearCells(row, 0, result.cols);
+            page.clearCells(row, 0, page.size.cols);
         }
 
         // Update our total rows to be our row size.
@@ -1307,12 +1307,28 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
         .lt => {
             // We first change our row count so that we have the proper amount
             // we can use when shrinking our cols.
+            const old_active_top = self.total_rows - self.rows;
             try self.resizeWithoutReflow(opts: {
                 var copy = opts;
                 copy.cols = self.cols;
                 break :opts copy;
             });
-            try self.resizeCols(cols, opts);
+
+            // Reflow counts rows below the cursor in the new active area.
+            var cols_opts = opts;
+            if (cols_opts.cursor) |*c| {
+                if (c.pin) |p| {
+                    if (self.pointFromPin(.active, p.*)) |active| {
+                        c.y = @intCast(active.active.y);
+                    }
+                } else {
+                    const screen_y = old_active_top + c.y;
+                    const new_active_top = self.total_rows - self.rows;
+                    if (screen_y >= new_active_top) c.y = @intCast(screen_y - new_active_top);
+                }
+            }
+
+            try self.resizeCols(cols, cols_opts);
         },
     }
 
@@ -1683,7 +1699,14 @@ const ReflowCursor = struct {
             self.new_rows -= 1;
         }
 
-        self.copyRowMetadata(src_row);
+        // A merged continuation must not erase a prompt start. An explicit
+        // start on a wrapped source row still marks the destination row.
+        if (!self.pending_wrap and
+            (self.x == 0 or self.page_row.semantic_prompt == .none or
+                src_row.semantic_prompt == .prompt))
+        {
+            self.copyRowMetadata(src_row);
+        }
 
         var x: usize = 0;
         while (x < cols_len) {
@@ -1692,6 +1715,9 @@ const ReflowCursor = struct {
                 try self.cursorScrollOrNewPage(list, cap);
                 self.copyRowMetadata(src_row);
                 self.page_row.wrap_continuation = true;
+                if (x > 0 and self.page_row.semantic_prompt == .prompt) {
+                    self.page_row.semantic_prompt = .prompt_continuation;
+                }
             }
 
             // Move any tracked pins from the source.
@@ -2434,6 +2460,7 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                 var it = self.pageIterator(.right_down, .{ .screen = .{} }, null);
                 while (it.next()) |chunk| {
                     const page = chunk.node.page();
+                    if (page.size.cols <= cols) continue;
                     defer page.assertIntegrity();
                     const rows = page.rows.ptr(page.memory);
                     for (0..page.size.rows) |i| {
@@ -2441,7 +2468,7 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                         // If the cut splits a wide char, clear its head too.
                         const cells = row.cells.ptr(page.memory);
                         const start = if (cells[cols - 1].wide == .wide) cols - 1 else cols;
-                        page.clearCells(row, start, self.cols);
+                        page.clearCells(row, start, page.size.cols);
                     }
 
                     page.size.cols = cols;
@@ -2635,17 +2662,7 @@ fn resizeWithoutReflowGrowCols(
         break :err cap;
     };
 
-    // On error, we need to undo all the pages we've added.
     const prev = chunk.node.prev;
-    errdefer {
-        var current = chunk.node.prev;
-        while (current) |p| {
-            if (current == prev) break;
-            current = p.prev;
-            self.pages.remove(p);
-            self.destroyNode(p);
-        }
-    }
 
     // Keeps track of all our copied rows. Assertions at the end is that
     // we copied exactly our page size.
@@ -2680,30 +2697,21 @@ fn resizeWithoutReflowGrowCols(
         const dst_rows = prev_page.rows.ptr(prev_page.memory)[prev_page.size.rows..];
         for (dst_rows, src_rows) |*dst_row, *src_row| {
             prev_page.size.rows += 1;
-            copied += 1;
             prev_page.cloneRowFrom(
                 page,
                 dst_row,
                 src_row,
             ) catch {
-                // If an error happens, we undo our row copy and break out
-                // into creating a new page.
+                // Retire the partially copied row, including managed cell
+                // data. Successfully copied rows remain in the previous page.
+                prev_page.resetRow(dst_row);
                 prev_page.size.rows -= 1;
-                copied -= 1;
-                break :prev;
+                break;
             };
+            copied += 1;
         }
 
-        assert(copied == len);
         assert(prev_page.size.rows <= prev_page.capacity.rows);
-
-        // Remap any tracked pins that pointed to rows we just copied to prev.
-        const pin_keys = self.tracked_pins.keys();
-        for (pin_keys) |p| {
-            if (p.node != chunk.node or p.y >= len) continue;
-            p.node = prev_node;
-            p.y += prev_page.size.rows - len;
-        }
     }
 
     // If we have an error, we clear the rows we just added to our prev page.
@@ -2766,26 +2774,36 @@ fn resizeWithoutReflowGrowCols(
                 break;
             }
         }
-        const y_end = copied;
-
         // Insert our new page
         self.pages.insertBefore(chunk.node, new_node);
-
-        // Update our tracked pins that pointed to this previous page.
-        const pin_keys = self.tracked_pins.keys();
-        for (pin_keys) |p| {
-            if (p.node != chunk.node or
-                p.y < y_start or
-                p.y >= y_end) continue;
-            p.node = new_node;
-            p.y -= y_start;
-        }
     }
     assert(copied == page.size.rows);
 
     // Our prior errdeferes are invalid after this point so ensure
     // we don't have any more errors.
     errdefer comptime unreachable;
+
+    // Publish the remaps only after all allocations succeed. The previous
+    // page owns the backfilled prefix even if the copy stopped early.
+    for (self.tracked_pins.keys()) |pin_| {
+        if (pin_.node != chunk.node) continue;
+        if (pin_.y < prev_copied) {
+            const node = prev.?;
+            pin_.node = node;
+            pin_.y += node.rows() - prev_copied;
+            continue;
+        }
+
+        var node = if (prev) |p| p.next.? else self.pages.first.?;
+        var y = pin_.y - prev_copied;
+        while (node != chunk.node) : (node = node.next.?) {
+            if (y < node.rows()) break;
+            y -= node.rows();
+        }
+        assert(node != chunk.node);
+        pin_.node = node;
+        pin_.y = y;
+    }
 
     // Remove the old page.
     // Deallocate the old page.
@@ -13228,6 +13246,18 @@ test "PageList clone less than active" {
     try testing.expectEqual(@as(usize, s.rows), s2.totalRows());
 }
 
+test "PageList clone less than active on a narrower page" {
+    const alloc = std.testing.allocator;
+    var s = try init(alloc, 4, 3, null);
+    defer s.deinit();
+    s.pages.first.?.page().size.cols = 2;
+
+    var copy = try s.clone(alloc, .{ .top = .{ .active = .{ .y = 2 } } });
+    defer copy.deinit();
+    try std.testing.expectEqual(@as(usize, s.rows), copy.totalRows());
+    try std.testing.expectEqual(2, copy.pages.last.?.cols());
+}
+
 test "PageList clone remap tracked pin" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -15885,7 +15915,132 @@ test "PageList resize reflow less cols no reflow preserves semantic prompt" {
         {
             const p = s.pin(.{ .active = .{ .y = 2 } }).?;
             const rac = p.rowAndCell();
-            try testing.expect(rac.row.semantic_prompt == .prompt);
+            try testing.expect(rac.row.semantic_prompt == .prompt_continuation);
+        }
+    }
+}
+
+test "PageList resize reflow semantic prompt marks" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Each case writes `rows` at `cols`, reflows to `new_cols`, and checks
+    // the marks of the rows from the top. A reflowed prompt must have the
+    // marks it would have had if it were printed at the new width. Only
+    // its first row is `.prompt`, and every other row of it is
+    // `.prompt_continuation`.
+    const Source = struct {
+        text: []const u8,
+        mark: Row.SemanticPrompt,
+        wrap: bool = false,
+    };
+    const cases = [_]struct {
+        cols: size.CellCountInt,
+        new_cols: size.CellCountInt,
+        rows: []const Source,
+        marks: []const Row.SemanticPrompt,
+    }{
+        // Splitting a prompt row.
+        .{
+            .cols = 4,
+            .new_cols = 2,
+            .rows = &.{.{ .text = "abcd", .mark = .prompt }},
+            .marks = &.{ .prompt, .prompt_continuation },
+        },
+        // Splitting a wrapped prompt, where the continuation starts a row.
+        .{
+            .cols = 4,
+            .new_cols = 2,
+            .rows = &.{
+                .{ .text = "abcd", .mark = .prompt, .wrap = true },
+                .{ .text = "ef", .mark = .prompt_continuation },
+            },
+            .marks = &.{ .prompt, .prompt_continuation, .prompt_continuation },
+        },
+        // Joining a prompt with its continuation into one row.
+        .{
+            .cols = 2,
+            .new_cols = 4,
+            .rows = &.{
+                .{ .text = "ab", .mark = .prompt, .wrap = true },
+                .{ .text = "cd", .mark = .prompt_continuation },
+            },
+            .marks = &.{ .prompt, .none },
+        },
+        // Joining part of a continuation.
+        .{
+            .cols = 3,
+            .new_cols = 4,
+            .rows = &.{
+                .{ .text = "abc", .mark = .prompt, .wrap = true },
+                .{ .text = "def", .mark = .prompt_continuation },
+            },
+            .marks = &.{ .prompt, .prompt_continuation },
+        },
+        // Joining two prompts in a row, each into its own row.
+        .{
+            .cols = 2,
+            .new_cols = 4,
+            .rows = &.{
+                .{ .text = "ab", .mark = .prompt, .wrap = true },
+                .{ .text = "cd", .mark = .prompt_continuation },
+                .{ .text = "ef", .mark = .prompt, .wrap = true },
+                .{ .text = "gh", .mark = .prompt_continuation },
+            },
+            .marks = &.{ .prompt, .prompt, .none },
+        },
+        // An explicit prompt start at a source wrap boundary must stay a
+        // start when it lands at the beginning of a destination row.
+        .{
+            .cols = 4,
+            .new_cols = 2,
+            .rows = &.{
+                .{ .text = "abcd", .mark = .prompt, .wrap = true },
+                .{ .text = "ef", .mark = .prompt },
+            },
+            .marks = &.{ .prompt, .prompt_continuation, .prompt },
+        },
+        // An explicit start still marks a row when it joins unmarked output.
+        .{
+            .cols = 2,
+            .new_cols = 4,
+            .rows = &.{
+                .{ .text = "ab", .mark = .none, .wrap = true },
+                .{ .text = "cd", .mark = .prompt },
+            },
+            .marks = &.{ .prompt, .none },
+        },
+        // Splitting output doesn't add marks.
+        .{
+            .cols = 4,
+            .new_cols = 2,
+            .rows = &.{
+                .{ .text = "abcd", .mark = .none },
+                .{ .text = "ef", .mark = .prompt },
+            },
+            .marks = &.{ .none, .none, .prompt },
+        },
+    };
+
+    for (cases) |case| {
+        var s = try init(alloc, case.cols, 4, 0);
+        defer s.deinit();
+        const page = s.pages.first.?.page();
+        for (case.rows, 0..) |src, y| {
+            const row = page.getRowAndCell(0, y).row;
+            row.semantic_prompt = src.mark;
+            row.wrap = src.wrap;
+            row.wrap_continuation = y > 0 and case.rows[y - 1].wrap;
+            for (src.text, 0..) |c, x| {
+                page.getRowAndCell(x, y).cell.* = .init(c);
+            }
+        }
+
+        try s.resize(.{ .cols = case.new_cols, .reflow = true });
+
+        for (case.marks, 0..) |mark, y| {
+            const p = s.pin(.{ .screen = .{ .y = @intCast(y) } }).?;
+            try testing.expectEqual(mark, p.rowAndCell().row.semantic_prompt);
         }
     }
 }
@@ -17686,6 +17841,101 @@ test "PageList resize (no reflow) more cols remaps pins in backfill path" {
     const cell = tracked.rowAndCell().cell;
     try testing.expectEqual(.codepoint, cell.content_tag);
     try testing.expectEqual(marker, cell.content.codepoint);
+}
+
+test "PageList resize (no reflow) more cols remaps viewport pin when backfill stops early" {
+    // Regression test: the backfill in resizeWithoutReflowGrowCols stops
+    // at the first row that doesn't fit in the previous page (here, its
+    // graphemes exceed that page's capacity). The rows copied before it
+    // must still have their tracked pins remapped, or a viewport scrolled
+    // onto one of them is left on the destroyed page.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const cols: size.CellCountInt = 5;
+    const new_cols: size.CellCountInt = cols + 1;
+    const new_cap = try std_capacity.adjust(.{ .cols = new_cols });
+
+    var s = try init(alloc, cols, 10, null);
+    defer s.deinit();
+
+    // Three pages with the active area entirely in the last one.
+    while (s.totalPages() < 3) _ = try s.grow();
+    for (0..s.rows) |_| _ = try s.grow();
+    try testing.expectEqual(3, s.totalPages());
+
+    // Leave the first page one row longer than a page at the new width
+    // holds, so its copy ends in a one-row page with spare capacity that
+    // the second page backfills.
+    {
+        const first = s.pages.first.?;
+        try testing.expect(first.rows() > new_cap.rows + 1);
+        s.eraseHistory(.{ .history = .{
+            .y = first.rows() - (new_cap.rows + 1) - 1,
+        } });
+        try testing.expectEqual(first, s.pages.first.?);
+        try testing.expectEqual(new_cap.rows + 1, first.rows());
+    }
+
+    // Give the second page more grapheme capacity than the backfill
+    // target has and fill its row 1 past the target's capacity. Row 0
+    // is plain, so the backfill copies it and then stops at row 1.
+    const cps: [64]u21 = @splat(0x0301);
+    const second = second: {
+        var node = s.pages.first.?.next.?;
+        for (0..3) |_| node = try s.increaseCapacity(node, .grapheme_bytes);
+        break :second node;
+    };
+    {
+        const page = second.page();
+        const rac = page.getRowAndCell(0, 0);
+        rac.cell.* = .init('X');
+
+        for (0..cols) |x| {
+            const g = page.getRowAndCell(x, 1);
+            g.cell.* = .init('G');
+            try page.setGraphemes(g.row, g.cell, &cps);
+        }
+    }
+
+    // Scroll the viewport to the row the backfill copies.
+    s.scroll(.{ .pin = .{ .node = second, .y = 0 } });
+    try testing.expect(s.viewport == .pin);
+    const offset = s.scrollbar().offset;
+
+    try s.resize(.{ .cols = new_cols, .reflow = false });
+
+    // The viewport is still on the same row, in a live page.
+    try testing.expect(s.viewport == .pin);
+    try testing.expectEqual(offset, s.scrollbar().offset);
+    {
+        const cell = s.viewport_pin.rowAndCell().cell;
+        try testing.expectEqual('X', cell.content.codepoint);
+    }
+
+    // The backfilled page ends at the viewport row. The row that didn't
+    // fit was retired from it in the default state, without leaking the
+    // graphemes it partially copied.
+    {
+        const node = s.viewport_pin.node;
+        const page = node.page();
+        try testing.expectEqual(s.viewport_pin.y + 1, node.rows());
+        const retired = &page.rows.ptr(page.memory)[node.rows()];
+        try testing.expect(!retired.managedMemory());
+        try testing.expectEqual(0, page.graphemeCount());
+    }
+
+    // The row that didn't fit keeps its graphemes in the next page.
+    {
+        const p = s.viewport_pin.down(1).?;
+        try testing.expect(p.node != s.viewport_pin.node);
+        const rac = p.rowAndCell();
+        try testing.expectEqual('G', rac.cell.content.codepoint);
+        try testing.expectEqual(
+            cps.len,
+            p.node.page().lookupGrapheme(rac.cell).?.len,
+        );
+    }
 }
 
 test "PageList compact pool page produces exact-size heap page" {

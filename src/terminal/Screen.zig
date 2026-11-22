@@ -2151,13 +2151,11 @@ pub inline fn resize(
 
     // A prompt redraw clears the prompt after the fallible resize
     // (clearPromptForRedraw), but where the clear starts is read here, from
-    // the rows as the prompt wrote them. The reflow copies a row's prompt
-    // mark onto every row it wraps that row into (PageList's
-    // ReflowCursor.copyRowMetadata), so afterwards a wrapped piece reads as
-    // a prompt start of its own, and a widening can move this prompt's start
-    // into the middle of a row that an earlier prompt's line begins. A
-    // tracked pin follows the start through the resize. Track it before
-    // changing any state since tracking the pin can fail.
+    // the rows as the prompt wrote them. A widening can move this prompt's
+    // start into the middle of a row that an earlier prompt's line begins.
+    // A row mark cannot locate that column, but a tracked pin follows the
+    // start through the resize. Track it before changing any state since
+    // tracking the pin can fail.
     const redraw_pin: ?*Pin = redraw: {
         const start = self.promptRedrawStart(opts.prompt_redraw) orelse
             break :redraw null;
@@ -2287,6 +2285,10 @@ pub inline fn resize(
     // If our cursor was updated, we do a full reload so all our cursor
     // state is correct.
     self.cursorReload();
+
+    // Erasing history can mark the cursor pin garbage even though the
+    // cursor is still live at the remapped position.
+    self.cursor.page_pin.garbage = false;
 
     // If resize moved a cursor with pending wrap away from the right edge,
     // advance to the next cell instead of wrapping on the next print.
@@ -4240,6 +4242,21 @@ test "Screen reset cursor pin is not garbage" {
     // born garbage and reaped.
     s.reset();
     try testing.expect(!s.cursor.page_pin.garbage);
+}
+
+test "Screen resize erasing the cursor row leaves its pin not garbage" {
+    const alloc = std.testing.allocator;
+    var s = try Screen.init(alloc, .{ .cols = 12, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // The bottom row has content, so shrinking pushes the top and its
+    // cursor into history instead of trimming blank rows off the bottom.
+    s.cursorAbsolute(0, 5);
+    try s.testWriteString("x");
+    s.cursorAbsolute(0, 0);
+
+    try s.resize(.{ .cols = 12, .rows = 3 });
+    try std.testing.expect(!s.cursor.page_pin.garbage);
 }
 
 test "Screen read and write" {
@@ -9007,6 +9024,11 @@ test "Screen: resize errors preserve state" {
         try testing.expectEqual(before.pages.viewport, s.pages.viewport);
         try testing.expectEqual(before_viewport_pin, s.pages.viewport_pin.*);
         try testing.expectEqual(before_tracked_pins, s.pages.countTrackedPins());
+        if (std.valgrind.runningOnValgrind() > 0) {
+            // This comparison includes padding in the raw page snapshot.
+            std.valgrind.memcheck.makeMemDefined(before_page);
+            std.valgrind.memcheck.makeMemDefined(s.pages.pages.first.?.page().memory);
+        }
         try testing.expectEqualSlices(
             u8,
             before_page,
@@ -9648,6 +9670,25 @@ test "Screen: resize more rows, less cols with reflow with scrollback" {
         defer alloc.free(contents);
         const expected = "1A\nBC\nD\n2E\nFG\nH3\nIJ\nKL\n4M\nNO\nP";
         try testing.expectEqualStrings(expected, contents);
+    }
+}
+
+test "Screen: resize more rows, less cols pulls scrollback like separate resizes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]bool{ true, false }) |pull| {
+        var s = try init(alloc, .{ .cols = 5, .rows = 2, .max_scrollback = 1000 });
+        defer s.deinit();
+        try s.testWriteString("1A\n2B\n3C\n");
+        try testing.expectEqual(1, s.cursor.y);
+
+        try s.resize(.{ .cols = 4, .rows = 4, .pull_scrollback = pull });
+
+        const contents = try s.dumpStringAlloc(alloc, .{ .viewport = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings(if (pull) "1A\n2B\n3C" else "3C", contents);
+        try testing.expectEqual(if (pull) @as(size.CellCountInt, 3) else 1, s.cursor.y);
     }
 }
 

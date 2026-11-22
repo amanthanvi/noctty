@@ -207,7 +207,7 @@ pub fn format_alloc(
     }
 
     const buf = aw.toOwnedSlice() catch return .out_of_memory;
-    out_ptr.* = buf.ptr;
+    out_ptr.* = if (buf.len == 0) null else buf.ptr;
     out_len.* = buf.len;
     return .success;
 }
@@ -251,6 +251,39 @@ test "terminal_new invalid_value on null terminal" {
 
 test "free null" {
     free(null);
+}
+
+test "format_alloc empty output" {
+    const failing: CAllocator = .fromZig(&testing.failing_allocator);
+    var t: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{ .cols = 100, .rows = 40, .max_scrollback = 0 },
+    ));
+    defer terminal_c.free(t);
+
+    const opts: TerminalOptions = std.mem.zeroInit(TerminalOptions, .{});
+    var f: Formatter = null;
+    try testing.expectEqual(Result.success, terminal_new(&lib.alloc.test_allocator, &f, t, opts));
+    defer free(f);
+
+    for ([_]?*const CAllocator{ null, &failing }) |allocator| {
+        var sentinel: u8 = 0;
+        var ptr: ?[*]u8 = @ptrCast(&sentinel);
+        var len: usize = 123;
+        try testing.expectEqual(Result.success, format_alloc(f, allocator, &ptr, &len));
+        try testing.expectEqual(@as(usize, 0), len);
+        try testing.expectEqual(null, ptr);
+        @import("allocator.zig").free(allocator, ptr, len);
+    }
+
+    terminal_c.vt_write(t, "hello", 5);
+    var ptr: ?[*]u8 = null;
+    var len: usize = 0;
+    try testing.expectEqual(Result.success, format_alloc(f, null, &ptr, &len));
+    defer @import("allocator.zig").free(null, ptr, len);
+    try testing.expectEqualStrings("hello", ptr.?[0..len]);
 }
 
 test "format plain" {

@@ -109,12 +109,14 @@ typedef void (*GhosttySysLogFn)(
  * Decodes raw PNG data into RGBA pixels. The output pixel data must be
  * allocated through the provided allocator. The library takes ownership
  * of the buffer and will free it with the same allocator.
+ * The library zero-initializes the output before invoking the callback.
+ * A callback that reports success must set a non-NULL pixel data pointer.
  *
  * @param userdata  The userdata pointer set via GHOSTTY_SYS_OPT_USERDATA
  * @param allocator The allocator to use for the output pixel buffer
  * @param data      Pointer to the raw PNG data
  * @param data_len  Length of the raw PNG data in bytes
- * @param[out] out  On success, filled with the decoded image
+ * @param[out] out  Initially zeroed. On success, filled with the decoded image
  * @return true on success, false on failure
  */
 typedef bool (*GhosttySysDecodePngFn)(
