@@ -353,6 +353,17 @@ public static class GuiHiddenRunnerNative {
 
     public static uint ExitCode(IntPtr process) { uint code; return GetExitCodeProcess(process, out code) ? code : 0xFFFFFFFF; }
 
+    public static uint? WaitForRoleExit(Func<uint?> readExit, int timeoutMs) {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (true) {
+            var code = readExit();
+            if (code.HasValue) return code;
+            long remaining = timeoutMs - clock.ElapsedMilliseconds;
+            if (remaining <= 0) return null;
+            Thread.Sleep((int)Math.Min(25, remaining));
+        }
+    }
+
     // Whether `commandLine` starts System32's cmd.exe with /D among its switches before /C, /R or /K (cmd reads
     // switches without regard to case, and runs /R as /C: `cmd /R /D x` reads `/D x` as its command and runs AutoRun;
     // Opus on #740). The text is tested here and never kept. A command line holding a control character is not read
@@ -416,7 +427,6 @@ public static class GuiHiddenRunnerNative {
     public sealed class JobWatch : IDisposable {
         readonly IntPtr port; readonly IntPtr job; readonly Thread reader; readonly string systemCmd; readonly string flagDirectory;
         readonly string systemCmdId, appPath, appId, cliPath, cliId;
-        readonly bool captureAppExit;
         volatile bool stopping; int cmdCount; int taken;
         public volatile bool Faulted;
         // How many joiners the reader has taken from the port (each gets a row, opened or not).
@@ -426,10 +436,9 @@ public static class GuiHiddenRunnerNative {
         readonly List<JoinedProcess> opened = new List<JoinedProcess>();
         // `appPath` and `cliPath` are the staged copy's noctty.exe and noctty.com; a noctty joiner is in the copy only
         // when its image is one of them by path and identity.
-        public JobWatch(IntPtr job, string systemCmd, string flagDirectory, string appPath, string cliPath, bool captureAppExit) {
+        public JobWatch(IntPtr job, string systemCmd, string flagDirectory, string appPath, string cliPath) {
             this.job = job; this.systemCmd = systemCmd; this.flagDirectory = flagDirectory;
             this.appPath = appPath; this.cliPath = cliPath;
-            this.captureAppExit = captureAppExit;
             systemCmdId = FileId(systemCmd); appId = FileId(appPath); cliId = FileId(cliPath);
             if (systemCmdId == null || appId == null || cliId == null) throw new Exception("The watch could not read System32's cmd.exe or the copy's identity.");
             port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
@@ -496,14 +505,25 @@ public static class GuiHiddenRunnerNative {
             }
         }
         public JoinedProcess[] Snapshot() { lock (joined) return joined.ToArray(); }
-        public void Dispose() {
+        public void Dispose() { Finish(0, 0, 0); }
+        public void Finish(int rolePid, long roleCreation, int leafPid) {
             stopping = true; Stopped = reader.Join(5000);
-            lock (joined) foreach (var r in joined) if (r.Handle != IntPtr.Zero) {
-                // Read a full exit code only from the held, signalled handle of a verified copy.
-                uint code;
-                if (captureAppExit && r.InCopy && string.Equals(r.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) &&
-                    WaitForSingleObject(r.Handle, 0) == 0 && GetExitCodeProcess(r.Handle, out code)) r.Exit = code;
-                CloseHandle(r.Handle); r.Handle = IntPtr.Zero;
+            lock (joined) {
+                if (Stopped && rolePid != 0) {
+                    var apps = joined.FindAll(r => r.Pid == rolePid && r.Creation == roleCreation && r.Parent == leafPid &&
+                        r.InCopy && string.Equals(r.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase));
+                    if (apps.Count == 1 && apps[0].Handle != IntPtr.Zero) {
+                        // Job accounting cannot substitute for a full exit code from this exact, signalled handle.
+                        IntPtr handle = apps[0].Handle;
+                        apps[0].Exit = WaitForRoleExit(() => {
+                            uint code;
+                            return WaitForSingleObject(handle, 0) == 0 && GetExitCodeProcess(handle, out code) ? (uint?)code : null;
+                        }, 3000);
+                    }
+                }
+                foreach (var r in joined) if (r.Handle != IntPtr.Zero) {
+                    CloseHandle(r.Handle); r.Handle = IntPtr.Zero;
+                }
             }
             if (Stopped) foreach (var r in opened) if (r.Handle != IntPtr.Zero) CloseHandle(r.Handle);
             CloseHandle(port);
@@ -917,7 +937,7 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
         $job = [GuiHiddenRunnerNative]::CreateRunJob()
         $systemCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
-        $watch = [GuiHiddenRunnerNative+JobWatch]::new($job, $systemCmd, $run, (Join-Path $copy 'noctty.exe'), (Join-Path $copy 'noctty.com'), [bool]$roleDump)
+        $watch = [GuiHiddenRunnerNative+JobWatch]::new($job, $systemCmd, $run, (Join-Path $copy 'noctty.exe'), (Join-Path $copy 'noctty.com'))
         $leafEnvironment = [ordered]@{
             NOCTTY_GUI_HIDDEN_DESKTOP = "WinSta0\$desktopName"
             NOCTTY_GUI_HIDDEN_EXE = (Join-Path $copy 'noctty.exe')
@@ -977,12 +997,15 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         $drainDeadline = [datetime]::UtcNow.AddSeconds(5)
         while ($watch.Taken -lt $total -and [datetime]::UtcNow -lt $drainDeadline) { Start-Sleep -Milliseconds 50 }
         Start-Sleep -Milliseconds 100
-        $watch.Dispose()
+        $launcher = Get-GuiHiddenLauncherRecords (Join-Path $run 'launcher-pids.txt')
+        if ($roleDump -and $launcher.Count -eq 1) {
+            $rolePid = @($launcher.Keys)[0]
+            $watch.Finish($rolePid, $launcher[$rolePid], $leafPid)
+        } else { $watch.Dispose() }
         $record.watchFaulted = [bool]$watch.Faulted
         $record.watchStopped = [bool]$watch.Stopped
         $rows = @($watch.Snapshot())
         $watch = $null
-        $launcher = Get-GuiHiddenLauncherRecords (Join-Path $run 'launcher-pids.txt')
         $record.processes = Get-GuiHiddenProcessVerdict $rows $launcher $total ([int]$Leaf.expectedShells) $token $leafPid
         $record.defaultWindows = $defaultWindows
         $record.defaultWalkFailed = $defaultWalkFailed
