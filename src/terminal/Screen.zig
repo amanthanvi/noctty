@@ -1318,10 +1318,7 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
     // Rotate the region rows so the now-blank top row moves to the
     // bottom (the cursor row) and everything else shifts up by one.
     // Rotating the region changes which logical row its coordinates
-    // identify, so the fork's row generation (which Win32 UIA reads for
-    // held range geometry) moves too, before the mutation, as
-    // PageList.eraseRowBounded does on the cross-page path.
-    self.pages.row_generation +%= 1;
+    // identify, as PageList.eraseRowBounded does on the cross-page path.
     self.pages.invalidateNodeLayout(pin.node);
     fastmem.rotateOnce(Row, rows);
 
@@ -2190,11 +2187,8 @@ pub inline fn resize(
     // asking PageList to resize.
     //
     // Save everything first so we can put the cursor back together afterward,
-    // or restore it unchanged if the resize fails. We also save the original
-    // node and serial so after a successful resize we can tell whether that
-    // page survived and still needs its temporary references released.
+    // or restore it unchanged if the resize fails.
     const cursor_node = self.cursor.page_pin.node;
-    const cursor_node_serial = cursor_node.serial;
     const cursor_style = self.cursor.style;
     const cursor_style_id = self.cursor.style_id;
     const cursor_hyperlink = self.cursor.hyperlink;
@@ -2219,6 +2213,13 @@ pub inline fn resize(
         self.cursor.hyperlink = cursor_hyperlink;
         self.cursor.hyperlink_id = cursor_hyperlink_id;
     }
+
+    // Layout serials can change while the original page still owns its
+    // entries. Watch for retirement of the storage itself through resize
+    // and the cursor restoration below.
+    assert(self.pages.resize_cursor_page == null);
+    self.pages.resize_cursor_page = cursor_node;
+    defer self.pages.resize_cursor_page = null;
 
     // Release the cursor style while resizing just in case the cursor ends
     // up on a different page.
@@ -2372,29 +2373,10 @@ pub inline fn resize(
         self.alloc.destroy(link);
     }
 
-    // A tracked pin follows its content when PageList moves or replaces a
-    // page. If the cursor's pin still points to the node we started with,
-    // that node survived the resize and still owns the temporary style and
-    // hyperlink references we added above.
-    //
-    // Comparing pointers is not enough by itself. PageList keeps a pool of
-    // nodes, so it can destroy a node and create a replacement at the same
-    // memory address. Every new use of a node gets a different serial number,
-    // making the pointer-and-serial pair an O(1) identity check.
-    const cursor_node_survived =
-        self.cursor.page_pin.node == cursor_node and
-        self.cursor.page_pin.node.serial == cursor_node_serial;
-    if (comptime build_options.slow_runtime_safety) {
-        assert(cursor_node_survived ==
-            self.pages.nodeIsValid(cursor_node, cursor_node_serial));
-    }
-
-    // A surviving node still contains our temporary references, so remove
-    // them now. If the node was replaced, its destruction removed those
-    // references along with the rest of the old page so we don't need to
-    // fix it up.
-    if (cursor_node_survived) {
-        const page = cursor_node.page();
+    // A retained page still owns the temporary references, even if the
+    // cursor moved elsewhere or the page received a new layout serial.
+    if (self.pages.resize_cursor_page) |node| {
+        const page = node.page();
         if (cursor_style_id != style.default_id) {
             page.styles.release(page.memory, cursor_style_id);
         }
@@ -9091,6 +9073,31 @@ test "Screen: resize cursor references when node survives" {
             page.hyperlink_set.refCount(page.memory, s.cursor.hyperlink_id),
         );
     }
+}
+
+test "Screen: resize balances cursor refcounts after a retained page is renewed" {
+    const testing = std.testing;
+    var s = try init(testing.allocator, .{
+        .cols = 5,
+        .rows = 4,
+        .max_scrollback = 1000,
+    });
+    defer s.deinit();
+
+    try s.setAttribute(.bold);
+    try s.startHyperlink("https://example.com/", "resize");
+    try s.testWriteString("abc");
+    const node = s.cursor.page_pin.node;
+    const serial = node.serial;
+
+    // Shrinking past blank rows truncates the page in place and renews its
+    // layout serial while retaining the cursor entries and the three cells.
+    try s.resize(.{ .cols = 5, .rows = 2 });
+    try testing.expectEqual(node, s.cursor.page_pin.node);
+    try testing.expect(!s.pages.nodeIsValid(node, serial));
+    const page = node.page();
+    try testing.expectEqual(4, page.styles.refCount(page.memory, s.cursor.style_id));
+    try testing.expectEqual(4, page.hyperlink_set.refCount(page.memory, s.cursor.hyperlink_id));
 }
 
 test "Screen: resize cursor references when node is replaced" {

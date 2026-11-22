@@ -1,6 +1,6 @@
 # Noctty shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
-# noctty-integration-revision: 1
+# noctty-integration-revision: 2
 #   Raise it when a change must not be undone by an older noctty that shares
 #   the installed copy; see src/apprt/win32_powershell_install.zig.
 #
@@ -441,7 +441,7 @@ if ((__ghostty_has_feature_prefix 'ssh-') -and
         $invocation = __ghostty_build_ssh_invocation `
             -Arguments $Arguments `
             -ConfigLines $ssh_config `
-            -CacheProbe { param([string]$Target) __ghostty_ssh_cache "--host=$Target" }
+            -CacheProbe { param([string]$Target) __ghostty_ssh_cache $Target }
 
         $had_term = Test-Path Env:TERM
         $had_colorterm = Test-Path Env:COLORTERM

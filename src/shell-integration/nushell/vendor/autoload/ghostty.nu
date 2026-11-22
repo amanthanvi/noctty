@@ -32,7 +32,7 @@ export module ghostty {
         | default {user: $env.USER hostname: "localhost"}
       let ssh_id = $"($ssh_cfg.user)@($ssh_cfg.hostname)"
 
-      if (^$ghostty "+ssh-cache" $"--host=($ssh_id)" | complete | $in.exit_code == 0) {
+      if (^$ghostty "+ssh-cache" $ssh_id | complete | $in.exit_code == 0) {
         $ssh_env.TERM = "xterm-ghostty"
       } else {
         $ssh_env.TERM = "xterm-256color"

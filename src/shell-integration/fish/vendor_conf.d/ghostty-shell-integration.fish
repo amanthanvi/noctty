@@ -156,7 +156,7 @@ function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
                     set -l ssh_target "$ssh_user@$ssh_hostname"
 
                     # Check if terminfo is already cached
-                    if test -x "$GHOSTTY_BIN_DIR/noctty"; and "$GHOSTTY_BIN_DIR/noctty" +ssh-cache --host="$ssh_target" >/dev/null 2>&1
+                    if test -x "$GHOSTTY_BIN_DIR/noctty"; and "$GHOSTTY_BIN_DIR/noctty" +ssh-cache "$ssh_target" >/dev/null 2>&1
                         set ssh_term xterm-ghostty
                     else if command -q infocmp
                         set -l ssh_terminfo

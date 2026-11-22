@@ -7703,7 +7703,7 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
         cell_height: f64 = 16,
         origin_x: f64 = 4,
         origin_y: f64 = 6,
-        numbering: terminal_text.RowNumbering = .{ .active_key = 0, .page_serial_min = 1, .first_page_serial = 1, .rows = 3, .columns = 10 },
+        numbering: terminal_text.RowNumbering = .{ .active_key = 0, .page_serial_epoch = 1, .first_page_serial = 1, .rows = 3, .columns = 10 },
         available: bool = true,
         snapshot_calls: usize = 0,
         fn name(_: *anyopaque, _: []u8) []const u8 {
@@ -7798,7 +7798,7 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
         switch (cause) {
             0 => ctx.available = false,
             1 => ctx.numbering.active_key += 1,
-            2 => ctx.numbering.page_serial_min += 1,
+            2 => ctx.numbering.page_serial_epoch += 1,
             3 => ctx.numbering.first_page_serial += 1,
             4 => ctx.numbering.rows += 1,
             5 => ctx.numbering.columns += 1,
