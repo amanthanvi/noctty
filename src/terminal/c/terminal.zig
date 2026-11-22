@@ -209,9 +209,13 @@ const Effects = struct {
         const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
         const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
         const func = wrapper.effects.color_scheme orelse return null;
-        var scheme: device_status.ColorScheme = undefined;
-        if (func(@ptrCast(wrapper), wrapper.effects.userdata, &scheme)) return scheme;
-        return null;
+        var scheme: device_status.ColorScheme = .light;
+        if (!func(@ptrCast(wrapper), wrapper.effects.userdata, &scheme)) return null;
+
+        // Read the backing integer before interpreting the callback's
+        // output as a Zig enum. An unknown value gives no answer.
+        const raw: *const std.meta.Tag(device_status.ColorScheme) = @ptrCast(&scheme);
+        return std.enums.fromInt(device_status.ColorScheme, raw.*);
     }
 
     fn deviceAttributesTrampoline(handler: *Handler) device_attributes.Attributes {
@@ -220,7 +224,7 @@ const Effects = struct {
         const func = wrapper.effects.device_attributes_cb orelse return .{};
 
         // Get our attributes from the callback.
-        var c_attrs: CDeviceAttributes = undefined;
+        var c_attrs = std.mem.zeroes(CDeviceAttributes);
         if (!func(@ptrCast(wrapper), wrapper.effects.userdata, &c_attrs)) return .{};
 
         // Note below we use a lot of enumFromInt but its always safe
@@ -313,7 +317,7 @@ const Effects = struct {
         const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
         const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
         const func = wrapper.effects.size_cb orelse return null;
-        var s: size_report.Size = undefined;
+        var s = std.mem.zeroes(size_report.Size);
         if (func(@ptrCast(wrapper), wrapper.effects.userdata, &s)) return s;
         return null;
     }
@@ -3243,6 +3247,49 @@ test "pwd_changed without callback is silent" {
     try testing.expectEqualStrings("file:///tmp", zigTerminal(t).?.getPwd().?);
 }
 
+test "color scheme callback defaults to light" {
+    if (comptime lib.target != .c) return error.SkipZigTest;
+
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+    ));
+    defer free(t);
+
+    const S = struct {
+        fn colorScheme(_: Terminal, _: ?*anyopaque, out: *device_status.ColorScheme) callconv(lib.calling_conv) bool {
+            const raw: *const std.meta.Tag(device_status.ColorScheme) = @ptrCast(out);
+            return raw.* == 0;
+        }
+    };
+    try testing.expectEqual(Result.success, set(t, .color_scheme, @ptrCast(&S.colorScheme)));
+    try testing.expectEqual(@as(?device_status.ColorScheme, .light), Effects.colorSchemeTrampoline(&t.?.stream.handler));
+}
+
+test "color scheme callback rejects an invalid value" {
+    if (comptime lib.target != .c) return error.SkipZigTest;
+
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+    ));
+    defer free(t);
+
+    const S = struct {
+        fn colorScheme(_: Terminal, _: ?*anyopaque, out: *device_status.ColorScheme) callconv(lib.calling_conv) bool {
+            const raw: *std.meta.Tag(device_status.ColorScheme) = @ptrCast(out);
+            raw.* = 2;
+            return true;
+        }
+    };
+    try testing.expectEqual(Result.success, set(t, .color_scheme, @ptrCast(&S.colorScheme)));
+    try testing.expect(Effects.colorSchemeTrampoline(&t.?.stream.handler) == null);
+}
+
 test "set size callback" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
@@ -3258,10 +3305,12 @@ test "set size callback" {
 
     const S = struct {
         var last_data: ?[]u8 = null;
+        var arrived: ?size_report.Size = null;
 
         fn deinit() void {
             if (last_data) |d| testing.allocator.free(d);
             last_data = null;
+            arrived = null;
         }
 
         fn writePty(_: Terminal, _: ?*anyopaque, ptr: [*]const u8, len: usize) callconv(lib.calling_conv) void {
@@ -3270,12 +3319,11 @@ test "set size callback" {
         }
 
         fn sizeCb(_: Terminal, _: ?*anyopaque, out_size: *size_report.Size) callconv(lib.calling_conv) bool {
-            out_size.* = .{
-                .rows = 24,
-                .columns = 80,
-                .cell_width = 8,
-                .cell_height = 16,
-            };
+            arrived = out_size.*;
+            out_size.rows = 24;
+            out_size.columns = 80;
+            out_size.cell_width = 8;
+            out_size.cell_height = 16;
             return true;
         }
     };
@@ -3288,6 +3336,7 @@ test "set size callback" {
     vt_write(t, "\x1B[18t", 5);
     try testing.expect(S.last_data != null);
     try testing.expectEqualStrings("\x1b[8;24;80t", S.last_data.?);
+    try testing.expectEqualDeep(std.mem.zeroes(size_report.Size), S.arrived.?);
 }
 
 test "size without callback is silent" {
@@ -3322,10 +3371,12 @@ test "set device_attributes callback primary" {
 
     const S = struct {
         var last_data: ?[]u8 = null;
+        var arrived: ?Effects.CDeviceAttributes = null;
 
         fn deinit() void {
             if (last_data) |d| testing.allocator.free(d);
             last_data = null;
+            arrived = null;
         }
 
         fn writePty(_: Terminal, _: ?*anyopaque, ptr: [*]const u8, len: usize) callconv(lib.calling_conv) void {
@@ -3334,6 +3385,7 @@ test "set device_attributes callback primary" {
         }
 
         fn da(_: Terminal, _: ?*anyopaque, out: *Effects.CDeviceAttributes) callconv(lib.calling_conv) bool {
+            arrived = out.*;
             out.* = .{
                 .primary = .{
                     .conformance_level = 64,
@@ -3359,6 +3411,7 @@ test "set device_attributes callback primary" {
     vt_write(t, "\x1B[c", 3);
     try testing.expect(S.last_data != null);
     try testing.expectEqualStrings("\x1b[?64;22;52c", S.last_data.?);
+    try testing.expectEqualDeep(std.mem.zeroes(Effects.CDeviceAttributes), S.arrived.?);
 }
 
 test "set device_attributes callback secondary" {

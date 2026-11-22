@@ -657,6 +657,7 @@ pub fn init(
         cols,
         rows,
     );
+    errdefer freeInitialHeapPages(pool.pages.arena.child_allocator, page_list);
 
     // Get our minimum max size, see doc comments for more details.
     const min_max_size = minMaxSize(cols, rows);
@@ -721,15 +722,7 @@ fn initPages(
 
     // If we have an error, we need to clean up our heap-owned pages
     // since they're not in the pool.
-    errdefer {
-        var it = page_list.first;
-        while (it) |node| : (it = node.next) {
-            switch (node.owned) {
-                .pool => {},
-                .heap => page_alloc.free(node.page().memory),
-            }
-        }
-    }
+    errdefer freeInitialHeapPages(page_alloc, page_list);
 
     var rem = rows;
     while (rem > 0) {
@@ -785,6 +778,14 @@ fn initPages(
     assert(page_list.first != null);
 
     return .{ page_list, page_size };
+}
+
+/// Release pages allocated outside the pool while building the initial list.
+fn freeInitialHeapPages(page_alloc: Allocator, pages: List) void {
+    var it = pages.first;
+    while (it) |node| : (it = node.next) {
+        if (node.owned == .heap) page_alloc.free(node.pageAssumeResident().memory);
+    }
 }
 
 /// Assert that the PageList is in a valid state. This is a no-op in
@@ -1305,9 +1306,27 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
         },
 
         .lt => {
+            const row_change = std.math.order(opts.rows orelse self.rows, self.rows);
+            const old_active_top: ?usize = if (row_change == .lt) self.total_rows - self.rows else null;
+            var cols_opts = opts;
+            // Growing rows can prune whole history pages, so even an
+            // absolute row number cannot identify the same cursor afterward.
+            const temporary_cursor_pin = track: {
+                if (row_change != .gt) break :track null;
+                const cursor = if (cols_opts.cursor) |*c| c else break :track null;
+                if (cursor.pin != null) break :track null;
+                const pin_value = self.pin(.{ .active = .{
+                    .x = cursor.x,
+                    .y = cursor.y,
+                } }) orelse break :track null;
+                const tracked = try self.trackPin(pin_value);
+                cursor.pin = tracked;
+                break :track tracked;
+            };
+            defer if (temporary_cursor_pin) |p| self.untrackPin(p);
+
             // We first change our row count so that we have the proper amount
             // we can use when shrinking our cols.
-            const old_active_top = self.total_rows - self.rows;
             try self.resizeWithoutReflow(opts: {
                 var copy = opts;
                 copy.cols = self.cols;
@@ -1315,14 +1334,15 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
             });
 
             // Reflow counts rows below the cursor in the new active area.
-            var cols_opts = opts;
             if (cols_opts.cursor) |*c| {
                 if (c.pin) |p| {
                     if (self.pointFromPin(.active, p.*)) |active| {
                         c.y = @intCast(active.active.y);
                     }
-                } else {
-                    const screen_y = old_active_top + c.y;
+                } else if (old_active_top) |top| {
+                    // Keep the coordinate remap on shrink. Tracking the old
+                    // row would let reflow recover it by discarding rows below.
+                    const screen_y = top + c.y;
                     const new_active_top = self.total_rows - self.rows;
                     if (screen_y >= new_active_top) c.y = @intCast(screen_y - new_active_top);
                 }
@@ -8315,6 +8335,20 @@ test "PageList init error" {
                 null,
             ),
         );
+    }
+
+    // Once initPages succeeds, init owns those pages even if it can't
+    // register the viewport pin.
+    {
+        const tw = init_tw;
+        defer tw.end(.reset) catch unreachable;
+        tw.errorAlways(.viewport_pin_track, error.OutOfMemory);
+        try std.testing.expectError(error.OutOfMemory, init(
+            std.testing.allocator,
+            std_capacity.maxCols().? + 1,
+            1,
+            null,
+        ));
     }
 }
 
@@ -16010,6 +16044,18 @@ test "PageList resize reflow semantic prompt marks" {
             },
             .marks = &.{ .prompt, .none },
         },
+        // An explicit start also replaces a continuation mark on the
+        // destination row when it joins the previous prompt's tail.
+        .{
+            .cols = 2,
+            .new_cols = 3,
+            .rows = &.{
+                .{ .text = "ab", .mark = .prompt, .wrap = true },
+                .{ .text = "cd", .mark = .prompt_continuation, .wrap = true },
+                .{ .text = "ef", .mark = .prompt },
+            },
+            .marks = &.{ .prompt, .prompt },
+        },
         // Splitting output doesn't add marks.
         .{
             .cols = 4,
@@ -16911,6 +16957,63 @@ test "PageList erase trailing rows across pages moves pins and frees styles" {
     try testing.expect(page.getCells(end_row)[s.cols - 1].wide != .spacer_head);
     try testing.expectEqual(@as(usize, 0), page.styles.count());
     try page.verifyIntegrity(alloc);
+}
+
+test "PageList resize preserves populated rows when shrinking with a coordinate-only cursor" {
+    const testing = std.testing;
+    var s = try init(testing.allocator, 4, 3, null);
+    defer s.deinit();
+
+    for ("ABC", 0..) |mark, y| {
+        s.getCell(.{ .active = .{ .y = @intCast(y) } }).?.cell.* = .init(mark);
+    }
+
+    try s.resize(.{
+        .cols = 3,
+        .rows = 2,
+        .pull_scrollback = false,
+        .cursor = .{ .x = 0, .y = 0 },
+    });
+
+    try testing.expectEqual(@as(u21, 'A'), s.getCell(.{ .history = .{} }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'B'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{ .y = 1 } }).?.cell.content.codepoint);
+}
+
+test "PageList resize keeps a coordinate-only cursor when height growth prunes history" {
+    const testing = std.testing;
+
+    // Fill two pages, so adding a row at the byte limit recycles the
+    // first history page and changes the cursor's screen-relative row.
+    var s = try init(testing.allocator, 8, 4, 2 * std_size);
+    defer s.deinit();
+    const page_rows = s.pages.first.?.capacity().rows;
+    try s.growRows(2 * @as(usize, page_rows) - s.rows);
+    try testing.expectEqual(2 * std_size, s.page_size);
+    const history = try s.trackPin(s.getTopLeft(.screen));
+    defer s.untrackPin(history);
+
+    // Each row below the cursor wraps when columns shrink, enough to
+    // push the cursor into history unless resize keeps its row active.
+    var rows = s.rowIterator(.right_down, .{ .active = .{} }, null);
+    var y: usize = 0;
+    while (rows.next()) |p| : (y += 1) {
+        const row = p.rowAndCell().row;
+        const cells = p.node.page().getCells(row);
+        const len = if (y == 0) 1 else s.cols;
+        for (cells[0..len]) |*cell| cell.* = .init(if (y == 0) 'C' else 'x');
+    }
+
+    try s.resize(.{
+        .cols = 4,
+        .rows = 5,
+        .reflow = true,
+        .pull_scrollback = false,
+        .cursor = .{ .x = 0, .y = 0 },
+    });
+    try testing.expect(history.garbage);
+    try testing.expectEqual(@as(u21, 'C'), s.getCell(.{ .active = .{} }).?.cell.content.codepoint);
+    try testing.expectEqual(@as(usize, 2), s.countTrackedPins());
 }
 
 test "PageList resize reflow less cols no scrollback pull blank active" {
@@ -17936,6 +18039,68 @@ test "PageList resize (no reflow) more cols remaps viewport pin when backfill st
             p.node.page().lookupGrapheme(rac.cell).?.len,
         );
     }
+}
+
+test "PageList resize backfill keeps source pins when a replacement allocation fails" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 5;
+    const new_cols: size.CellCountInt = 6;
+
+    // Make a full page that can widen in place, followed by a full page
+    // that has to split when widened. Free one row for backfill.
+    var s = try init(testing.allocator, new_cols, initialCapacity(new_cols).rows, null);
+    defer s.deinit();
+    try s.resize(.{ .cols = cols, .reflow = false });
+    const previous = s.pages.first.?;
+    var source = (try s.grow()).?;
+    try s.growRows(source.capacity().rows - source.rows());
+    s.eraseHistory(.{ .history = .{ .y = 0 } });
+    const previous_rows = previous.rows();
+    try testing.expectEqual(previous.capacity().rows - 1, previous_rows);
+
+    // Make both replacement pages use direct allocations, so failing
+    // the second allocation does not depend on the arena's free list.
+    for (0..3) |_| source = try s.increaseCapacity(source, .grapheme_bytes);
+    const replacement_cap = try source.capacity().adjust(.{ .cols = new_cols });
+    try testing.expect(source.rows() - 1 > replacement_cap.rows);
+    try testing.expect(Page.layout(replacement_cap).total_size > std_size);
+
+    s.scroll(.{ .pin = .{ .node = source, .y = 0 } });
+    try testing.expect(s.viewport == .pin);
+    try testing.expectEqual(source, s.viewport_pin.node);
+    const remainder = try s.trackPin(.{ .node = source, .y = 1 });
+    defer s.untrackPin(remainder);
+
+    const serial = s.page_serial;
+    const page_size = s.page_size;
+    const page_alloc = s.pool.pages.arena.child_allocator;
+    var failing = testing.FailingAllocator.init(page_alloc, .{ .fail_index = 1 });
+    s.pool.pages.arena.child_allocator = failing.allocator();
+    defer s.pool.pages.arena.child_allocator = page_alloc;
+
+    // Check the pins ourselves before any integrity check can dereference
+    // a stale one. Restore the pins for teardown if an assertion fails.
+    {
+        const viewport_before = s.viewport_pin.*;
+        const remainder_before = remainder.*;
+        s.pauseIntegrityChecks(true);
+        defer s.pauseIntegrityChecks(false);
+        defer {
+            s.viewport_pin.* = viewport_before;
+            remainder.* = remainder_before;
+        }
+
+        try testing.expectError(error.OutOfMemory, s.resize(.{ .cols = new_cols, .reflow = false }));
+        try testing.expect(failing.has_induced_failure);
+        try testing.expectEqual(serial + 1, s.page_serial);
+        try testing.expectEqual(page_size, s.page_size);
+        try testing.expectEqual(previous_rows, previous.rows());
+        try testing.expectEqual(source, previous.next.?);
+        try testing.expectEqual(source, s.pages.last.?);
+        try testing.expectEqual(remainder_before, remainder.*);
+        try testing.expectEqual(viewport_before, s.viewport_pin.*);
+    }
+    try s.verifyIntegrity();
 }
 
 test "PageList compact pool page produces exact-size heap page" {
