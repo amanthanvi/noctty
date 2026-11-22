@@ -7872,7 +7872,7 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
 }
 
 test "PKG71 scrollback-erase rejects held overlapping geometry" {
-    try @import("../win32.zig").test_support.runOnHiddenDesktop(struct {
+    try @import("../win32/host.zig").Host.runOnPrivateDesktop(struct {
         fn run() !void {
             const win32 = @import("../win32/sys.zig");
             const terminal = @import("../../terminal/main.zig");
