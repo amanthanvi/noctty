@@ -1344,14 +1344,23 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
 
     // Update tracked pins within the region since their rows moved up
     // by one. The cursor's own pin is skipped because the cursor stays
-    // at the region bottom (the new blank row).
+    // at the region bottom (the new blank row). A pin on page row 0, the
+    // erased top row, stays where it is, column included, and reads the row
+    // that moved up into its place. Fork change (main parity):
+    // PageList.eraseRowBounded resets such a pin's column to 0, but this is
+    // the in-place route upstream 77190bd02 opened for a screen without
+    // scrollback (the alternate screen, and the primary screen at
+    // scrollback-limit = 0), which main scrolls with PageList.eraseRow(.active),
+    // and eraseRow leaves a pin on the erased row alone. The reset moved a
+    // pressed link's left-click pin to column 0, so its release read as a drag
+    // and opened nothing (terminal-core.md, CLICK-PIN-01).
     const pin_keys = self.pages.tracked_pins.keys();
     for (pin_keys) |p| {
         if (p.node != pin.node or
             p == pin or
             p.y < pin.y - limit or
             p.y > pin.y) continue;
-        if (p.y == 0) p.x = 0 else p.y -= 1;
+        if (p.y != 0) p.y -= 1;
     }
 
     // The cursor pin is unchanged, but the Row structure at the pin
