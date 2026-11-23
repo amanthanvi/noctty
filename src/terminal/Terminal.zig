@@ -17976,6 +17976,54 @@ test "Terminal: index without scrollback keeps a top-row-pin selection start at 
     try testing.expectEqual(@as(@TypeOf(pt.y), 0), pt.y);
 }
 
+// The same pin across a page boundary: a 480x100 screen without scrollback
+// needs two pages for its active area, so a full-screen index takes
+// Screen.cursorScrollRegionUpSlow, whose PageList.eraseRowBounded cross-page
+// branch keeps a pin on page row 0 at its column as main's eraseRow(.active)
+// does (CLICK-PIN-01). A grid this size spans pages from the start (a 4K
+// display with a small font; production pages hold fewer rows than the test
+// build's), and a style-capacity split can split a smaller one.
+fn testTopRowPinAcrossPages(t: *Terminal) !void {
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testTopRowPinLines(s);
+
+    // The active area starts on page row 0 of one page and its bottom row is
+    // on the next page, the last, so the region crosses the boundary.
+    t.setCursorPos(t.rows, 1);
+    const active_top = s.pages.getTopLeft(.active);
+    try testing.expectEqual(@as(@TypeOf(active_top.y), 0), active_top.y);
+    const active_bottom = s.pages.getBottomRight(.active) orelse return error.NoActiveBottom;
+    try testing.expect(active_top.node != active_bottom.node);
+    try testing.expect(active_top.node.next == active_bottom.node);
+    try testing.expect(s.cursor.page_pin.node == active_bottom.node);
+    try testing.expect(s.cursor.page_pin.y < t.rows - 1);
+
+    const pin = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 0 } }).?);
+    defer s.pages.untrackPin(pin);
+
+    try t.index();
+
+    const pt = (s.pages.pointFromPin(.viewport, pin.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
+    try testing.expectEqual(@as(@TypeOf(pt.y), 0), pt.y);
+}
+
+test "Terminal: alt-screen index across two pages keeps a top-row-pin at its column" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 480, .rows = 100 });
+    defer t.deinit(alloc);
+    _ = try t.switchScreen(.alternate);
+    try testTopRowPinAcrossPages(&t);
+}
+
+test "Terminal: index without scrollback across two pages keeps a top-row-pin at its column" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 480, .rows = 100, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    try testTopRowPinAcrossPages(&t);
+}
+
 // Where this fork still differs from main (CLICK-PIN-01, leftover 2): when the
 // active area starts below page row 0, the fast path's region top is not page
 // row 0, so it moves a top-row pin up one row, out of the active area, with its
