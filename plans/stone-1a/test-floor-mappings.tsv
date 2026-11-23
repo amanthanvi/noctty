@@ -1,0 +1,9 @@
+# 1A floor mappings (PLAN.md r46a §3.2; plan-delta item 18, TD D47-D53): an upstream floor test of 74d0c72fd that
+# the branch runs under another name, the replacing test checked OK in the tip's ran lists at 5c7a99a13 (R1A, 2026-11-22).
+# Columns: floor test<TAB>suite<TAB>qualified name at the tip<TAB>reason.
+src/terminal/c/paste.zig :: is_safe with newline	ghostty-vt-c-test	terminal.c.paste.test.is_safe with newline and carriage return	the fork's own test replaces it, from before the cut (present at 6c7401ce0)
+src/terminal/c/terminal.zig :: set write_pty callback	ghostty-vt-c-test	terminal.c.terminal.test.set write_pty callback DECRQM	kept under the fork's and v1.4.0's name: resolution ledger src/terminal/c/terminal.zig hunk 10/10
+src/terminal/kitty/graphics_storage.zig :: storage: delete all placements and images	ghostty-test	terminal.kitty.graphics_storage.test.storage: delete all placements and images preserves limit	the fork replaced it before the cut in 30d5da909 (#624, Ghostty 1.4 Kitty graphics hardening)
+src/config/Config.zig :: Keybinds :: parseCLI reset clears tables	ghostty-test	config.Config.Keybinds.test.parseCLI reset clears custom tables and restores default tables	the fork's own test replaces it, from before the cut (present at 6c7401ce0)
+src/renderer/State.zig :: preedit range covers exact cell width	ghostty-test	renderer.State.test.preedit layout covers exact cell width	the fork's preedit layout test of the same case against layout(): resolution ledger src/renderer/State.zig hunk 3/3
+src/renderer/State.zig :: preedit range shifts left at right edge	ghostty-test	renderer.State.test.preedit layout shifts left at right edge	as above: resolution ledger src/renderer/State.zig hunk 3/3
