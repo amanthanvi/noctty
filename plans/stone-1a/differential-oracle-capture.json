@@ -1,0 +1,277 @@
+{
+  "build_command": "scripts\\dev-windows.cmd zig build oracle -Dvt-api=stone_flag -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --prefix H:\\scratch\\w-corpus-e6f2\\build-1a --summary all",
+  "capture_command": "python -B test\\differential-oracle\\oracle.py capture --corpus PRE_R2\\corpus.json --exe H:\\scratch\\w-corpus-e6f2\\build-1a\\bin\\differential-oracle.exe --source-root SOURCE_AT_CAPTURE_SHA --out H:\\scratch\\w-corpus-e6f2\\capture-1a --work H:\\scratch\\w-corpus-e6f2\\run-1a",
+  "controls": {
+    "native_checks": 14,
+    "paired_dump_checks": 36
+  },
+  "corpus_sha256": "33409191d5be9da542cf1f277796f975961e908a7db863569b5cded3904cb5ad",
+  "coverage": {
+    "alternate_screen_history": {
+      "dumps": 8,
+      "inputs": 3
+    },
+    "changed": {
+      "dumps": 1319,
+      "inputs": 357
+    },
+    "dumps_per_run": 16096,
+    "equal_dumps": 14777,
+    "formats": [
+      "plain",
+      "vt"
+    ],
+    "headless_pwd_overlap_with_w12": {
+      "dumps": 16,
+      "inputs": 8
+    },
+    "input_kinds": {
+      "conpty_replay": 11,
+      "fuzz": 4001,
+      "synthetic": 12
+    },
+    "inputs": 4024,
+    "intended_fork_change": {
+      "dumps": 0,
+      "inputs": 0
+    },
+    "oracle_artefact": {
+      "dumps": 94,
+      "inputs": 47
+    },
+    "regression": {
+      "dumps": 0,
+      "inputs": 0
+    },
+    "runs_per_side": 2,
+    "sizes": [
+      [
+        80,
+        24
+      ],
+      [
+        132,
+        43
+      ]
+    ],
+    "untriaged_dumps": 0,
+    "upstream_fix": {
+      "dumps": 1225,
+      "inputs": 310
+    },
+    "w12_utf8": {
+      "dumps": 1217,
+      "inputs": 307
+    }
+  },
+  "execution": "The quiet-window guard and one BelowNormal slot wrapped the builds and captures. PRE_R2 is the retained shipped-r2 capture of 263eacfa0. Use fresh output and work paths for another run.",
+  "harness_change": "Only src/differential_oracle_build.zig changed between admitted captures. The stone app oracle uses the PLAN section 2.7 role-off build options and the stone API selector. The runner, generator and adapters retain their recorded source hashes.",
+  "harness_declarations": [
+    "fd5bfed51140e82dc074cc1d5f2a78492b55115996bdc1b58cdb9f63c375da66:293a2fea2b4e499574612ba0036029a3c4b6ee405748206a058580bcda199e03"
+  ],
+  "ledger_revision": "59323841598b7e64ff50d5e812b77f1e12794790",
+  "plan_section": "3.4, 1A pre-merge versus 1A",
+  "pre_admission": "The pre capture uses R2 and R5 byte-identical dumps for both repeats plus round 10 metadata. Both reconstructed manifests exactly match the archived round 10 SHA-256 values. The admitted comparison rechecks the dumps, both manifests, completion, corpus and request.",
+  "profile_declarations": [
+    {
+      "new": {
+        "present": true,
+        "value": "dev"
+      },
+      "old": {
+        "present": false
+      },
+      "option": "terminal_options.version_pre",
+      "reason": "The 1A app Terminal options expose the existing dev prerelease component as a separate field; the full version string is unchanged.",
+      "side": "branch"
+    }
+  ],
+  "request_sha256": "e65b3429038b275d3ed0c8586947ace2cd00725fc2dcb677232921900d59ceb6",
+  "retained_files": {
+    "build-1a.cmd": {
+      "path": "H:/scratch/w-corpus-e6f2/build-1a.cmd",
+      "sha256": "69faf54bf03a3c1670152b878f10c5c467ecd0e74ae4581c52359bf0ead633e4"
+    },
+    "build-1a.log": {
+      "path": "H:/scratch/w-corpus-e6f2/build-1a.log",
+      "sha256": "ff5e17768ddd147dcf074a3df721f161fbc590c3d13e2067e5c5644c64a31a87"
+    },
+    "build-pre-control.log": {
+      "path": "H:/scratch/w-corpus-e6f2/build-pre-control.log",
+      "sha256": "add4645859ede3a0035d5325224b7acb5eae580644052447557c0b87a5d95139"
+    },
+    "capture-1a/completion.json": {
+      "path": "H:/scratch/w-corpus-e6f2/capture-1a/completion.json",
+      "sha256": "2fc2cf199dab362ed24de5b03364678c1688f0ec0fc3531c62b2ea4e60b367e5"
+    },
+    "capture-1a/corpus.json": {
+      "path": "H:/scratch/w-corpus-e6f2/capture-1a/corpus.json",
+      "sha256": "33409191d5be9da542cf1f277796f975961e908a7db863569b5cded3904cb5ad"
+    },
+    "capture.cmd": {
+      "path": "H:/scratch/w-corpus-e6f2/capture.cmd",
+      "sha256": "a22f5fb3eab5c67c9448af2c12b007b8f99ccc76c28049a64301d5145a51bda2"
+    },
+    "capture.log": {
+      "path": "H:/scratch/w-corpus-e6f2/capture.log",
+      "sha256": "b246f971f6d0f097a9b478faa98e9aaef636101ef55735e5b7726761ef057e4c"
+    },
+    "cause-analysis.json": {
+      "path": "H:/scratch/w-corpus-e6f2/cause-analysis.json",
+      "sha256": "09a382e4b9a90145cae89741851a2029a8dfb34c32bc6e2eadb242250f10dbd6"
+    },
+    "compare.cmd": {
+      "path": "H:/scratch/w-corpus-e6f2/compare.cmd",
+      "sha256": "719e4ed4eccb0440b8b01f7dc10299d03373c9eed22bfae915123826ff4dfb75"
+    },
+    "compare.log": {
+      "path": "H:/scratch/w-corpus-e6f2/compare.log",
+      "sha256": "ff798a34724eda4c7f094ccfef2cd61600af68d331f94ca794343047a227310b"
+    },
+    "finish-1a.ps1": {
+      "path": "H:/scratch/w-corpus-e6f2/finish-1a.ps1",
+      "sha256": "b20ccab07aee743263c00c6b8c0244cb55ea01815899393180e907d63517b848"
+    },
+    "ledger-validation.json": {
+      "path": "H:/scratch/w-corpus-e6f2/ledger-validation.json",
+      "sha256": "89bff3fc40455c7e4fa38093ab6c8164b861a14c73339124a8d99a9e1008078f"
+    },
+    "native-controls-1a.json": {
+      "path": "H:/scratch/w-corpus-e6f2/native-controls-1a.json",
+      "sha256": "ac88b1ba0228f51c601243115857aad668f4092d24ce96fd08c7730ab040a157"
+    },
+    "pair-triaged.json": {
+      "path": "H:/scratch/w-corpus-e6f2/pair-triaged.json",
+      "sha256": "ff3dbfd9139a2f9376b1ff168025cb2046cfecf77f07923eba861650ec9da8f7"
+    },
+    "pair.json": {
+      "path": "H:/scratch/w-corpus-e6f2/pair.json",
+      "sha256": "e4bb996245cad2be2aa27afd7fe83d86bde018ec7aa7584bf35b0e1bca3046fd"
+    },
+    "paired-controls-retry.log": {
+      "path": "H:/scratch/w-corpus-e6f2/paired-controls-retry.log",
+      "sha256": "dc57228fb2de384a689189974a0350ebb4e5681f368b8e0a137d4d3a4bda2a6b"
+    },
+    "paired-controls.cmd": {
+      "path": "H:/scratch/w-corpus-e6f2/paired-controls.cmd",
+      "sha256": "3d7640e41ef716fcb12606b22e66a12013df2af382f2ca3ea6d6f9501ba67a69"
+    },
+    "paired-controls.json": {
+      "path": "H:/scratch/w-corpus-e6f2/paired-controls.json",
+      "sha256": "3c5020d83c96bcff8e23330c6150414e22d2df2aa3be35e3a67d808a385013a6"
+    },
+    "paired-controls.log": {
+      "path": "H:/scratch/w-corpus-e6f2/paired-controls.log",
+      "sha256": "3698351c5104dd756afce6105548b1ac5a042837ff86bfafe7e1c6760af0041e"
+    },
+    "paired-controls.py": {
+      "path": "H:/scratch/w-corpus-e6f2/paired-controls.py",
+      "sha256": "1fe57ef493650875c0e8f173638839ebf687a3640d6dd7171444c3cdd4a4449c"
+    },
+    "pre-r10-restored/completion.json": {
+      "path": "H:/scratch/w-corpus-e6f2/pre-r10-restored/completion.json",
+      "sha256": "d12120cd6b79080a20f95e9eac04e2d5460886bde2ce1ea2c732c45e39448dea"
+    },
+    "profile-declarations.json": {
+      "path": "H:/scratch/w-corpus-e6f2/profile-declarations.json",
+      "sha256": "3a84899865d7eb5437b9c1d7f2ebb2884b4b5a4e090fe7d8cc2454ee3d998ef2"
+    },
+    "restore-pre.py": {
+      "path": "H:/scratch/w-corpus-e6f2/restore-pre.py",
+      "sha256": "7efbe909301a310b8ba7ac8e8b6170eb6d6b215a00e63b048199d8b582faaef6"
+    },
+    "scroll-delta-proof.json": {
+      "path": "H:/scratch/w-corpus-e6f2/scroll-delta-proof.json",
+      "sha256": "ebb1ae2e15b76d3d275f1feaf34116c543a0b2554b7bcc50a516d625a6a19508"
+    },
+    "triage-compare.cmd": {
+      "path": "H:/scratch/w-corpus-e6f2/triage-compare.cmd",
+      "sha256": "415f0b828cb08bd657ca257e8dc9fe91c578c161ea32ddd532c5b381ca752ff2"
+    },
+    "triage-compare.log": {
+      "path": "H:/scratch/w-corpus-e6f2/triage-compare.log",
+      "sha256": "6356cb0e2697e1ea4fdf96569784fa7ed12db7c642df35b22cbb7f17f33e2b8f"
+    },
+    "triage.json": {
+      "path": "H:/scratch/w-corpus-e6f2/triage.json",
+      "sha256": "49fd986b2cf17305e2b9b01f6fd41ec6d3afece9614deaf83dc556da44692c44"
+    },
+    "validate-scroll-deltas.py": {
+      "path": "H:/scratch/w-corpus-e6f2/validate-scroll-deltas.py",
+      "sha256": "991d6f4e08340a98c874a332feb3d502794c2f2b67c693ee509994ab50bede80"
+    },
+    "verify-causes.py": {
+      "path": "H:/scratch/w-corpus-e6f2/verify-causes.py",
+      "sha256": "6d54c6fe60ac71f5ae4f4036d6824324ef27e419d4a9d670fca163a7f6bf5170"
+    },
+    "verify-ledger.py": {
+      "path": "H:/scratch/w-corpus-e6f2/verify-ledger.py",
+      "sha256": "786bda43f143bf31a467655b2c9dba01b7921fd54584e725456959f74e28b1e2"
+    }
+  },
+  "schema": 1,
+  "scope": "Headless terminal semantics on Windows. Phase 1A is an authenticated two-way pre/branch comparison, with the source and paired controls named per row. The full v1.4.0 public-lib-vt comparison is a separate 1B gate.",
+  "sides": {
+    "branch": {
+      "build_identity": {
+        "dirty": false,
+        "revision": "5c7a99a131790499b9a26a851173da86c280f19c",
+        "terminal_source": "app",
+        "vt_api": "stone_flag",
+        "zig_exe_sha256": "d408dd38eed3e5204af841bcebf70502a4dbbb8399a3a3262be55059370bc018",
+        "zig_lib_sha256": "59722b08866d92b53a38ef3ba6926376c0e6334e985705eaa65c77596f7dc066"
+      },
+      "completion_sha256": "2fc2cf199dab362ed24de5b03364678c1688f0ec0fc3531c62b2ea4e60b367e5",
+      "corpus_source_revision": "263eacfa08ba4c4e550364760a935149863d41ec",
+      "exe_sha256": "17d5da615fb34e4796751fdea7b70de91f2c8b4975a412c8c55c6c720e2625a4",
+      "harness_sources_sha256": "293a2fea2b4e499574612ba0036029a3c4b6ee405748206a058580bcda199e03",
+      "manifest_sha256s": {
+        "run-1": "e5f8d84a5024697b8cd343c0c89ec0faa41ee8b8be7d6ad28fdd5124423a295b",
+        "run-2": "e5f8d84a5024697b8cd343c0c89ec0faa41ee8b8be7d6ad28fdd5124423a295b"
+      },
+      "provenance": {
+        "instrumented_revision": "5c7a99a131790499b9a26a851173da86c280f19c",
+        "production_revision": "5c7a99a131790499b9a26a851173da86c280f19c"
+      },
+      "revision": "5c7a99a131790499b9a26a851173da86c280f19c",
+      "shipped_profile": {
+        "applicable": true,
+        "differences": [],
+        "matches": true
+      }
+    },
+    "pre": {
+      "build_identity": {
+        "dirty": false,
+        "revision": "1310f99ac27adcc774a857b7edde157d86be9b7e",
+        "terminal_source": "app",
+        "vt_api": "fork",
+        "zig_exe_sha256": "d408dd38eed3e5204af841bcebf70502a4dbbb8399a3a3262be55059370bc018",
+        "zig_lib_sha256": "59722b08866d92b53a38ef3ba6926376c0e6334e985705eaa65c77596f7dc066"
+      },
+      "completion_sha256": "d12120cd6b79080a20f95e9eac04e2d5460886bde2ce1ea2c732c45e39448dea",
+      "corpus_source_revision": "263eacfa08ba4c4e550364760a935149863d41ec",
+      "exe_sha256": "c6b657988203af70d59b4857bc529476458723965fa43259e656d162231d9085",
+      "harness_sources_sha256": "fd5bfed51140e82dc074cc1d5f2a78492b55115996bdc1b58cdb9f63c375da66",
+      "manifest_sha256s": {
+        "run-1": "9f5cf1ddeea6d8deadb1f0f5acc0c3c462835a43f795c59ef05555aee2b7eef2",
+        "run-2": "9f5cf1ddeea6d8deadb1f0f5acc0c3c462835a43f795c59ef05555aee2b7eef2"
+      },
+      "provenance": {
+        "instrumented_build_sha256": "597d203a78709081ebc966a06f3dbb257a4552df09bfa87b097cf5a7f50c2f69",
+        "instrumented_revision": "1310f99ac27adcc774a857b7edde157d86be9b7e",
+        "original_build_sha256": "7d9ad32eb0132f3777433e3b06b091e02f98a3c91e284aa8821f9f1c4dcd0979",
+        "production_revision": "263eacfa08ba4c4e550364760a935149863d41ec",
+        "vt_api": "fork"
+      },
+      "revision": "263eacfa08ba4c4e550364760a935149863d41ec",
+      "shipped_profile": {
+        "applicable": true,
+        "differences": [],
+        "matches": true
+      }
+    }
+  },
+  "status": "pass",
+  "triage_tsv_sha256": "7ff80aae643f82d922024be7d0531738ab0422dc25fe8016d51ead3af925c515"
+}
