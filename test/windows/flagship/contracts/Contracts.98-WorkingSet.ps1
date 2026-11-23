@@ -1086,9 +1086,11 @@ try {
     }
     # Leave the copy with the legacy file, as before, for nothing after this reads it.
     [IO.File]::WriteAllText((Join-Path $strayCopy 'ghostty\config'), "initial-command = direct:C:\Windows\System32\cmd.exe /D /C exit`n")
-    # The list is the product's: file_load.zig's legacy paths, rooted at the portable root.
+    # The list is the product's: file_load.zig's legacy paths, under the config home `configHomePath` names, which
+    # outside a test build is xdg.config's, rooted at the portable root (a test build names its own root instead:
+    # `test_config_root`, w1a/1a6-test-config-guard).
     $fileLoadZig = Get-Content -LiteralPath (Join-Path $repoRoot 'src\config\file_load.zig') -Raw
-    if (-not $fileLoadZig.Contains('.subdir = "ghostty/config"') -or -not $fileLoadZig.Contains('.subdir = "winghostty/config.ghostty"')) { throw 'The stray-config list is not file_load.zig''s legacy paths.' }
+    if (-not $fileLoadZig.Contains('configHomePath(alloc, "ghostty/config")') -or -not $fileLoadZig.Contains('configHomePath(alloc, "winghostty/config.ghostty")') -or -not $fileLoadZig.Contains('return try xdg.config(alloc, .{ .subdir = subdir });')) { throw 'The stray-config list is not file_load.zig''s legacy paths.' }
 } finally { [IO.Directory]::Delete($configDir, $true) }
 
 # What the payload checks and the transport check read from the product: the session budget and overhead, the UIA
