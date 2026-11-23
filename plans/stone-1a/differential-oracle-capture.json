@@ -133,16 +133,16 @@
       "sha256": "b20ccab07aee743263c00c6b8c0244cb55ea01815899393180e907d63517b848"
     },
     "ledger-validation.json": {
-      "path": "H:/scratch/w-corpus-e6f2/ledger-validation.json",
-      "sha256": "89bff3fc40455c7e4fa38093ab6c8164b861a14c73339124a8d99a9e1008078f"
+      "path": "H:/scratch/w-corpus-e6f2/pwd-correction/ledger-validation.json",
+      "sha256": "9b2b7c7da6fb4145776f5a8d331c1c9cc85a68f0a2ab1813eaa7eba983735858"
     },
     "native-controls-1a.json": {
       "path": "H:/scratch/w-corpus-e6f2/native-controls-1a.json",
       "sha256": "ac88b1ba0228f51c601243115857aad668f4092d24ce96fd08c7730ab040a157"
     },
     "pair-triaged.json": {
-      "path": "H:/scratch/w-corpus-e6f2/pair-triaged.json",
-      "sha256": "ff3dbfd9139a2f9376b1ff168025cb2046cfecf77f07923eba861650ec9da8f7"
+      "path": "H:/scratch/w-corpus-e6f2/pwd-correction/pair-triaged.json",
+      "sha256": "6716f39bc0d036790ebfabbf273a4ddfa14b2f5c53d33c340add786471938ca6"
     },
     "pair.json": {
       "path": "H:/scratch/w-corpus-e6f2/pair.json",
@@ -185,16 +185,16 @@
       "sha256": "ebb1ae2e15b76d3d275f1feaf34116c543a0b2554b7bcc50a516d625a6a19508"
     },
     "triage-compare.cmd": {
-      "path": "H:/scratch/w-corpus-e6f2/triage-compare.cmd",
-      "sha256": "415f0b828cb08bd657ca257e8dc9fe91c578c161ea32ddd532c5b381ca752ff2"
+      "path": "H:/scratch/w-corpus-e6f2/pwd-correction/triage-compare.cmd",
+      "sha256": "6ff761d6fc8435e8c61e410620b81994a7808f57a1462a8f88f5e4ea3ad38413"
     },
     "triage-compare.log": {
-      "path": "H:/scratch/w-corpus-e6f2/triage-compare.log",
-      "sha256": "6356cb0e2697e1ea4fdf96569784fa7ed12db7c642df35b22cbb7f17f33e2b8f"
+      "path": "H:/scratch/w-corpus-e6f2/pwd-correction/triage-compare.log",
+      "sha256": "49772d16a1b10126f5abcfb23a643910b9960003ea3f91b8edc2dade375f7b38"
     },
     "triage.json": {
-      "path": "H:/scratch/w-corpus-e6f2/triage.json",
-      "sha256": "49fd986b2cf17305e2b9b01f6fd41ec6d3afece9614deaf83dc556da44692c44"
+      "path": "H:/scratch/w-corpus-e6f2/pwd-correction/triage.json",
+      "sha256": "e3f27bd5a65754c4307d4e5c66c65e76b23f27f48a7b231c743fee26a08be4dc"
     },
     "validate-scroll-deltas.py": {
       "path": "H:/scratch/w-corpus-e6f2/validate-scroll-deltas.py",
@@ -273,5 +273,5 @@
     }
   },
   "status": "pass",
-  "triage_tsv_sha256": "7ff80aae643f82d922024be7d0531738ab0422dc25fe8016d51ead3af925c515"
+  "triage_tsv_sha256": "353086944473b34c6ef11f6ba0ff2a51d1d72abf1ddda5903d4cfba9724ebcac"
 }
