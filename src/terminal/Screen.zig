@@ -1354,16 +1354,16 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
     // upstream 77190bd02 moved onto this route: main scrolls it with
     // cursorDownScroll's PageList.eraseRow(.active), which leaves that pin
     // alone, and the reset moved a pressed link's left-click pin to column 0,
-    // so its release read as a drag and opened nothing. Main differs on the
-    // rest of this route. When the active area starts below page row 0 (after
-    // a scroll clear) the top row's pin moves above the active area here,
-    // where eraseRow keeps it. A region with top > 0 main scrolls with
+    // so its release read as a drag and opened nothing. Not every scroll on
+    // this route is that case. When the active area starts below page row 0
+    // (after a scroll clear) the top row's pin moves above the active area
+    // here, where eraseRow keeps it. A region with top > 0 main scrolls with
     // PageList.eraseRowBounded, which resets the column (so a region top on
-    // page row 0 is a departure here), or with deleteLines, which moves no
-    // pin, when the cursor has a background color. A top-anchored region that
-    // ends above the bottom row main scrolls with cursorScrollAbove, which
-    // moves the top-row pin above the active area with its row
-    // (terminal-core.md, CLICK-PIN-01).
+    // page row 0 is a departure here, and any other page row matches), or
+    // with deleteLines, which moves no pin, when the cursor has a background
+    // color. A top-anchored region that ends above the bottom row main
+    // scrolls with cursorScrollAbove, which moves the top-row pin above the
+    // active area with its row (terminal-core.md, CLICK-PIN-01).
     const pin_keys = self.pages.tracked_pins.keys();
     for (pin_keys) |p| {
         if (p.node != pin.node or

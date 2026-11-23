@@ -4834,12 +4834,12 @@ pub fn eraseRowBounded(
         // spans pages, so it reaches this branch and never the single-page
         // one above, which keeps upstream's reset (upstream's test "PageList
         // eraseRowBounded with pin at top" pins it). For a full-screen scroll
-        // of a screen without scrollback (the
-        // alternate screen, the primary at scrollback-limit = 0) main runs
-        // eraseRow(.active), which leaves that pin alone, and the reset moved a
-        // pressed link's left-click pin to column 0, so its release read as a
-        // drag. Main's eraseRowBounded resets the column here, for a region
-        // with top > 0 (terminal-core.md, CLICK-PIN-01).
+        // of a screen without scrollback (the alternate screen, the primary at
+        // scrollback-limit = 0) main runs eraseRow(.active), which leaves that
+        // pin alone, and the reset moved a pressed link's left-click pin to
+        // column 0, so its release read as a drag. Main's eraseRowBounded
+        // resets the column here, for a region with top > 0 (terminal-core.md,
+        // CLICK-PIN-01).
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
             if (p.node == node and p.y >= pn.y) {
