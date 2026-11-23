@@ -408,6 +408,8 @@
         "src/terminal/search/Thread.zig",
         "scripts/windows-harness-history.ps1",
         "src/apprt/win32/test_support.zig",
+        "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
         "src/apprt/win32/host.zig",
         "src/apprt/win32/registry.zig",
         "src/apprt/win32_compositor_native.zig",

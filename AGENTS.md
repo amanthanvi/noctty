@@ -310,7 +310,8 @@ that govern each symbol you change, or that none does.
   (`termio/stream_handler.zig`, `os.hostname.isLocal`, `os/local_path.zig`
   `pwd`, and the stored-pwd spellings in `os/path.zig`), `src/Surface.zig`
   locking around links (the left release: `linkAtLocked`, `processLinks`,
-  `maybePromptClick`) and its left-click selection path
+  `maybePromptClick`, and the hover refresh it runs first, `mouseRefreshLinks`
+  with `Mouse.activeLeftClickPin`) and its left-click selection path
   (`Mouse.left_click_pin`, `dragLeftClickTriple`, `selectionScrollTick`;
   not upstream's `SelectionGesture`),
   and `ShellExecute*` calls queued for the message loop
@@ -757,7 +758,12 @@ that govern each symbol you change, or that none does.
   `Contracts.90-Workflows.ps1`), the soak
   (`test/windows/interactive-win11-soak.ps1`, its judge `ci/soak_judge.py`
   with `ci/test_soak_judge.py`, and the slope thresholds
-  `ci/soak-thresholds.tsv`), the hidden-desktop GUI suite
+  `ci/soak-thresholds.tsv`), the PKG-23 Ctrl+click harness
+  (`test/windows/hidden-win11-pkg23-ctrl-click.ps1`, its contract
+  `Contracts.98-Pkg23CtrlClick.ps1`) and the Debug open-URL trace it reads
+  (`recordOpenUrlForTest` and `NOCTTY_WIN32_OPEN_URL_TRACE_FILE` in
+  `src/apprt/win32.zig`, `dispatchOpenTarget` in `src/apprt/win32/app.zig`),
+  the hidden-desktop GUI suite
   (`test/windows/gui-hidden-runner.ps1`, its plan
   `test/windows/gui-hidden-plan.json`, `.github/workflows/gui-hidden.yml`
   and its selection `scripts/ci-gui-selection.ps1` with the script walker
