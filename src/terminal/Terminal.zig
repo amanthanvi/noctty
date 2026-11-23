@@ -18063,3 +18063,52 @@ test "Terminal: index without scrollback from an active top below page row 0 mov
     try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
     try testing.expectEqual(active_top_y - 1, pt.y);
 }
+
+// Where this fork differs from main for a region with top > 0 while the cursor
+// has a background color (review M2, CLICK-PIN-01): main's index() sends that
+// scroll to scrollUp(1), whose deleteLines moves no tracked pin, so every pin
+// stays on its screen cell; upstream 77190bd02 removed that detour, and here
+// Screen.cursorScrollRegionUp moves the region's pins up with their rows, the
+// region's top-row pin to the row above it (its column kept, the region top
+// not being page row 0). So a Ctrl+click in such a region during output reads
+// as a drag here and opens on main, and a selection there follows its text
+// here and stays on its cells on main. Not changed; this pins the behaviour, so
+// a change to that route updates it knowingly.
+test "Terminal: index in a region with top > 0 and a background moves cursorScrollRegionUp region pins up with their rows" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 6 });
+    defer t.deinit(alloc);
+    _ = try t.switchScreen(.alternate);
+    const s = t.screens.active;
+    for (0..6) |y| {
+        s.cursorAbsolute(0, @intCast(y));
+        try s.testWriteString("row");
+    }
+
+    try t.setAttribute(.{ .direct_color_bg = .{ .r = 0xFF, .g = 0, .b = 0 } });
+    try testing.expect(!s.blankCell().isZero());
+
+    // DECSTBM 2;5: rows 1 to 4. It homes the cursor, so put it back on the
+    // region's bottom row.
+    t.setTopAndBottomMargin(2, 5);
+    t.setCursorPos(5, 1);
+
+    const p_top = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 1 } }).?);
+    defer s.pages.untrackPin(p_top);
+    const p_mid = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 3 } }).?);
+    defer s.pages.untrackPin(p_mid);
+    const p_below = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 5 } }).?);
+    defer s.pages.untrackPin(p_below);
+
+    try t.index();
+
+    const top = (s.pages.pointFromPin(.viewport, p_top.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(top.x), 3), top.x);
+    try testing.expectEqual(@as(@TypeOf(top.y), 0), top.y);
+    const mid = (s.pages.pointFromPin(.viewport, p_mid.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(mid.x), 3), mid.x);
+    try testing.expectEqual(@as(@TypeOf(mid.y), 2), mid.y);
+    const below = (s.pages.pointFromPin(.viewport, p_below.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(below.x), 3), below.x);
+    try testing.expectEqual(@as(@TypeOf(below.y), 5), below.y);
+}
