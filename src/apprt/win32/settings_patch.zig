@@ -2448,24 +2448,9 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     }
     // Every other case through the loader as well, so a change to its
     // wording fails here: a dark theme by name, searched for in the user's
-    // theme directory (`XDG_CONFIG_HOME` points at this test's for its
-    // length, then back), and by path.
-    const os = @import("../../os/main.zig");
-    if (try os.xdg.portableRoot(alloc)) |portable| {
-        alloc.free(portable);
-        return error.SkipZigTest;
-    }
-    const saved: ?[:0]u8 = saved: {
-        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :saved null,
-            else => return err,
-        };
-        defer alloc.free(value);
-        break :saved try alloc.dupeZ(u8, value);
-    };
-    defer if (saved) |value| alloc.free(value);
-    defer _ = if (saved) |value| os.setenv("XDG_CONFIG_HOME", value) else os.unsetenv("XDG_CONFIG_HOME");
-    const themes_dir = try std.fs.path.join(alloc, &.{ "xdg", @import("../../build_config.zig").data_dir_name, "themes" });
+    // theme directory (under the config home this test names,
+    // `file_load.test_config_root`), and by path.
+    const themes_dir = try std.fs.path.join(alloc, &.{ "home", @import("../../build_config.zig").data_dir_name, "themes" });
     defer alloc.free(themes_dir);
     try tmp.dir.makePath(themes_dir);
     var themes = try tmp.dir.openDir(themes_dir, .{});
@@ -2473,11 +2458,11 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     try themes.writeFile(.{ .sub_path = "Mine", .data = "font-size = 14\n" });
     try themes.makeDir("Dir");
     try tmp.dir.makeDir("dir");
-    const xdg_path = try tmp.dir.realpathAlloc(alloc, "xdg");
-    defer alloc.free(xdg_path);
-    const xdg = try alloc.dupeZ(u8, xdg_path);
-    defer alloc.free(xdg);
-    try testing.expectEqual(@as(c_int, 0), os.setenv("XDG_CONFIG_HOME", xdg));
+    const home = try tmp.dir.realpathAlloc(alloc, "home");
+    defer alloc.free(home);
+    const file_load = @import("../../config/file_load.zig");
+    file_load.test_config_root = home;
+    defer file_load.test_config_root = null;
     const mine = try themes.realpathAlloc(alloc, "Mine");
     defer alloc.free(mine);
     const gone = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(dark) orelse return error.TestExpectedDir, "gone" });

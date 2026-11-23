@@ -14610,6 +14610,12 @@ test "win32 an OpenGL retry on a window reuses the pixel format it set" {
     var app: App = undefined;
     try app.init(core, .{});
     defer app.terminate();
+    // `createGLContext` starts the process-wide OpenGL startup diagnostics
+    // (the core app is still `first`), and nothing here ends them. Left on,
+    // a later test in this process that fails an OpenGL start on purpose
+    // ("failed context preparation preserves the previous GL dispatch")
+    // logs an error and fails.
+    defer gl_startup.clearOpenGLStartupFailure();
 
     const hwnd = try createTestHostWindow();
     defer _ = sys.DestroyWindow(hwnd);
@@ -14697,6 +14703,153 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
         error.FileNotFound,
         data_dir.access("shell-integration", .{}),
     );
+}
+
+/// A scratch per-user config home that a loader without the test build's
+/// guard (`config_file_load.test_config_root`) would read: `XDG_CONFIG_HOME`,
+/// which wins over `LOCALAPPDATA`, points at it until `deinit` puts the
+/// earlier value back. Null when portable mode is on, since a loader without
+/// the guard then reads beside the executable, which no variable steers.
+const TestConfigHomeEnv = struct {
+    tmp: std.testing.TmpDir,
+    path: []u8,
+    saved: ?[:0]u8,
+
+    fn init(alloc: Allocator) !?TestConfigHomeEnv {
+        if (try internal_os.xdg.portableRoot(alloc)) |root| {
+            alloc.free(root);
+            return null;
+        }
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const path = try tmp.dir.realpathAlloc(alloc, ".");
+        errdefer alloc.free(path);
+        const saved: ?[:0]u8 = saved: {
+            const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+                error.EnvironmentVariableNotFound => break :saved null,
+                else => return err,
+            };
+            defer alloc.free(value);
+            break :saved try alloc.dupeZ(u8, value);
+        };
+        errdefer if (saved) |value| alloc.free(value);
+        const path_z = try alloc.dupeZ(u8, path);
+        defer alloc.free(path_z);
+        if (internal_os.setenv("XDG_CONFIG_HOME", path_z) != 0) return error.TestSetEnvFailed;
+        return .{ .tmp = tmp, .path = path, .saved = saved };
+    }
+
+    fn deinit(self: *TestConfigHomeEnv, alloc: Allocator) void {
+        if (self.saved) |value| {
+            _ = internal_os.setenv("XDG_CONFIG_HOME", value);
+            alloc.free(value);
+        } else _ = internal_os.unsetenv("XDG_CONFIG_HOME");
+        alloc.free(self.path);
+        self.tmp.cleanup();
+    }
+
+    const config_path = build_config.data_dir_name ++ "/config.ghostty";
+    const probe_title = "test-config-guard-probe";
+
+    /// Fails, naming `route`, when `config` carries the probe file's title.
+    fn expectProbeUnread(config: *const configpkg.Config, route: []const u8) !void {
+        const title = config.title orelse return;
+        std.debug.print("{s} read a default config file: title = {s}\n", .{ route, title });
+        return error.TestDefaultConfigLoaded;
+    }
+
+    /// Fails, naming `route`, when a config template is now in this home.
+    fn expectNoTemplate(self: *const TestConfigHomeEnv, route: []const u8) !void {
+        self.tmp.dir.access(config_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        std.debug.print("{s} wrote a config template\n", .{route});
+        return error.TestConfigTemplateWritten;
+    }
+};
+
+test "win32 a test-built App reads no default config file, wherever the environment points" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    // Without the guard a portable copy reads beside the executable, which
+    // this test cannot steer, so it could not fail there. Skip rather than
+    // pass without checking anything.
+    var env = (try TestConfigHomeEnv.init(alloc)) orelse return error.SkipZigTest;
+    defer env.deinit(alloc);
+    try env.tmp.dir.makePath(build_config.data_dir_name);
+    try env.tmp.dir.writeFile(.{
+        .sub_path = TestConfigHomeEnv.config_path,
+        .data = "title = " ++ TestConfigHomeEnv.probe_title ++ "\n",
+    });
+
+    // `App.init`, as "win32 runtime can initialize config" runs it.
+    {
+        var core = try CoreApp.create(alloc);
+        defer core.destroy();
+        var app: App = undefined;
+        try app.init(core, .{});
+        defer app.terminate();
+        try TestConfigHomeEnv.expectProbeUnread(&app.config, "App.init");
+    }
+    // `Config.load`, which a hard `reload_config` and a Settings save's
+    // reload (`loadConfigAtStartupCwd`) run too.
+    {
+        var config = try configpkg.Config.load(alloc);
+        defer config.deinit();
+        try TestConfigHomeEnv.expectProbeUnread(&config, "Config.load");
+    }
+    // The palette's theme preview (`Host.loadPaletteThemeConfig`).
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try config.loadDefaultFiles(alloc);
+        try TestConfigHomeEnv.expectProbeUnread(&config, "loadDefaultFiles");
+    }
+
+    // The positive control: as the config home a test names, the same file
+    // is read.
+    config_file_load.test_config_root = env.path;
+    defer config_file_load.test_config_root = null;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    try config.loadDefaultFiles(alloc);
+    try std.testing.expectEqualStrings(TestConfigHomeEnv.probe_title, config.title orelse "");
+}
+
+test "win32 a test-built App writes no config template, wherever the environment points" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    // Skipped in portable mode for the reason the test above gives.
+    var env = (try TestConfigHomeEnv.init(alloc)) orelse return error.SkipZigTest;
+    defer env.deinit(alloc);
+
+    // No config file anywhere in the home the environment names, which is
+    // when a launch writes the template.
+    {
+        var core = try CoreApp.create(alloc);
+        defer core.destroy();
+        var app: App = undefined;
+        try app.init(core, .{});
+        defer app.terminate();
+    }
+    try env.expectNoTemplate("App.init");
+    {
+        var config = try configpkg.Config.load(alloc);
+        defer config.deinit();
+    }
+    try env.expectNoTemplate("Config.load");
+
+    // The positive control: as the config home a test names, it gets the
+    // template.
+    config_file_load.test_config_root = env.path;
+    defer config_file_load.test_config_root = null;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    try config.loadDefaultFiles(alloc);
+    const template = try env.tmp.dir.readFileAlloc(alloc, TestConfigHomeEnv.config_path, 1 << 16);
+    defer alloc.free(template);
+    try std.testing.expect(std.mem.indexOf(u8, template, "# This is the configuration file for noctty.") != null);
 }
 
 test "win32 named layout encoding uses the persistence read limit" {
