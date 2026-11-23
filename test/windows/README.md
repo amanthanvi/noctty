@@ -727,7 +727,8 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, the soak,
+`-restore-quarantine`, `-app-delivery`, `-restart-manager`, `-list-profiles` and
+`-pkg23-ctrl-click`, the soak,
 `interactive-win11-soak.ps1`, for its desktop, job and driver launch, and `hidden-win11-working-set.ps1`
 for its desktop and guards); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
@@ -754,6 +755,67 @@ without `noctty.ico`, and record startup, clipboard and history guards.
   rejects a held snapshot with the same oracle used for the fresh viewport.
   It records rectangle counts as observations. The provider unit test checks
   fresh and held geometry against the same available post-erase viewport.
+
+## hidden-win11-pkg23-ctrl-click.ps1
+
+PKG-23's regression on a private desktop: while `cmd` prints
+`https://pkg23.invalid/<eight digits>/<the same digits>` without end, with `scrollback-limit = 0`,
+the driver posts Ctrl+left clicks (move, press and release with `MK_CONTROL`;
+no key message) on row 0 and requires every click to open its whole URL. Before
+the fix in the 2026-10-11 PKG-23 entry (terminal-core.md), main opened 94 of 300
+clicks and 73 of those URLs were torn; the 2026-11-20 LEFT-RELEASE-LOCK entry
+moved the lock it guards.
+
+Use a clean checkout with a completed Debug measurement build as `-MeasureRepo`
+and a new evidence directory as `-Run`. The copy is portable, without
+`noctty.ico`, with LOCALAPPDATA, APPDATA, TEMP and TMP inside the run, and its
+own `config.ghostty` runs System32's `cmd.exe /D` directly, denies the clipboard
+and turns copy-on-select off.
+
+```powershell
+pwsh -NoProfile -File .\hidden-win11-pkg23-ctrl-click.ps1 -MeasureRepo <checkout> -Run <new dir> [-Clicks 300] [-DryClickOnly]
+pwsh -NoProfile -File .\hidden-win11-pkg23-ctrl-click.ps1 -ControlOnly
+```
+
+Every open goes to the Debug-only trace seam (`NOCTTY_WIN32_OPEN_URL_TRACE_FILE`,
+`recordOpenUrlForTest`), which writes the URL and returns before `ShellExecuteW`,
+and every URL names the reserved `.invalid` host. Before anything starts, the
+outer half checks that seam (`Get-Pkg23SeamProblems`) in the source the
+measurement build was made from, not in this checkout. One dry click on a still
+screen comes first and must prove the seam: the build's own `+version` says
+Debug and the record is exactly the dry URL. The driver's job gaining no process
+(while the same count rose by the copy and its shell at launch) supports that,
+but cannot prove it alone: an open can be handed to a broker outside the job.
+Otherwise the run exits 4 and clicks nothing more; a copy that dies or stops
+answering at that first release is a product failure (exit 1), and nothing more
+is clicked either. The trace file holds one open, so the
+driver keeps each click's record in `pkg23\records\click-NNNN.txt`, deletes
+the trace and watches 150 ms for a second open before the next click (and 1 s
+after the last). Every click is in column 0 of row 0, after a Ctrl move to a cell
+with no link, so each refreshes the link under the pointer, and
+`click-repeat-interval = 1` keeps each a single click. Column 0 is where the
+2026-10-11 probe clicked. A pass there does not cover a click inside the link:
+on stone at `5c7a99a13` a click at column 3 during the stream opened 0 or 1 of
+30 where main at `358ce0f6a` opened them all, a stone regression whose cause is
+not yet found (test-harnesses.md, PKG23-HARNESS-01 trap (3)).
+
+The checker fails a click with no record, a record that is not one
+CRLF-terminated line (partial), a line that is not a whole streamed URL with its
+number twice (torn, which also catches a splice of two rows), a record or open
+for no click, a number lower than the one before, and a row 0 that never moved.
+Its 25 controls run before every launch, and `-ControlOnly` runs only them;
+`flagship/contracts/Contracts.98-Pkg23CtrlClick.ps1` runs that, refuses checker
+mutations that would pass a missing or partial record, pins the harness's
+isolation, and runs the seam check on this checkout's opener and on mutations of
+it. Results are in `pkg23-results.json`
+(counts, the dry-click proof and checks; no path, coordinate, command line or
+environment value) and `pkg23-guards.json`. Exit 0 passes; 1 is a failed check, a
+product failure at the dry click or an unfinished run; 3 a changed isolation
+guard (startup ledger, history, clipboard, a new jump-list file, a reparse point
+in the run); 4 a build that is not Debug, a source without the seam, or an
+unproven dry click.
+Posted input only: a modifier held at the real keyboard can still reach a click,
+and OSC 8 links are not streamed.
 
 ## PowerShell history isolation
 
