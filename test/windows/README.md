@@ -793,11 +793,11 @@ driver keeps each click's record in `pkg23\records\click-NNNN.txt`, deletes
 the trace and watches 150 ms for a second open before the next click (and 1 s
 after the last). Every click is in column 0 of row 0, after a Ctrl move to a cell
 with no link, so each refreshes the link under the pointer, and
-`click-repeat-interval = 1` keeps each a single click. Column 0, because the
-stream can prune the press's page before the release: `PageList` then moves the
-press's tracked pin to the new first page's top-left, and the release reads a
-click in any other column as a drag and opens nothing (30 clicks at columns 3
-and 14 opened none).
+`click-repeat-interval = 1` keeps each a single click. Column 0 is where the
+2026-10-11 probe clicked. A pass there does not cover a click inside the link:
+on stone at `5c7a99a13` a click at column 3 during the stream opened 0 or 1 of
+30 where main at `358ce0f6a` opened them all, a stone regression whose cause is
+not yet found (test-harnesses.md, PKG23-HARNESS-01 trap (3)).
 
 The checker fails a click with no record, a record that is not one
 CRLF-terminated line (partial), a line that is not a whole streamed URL with its

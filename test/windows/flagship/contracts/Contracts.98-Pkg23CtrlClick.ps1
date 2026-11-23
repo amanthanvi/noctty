@@ -97,6 +97,11 @@ $pkg23Rules = @(
         Mutation = @('[Pkg23Native]::CtrlClick($Pane, $script:parkX, $script:parkY, $X, $Y)', '[Pkg23Native]::CtrlClick($Pane, $script:parkX, $script:parkY, $X, $Y); Start-Process notepad')
     }
     @{
+        Description = 'a -Run that already exists launches nothing, so the results the outer half reads are this run''s'
+        Pattern = '(?s)if \(-not \$Driver\) \{\s+if \(-not \$MeasureRepo -or -not \$Run\) \{ throw [^\r\n]*\}\s+if \(Test-Path -LiteralPath \$Run\) \{ Write-Host [^\r\n]*; exit 1 \}'
+        Mutation = @('if (Test-Path -LiteralPath $Run) {', 'if ($false) {')
+    }
+    @{
         Description = 'the outer half runs the checker controls, then admits only the receipt-bound measurement build, before the driver'
         Pattern = '(?s)if \(-not \$Driver\) \{.*?\$controls = Invoke-Pkg23CheckerControls\s.*?Assert-InteractiveWin11MeasureBuild -RepoRoot \$MeasureRepo -ExePath \$exe.*?Invoke-LocalHiddenDriver -Script'
         Mutation = @('$controls = Invoke-Pkg23CheckerControls', '$controls = 0')

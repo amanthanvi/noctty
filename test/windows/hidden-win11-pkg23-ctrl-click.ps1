@@ -36,9 +36,9 @@ Then cmd prints https://pkg23.invalid/<eight digits>/<the same digits> forever, 
 clicks (WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP with MK_CONTROL; no key message) on row 0,
 in column 0, each after a Ctrl move to a cell with no link, so every click refreshes the link
 under the pointer (`mouseRefreshLinks`) and, with click-repeat-interval = 1, counts as a single
-click. Column 0 because a release reads the press's tracked pin: when the stream prunes the
-press's page first, PageList moves the pin to the new first page's top-left, and the release then
-reads a click in any other column as a drag and opens nothing. After each click
+click. Column 0 is where the 2026-10-11 probe clicked; a pass there does not cover a click
+inside the link, which opened nothing at column 3 on stone at 5c7a99a13 and opened on main at
+358ce0f6a (test-harnesses.md, PKG23-HARNESS-01 trap (3)). After each click
 it waits for the record, copies its exact bytes to pkg23\records\click-NNNN.txt and deletes the
 trace before the next click, then watches 150 ms for a second open (and 1 s after the last
 click). The checker (Get-Pkg23Verdict) then requires every click to have a record that is one
@@ -261,6 +261,8 @@ function Get-Pkg23ReparsePointCount([string] $Root) {
 
 if (-not $Driver) {
     if (-not $MeasureRepo -or -not $Run) { throw 'Pass -MeasureRepo (a clean checkout with a completed measurement build) and -Run (a new directory).' }
+    # Before anything else: the results read below must be this run's, never an earlier run's in the same place.
+    if (Test-Path -LiteralPath $Run) { Write-Host 'PKG-23: -Run must name a new directory; nothing was launched.'; exit 1 }
     # The checker must refuse a missing or partial record before anything starts.
     $controls = Invoke-Pkg23CheckerControls
     . (Join-Path $PSScriptRoot '..\..\scripts\interactive-win11-measure-lib.ps1')
@@ -591,7 +593,7 @@ function Invoke-Pkg23Driver {
     Start-Sleep -Milliseconds 1500   # ConPTY renders the line to the pane
     $launchProcesses = [Pkg23Native]::JobTotalProcesses() - $launchBefore
 
-    # Row 0, column 0 (the URL's first cell, where a pruned press pin lands), and a park cell in
+    # Row 0, column 0 (the URL's first cell, where the October probe clicked), and a park cell in
     # row 2 past the end of its URL, from the configured 100x30 grid and 4 pt padding; an estimate
     # off by a third of a cell still lands on both cells.
     $size = [Pkg23Native]::ClientSize($pane)
