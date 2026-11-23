@@ -1344,14 +1344,33 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
 
     // Update tracked pins within the region since their rows moved up
     // by one. The cursor's own pin is skipped because the cursor stays
-    // at the region bottom (the new blank row).
+    // at the region bottom (the new blank row). A pin on page row 0, which
+    // only the erased top row can be, stays where it is, column included, and
+    // reads the row that moved up into its place; the slow path's
+    // PageList.eraseRowBounded does the same. Fork change: upstream reset its
+    // column to 0. That is main parity for a full-screen scroll of a screen
+    // without scrollback (the alternate screen, the primary screen at
+    // scrollback-limit = 0) whose active area starts on page row 0, which
+    // upstream 77190bd02 moved onto this route: main scrolls it with
+    // cursorDownScroll's PageList.eraseRow(.active), which leaves that pin
+    // alone, and the reset moved a pressed link's left-click pin to column 0,
+    // so its release read as a drag and opened nothing. Not every scroll on
+    // this route is that case. When the active area starts below page row 0
+    // (after a scroll clear) the top row's pin moves above the active area
+    // here, where eraseRow keeps it. A region with top > 0 main scrolls with
+    // PageList.eraseRowBounded, which resets the column (so a region top on
+    // page row 0 is a departure here, and any other page row matches), or
+    // with deleteLines, which moves no pin, when the cursor has a background
+    // color. A top-anchored region that ends above the bottom row main
+    // scrolls with cursorScrollAbove, which moves the top-row pin above the
+    // active area with its row (terminal-core.md, CLICK-PIN-01).
     const pin_keys = self.pages.tracked_pins.keys();
     for (pin_keys) |p| {
         if (p.node != pin.node or
             p == pin or
             p.y < pin.y - limit or
             p.y > pin.y) continue;
-        if (p.y == 0) p.x = 0 else p.y -= 1;
+        if (p.y != 0) p.y -= 1;
     }
 
     // The cursor pin is unchanged, but the Row structure at the pin

@@ -17896,3 +17896,219 @@ test "Terminal: glyph APC stores session glossary entries" {
     t.fullReset();
     try testing.expect(!t.glyph_glossary.contains(0xE0A0));
 }
+
+// A tracked pin on the top row of a screen without scrollback, through one
+// linefeed at the bottom row: Screen.cursorScrollRegionUp's in-place route
+// (upstream 77190bd02) keeps a pin on page row 0 at its column, as main's
+// PageList.eraseRow(.active) does, so a left release at the pressed cell reads
+// as a click, not a drag (Surface.mouseRefreshLinks compares
+// pointFromPin(.viewport, press pin) with the release's cell). See
+// terminal-core.md, CLICK-PIN-01.
+fn testTopRowPinLines(s: *Screen) !void {
+    try s.testWriteString("one");
+    s.cursorAbsolute(0, 1);
+    try s.testWriteString("two");
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("three");
+}
+
+test "Terminal: index without scrollback keeps a top-row-pin at its column" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testTopRowPinLines(s);
+
+    // A left press at row 0, column 3 tracks its pin (Surface's left_click_pin).
+    const pin = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 0 } }).?);
+    defer s.pages.untrackPin(pin);
+
+    // One line of output: a linefeed at the bottom row scrolls the screen.
+    try t.index();
+
+    const pt = (s.pages.pointFromPin(.viewport, pin.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
+    try testing.expectEqual(@as(@TypeOf(pt.y), 0), pt.y);
+}
+
+test "Terminal: alt-screen index keeps a top-row-pin at its column" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+    _ = try t.switchScreen(.alternate);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testTopRowPinLines(s);
+
+    const pin = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 0 } }).?);
+    defer s.pages.untrackPin(pin);
+
+    // One line of output at the bottom row: no scroll region is set.
+    try t.index();
+
+    const pt = (s.pages.pointFromPin(.viewport, pin.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
+    try testing.expectEqual(@as(@TypeOf(pt.y), 0), pt.y);
+}
+
+test "Terminal: index without scrollback keeps a top-row-pin selection start at its column" {
+    const Selection = @import("Selection.zig");
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testTopRowPinLines(s);
+
+    // A selection from row 0, column 3 to row 1, column 2: its bounds are tracked pins.
+    try s.select(Selection.init(
+        s.pages.pin(.{ .viewport = .{ .x = 3, .y = 0 } }).?,
+        s.pages.pin(.{ .viewport = .{ .x = 2, .y = 1 } }).?,
+        false,
+    ));
+
+    try t.index();
+
+    const sel = s.selection orelse return error.SelectionCleared;
+    const pt = (s.pages.pointFromPin(.viewport, sel.start()) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
+    try testing.expectEqual(@as(@TypeOf(pt.y), 0), pt.y);
+}
+
+// The same pin across a page boundary: a 480x100 screen without scrollback
+// needs two pages for its active area, so a full-screen index takes
+// Screen.cursorScrollRegionUpSlow, whose PageList.eraseRowBounded cross-page
+// branch keeps a pin on page row 0 at its column as main's eraseRow(.active)
+// does (CLICK-PIN-01). A grid this size spans pages from the start (a 4K
+// display with a small font; production pages hold fewer rows than the test
+// build's), and a style-capacity split can split a smaller one.
+fn testTopRowPinAcrossPages(t: *Terminal) !void {
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+    try testTopRowPinLines(s);
+
+    // The active area starts on page row 0 of one page and its bottom row is
+    // on the next page, the last, so the region crosses the boundary.
+    t.setCursorPos(t.rows, 1);
+    const active_top = s.pages.getTopLeft(.active);
+    try testing.expectEqual(@as(@TypeOf(active_top.y), 0), active_top.y);
+    const active_bottom = s.pages.getBottomRight(.active) orelse return error.NoActiveBottom;
+    try testing.expect(active_top.node != active_bottom.node);
+    try testing.expect(active_top.node.next == active_bottom.node);
+    try testing.expect(s.cursor.page_pin.node == active_bottom.node);
+    try testing.expect(s.cursor.page_pin.y < t.rows - 1);
+
+    const pin = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 0 } }).?);
+    defer s.pages.untrackPin(pin);
+
+    try t.index();
+
+    const pt = (s.pages.pointFromPin(.viewport, pin.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
+    try testing.expectEqual(@as(@TypeOf(pt.y), 0), pt.y);
+}
+
+test "Terminal: alt-screen index across two pages keeps a top-row-pin at its column" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 480, .rows = 100 });
+    defer t.deinit(alloc);
+    _ = try t.switchScreen(.alternate);
+    try testTopRowPinAcrossPages(&t);
+}
+
+test "Terminal: index without scrollback across two pages keeps a top-row-pin at its column" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 480, .rows = 100, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    try testTopRowPinAcrossPages(&t);
+}
+
+// Where this fork still differs from main (CLICK-PIN-01, leftover 2): when the
+// active area starts below page row 0, the fast path's region top is not page
+// row 0, so it moves a top-row pin up one row, out of the active area, with its
+// column; main's eraseRow(.active) leaves it at active (3, 0). A left release
+// then finds no press cell in the viewport and opens the link under the
+// pointer, as main does. A change to that route updates this test knowingly.
+test "Terminal: index without scrollback from an active top below page row 0 moves a top-row-pin above the active area" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 0 });
+    defer t.deinit(alloc);
+    const s = t.screens.active;
+    try testing.expect(s.no_scrollback);
+
+    // Three lines, then a scroll clear (ED 22, kitty's scroll_complete), which
+    // pushes them into history even without scrollback, so the active area
+    // starts below page row 0.
+    try s.testWriteString("old");
+    s.cursorAbsolute(0, 1);
+    try s.testWriteString("old");
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("old");
+    try s.scrollClear();
+    const active_top = s.pages.getTopLeft(.active);
+    try testing.expect(active_top.y != 0);
+    const active_top_y = (s.pages.pointFromPin(.screen, active_top) orelse return error.ActiveTopNotOnScreen).coord().y;
+
+    s.cursorAbsolute(0, 0);
+    try testTopRowPinLines(s);
+
+    const pin = try s.pages.trackPin(s.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?);
+    defer s.pages.untrackPin(pin);
+
+    try t.index();
+
+    try testing.expect(s.pages.pointFromPin(.active, pin.*) == null);
+    const pt = (s.pages.pointFromPin(.screen, pin.*) orelse return error.PinLeftScreen).coord();
+    try testing.expectEqual(@as(@TypeOf(pt.x), 3), pt.x);
+    try testing.expectEqual(active_top_y - 1, pt.y);
+}
+
+// Where this fork differs from main for a region with top > 0 while the cursor
+// has a background color (review M2, CLICK-PIN-01): main's index() sends that
+// scroll to scrollUp(1), whose deleteLines moves no tracked pin, so every pin
+// stays on its screen cell; upstream 77190bd02 removed that detour, and here
+// Screen.cursorScrollRegionUp moves the region's pins up with their rows, the
+// region's top-row pin to the row above it (its column kept, the region top
+// not being page row 0). So a Ctrl+click in such a region during output reads
+// as a drag here and opens on main, and a selection there follows its text
+// here and stays on its cells on main. Not changed; this pins the behaviour, so
+// a change to that route updates it knowingly.
+test "Terminal: index in a region with top > 0 and a background moves cursorScrollRegionUp region pins up with their rows" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 6 });
+    defer t.deinit(alloc);
+    _ = try t.switchScreen(.alternate);
+    const s = t.screens.active;
+    for (0..6) |y| {
+        s.cursorAbsolute(0, @intCast(y));
+        try s.testWriteString("row");
+    }
+
+    try t.setAttribute(.{ .direct_color_bg = .{ .r = 0xFF, .g = 0, .b = 0 } });
+    try testing.expect(!s.blankCell().isZero());
+
+    // DECSTBM 2;5: rows 1 to 4. It homes the cursor, so put it back on the
+    // region's bottom row.
+    t.setTopAndBottomMargin(2, 5);
+    t.setCursorPos(5, 1);
+
+    const p_top = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 1 } }).?);
+    defer s.pages.untrackPin(p_top);
+    const p_mid = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 3 } }).?);
+    defer s.pages.untrackPin(p_mid);
+    const p_below = try s.pages.trackPin(s.pages.pin(.{ .viewport = .{ .x = 3, .y = 5 } }).?);
+    defer s.pages.untrackPin(p_below);
+
+    try t.index();
+
+    const top = (s.pages.pointFromPin(.viewport, p_top.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(top.x), 3), top.x);
+    try testing.expectEqual(@as(@TypeOf(top.y), 0), top.y);
+    const mid = (s.pages.pointFromPin(.viewport, p_mid.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(mid.x), 3), mid.x);
+    try testing.expectEqual(@as(@TypeOf(mid.y), 2), mid.y);
+    const below = (s.pages.pointFromPin(.viewport, p_below.*) orelse return error.PinLeftViewport).coord();
+    try testing.expectEqual(@as(@TypeOf(below.x), 3), below.x);
+    try testing.expectEqual(@as(@TypeOf(below.y), 5), below.y);
+}

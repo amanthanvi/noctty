@@ -4827,14 +4827,23 @@ pub fn eraseRowBounded(
             }
         }
 
+        // Fork change (main parity): a pin on page row 0, the erased row,
+        // stays where it is, column included, and reads the row that moved up
+        // into its place; upstream reset its column to 0. The one product
+        // caller, Screen.cursorScrollRegionUpSlow, passes only a region that
+        // spans pages, so it reaches this branch and never the single-page
+        // one above, which keeps upstream's reset (upstream's test "PageList
+        // eraseRowBounded with pin at top" pins it). For a full-screen scroll
+        // of a screen without scrollback (the alternate screen, the primary at
+        // scrollback-limit = 0) main runs eraseRow(.active), which leaves that
+        // pin alone, and the reset moved a pressed link's left-click pin to
+        // column 0, so its release read as a drag. Main's eraseRowBounded
+        // resets the column here, for a region with top > 0 (terminal-core.md,
+        // CLICK-PIN-01).
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
             if (p.node == node and p.y >= pn.y) {
-                if (p.y == 0) {
-                    p.x = 0;
-                } else {
-                    p.y -= 1;
-                }
+                if (p.y != 0) p.y -= 1;
             }
         }
     }
