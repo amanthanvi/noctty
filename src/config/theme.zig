@@ -5,6 +5,7 @@ const build_config = @import("../build_config.zig");
 const global_state = &@import("../global.zig").state;
 const internal_os = @import("../os/main.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
+const file_load = @import("file_load.zig");
 
 /// Location of possible themes. The order of this enum matters because it
 /// defines the priority of theme search (from top to bottom).
@@ -32,6 +33,18 @@ pub const Location = enum {
                     if (self == .user) build_config.data_dir_name else "ghostty",
                     "themes",
                 }) catch return error.OutOfMemory;
+
+                // A test build looks only under the config home its test
+                // names (`file_load.test_config_root`), and with none has
+                // no user theme directory, so it never probes the
+                // developer's own themes.
+                if (comptime builtin.is_test) break :user file_load.configHomePath(
+                    arena_alloc,
+                    subdir,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.NoTestConfigRoot => return null,
+                };
 
                 break :user internal_os.xdg.config(
                     arena_alloc,
@@ -441,6 +454,11 @@ test "issue149 user theme locations prefer noctty before legacy ghostty" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
+    // A test build has user theme directories only under a config home its
+    // test names; nothing here opens them.
+    file_load.test_config_root = if (builtin.os.tag == .windows) "C:\\noctty-test-config-home" else "/noctty-test-config-home";
+    defer file_load.test_config_root = null;
+
     var it: LocationIterator = .{ .arena_alloc = arena.allocator() };
     const user = (try it.next()).?;
     try std.testing.expectEqual(Location.user, user.location);
@@ -463,6 +481,14 @@ test "a theme no directory has is one diagnostic that names every path tried" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
+    // The user theme directories under a scratch config home this test
+    // names (a test build has none otherwise), so the paths tried are there.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(arena.allocator(), ".");
+    file_load.test_config_root = home;
+    defer file_load.test_config_root = null;
+
     var diags: cli_diags.DiagnosticList = .{};
     const found = try open(arena.allocator(), "no-such-theme-pkg22", &diags);
     try std.testing.expect(found == null);
@@ -473,7 +499,77 @@ test "a theme no directory has is one diagnostic that names every path tried" {
     try std.testing.expect(std.mem.indexOf(u8, message, "theme \"no-such-theme-pkg22\" not found") != null);
 
     var it: LocationIterator = .{ .arena_alloc = arena.allocator() };
-    while (try it.next()) |loc| {
+    var tried: usize = 0;
+    while (try it.next()) |loc| : (tried += 1) {
         try std.testing.expect(std.mem.indexOf(u8, message, loc.dir) != null);
     }
+    // At least both user directories, so the check above is not empty.
+    try std.testing.expect(tried >= 2);
+}
+
+test "a test build looks for user themes only under the config home its test names" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+
+    // Without the guard a portable copy looks beside the executable, which
+    // the environment below cannot steer, so this test could not fail there.
+    // Skip rather than pass without checking anything.
+    if (try internal_os.xdg.portableRoot(alloc)) |root| {
+        alloc.free(root);
+        return error.SkipZigTest;
+    }
+
+    // A theme in a scratch home's user theme directory, where a lookup
+    // without the guard looks first: `XDG_CONFIG_HOME` points at the home
+    // (it wins over `LOCALAPPDATA`) for this test's length.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const themes_dir = build_config.data_dir_name ++ "/themes";
+    try tmp.dir.makePath(themes_dir);
+    try tmp.dir.writeFile(.{ .sub_path = themes_dir ++ "/test-config-guard-theme", .data = "font-size = 31\n" });
+    const home = try tmp.dir.realpathAlloc(arena.allocator(), ".");
+    const saved: ?[:0]u8 = saved: {
+        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => break :saved null,
+            else => return err,
+        };
+        defer alloc.free(value);
+        break :saved try alloc.dupeZ(u8, value);
+    };
+    defer if (saved) |value| alloc.free(value);
+    defer _ = if (saved) |value|
+        internal_os.setenv("XDG_CONFIG_HOME", value)
+    else
+        internal_os.unsetenv("XDG_CONFIG_HOME");
+    try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", try arena.allocator().dupeZ(u8, home)));
+
+    // No root named: the theme is not found, and no user theme directory is
+    // there to look in.
+    {
+        var diags: cli_diags.DiagnosticList = .{};
+        if (try open(arena.allocator(), "test-config-guard-theme", &diags)) |hit| {
+            hit.file.close();
+            std.debug.print("found the scratch home's theme without a named root\n", .{});
+            return error.TestUserThemeFound;
+        }
+        var it: LocationIterator = .{ .arena_alloc = arena.allocator() };
+        while (try it.next()) |loc| {
+            if (loc.location == .resources) continue;
+            std.debug.print("a {t} theme directory without a named root\n", .{loc.location});
+            return error.TestUserThemeDirectory;
+        }
+    }
+
+    // The positive control: named as the test's config home, the theme is
+    // found there, as a user theme.
+    file_load.test_config_root = home;
+    defer file_load.test_config_root = null;
+    var diags: cli_diags.DiagnosticList = .{};
+    const hit = (try open(arena.allocator(), "test-config-guard-theme", &diags)) orelse
+        return error.TestExpectedTheme;
+    defer hit.file.close();
+    const expected = try std.fs.path.join(arena.allocator(), &.{ home, build_config.data_dir_name, "themes", "test-config-guard-theme" });
+    try std.testing.expectEqualStrings(expected, hit.path);
 }

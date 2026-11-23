@@ -655,9 +655,10 @@ that govern each symbol you change, or that none does.
   clones, what `Surface.DerivedConfig` must own, `RepeatableCommand.clone`
   and its C mirror (`value_c`, `Command.cval`), UTF-16 themes
   (`Config.textReader`, `_undecodable_theme`), the default config files and
-  their paths (`Config.loadDefaultFiles`, `src/config/file_load.zig`) and
-  the root a test build reads them under (`file_load.test_config_root`,
-  `hasConfigHome`), `+edit-config` and opening
+  their paths (`Config.loadDefaultFiles`, `src/config/file_load.zig`), the
+  user theme directories (`theme.Location.dir`), and the root a test build
+  reads both under (`file_load.test_config_root`, `hasConfigHome`,
+  `configHomePath`), `+edit-config` and opening
   the config file, adding config keys.
 - [app-lifecycle.md](docs/agents/log/app-lifecycle.md): `App.init` and
   startup stalls, a cold `--launch-layout` (`App.startup_launch_layout`,

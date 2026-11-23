@@ -10,13 +10,14 @@ const log = std.log.scoped(.config);
 /// Tests only: the per-user config home a test names for itself, which a
 /// test build reads in place of `xdg.config` (the portable root,
 /// `XDG_CONFIG_HOME`, then `LOCALAPPDATA`). Every default config path below
-/// resolves under it.
+/// and the user theme directories (`theme.Location.dir`) resolve under it.
 ///
 /// Null, the default, names none. A test build then loads no default file
-/// and writes no template (`Config.loadDefaultFiles`), and the paths below
-/// fail with `error.NoTestConfigRoot`, so a test-built App (`App.init`, a
-/// reload, the palette's theme preview, a Settings save or its target)
-/// never reads or writes the developer's own config files. The environment
+/// and writes no template (`Config.loadDefaultFiles`), has no user theme
+/// directory, and the paths below fail with `error.NoTestConfigRoot`, so a
+/// test-built App (`App.init`, a reload, the palette's theme preview, a
+/// Settings save or its target, a theme lookup) never reads or writes the
+/// developer's own config files or themes. The environment
 /// does not decide this: a test that sets `XDG_CONFIG_HOME` for its own
 /// length leaves it set for whatever else runs meanwhile.
 ///
@@ -35,7 +36,7 @@ pub fn hasConfigHome() bool {
 /// `subdir` under the per-user config home: `xdg.config`'s, or in a test
 /// build the root its test names (`test_config_root`). The caller owns the
 /// returned path.
-fn configHomePath(alloc: Allocator, subdir: []const u8) ![]u8 {
+pub fn configHomePath(alloc: Allocator, subdir: []const u8) ![]u8 {
     if (comptime builtin.is_test) {
         const root = test_config_root orelse return error.NoTestConfigRoot;
         return try std.fs.path.join(alloc, &.{ root, subdir });
