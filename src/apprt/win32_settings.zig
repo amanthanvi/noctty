@@ -15654,6 +15654,10 @@ test "settings the default config file is named only when every candidate it nee
             return .missing;
         }
     };
+    // A test build has default paths only under a config home its test
+    // names; the probe opens nothing there.
+    config_file_load.test_config_root = "C:\\noctty-test-config-home";
+    defer config_file_load.test_config_root = null;
     const xdg = try config_file_load.defaultXdgPath(alloc);
     defer alloc.free(xdg);
     // Nothing anywhere: the noctty file.

@@ -4942,7 +4942,15 @@ fn defaultConfigIsEmpty(path: []const u8) bool {
 ///
 /// The legacy `config` file (without extension) is first loaded,
 /// then `config.ghostty`.
+///
+/// A test build has default files only under the root its test names
+/// (`file_load.test_config_root`); with none it loads nothing and writes no
+/// template. Every load of a test-built App comes through here: `Config.load`
+/// (`App.init`, a hard `reload_config`, a Settings save's reload) and the
+/// palette's theme preview (`Host.loadPaletteThemeConfig`).
 pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
+    if (!file_load.hasConfigHome()) return;
+
     // Load XDG first
     const legacy_xdg_path = try file_load.legacyGhosttyDefaultXdgPath(alloc);
     defer alloc.free(legacy_xdg_path);
@@ -4991,34 +4999,13 @@ test "default config files: an edit to the edit-target takes effect on reload" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // `xdg.config` pins everything beside the executable in portable mode, so
-    // redirecting the config home below could not steer it. Skip rather than
-    // pass without checking anything.
-    if (try internal_os.xdg.portableRoot(alloc)) |root| {
-        alloc.free(root);
-        return error.SkipZigTest;
-    }
-
+    // Each case names its own scratch config home
+    // (`file_load.test_config_root`), which a test build reads in place of
+    // the portable root, `XDG_CONFIG_HOME` and `LOCALAPPDATA`.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(tmp_path);
-
-    // Point XDG_CONFIG_HOME (it wins over LOCALAPPDATA) at a scratch directory
-    // for the length of this test, then put the real value back.
-    const saved: ?[:0]u8 = saved: {
-        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :saved null,
-            else => return err,
-        };
-        defer alloc.free(value);
-        break :saved try alloc.dupeZ(u8, value);
-    };
-    defer if (saved) |value| alloc.free(value);
-    defer _ = if (saved) |value|
-        internal_os.setenv("XDG_CONFIG_HOME", value)
-    else
-        internal_os.unsetenv("XDG_CONFIG_HOME");
 
     const File = struct { path: []const u8, content: []const u8 };
     const Case = struct {
@@ -5112,9 +5099,8 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         try tmp.dir.makePath(home_name);
         const home = try std.fs.path.join(alloc, &.{ tmp_path, home_name });
         defer alloc.free(home);
-        const home_z = try alloc.dupeZ(u8, home);
-        defer alloc.free(home_z);
-        try testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", home_z));
+        file_load.test_config_root = home;
+        defer file_load.test_config_root = null;
 
         var home_dir = try tmp.dir.openDir(home_name, .{});
         defer home_dir.close();
@@ -5170,6 +5156,29 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         try cfg.loadDefaultFiles(alloc);
         try testing.expectEqual(@as(f32, 77), cfg.@"font-size");
     }
+}
+
+test "default config files: a test build has none until its test names a config home" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // No path to read or write (a Settings save's target, `edit.openPath`,
+    // fails before it makes a folder), whatever the environment says.
+    try testing.expect(!file_load.hasConfigHome());
+    try testing.expectError(error.NoTestConfigRoot, file_load.defaultXdgPath(alloc));
+    try testing.expectError(error.NoTestConfigRoot, file_load.legacyGhosttyDefaultXdgPath(alloc));
+    try testing.expectError(error.NoTestConfigRoot, file_load.legacyForkXdgPath(alloc));
+    try testing.expectError(error.NoTestConfigRoot, file_load.preferredDefaultFilePath(alloc));
+
+    // Named, the paths are under it.
+    const root = if (builtin.os.tag == .windows) "C:\\noctty-test-config-home" else "/noctty-test-config-home";
+    file_load.test_config_root = root;
+    defer file_load.test_config_root = null;
+    try testing.expect(file_load.hasConfigHome());
+    const path = try file_load.defaultXdgPath(alloc);
+    defer alloc.free(path);
+    try testing.expect(std.mem.startsWith(u8, path, root));
+    try testing.expect(std.mem.endsWith(u8, path, "config.ghostty"));
 }
 
 /// Load and parse the CLI args.

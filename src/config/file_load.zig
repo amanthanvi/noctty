@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const build_config = @import("../build_config.zig");
@@ -6,22 +7,52 @@ const xdg = @import("../os/xdg.zig");
 
 const log = std.log.scoped(.config);
 
+/// Tests only: the per-user config home a test names for itself, which a
+/// test build reads in place of `xdg.config` (the portable root,
+/// `XDG_CONFIG_HOME`, then `LOCALAPPDATA`). Every default config path below
+/// resolves under it.
+///
+/// Null, the default, names none. A test build then loads no default file
+/// and writes no template (`Config.loadDefaultFiles`), and the paths below
+/// fail with `error.NoTestConfigRoot`, so a test-built App (`App.init`, a
+/// reload, the palette's theme preview, a Settings save or its target)
+/// never reads or writes the developer's own config files. The environment
+/// does not decide this: a test that sets `XDG_CONFIG_HOME` for its own
+/// length leaves it set for whatever else runs meanwhile.
+///
+/// Thread-local, so a root one test names reaches nothing on another thread.
+/// A test that sets it puts it back to null before it returns.
+pub threadlocal var test_config_root: if (builtin.is_test) ?[]const u8 else void =
+    if (builtin.is_test) null else {};
+
+/// Whether this build has a per-user config home: always outside tests, and
+/// in a test build only while its test names one (`test_config_root`).
+pub fn hasConfigHome() bool {
+    if (comptime !builtin.is_test) return true;
+    return test_config_root != null;
+}
+
+/// `subdir` under the per-user config home: `xdg.config`'s, or in a test
+/// build the root its test names (`test_config_root`). The caller owns the
+/// returned path.
+fn configHomePath(alloc: Allocator, subdir: []const u8) ![]u8 {
+    if (comptime builtin.is_test) {
+        const root = test_config_root orelse return error.NoTestConfigRoot;
+        return try std.fs.path.join(alloc, &.{ root, subdir });
+    }
+    return try xdg.config(alloc, .{ .subdir = subdir });
+}
+
 /// Default path for the XDG home configuration file. Returned value
 /// must be freed by the caller.
 pub fn defaultXdgPath(alloc: Allocator) ![]const u8 {
-    return try xdg.config(
-        alloc,
-        .{ .subdir = build_config.data_dir_name ++ "/config.ghostty" },
-    );
+    return try configHomePath(alloc, build_config.data_dir_name ++ "/config.ghostty");
 }
 
 /// Legacy Ghostty default path for the XDG home configuration file.
 /// Returned value must be freed by the caller.
 pub fn legacyGhosttyDefaultXdgPath(alloc: Allocator) ![]const u8 {
-    return try xdg.config(
-        alloc,
-        .{ .subdir = "ghostty/config" },
-    );
+    return try configHomePath(alloc, "ghostty/config");
 }
 
 /// Pre-rename fork default path for the XDG home configuration file.
@@ -29,10 +60,7 @@ pub fn legacyGhosttyDefaultXdgPath(alloc: Allocator) ![]const u8 {
 /// existing users still have their config under that directory.
 /// Returned value must be freed by the caller.
 pub fn legacyForkXdgPath(alloc: Allocator) ![]const u8 {
-    return try xdg.config(
-        alloc,
-        .{ .subdir = "winghostty/config.ghostty" },
-    );
+    return try configHomePath(alloc, "winghostty/config.ghostty");
 }
 
 pub const FileState = enum { missing, empty, content };
