@@ -1050,6 +1050,33 @@ python -I ci/soak_judge.py <run dir> --min-minutes 480 --other-run <the other co
 Release coverage runs 480 minutes; Phase 0a's runs are 120 (`-Minutes 120`,
 `--min-minutes 120`).
 
+The same night's ReleaseSafe copy runs with `-RoleDump` (PLAN.md §2.7, §19.3:
+the run `soak-releasesafe` in `ci/role-runs.tsv`). Only the copy gets
+`NOCTTY_THREAD_ROLE_DUMP=<run>\role-dump`; an inherited value is cleared, so
+`+version` and a copy without the switch write nothing. The driver is the
+run's launcher: it records the copy's launch row and receipt from the held
+handle (PID and creation time) through `ci/role_supervisor.py`, then after the
+quit the exit receipt (`GetExitCodeProcess` on that handle) and the seal, into
+`<run>\role-manifest.tsv`. It fails closed: a supervisor call that fails, a
+copy that has not ended, no dump, or any dump but the copy's own makes the
+driver exit 5 (`RoleErrors` in `harness.json`). Then symbolise the dump with
+the build's images and PDBs (the symbols ZIP) and compare it; on 0.15.2 the
+pair checks are advisory and the launch, dump and seal checks gate.
+
+```powershell
+pwsh -NoProfile -File test/windows/interactive-win11-soak.ps1 `
+    -Bin <extracted ReleaseSafe portable ZIP>\noctty -Run <new dir> `
+    -ExpectedBuildMode ReleaseSafe -Minutes 480 -SandboxName soak-safe -RoleDump
+# symbolise with the same checkout's test exe (zig build -Demit-exe=false -Demit-test-exe=true)
+$env:NOCTTY_THREAD_ROLE_SYMBOLISE = '<run>\role-dump'
+$env:NOCTTY_THREAD_ROLE_SYMBOLISED = '<new dir>'
+$env:NOCTTY_THREAD_ROLE_IMAGES = '<dir holding the copy''s noctty.exe and noctty.pdb>'
+$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = '<the build''s checkout>\'
+zig-out\bin\ghostty-test.exe
+python -I ci/role_compare3.py --runs ci/role-runs.tsv --run soak-releasesafe --compiler 0.15 `
+    <run>\role-manifest.tsv ci/lock-inventory-threads.tsv <symbolised dir> --table-scope 1a
+```
+
 `ci/soak_judge.py` fails a run by the process rules (a gone, changed or hung
 process, an early or non-zero end, an exit no quit request of the harness
 reached (`UNASKED-EXIT`: an `end unasked` row, which fails even at exit code

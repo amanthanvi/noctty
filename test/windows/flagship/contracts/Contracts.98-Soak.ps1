@@ -211,6 +211,31 @@ $soakRules = @(
         Pattern = '(?s)if \(\$problems\.Count -gt 0\) \{.*?WriteAllLines\(\(Join-Path \$Destination ''wer-scan-incomplete\.txt''\)'
         Mutation = @("'wer-scan-incomplete.txt'", "'..\wer-scan-incomplete.txt'")
     }
+    @{
+        Description = 'only -RoleDump''s copy gets the thread-role dump directory: an inherited one is removed before +version, it is set just before the copy''s spawn and removed just after (PLAN.md §19.3; GUI-HIDDEN-ROLE-ENV-01: NullString, not $null)'
+        Pattern = '(?s)\[Environment\]::SetEnvironmentVariable\(''NOCTTY_THREAD_ROLE_DUMP'', \[Management\.Automation\.Language\.NullString\]::Value, ''Process''\).*?\$check = \[SoakNative\]::Spawn\(.*?if \(\$RoleDump\) \{.*?\[Environment\]::SetEnvironmentVariable\(''NOCTTY_THREAD_ROLE_DUMP'', \$roleDumpDir, ''Process''\)\s*\}\s*\$pi = \[SoakNative\]::Spawn\(\$exe, \$commandLine, [^\r\n]*\r?\n\s*\[Environment\]::SetEnvironmentVariable\(''NOCTTY_THREAD_ROLE_DUMP'', \[Management\.Automation\.Language\.NullString\]::Value, ''Process''\)'
+        Mutation = @("NullString]::Value, 'Process'", "NullString]::Value, 'User'")
+    }
+    @{
+        Description = 'the launcher''s launch row and receipt come from the held handle''s PID and creation time, right after the run''s own launch row, through ci/role_supervisor.py (PLAN.md §19.3 AD1)'
+        Pattern = '(?s)\$start = \[SoakNative\]::CreationTime\(\$process\).*?Add-Line \$runTsv "launch`t\$nocttyPid`t\$start".*?if \(\$RoleDump\) \{ Invoke-SoakRoleSupervisor @\(''launch'', \$roleState, \$roleManifest, \[string\]\$nocttyPid, \[string\]\$start, ''gui''\) \}'
+        Mutation = @("[string]`$start, 'gui') }", "[string]`$start, 'cli') }")
+    }
+    @{
+        Description = 'a thread-role supervisor call that fails throws, so a launcher whose append fails fails the harness (PLAN.md §19.3)'
+        Pattern = '(?s)function Invoke-SoakRoleSupervisor\(\[string\[\]\] \$Arguments\) \{.*?& python -I \$supervisor @Arguments 2>&1\s*if \(\$LASTEXITCODE -ne 0\) \{ throw '
+        Mutation = @('if ($LASTEXITCODE -ne 0) { throw "The thread-role supervisor', 'if ($false) { throw "The thread-role supervisor')
+    }
+    @{
+        Description = 'the exit receipt is the held handle''s full exit code, only for a copy that has ended, then the seal; no exit receipt, no dump or any dump but the copy''s own fails closed with exit 5 (TD D45)'
+        Pattern = '(?s)if \(\[SoakNative\]::WaitForSingleObject\(\$process, 0\) -ne 0\) \{\s*\$harness\.RoleErrors\.Add\(''ROLE-EXIT-MISSING.*?\$roleCode = \[SoakNative\]::ExitCode\(\$process\)\s*Invoke-SoakRoleSupervisor @\(''exit'', \$roleState, \$roleManifest, ''soak-releasesafe'', \[string\]\$nocttyPid, \[string\]\$start, ''gui'', \[string\]\$roleCode, .*?Invoke-SoakRoleSupervisor @\(''seal'', \$roleState, \$roleManifest\).*?if \(\$roleDumps\.Count -eq 0\) \{\s*\$harness\.RoleErrors\.Add\(''ROLE-DUMP-MISSING.*?-cne "noctty-\$nocttyPid-\$start\.pairs".*?if \(\$harness\.RoleErrors\.Count -gt 0\) \{[^}]*return 5'
+        Mutation = @('return 5', 'return 0')
+    }
+    @{
+        Description = 'the outer half hands -RoleDump to the driver'
+        Pattern = 'if \(\$RoleDump\) \{ \$line \+= '' -RoleDump'' \}'
+        Mutation = @("if (`$RoleDump) { `$line += ' -RoleDump' }", '')
+    }
 )
 $soakMutations = 0
 foreach ($rule in $soakRules) {
