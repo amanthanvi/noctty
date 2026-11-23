@@ -21,7 +21,7 @@ import sys
 
 STONE = "74d0c72fd"
 CUT = "6c7401ce0"
-TIP = "75e288532"  # the D70 integration tip with the guard (w1a/1a6-int); was 5c7a99a13
+TIP = "362873bbe"  # the D70 integration tip with the click-pin fix (w1a/1a6-int); was 5c7a99a13
 MERGE = "ab950cd81"
 FORWARD = "358ce0f6a"
 LEDGER = Path("plans/stone-1a/residual-ledger.tsv")
