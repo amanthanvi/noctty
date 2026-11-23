@@ -34,22 +34,26 @@ a product failure (exit 1), and nothing more is clicked either.
 
 Then cmd prints https://pkg23.invalid/<eight digits>/<the same digits> forever, and the driver posts -Clicks Ctrl+left
 clicks (WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP with MK_CONTROL; no key message) on row 0,
-in column 0, each after a Ctrl move to a cell with no link, so every click refreshes the link
-under the pointer (`mouseRefreshLinks`) and, with click-repeat-interval = 1, counts as a single
-click. Column 0 is where the 2026-10-11 probe clicked; a pass there does not cover a click
-inside the link, which opened nothing at column 3 on stone at 5c7a99a13 and opened on main at
-358ce0f6a (test-harnesses.md, PKG23-HARNESS-01 trap (3)). After each click
-it waits for the record, copies its exact bytes to pkg23\records\click-NNNN.txt and deletes the
-trace before the next click, then watches 150 ms for a second open (and 1 s after the last
-click). The checker (Get-Pkg23Verdict) then requires every click to have a record that is one
+each after a Ctrl move to a cell with no link, so every click refreshes the link under the pointer
+(`mouseRefreshLinks`) and, with click-repeat-interval = 1, counts as a single click. -Sets picks
+the sets, both by default (TD D69, D74), each its own launch with its own dry click, counted
+separately: set A is the 2026-10-11 run, the primary screen at scrollback-limit = 0 with every
+click at column 0; set B clicks column 3 on the alternate screen, which scrolls in place, where a
+press pin at any column but 0 once moved to column 0 and its release read as a drag
+(terminal-core.md, CLICK-PIN-01). After each click it waits for the record, copies its exact
+bytes to pkg23\<set>\records\click-NNNN.txt and deletes the trace before the next click, then
+watches 150 ms for a second open (and 1 s after the last click). The checker (Get-Pkg23Verdict) then requires every click to have a record that is one
 CRLF-terminated line holding a whole, self-checking URL of the stream (its number twice; none
 missing, none partial, none torn), no open for no click, the numbers never to go back, and row 0
 to have moved during the clicks.
 Its controls (Invoke-Pkg23CheckerControls) run first in every mode, so a checker that would accept
 a missing or partial record stops the run before anything starts; -ControlOnly runs only them.
 
-Results: pkg23-results.json (counts, the dry-click proof, checks; no path, coordinate, command
-line or environment value), pkg23\dry.txt, pkg23\records\, pkg23\version.txt, startup-state.json.
+Results: pkg23-results.json (per set its counts, the dry-click proof and checks; no path,
+coordinate, command line or environment value), pkg23\<set>\dry.txt, pkg23\<set>\records\,
+pkg23\version.txt, startup-state.json, and pkg23-guards.json, which holds the guards' own values
+on every run, metadata only: the clipboard sequence number and each PowerShell history candidate's
+index with its size and last-write ticks, before and after.
 Exit 0: every check passed. 1: a check failed, the copy failed at the dry click, or the run did
 not finish. 3: an isolation guard changed (startup ledger, history, clipboard, a new jump-list
 file, a reparse point in the run). 4: the build is not Debug, its source lacks the seam, or the
@@ -65,6 +69,7 @@ param(
     [string] $MeasureRepo,
     [string] $Run,
     [ValidateRange(2, 1000)] [int] $Clicks = 300,
+    [ValidateSet('A', 'B', 'AB')] [string] $Sets = 'AB',
     [switch] $DryClickOnly,
     [switch] $ControlOnly,
     [ValidateRange(60, 7200)] [int] $DriverTimeoutSeconds = 1800,
@@ -284,7 +289,13 @@ if (-not $Driver) {
     }
     $jumpBefore = @(Jump-List-Files | ForEach-Object { $_.Path })
     $since = [DateTimeOffset]::UtcNow
-    $driverArguments = @('-Clicks', [string]$Clicks)
+    # The guards' own values, metadata only, before and after (TD D74): the clipboard sequence number
+    # and each PowerShell history candidate's index with its size and last-write ticks, never a path,
+    # a command line or any content.
+    $historyPaths = @(Get-WindowsHarnessHistoryPaths)
+    $historyBefore = @($historyPaths | ForEach-Object { Get-WindowsHarnessHistoryMetadata $_ })
+    $clipboardBefore = [HiddenLocal]::GetClipboardSequenceNumber()
+    $driverArguments = @('-Clicks', [string]$Clicks, '-Sets', $Sets)
     if ($DryClickOnly) { $driverArguments += '-DryClickOnly' }
     $driverError = $null
     try {
@@ -292,6 +303,8 @@ if (-not $Driver) {
             -TimeoutSeconds $DriverTimeoutSeconds -Label 'PKG-23 driver' -PassDesktopName -GuardClipboard -OmitIcon `
             -DriverArguments $driverArguments
     } catch { $driverError = $_ }
+    $historyAfter = @($historyPaths | ForEach-Object { Get-WindowsHarnessHistoryMetadata $_ })
+    $clipboardAfter = [HiddenLocal]::GetClipboardSequenceNumber()
     $statePath = Join-Path $Run 'startup-state.json'
     if (-not (Test-Path -LiteralPath $statePath)) { throw $driverError }
     $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
@@ -303,27 +316,39 @@ if (-not $Driver) {
         StartupUnchanged = [bool]$state.Unchanged; HistoryUnchanged = [bool]$state.HistoryUnchanged
         ClipboardUnchanged = [bool]$state.ClipboardUnchanged; OwnedJobCleanedUp = [bool]$state.OwnedJobCleanedUp
         NewJumpListFiles = $newJump; ReparsePoints = $reparse; CheckerControls = $controls
+        ClipboardSequence = [ordered]@{ Before = $clipboardBefore; After = $clipboardAfter
+            DriverBefore = $state.ClipboardSequenceBefore; DriverAfter = $state.ClipboardSequenceAfter }
+        History = @(for ($i = 0; $i -lt $historyPaths.Count; $i++) {
+            [ordered]@{ Index = $i; Before = $historyBefore[$i]; After = $historyAfter[$i]; Changed = ($historyBefore[$i] -cne $historyAfter[$i]) } })
     }
-    $guards | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Run 'pkg23-guards.json')
+    $guards | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'pkg23-guards.json')
     if (-not $guards.StartupUnchanged -or -not $guards.HistoryUnchanged -or -not $guards.ClipboardUnchanged -or $newJump -ne 0 -or $reparse -ne 0) {
-        Write-Host "PKG-23: an isolation guard changed (startup=$($guards.StartupUnchanged) history=$($guards.HistoryUnchanged) clipboard=$($guards.ClipboardUnchanged) new jump-list files=$newJump reparse points=$reparse); stop launches and report it."
+        Write-Host "PKG-23: an isolation guard changed (startup=$($guards.StartupUnchanged) history=$($guards.HistoryUnchanged) clipboard=$($guards.ClipboardUnchanged) new jump-list files=$newJump reparse points=$reparse; values in pkg23-guards.json); stop launches and report it."
         exit 3
     }
-    if ($null -ne $results -and $results.Stage -eq 'dry-product-failure') {
-        Write-Host "PKG-23: FAIL, the copy died or stopped answering at the dry click's link release (alive $($results.DryClickCopy.Alive), answering $($results.DryClickCopy.Responds)); nothing more was clicked."
-        exit 1
-    }
-    if ($null -ne $results -and $results.Stage -eq 'dry-failed') {
-        Write-Host "PKG-23: the dry click did not prove the trace seam (build mode $($results.DryClick.BuildMode), record $($results.DryClick.Record), job processes $($results.DryClick.JobProcessesBefore) -> $($results.DryClick.JobProcessesAfter), new: $(@($results.DryClick.NewProcesses) -join ', ')); nothing more was clicked."
+    if ($null -ne $results -and $results.Stage -eq 'dry-failed' -and [string]$results.BuildMode -cne 'Debug') {
+        Write-Host "PKG-23: the copy's own +version names build mode '$($results.BuildMode)', not Debug, so the trace seam is not there; nothing was clicked."
         exit 4
     }
-    if ($null -ne $results -and $null -ne $results.DryClick) {
-        Write-Host "PKG-23 dry click: $(if ($results.DryClick.Passed) { 'PASS' } else { 'FAIL' }) (build mode $($results.DryClick.BuildMode), record $($results.DryClick.Record), job processes $($results.DryClick.JobProcessesBefore) -> $($results.DryClick.JobProcessesAfter))"
-    }
-    if ($null -ne $results -and $null -ne $results.Verdict) {
-        $v = $results.Verdict
-        Write-Host ("PKG-23 Ctrl+click: {0} clicks={1} opened={2} whole={3} missing={4} partial={5} torn={6} extra={7} ordered={8} moved={9} distinct={10} duration={11:N1}s" -f `
-            $(if ($v.Passed) { 'PASS' } else { 'FAIL' }), $v.Clicks, $v.Opened, $v.Whole, $v.Missing, $v.Partial, $v.Torn, $v.Extra, $v.Ordered, $v.Moved, $v.DistinctNumbers, [double]$results.ClickSeconds)
+    $setRecords = @(if ($null -ne $results -and $null -ne $results.Set) { $results.Set.PSObject.Properties })
+    foreach ($entry in $setRecords) {
+        $r = $entry.Value
+        if ($null -ne $r.DryClick) {
+            Write-Host "PKG-23 set $($entry.Name) dry click: $(if ($r.DryClick.Passed) { 'PASS' } else { 'FAIL' }) (build mode $($r.DryClick.BuildMode), record $($r.DryClick.Record), job processes $($r.DryClick.JobProcessesBefore) -> $($r.DryClick.JobProcessesAfter))"
+        }
+        if ($r.Stage -eq 'dry-product-failure') {
+            Write-Host "PKG-23: FAIL, set $($entry.Name)'s copy died or stopped answering at the dry click's link release (alive $($r.DryClickCopy.Alive), answering $($r.DryClickCopy.Responds)); nothing more was clicked."
+            exit 1
+        }
+        if ($r.Stage -eq 'dry-failed') {
+            Write-Host "PKG-23: set $($entry.Name)'s dry click did not prove the trace seam (record $($r.DryClick.Record), job processes $($r.DryClick.JobProcessesBefore) -> $($r.DryClick.JobProcessesAfter), new: $(@($r.DryClick.NewProcesses) -join ', ')); nothing more was clicked."
+            exit 4
+        }
+        if ($null -ne $r.Verdict) {
+            $v = $r.Verdict
+            Write-Host ("PKG-23 set {0} Ctrl+click: {1} screen={2} column={3} clicks={4} opened={5} whole={6} missing={7} partial={8} torn={9} extra={10} ordered={11} moved={12} distinct={13} duration={14:N1}s" -f `
+                $entry.Name, $(if ($v.Passed) { 'PASS' } else { 'FAIL' }), $(if ($r.AltScreen) { 'alternate' } else { 'primary' }), $r.Column, $v.Clicks, $v.Opened, $v.Whole, $v.Missing, $v.Partial, $v.Torn, $v.Extra, $v.Ordered, $v.Moved, $v.DistinctNumbers, [double]$r.ClickSeconds)
+        }
     }
     if ($driverError) { Write-Host "PKG-23: FAIL ($($driverError.Exception.Message))"; exit 1 }
     Write-Host 'PKG-23: PASS'
@@ -425,41 +450,56 @@ $desktop = "WinSta0\$DesktopName"
 $cmd = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
 $exe = Join-Path $Bin 'noctty.exe'
 $work = Join-Path $Run 'pkg23'
-$recordsDir = Join-Path $work 'records'
 $traceDir = Join-Path $work 'trace'
 $tracePath = Join-Path $traceDir 'open-url.txt'
-foreach ($dir in @($work, $recordsDir, $traceDir)) { [void][IO.Directory]::CreateDirectory($dir) }
-$dryShown = Join-Path $Bin 'pkg23-dry-shown.txt'
-$streamStarted = Join-Path $Bin 'pkg23-stream-started.txt'
+foreach ($dir in @($work, $traceDir)) { [void][IO.Directory]::CreateDirectory($dir) }
 $script:checks = [Collections.Generic.List[object]]::new()
+$script:setName = ''
+# The sets, counted separately (TD D69, D74), each its own launch of the copy with its own dry click:
+# A is the 2026-10-11 run, the primary screen at scrollback-limit = 0 with every click at column 0;
+# B clicks column 3 on the alternate screen, which has no scrollback, so each line of output scrolls
+# it in place through Screen.cursorScrollRegionUp (terminal-core.md, CLICK-PIN-01).
+$setSpecs = [ordered]@{
+    A = [ordered]@{ AltScreen = $false; Column = 0 }
+    B = [ordered]@{ AltScreen = $true; Column = 3 }
+}
+$setNames = @(if ($Sets -eq 'AB') { 'A', 'B' } else { $Sets })
 $results = [ordered]@{
-    Stage = 'start'; Clicks = $Clicks; DryClickOnly = [bool]$DryClickOnly
-    DryClick = $null; DryClickCopy = $null; Verdict = $null; ClickSeconds = $null; ExtraOpens = 0; LateRecordsDiscarded = 0
+    Stage = 'start'; Sets = $Sets; Clicks = $Clicks; DryClickOnly = [bool]$DryClickOnly; BuildMode = $null
+    Set = [ordered]@{}
     Checks = $script:checks
     Limit = 'Posted window messages on a never-shown private desktop; real pointer input, a modifier held at the real keyboard, and OSC 8 links are not exercised.'
 }
+$classToken = [guid]::NewGuid().ToString('N')
 
-# The stream: the dry URL on a still screen until a key arrives, then numbered URLs forever.
-# ASCII with CRLF line ends; its markers sit beside it (%~dp0), found through the working directory.
-$stream = @(
-    '@echo off'
-    "echo $($script:Pkg23DryUrl)"
-    'echo dry>"%~dp0pkg23-dry-shown.txt"'
-    'pause >nul'
-    'echo stream>"%~dp0pkg23-stream-started.txt"'
-    'for /L %%i in (10000000,1,99999999) do echo https://pkg23.invalid/%%i/%%i'
-)
-[IO.File]::WriteAllText((Join-Path $Bin 'pkg23-stream.cmd'), (($stream -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
-# The copy's own config (a portable copy reads config.ghostty at its root; no --config-file).
-# System32's cmd.exe runs directly with /D, so no AutoRun runs; the clipboard is denied and
-# copy-on-select is off; a class of its own keeps every IPC pipe apart from any other noctty.
-@(
-    "command = direct:$cmd /D /C pkg23-stream.cmd", "working-directory = $Bin", 'shell-integration = none',
-    'single-instance = false', "class = noctty-test-pkg23-$([guid]::NewGuid().ToString('N'))", 'window-save-state = never',
-    'confirm-close-surface = false', 'copy-on-select = false', 'clipboard-read = deny', 'clipboard-write = deny',
-    'auto-update = off', 'desktop-notifications = false', 'keybind = clear', 'scrollback-limit = 0', 'click-repeat-interval = 1',
-    'window-width = 100', 'window-height = 30', 'window-padding-x = 4', 'window-padding-y = 4'
-) | Set-Content -LiteralPath (Join-Path $Bin 'config.ghostty') -Encoding utf8NoBOM
+# One set's stream and the copy's config for it. The stream shows the dry URL on a still screen
+# until a key arrives, then numbered URLs forever; set B enters the alternate screen and homes the
+# cursor first, with no line end. ASCII with CRLF line ends; its markers sit beside it (%~dp0),
+# found through the working directory. The copy's own config (a portable copy reads config.ghostty
+# at its root; no --config-file): System32's cmd.exe runs directly with /D, so no AutoRun runs; the
+# clipboard is denied and copy-on-select is off; a class of its own keeps every IPC pipe apart.
+function Write-Pkg23SetFiles([string] $Name, $Spec) {
+    $stream = @('@echo off')
+    if ($Spec.AltScreen) { $stream += ('<nul set /p "=' + [char]27 + '[?1049h' + [char]27 + '[H"') }
+    $stream += @(
+        "echo $($script:Pkg23DryUrl)"
+        "echo dry>""%~dp0pkg23-$Name-dry-shown.txt"""
+        'pause >nul'
+        "echo stream>""%~dp0pkg23-$Name-stream-started.txt"""
+        'for /L %%i in (10000000,1,99999999) do echo https://pkg23.invalid/%%i/%%i'
+    )
+    [IO.File]::WriteAllText((Join-Path $Bin "pkg23-stream-$Name.cmd"), (($stream -join "`r`n") + "`r`n"), [Text.Encoding]::ASCII)
+    @(
+        "command = direct:$cmd /D /C pkg23-stream-$Name.cmd", "working-directory = $Bin", 'shell-integration = none',
+        'single-instance = false', "class = noctty-test-pkg23-$classToken", 'window-save-state = never',
+        'confirm-close-surface = false', 'copy-on-select = false', 'clipboard-read = deny', 'clipboard-write = deny',
+        'auto-update = off', 'desktop-notifications = false', 'keybind = clear', 'scrollback-limit = 0', 'click-repeat-interval = 1',
+        'window-width = 100', 'window-height = 30', 'window-padding-x = 4', 'window-padding-y = 4'
+    ) | Set-Content -LiteralPath (Join-Path $Bin 'config.ghostty') -Encoding utf8NoBOM
+}
+
+# A check named for the set it belongs to.
+function SetCheck([string] $Name, [bool] $Passed, $Expected, $Actual) { Check "set $($script:setName): $Name" $Passed $Expected $Actual }
 
 # The copy's build mode, from its own +version (src/cli/version.zig), before anything starts.
 function Get-Pkg23BuildMode {
@@ -549,22 +589,21 @@ function Close-Pkg23Copy {
     }
     [uint32] $code = 0
     [void][HiddenLocal]::GetExitCodeProcess($script:noctty.process, [ref]$code)
-    Check 'noctty closed on WM_CLOSE with exit 0' (-not $forced -and $code -eq 0) 'closed, exit 0' @{ Forced = $forced; Exit = $code }
+    SetCheck 'noctty closed on WM_CLOSE with exit 0' (-not $forced -and $code -eq 0) 'closed, exit 0' @{ Forced = $forced; Exit = $code }
     [void][HiddenLocal]::CloseHandle($script:noctty.thread); [void][HiddenLocal]::CloseHandle($script:noctty.process)
     $script:noctty = $null
 }
 
-# The driver's steps; a `return` ends them, and the caller's finally closes the copy.
-function Invoke-Pkg23Driver {
-    $results.Stage = 'build-mode'
-    $buildMode = Get-Pkg23BuildMode
-    if (-not [string]::Equals($buildMode, 'Debug', [StringComparison]::Ordinal)) {
-        $results.DryClick = Get-Pkg23DryVerdict $null $buildMode 0 0 @() 0
-        $results.Stage = 'dry-failed'
-        return
-    }
+# One set's steps: launch the copy, the dry click, the stream, the clicks, the verdict, into the
+# set's own record `$R`. A `return` ends them; the caller's finally closes the copy.
+function Invoke-Pkg23Set([string] $Name, $Spec, [string] $BuildMode, $R) {
+    $recordsDir = Join-Path $work "$Name\records"
+    [void][IO.Directory]::CreateDirectory($recordsDir)
+    $dryShown = Join-Path $Bin "pkg23-$Name-dry-shown.txt"
+    $streamStarted = Join-Path $Bin "pkg23-$Name-stream-started.txt"
+    Write-Pkg23SetFiles $Name $Spec
 
-    $results.Stage = 'launch'
+    $R.Stage = 'launch'
     # The seam reads this at every open (recordOpenUrlForTest); the copy inherits it.
     $env:NOCTTY_WIN32_OPEN_URL_TRACE_FILE = $tracePath
     $line = '"{0}" --single-instance=false --window-save-state=never' -f $exe
@@ -584,32 +623,32 @@ function Invoke-Pkg23Driver {
         if ($started -and $hosts.Count -eq 1 -and @([HiddenLocal]::Surfaces($hosts[0])).Count -eq 1) { $script:hostWindow = $hosts[0]; return $true }
         return $false
     } 30
-    if (-not $ready) { throw 'The copy did not reach ready with one window and one pane in 30 s.' }
+    if (-not $ready) { throw "Set ${Name}: the copy did not reach ready with one window and one pane in 30 s." }
     $hostWindow = $script:hostWindow
     if ([HiddenLocal]::WindowDesktop($hostWindow) -cne $DesktopName) { throw 'The copy''s window is not on the private desktop.' }
     [void][Pkg23Native]::ShowWindow($hostWindow, 4)   # SW_SHOWNOACTIVATE, on the never-shown desktop
     $pane = @([HiddenLocal]::Surfaces($hostWindow))[0]
-    if (-not (Wait-Until { Test-Path -LiteralPath $dryShown } 20)) { throw 'The stream did not show its dry URL in 20 s.' }
+    if (-not (Wait-Until { Test-Path -LiteralPath $dryShown } 20)) { throw "Set ${Name}: the stream did not show its dry URL in 20 s." }
     Start-Sleep -Milliseconds 1500   # ConPTY renders the line to the pane
     $launchProcesses = [Pkg23Native]::JobTotalProcesses() - $launchBefore
 
-    # Row 0, column 0 (the URL's first cell, where the October probe clicked), and a park cell in
-    # row 2 past the end of its URL, from the configured 100x30 grid and 4 pt padding; an estimate
-    # off by a third of a cell still lands on both cells.
+    # Row 0 at the set's column (A: column 0, where the October probe clicked; B: column 3, inside
+    # the URL), and a park cell in row 2 past the end of its URL, from the configured 100x30 grid and
+    # 4 pt padding; an estimate off by a third of a cell still lands on each cell.
     $size = [Pkg23Native]::ClientSize($pane)
     $dpi = [double][Pkg23Native]::GetDpiForWindow($pane)
     $pad = [Math]::Floor(4 * $dpi / 72)   # scaledPadding in src/Surface.zig floors points * dpi / 72
     $cellWidth = ($size[0] - 2 * $pad) / 100.0
     $cellHeight = ($size[1] - 2 * $pad) / 30.0
     $y = [int]($pad + $cellHeight / 2)
-    $x = [int]($pad + $cellWidth / 2)
+    $x = [int]($pad + ($Spec.Column + 0.5) * $cellWidth)
     $script:parkX = [int]($pad + 70.5 * $cellWidth)
     $script:parkY = [int]($pad + 2.5 * $cellHeight)
     if ($cellWidth -lt 2 -or $cellHeight -lt 4) { throw 'The pane is too small to place a click on row 0.' }
 
     # (a) The dry click: the build is Debug, the record is exactly the dry URL, and the job gains no
     # process, so the seam replaced ShellExecuteW. Anything else stops the run here.
-    $results.Stage = 'dry'
+    $R.Stage = 'dry'
     Clear-Pkg23Trace
     $before = [Pkg23Native]::JobTotalProcesses()
     $idsBefore = @([Pkg23Native]::JobProcessIds())
@@ -621,66 +660,84 @@ function Invoke-Pkg23Driver {
         $process = Get-Process -Id $_ -ErrorAction SilentlyContinue
         if ($process) { $process.ProcessName } else { 'exited' }
     })
-    if ($null -ne $dry.Bytes) { [IO.File]::WriteAllBytes((Join-Path $work 'dry.txt'), $dry.Bytes) }
+    if ($null -ne $dry.Bytes) { [IO.File]::WriteAllBytes((Join-Path $work "$Name\dry.txt"), $dry.Bytes) }
     # A copy that died or stopped answering at its first link release is a product failure (a
     # LEFT-RELEASE-LOCK regression panics or deadlocks there), not an unproven seam; either way
     # nothing more is clicked.
     $alive = Test-Pkg23Running
     $responds = $alive -and [Pkg23Native]::Responds($hostWindow)
-    $results.DryClickCopy = [ordered]@{ Alive = $alive; Responds = $responds }
-    Check 'the copy survived the dry click and answers messages' ($alive -and $responds) 'alive, answering' $results.DryClickCopy
-    if (-not ($alive -and $responds)) { $results.Stage = 'dry-product-failure'; return }
-    $results.DryClick = Get-Pkg23DryVerdict $dry.Bytes $buildMode $before $after $newNames $launchProcesses
-    Check 'the dry click proved that the trace seam replaced the open' $results.DryClick.Passed 'Debug, the dry URL recorded whole, no process gained' $results.DryClick
-    if (-not $results.DryClick.Passed) { $results.Stage = 'dry-failed'; return }
+    $R.DryClickCopy = [ordered]@{ Alive = $alive; Responds = $responds }
+    SetCheck 'the copy survived the dry click and answers messages' ($alive -and $responds) 'alive, answering' $R.DryClickCopy
+    if (-not ($alive -and $responds)) { $R.Stage = 'dry-product-failure'; return }
+    $R.DryClick = Get-Pkg23DryVerdict $dry.Bytes $BuildMode $before $after $newNames $launchProcesses
+    SetCheck 'the dry click proved that the trace seam replaced the open' $R.DryClick.Passed 'Debug, the dry URL recorded whole, no process gained' $R.DryClick
+    if (-not $R.DryClick.Passed) { $R.Stage = 'dry-failed'; return }
     Clear-Pkg23Trace
-    if ($DryClickOnly) { $results.Stage = 'done'; return }
+    if ($DryClickOnly) { $R.Stage = 'done'; return }
 
     # The stream: one key releases cmd's pause.
-    $results.Stage = 'stream'
+    $R.Stage = 'stream'
     [Pkg23Native]::ClearKeys($pane)
     [HiddenLocal]::PostSurfaceKey($pane, $script:noctty.pid, $DesktopName, 0x0D)
-    if (-not (Wait-Until { Test-Path -LiteralPath $streamStarted } 15)) { throw 'The stream did not start in 15 s.' }
+    if (-not (Wait-Until { Test-Path -LiteralPath $streamStarted } 15)) { throw "Set ${Name}: the stream did not start in 15 s." }
     Start-Sleep -Milliseconds 1500   # the screen fills and scrolls, so row 0 changes under the clicks
 
-    $results.Stage = 'clicks'
+    $R.Stage = 'clicks'
     $timer = [Diagnostics.Stopwatch]::StartNew()
     for ($i = 1; $i -le $Clicks; $i++) {
-        if (-not (Test-Pkg23Running)) { throw "The copy exited before click $i." }
+        if (-not (Test-Pkg23Running)) { throw "Set ${Name}: the copy exited before click $i." }
         Send-Pkg23Click $pane $x $y
         $record = Wait-Pkg23Record 3000
         if ($null -ne $record.Bytes) { [IO.File]::WriteAllBytes((Join-Path $recordsDir ('click-{0:D4}.txt' -f $i)), $record.Bytes) }
         else {
             # An open later than the wait must not land as the next click's record.
             Start-Sleep -Milliseconds 500
-            if ([IO.File]::Exists($tracePath)) { $results.LateRecordsDiscarded++ }
+            if ([IO.File]::Exists($tracePath)) { $R.LateRecordsDiscarded++ }
         }
         Clear-Pkg23Trace
         # A second open from the same click would rewrite the trace now; count it, never as the next click's.
-        if (Test-Pkg23TraceAppears 150) { $results.ExtraOpens++; Clear-Pkg23Trace }
+        if (Test-Pkg23TraceAppears 150) { $R.ExtraOpens++; Clear-Pkg23Trace }
     }
     $timer.Stop()
-    $results.ClickSeconds = [Math]::Round($timer.Elapsed.TotalSeconds, 2)
-    if (Test-Pkg23TraceAppears 1000) { $results.ExtraOpens++; Clear-Pkg23Trace }   # after the last click
-    Check 'the copy stayed up through every click' (Test-Pkg23Running) $true (Test-Pkg23Running)
-    Check 'no click opened twice and no record came late' ($results.ExtraOpens -eq 0 -and $results.LateRecordsDiscarded -eq 0) 0 `
-        @{ ExtraOpens = $results.ExtraOpens; LateRecordsDiscarded = $results.LateRecordsDiscarded }
+    $R.ClickSeconds = [Math]::Round($timer.Elapsed.TotalSeconds, 2)
+    if (Test-Pkg23TraceAppears 1000) { $R.ExtraOpens++; Clear-Pkg23Trace }   # after the last click
+    SetCheck 'the copy stayed up through every click' (Test-Pkg23Running) $true (Test-Pkg23Running)
+    SetCheck 'no click opened twice and no record came late' ($R.ExtraOpens -eq 0 -and $R.LateRecordsDiscarded -eq 0) 0 `
+        @{ ExtraOpens = $R.ExtraOpens; LateRecordsDiscarded = $R.LateRecordsDiscarded }
 
     $records = @{}
     foreach ($file in [IO.Directory]::GetFiles($recordsDir)) {
-        $name = [IO.Path]::GetFileName($file)
-        $match = [regex]::Match($name, '\Aclick-([0-9]{4})\.txt\z')
-        if ($match.Success) { $records[[int]$match.Groups[1].Value] = [IO.File]::ReadAllBytes($file) } else { $records[$name] = [byte[]]@() }
+        $leaf = [IO.Path]::GetFileName($file)
+        $match = [regex]::Match($leaf, '\Aclick-([0-9]{4})\.txt\z')
+        if ($match.Success) { $records[[int]$match.Groups[1].Value] = [IO.File]::ReadAllBytes($file) } else { $records[$leaf] = [byte[]]@() }
     }
-    $verdict = Get-Pkg23Verdict $records $Clicks ($results.ExtraOpens + $results.LateRecordsDiscarded)
-    $results.Verdict = $verdict
-    Check "every click opened ($($verdict.Opened) of $Clicks)" ($verdict.Missing -eq 0) $Clicks $verdict.Opened
-    Check "every record is one whole line ($($verdict.Partial) partial)" ($verdict.Partial -eq 0) 0 $verdict.Partial
-    Check "every URL is whole ($($verdict.Whole) of $Clicks, $($verdict.Torn) torn)" ($verdict.Whole -eq $Clicks) $Clicks $verdict.Whole
-    Check 'no record for a click that was not made' ($verdict.Extra -eq 0) 0 $verdict.Extra
-    Check 'the opened numbers never went back' $verdict.Ordered $true $verdict.Ordered
-    Check 'row 0 moved during the clicks' $verdict.Moved $true @{ Distinct = $verdict.DistinctNumbers }
-    Check 'the checker passed the run' $verdict.Passed $true $verdict.Passed
+    $verdict = Get-Pkg23Verdict $records $Clicks ($R.ExtraOpens + $R.LateRecordsDiscarded)
+    $R.Verdict = $verdict
+    SetCheck "every click opened ($($verdict.Opened) of $Clicks)" ($verdict.Missing -eq 0) $Clicks $verdict.Opened
+    SetCheck "every record is one whole line ($($verdict.Partial) partial)" ($verdict.Partial -eq 0) 0 $verdict.Partial
+    SetCheck "every URL is whole ($($verdict.Whole) of $Clicks, $($verdict.Torn) torn)" ($verdict.Whole -eq $Clicks) $Clicks $verdict.Whole
+    SetCheck 'no record for a click that was not made' ($verdict.Extra -eq 0) 0 $verdict.Extra
+    SetCheck 'the opened numbers never went back' $verdict.Ordered $true $verdict.Ordered
+    SetCheck 'row 0 moved during the clicks' $verdict.Moved $true @{ Distinct = $verdict.DistinctNumbers }
+    SetCheck 'the checker passed the run' $verdict.Passed $true $verdict.Passed
+    $R.Stage = 'done'
+}
+
+# The driver: the copy's build mode once, then each set in turn, its copy closed before the next.
+function Invoke-Pkg23Driver {
+    $results.Stage = 'build-mode'
+    $buildMode = Get-Pkg23BuildMode
+    $results.BuildMode = $buildMode
+    if (-not [string]::Equals($buildMode, 'Debug', [StringComparison]::Ordinal)) { $results.Stage = 'dry-failed'; return }
+    foreach ($name in $setNames) {
+        $script:setName = $name
+        $R = [ordered]@{ Stage = 'start'; AltScreen = $setSpecs[$name].AltScreen; Column = $setSpecs[$name].Column
+            DryClick = $null; DryClickCopy = $null; Verdict = $null; ClickSeconds = $null; ExtraOpens = 0; LateRecordsDiscarded = 0 }
+        $results.Set[$name] = $R
+        $results.Stage = "set $name"
+        try { Invoke-Pkg23Set $name $setSpecs[$name] $buildMode $R } finally { Close-Pkg23Copy }
+        if ($R.Stage -eq 'dry-failed' -or $R.Stage -eq 'dry-product-failure') { $results.Stage = $R.Stage; return }
+    }
     $results.Stage = 'done'
 }
 

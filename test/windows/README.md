@@ -793,11 +793,16 @@ driver keeps each click's record in `pkg23\records\click-NNNN.txt`, deletes
 the trace and watches 150 ms for a second open before the next click (and 1 s
 after the last). Every click is in column 0 of row 0, after a Ctrl move to a cell
 with no link, so each refreshes the link under the pointer, and
-`click-repeat-interval = 1` keeps each a single click. Column 0 is where the
-2026-10-11 probe clicked. A pass there does not cover a click inside the link:
-on stone at `5c7a99a13` a click at column 3 during the stream opened 0 or 1 of
-30 where main at `358ce0f6a` opened them all, a stone regression whose cause is
-not yet found (test-harnesses.md, PKG23-HARNESS-01 trap (3)).
+`click-repeat-interval = 1` keeps each a single click. A run has two sets by
+default (`-Sets A`, `B` or `AB`), each its own launch with its own dry click,
+counted separately. Set A is the 2026-10-11 run: the primary screen at
+`scrollback-limit = 0`, every click at column 0, where the October probe
+clicked. Set B clicks column 3 on the alternate screen, which scrolls in place:
+there upstream 77190bd02's scroll path reset a top-row press pin to column 0,
+so the release read as a drag and opened nothing (0 of 30 on stone at
+`5c7a99a13`, 30 of 30 on main and with the fork's fix; terminal-core.md,
+CLICK-PIN-01). The harness measures lock safety and whole URLs: once the pressed
+row scrolls away, both trees open the link now under the pointer.
 
 The checker fails a click with no record, a record that is not one
 CRLF-terminated line (partial), a line that is not a whole streamed URL with its
@@ -806,10 +811,12 @@ for no click, a number lower than the one before, and a row 0 that never moved.
 Its 25 controls run before every launch, and `-ControlOnly` runs only them;
 `flagship/contracts/Contracts.98-Pkg23CtrlClick.ps1` runs that, refuses checker
 mutations that would pass a missing or partial record, pins the harness's
-isolation, and runs the seam check on this checkout's opener and on mutations of
-it. Results are in `pkg23-results.json`
-(counts, the dry-click proof and checks; no path, coordinate, command line or
-environment value) and `pkg23-guards.json`. Exit 0 passes; 1 is a failed check, a
+isolation and both sets, and runs the seam check on this checkout's opener and on
+mutations of it. Results are in `pkg23-results.json` (per set its counts,
+dry-click proof and checks; no path, coordinate, command line or environment
+value) and `pkg23-guards.json`, which holds the guards' own values on every run,
+metadata only: the clipboard sequence number and each PowerShell history
+candidate's index, size and last-write ticks, before and after. Exit 0 passes; 1 is a failed check, a
 product failure at the dry click or an unfinished run; 3 a changed isolation
 guard (startup ledger, history, clipboard, a new jump-list file, a reparse point
 in the run); 4 a build that is not Debug, a source without the seam, or an

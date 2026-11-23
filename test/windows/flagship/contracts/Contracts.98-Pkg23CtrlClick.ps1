@@ -123,8 +123,8 @@ $pkg23Rules = @(
     }
     @{
         Description = 'a copy that died or stopped answering at the dry click stops the run before the stream'
-        Pattern = '(?s)\$alive = Test-Pkg23Running\s+\$responds = \$alive -and \[Pkg23Native\]::Responds\(\$hostWindow\).*?if \(-not \(\$alive -and \$responds\)\) \{ \$results\.Stage = ''dry-product-failure''; return \}.*?PostSurfaceKey\(\$pane'
-        Mutation = @("`$results.Stage = 'dry-product-failure'; return }", "`$results.Stage = 'dry-product-failure' }")
+        Pattern = '(?s)\$alive = Test-Pkg23Running\s+\$responds = \$alive -and \[Pkg23Native\]::Responds\(\$hostWindow\).*?if \(-not \(\$alive -and \$responds\)\) \{ \$R\.Stage = ''dry-product-failure''; return \}.*?PostSurfaceKey\(\$pane'
+        Mutation = @("`$R.Stage = 'dry-product-failure'; return }", "`$R.Stage = 'dry-product-failure' }")
     }
     @{
         Description = 'the driver runs on its own private desktop with the clipboard guarded and a copy without noctty.ico'
@@ -143,8 +143,8 @@ $pkg23Rules = @(
     }
     @{
         Description = 'the copy runs System32''s cmd.exe directly with /D (no AutoRun), no shell integration, its own class, single-instance off'
-        Pattern = '"command = direct:\$cmd /D /C pkg23-stream\.cmd", "working-directory = \$Bin", ''shell-integration = none'',\s+''single-instance = false'', "class = noctty-test-pkg23-\$\(\[guid\]::NewGuid\(\)\.ToString\(''N''\)\)"'
-        Mutation = @('"command = direct:$cmd /D /C pkg23-stream.cmd"', '"command = cmd.exe /C pkg23-stream.cmd"')
+        Pattern = '(?s)\$classToken = \[guid\]::NewGuid\(\)\.ToString\(''N''\).*?"command = direct:\$cmd /D /C pkg23-stream-\$Name\.cmd", "working-directory = \$Bin", ''shell-integration = none'',\s+''single-instance = false'', "class = noctty-test-pkg23-\$classToken"'
+        Mutation = @('"command = direct:$cmd /D /C pkg23-stream-$Name.cmd"', '"command = cmd.exe /C pkg23-stream-$Name.cmd"')
     }
     @{
         Description = 'the copy denies the clipboard, copies nothing on select, checks no update, and keeps no scrollback'
@@ -158,7 +158,7 @@ $pkg23Rules = @(
     }
     @{
         Description = 'the copy''s build mode comes from its own +version, and a build that is not Debug stops before the launch'
-        Pattern = '(?s)\$buildMode = Get-Pkg23BuildMode\s+if \(-not \[string\]::Equals\(\$buildMode, ''Debug'', \[StringComparison\]::Ordinal\)\) \{[^}]*?\$results\.Stage = ''dry-failed''\s+return\s+\}.*?\[HiddenLocal\]::Spawn\(\$exe, \$line'
+        Pattern = '(?s)function Invoke-Pkg23Driver \{\s+\$results\.Stage = ''build-mode''\s+\$buildMode = Get-Pkg23BuildMode\s+\$results\.BuildMode = \$buildMode\s+if \(-not \[string\]::Equals\(\$buildMode, ''Debug'', \[StringComparison\]::Ordinal\)\) \{ \$results\.Stage = ''dry-failed''; return \}\s+foreach \(\$name in \$setNames\)'
         Mutation = @('$buildMode = Get-Pkg23BuildMode', '$buildMode = ''Debug''')
     }
     @{
@@ -168,13 +168,13 @@ $pkg23Rules = @(
     }
     @{
         Description = 'one dry click is checked before the stream starts, and a failed one returns before the stream''s key'
-        Pattern = '(?s)Send-Pkg23Click \$pane \$x \$y\s+\$dry = Wait-Pkg23Record 5000.*?\$results\.DryClick = Get-Pkg23DryVerdict \$dry\.Bytes \$buildMode \$before \$after \$newNames \$launchProcesses.*?if \(-not \$results\.DryClick\.Passed\) \{ \$results\.Stage = ''dry-failed''; return \}.*?PostSurfaceKey\(\$pane'
-        Mutation = @("`$results.Stage = 'dry-failed'; return }", "`$results.Stage = 'dry-failed' }")
+        Pattern = '(?s)Send-Pkg23Click \$pane \$x \$y\s+\$dry = Wait-Pkg23Record 5000.*?\$R\.DryClick = Get-Pkg23DryVerdict \$dry\.Bytes \$BuildMode \$before \$after \$newNames \$launchProcesses.*?if \(-not \$R\.DryClick\.Passed\) \{ \$R\.Stage = ''dry-failed''; return \}.*?PostSurfaceKey\(\$pane'
+        Mutation = @("if (-not `$R.DryClick.Passed) { `$R.Stage = 'dry-failed'; return }", "if (-not `$R.DryClick.Passed) { `$R.Stage = 'dry-failed' }")
     }
     @{
         Description = 'each click''s record is archived, the trace cleared, and a second open counted before the next click, and the run looks for one after the last'
-        Pattern = '(?s)for \(\$i = 1; \$i -le \$Clicks; \$i\+\+\) \{.*?Send-Pkg23Click \$pane \$x \$y\s+\$record = Wait-Pkg23Record 3000\s+if \(\$null -ne \$record\.Bytes\) \{ \[IO\.File\]::WriteAllBytes\(.*?\}\s+Clear-Pkg23Trace\s+if \(Test-Pkg23TraceAppears 150\) \{ \$results\.ExtraOpens\+\+; Clear-Pkg23Trace \}\s+\}.*?if \(Test-Pkg23TraceAppears 1000\) \{ \$results\.ExtraOpens\+\+; Clear-Pkg23Trace \}.*?Get-Pkg23Verdict \$records \$Clicks \(\$results\.ExtraOpens \+ \$results\.LateRecordsDiscarded\)'
-        Mutation = @('if (Test-Pkg23TraceAppears 150) { $results.ExtraOpens++; Clear-Pkg23Trace }', '')
+        Pattern = '(?s)for \(\$i = 1; \$i -le \$Clicks; \$i\+\+\) \{.*?Send-Pkg23Click \$pane \$x \$y\s+\$record = Wait-Pkg23Record 3000\s+if \(\$null -ne \$record\.Bytes\) \{ \[IO\.File\]::WriteAllBytes\(.*?\}\s+Clear-Pkg23Trace\s+if \(Test-Pkg23TraceAppears 150\) \{ \$R\.ExtraOpens\+\+; Clear-Pkg23Trace \}\s+\}.*?if \(Test-Pkg23TraceAppears 1000\) \{ \$R\.ExtraOpens\+\+; Clear-Pkg23Trace \}.*?Get-Pkg23Verdict \$records \$Clicks \(\$R\.ExtraOpens \+ \$R\.LateRecordsDiscarded\)'
+        Mutation = @('if (Test-Pkg23TraceAppears 150) { $R.ExtraOpens++; Clear-Pkg23Trace }', '')
     }
     @{
         Description = 'a click is a posted move to the park cell, then a move, press and release, all carrying MK_CONTROL, after the target thread''s key state is cleared'
@@ -182,9 +182,34 @@ $pkg23Rules = @(
         Mutation = @('0x201, new IntPtr(0x9)', '0x201, new IntPtr(0x1)')
     }
     @{
-        Description = 'every click is in column 0 of row 0 (where a pruned press pin lands) and a single click'
-        Pattern = '(?s)\A(?=.*\$y = \[int\]\(\$pad \+ \$cellHeight / 2\)\s+\$x = \[int\]\(\$pad \+ \$cellWidth / 2\)\s+\$script:parkX = \[int\]\(\$pad \+ 70\.5 \* \$cellWidth\)\s+\$script:parkY = \[int\]\(\$pad \+ 2\.5 \* \$cellHeight\))(?=.*''scrollback-limit = 0'', ''click-repeat-interval = 1'',)'
-        Mutation = @('$x = [int]($pad + $cellWidth / 2)', '$x = [int]($pad + 3.5 * $cellWidth)')
+        Description = 'every click is on row 0 at its set''s column (set A column 0, as the October probe clicked; set B column 3, inside the URL), each a single click'
+        Pattern = '(?s)\A(?=.*\$y = \[int\]\(\$pad \+ \$cellHeight / 2\)\s+\$x = \[int\]\(\$pad \+ \(\$Spec\.Column \+ 0\.5\) \* \$cellWidth\)\s+\$script:parkX = \[int\]\(\$pad \+ 70\.5 \* \$cellWidth\)\s+\$script:parkY = \[int\]\(\$pad \+ 2\.5 \* \$cellHeight\))(?=.*''scrollback-limit = 0'', ''click-repeat-interval = 1'',)(?=.*\bA = \[ordered\]@\{ AltScreen = \$false; Column = 0 \})'
+        Mutation = @('A = [ordered]@{ AltScreen = $false; Column = 0 }', 'A = [ordered]@{ AltScreen = $false; Column = 3 }')
+    }
+    @{
+        Description = 'set B clicks column 3 on the alternate screen: its stream enters it (DECSET 1049) and homes the cursor before the dry URL'
+        Pattern = '(?s)\bB = \[ordered\]@\{ AltScreen = \$true; Column = 3 \}.*?\$stream = @\(''@echo off''\)\s+if \(\$Spec\.AltScreen\) \{ \$stream \+= \(''<nul set /p "='' \+ \[char\]27 \+ ''\[\?1049h'' \+ \[char\]27 \+ ''\[H"''\) \}\s+\$stream \+= @\(\s+"echo \$\(\$script:Pkg23DryUrl\)"'
+        Mutation = @("'[?1049h'", "'[?1047h'")
+    }
+    @{
+        Description = 'set B is column 3, not column 0'
+        Pattern = '\bB = \[ordered\]@\{ AltScreen = \$true; Column = 3 \}'
+        Mutation = @('B = [ordered]@{ AltScreen = $true; Column = 3 }', 'B = [ordered]@{ AltScreen = $true; Column = 0 }')
+    }
+    @{
+        Description = 'the sets are counted separately: each its own launch, records directory and verdict, and a run takes both by default'
+        Pattern = '(?s)\[ValidateSet\(''A'', ''B'', ''AB''\)\] \[string\] \$Sets = ''AB''.*?\$recordsDir = Join-Path \$work "\$Name\\records".*?\$R\.Verdict = \$verdict.*?\$results\.Set\[\$name\] = \$R\s+\$results\.Stage = "set \$name"\s+try \{ Invoke-Pkg23Set \$name \$setSpecs\[\$name\] \$buildMode \$R \} finally \{ Close-Pkg23Copy \}'
+        Mutation = @('$recordsDir = Join-Path $work "$Name\records"', '$recordsDir = Join-Path $work "records"')
+    }
+    @{
+        Description = 'a run takes both sets unless told otherwise'
+        Pattern = '\[ValidateSet\(''A'', ''B'', ''AB''\)\] \[string\] \$Sets = ''AB'''
+        Mutation = @("[string] `$Sets = 'AB'", "[string] `$Sets = 'A'")
+    }
+    @{
+        Description = 'the guards'' values are written into the run before the trip exit: the clipboard sequence and each history candidate''s index, size and ticks, before and after, no path or content'
+        Pattern = '(?s)\$historyBefore = @\(\$historyPaths \| ForEach-Object \{ Get-WindowsHarnessHistoryMetadata \$_ \}\)\s+\$clipboardBefore = \[HiddenLocal\]::GetClipboardSequenceNumber\(\).*?Invoke-LocalHiddenDriver.*?\$historyAfter = @\(\$historyPaths \| ForEach-Object \{ Get-WindowsHarnessHistoryMetadata \$_ \}\)\s+\$clipboardAfter = \[HiddenLocal\]::GetClipboardSequenceNumber\(\).*?ClipboardSequence = \[ordered\]@\{ Before = \$clipboardBefore; After = \$clipboardAfter.*?History = @\(for \(\$i = 0; \$i -lt \$historyPaths\.Count; \$i\+\+\) \{\s+\[ordered\]@\{ Index = \$i; Before = \$historyBefore\[\$i\]; After = \$historyAfter\[\$i\];.*?\| Set-Content -LiteralPath \(Join-Path \$Run ''pkg23-guards\.json''\)\s+if \(-not \$guards\.StartupUnchanged'
+        Mutation = @('History = @(for ($i = 0;', 'Hist = @(for ($i = 0;')
     }
     @{
         Description = 'a click goes only to the owned pane of the copy on the private desktop'
