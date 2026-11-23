@@ -808,7 +808,10 @@ that govern each symbol you change, or that none does.
   (`win32/test_support.zig`, `TestSession`, the private-desktop runners
   `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop`, the empty
   keyboard they pin and the window probe that checks their role,
-  `RoleProbeWindow`), PSReadLine history isolation
+  `RoleProbeWindow`), process-wide state a test leaves for the later tests
+  in its shard (the OpenGL startup diagnostics `App.createGLContext`
+  starts: `gl_startup.beginOpenGLStartupDiagnostics`,
+  `clearOpenGLStartupFailure`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`), the shell a fixture starts (the
   config line `Get-InteractiveWin11HostedPolicyConfig` writes, the shared
   helper's legacy `--command=cmd.exe`), a bash

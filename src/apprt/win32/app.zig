@@ -14610,6 +14610,12 @@ test "win32 an OpenGL retry on a window reuses the pixel format it set" {
     var app: App = undefined;
     try app.init(core, .{});
     defer app.terminate();
+    // `createGLContext` starts the process-wide OpenGL startup diagnostics
+    // (the core app is still `first`), and nothing here ends them. Left on,
+    // a later test in this process that fails an OpenGL start on purpose
+    // ("failed context preparation preserves the previous GL dispatch")
+    // logs an error and fails.
+    defer gl_startup.clearOpenGLStartupFailure();
 
     const hwnd = try createTestHostWindow();
     defer _ = sys.DestroyWindow(hwnd);
