@@ -13,7 +13,8 @@
 
 ## What landed
 
-- **1A.1:** the stepping-stone merge. 202 conflicted paths, each in `plans/stone-1a/resolution-ledger.tsv`.
+- **1A.1:** the stepping-stone merge. 202 conflicted paths: 381 hunks in 81 content files, one row each in
+  `plans/stone-1a/resolution-ledger.tsv`, and 121 modify/delete paths, counted in its header.
 - **1A.2:** the review of the clean-merged files and clean hunks, and the thread-role layer's log entries and routing.
 - **1A.3:** page serials and generations.
 - **1A.4:** the post-stone audit of 244 upstream commits (`plans/stone-1a/post-stone-audit.tsv`), with the
@@ -28,7 +29,8 @@
   - the PKG-23 harness;
   - the test-config guard;
   - the click-pin fix.
-- **lib-vt:** `ghostty-vt.dll` ships as the signed stub (decision 35, #688 `62e49dd8d`).
+- **lib-vt:** unchanged by the landing; the portable ZIP keeps #688's signed `ghostty-vt.dll` stub (decision 35,
+  `62e49dd8d`, already on `main`).
 - **One forward merge of `main`,** through #747.
 
 ## Accepted differences from `main` (maintainer, 2026-11-23)
@@ -37,7 +39,8 @@ These are the five click-pin leftovers, recorded in `docs/agents/log/terminal-co
 accepted all five for 1A. The landing seats checked that each matches the code; they weren't asked to judge them (TD
 C9, D83).
 
-1. **After a scroll clear on the primary screen at scrollback 0:** a top-row selection or search highlight starts on
+1. **After a scroll clear on a screen without scrollback** (ED 22 on either screen, or ED 2 at a marked prompt on
+   the primary): a top-row selection or search highlight starts on
    the pre-clear history row. A Ctrl+click there opens the link under the pointer, as on `main`.
 2. **A region below the top whose top row is page row 0:** the pressed column is kept, where `main` resets it to 0.
 3. **A scroll region below the top with an SGR background:** pins move with their rows, so a Ctrl+click during
@@ -102,17 +105,19 @@ The plan's Phase 0a delta, items 15–22:
 
 **Redone on the merge SHA:**
 
-- **Test, push 45561987484: success** (every job), with its artifact `flagship-portable-x64-45561987484`.
+- **Test, push 45561987484: success** (every job that ran), with its artifact `flagship-portable-x64-45561987484`.
 - **GUI Hidden Desktop, push 45561987608: failed twice** (attempt 2 was D92(e)'s one rerun) on one leaf,
   `cli-automation`, and only on its process audit. The other 6 leaves passed both times.
-  - Attempt 1: 52 of 54 job processes read (1 not opened); 26 noctty processes, 1 with its argv unread.
+  - Attempt 1: 52 of 54 job processes read (1 not opened, 1 with its image unread); 26 noctty processes, 1 with
+    its argv unread.
   - Attempt 2: 54 of 54 read; 27 noctty processes, 1 with its argv unread.
   - Both: 4/4 shells pass, 0 unaccounted, 0 outside the copy, 0 refused arguments, exit 0, no timeout.
   - The PR run 45173017745 at the identical tree, on the same image (win25-vs2026 20261116.315.1), passed it
     with every argv read.
-  - The audit fails the leaf on any noctty process with no argv (`gui-hidden-runner.ps1`). It had already failed
-    on `main` before the merge: push run 44997457453 at `358ce0f6a` (2026-11-22), "session-restore FAIL
-    (processes)", while three scheduled runs there passed.
+  - The audit fails the leaf on any noctty process with no argv, and on any process it can't open
+    (`gui-hidden-runner.ps1`). The second kind had already failed on `main` before the merge: push run
+    44997457453 at `358ce0f6a` (2026-11-22), "session-restore FAIL (processes)", with 1 of 38 processes not
+    opened and every noctty argv read, while three scheduled runs there passed.
   - Inferred, not shown: a short-lived noctty process exits while the audit reads it. TD D112: recorded, and the
     landing proceeds; `release.yml` needs only the Test run.
 
