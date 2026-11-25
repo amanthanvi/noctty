@@ -770,7 +770,9 @@ that govern each symbol you change, or that none does.
   (`recordOpenUrlForTest` and `NOCTTY_WIN32_OPEN_URL_TRACE_FILE` in
   `src/apprt/win32.zig`, `dispatchOpenTarget` in `src/apprt/win32/app.zig`),
   the hidden-desktop GUI suite
-  (`test/windows/gui-hidden-runner.ps1`, its plan
+  (`test/windows/gui-hidden-runner.ps1` and its process audit: `JobWatch`,
+  `OpenJoiner`, `ExitedBy`, `Get-GuiHiddenProcessVerdict` and the receipt's
+  `*Exited` counts; its plan
   `test/windows/gui-hidden-plan.json`, `.github/workflows/gui-hidden.yml`
   and its selection `scripts/ci-gui-selection.ps1` with the script walker
   `scripts/ci-script-closure.ps1` and the fixtures
@@ -820,7 +822,10 @@ that govern each symbol you change, or that none does.
   `RoleProbeWindow`), process-wide state a test leaves for the later tests
   in its shard (the OpenGL startup diagnostics `App.createGLContext`
   starts: `gl_startup.beginOpenGLStartupDiagnostics`,
-  `clearOpenGLStartupFailure`), PSReadLine history isolation
+  `clearOpenGLStartupFailure`) and the process's handle count a test
+  compares (`GetProcessHandleCount`, which the IPC handle test in
+  `src/apprt/win32/ipc_server.zig`, `testProcessHandleCount`, reads in an
+  isolated child), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`), the shell a fixture starts (the
   config line `Get-InteractiveWin11HostedPolicyConfig` writes, the shared
   helper's legacy `--command=cmd.exe`), a bash
