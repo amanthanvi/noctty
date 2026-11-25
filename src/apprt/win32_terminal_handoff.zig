@@ -3,6 +3,8 @@
 //! console half remains a compatible Windows Terminal OpenConsole process.
 
 const std = @import("std");
+const win32_sys = @import("win32/sys.zig");
+const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const ptypkg = @import("../pty.zig");
@@ -15,7 +17,7 @@ const HRESULT = com.HRESULT;
 const GUID = com.GUID;
 const HANDLE = windows.HANDLE;
 const DWORD = windows.DWORD;
-const BOOL = windows.BOOL;
+const BOOL = win32_types.BOOL;
 const LPCWSTR = ?[*:0]const u16;
 const HKEY = *opaque {};
 const LSTATUS = i32;
@@ -761,15 +763,15 @@ fn iidEqual(a: *const GUID, b: *const GUID) bool {
 fn duplicateLocalHandle(source: HANDLE) !HANDLE {
     var duplicate: HANDLE = undefined;
     const process = windows.GetCurrentProcess();
-    if (windows.kernel32.DuplicateHandle(
+    if (win32_sys.DuplicateHandle(
         process,
         source,
         process,
         &duplicate,
         0,
-        windows.FALSE,
+        win32_types.FALSE,
         windows.DUPLICATE_SAME_ACCESS,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
     return duplicate;
 }
 
@@ -830,7 +832,7 @@ const Win32ComCallerIntegrityOps = struct {
 
     fn openThreadToken(_: *@This()) ?HANDLE {
         var token: HANDLE = undefined;
-        if (OpenThreadToken(windows.GetCurrentThread(), TOKEN_QUERY, windows.TRUE, &token) == 0)
+        if (OpenThreadToken(windows.GetCurrentThread(), TOKEN_QUERY, win32_types.TRUE, &token) == 0)
             return null;
         return token;
     }
@@ -853,11 +855,11 @@ const Win32ComCallerIntegrityOps = struct {
     /// is not survivable.
     fn isImpersonating(_: *@This()) bool {
         var token: HANDLE = undefined;
-        if (OpenThreadToken(windows.GetCurrentThread(), TOKEN_QUERY, windows.TRUE, &token) != 0) {
+        if (OpenThreadToken(windows.GetCurrentThread(), TOKEN_QUERY, win32_types.TRUE, &token) != 0) {
             _ = windows.CloseHandle(token);
             return true;
         }
-        return windows.kernel32.GetLastError() != .NO_TOKEN;
+        return std.os.windows.GetLastError() != .NO_TOKEN;
     }
 
     /// Drop the impersonation token without going through COM. CoRevertToSelf
@@ -1931,7 +1933,7 @@ test "handoff is visible before the UI can defer adopting it" {
     try std.testing.expect(state.primed_at_offer);
     var packet: [4]u8 = undefined;
     var read: DWORD = 0;
-    try std.testing.expect(windows.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
+    try std.testing.expect(win32_sys.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
     try std.testing.expectEqual(@as(DWORD, packet.len), read);
     try std.testing.expectEqualSlices(u8, &.{ 1, 0, 1, 0 }, &packet);
 }

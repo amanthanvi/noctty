@@ -5,6 +5,8 @@
 //! a small `.dmp` next to any other local crash artifacts.
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const windows = std.os.windows;
 const dir = @import("dir.zig");
 
@@ -27,7 +29,7 @@ const MiniDumpType =
 const MINIDUMP_EXCEPTION_INFORMATION = extern struct {
     ThreadId: windows.DWORD,
     ExceptionPointers: *windows.EXCEPTION_POINTERS align(4),
-    ClientPointers: windows.BOOL,
+    ClientPointers: win32_types.BOOL,
 };
 
 comptime {
@@ -41,7 +43,7 @@ extern "kernel32" fn SetUnhandledExceptionFilter(
     lpTopLevelExceptionFilter: ExceptionFilter,
 ) callconv(.winapi) ExceptionFilter;
 
-extern "kernel32" fn DeleteFileW(path: windows.LPCWSTR) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn DeleteFileW(path: windows.LPCWSTR) callconv(.winapi) win32_types.BOOL;
 
 extern "dbghelp" fn MiniDumpWriteDump(
     hProcess: windows.HANDLE,
@@ -51,7 +53,7 @@ extern "dbghelp" fn MiniDumpWriteDump(
     ExceptionParam: ?*MINIDUMP_EXCEPTION_INFORMATION,
     UserStreamParam: ?*anyopaque,
     CallbackParam: ?*anyopaque,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 var installed = false;
 var previous_filter: ExceptionFilter = null;
@@ -168,18 +170,18 @@ fn writeMinidumpIn(base_dir: []const u8, base_dir_w: [:0]const u16, info: *windo
     for (filename, base_dir_w.len + sep_len..) |c, i| dump_path_w[i] = c;
     dump_path_w[wide_len] = 0;
 
-    const handle = windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         &dump_path_w,
-        windows.GENERIC_WRITE,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_WRITE,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
         null,
-        windows.CREATE_ALWAYS,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.CREATE_ALWAYS,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
-    if (handle == windows.INVALID_HANDLE_VALUE) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (handle == windows.INVALID_HANDLE_VALUE) return windows.unexpectedError(std.os.windows.GetLastError());
     errdefer if (DeleteFileW(&dump_path_w) == 0) {
-        log.warn("failed to delete incomplete windows minidump path={s} err={}", .{ path, windows.kernel32.GetLastError() });
+        log.warn("failed to delete incomplete windows minidump path={s} err={}", .{ path, std.os.windows.GetLastError() });
     };
     defer windows.CloseHandle(handle);
 
@@ -198,7 +200,7 @@ fn writeMinidumpIn(base_dir: []const u8, base_dir_w: [:0]const u16, info: *windo
         null,
         null,
     ) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
 
     log.warn("windows minidump written path={s}", .{path});

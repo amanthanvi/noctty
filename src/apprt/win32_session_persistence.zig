@@ -1,6 +1,8 @@
 //! Windows session-state file I/O and recovery policy.
 
 const std = @import("std");
+const win32_sys = @import("win32/sys.zig");
+const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const consts = @import("win32/consts.zig");
 const schema = @import("win32_session_state.zig");
@@ -117,7 +119,7 @@ pub fn quarantineFileAlloc(
 fn renameNoReplace(old_path: []const u8, new_path: []const u8) !void {
     const old_w = try std.os.windows.sliceToPrefixedFileW(null, old_path);
     const new_w = try std.os.windows.sliceToPrefixedFileW(null, new_path);
-    try std.posix.renameatW(std.fs.cwd().fd, old_w.span(), std.fs.cwd().fd, new_w.span(), std.os.windows.FALSE);
+    try std.posix.renameatW(std.fs.cwd().fd, old_w.span(), std.fs.cwd().fd, new_w.span(), win32_types.FALSE);
 }
 
 fn quarantineSlotPathAlloc(alloc: Allocator, absolute_path: []const u8, suffix: []const u8, index: usize) ![]u8 {
@@ -233,9 +235,9 @@ fn replaceFileAtomicWindows(absolute_path: []const u8, temporary_path: []const u
     defer std.heap.page_allocator.free(temporary_w);
 
     if (sys.ReplaceFileW(target_w.ptr, temporary_w.ptr, null, 0, null, null) != 0) return null;
-    const replace_error: u32 = @intFromEnum(std.os.windows.kernel32.GetLastError());
+    const replace_error: u32 = @intFromEnum(std.os.windows.GetLastError());
     if (sys.MoveFileExW(temporary_w.ptr, target_w.ptr, MOVEFILE_REPLACE_EXISTING) != 0) return null;
-    const move_error: u32 = @intFromEnum(std.os.windows.kernel32.GetLastError());
+    const move_error: u32 = @intFromEnum(std.os.windows.GetLastError());
     return .{
         .replace_error = replace_error,
         .move_error = move_error,
@@ -358,7 +360,7 @@ test "win32 recovery persistence falls back in place when delete sharing blocks 
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
     defer std.testing.allocator.free(path_w);
 
-    const held = std.os.windows.kernel32.CreateFileW(
+    const held = win32_sys.CreateFileW(
         path_w.ptr,
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE,

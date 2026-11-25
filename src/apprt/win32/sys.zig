@@ -25,6 +25,8 @@ const UINT_PTR = win32_types.UINT_PTR;
 const DWORD = win32_types.DWORD;
 const WORD = win32_types.WORD;
 const BYTE = win32_types.BYTE;
+const ULONG = win32_types.ULONG;
+const OVERLAPPED = win32_types.OVERLAPPED;
 const BOOL = win32_types.BOOL;
 pub const HWND = win32_types.HWND;
 const HINSTANCE = win32_types.HINSTANCE;
@@ -34,7 +36,7 @@ const HANDLE = windows.HANDLE;
 const SIZE_T = windows.SIZE_T;
 const SECURITY_ATTRIBUTES = windows.SECURITY_ATTRIBUTES;
 const GUID = windows.GUID;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 pub const HMONITOR = *opaque {};
 pub const HKEY = windows.HKEY;
 const HRGN = *anyopaque;
@@ -912,4 +914,124 @@ pub extern "advapi32" fn RegSetValueExW(
     dwType: DWORD,
     lpData: [*]const u8,
     cbData: DWORD,
+) callconv(.winapi) i32;
+
+// kernel32 and advapi32 declarations that Zig 0.17 removed from `std.os.windows`,
+// written against the SDK prototypes. `BOOL` is the SDK's `int`
+// (`win32_types.BOOL`); a function that signals failure with NULL returns an
+// optional handle, and one that signals it with INVALID_HANDLE_VALUE returns
+// `HANDLE` (PLAN decision 13, section 7.4).
+
+pub const VECTORED_EXCEPTION_HANDLER = *const fn (ExceptionInfo: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long;
+pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(.winapi) BOOL;
+
+/// Returns the handler's registration, or NULL on failure.
+pub extern "kernel32" fn AddVectoredExceptionHandler(First: ULONG, Handler: ?VECTORED_EXCEPTION_HANDLER) callconv(.winapi) ?*anyopaque;
+
+pub extern "kernel32" fn CancelIoEx(hFile: HANDLE, lpOverlapped: ?*OVERLAPPED) callconv(.winapi) BOOL;
+
+/// Fails with INVALID_HANDLE_VALUE, not NULL.
+pub extern "kernel32" fn CreateFileW(
+    lpFileName: LPCWSTR,
+    dwDesiredAccess: DWORD,
+    dwShareMode: DWORD,
+    lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
+    dwCreationDisposition: DWORD,
+    dwFlagsAndAttributes: DWORD,
+    hTemplateFile: ?HANDLE,
+) callconv(.winapi) HANDLE;
+
+pub extern "kernel32" fn DuplicateHandle(
+    hSourceProcessHandle: HANDLE,
+    hSourceHandle: HANDLE,
+    hTargetProcessHandle: HANDLE,
+    lpTargetHandle: *HANDLE,
+    dwDesiredAccess: DWORD,
+    bInheritHandle: BOOL,
+    dwOptions: DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn ExitProcess(uExitCode: UINT) callconv(.winapi) noreturn;
+
+pub extern "kernel32" fn FlushFileBuffers(hFile: HANDLE) callconv(.winapi) BOOL;
+
+/// A pseudo handle, never NULL.
+pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
+
+pub extern "kernel32" fn GetExitCodeProcess(hProcess: HANDLE, lpExitCode: *DWORD) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn GetFileAttributesW(lpFileName: LPCWSTR) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn GetModuleFileNameW(hModule: HMODULE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn GetOverlappedResult(
+    hFile: HANDLE,
+    lpOverlapped: *OVERLAPPED,
+    lpNumberOfBytesTransferred: *DWORD,
+    bWait: BOOL,
+) callconv(.winapi) BOOL;
+
+/// NULL when the process has no such handle, INVALID_HANDLE_VALUE on failure.
+pub extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?HANDLE;
+
+pub extern "kernel32" fn GetSystemDirectoryW(lpBuffer: [*]u16, uSize: UINT) callconv(.winapi) UINT;
+
+pub extern "kernel32" fn LoadLibraryExW(lpLibFileName: LPCWSTR, hFile: ?HANDLE, dwFlags: DWORD) callconv(.winapi) HMODULE;
+
+pub extern "kernel32" fn ReadFile(
+    hFile: HANDLE,
+    lpBuffer: *anyopaque,
+    nNumberOfBytesToRead: DWORD,
+    lpNumberOfBytesRead: ?*DWORD,
+    lpOverlapped: ?*OVERLAPPED,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn SetConsoleCtrlHandler(HandlerRoutine: ?HANDLER_ROUTINE, Add: BOOL) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn SetLastError(dwErrCode: DWORD) callconv(.winapi) void;
+
+pub extern "kernel32" fn Sleep(dwMilliseconds: DWORD) callconv(.winapi) void;
+
+pub extern "kernel32" fn TerminateProcess(hProcess: HANDLE, uExitCode: UINT) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn WaitForMultipleObjects(
+    nCount: DWORD,
+    lpHandle: [*]const HANDLE,
+    bWaitAll: BOOL,
+    dwMilliseconds: DWORD,
+) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn WriteFile(
+    hFile: HANDLE,
+    lpBuffer: [*]const u8,
+    nNumberOfBytesToWrite: DWORD,
+    lpNumberOfBytesWritten: ?*DWORD,
+    lpOverlapped: ?*OVERLAPPED,
+) callconv(.winapi) BOOL;
+
+pub const GetOverlappedResultError = error{ WouldBlock, Unexpected };
+
+/// `GetOverlappedResult` with std's former error mapping: `WouldBlock` when the
+/// operation is still pending and `wait` is false.
+pub fn getOverlappedResult(h: HANDLE, overlapped: *OVERLAPPED, wait: bool) GetOverlappedResultError!DWORD {
+    var bytes: DWORD = undefined;
+    if (GetOverlappedResult(h, overlapped, &bytes, @intFromBool(wait)) == 0) {
+        switch (windows.GetLastError()) {
+            .IO_INCOMPLETE => if (!wait) return error.WouldBlock else unreachable,
+            else => |err| return windows.unexpectedError(err),
+        }
+    }
+    return bytes;
+}
+
+pub extern "advapi32" fn RegGetValueW(
+    hkey: HKEY,
+    lpSubKey: ?LPCWSTR,
+    lpValue: ?LPCWSTR,
+    dwFlags: DWORD,
+    pdwType: ?*DWORD,
+    pvData: ?*anyopaque,
+    pcbData: ?*DWORD,
 ) callconv(.winapi) i32;

@@ -19,6 +19,8 @@
 //! lines for the key go, and `key =` (which clears what any earlier layer
 //! gave) then one line per value take the place of the first of them.
 const std = @import("std");
+const win32_sys = @import("sys.zig");
+const win32_types = @import("../win32_types.zig");
 const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../../config.zig");
@@ -2437,7 +2439,7 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // dark reads it, after the save's probe: it does not open.
     {
         const wide = try std.os.windows.sliceToPrefixedFileW(null, dark);
-        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
         var switched = (try fresh.changeConditionalState(.{ .theme = .dark })) orelse return error.TestExpectedSwitch;
@@ -2499,7 +2501,7 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // found at.
     try check(alloc, tmp.dir, none, light, "Mine", null);
     const wide = try std.os.windows.sliceToPrefixedFileW(null, mine);
-    const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
     defer std.os.windows.CloseHandle(handle);
     try check(alloc, tmp.dir, none, light, "Mine", mine);
@@ -2846,7 +2848,7 @@ test "settings patch: a config-file the load could not open or read whole, or a 
         const path = try tmp.dir.realpathAlloc(alloc, "config");
         defer alloc.free(path);
         const wide = try std.os.windows.sliceToPrefixedFileW(null, held);
-        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
         var config = try testLoad(alloc, none, path);

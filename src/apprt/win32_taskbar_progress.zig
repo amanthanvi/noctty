@@ -5,7 +5,7 @@ const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const gui_probe_trace = @import("../os/gui_probe_trace.zig");
 
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const GUID = windows.GUID;
 const BOOL = win32_types.BOOL;
 const DWORD = win32_types.DWORD;

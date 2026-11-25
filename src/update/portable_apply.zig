@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const util = @import("util.zig");
 
@@ -969,27 +971,27 @@ fn syncDirectory(alloc: Allocator, path: []const u8) !void {
     }
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const handle = std.os.windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path_w.ptr,
-        std.os.windows.GENERIC_WRITE,
-        std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE | std.os.windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_WRITE,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_FLAG_BACKUP_SEMANTICS,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_FLAG_BACKUP_SEMANTICS,
         null,
     );
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) {
         log.debug("directory sync open unsupported path={s} err={}", .{
             path,
-            std.os.windows.kernel32.GetLastError(),
+            std.os.windows.GetLastError(),
         });
         return;
     }
     defer std.os.windows.CloseHandle(handle);
-    if (std.os.windows.kernel32.FlushFileBuffers(handle) == 0) {
+    if (win32_sys.FlushFileBuffers(handle) == 0) {
         log.debug("directory sync unsupported path={s} err={}", .{
             path,
-            std.os.windows.kernel32.GetLastError(),
+            std.os.windows.GetLastError(),
         });
     }
 }
@@ -1208,9 +1210,9 @@ fn removePathIfExists(path: []const u8) !void {
     if (builtin.os.tag == .windows) {
         const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
         defer std.heap.page_allocator.free(path_w);
-        const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
+        const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
         if (attributes != std.os.windows.INVALID_FILE_ATTRIBUTES and
-            attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0)
         {
             if (attributes & file_attribute_directory != 0) {
                 return std.fs.deleteDirAbsolute(path);
@@ -1226,9 +1228,9 @@ fn pathKind(path: []const u8) !std.fs.File.Kind {
     if (builtin.os.tag != .windows) return (try std.fs.cwd().statFile(path)).kind;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
-    const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
+    const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
     if (attributes == std.os.windows.INVALID_FILE_ATTRIBUTES) {
-        const err = std.os.windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         return switch (err) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             else => std.os.windows.unexpectedError(err),
@@ -1245,15 +1247,15 @@ fn pathIsWindowsReparsePointChecked(alloc: Allocator, path: []const u8) !bool {
     if (builtin.os.tag != .windows) return false;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
+    const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
     if (attributes == std.os.windows.INVALID_FILE_ATTRIBUTES) {
-        const err = std.os.windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         return switch (err) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             else => std.os.windows.unexpectedError(err),
         };
     }
-    return attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    return attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0;
 }
 
 const movefile_replace_existing: u32 = 0x1;
@@ -1584,13 +1586,13 @@ test "portable rollback succeeds when the swap failed on a file held without del
     // read and copied, but neither renamed nor replaced.
     const dll_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, dll_path);
     defer alloc.free(dll_w);
-    const holder = std.os.windows.kernel32.CreateFileW(
+    const holder = win32_sys.CreateFileW(
         dll_w.ptr,
-        std.os.windows.GENERIC_READ,
-        std.os.windows.FILE_SHARE_READ | std.os.windows.FILE_SHARE_WRITE,
+        win32_types.GENERIC_READ,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expect(holder != std.os.windows.INVALID_HANDLE_VALUE);

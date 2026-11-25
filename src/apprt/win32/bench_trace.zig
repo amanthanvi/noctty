@@ -5,6 +5,7 @@
 //! stage names and timestamps. Traces are inert without their environment flags.
 
 const std = @import("std");
+const win32_sys = @import("sys.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
@@ -705,7 +706,7 @@ pub fn queryProcessPrivateBytes() ?u64 {
     var counters: PROCESS_MEMORY_COUNTERS_EX = undefined;
     counters.cb = @sizeOf(PROCESS_MEMORY_COUNTERS_EX);
     if (K32GetProcessMemoryInfo(
-        windows.kernel32.GetCurrentProcess(),
+        win32_sys.GetCurrentProcess(),
         &counters,
         counters.cb,
     ) == 0) return null;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const win32_types = @import("apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 
@@ -97,9 +98,9 @@ fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
     _ = SetStdHandle(id, handle);
 }
 
-extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?windows.HANDLE;
-extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) u32;
 extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(.winapi) void;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;

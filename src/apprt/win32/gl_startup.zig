@@ -27,7 +27,7 @@ pub const StartupLoaderErrorDialogSuppression = struct {
         if (sys.SetThreadErrorMode(self.previous_mode, null) == 0) {
             log.warn(
                 "failed to restore startup loader thread error mode win32_error={d}",
-                .{@intFromEnum(windows.kernel32.GetLastError())},
+                .{@intFromEnum(std.os.windows.GetLastError())},
             );
         }
         self.active = false;
@@ -41,7 +41,7 @@ pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
     if (sys.SetThreadErrorMode(c.SEM_FAILCRITICALERRORS | c.SEM_NOOPENFILEERRORBOX, &previous_mode) == 0) {
         log.warn(
             "failed to suppress startup loader error dialogs win32_error={d}",
-            .{@intFromEnum(windows.kernel32.GetLastError())},
+            .{@intFromEnum(std.os.windows.GetLastError())},
         );
         return .{};
     }
@@ -55,7 +55,7 @@ pub fn setDefaultDllDirectories() ?windows.Win32Error {
     if (sys.SetDefaultDllDirectories(c.LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) != 0) {
         return null;
     }
-    return windows.kernel32.GetLastError();
+    return std.os.windows.GetLastError();
 }
 
 pub const OpenGLStartupStep = enum {

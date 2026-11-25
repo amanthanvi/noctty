@@ -1,6 +1,7 @@
 //! Lazy, process-lifetime OpenGL entry points. Importing this module does not
 //! load OpenGL; the first WGL call or core symbol lookup loads System32 only.
 const std = @import("std");
+const win32_sys = @import("sys.zig");
 const windows = std.os.windows;
 const types = @import("../win32_types.zig");
 
@@ -15,23 +16,23 @@ const Api = struct {
 
 const NativeBackend = struct {
     fn loadLibraryExW(_: *@This(), name: [*:0]const u16, reserved: ?windows.HANDLE, flags: u32) types.HMODULE {
-        return windows.kernel32.LoadLibraryExW(name, reserved, flags);
+        return win32_sys.LoadLibraryExW(name, reserved, flags);
     }
 
     fn freeLibrary(_: *@This(), module: types.HMODULE) void {
-        _ = windows.kernel32.FreeLibrary(@ptrCast(module.?));
+        _ = win32_sys.FreeLibrary(@ptrCast(module.?));
     }
 
     fn getProcAddress(_: *@This(), module: types.HMODULE, name: [*:0]const u8) ?*const anyopaque {
-        return windows.kernel32.GetProcAddress(@ptrCast(module.?), name);
+        return win32_sys.GetProcAddress(@ptrCast(module.?), name);
     }
 
     fn getLastError(_: *@This()) u32 {
-        return @intFromEnum(windows.kernel32.GetLastError());
+        return @intFromEnum(std.os.windows.GetLastError());
     }
 
     fn setLastError(_: *@This(), err: u32) void {
-        windows.kernel32.SetLastError(@enumFromInt(err));
+        win32_sys.SetLastError(err);
     }
 };
 

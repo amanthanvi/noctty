@@ -70,7 +70,7 @@ const ATOM = win32_types.ATOM;
 const COLORREF = win32_types.COLORREF;
 const RECT = win32_types.RECT;
 const GUID = windows.GUID;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const HMONITOR = sys.HMONITOR;
 
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
@@ -7420,7 +7420,7 @@ pub const SettingsWindow = struct {
             };
             self.class_atom = sys.RegisterClassExW(&wc);
             if (self.class_atom == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
         }
         if (self.viewport_class_atom == 0) {
@@ -7440,7 +7440,7 @@ pub const SettingsWindow = struct {
             };
             self.viewport_class_atom = sys.RegisterClassExW(&wc);
             if (self.viewport_class_atom == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
         }
 
@@ -7469,7 +7469,7 @@ pub const SettingsWindow = struct {
             null,
             self.handle.hinstance,
             self,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return windows.unexpectedError(std.os.windows.GetLastError());
         self.hwnd = hwnd;
         self.dpi = normalizedDpi(sys.GetDpiForWindow(hwnd));
         // The class icon is what Alt+Tab shows; the caption and taskbar sizes
@@ -7593,7 +7593,7 @@ pub const SettingsWindow = struct {
             hinstance,
             self,
         ) orelse {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             _ = sys.DestroyWindow(hwnd);
             return windows.unexpectedError(err);
         };
@@ -16617,7 +16617,7 @@ test "settings arrow-key groups stop at the rail and the action bar" {
                 settings.btn_section_appearance.?,
                 dialog_test.GetNextDlgGroupItem(hwnd, settings.btn_section_reference.?, 0).?,
             );
-            for (std.enums.values(Section)) |section| for ([_]windows.BOOL{ 0, 1 }) |previous| {
+            for (std.enums.values(Section)) |section| for ([_]win32_types.BOOL{ 0, 1 }) |previous| {
                 try std.testing.expect(rail(settings, dialog_test.GetNextDlgGroupItem(hwnd, settings.sectionButton(section).?, previous).?));
             };
 
@@ -16758,7 +16758,7 @@ test "settings labeled checkbox arrow group never visits its static label" {
             for (settings.controlsForRole(.check_box)) |optional| {
                 const control = optional orelse continue;
                 if (sys.IsWindowVisible(control) == 0 or sys.IsWindowEnabled(control) == 0) continue;
-                for ([_]windows.BOOL{ 0, 1 }) |previous| {
+                for ([_]win32_types.BOOL{ 0, 1 }) |previous| {
                     const next = dialog_test.GetNextDlgGroupItem(fixture.hwnd(), control, previous).?;
                     try std.testing.expect(settings.controlIndex(next) != null);
                 }
@@ -16800,7 +16800,7 @@ test "settings display-only text row needs no persistence adapter" {
             const after_style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(after, GWL_STYLE))));
             _ = sys.SetWindowLongPtrW(after, GWL_STYLE, @intCast(after_style | group(formGroupStarts(7, true, false))));
             for ([_]HWND{ before, after }) |checkbox| {
-                for ([_]windows.BOOL{ 0, 1 }) |previous| {
+                for ([_]win32_types.BOOL{ 0, 1 }) |previous| {
                     try std.testing.expect(dialog_test.GetNextDlgGroupItem(fixture.hwnd(), checkbox, previous).? != control);
                 }
             }
@@ -19757,7 +19757,7 @@ test "settings a Reset button joins its row's arrow-key run and never a label's"
                     if (item.control_index >= form_field_count) continue;
                     const button = settings.reset_buttons[item.control_index] orelse continue;
                     if (sys.IsWindowVisible(button) == 0) continue;
-                    for ([_]windows.BOOL{ 0, 1 }) |previous| {
+                    for ([_]win32_types.BOOL{ 0, 1 }) |previous| {
                         // A field or a Reset button of the form, never a label
                         // and never outside the form.
                         const next = dialog_test.GetNextDlgGroupItem(hwnd, button, previous).?;
@@ -19775,7 +19775,7 @@ test "settings a Reset button joins its row's arrow-key run and never a label's"
                     if (sys.IsWindowVisible(control) == 0 or sys.IsWindowEnabled(control) == 0) continue;
                     const reset = if (item.control_index < form_field_count) settings.reset_buttons[item.control_index] else null;
                     for ([_]?HWND{ control, reset }) |maybe| if (maybe) |window| if (sys.IsWindowVisible(window) != 0) {
-                        for ([_]windows.BOOL{ 0, 1 }) |previous| {
+                        for ([_]win32_types.BOOL{ 0, 1 }) |previous| {
                             errdefer std.debug.print("settings arrow run from control {d} reaches a trackbar or up-down\n", .{item.control_index});
                             try std.testing.expect(!isCompanion(settings, dialog_test.GetNextDlgGroupItem(hwnd, window, previous).?));
                         }
@@ -19784,7 +19784,7 @@ test "settings a Reset button joins its row's arrow-key run and never a label's"
             }
             settings.setActiveSection(.appearance);
             const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
-            for ([_]windows.BOOL{ 0, 1 }) |previous| try std.testing.expectEqual(slider, dialog_test.GetNextDlgGroupItem(hwnd, slider, previous).?);
+            for ([_]win32_types.BOOL{ 0, 1 }) |previous| try std.testing.expectEqual(slider, dialog_test.GetNextDlgGroupItem(hwnd, slider, previous).?);
 
             // The button starts no group (a hidden one would still end its
             // control's run): the notification checkboxes' run takes each
