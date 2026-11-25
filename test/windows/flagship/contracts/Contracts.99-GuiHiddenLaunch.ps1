@@ -835,10 +835,11 @@ foreach ($case in @(
 $guiVerdictToken = [guid]::NewGuid().ToString('N')
 $guiGui = @('noctty.exe', '--single-instance=false', "--class=noctty-interactive-x-$guiVerdictToken", '-e', 'cmd')
 $guiIpc = @('noctty.com', '+list-windows', "--class=noctty-automation-x-$guiVerdictToken")
-$guiRow = { param($Id, $Image, $Parent, $Creation, [bool] $IsCmd = $false, [bool] $Read = $false, [bool] $System = $false, [bool] $Off = $false, [bool] $OpenFailed = $false, [string[]] $Argv = $null, [bool] $InCopy = $true)
+$guiRow = { param($Id, $Image, $Parent, $Creation, [bool] $IsCmd = $false, [bool] $Read = $false, [bool] $System = $false, [bool] $Off = $false, [bool] $OpenFailed = $false, [string[]] $Argv = $null, [bool] $InCopy = $true, [bool] $Exited = $false, [bool] $Unpinned = $false)
     $isNoctty = $Image -ieq 'noctty.exe' -or $Image -ieq 'noctty.com'
     [pscustomobject]@{ Pid = $Id; Image = $Image; Parent = $Parent; Creation = $Creation; IsCmd = $IsCmd; CmdRead = $Read; CmdSystem = $System; CmdImageSystem = $System
-        CmdAutoRunOff = $Off; OpenFailed = $OpenFailed; Unpinned = $false; IsNoctty = $isNoctty; InCopy = ($isNoctty -and $InCopy); Argv = $(if ($isNoctty) { $Argv } else { $null }) } }
+        CmdAutoRunOff = $Off; OpenFailed = $OpenFailed; Unpinned = $Unpinned; IsNoctty = $isNoctty; InCopy = ($isNoctty -and $InCopy); Argv = $(if ($isNoctty) { $Argv } else { $null })
+        ExitedBeforeRead = $Exited } }
 $guiGoodRows = @(
     (& $guiRow 100 'pwsh.exe' 1 10)
     (& $guiRow 200 'noctty.exe' 100 20 -Argv $guiGui)
@@ -886,8 +887,174 @@ foreach ($bad in @(
         @{ Name = 'an IPC action without a class'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Argv @('noctty.com', '+new-window'))); Total = 11; Shells = 1 }
         # #738's notSeenInJob: a process the launcher recorded that the job never showed read (PROBE-JOB-WATCH-OPEN-FIRST-01).
         @{ Name = 'a launcher record the job never showed'; Rows = @($guiGoodRows | Where-Object { $_.Pid -ne 600 -and $_.Pid -ne 700 }); Total = 9; Shells = 1 }
+        # TD D112: a joiner that had exited before the read is counted apart, but an exited one vouches for no child,
+        # matches no launcher record by another creation time, and leaves the shell rule as it was.
+        @{ Name = 'a noctty forwarded by a launched CLI that had exited before its image was read'; Rows = (& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true)); Total = 11; Shells = 1 }
+        @{ Name = 'a cmd that had exited before its command line was read'; Rows = (& $guiReplace 400 (& $guiRow 400 'cmd.exe' 200 40 $true $false $false $false -Exited $true)); Total = 11; Shells = 1 }
+        @{ Name = 'a launcher record matched only by an exited joiner of another creation time'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 61 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Shells = 1 }
     )) {
     if ((& $guiVerdict $bad.Rows $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
+}
+
+# ---- (9b) a joiner the reader could not read because it had already exited is counted apart and passes (TD D112;
+# main's push runs 45561987608 and 44997457453 failed on such joiners alone). The live controls above ('a joiner that
+# could not be opened', 'a joiner opened and pinned whose image could not be read', 'a noctty whose command line was
+# not read') keep failing, and so do the same rows marked live explicitly.
+foreach ($good in @(
+        @{ Name = 'a joiner that had exited before it was opened'; Rows = (& $guiWith @((& $guiRow 800 $null 0 0 -OpenFailed $true -Exited $true))); Total = 12; Exited = 'unopenedExited'; Live = 'unopened' }
+        @{ Name = 'a joiner whose PID named another process when it was opened'; Rows = (& $guiWith @((& $guiRow 805 $null 0 0 -Unpinned $true -Exited $true))); Total = 12; Exited = 'unpinnedExited'; Live = 'unpinned' }
+        @{ Name = 'a joiner that had exited before its image was read'; Rows = (& $guiWith @((& $guiRow 810 $null 100 81 -Exited $true))); Total = 12; Exited = 'imageUnreadExited'; Live = 'imageUnread' }
+        @{ Name = 'a noctty that had exited before its command line was read'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Exited $true)); Total = 11; Exited = 'nocttyArgvUnreadExited'; Live = 'nocttyArgvUnread' }
+        @{ Name = 'a launched CLI that had exited before its image was read'; Rows = @(& $guiReplace 600 (& $guiRow 600 $null 100 60 -Exited $true) | Where-Object { $_.Pid -ne 700 }); Total = 10; Exited = 'launcherExitedUnread'; Live = 'launcherNotSeen' }
+    )) {
+    $verdict = & $guiVerdict $good.Rows $good.Total 1
+    if (-not $verdict.passed -or $verdict[$good.Exited] -ne 1 -or $verdict[$good.Live] -ne 0) {
+        throw "The process verdict did not count $($good.Name) apart ($($good.Exited) $($verdict[$good.Exited]), $($good.Live) $($verdict[$good.Live]), passed $($verdict.passed))."
+    }
+}
+foreach ($live in @(
+        @{ Name = 'a live joiner that could not be opened'; Rows = (& $guiWith @((& $guiRow 800 $null 0 0 -OpenFailed $true -Exited $false))); Total = 12; Counter = 'unopened' }
+        @{ Name = 'a live joiner whose image could not be read'; Rows = (& $guiWith @((& $guiRow 810 $null 100 81 -Exited $false))); Total = 12; Counter = 'imageUnread' }
+        @{ Name = 'a live noctty whose command line was not read'; Rows = (& $guiReplace 700 (& $guiRow 700 'noctty.exe' 600 70 -Exited $false)); Total = 11; Counter = 'nocttyArgvUnread' }
+    )) {
+    $verdict = & $guiVerdict $live.Rows $live.Total 1
+    if ($verdict.passed -or $verdict[$live.Counter] -ne 1) { throw "The process verdict passed $($live.Name), or did not count it." }
+}
+
+# ---- (9c) the reader's exit checks on real processes (OpenJoiner, ExitedBy), and the negative control through the
+# runner's own JobWatch: a live joiner it may not open (a DACL that grants this user only SYNCHRONIZE,
+# QUERY_LIMITED_INFORMATION and TERMINATE; the process stays suspended and never runs) is unopened, not exited, and
+# fails the verdict, where the same process with the default DACL is read and passes.
+if (-not ('GuiHiddenContractJoiner' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class GuiHiddenContractJoiner {
+    // SECURITY_ATTRIBUTES, STARTUPINFOW and PROCESS_INFORMATION as the x64 SDK lays them out (no pshpack): the sizes
+    // the runner's pinned layout gives them, checked by Sizes() before anything starts.
+    [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public int inherit; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct Startup {
+        public int cb; public string reserved, desktop, title;
+        public int x, y, cx, cy, charsX, charsY, fill, flags; public short show, reservedBytes;
+        public IntPtr reservedPointer, input, output, error;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct ProcessInfo { public IntPtr process, thread; public int pid, tid; }
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessW(string app, StringBuilder command, ref SecurityAttributes pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref Startup startup, out ProcessInfo info);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll")] public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll")] static extern void GetSystemTimePreciseAsFileTime(out long time);
+    public static string Sizes() {
+        return Marshal.SizeOf(typeof(SecurityAttributes)) + " " + Marshal.SizeOf(typeof(Startup)) + " " + Marshal.SizeOf(typeof(ProcessInfo));
+    }
+    // Starts `app` suspended and without a window, with `sddl` as its security descriptor when one is given, and
+    // assigns it to `job` (when not zero). It is never resumed: the caller terminates it and closes both handles.
+    public static ProcessInfo StartSuspended(string app, string command, string sddl, IntPtr job) {
+        IntPtr descriptor = IntPtr.Zero;
+        var sa = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)) };
+        if (sddl != null) {
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out descriptor, IntPtr.Zero)) throw new Exception("ConvertStringSecurityDescriptorToSecurityDescriptor failed: " + Marshal.GetLastWin32Error());
+            sa.descriptor = descriptor;
+        }
+        try {
+            var si = new Startup(); si.cb = Marshal.SizeOf(typeof(Startup));
+            ProcessInfo pi;
+            if (!CreateProcessW(app, new StringBuilder(command), ref sa, IntPtr.Zero, false, 0x4 | 0x08000000, IntPtr.Zero, null, ref si, out pi)) // SUSPENDED | NO_WINDOW
+                throw new Exception("CreateProcess failed: " + Marshal.GetLastWin32Error());
+            if (job != IntPtr.Zero && !AssignProcessToJobObject(job, pi.process)) {
+                int error = Marshal.GetLastWin32Error();
+                TerminateProcess(pi.process, 1); CloseHandle(pi.thread); CloseHandle(pi.process);
+                throw new Exception("AssignProcessToJobObject failed: " + error);
+            }
+            return pi;
+        } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+    }
+    // Creation and exit time of `process`, or null.
+    public static long[] Times(IntPtr process) { long c, e, k, u; return GetProcessTimes(process, out c, out e, out k, out u) ? new long[] { c, e } : null; }
+    public static long Now() { long t; GetSystemTimePreciseAsFileTime(out t); return t; }
+}
+'@
+}
+if ([GuiHiddenContractJoiner]::Sizes() -cne '24 104 24') { throw 'The contract''s process structs are not laid out as the SDK''s.' }
+$guiJoinerCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+$guiJoinerLine = "`"$guiJoinerCmd`" /D /C exit 7"
+$guiJoinerUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+# SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE for this user alone: no QUERY, no VM_READ.
+$guiJoinerSddl = "D:P(A;;0x101001;;;$guiJoinerUser)"
+$guiJoinerScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-gui-hidden-joiner-' + [guid]::NewGuid().ToString('N'))
+$guiJoinerOpen = [Collections.Generic.List[object]]::new()
+try {
+    [void](New-Item -ItemType Directory -Path $guiJoinerScratch)
+    # An exited process whose handle is held: ExitedBy only with its own creation time and an exit time no later than
+    # the failed read's.
+    $exited = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+    $guiJoinerOpen.Add($exited)
+    [void][GuiHiddenContractJoiner]::TerminateProcess($exited.process, 7)
+    if ([GuiHiddenContractJoiner]::WaitForSingleObject($exited.process, 5000) -ne 0) { throw 'The exited control process did not end.' }
+    $times = [GuiHiddenContractJoiner]::Times($exited.process)
+    if ($null -eq $times -or $times[1] -eq 0) { throw 'The exited control process has no exit time.' }
+    if (-not [GuiHiddenRunnerNative]::ExitedBy($exited.process, $times[0], [GuiHiddenContractJoiner]::Now())) { throw 'ExitedBy missed a process that had exited before the read failed.' }
+    if ([GuiHiddenRunnerNative]::ExitedBy($exited.process, $times[0], $times[1] - 1)) { throw 'ExitedBy counted a process that was live when its read failed.' }
+    if ([GuiHiddenRunnerNative]::ExitedBy($exited.process, $times[0] + 1, [GuiHiddenContractJoiner]::Now())) { throw 'ExitedBy accepted another creation time.' }
+    # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone (a PID reused at once would
+    # open, which the reader unpins; the control then says it was skipped).
+    $gonePid = $exited.pid
+    [void][GuiHiddenContractJoiner]::CloseHandle($exited.thread); [void][GuiHiddenContractJoiner]::CloseHandle($exited.process)
+    [void]$guiJoinerOpen.Remove($exited)
+    $gone = $false
+    $handle = [GuiHiddenRunnerNative]::OpenJoiner($gonePid, [ref]$gone)
+    if ($handle -ne [IntPtr]::Zero) { [void][GuiHiddenContractJoiner]::CloseHandle($handle); Write-Host 'Contracts.99-GuiHiddenLaunch gone-PID control: SKIPPED (the PID was reused at once)' }
+    elseif (-not $gone) { throw 'OpenJoiner did not report a PID that no process holds as gone.' }
+
+    # A live joiner the reader may not open, through the runner's JobWatch, and the same process with the default DACL.
+    foreach ($case in @(@{ Sddl = $guiJoinerSddl; Readable = $false }, @{ Sddl = $null; Readable = $true })) {
+        $job = [GuiHiddenRunnerNative]::CreateRunJob()
+        $watch = $null
+        try {
+            $watch = [GuiHiddenRunnerNative+JobWatch]::new($job, $guiJoinerCmd, $guiJoinerScratch, $guiJoinerCmd, $guiJoinerCmd)
+            $live = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $case.Sddl, $job)
+            $guiJoinerOpen.Add($live)
+            $deadline = [datetime]::UtcNow.AddSeconds(10)
+            while (@($watch.Snapshot()).Count -lt 1 -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 20 }
+            # Checked while the process is live and suspended; then the job ends it.
+            if (-not $case.Readable) {
+                $gone = $false
+                $probe = [GuiHiddenRunnerNative]::OpenJoiner($live.pid, [ref]$gone)
+                if ($probe -ne [IntPtr]::Zero) { [void][GuiHiddenContractJoiner]::CloseHandle($probe); throw 'The control''s DACL let the reader open its process.' }
+                if ($gone) { throw 'OpenJoiner reported a live process it may not open as gone.' }
+                if ([GuiHiddenRunnerNative]::ExitedBy($live.process, ([GuiHiddenContractJoiner]::Times($live.process))[0], [GuiHiddenContractJoiner]::Now())) { throw 'ExitedBy counted a live process as exited.' }
+            }
+            $total = [GuiHiddenRunnerNative]::StopRunJob($job)
+            $watch.Dispose()
+            $rows = @($watch.Snapshot())
+            $watch = $null
+            $verdict = Get-GuiHiddenProcessVerdict $rows @{} $total 0 $guiVerdictToken 0
+            if ($case.Readable) {
+                if ($rows.Count -ne 1 -or $rows[0].OpenFailed -or $rows[0].Unpinned -or $rows[0].Image -ine 'cmd.exe' -or -not $rows[0].CmdRead -or -not $verdict.passed) {
+                    throw 'The positive half: the JobWatch did not read the default-DACL control process, or the verdict failed it.'
+                }
+            }
+            elseif ($rows.Count -ne 1 -or -not $rows[0].OpenFailed -or $rows[0].ExitedBeforeRead -or $verdict.passed -or $verdict.unopened -ne 1 -or $verdict.unopenedExited -ne 0) {
+                throw 'The negative control: a live joiner the reader could not open was not counted as live and unopened, or the verdict passed it.'
+            }
+        }
+        finally {
+            if ($null -ne $watch) { $watch.Dispose() }
+            [void][GuiHiddenRunnerNative]::CloseHandle($job)
+        }
+    }
+}
+finally {
+    foreach ($pi in $guiJoinerOpen) {
+        [void][GuiHiddenContractJoiner]::TerminateProcess($pi.process, 1)
+        [void][GuiHiddenContractJoiner]::CloseHandle($pi.thread); [void][GuiHiddenContractJoiner]::CloseHandle($pi.process)
+    }
+    Remove-Item -LiteralPath $guiJoinerScratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ---- (9a) the role dump opt-in and the launcher-bound exit, with the supervisor replaced by a recorder.

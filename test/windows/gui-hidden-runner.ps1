@@ -51,7 +51,10 @@ and identity) and keep the argument rule on its command line, and be accounted f
 and creation time recorded before it ran), a noctty.com started by a shell inside the terminal (the shell the exact
 child of an accounted noctty.exe; shell-command's PATH lookup), or a noctty.exe an accounted noctty.com forwarded.
 A leaf passes only with every joiner read (the job's TotalProcesses against the processes read, each with its image),
-every cmd read and passing, at least the plan's expectedShells of them, and every noctty accounted for. The k-th cmd
+every cmd read and passing, at least the plan's expectedShells of them, and every noctty accounted for. A joiner, or
+a noctty's command line, that could not be read because the process had already exited (its PID held no process when
+it was opened, or already named another one, or its handle was signalled with an exit time no later than the failed
+read) is counted apart (`...Exited` in the receipt) and does not fail the leaf; one still running fails it. The k-th cmd
 read creates `shell-read-<k>.flag` in the leaf's run directory, the barrier a one-shot `/c` stimulus waits on. While
 the leaf runs, and once more before its job is ended, no window of its job may sit on Default (polled every 500 ms: a
 window that opens and closes between two samples is not seen). Afterwards the leaf's receipt must be complete and say
@@ -413,12 +416,40 @@ public static class GuiHiddenRunnerNative {
     }
 
     // One joiner. Only facts leave the reader: an image's leaf name and booleans. A noctty's split command line
-    // (`Argv`) stays in memory for the argument rule and is never written.
+    // (`Argv`) stays in memory for the argument rule and is never written. `ExitedBeforeRead`: the read that left the
+    // joiner unopened, unpinned, without its image or (a noctty) without its command line failed after the joiner
+    // had exited, by `OpenJoiner`, `Unpinned`'s own check or `ExitedBy`; the verdict counts such a joiner apart.
     public sealed class JoinedProcess {
         public int Pid; public long Taken; public IntPtr Handle; public bool OpenFailed; public bool Unpinned;
         public long Creation; public int Parent; public string Image; public uint? Exit;
         public bool IsCmd; public bool CmdRead; public bool CmdSystem; public bool CmdImageSystem; public bool CmdAutoRunOff; public int CmdOrdinal;
-        public bool IsNoctty; public bool InCopy; public string[] Argv;
+        public bool IsNoctty; public bool InCopy; public string[] Argv; public bool ExitedBeforeRead;
+    }
+
+    // Opens a joiner the way the reader does (QUERY_LIMITED | QUERY | VM_READ | SYNCHRONIZE). On a failure `gone` says
+    // whether no process holds the PID at all (ERROR_INVALID_PARAMETER, 87): the joiner had exited and its last handle
+    // was closed before the open. Measured on Windows 11 build 26300: an exited process with no handle left and a PID
+    // never used both fail with 87, a live process whose DACL withholds those rights with ERROR_ACCESS_DENIED (5),
+    // which is not `gone`. A reused PID would have opened, and `ReadOpened` unpins it.
+    public static IntPtr OpenJoiner(int pid, out bool gone) {
+        IntPtr handle = OpenProcess(0x1000 | 0x0400 | 0x0010 | 0x00100000, false, pid);
+        gone = handle == IntPtr.Zero && Marshal.GetLastWin32Error() == 87;
+        return handle;
+    }
+
+    // Whether the process behind `handle`, pinned at creation time `creation`, had exited by `failedAt`, the time
+    // (GetSystemTimePreciseAsFileTime) taken just after one of its reads failed: the handle is signalled, its exit code
+    // reads, and GetProcessTimes on the same handle gives the same creation time and an exit time no later than
+    // `failedAt`. A creation time alone proves no exit (PROBE-ALIVE-01), and a process that exits after the failed read
+    // was live when it failed, so it is not counted here. Measured on Windows 11 build 26300 with `cmd /D /C exit`
+    // children: on an exited one whose handle was held, QueryFullProcessImageNameW failed with ERROR_GEN_FAILURE (31)
+    // and ProcessCommandLineInformation with STATUS_PROCESS_IS_TERMINATING; over 20 of them the exit time was 0.6 to
+    // 3.7 ms before a precise reading taken as the wait on each returned, never after it.
+    public static bool ExitedBy(IntPtr handle, long creation, long failedAt) {
+        if (handle == IntPtr.Zero || WaitForSingleObject(handle, 0) != 0) return false;
+        uint code; long c, e, k, u;
+        if (!GetExitCodeProcess(handle, out code) || !GetProcessTimes(handle, out c, out e, out k, out u)) return false;
+        return c == creation && e != 0 && e <= failedAt;
     }
 
     // The job's completion-port reader (gui-hosted-probe.ps1's JobWatch, #738, PROBE-JOB-WATCH-OPEN-FIRST-01): every
@@ -459,8 +490,9 @@ public static class GuiHiddenRunnerNative {
                     long at; GetSystemTimePreciseAsFileTime(out at);
                     var row = new JoinedProcess { Pid = (int)overlapped.ToInt64(), Taken = at };
                     Interlocked.Increment(ref taken);
-                    row.Handle = OpenProcess(0x1000 | 0x0400 | 0x0010 | 0x00100000, false, row.Pid); // QUERY_LIMITED | QUERY | VM_READ | SYNCHRONIZE
-                    if (row.Handle == IntPtr.Zero) row.OpenFailed = true;
+                    bool gone;
+                    row.Handle = OpenJoiner(row.Pid, out gone);
+                    if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = gone; }
                     opened.Add(row);
                     continue;
                 }
@@ -475,18 +507,28 @@ public static class GuiHiddenRunnerNative {
             if (h == IntPtr.Zero) return;
             long c, e, k, u; bool member;
             bool timed = GetProcessTimes(h, out c, out e, out k, out u);
-            if (!IsProcessInJob(h, job, out member) || !member || !timed || c > row.Taken) {
+            bool asked = IsProcessInJob(h, job, out member);
+            if (!asked || !member || !timed || c > row.Taken) {
+                // With both facts read, a PID that names a process created after the joiner's message was taken, or
+                // one outside the job (which no joiner can leave: no breakaway), is not the joiner's: the joiner had
+                // exited before this open. A failed read of either fact proves nothing.
+                row.ExitedBeforeRead = asked && timed && (!member || c > row.Taken);
                 row.Unpinned = true; CloseHandle(h); row.Handle = IntPtr.Zero; return;
             }
             row.Creation = c;
             ProcessBasic basic; int returned;
             if (NtQueryInformationProcess(h, 0, out basic, Marshal.SizeOf(typeof(ProcessBasic)), out returned) == 0) row.Parent = (int)basic.parentPid.ToInt64();
+            long failedAt;
             string imagePath = ImagePathOf(h);
+            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt); }
             row.Image = imagePath == null ? null : Path.GetFileName(imagePath);
             if (row.Image != null && (string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) || string.Equals(row.Image, "noctty.com", StringComparison.OrdinalIgnoreCase))) {
                 row.IsNoctty = true;
                 row.InCopy = string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) ? SameImage(imagePath, appPath, appId) : SameImage(imagePath, cliPath, cliId);
-                row.Argv = SplitCommandLine(CommandLineOf(h));
+                string commandLine = CommandLineOf(h);
+                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt); }
+                row.Argv = SplitCommandLine(commandLine);
+                commandLine = null;
             }
             if (row.Image != null && string.Equals(row.Image, "cmd.exe", StringComparison.OrdinalIgnoreCase)) {
                 row.IsCmd = true;
@@ -747,13 +789,21 @@ function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPi
 # - a noctty.exe that an accounted noctty.com forwarded (its exact child).
 # "Exact child": the child's parent PID is a read joiner created no later than the child, so a reused PID cannot
 # vouch. Anything else fails, whoever started it (H2 on #740; Opus M1: a leaf's own shell starting noctty).
+# A joiner the reader could not read because it had already exited (`ExitedBeforeRead`: its open found no process under
+# its PID, its PID already named another process, or its pinned handle was signalled with an exit time no later than
+# the failed read; JobWatch's `OpenJoiner` and `ExitedBy`) is counted apart and does not fail the leaf: on `main`, push
+# run 45561987608 failed twice, and push run 44997457453 once, on such joiners alone (TD D112). A live joiner the
+# reader could not read still fails it, and an exited one vouches for no child. A cmd whose command line was not read
+# still fails the leaf whether or not it had exited, since its /D is what the shell rule proves.
 function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalProcesses, [int] $ExpectedShells, [string] $Token, [int] $LeafPid) {
     # A joiner counts as read only with its image too: one whose image could not be read (opened and pinned, but
-    # QueryFullProcessImageName failed) could be a cmd or a noctty, so it is unreadable, and the verdict fails.
+    # QueryFullProcessImageName failed) could be a cmd or a noctty, so it is unreadable, and the verdict fails unless
+    # it had exited first.
     $isRead = { param($Row) -not $Row.OpenFailed -and -not $Row.Unpinned -and -not [string]::IsNullOrEmpty($Row.Image) }
     $byPid = @{}
     foreach ($row in $Rows) { if (& $isRead $row) { $byPid[$row.Pid] = $row } }
     $read = @($Rows | Where-Object { & $isRead $_ }).Count
+    $exitedUnread = @($Rows | Where-Object { -not (& $isRead $_) -and $_.ExitedBeforeRead -eq $true })
     $cmds = @($Rows | Where-Object { $_.IsCmd })
     $nocttyRows = @($Rows | Where-Object { $_.IsNoctty })
     $parentOf = {
@@ -763,10 +813,10 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         return $parent
     }
     $accounted = @{}
-    $argumentRefused = 0; $argvUnread = 0; $outsideCopy = 0
+    $argumentRefused = 0; $argvUnread = 0; $argvExited = 0; $outsideCopy = 0
     foreach ($row in @($nocttyRows | Sort-Object Creation)) {
         if (-not $row.InCopy) { $outsideCopy++ }
-        if ($null -eq $row.Argv -or $row.Argv.Count -lt 1) { $argvUnread++ }
+        if ($null -eq $row.Argv -or $row.Argv.Count -lt 1) { if ($row.ExitedBeforeRead -eq $true) { $argvExited++ } else { $argvUnread++ } }
         elseif (Get-InteractiveWin11HostedArgumentRefusal -Arguments @($row.Argv | Select-Object -Skip 1) -Token $Token) { $argumentRefused++ }
         $recorded = $Launcher.ContainsKey($row.Pid) -and $Launcher[$row.Pid] -eq $row.Creation
         $parent = & $parentOf $row
@@ -783,15 +833,27 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
     }
     $unaccounted = $nocttyRows.Count - $accounted.Count
     # Every process the launcher recorded must be a joiner the reader read, by PID and creation time: one the job never
-    # reported, or reported unread, fails the leaf (#738's notSeenInJob; PROBE-JOB-WATCH-OPEN-FIRST-01).
-    $launcherNotSeen = @($Launcher.Keys | Where-Object { -not ($byPid.ContainsKey($_) -and $byPid[$_].Creation -eq $Launcher[$_]) }).Count
+    # reported, or reported unread, fails the leaf (#738's notSeenInJob; PROBE-JOB-WATCH-OPEN-FIRST-01). One the reader
+    # pinned by the same PID and creation time that had exited before its image was read was seen, and is counted apart.
+    $exitedPinned = @{}
+    foreach ($row in $exitedUnread) { if (-not $row.OpenFailed -and -not $row.Unpinned -and $row.Creation -ne 0) { $exitedPinned[$row.Pid] = $row } }
+    $launcherRead = { param($Id) $byPid.ContainsKey($Id) -and $byPid[$Id].Creation -eq $Launcher[$Id] }
+    $launcherExitedFirst = { param($Id) -not (& $launcherRead $Id) -and $exitedPinned.ContainsKey($Id) -and $exitedPinned[$Id].Creation -eq $Launcher[$Id] }
+    $launcherExited = @($Launcher.Keys | Where-Object { & $launcherExitedFirst $_ }).Count
+    $launcherNotSeen = @($Launcher.Keys | Where-Object { -not (& $launcherRead $_) -and -not (& $launcherExitedFirst $_) }).Count
     $cmdPassing = @($cmds | Where-Object { $_.CmdRead -and $_.CmdSystem -and $_.CmdAutoRunOff }).Count
     $verdict = [ordered]@{
         jobTotalProcesses = $TotalProcesses
         processesRead = $read
-        unopened = @($Rows | Where-Object { $_.OpenFailed }).Count
-        unpinned = @($Rows | Where-Object { $_.Unpinned }).Count
-        imageUnread = @($Rows | Where-Object { -not $_.OpenFailed -and -not $_.Unpinned -and [string]::IsNullOrEmpty($_.Image) }).Count
+        # The unread joiners: `unopened`, `unpinned` and `imageUnread` count the live ones, which fail the leaf; the
+        # `...Exited` counts, the ones that had exited before the read, which do not.
+        processesExitedUnread = $exitedUnread.Count
+        unopened = @($Rows | Where-Object { $_.OpenFailed -and $_.ExitedBeforeRead -ne $true }).Count
+        unopenedExited = @($exitedUnread | Where-Object { $_.OpenFailed }).Count
+        unpinned = @($Rows | Where-Object { $_.Unpinned -and $_.ExitedBeforeRead -ne $true }).Count
+        unpinnedExited = @($exitedUnread | Where-Object { $_.Unpinned }).Count
+        imageUnread = @($Rows | Where-Object { -not $_.OpenFailed -and -not $_.Unpinned -and [string]::IsNullOrEmpty($_.Image) -and $_.ExitedBeforeRead -ne $true }).Count
+        imageUnreadExited = @($exitedUnread | Where-Object { -not $_.OpenFailed -and -not $_.Unpinned }).Count
         shellsExpected = $ExpectedShells
         shellsObserved = $cmds.Count
         shellsPassing = $cmdPassing
@@ -803,10 +865,12 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
         nocttyUnaccounted = $unaccounted
         nocttyOutsideCopy = $outsideCopy
         nocttyArgvUnread = $argvUnread
+        nocttyArgvUnreadExited = $argvExited
         nocttyArgumentRefused = $argumentRefused
         launcherNotSeen = $launcherNotSeen
+        launcherExitedUnread = $launcherExited
     }
-    $verdict.passed = $TotalProcesses -eq $Rows.Count -and $read -eq $Rows.Count -and $cmdPassing -eq $cmds.Count -and
+    $verdict.passed = $TotalProcesses -eq $Rows.Count -and ($read + $exitedUnread.Count) -eq $Rows.Count -and $cmdPassing -eq $cmds.Count -and
         $cmds.Count -ge $ExpectedShells -and $unaccounted -eq 0 -and $outsideCopy -eq 0 -and $argvUnread -eq 0 -and $argumentRefused -eq 0 -and $launcherNotSeen -eq 0
     return $verdict
 }
