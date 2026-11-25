@@ -1733,10 +1733,11 @@ GUI-HIDDEN-EXITED-READ-01), unless the runner's own end of the job may have
 killed it. That takes proof:
 
 - its open failed with `ERROR_INVALID_PARAMETER` (87, no process holds the
-  PID; `GoneBeforeStop`), for a message taken before the runner ended the job;
-- or its PID, read, named a process outside the job (`Pinned`), again for a
-  message taken before the stop. A creation time later than the message leaves
-  the row unpinned and live;
+  PID; `GoneBeforeStop`), and the open completed before the runner ended the
+  job;
+- or its PID, read, named a process outside the job (`Pinned`), by a check
+  that completed before the stop. A creation time later than the message
+  leaves the row unpinned and live;
 - or, after a failed image or command-line read (`ExitedBy`), all of these:
   - the failure is a termination kind: 5 or 31 for the image, or
     `STATUS_PROCESS_IS_TERMINATING` or `STATUS_PARTIAL_COPY` for the command
@@ -1744,14 +1745,17 @@ killed it. That takes proof:
   - the pinned handle signals within 100 ms;
   - the creation time is the pinned one;
   - the exit time is no later than the failure plus that wait, and before the
-    stop.
+    stop as it stands after the wait (`ExitedBeforeStop`).
 
 The receipt counts these apart: `processesExitedUnread`, `unopenedExited`,
 `unpinnedExited`, `imageUnreadExited`, `nocttyArgvUnreadExited` and
 `launcherExitedUnread` (a launcher record matched by PID and creation time).
 `unopened`, `unpinned`, `imageUnread` and `nocttyArgvUnread` count the live
-ones, and any of those fails the leaf. An exited joiner vouches for no child,
-not even a noctty whose image was read (its own launcher record still counts),
+ones, and any of those fails the leaf. A launcher-recorded process gone at its
+open counts in `unopenedExited` and in `launcherNotSeen`, which fails the leaf:
+with no creation time it cannot match the launcher's record. An exited joiner
+vouches for no child, not even a noctty whose image was read (its own launcher
+record still counts),
 and a `cmd.exe` whose command line was not read fails whether or not it had
 exited. Such a joiner is no evidence either way: what was not read was not
 checked (its image, or a noctty's argument rule), so a short-lived stray

@@ -939,6 +939,7 @@ if (-not ('GuiHiddenContractJoiner' -as [type])) {
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 public static class GuiHiddenContractJoiner {
     // SECURITY_ATTRIBUTES (minwinbase.h), STARTUPINFOW and PROCESS_INFORMATION (processthreadsapi.h) as the x64 SDK
     // lays them out: neither header wraps them in a pshpack, so each field sits at its natural alignment. TOKEN_PRIVILEGES
@@ -1006,6 +1007,13 @@ public static class GuiHiddenContractJoiner {
     // Creation and exit time of `process`, or null.
     public static long[] Times(IntPtr process) { long c, e, k, u; return GetProcessTimes(process, out c, out e, out k, out u) ? new long[] { c, e } : null; }
     public static long Now() { long t; GetSystemTimePreciseAsFileTime(out t); return t; }
+    // The runner's end of the job during ExitedBy's wait: after `delayMs`, note the stop time in `cell[0]` and then
+    // terminate `process`, the order StopRunJob keeps (NoteStop, then TerminateJobObject).
+    public static Thread StopAndTerminateAfter(IntPtr process, int delayMs, long[] cell) {
+        var thread = new Thread(() => { Thread.Sleep(delayMs); Interlocked.Exchange(ref cell[0], Now()); TerminateProcess(process, 1); });
+        thread.IsBackground = true; thread.Start(); return thread;
+    }
+    public static long ReadStop(long[] cell) { return Interlocked.Read(ref cell[0]); }
     // The error of opening `pid` for SYNCHRONIZE alone, 0 when it opens: ERROR_INVALID_PARAMETER (87) when no process
     // holds the PID, anything else when one does.
     public static int OpenError(int pid) {
@@ -1068,10 +1076,10 @@ if (-not [string]::Equals([GuiHiddenContractJoiner]::Layout(), $guiJoinerLayout,
 # passes its own termination kind; the leaf's stop tells the watch (#752's Opus seat: a mutant that marked every unpinned
 # joiner exited passed the contracts, since nothing pinned the call site).
 foreach ($site in @(
-        @{ Name = 'the open'; Pattern = 'if \(row\.Handle == IntPtr\.Zero\) \{ row\.OpenFailed = true; row\.ExitedBeforeRead = GoneBeforeStop\(gone, row\.Taken, StopAt\); \}' }
-        @{ Name = 'the pin'; Pattern = 'if \(!Pinned\(timed, asked, member, c, row\.Taken, StopAt, out exitedFirst\)\) \{\s*row\.ExitedBeforeRead = exitedFirst;\s*row\.Unpinned = true;' }
-        @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBy\(h, c, failedAt, ImageReadEnded\(readError\), StopAt\); \}' }
-        @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBy\(h, c, failedAt, CommandLineReadEnded\(readError\), StopAt\); \}' }
+        @{ Name = 'the open'; Pattern = 'row\.Handle = OpenJoiner\(row\.Pid, out gone\);\s*long openedAt; GetSystemTimePreciseAsFileTime\(out openedAt\);\s*if \(row\.Handle == IntPtr\.Zero\) \{ row\.OpenFailed = true; row\.ExitedBeforeRead = GoneBeforeStop\(gone, openedAt, StopAt\); \}' }
+        @{ Name = 'the pin'; Pattern = 'bool asked = IsProcessInJob\(h, job, out member\);\s*long checkedAt; GetSystemTimePreciseAsFileTime\(out checkedAt\);\s*bool exitedFirst;\s*if \(!Pinned\(timed, asked, member, c, row\.Taken, checkedAt, StopAt, out exitedFirst\)\) \{\s*row\.ExitedBeforeRead = exitedFirst;\s*row\.Unpinned = true;' }
+        @{ Name = 'the image read'; Pattern = 'string imagePath = ImagePathOf\(h, out readError\);\s*if \(imagePath == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, ImageReadEnded\(readError\), \(\) => StopAt\); \}' }
+        @{ Name = 'the command-line read'; Pattern = 'string commandLine = CommandLineOf\(h, out readError\);\s*if \(commandLine == null\) \{ GetSystemTimePreciseAsFileTime\(out failedAt\); row\.ExitedBeforeRead = ExitedBeforeStop\(h, c, failedAt, CommandLineReadEnded\(readError\), \(\) => StopAt\); \}' }
         @{ Name = 'the stop'; Pattern = 'public static int StopRunJob\(IntPtr job, JobWatch watch\) \{\s*if \(watch != null\) watch\.NoteStop\(\);\s*return StopRunJob\(job\);' }
     )) {
     if ($guiRunnerSource -notmatch $site.Pattern) { throw "The reader's exited mark at $($site.Name) no longer goes through its predicate." }
@@ -1081,33 +1089,34 @@ if (@($guiRunnerAst.FindAll({ param($n) $n -is [System.Management.Automation.Lan
 }
 
 # Pinned: only a joiner read in the job and created no later than its message is pinned, and only one read outside the
-# job, from a message taken before the stop, had exited; a later creation time (a backward clock step gives one) is
-# unpinned and live.
+# job, by a check that completed before the stop, had exited; a later creation time (a backward clock step gives one) is
+# unpinned and live. A message taken before the stop is not enough when the check itself completed after it.
 $guiMax = [long]::MaxValue
 foreach ($case in @(
-        @{ Timed = $true; Asked = $true; Member = $true; Creation = 10; Taken = 20; Stop = $guiMax; Pinned = $true; Exited = $false }
-        @{ Timed = $true; Asked = $true; Member = $true; Creation = 20; Taken = 20; Stop = $guiMax; Pinned = $true; Exited = $false }
-        @{ Timed = $true; Asked = $true; Member = $true; Creation = 30; Taken = 20; Stop = $guiMax; Pinned = $false; Exited = $false }
-        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Stop = $guiMax; Pinned = $false; Exited = $true }
-        @{ Timed = $false; Asked = $true; Member = $false; Creation = 0; Taken = 20; Stop = $guiMax; Pinned = $false; Exited = $true }
-        @{ Timed = $false; Asked = $true; Member = $true; Creation = 0; Taken = 20; Stop = $guiMax; Pinned = $false; Exited = $false }
-        @{ Timed = $true; Asked = $false; Member = $false; Creation = 10; Taken = 20; Stop = $guiMax; Pinned = $false; Exited = $false }
-        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Stop = 20; Pinned = $false; Exited = $false }
-        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Stop = 21; Pinned = $false; Exited = $true }
+        @{ Timed = $true; Asked = $true; Member = $true; Creation = 10; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $true; Exited = $false }
+        @{ Timed = $true; Asked = $true; Member = $true; Creation = 20; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $true; Exited = $false }
+        @{ Timed = $true; Asked = $true; Member = $true; Creation = 30; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $false; Exited = $false }
+        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $false; Exited = $true }
+        @{ Timed = $false; Asked = $true; Member = $false; Creation = 0; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $false; Exited = $true }
+        @{ Timed = $false; Asked = $true; Member = $true; Creation = 0; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $false; Exited = $false }
+        @{ Timed = $true; Asked = $false; Member = $false; Creation = 10; Taken = 20; Checked = 22; Stop = $guiMax; Pinned = $false; Exited = $false }
+        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Checked = 22; Stop = 22; Pinned = $false; Exited = $false }
+        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Checked = 22; Stop = 23; Pinned = $false; Exited = $true }
+        @{ Timed = $true; Asked = $true; Member = $false; Creation = 10; Taken = 20; Checked = 22; Stop = 21; Pinned = $false; Exited = $false }
     )) {
     $exitedFirst = $false
-    $pinned = [GuiHiddenRunnerNative]::Pinned($case.Timed, $case.Asked, $case.Member, $case.Creation, $case.Taken, $case.Stop, [ref]$exitedFirst)
+    $pinned = [GuiHiddenRunnerNative]::Pinned($case.Timed, $case.Asked, $case.Member, $case.Creation, $case.Taken, $case.Checked, $case.Stop, [ref]$exitedFirst)
     if ($pinned -ne $case.Pinned -or $exitedFirst -ne $case.Exited) {
-        throw "Pinned misjudged timed $($case.Timed), asked $($case.Asked), member $($case.Member), creation $($case.Creation), taken $($case.Taken), stop $($case.Stop)."
+        throw "Pinned misjudged timed $($case.Timed), asked $($case.Asked), member $($case.Member), creation $($case.Creation), taken $($case.Taken), checked $($case.Checked), stop $($case.Stop)."
     }
 }
 foreach ($case in @(
-        @{ Gone = $true; Taken = 20; Stop = $guiMax; Exited = $true }
-        @{ Gone = $false; Taken = 20; Stop = $guiMax; Exited = $false }
-        @{ Gone = $true; Taken = 20; Stop = 20; Exited = $false }
-        @{ Gone = $true; Taken = 20; Stop = 21; Exited = $true }
+        @{ Gone = $true; Checked = 20; Stop = $guiMax; Exited = $true }
+        @{ Gone = $false; Checked = 20; Stop = $guiMax; Exited = $false }
+        @{ Gone = $true; Checked = 20; Stop = 20; Exited = $false }
+        @{ Gone = $true; Checked = 20; Stop = 21; Exited = $true }
     )) {
-    if ([GuiHiddenRunnerNative]::GoneBeforeStop($case.Gone, $case.Taken, $case.Stop) -ne $case.Exited) { throw "GoneBeforeStop misjudged gone $($case.Gone), taken $($case.Taken), stop $($case.Stop)." }
+    if ([GuiHiddenRunnerNative]::GoneBeforeStop($case.Gone, $case.Checked, $case.Stop) -ne $case.Exited) { throw "GoneBeforeStop misjudged gone $($case.Gone), checked $($case.Checked), stop $($case.Stop)." }
 }
 
 $guiJoinerCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
@@ -1154,6 +1163,20 @@ try {
             throw "ExitedBy misjudged $($case.Name)."
         }
     }
+    # ExitedBeforeStop reads the stop time after the wait (Greptile and CodeRabbit on #752): an exited process with no
+    # stop passes; a live one the runner's end of the job kills during the wait, its stop noted first, does not.
+    $guiStopCell = [long[]]@($guiMax)
+    if (-not [GuiHiddenRunnerNative]::ExitedBeforeStop($exited.process, $times[0], [GuiHiddenContractJoiner]::Now(), $true, [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) })) {
+        throw 'ExitedBeforeStop refused an exited process with no stop.'
+    }
+    $stopped = [GuiHiddenContractJoiner]::StartSuspended($guiJoinerCmd, $guiJoinerLine, $null, [IntPtr]::Zero)
+    $guiJoinerOpen.Add($stopped)
+    $stoppedCreation = ([GuiHiddenContractJoiner]::Times($stopped.process))[0]
+    $stopper = [GuiHiddenContractJoiner]::StopAndTerminateAfter($stopped.process, 30, $guiStopCell)
+    $stoppedExited = [GuiHiddenRunnerNative]::ExitedBeforeStop($stopped.process, $stoppedCreation, [GuiHiddenContractJoiner]::Now(), $true, [Func[long]] { [GuiHiddenContractJoiner]::ReadStop($guiStopCell) })
+    if (-not $stopper.Join(5000)) { throw 'The stop control''s thread did not finish.' }
+    if ([GuiHiddenContractJoiner]::ReadStop($guiStopCell) -eq $guiMax) { throw 'The stop control never noted its stop.' }
+    if ($stoppedExited) { throw 'ExitedBeforeStop counted a joiner the runner ended during its wait as exited before the stop.' }
     # Its PID once its last handle is closed: no process holds it, so OpenJoiner says gone. When a process holds the PID
     # again (it opens, or refuses the open), the control is skipped and says so.
     $gonePid = $exited.pid

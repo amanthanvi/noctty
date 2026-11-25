@@ -454,20 +454,22 @@ public static class GuiHiddenRunnerNative {
         return handle;
     }
 
-    // Whether a joiner whose open found no process (`gone`) had exited before its read: only when its message was
-    // taken before the runner ended the job (`stopAt`, JobWatch.NoteStop), since a joiner the runner killed is gone
-    // too.
-    public static bool GoneBeforeStop(bool gone, long taken, long stopAt) { return gone && taken < stopAt; }
+    // Whether a joiner whose open found no process (`gone`) had exited before its read: only when the open completed
+    // (`checkedAt`, sampled after it returned) before the runner ended the job (`stopAt`, JobWatch.NoteStop, read after
+    // that sample), since a joiner the runner killed is gone too. The message's dequeue time is not enough: the reader
+    // may pause between taking the message and opening the PID (CodeRabbit on #752).
+    public static bool GoneBeforeStop(bool gone, long checkedAt, long stopAt) { return gone && checkedAt < stopAt; }
 
     // Whether the reader pins the process it opened as the joiner: its creation time and its job membership both
-    // read, in the job, and created no later than the joiner's message was taken. `exited`: an unpinned one had
-    // exited before the open only when its membership was read as outside the job, which no joiner can leave (no
-    // breakaway), so the PID names another process; and only for a message taken before the runner ended the job. A
-    // creation time later than the message is not proof of a reused PID, since a backward clock step gives one too
-    // (#752's Opus seat), so that row is unpinned and live.
-    public static bool Pinned(bool timed, bool asked, bool member, long creation, long taken, long stopAt, out bool exited) {
+    // read, in the job, and created no later than the joiner's message was taken (`taken`). `exited`: an unpinned one
+    // had exited before the open only when its membership was read as outside the job, which no joiner can leave (no
+    // breakaway), so the PID names another process; and only when that check completed (`checkedAt`) before the runner
+    // ended the job, not merely the message's dequeue (CodeRabbit on #752). A creation time later than the message is
+    // not proof of a reused PID, since a backward clock step gives one too (#752's Opus seat), so that row is unpinned
+    // and live.
+    public static bool Pinned(bool timed, bool asked, bool member, long creation, long taken, long checkedAt, long stopAt, out bool exited) {
         bool pinned = timed && asked && member && creation <= taken;
-        exited = !pinned && asked && !member && taken < stopAt;
+        exited = !pinned && asked && !member && checkedAt < stopAt;
         return pinned;
     }
 
@@ -499,6 +501,14 @@ public static class GuiHiddenRunnerNative {
         uint code; long c, e, k, u;
         if (!GetExitCodeProcess(handle, out code) || !GetProcessTimes(handle, out c, out e, out k, out u)) return false;
         return c == creation && e != 0 && e <= failedAt + ExitWaitMs * 10000L && e < stopAt;
+    }
+
+    // ExitedBy against the runner's stop time as it stands after the wait: the runner may end the job while ExitedBy
+    // waits for the handle, so a stop time read before the wait could excuse a joiner the runner killed (Greptile and
+    // CodeRabbit on #752). The first call waits with no stop bound; the second, on a handle already signalled, returns
+    // at once and reads `stopAt` only then.
+    public static bool ExitedBeforeStop(IntPtr handle, long creation, long failedAt, bool terminating, Func<long> stopAt) {
+        return ExitedBy(handle, creation, failedAt, terminating, long.MaxValue) && ExitedBy(handle, creation, failedAt, terminating, stopAt());
     }
 
     // The job's completion-port reader (gui-hosted-probe.ps1's JobWatch, #738, PROBE-JOB-WATCH-OPEN-FIRST-01): every
@@ -544,7 +554,8 @@ public static class GuiHiddenRunnerNative {
                     Interlocked.Increment(ref taken);
                     bool gone;
                     row.Handle = OpenJoiner(row.Pid, out gone);
-                    if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = GoneBeforeStop(gone, row.Taken, StopAt); }
+                    long openedAt; GetSystemTimePreciseAsFileTime(out openedAt);
+                    if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = GoneBeforeStop(gone, openedAt, StopAt); }
                     opened.Add(row);
                     continue;
                 }
@@ -560,8 +571,9 @@ public static class GuiHiddenRunnerNative {
             long c, e, k, u; bool member;
             bool timed = GetProcessTimes(h, out c, out e, out k, out u);
             bool asked = IsProcessInJob(h, job, out member);
+            long checkedAt; GetSystemTimePreciseAsFileTime(out checkedAt);
             bool exitedFirst;
-            if (!Pinned(timed, asked, member, c, row.Taken, StopAt, out exitedFirst)) {
+            if (!Pinned(timed, asked, member, c, row.Taken, checkedAt, StopAt, out exitedFirst)) {
                 row.ExitedBeforeRead = exitedFirst;
                 row.Unpinned = true; CloseHandle(h); row.Handle = IntPtr.Zero; return;
             }
@@ -570,13 +582,13 @@ public static class GuiHiddenRunnerNative {
             if (NtQueryInformationProcess(h, 0, out basic, Marshal.SizeOf(typeof(ProcessBasic)), out returned) == 0) row.Parent = (int)basic.parentPid.ToInt64();
             long failedAt; int readError;
             string imagePath = ImagePathOf(h, out readError);
-            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt, ImageReadEnded(readError), StopAt); }
+            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, ImageReadEnded(readError), () => StopAt); }
             row.Image = imagePath == null ? null : Path.GetFileName(imagePath);
             if (row.Image != null && (string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) || string.Equals(row.Image, "noctty.com", StringComparison.OrdinalIgnoreCase))) {
                 row.IsNoctty = true;
                 row.InCopy = string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) ? SameImage(imagePath, appPath, appId) : SameImage(imagePath, cliPath, cliId);
                 string commandLine = CommandLineOf(h, out readError);
-                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt, CommandLineReadEnded(readError), StopAt); }
+                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBeforeStop(h, c, failedAt, CommandLineReadEnded(readError), () => StopAt); }
                 row.Argv = SplitCommandLine(commandLine);
                 commandLine = null;
             }
