@@ -18024,12 +18024,13 @@ test "Terminal: index without scrollback across two pages keeps a top-row-pin at
     try testTopRowPinAcrossPages(&t);
 }
 
-// Where this fork still differs from main (CLICK-PIN-01, leftover 2): when the
-// active area starts below page row 0, the fast path's region top is not page
-// row 0, so it moves a top-row pin up one row, out of the active area, with its
-// column; main's eraseRow(.active) leaves it at active (3, 0). A left release
-// then finds no press cell in the viewport and opens the link under the
-// pointer, as main does. A change to that route updates this test knowingly.
+// Where this fork still differs from main (CLICK-PIN-01, leftover (1)): when
+// the active area starts below page row 0, the fast path's region top is not
+// page row 0, so it moves a top-row pin up one row, out of the active area,
+// with its column; main's eraseRow(.active) leaves it at active (3, 0). A left
+// release then finds no press cell in the viewport and opens the link under
+// the pointer, as main does. A change to that route updates this test
+// knowingly.
 test "Terminal: index without scrollback from an active top below page row 0 moves a top-row-pin above the active area" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 0 });

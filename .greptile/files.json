@@ -423,6 +423,7 @@
         "src/test_shard.zig",
         "src/main.zig",
         "src/sync/isolated.zig",
+        "src/apprt/win32/ipc_server.zig",
         "src/sync/symbolise.zig",
         "src/sync/compare.zig",
         "src/sync/state_mutex.zig",

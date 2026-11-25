@@ -47,9 +47,14 @@ if ($pathKindsFound.Count -ne 0) {
 
 # Negative control: the same check, in a scratch repository with planted files, one under a
 # group pattern, one an explicit delete-list path, one a nested gtk file, and one that is
-# allowed (a fork file beside them), must find exactly the three planted ones.
-$pathKindsScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-pathkinds-' + [Guid]::NewGuid().ToString('N'))
+# allowed (a fork file beside them), must find exactly the three planted ones. The scratch
+# repository sits under the checkout's git-ignored .zig-cache, where the contracts' Zig
+# fixture batch already installs (.zig-cache\flagship-fixtures), not under %TEMP%, and is
+# removed again whatever the control found.
+$pathKindsScratchParent = Join-Path $repoRoot '.zig-cache\flagship-contracts'
+$pathKindsScratch = Join-Path $pathKindsScratchParent ('pathkinds-' + [Guid]::NewGuid().ToString('N'))
 try {
+    [void](New-Item -ItemType Directory -Force -Path $pathKindsScratchParent)
     [void](New-Item -ItemType Directory -Path $pathKindsScratch)
     & git -C $pathKindsScratch -c init.templateDir= init -q
     if ($LASTEXITCODE -ne 0) { throw 'git init failed for the path-kinds control.' }
