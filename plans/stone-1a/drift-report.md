@@ -1,5 +1,7 @@
 # 1A drift report: stepping stone → `main`
 
+- **Report date:** 2026-11-25
+
 ## Identity
 
 | Item                                  | Value                                                                                                                                                   |
@@ -10,6 +12,9 @@
 | Landing merge (`main` after)          | `f739b4c7bc2404ef1fe8837c425dc4090f542af7` (merged 2026-11-25 06:37:08Z), a merge commit of #748: first parent `358ce0f6a`, second parent the gated tip |
 | Tree                                  | `2a50ea83a7b1567e5a77d5d3aabb6fce3379de6d`, equal to the gated tip's tree                                                                               |
 | Upstream merge base after the landing | `74d0c72fd`; the next forward step (1B) moves the base to v1.4.0                                                                                        |
+
+Below, `main` in a comparison (the accepted differences and the soak pairs) means `358ce0f6a`, the base
+before the landing. P8-3 ran after the merge, but its `main` copies are the same `358ce0f6a` packages as P8-2's.
 
 ## What landed
 
@@ -29,8 +34,8 @@
   - the PKG-23 harness;
   - the test-config guard;
   - the click-pin fix.
-- **lib-vt:** unchanged by the landing; the portable ZIP keeps #688's signed `ghostty-vt.dll` stub (decision 35,
-  `62e49dd8d`, already on `main`).
+- **lib-vt packaging:** unchanged by the landing; the portable ZIP keeps #688's signed `ghostty-vt.dll` stub
+  (decision 35, `62e49dd8d`, already on `main`).
 - **One forward merge of `main`,** through #747.
 
 ## Accepted differences from `main` (maintainer, 2026-11-23)
@@ -95,7 +100,7 @@ The plan's Phase 0a delta, items 15–22:
       for 8 hours.
     - **P8-2** (rule sha256 `c55b35b6f3164e50`, undisturbed): ReleaseSafe PASS, paired -0.20 MB/h with an upper bound
       of +0.14. ReleaseFast FAIL, +29.98 with an upper bound of +58.27. `main`'s ReleaseFast copy levelled off at
-      about 215 MiB; the tip's copy and `main`'s own ReleaseSafe copy at about 368. All four were flat over
+      about 215 MiB, the tip's at about 370, and `main`'s own ReleaseSafe copy at about 368. All four were flat over
       minutes 361-480.
     - **The maintainer waived the ReleaseFast failure for landing** (2026-11-25, D108 option A).
     - **P8-3** (ReleaseFast, the tip x2 and `main` x2, rule sha256 `9c3f44fee16f33e3`, undisturbed): PASS. The
@@ -139,8 +144,8 @@ p95 are therefore unmeasured for 1A.
   windows-2025 (expected 340 handles, found 474), and passed on the rerun.
   - The same job passed on the PR-event run, on the same image. No cause was traced.
   - The test counts the whole process's handles. Isolating it is follow-up PR 2.
-- **Foreign activity during the measurement windows:** an MSVC `link`/`vctip` process at 12:11Z, during the D82
-  rerun, from an unknown source.
+- **Foreign activity during the measurement windows:** an MSVC `link`/`vctip` process at 12:11Z on 2026-11-23,
+  during the D82 rerun, from an unknown source.
   - No RDP or Chrome Remote Desktop connection was logged. Whether another remote-access tool was in use is
     unsettled.
 - **Idle checks:** they see RDP sessions only. For the clicks, the direct evidence is the unchanged guards.
@@ -170,10 +175,12 @@ the release workflow's promote mode with the recorded candidate and manifest.
      cover different text at `f0a5dc507`);
    - the PKG-23 README lines;
    - the plan deltas.
-2. **A test-hygiene PR:**
+2. **A test-hygiene PR (#752):**
    - the IPC handle test counts only its own handles;
-   - the PathKinds negative-control scratch moves under the run directory;
+   - the PathKinds negative-control scratch moves out of `%TEMP%`, under the checkout's ignored `.zig-cache`;
    - the GUI process audit tells a process that exited before its argv was read from a live one it can't read,
-     with a negative control that still fails the live case (TD D112).
+     with a negative control that still fails the live case (TD D112);
+   - the click-pin comments: `eraseRowBounded`'s "(main parity)" label in `PageList.zig`, the two "here"s in
+     `Screen.cursorScrollRegionUp`, and the "leftover 2" test comment in `Terminal.zig`.
 
    It takes the full suite and a seat review.
