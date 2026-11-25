@@ -279,7 +279,7 @@ that govern each symbol you change, or that none does.
   policy, keyboard-mode recovery at the prompt after a TUI leaves Kitty or
   modifyOtherKeys flags set (`CSI <99u`, `CSI >4;0m`).
 - [terminal-core.md](docs/agents/log/terminal-core.md): `src/terminal/` (VT
-  parser limits, `PageList` and its page serials (`page_serial_min`,
+  parser limits, `PageList` and its page serials (`page_serial_epoch`,
   `nodeIsValid`, the source renewal in `PageList.split`), `PageList.Node`'s
   accessors (`page()`, `rows()`, `cols()`, `capacity()`, `Node.Data`, and
   from the stepping-stone merge upstream's `pageIfResident()`,

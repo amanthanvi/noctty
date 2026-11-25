@@ -1,5 +1,5 @@
 # Phase 1A residual ledger, PLAN §3.3 and TD D43.
-# Stone 74d0c72fd9318ad3ab95bfb56f6c2d995e267e2e; classified tip 362873bbe623b7d9cc672c7ce744aaee60781b12.
+# Stone 74d0c72fd9318ad3ab95bfb56f6c2d995e267e2e; classified tip f0a5dc507ad335ba08292a9e8202ea53bcfd1dee.
 # 385 changed shared paths of 5016; 2466 diff records; +67201/-22733 text lines.
 # id: stable key for a path and hunk fingerprint(s). path: Git path. class: PLAN §2.1 owner class.
 # granularity: file for uniform class 1; hunk for mixed class 1 and all other classes.
