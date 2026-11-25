@@ -931,8 +931,10 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class GuiHiddenContractJoiner {
-    // SECURITY_ATTRIBUTES, STARTUPINFOW and PROCESS_INFORMATION as the x64 SDK lays them out (no pshpack): the sizes
-    // the runner's pinned layout gives them, checked by Sizes() before anything starts.
+    // SECURITY_ATTRIBUTES (minwinbase.h), STARTUPINFOW and PROCESS_INFORMATION (processthreadsapi.h) as the x64 SDK
+    // lays them out: neither header wraps them in a pshpack, so each field sits at its natural alignment. Layout()
+    // reports each struct's marshalled size and every field's offset, and the contract refuses to start anything
+    // unless it equals the SDK's literal below (AGENTS.md "Win32 FFI").
     [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public int inherit; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct Startup {
         public int cb; public string reserved, desktop, title;
@@ -949,8 +951,17 @@ public static class GuiHiddenContractJoiner {
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll")] static extern void GetSystemTimePreciseAsFileTime(out long time);
-    public static string Sizes() {
-        return Marshal.SizeOf(typeof(SecurityAttributes)) + " " + Marshal.SizeOf(typeof(Startup)) + " " + Marshal.SizeOf(typeof(ProcessInfo));
+    static string LayoutOf(Type type, params string[] fields) {
+        var parts = new System.Collections.Generic.List<string> { type.Name + "=" + Marshal.SizeOf(type) };
+        foreach (string field in fields) parts.Add(field + "@" + Marshal.OffsetOf(type, field));
+        return string.Join(" ", parts);
+    }
+    public static string Layout() {
+        return string.Join("; ", new[] {
+            LayoutOf(typeof(SecurityAttributes), "length", "descriptor", "inherit"),
+            LayoutOf(typeof(Startup), "cb", "reserved", "desktop", "title", "x", "y", "cx", "cy", "charsX", "charsY", "fill", "flags",
+                "show", "reservedBytes", "reservedPointer", "input", "output", "error"),
+            LayoutOf(typeof(ProcessInfo), "process", "thread", "pid", "tid") });
     }
     // Starts `app` suspended and without a window, with `sddl` as its security descriptor when one is given, and
     // assigns it to `job` (when not zero). It is never resumed: the caller terminates it and closes both handles.
@@ -980,7 +991,15 @@ public static class GuiHiddenContractJoiner {
 }
 '@
 }
-if ([GuiHiddenContractJoiner]::Sizes() -cne '24 104 24') { throw 'The contract''s process structs are not laid out as the SDK''s.' }
+# The x64 SDK's sizes and offsets: SECURITY_ATTRIBUTES { DWORD nLength; LPVOID lpSecurityDescriptor; BOOL bInheritHandle; },
+# STARTUPINFOW (a DWORD, three pointers, eight DWORDs, two WORDs, then four pointers) and PROCESS_INFORMATION (two
+# handles, then two DWORDs).
+$guiJoinerLayout = 'SecurityAttributes=24 length@0 descriptor@8 inherit@16; ' +
+    'Startup=104 cb@0 reserved@8 desktop@16 title@24 x@32 y@36 cx@40 cy@44 charsX@48 charsY@52 fill@56 flags@60 show@64 reservedBytes@66 reservedPointer@72 input@80 output@88 error@96; ' +
+    'ProcessInfo=24 process@0 thread@8 pid@16 tid@20'
+if (-not [string]::Equals([GuiHiddenContractJoiner]::Layout(), $guiJoinerLayout, [StringComparison]::Ordinal)) {
+    throw 'The contract''s process structs are not laid out as the SDK''s.'
+}
 $guiJoinerCmd = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
 $guiJoinerLine = "`"$guiJoinerCmd`" /D /C exit 7"
 $guiJoinerUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
