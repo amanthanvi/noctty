@@ -97,8 +97,15 @@ The plan's Phase 0a delta, items 15–22:
       of +0.14. ReleaseFast FAIL, +29.98 with an upper bound of +58.27. `main`'s ReleaseFast copy levelled off at
       about 215 MiB; the tip's copy and `main`'s own ReleaseSafe copy at about 368. All four were flat over
       minutes 361-480.
-    - **The maintainer waived the ReleaseFast failure for landing** (2026-11-25, D108 option A). Inferred, not shown:
-      the tip does not raise the ReleaseFast ceiling.
+    - **The maintainer waived the ReleaseFast failure for landing** (2026-11-25, D108 option A).
+    - **P8-3** (ReleaseFast, the tip x2 and `main` x2, rule sha256 `9c3f44fee16f33e3`, undisturbed): PASS. The
+      ceiling rule R1: the tip's minute 421-480 medians are 289.6 and 178.5 MiB against `main`'s 289.6 and 258.3,
+      so neither tip copy sits above both `main` copies. The bounded rule R2: both tip copies are flat over
+      minutes 361-480 (+0.65 and +0.90 MB/h, lower bounds -1.44 and -1.27).
+    - **Observed:** across P8-2 and P8-3 the tip's three ReleaseFast ceilings are 370, 289.6 and 178.5 MiB, a
+      192 MiB spread within one build, larger than the 155 MiB difference P8-2 failed on; `main`'s three are 215,
+      289.6 and 258.3. Inferred: the ceiling is set per copy, not per build. Not shown: that there is no build
+      effect smaller than that spread, with three copies per build.
 - **Hosted runs at the tip:**
   - the PR-event runs, including Test 45173017558 and GUI Hidden Desktop 45173017745;
   - Windows 10 branches 45175879544, with the windows-2022 skip budget passing;
@@ -138,15 +145,20 @@ p95 are therefore unmeasured for 1A.
     unsettled.
 - **Idle checks:** they see RDP sessions only. For the clicks, the direct evidence is the unchanged guards.
 
-## Promotion gate (TD D108, D109, D111, D112)
+## Promotion gate (TD D108, D109, D111, D112, D114)
 
-Promotion of 1.3.139 now waits only on P8-3 (the other two items are closed):
+The gate added for the soak waiver is met:
 
-- a P8-3 pass: ReleaseFast, the tip x2 and `main` x2 (launched tip first), under D108's ceiling rule R1 and bounded
-  rule R2;
+- ~~a P8-3 pass~~: PASS (2026-11-25 16:12Z; see the soaks above);
 - ~~the redone T-RS role compare~~: closed by TD D111 (ADVISORY, exactly night1's 12 pairs outside the table);
 - ~~a passing GUI Hidden Desktop run on `main` at or after the merge~~ (TD D112): closed by the scheduled run
   45570413518 at `f739b4c7b` (2026-11-25 07:43Z, success).
+
+Promotion still waits on the plan's prerelease soak: v1.3.139 was published on 2026-11-25 at 07:59Z, so the
+window ends on 2026-12-02 at the earliest and 2026-12-09 at the latest. The go condition is no unexplained
+regression in the 1A areas; shortening the window is the maintainer's call. The soak counts only for copies that
+run 1.3.139, because the updater doesn't offer prereleases. At promotion, the stable-copy PR lands first, then
+the release workflow's promote mode with the recorded candidate and manifest.
 
 ## Follow-ups (TD D95), after the hold is deleted
 
