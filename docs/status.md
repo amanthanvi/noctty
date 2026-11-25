@@ -13,8 +13,8 @@ paths, shells, updates, automation, and troubleshooting, see
 
 ## Upstream
 
-noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
-2026-04-05). It is a hard fork with scheduled merge windows; see the
+noctty is based on upstream's stepping stone toward v1.4.0 (`1.3.2-dev`,
+`74d0c72fd`, 2026-07-20), merged by #748. It is a hard fork with scheduled merge windows; see the
 [upstream merge policy](upstream-merge-policy.md).
 
 ## Supported platform
