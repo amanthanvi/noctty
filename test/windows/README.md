@@ -1729,26 +1729,34 @@ ConPTY pair) changed.
 
 **What it counts without failing.** A joiner the reader could not read because
 the process had already exited (test-harnesses.md: 2026-11-25
-GUI-HIDDEN-EXITED-READ-01). That takes proof:
+GUI-HIDDEN-EXITED-READ-01), unless the runner's own end of the job may have
+killed it. That takes proof:
 
 - its open failed with `ERROR_INVALID_PARAMETER` (87, no process holds the
-  PID; `OpenJoiner`);
-- or its PID, read, already named a process created after the joiner's
-  message, or one outside the job;
-- or, after a failed image or command-line read, its pinned handle is
-  signalled, its exit code reads, and its creation time is the pinned one with
-  an exit time no later than the failure (`ExitedBy`).
+  PID; `GoneBeforeStop`), for a message taken before the runner ended the job;
+- or its PID, read, named a process outside the job (`Pinned`), again for a
+  message taken before the stop. A creation time later than the message leaves
+  the row unpinned and live;
+- or, after a failed image or command-line read (`ExitedBy`), all of these:
+  - the failure is a termination kind: 5 or 31 for the image, or
+    `STATUS_PROCESS_IS_TERMINATING` or `STATUS_PARTIAL_COPY` for the command
+    line, as measured on exiting processes;
+  - the pinned handle signals within 100 ms;
+  - the creation time is the pinned one;
+  - the exit time is no later than the failure plus that wait, and before the
+    stop.
 
 The receipt counts these apart: `processesExitedUnread`, `unopenedExited`,
 `unpinnedExited`, `imageUnreadExited`, `nocttyArgvUnreadExited` and
 `launcherExitedUnread` (a launcher record matched by PID and creation time).
 `unopened`, `unpinned`, `imageUnread` and `nocttyArgvUnread` count the live
 ones, and any of those fails the leaf. An exited joiner vouches for no child,
+not even a noctty whose image was read (its own launcher record still counts),
 and a `cmd.exe` whose command line was not read fails whether or not it had
 exited. Such a joiner is no evidence either way: what was not read was not
 checked (its image, or a noctty's argument rule), so a short-lived stray
-process passes, counted. A read that fails while the process is still exiting
-stays a live failure.
+process passes, counted. Any other failure, or an exit that does not signal
+within the wait, stays a live failure.
 
 **The real-input module.** `scripts/interactive-win11-realinput.ps1`
 (`InteractiveWin11RealInput`) holds the input and foreground calls. Window-lib

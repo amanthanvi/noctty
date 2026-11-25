@@ -53,8 +53,9 @@ child of an accounted noctty.exe; shell-command's PATH lookup), or a noctty.exe 
 A leaf passes only with every joiner read (the job's TotalProcesses against the processes read, each with its image),
 every cmd read and passing, at least the plan's expectedShells of them, and every noctty accounted for. A joiner, or
 a noctty's command line, that could not be read because the process had already exited (its PID held no process when
-it was opened, or already named another one, or its handle was signalled with an exit time no later than the failed
-read) is counted apart (`...Exited` in the receipt) and does not fail the leaf; one still running fails it. The k-th cmd
+it was opened, or already named a process outside the job, or the read failed the way an exited process's read fails
+and its handle signalled within 100 ms with its exit time) is counted apart (`...Exited` in the receipt) and does not
+fail the leaf, unless the runner's own end of the job killed it; one still running fails it. The k-th cmd
 read creates `shell-read-<k>.flag` in the leaf's run directory, the barrier a one-shot `/c` stimulus waits on. While
 the leaf runs, and once more before its job is ended, no window of its job may sit on Default (polled every 500 ms: a
 window that opens and closes between two samples is not seen). Afterwards the leaf's receipt must be complete and say
@@ -280,6 +281,13 @@ public static class GuiHiddenRunnerNative {
         return job;
     }
 
+    // StopRunJob, first telling `watch` the moment the runner ends the job (JobWatch.NoteStop), so a joiner the runner
+    // itself killed is never counted as one that had exited before its read (#752's Opus seat).
+    public static int StopRunJob(IntPtr job, JobWatch watch) {
+        if (watch != null) watch.NoteStop();
+        return StopRunJob(job);
+    }
+
     // Ends every process of the job and waits (at most 10 s) until none is active. Returns the job's TotalProcesses.
     public static int StopRunJob(IntPtr job) {
         TerminateJobObject(job, 1);
@@ -397,28 +405,37 @@ public static class GuiHiddenRunnerNative {
         return 1;
     }
 
-    static string CommandLineOf(IntPtr process) {
+    static string CommandLineOf(IntPtr process) { int status; return CommandLineOf(process, out status); }
+
+    // The command line of `process`, or null. `status` is the NTSTATUS of the query that failed, -1 for a length or text
+    // the reader refuses, and 0 once read.
+    public static string CommandLineOf(IntPtr process, out int status) {
         int length;
-        NtQueryInformationProcess(process, 60, IntPtr.Zero, 0, out length); // ProcessCommandLineInformation
-        if (length <= 16 || length > (1 << 20)) return null;
+        status = NtQueryInformationProcess(process, 60, IntPtr.Zero, 0, out length); // ProcessCommandLineInformation
+        if (length <= 16 || length > (1 << 20)) { if (status == 0) status = -1; return null; }
         IntPtr buffer = Marshal.AllocHGlobal(length);
         try {
-            if (NtQueryInformationProcess(process, 60, buffer, length, out length) != 0) return null;
+            status = NtQueryInformationProcess(process, 60, buffer, length, out length);
+            if (status != 0) return null;
             int bytes = (ushort)Marshal.ReadInt16(buffer);
             IntPtr text = Marshal.ReadIntPtr(buffer, 8); // UNICODE_STRING x64: Length, MaximumLength, padding, Buffer
-            return bytes == 0 || text == IntPtr.Zero ? null : Marshal.PtrToStringUni(text, bytes / 2);
+            if (bytes == 0 || text == IntPtr.Zero) { status = -1; return null; }
+            return Marshal.PtrToStringUni(text, bytes / 2);
         } finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    static string ImagePathOf(IntPtr process) {
+    // The image path of `process`, or null with QueryFullProcessImageNameW's error in `error` (0 once read).
+    public static string ImagePathOf(IntPtr process, out int error) {
         var name = new StringBuilder(32768); uint size = (uint)name.Capacity;
-        return QueryFullProcessImageNameW(process, 0, name, ref size) ? name.ToString() : null;
+        if (QueryFullProcessImageNameW(process, 0, name, ref size)) { error = 0; return name.ToString(); }
+        error = Marshal.GetLastWin32Error();
+        return null;
     }
 
     // One joiner. Only facts leave the reader: an image's leaf name and booleans. A noctty's split command line
     // (`Argv`) stays in memory for the argument rule and is never written. `ExitedBeforeRead`: the read that left the
     // joiner unopened, unpinned, without its image or (a noctty) without its command line failed after the joiner
-    // had exited, by `OpenJoiner`, `Unpinned`'s own check or `ExitedBy`; the verdict counts such a joiner apart.
+    // had exited, by `GoneBeforeStop`, `Pinned` or `ExitedBy`; the verdict counts such a joiner apart.
     public sealed class JoinedProcess {
         public int Pid; public long Taken; public IntPtr Handle; public bool OpenFailed; public bool Unpinned;
         public long Creation; public int Parent; public string Image; public uint? Exit;
@@ -437,19 +454,51 @@ public static class GuiHiddenRunnerNative {
         return handle;
     }
 
-    // Whether the process behind `handle`, pinned at creation time `creation`, had exited by `failedAt`, the time
-    // (GetSystemTimePreciseAsFileTime) taken just after one of its reads failed: the handle is signalled, its exit code
-    // reads, and GetProcessTimes on the same handle gives the same creation time and an exit time no later than
-    // `failedAt`. A creation time alone proves no exit (PROBE-ALIVE-01), and a process that exits after the failed read
-    // was live when it failed, so it is not counted here. Measured on Windows 11 build 26300 with `cmd /D /C exit`
-    // children: on an exited one whose handle was held, QueryFullProcessImageNameW failed with ERROR_GEN_FAILURE (31)
-    // and ProcessCommandLineInformation with STATUS_PROCESS_IS_TERMINATING; over 20 of them the exit time was 0.6 to
-    // 3.7 ms before a precise reading taken as the wait on each returned, never after it.
-    public static bool ExitedBy(IntPtr handle, long creation, long failedAt) {
-        if (handle == IntPtr.Zero || WaitForSingleObject(handle, 0) != 0) return false;
+    // Whether a joiner whose open found no process (`gone`) had exited before its read: only when its message was
+    // taken before the runner ended the job (`stopAt`, JobWatch.NoteStop), since a joiner the runner killed is gone
+    // too.
+    public static bool GoneBeforeStop(bool gone, long taken, long stopAt) { return gone && taken < stopAt; }
+
+    // Whether the reader pins the process it opened as the joiner: its creation time and its job membership both
+    // read, in the job, and created no later than the joiner's message was taken. `exited`: an unpinned one had
+    // exited before the open only when its membership was read as outside the job, which no joiner can leave (no
+    // breakaway), so the PID names another process; and only for a message taken before the runner ended the job. A
+    // creation time later than the message is not proof of a reused PID, since a backward clock step gives one too
+    // (#752's Opus seat), so that row is unpinned and live.
+    public static bool Pinned(bool timed, bool asked, bool member, long creation, long taken, long stopAt, out bool exited) {
+        bool pinned = timed && asked && member && creation <= taken;
+        exited = !pinned && asked && !member && taken < stopAt;
+        return pinned;
+    }
+
+    // The failures a read gives while its process exits, or once it has, measured on Windows 11 build 26300 with
+    // `cmd /D /C exit 7` children whose handle was held, each polled with these reads until the first one failed (#752):
+    // the image read, QueryFullProcessImageNameW, failed with ERROR_ACCESS_DENIED (5) in 99 of 100 and ERROR_GEN_FAILURE
+    // (31) in 1, the one already signalled; the command-line read, ProcessCommandLineInformation, with
+    // STATUS_PROCESS_IS_TERMINATING in 86 of 100 and STATUS_PARTIAL_COPY in 14. Every read before those failures
+    // succeeded: on a handle opened with these rights a live process does not fail them. Any other failure is a live one.
+    public static bool ImageReadEnded(int error) { return error == 31 || error == 5; }
+    public static bool CommandLineReadEnded(int status) { return status == unchecked((int)0xC000010A) || status == unchecked((int)0x8000000D); }
+    // How long ExitedBy waits for a terminating process's handle to signal.
+    public const uint ExitWaitMs = 100;
+
+    // Whether a read of the process behind `handle`, pinned at creation time `creation`, failed because the process
+    // was ending: all of
+    // (a) the failure is the termination kind (`terminating`: ImageReadEnded or CommandLineReadEnded);
+    // (b) the handle signals within ExitWaitMs, and its exit code reads;
+    // (c) GetProcessTimes on it gives the same creation time;
+    // (d) an exit time no later than `failedAt` (GetSystemTimePreciseAsFileTime, taken just after the failed read)
+    //     plus that wait, and before the runner ended the job (`stopAt`).
+    // A creation time alone proves no exit (PROBE-ALIVE-01). The wait is why (b) holds for a process caught inside its
+    // exit: #752's Opus seat measured that a 0 ms wait classed 99 of 100 failed image reads and 100 of 100 failed
+    // command-line reads of exiting `cmd /D /C exit 7` children live, some command-line reads failing up to 13.4 ms
+    // before the exit time; here 99 of 100 image and 100 of 100 command-line failures came before the handle signalled.
+    // (a) is what makes the failure an exit's, so when the time is sampled does not matter.
+    public static bool ExitedBy(IntPtr handle, long creation, long failedAt, bool terminating, long stopAt) {
+        if (!terminating || handle == IntPtr.Zero || WaitForSingleObject(handle, ExitWaitMs) != 0) return false;
         uint code; long c, e, k, u;
         if (!GetExitCodeProcess(handle, out code) || !GetProcessTimes(handle, out c, out e, out k, out u)) return false;
-        return c == creation && e != 0 && e <= failedAt;
+        return c == creation && e != 0 && e <= failedAt + ExitWaitMs * 10000L && e < stopAt;
     }
 
     // The job's completion-port reader (gui-hosted-probe.ps1's JobWatch, #738, PROBE-JOB-WATCH-OPEN-FIRST-01): every
@@ -458,8 +507,11 @@ public static class GuiHiddenRunnerNative {
     public sealed class JobWatch : IDisposable {
         readonly IntPtr port; readonly IntPtr job; readonly Thread reader; readonly string systemCmd; readonly string flagDirectory;
         readonly string systemCmdId, appPath, appId, cliPath, cliId;
-        volatile bool stopping; int cmdCount; int taken;
+        volatile bool stopping; int cmdCount; int taken; long stopAt = long.MaxValue;
         public volatile bool Faulted;
+        // When the runner ended the job (StopRunJob with this watch); long.MaxValue until then.
+        public long StopAt { get { return Volatile.Read(ref stopAt); } }
+        public void NoteStop() { long at; GetSystemTimePreciseAsFileTime(out at); Volatile.Write(ref stopAt, at); }
         // How many joiners the reader has taken from the port (each gets a row, opened or not).
         public int Taken { get { return Volatile.Read(ref taken); } }
         public bool Stopped;
@@ -492,7 +544,7 @@ public static class GuiHiddenRunnerNative {
                     Interlocked.Increment(ref taken);
                     bool gone;
                     row.Handle = OpenJoiner(row.Pid, out gone);
-                    if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = gone; }
+                    if (row.Handle == IntPtr.Zero) { row.OpenFailed = true; row.ExitedBeforeRead = GoneBeforeStop(gone, row.Taken, StopAt); }
                     opened.Add(row);
                     continue;
                 }
@@ -508,25 +560,23 @@ public static class GuiHiddenRunnerNative {
             long c, e, k, u; bool member;
             bool timed = GetProcessTimes(h, out c, out e, out k, out u);
             bool asked = IsProcessInJob(h, job, out member);
-            if (!asked || !member || !timed || c > row.Taken) {
-                // With both facts read, a PID that names a process created after the joiner's message was taken, or
-                // one outside the job (which no joiner can leave: no breakaway), is not the joiner's: the joiner had
-                // exited before this open. A failed read of either fact proves nothing.
-                row.ExitedBeforeRead = asked && timed && (!member || c > row.Taken);
+            bool exitedFirst;
+            if (!Pinned(timed, asked, member, c, row.Taken, StopAt, out exitedFirst)) {
+                row.ExitedBeforeRead = exitedFirst;
                 row.Unpinned = true; CloseHandle(h); row.Handle = IntPtr.Zero; return;
             }
             row.Creation = c;
             ProcessBasic basic; int returned;
             if (NtQueryInformationProcess(h, 0, out basic, Marshal.SizeOf(typeof(ProcessBasic)), out returned) == 0) row.Parent = (int)basic.parentPid.ToInt64();
-            long failedAt;
-            string imagePath = ImagePathOf(h);
-            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt); }
+            long failedAt; int readError;
+            string imagePath = ImagePathOf(h, out readError);
+            if (imagePath == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt, ImageReadEnded(readError), StopAt); }
             row.Image = imagePath == null ? null : Path.GetFileName(imagePath);
             if (row.Image != null && (string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) || string.Equals(row.Image, "noctty.com", StringComparison.OrdinalIgnoreCase))) {
                 row.IsNoctty = true;
                 row.InCopy = string.Equals(row.Image, "noctty.exe", StringComparison.OrdinalIgnoreCase) ? SameImage(imagePath, appPath, appId) : SameImage(imagePath, cliPath, cliId);
-                string commandLine = CommandLineOf(h);
-                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt); }
+                string commandLine = CommandLineOf(h, out readError);
+                if (commandLine == null) { GetSystemTimePreciseAsFileTime(out failedAt); row.ExitedBeforeRead = ExitedBy(h, c, failedAt, CommandLineReadEnded(readError), StopAt); }
                 row.Argv = SplitCommandLine(commandLine);
                 commandLine = null;
             }
@@ -790,11 +840,13 @@ function Write-GuiHiddenRoleManifest($Rows, [hashtable] $Launcher, [int] $LeafPi
 # "Exact child": the child's parent PID is a read joiner created no later than the child, so a reused PID cannot
 # vouch. Anything else fails, whoever started it (H2 on #740; Opus M1: a leaf's own shell starting noctty).
 # A joiner the reader could not read because it had already exited (`ExitedBeforeRead`: its open found no process under
-# its PID, its PID already named another process, or its pinned handle was signalled with an exit time no later than
-# the failed read; JobWatch's `OpenJoiner` and `ExitedBy`) is counted apart and does not fail the leaf: on `main`, push
-# run 45561987608 failed twice, and push run 44997457453 once, on such joiners alone (TD D112). A live joiner the
-# reader could not read still fails it, and an exited one vouches for no child. A cmd whose command line was not read
-# still fails the leaf whether or not it had exited, since its /D is what the shell rule proves.
+# its PID, its PID already named a process outside the job, or its read failed with the termination kind and its
+# pinned handle signalled within ExitWaitMs with a matching exit time, each before the runner ended the job;
+# JobWatch's `GoneBeforeStop`, `Pinned` and `ExitedBy`) is counted apart and does not fail the leaf: on `main`, push run 45561987608 failed twice, and push run 44997457453 once, on unread joiners alone (TD
+# D112). A live joiner the reader could not read still fails it. An exited one vouches for no child (`parentOf`), not
+# even a noctty whose image was read and whose command line was not, though a launcher record still accounts for that
+# noctty itself (CodeRabbit and Sourcery on #752). A cmd whose command line was not read still fails the leaf whether
+# or not it had exited, since its /D is what the shell rule proves.
 function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalProcesses, [int] $ExpectedShells, [string] $Token, [int] $LeafPid) {
     # A joiner counts as read only with its image too: one whose image could not be read (opened and pinned, but
     # QueryFullProcessImageName failed) could be a cmd or a noctty, so it is unreadable, and the verdict fails unless
@@ -809,7 +861,7 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
     $parentOf = {
         param($Row)
         $parent = $byPid[$Row.Parent]
-        if ($null -eq $parent -or $parent.Pid -eq $Row.Pid -or $parent.Creation -gt $Row.Creation) { return $null }
+        if ($null -eq $parent -or $parent.ExitedBeforeRead -eq $true -or $parent.Pid -eq $Row.Pid -or $parent.Creation -gt $Row.Creation) { return $null }
         return $parent
     }
     $accounted = @{}
@@ -835,10 +887,12 @@ function Get-GuiHiddenProcessVerdict($Rows, [hashtable] $Launcher, [int] $TotalP
     # Every process the launcher recorded must be a joiner the reader read, by PID and creation time: one the job never
     # reported, or reported unread, fails the leaf (#738's notSeenInJob; PROBE-JOB-WATCH-OPEN-FIRST-01). One the reader
     # pinned by the same PID and creation time that had exited before its image was read was seen, and is counted apart.
+    # The exited rows are keyed by PID and creation time, so a later generation of a reused PID cannot hide the
+    # launcher's (Sourcery on #752). An unopened or unpinned row has no creation time and matches no record.
     $exitedPinned = @{}
-    foreach ($row in $exitedUnread) { if (-not $row.OpenFailed -and -not $row.Unpinned -and $row.Creation -ne 0) { $exitedPinned[$row.Pid] = $row } }
+    foreach ($row in $exitedUnread) { if (-not $row.OpenFailed -and -not $row.Unpinned -and $row.Creation -ne 0) { $exitedPinned["$($row.Pid)/$($row.Creation)"] = $true } }
     $launcherRead = { param($Id) $byPid.ContainsKey($Id) -and $byPid[$Id].Creation -eq $Launcher[$Id] }
-    $launcherExitedFirst = { param($Id) -not (& $launcherRead $Id) -and $exitedPinned.ContainsKey($Id) -and $exitedPinned[$Id].Creation -eq $Launcher[$Id] }
+    $launcherExitedFirst = { param($Id) -not (& $launcherRead $Id) -and $exitedPinned.ContainsKey("$Id/$($Launcher[$Id])") }
     $launcherExited = @($Launcher.Keys | Where-Object { & $launcherExitedFirst $_ }).Count
     $launcherNotSeen = @($Launcher.Keys | Where-Object { -not (& $launcherRead $_) -and -not (& $launcherExitedFirst $_) }).Count
     $cmdPassing = @($cmds | Where-Object { $_.CmdRead -and $_.CmdSystem -and $_.CmdAutoRunOff }).Count
@@ -1055,7 +1109,7 @@ function Invoke-GuiHiddenLeaf($Leaf, [string] $Bin, [System.Collections.IDiction
         $record.seconds = [math]::Round(([datetime]::UtcNow - $started).TotalSeconds, 1)
         $record.timedOut = $timedOut
         $record.exitCode = $exitCode
-        $total = [GuiHiddenRunnerNative]::StopRunJob($job)
+        $total = [GuiHiddenRunnerNative]::StopRunJob($job, $watch)
         # The reader takes every joiner the job reported before it stops (at most 5 s); the verdict gates on the job's
         # own TotalProcesses, so one it missed fails the leaf rather than passing unread.
         $drainDeadline = [datetime]::UtcNow.AddSeconds(5)

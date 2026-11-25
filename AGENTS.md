@@ -770,8 +770,10 @@ that govern each symbol you change, or that none does.
   (`recordOpenUrlForTest` and `NOCTTY_WIN32_OPEN_URL_TRACE_FILE` in
   `src/apprt/win32.zig`, `dispatchOpenTarget` in `src/apprt/win32/app.zig`),
   the hidden-desktop GUI suite
-  (`test/windows/gui-hidden-runner.ps1` and its process audit: `JobWatch`,
-  `OpenJoiner`, `ExitedBy`, `Get-GuiHiddenProcessVerdict` and the receipt's
+  (`test/windows/gui-hidden-runner.ps1` and its process audit: `JobWatch`
+  and its stop, `NoteStop` and `StopRunJob`; `OpenJoiner`, `GoneBeforeStop`,
+  `Pinned`, `ExitedBy` and its termination kinds `ImageReadEnded` and
+  `CommandLineReadEnded`; `Get-GuiHiddenProcessVerdict` and the receipt's
   `*Exited` counts; its plan
   `test/windows/gui-hidden-plan.json`, `.github/workflows/gui-hidden.yml`
   and its selection `scripts/ci-gui-selection.ps1` with the script walker

@@ -4839,11 +4839,12 @@ pub fn eraseRowBounded(
         // screen, the primary at scrollback-limit = 0) main runs
         // eraseRow(.active), which leaves that pin alone, and the reset moved
         // a pressed link's left-click pin to column 0, so its release read as
-        // a drag. A region with top > 0 main scrolls with this function,
-        // which resets the column here, so a region whose top row is page
-        // row 0 (one that spans pages) departs from main; the fast path,
-        // Screen.cursorScrollRegionUp, keeps the column there too
-        // (terminal-core.md, CLICK-PIN-01).
+        // a drag. A region with top > 0 and the default background main
+        // scrolls with this function, which resets the column here, so such
+        // a region whose top row is page row 0 (one that spans pages)
+        // departs from main; the fast path, Screen.cursorScrollRegionUp,
+        // keeps the column there too. With a background color main runs
+        // deleteLines, which moves no pin (terminal-core.md, CLICK-PIN-01).
         const pin_keys = self.tracked_pins.keys();
         for (pin_keys) |p| {
             if (p.node == node and p.y >= pn.y) {
