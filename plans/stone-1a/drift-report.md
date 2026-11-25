@@ -9,7 +9,7 @@
 | Gated tip (`stone-1a`, frozen)        | `f0a5dc507ad335ba08292a9e8202ea53bcfd1dee`                                                                                                              |
 | Landing merge (`main` after)          | `f739b4c7bc2404ef1fe8837c425dc4090f542af7` (merged 2026-11-25 06:37:08Z), a merge commit of #748: first parent `358ce0f6a`, second parent the gated tip |
 | Tree                                  | `2a50ea83a7b1567e5a77d5d3aabb6fce3379de6d`, equal to the gated tip's tree                                                                               |
-| Upstream merge base after the landing | `74d0c72fd`; the next forward step (1B) starts from v1.4.0                                                                                              |
+| Upstream merge base after the landing | `74d0c72fd`; the next forward step (1B) moves the base to v1.4.0                                                                                        |
 
 ## What landed
 
@@ -87,8 +87,9 @@ The plan's Phase 0a delta, items 15–22:
     between sessions, so the band can't resolve that metric.
 - **Packaging and the soaks:**
   - The packaged builds: ReleaseFast 0.0.3 and ReleaseSafe 0.0.4.
-  - The two 8-hour soaks: night1 is the absolute soak of record (480 minutes each): ReleaseFast PASS, private slope +4.00 MB/h with a lower
-    bound of +3.14 under the 4.19 floor; ReleaseSafe FAIL SLOPE, +6.48 with a lower bound of +5.33.
+  - The two 8-hour soaks: night1 is the absolute soak of record (480 minutes each): ReleaseFast PASS, private
+    slope +4.00 MB/h with a lower bound of +3.14 under the 4.19 floor; ReleaseSafe FAIL SLOPE, +6.48 with a lower
+    bound of +5.33.
     - **Plan delta (TD D99-D108):** chain-2 showed the same churn-driven growth on `main` (+51.6 against the tip's
       +52.6 MB/h over 4 h, non-heap, on the OpenGL path), so the gate became paired: tip minus `main`, side by side
       for 8 hours.
@@ -114,7 +115,8 @@ The plan's Phase 0a delta, items 15–22:
   - Both: 4/4 shells pass, 0 unaccounted, 0 outside the copy, 0 refused arguments, exit 0, no timeout.
   - The PR run 45173017745 at the identical tree, on the same image (win25-vs2026 20261116.315.1), passed it
     with every argv read.
-  - The audit fails the leaf on any noctty process with no argv, and on any process it can't open
+  - The audit fails the leaf on any noctty process with no argv, and on any process it can't open or whose image it
+    can't read
     (`gui-hidden-runner.ps1`). The second kind had already failed on `main` before the merge: push run
     44997457453 at `358ce0f6a` (2026-11-22), "session-restore FAIL (processes)", with 1 of 38 processes not
     opened and every noctty argv read, while three scheduled runs there passed.
@@ -140,7 +142,8 @@ p95 are therefore unmeasured for 1A.
 
 Promotion of 1.3.139 now waits only on P8-3 (the other two items are closed):
 
-- a P8-3 pass: ReleaseFast, the tip x2 and `main` x2 (launched tip first), under D108's ceiling rule R1 and bounded rule R2;
+- a P8-3 pass: ReleaseFast, the tip x2 and `main` x2 (launched tip first), under D108's ceiling rule R1 and bounded
+  rule R2;
 - ~~the redone T-RS role compare~~: closed by TD D111 (ADVISORY, exactly night1's 12 pairs outside the table);
 - ~~a passing GUI Hidden Desktop run on `main` at or after the merge~~ (TD D112): closed by the scheduled run
   45570413518 at `f739b4c7b` (2026-11-25 07:43Z, success).
