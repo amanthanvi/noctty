@@ -138,11 +138,11 @@ not an adaptation to record.
   restores one, and upstream's test "compressed history match spanning
   page boundary remains compressed" fails.
 
-Until that merge lands on `main`, `main`'s node is still resident-only:
-`Data = struct { resident: Page }`, the four accessors `page()`, `rows()`,
-`cols()` and `capacity()`, and the owner inferred from the page's size. A
-hunk ported to `main` before then that uses another of upstream's node names
-is an adaptation, and this is what each becomes:
+Until that merge landed on `main` (`f739b4c7b`, #748), `main`'s node was
+resident-only: `Data = struct { resident: Page }`, the four accessors
+`page()`, `rows()`, `cols()` and `capacity()`, and the owner inferred from the
+page's size. A hunk ported to `main` before then that used another of
+upstream's node names was an adaptation, and this is what each became:
 
 - `pageAssumeResident()` and `metadata()`: `page()` where the node is
   mutable; otherwise add the accessor with upstream's resident arm alone
@@ -163,7 +163,7 @@ accessors. A direct `node.data.resident` compiles anywhere, and from the
 merge on it panics in a safe build when the node is compressed. Inside
 `PageList.zig`, upstream's own code reaches `node.data` directly
 (`compress`, `memoryStats` and tests at the stone); before the merge, the
-same grep over all of `src` also finds only Node's accessor bodies.
+same grep over all of `src` also found only Node's accessor bodies.
 
 Renderer scheduling is split in the fork: `Pacer.turn` decides when a frame
 updates, presents or waits and when the timers run, and `Thread.Frame` holds
@@ -194,8 +194,12 @@ report.
 Public tags remain plain semantic versions. `major.minor` tracks the upstream
 Ghostty line, while `patch` is fork-owned beginning at `100`: `1.3.100`,
 `1.3.101`, and so on. The exact upstream base does not appear in the public
-tag. The current base is `ba398dfff` from 2026-04-05: post-`v1.3.1` upstream
-main, represented as `1.3.2-dev`, not a released upstream tag.
+tag. The current base is the stepping stone `74d0c72fd` from 2026-07-20,
+landed on `main` by the merge commit `f739b4c7b` (#748); its dated drift report
+is `plans/stone-1a/drift-report.md`. The stone is still post-`v1.3.1` upstream
+main, represented as `1.3.2-dev`, not a released upstream tag, so
+`upstreamBaseVersion` stays `1.3.2`. The previous base was `ba398dfff` from
+2026-04-05, on the same `1.3.2-dev` line.
 
 ## Validation gates
 
