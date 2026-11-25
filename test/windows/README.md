@@ -788,13 +788,13 @@ Debug and the record is exactly the dry URL. The driver's job gaining no process
 but cannot prove it alone: an open can be handed to a broker outside the job.
 Otherwise the run exits 4 and clicks nothing more; a copy that dies or stops
 answering at that first release is a product failure (exit 1), and nothing more
-is clicked either. The trace file holds one open, so the
-driver keeps each click's record in the run's
-`pkg23\<set>\records\click-NNNN.txt`, deletes the trace and watches 150 ms for
-a second open before the next click (and 1 s after the last). Every click is on
-row 0 at its set's column (column 0 in set A, column 3 in set B, below), after
-a Ctrl move to a cell with no link, so each refreshes the link under the
-pointer, and `click-repeat-interval = 1` keeps each a single click. A run has two sets by
+is clicked either. The trace file holds one open, so the driver keeps each
+click's record in the run's `pkg23\<set>\records\click-NNNN.txt`, deletes the
+trace and watches 150 ms for a second open before the next click (and 1 s after
+the last). Every click is on row 0 at its set's column (column 0 in set A,
+column 3 in set B, below), after a Ctrl move to a cell with no link, so each
+refreshes the link under the pointer, and `click-repeat-interval = 1` keeps
+each a single click. A run has two sets by
 default (`-Sets A`, `B` or `AB`), each its own launch with its own dry click,
 counted separately. Set A is the 2026-10-11 run: the primary screen at
 `scrollback-limit = 0`, every click at column 0, where the October probe

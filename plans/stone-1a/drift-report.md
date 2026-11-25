@@ -2,18 +2,19 @@
 
 ## Identity
 
-| Item                                  | Value                                                                                                                                            |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Upstream base (the stepping stone)    | `74d0c72fd`                                                                                                                                      |
-| `main` before the landing             | `358ce0f6a`                                                                                                                                      |
-| Gated tip (`stone-1a`, frozen)        | `f0a5dc507ad335ba08292a9e8202ea53bcfd1dee`                                                                                                       |
-| Landing merge (`main` after)          | `f739b4c7bc2404ef1fe8837c425dc4090f542af7` (2026-11-25 06:37:10Z), a merge commit of #748: first parent `358ce0f6a`, second parent the gated tip |
-| Tree                                  | `2a50ea83a7b1567e5a77d5d3aabb6fce3379de6d`, equal to the gated tip's tree                                                                        |
-| Upstream merge base after the landing | `74d0c72fd`; the next forward step (1B) starts from v1.4.0                                                                                       |
+| Item                                  | Value                                                                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream base (the stepping stone)    | `74d0c72fd9318ad3ab95bfb56f6c2d995e267e2e` (2026-07-20)                                                                                                 |
+| `main` before the landing             | `358ce0f6a`                                                                                                                                             |
+| Gated tip (`stone-1a`, frozen)        | `f0a5dc507ad335ba08292a9e8202ea53bcfd1dee`                                                                                                              |
+| Landing merge (`main` after)          | `f739b4c7bc2404ef1fe8837c425dc4090f542af7` (merged 2026-11-25 06:37:08Z), a merge commit of #748: first parent `358ce0f6a`, second parent the gated tip |
+| Tree                                  | `2a50ea83a7b1567e5a77d5d3aabb6fce3379de6d`, equal to the gated tip's tree                                                                               |
+| Upstream merge base after the landing | `74d0c72fd`; the next forward step (1B) starts from v1.4.0                                                                                              |
 
 ## What landed
 
 - **1A.1:** the stepping-stone merge. 202 conflicted paths, each in `plans/stone-1a/resolution-ledger.tsv`.
+- **1A.2:** the review of the clean-merged files and clean hunks, and the thread-role layer's log entries and routing.
 - **1A.3:** page serials and generations.
 - **1A.4:** the post-stone audit of 244 upstream commits (`plans/stone-1a/post-stone-audit.tsv`), with the
   1A-relevant fixes forward-ported.
@@ -38,9 +39,9 @@ C9, D83).
 
 1. **After a scroll clear on the primary screen at scrollback 0:** a top-row selection or search highlight starts on
    the pre-clear history row. A Ctrl+click there opens the link under the pointer, as on `main`.
-2. **A scroll region below the top with an SGR background:** pins move with their rows, so a Ctrl+click during
+2. **A region below the top whose top row is page row 0:** the pressed column is kept, where `main` resets it to 0.
+3. **A scroll region below the top with an SGR background:** pins move with their rows, so a Ctrl+click during
    output opens nothing. `main` doesn't move them.
-3. **A region below the top whose top row is page row 0:** the pressed column is kept, where `main` resets it to 0.
 4. **A top-anchored region above a status line:** the top-row pin stays on row 0, where `main` moves it into history.
    The click outcome is the same on both.
 5. **libghostty-vt tracked grid refs and `SelectionGesture.left_click_pin`:** no `main` baseline.
@@ -103,7 +104,7 @@ The plan's Phase 0a delta, items 15–22:
 
 - **Test, push 45561987484: success** (every job), with its artifact `flagship-portable-x64-45561987484`.
 - **GUI Hidden Desktop, push 45561987608: failed twice** (attempt 2 was D92(e)'s one rerun) on one leaf,
-  `cli-automation`, and only on its process audit. The other 7 leaves passed both times.
+  `cli-automation`, and only on its process audit. The other 6 leaves passed both times.
   - Attempt 1: 52 of 54 job processes read (1 not opened); 26 noctty processes, 1 with its argv unread.
   - Attempt 2: 54 of 54 read; 27 noctty processes, 1 with its argv unread.
   - Both: 4/4 shells pass, 0 unaccounted, 0 outside the copy, 0 refused arguments, exit 0, no timeout.
@@ -111,7 +112,7 @@ The plan's Phase 0a delta, items 15–22:
     with every argv read.
   - The audit fails the leaf on any noctty process with no argv (`gui-hidden-runner.ps1`). It had already failed
     on `main` before the merge: push run 44997457453 at `358ce0f6a` (2026-11-22), "session-restore FAIL
-    (processes)", while two scheduled runs there passed.
+    (processes)", while three scheduled runs there passed.
   - Inferred, not shown: a short-lived noctty process exits while the audit reads it. TD D112: recorded, and the
     landing proceeds; `release.yml` needs only the Test run.
 
@@ -145,7 +146,8 @@ Promotion of 1.3.139 now waits only on P8-3 (the other two items are closed):
    - this report, under `plans/stone-1a/`;
    - the policy's base paragraph;
    - CLICK-PIN-01's wording;
-   - the generator's `TIP` constant and the dropped-delta header;
+   - the generator's `TIP` constant (the dropped-delta header stays at `5c7a99a13`: 24 of its 330 `tip:` ranges
+     cover different text at `f0a5dc507`);
    - the PKG-23 README lines;
    - the plan deltas.
 2. **A test-hygiene PR:**
