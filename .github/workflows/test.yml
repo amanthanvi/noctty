@@ -126,7 +126,7 @@ jobs:
           LINT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           LINT_BEFORE: ${{ github.event.before }}
         # A separate PR just before Phase 0b changes report to enforce here.
-        run: python -I ci/run_lints.py --win32-mode report
+        run: python -I ci/run_lints.py --win32-mode enforce
 
 
       - name: Armed renderer-state thread gate
