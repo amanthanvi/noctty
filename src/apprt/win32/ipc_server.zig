@@ -3161,6 +3161,27 @@ test "win32 IPC server stops promptly while a client holds a request open" {
 
 test "win32 IPC server start and stop cycles leak no handles" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const isolated = @import("../../sync/isolated.zig");
+
+    // A handle count is the whole process's, and a shard process shares it
+    // with every test that ran before this one and every thread those left:
+    // a hosted run counted 474 handles against 340 after the 50 cycles, and
+    // its rerun passed. So the cycles run in an isolated child of the test
+    // exe (sync/isolated.zig), a fresh process that runs this test alone,
+    // with no dump directory, and nothing but the cycles opens or closes a
+    // handle between the two counts. The child exits 1 when the counts
+    // differ and 4 when the cycles leak memory.
+    if (!isolated.inChild()) {
+        var child = try isolated.run(@src(), .none);
+        defer child.deinit();
+        if (child.timed_out or child.exit_code != isolated.exit_passed) {
+            std.debug.print("isolated parent: expected the handle-count child to exit successfully; exit code 0x{x} (timed out: {}), its stderr's end:\n{s}\n", .{
+                child.exit_code, child.timed_out, child.stderr[child.stderr.len -| 4000..],
+            });
+            return error.IsolatedChildFailed;
+        }
+        return;
+    }
 
     // The first cycle loads whatever the pipe and token APIs keep open for
     // the life of the process.
