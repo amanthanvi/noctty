@@ -187,6 +187,7 @@ const palette_list_class_name = win32.palette_list_class_name;
 const prompt_button_class = child_window.prompt_button_class;
 const prompt_label_class = child_window.prompt_label_class;
 const runOnHiddenDesktop = win32.runOnHiddenDesktop;
+const thread_role = @import("../../sync/thread_role.zig");
 const toastTestSplit = win32.toastTestSplit;
 const uninitializedInertStorage = win32.uninitializedInertStorage;
 
@@ -4057,8 +4058,8 @@ pub const Surface = struct {
         // the encoder does: the mode and the Kitty flags are the terminal's
         // live state.
         const encode_opts = encode_opts: {
-            self.core_surface.renderer_state.mutex.lock();
-            defer self.core_surface.renderer_state.mutex.unlock();
+            self.core_surface.renderer_state.lockDemand();
+            defer self.core_surface.renderer_state.unlockDemand();
             break :encode_opts input.key_encode.Options.fromTerminal(
                 self.core_surface.renderer_state.terminal,
             );
@@ -4344,7 +4345,10 @@ pub const Surface = struct {
 
     test "win32 pointer leave clears core link and renderer positions" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
-        var mutex: std.Thread.Mutex = .{};
+        // A pointer leave is a window message, handled on the UI thread.
+        const role_scope = thread_role.fixture(.ui);
+        defer role_scope.exit();
+        var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
         surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
         defer surface.core_surface.io.terminal.deinit(std.testing.allocator);
@@ -5799,4 +5803,46 @@ test "win32 GL unbind reports the boundary it actually established" {
     surface.hdc = @ptrFromInt(0x2000);
     try std.testing.expect(sys.wglGetCurrentContext() != surface.hglrc);
     try std.testing.expect(surface.clearGLContextCurrentChecked());
+}
+
+test "isolated: Win32 surface key demand records the key-message options read from .ui" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const testing = std.testing;
+    const isolated = @import("../../sync/isolated.zig");
+    if (isolated.inChild()) {
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var mutex: rendererpkg.StateMutex = .{};
+        var surface: Surface = .{ .app = undefined, .core_initialized = true };
+        var term = try terminal.Terminal.init(testing.allocator, .{ .cols = 10, .rows = 3 });
+        defer term.deinit(testing.allocator);
+        surface.core_surface.renderer_state = .{ .mutex = &mutex, .terminal = &term };
+
+        // The options read precedes dispatch. A message the dispatcher
+        // ignores isolates that read without consulting the keyboard.
+        surface.handleKeyMessage(c.WM_NULL, 0, 0, &.{});
+        try testing.expectEqual(@as(u32, 1), surface.core_surface.renderer_state.handoff_gen.load(.monotonic));
+        return;
+    }
+    var child = try isolated.run(@src(), .own);
+    defer child.deinit();
+    try testing.expect(!child.timed_out);
+    try testing.expectEqual(isolated.exit_passed, child.exit_code);
+
+    const raw = try child.dir.?.read();
+    defer testing.allocator.free(raw);
+    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
+    _ = lines.next(); // header
+    try testing.expect(std.mem.endsWith(u8, lines.next() orelse return error.MissingDemandPair, " demand ui"));
+    try testing.expect(lines.next() == null);
+
+    if (@import("../../sync/symbolise.zig").names_checked) {
+        var result = try isolated.compareChild(&child);
+        defer result.deinit();
+        try testing.expect(result.report.passed());
+        try testing.expect(result.holdsExactly(&.{.{
+            .function = "src/apprt/win32/terminal_window.zig:handleKeyMessage",
+            .role = "ui",
+        }}));
+    }
 }

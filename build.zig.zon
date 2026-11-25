@@ -51,7 +51,6 @@
         .opengl = .{ .path = "./pkg/opengl", .lazy = true },
         .sentry = .{ .path = "./pkg/sentry", .lazy = true },
         .simdutf = .{ .path = "./pkg/simdutf", .lazy = true },
-        .utfcpp = .{ .path = "./pkg/utfcpp", .lazy = true },
         .wuffs = .{ .path = "./pkg/wuffs", .lazy = true },
         .zlib = .{ .path = "./pkg/zlib", .lazy = true },
 
@@ -71,8 +70,8 @@
             .lazy = true,
         },
         .iterm2_themes = .{
-            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20260323-152405-a2c7b60.tgz",
-            .hash = "N-V-__8AAL6FAwBDPampKgDjoxlJYDIn2jv0VaINS4W6CXJN",
+            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20260713-155359-c3968b3.tgz",
+            .hash = "N-V-__8AALZGBAAS5NLVH-c8eC-6VtCdcH-9nUvVfUSkWS__",
             .lazy = true,
         },
     },

@@ -39,6 +39,8 @@ const terminal = bench_core.terminal;
 const Terminal = terminal.Terminal;
 const SearchThread = terminal.search.Thread;
 const QuerySearch = terminal.search.QuerySearch;
+const StateMutex = terminal.search.StateMutex;
+const thread_role = bench_core.thread_role;
 const stats = @import("stats.zig");
 
 pub const std_options: std.Options = .{ .log_level = .err };
@@ -239,8 +241,13 @@ fn runFeed(
         writeAll(&t, history);
 
         var sink: Sink = .{ .alloc = alloc };
-        // Single-threaded: nothing else contends for the lock here.
-        var mutex: std.Thread.Mutex = .{};
+        // Single-threaded: nothing else contends for the lock here. This
+        // thread steps the search as the search thread does. The benchmark
+        // is built without the thread-role layer, so the scope compiles to
+        // nothing (PLAN.md §2.7 acceptance test 14).
+        const role = thread_role.fixture(.search);
+        defer role.exit();
+        var mutex: StateMutex = .{};
         var search: QuerySearch = .init(alloc, .{ .terminal = &t, .mutex = &mutex });
         defer search.deinit();
 
@@ -423,7 +430,7 @@ fn streamLocked(
     streamed: []const u8,
     sink: ?*Sink,
 ) !StreamResult {
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: StateMutex = .{};
     var t = try initTerminal(alloc, args);
     defer t.deinit(alloc);
     writeAll(&t, history);
@@ -436,6 +443,11 @@ fn streamLocked(
     });
     var os_thread: ?std.Thread = null;
     defer {
+        // The app thread ends the search thread; its deinit stops the
+        // QuerySearch, which locks. Like the reader's scope below, this
+        // compiles to nothing in the benchmark (PLAN.md §2.7 test 14).
+        const app = thread_role.fixture(.ui);
+        defer app.exit();
         if (os_thread) |th| {
             thread.stop.notify() catch {};
             th.join();
@@ -462,6 +474,9 @@ fn streamLocked(
     else
         0;
 
+    // This thread writes the output under the lock as the pty reader does.
+    const reader = thread_role.fixture(.reader);
+    defer reader.exit();
     var stream = t.vtStream();
     defer stream.deinit();
     var timer = try std.time.Timer.start();

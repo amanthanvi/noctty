@@ -4,6 +4,10 @@
   "buildInputs": [
     "build.zig",
     "build.zig.zon",
+    "ci/lock-inventory-threads.tsv",
+    "ci/role_compare3.py",
+    "ci/role-runs.tsv",
+    "ci/role_supervisor.py",
     "dist/windows/**",
     "include/**",
     "pkg/**",
@@ -21,6 +25,7 @@
     { "id": "shell-command", "script": "test/windows/interactive-win11-shell-command.ps1", "sandbox": "shell-command", "arguments": ["-TimeoutSeconds", "60", "-ResetState"], "expectedShells": 1, "timeoutSeconds": 300 },
     { "id": "cli-automation", "script": "test/windows/cli-automation.ps1", "sandbox": "cli-automation", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 4, "timeoutSeconds": 300 },
     { "id": "undo", "script": "test/windows/interactive-win11-undo.ps1", "sandbox": "undo", "arguments": ["-ResetState"], "expectedShells": 3, "timeoutSeconds": 300 },
-    { "id": "session-restore", "script": "test/windows/interactive-win11-session-restore.ps1", "sandbox": "session-restore", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 10, "timeoutSeconds": 300 }
+    { "id": "session-restore", "script": "test/windows/interactive-win11-session-restore.ps1", "sandbox": "session-restore", "arguments": ["-TimeoutSeconds", "30", "-ResetState"], "expectedShells": 10, "timeoutSeconds": 300 },
+    { "id": "role-pairs", "script": "test/windows/gui-hidden-role-pairs.ps1", "sandbox": "role-pairs", "arguments": ["-TimeoutSeconds", "45"], "expectedShells": 1, "timeoutSeconds": 150, "roleDump": true }
   ]
 }

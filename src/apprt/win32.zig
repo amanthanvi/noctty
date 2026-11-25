@@ -27,6 +27,7 @@ const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
@@ -1599,6 +1600,8 @@ pub fn recoveryFailurePolicy(budget_exhausted: bool, scheduled: bool) RecoveryFa
 /// notice is informational and must not hold the terminal hostage.
 /// `MB_SETFOREGROUND` plus the box's own taskbar button carry the visibility.
 pub fn recoverySafeModeNoticeThread(text: [*:0]const u16) void {
+    const role_scope = thread_role.enter(.{ .worker = "safe-mode-notice" });
+    defer role_scope.exit();
     _ = sys.MessageBoxW(
         null,
         text,
@@ -2529,6 +2532,8 @@ pub fn profileDiscoveryThreadMain(
     attempt: u64,
     user_profiles: windows_shell.UserProfiles,
 ) void {
+    const role_scope = thread_role.enter(.{ .worker = "profile-discovery" });
+    defer role_scope.exit();
     defer delivery.release();
     var user = user_profiles;
     defer user.deinit();
@@ -2549,6 +2554,8 @@ pub fn profileDiscoveryThreadMain(
 }
 
 pub fn jumpListRebuildThreadMain(delivery: *AppDelivery, job: *win32_jump_list.RebuildJob) void {
+    const role_scope = thread_role.enter(.{ .worker = "jump-list" });
+    defer role_scope.exit();
     defer delivery.release();
     job.runInOwnApartment();
     var payload: AppDeliveryPayload = .{ .jump_list = job };
@@ -3019,6 +3026,8 @@ test "win32 Settings' profile choices name a resolved default the list lacks by 
 }
 
 pub fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
+    const role_scope = thread_role.enter(.{ .worker = "update-check" });
+    defer role_scope.exit();
     const alloc = request.alloc;
     defer {
         request.deinit();
@@ -6206,6 +6215,16 @@ pub const setQuickTerminalRect = quick_terminal_host.setQuickTerminalRect;
 
 pub const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 
+test "thread_role: runOnHiddenDesktop runs its body as the UI thread" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            const expected: thread_role.Role = if (thread_role.layer == .on) .ui else .none;
+            try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(thread_role.current()));
+        }
+    }.body);
+}
+
 const monitorInfo = quick_terminal_host.monitorInfo;
 
 // Keep helper modules reachable from the exe's module graph. Zig prunes
@@ -9141,6 +9160,7 @@ test "copied terminal text keeps only web and mail links as anchors" {
 /// The popup is owned by the host but is a top-level window, so nothing about
 /// it belongs to the host's own message flow beyond the paint.
 pub fn tabTooltipProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     switch (msg) {
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT => {
@@ -9180,6 +9200,7 @@ pub fn quickSelectProc(
     wParam: WPARAM,
     lParam: LPARAM,
 ) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const surface = getSurface(hwnd);
     switch (msg) {
         c.WM_ERASEBKGND => return 1,
@@ -9283,6 +9304,7 @@ pub fn scrollbarProc(
     wParam: WPARAM,
     lParam: LPARAM,
 ) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const surface = getSurface(hwnd);
     switch (msg) {
         c.WM_GETOBJECT => {
@@ -9571,6 +9593,7 @@ pub fn refocusHostAfterActivation(host: *Host) void {
 /// Window messages are dispatched by native menu/size/dialog pumps too. The
 /// only receiver with completion authority is this message-only App window.
 pub fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const app = windowData(App, hwnd) orelse return sys.DefWindowProcW(hwnd, message, wparam, lparam);
     const delivery = app.delivery orelse return 0;
     switch (message) {
@@ -9628,6 +9651,7 @@ pub fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: L
 /// The lifecycle window's procedure (`App.createLifecycleWindow`): it answers
 /// end-session messages for the app and is never shown.
 pub fn appLifecycleWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     switch (message) {
         // Whoever asks to show it (`ShowWindow`, `SetWindowPos`), it stays
         // hidden, as Windows Terminal's coordinator window does.
@@ -9695,6 +9719,7 @@ const Pkg19NativeDeliveryTest = struct {
         ticks: usize = 0,
 
         fn proc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+            thread_role.assertWindowProc();
             if (windowData(@This(), hwnd)) |self| switch (message) {
                 0x0211 => { // WM_ENTERMENULOOP
                     self.entered = true;
@@ -10404,6 +10429,7 @@ pub fn chromeSyncOrLog(comptime context: []const u8, sync: anytype) bool {
 }
 
 pub fn tabContainerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (getHost(hwnd)) |host| {
         if (msg == c.WM_GETOBJECT) {
             if (host.tab_container_uia_provider) |provider| {
@@ -10559,6 +10585,7 @@ fn paintBannerClient(host: *Host, hwnd: HWND, hdc: HDC) void {
 }
 
 pub fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (getHost(hwnd)) |host| {
         switch (msg) {
             c.WM_GETOBJECT => {
@@ -10700,6 +10727,7 @@ pub fn confirmPromptLineColor(
 /// announced. `HTTRANSPARENT` keeps the two lines from eating clicks
 /// aimed at the overlay band underneath them.
 fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (getHost(hwnd)) |host| {
         if (msg == c.WM_GETOBJECT) {
             if (host.overlayPromptTextProvider(hwnd)) |provider| {
@@ -10758,6 +10786,7 @@ pub fn buttonTooltipAction(msg: UINT, wParam: WPARAM) ButtonTooltipAction {
 }
 
 pub fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const host = getHost(hwnd);
     if (host) |v| {
         if (msg == c.WM_NCHITTEST and v.resizesFromTop(lParam)) return c.HTTRANSPARENT;
@@ -10976,6 +11005,7 @@ fn moveTabAmountToEdge(total: usize, current: usize, toward_start: bool) isize {
 }
 
 pub fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const host = getHost(hwnd);
     if (host) |v| {
         if (msg == c.WM_NCHITTEST and v.resizesFromTop(lParam)) return c.HTTRANSPARENT;
@@ -11393,6 +11423,7 @@ fn clearQuickSlotPinsRequested(vk: WPARAM, alt_pressed: bool, shift_pressed: boo
 }
 
 fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const host = getHost(hwnd);
     // This proc is shared with the confirm preview pane, which is the
     // same EDIT class but a different control. The UIA provider below
@@ -11547,6 +11578,7 @@ fn hostPaneDividerMessage(host: ?*Host, hwnd: HWND, msg: UINT, wParam: WPARAM, l
 }
 
 pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (msg == c.WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| {
@@ -12823,6 +12855,7 @@ pub const DeferredCharState = win32_input.DeferredCharState;
 pub const keyEventFromWin32Message = win32_input.keyEventFromWin32Message;
 
 pub fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (msg == c.WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| {
@@ -15288,9 +15321,17 @@ const ClipboardReplyFixture = struct {
     host: Host = undefined,
     surface: Surface = undefined,
     session: TestSession = .{},
-    mutex: std.Thread.Mutex = .{},
+    /// Not `mutex`: the lock inventory would take every `.mutex` lock in this
+    /// file for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
+    renderer_mutex: rendererpkg.StateMutex = .{},
+    /// The test thread stands for the UI thread, which owns the prompt and
+    /// takes the renderer lock in the OSC 52 completions, from `init` to
+    /// `deinit`.
+    role_scope: thread_role.Scope = undefined,
 
     fn init(self: *ClipboardReplyFixture) !void {
+        self.role_scope = thread_role.fixture(.ui);
+        errdefer self.role_scope.exit();
         try self.session.init(.{
             .core_app = &self.core_app,
             .app = &self.app,
@@ -15308,7 +15349,7 @@ const ClipboardReplyFixture = struct {
         errdefer core.io.mailbox.deinit(self.core_app.alloc);
         // The terminal's modes decide whether a paste is bracketed.
         core.io.terminal = try terminal.Terminal.init(self.core_app.alloc, .{ .cols = 10, .rows = 10 });
-        core.renderer_state = .{ .mutex = &self.mutex, .terminal = &core.io.terminal };
+        core.renderer_state = .{ .mutex = &self.renderer_mutex, .terminal = &core.io.terminal };
         self.surface.core_initialized = true;
     }
 
@@ -15320,6 +15361,7 @@ const ClipboardReplyFixture = struct {
         self.surface.core_surface.io.terminal.deinit(self.core_app.alloc);
         self.surface.core_surface.io.mailbox.deinit(self.core_app.alloc);
         self.session.deinit();
+        self.role_scope.exit();
     }
 
     fn setBracketedPaste(self: *ClipboardReplyFixture, on: bool) void {
@@ -24929,6 +24971,10 @@ test "win32 a sign-out latches the session snapshot, and a Restart Manager close
 
 test "win32 a Restart Manager query agrees only when a quit would ask nothing, and never waits for a renderer lock" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // The test thread is the UI thread: it owns the window the query reaches
+    // and holds the renderer lock below it.
+    const role_scope = thread_role.fixture(.ui);
+    defer role_scope.exit();
 
     var core_app: CoreApp = undefined;
     var app: App = undefined;
@@ -25001,7 +25047,7 @@ test "win32 a Restart Manager query agrees only when a quit would ask nothing, a
     // A terminal whose renderer lock is held counts as busy, and the query
     // does not wait for it: the holder can be this thread, below the sent
     // message. The lock is held here, so the core is read no further.
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: rendererpkg.StateMutex = .{};
     other.core_surface.renderer_state.mutex = &renderer_mutex;
     other.core_surface.config.confirm_close_surface = .true;
     other.core_surface.child_exited = false;

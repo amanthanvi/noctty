@@ -18,6 +18,8 @@ const PageList = @import("../PageList.zig");
 const Screen = @import("../Screen.zig");
 const ScreenSet = @import("../ScreenSet.zig");
 const Terminal = @import("../Terminal.zig");
+const StateMutex = @import("../../sync/state_mutex.zig").StateMutex;
+const thread_role = @import("../../sync/thread_role.zig");
 const Pattern = @import("pattern.zig").Pattern;
 const Query = @import("query_options.zig").Query;
 const ScreenSearch = @import("screen.zig").ScreenSearch;
@@ -38,9 +40,10 @@ pub const QuerySearch = struct {
 
         /// Must be held while the terminal is read or written. `step` and
         /// `deinit` take it themselves, so their caller must not hold it:
-        /// a Debug build panics with "Deadlock detected" and a release
-        /// build hangs.
-        mutex: *std.Thread.Mutex,
+        /// with the thread-role layer on the build panics (PN1), a Debug
+        /// build without it panics with "Deadlock detected", and a release
+        /// build without it hangs.
+        mutex: *StateMutex,
     };
 
     pub const Request = struct {
@@ -502,6 +505,10 @@ pub const QuerySearch = struct {
     }
 };
 
+// Each test below steps its QuerySearch on the test thread as the search
+// thread does, so it enters `.search` first, the role every QuerySearch
+// acquisition is reviewed for (PLAN.md §2.7 RQ8); `deinit`'s stop accepts it.
+
 /// What tests read from reports, copied out of what they borrow.
 const TestObserved = struct {
     state: QuerySearch.State = .idle,
@@ -559,7 +566,9 @@ test "an invalid query clears the previous search in one report" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -594,7 +603,9 @@ test "a query that matches nothing is not reported as invalid" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -632,7 +643,9 @@ test "a query that runs out of memory still stops the previous search" {
     // The new query already owns the event generation, so the previous
     // search must not keep reporting results under it.
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -661,7 +674,9 @@ test "a query that runs out of memory still stops the previous search" {
 
 test "equivalent query replays search state" {
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -715,7 +730,9 @@ fn testRowsContaining(alloc: Allocator, list: *PageList, needle: []const u8) ![]
 
 test "reported match rows follow streamed output while the scrollback is pruned" {
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
 
     // Room for about three pages, so the output below prunes the oldest.
     const page_size = page_size: {
@@ -768,7 +785,9 @@ test "select after the searched screen is removed" {
     // Upstream 73ac36fa5679: a select between refresh ticks must not reach
     // the searcher of a screen the terminal has already destroyed.
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
@@ -799,7 +818,9 @@ test "the first select with nothing selected starts at the newest match" {
     // `.prev` from no selection used to pick the oldest match, so the first
     // Enter after typing a query scrolled to the top of the scrollback.
     const alloc = testing.allocator;
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
 
     for ([_]ScreenSearch.Select{ .next, .prev }) |first| {
         var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
@@ -888,7 +909,9 @@ test "a full reset that re-creates the alternate screen at the same address drop
     defer reuse.deinit();
     const term_alloc = reuse.allocator();
 
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(term_alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(term_alloc);
 
@@ -927,7 +950,9 @@ test "a pattern that fails at run time ends the query with one clear" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{
         .cols = 10,
         .rows = 2,
@@ -988,7 +1013,9 @@ test "a pattern that fails while the report is built ends the query with one cle
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{
         .cols = 10,
         .rows = 2,
@@ -1037,7 +1064,9 @@ test "a replacing query whose first feed fails ends with one clear" {
     const alloc = testing.allocator;
     try oni.testing.ensureInit();
 
-    var mutex: std.Thread.Mutex = .{};
+    const role = thread_role.fixture(.search);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 

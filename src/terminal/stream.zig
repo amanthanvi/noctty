@@ -33,6 +33,7 @@ const debug = false;
 /// function for handling.
 pub const Action = union(Key) {
     print: Print,
+    print_slice: PrintSlice,
     print_repeat: usize,
     bell,
     backspace,
@@ -110,6 +111,7 @@ pub const Action = union(Key) {
     apc_start,
     apc_end: ApcEnd,
     apc_put: u8,
+    apc_put_slice: ApcPutSlice,
     end_hyperlink,
     active_status_display: ansi.StatusDisplay,
     decaln,
@@ -135,6 +137,7 @@ pub const Action = union(Key) {
         lib.target,
         &.{
             "print",
+            "print_slice",
             "print_repeat",
             "bell",
             "backspace",
@@ -212,6 +215,7 @@ pub const Action = union(Key) {
             "apc_start",
             "apc_end",
             "apc_put",
+            "apc_put_slice",
             "end_hyperlink",
             "active_status_display",
             "decaln",
@@ -258,6 +262,40 @@ pub const Action = union(Key) {
 
         pub fn cval(self: Print) Print.C {
             return .{ .cp = @intCast(self.cp) };
+        }
+    };
+
+    /// A run of printable codepoints. This is emitted instead of
+    /// individual print actions when the stream can decode multiple
+    /// printable codepoints at once, so handlers can process them in
+    /// batch with per-run rather than per-codepoint overhead (see
+    /// Terminal.printSlice). A naive handler can simply loop and
+    /// handle each codepoint like a print action.
+    ///
+    /// The slice is only valid for the duration of the handler call.
+    pub const PrintSlice = struct {
+        cps: []const u32,
+
+        pub const C = extern struct {
+            cps: [*]const u32,
+            len: usize,
+        };
+
+        pub fn cval(self: PrintSlice) PrintSlice.C {
+            return .{ .cps = self.cps.ptr, .len = self.cps.len };
+        }
+    };
+
+    pub const ApcPutSlice = struct {
+        bytes: []const u8,
+
+        pub const C = extern struct {
+            bytes: [*]const u8,
+            len: usize,
+        };
+
+        pub fn cval(self: ApcPutSlice) ApcPutSlice.C {
+            return .{ .bytes = self.bytes.ptr, .len = self.bytes.len };
         }
     };
 
@@ -441,6 +479,11 @@ pub const Action = union(Key) {
 /// about in its pursuit of implementing a terminal emulator or other
 /// functionality.
 ///
+/// Note that printable text is delivered via `print_slice` actions
+/// (runs of codepoints) whenever the stream can decode multiple
+/// codepoints at once, and via `print` actions otherwise. Handlers
+/// that care about text must handle both.
+///
 /// The Handler type must also have a `deinit` function.
 ///
 /// The "comptime" key is on purpose (vs. a standard Zig tagged union)
@@ -551,7 +594,14 @@ pub fn Stream(comptime H: type) type {
             // up to that point are just UTF-8.
             while (self.parser.state == .ground and offset < input.len) {
                 const res = simd.vt.utf8DecodeUntilControlSeq(input[offset..], cp_buf);
-                for (cp_buf[0..res.decoded]) |cp| {
+                const cps = cp_buf[0..res.decoded];
+
+                // Hand runs of printable codepoints to the handler as
+                // print_slice actions so it can process them with
+                // per-run rather than per-codepoint overhead.
+                var i: usize = 0;
+                while (i < cps.len) {
+                    const cp = cps[i];
                     // C0 controls execute and UTF-8-decoded C1 controls
                     // are dropped, as xterm does; neither prints. ESC never
                     // appears here because the decoder stops at it. A
@@ -560,9 +610,14 @@ pub fn Stream(comptime H: type) type {
                     if ((cp & ~@as(u32, 0x9F)) == 0) {
                         @branchHint(.unlikely);
                         if (cp <= 0x1F) self.execute(@intCast(cp));
+                        i += 1;
                         continue;
                     }
-                    self.print(@intCast(cp));
+
+                    var end = i + 1;
+                    while (end < cps.len and (cps[end] & ~@as(u32, 0x9F)) != 0) end += 1;
+                    self.handler.vt(.print_slice, .{ .cps = cps[i..end] });
+                    i = end;
                 }
                 // Consume the bytes we just processed.
                 offset += res.consumed;
@@ -606,10 +661,200 @@ pub fn Stream(comptime H: type) type {
             var offset: usize = 0;
             while (self.parser.state != .ground) {
                 if (offset >= input.len) return input.len;
+
+                // Fast path for CSI entry: "ESC [" is by far the most
+                // common escape sequence prefix, so handle the '[' and
+                // the byte that follows it here rather than paying a
+                // nextNonUtf8 call for each.
+                if (self.parser.state == .escape and input[offset] == '[') {
+                    self.parser.state = .csi_entry;
+                    offset += 1;
+                    continue;
+                }
+
+                if (comptime !@hasDecl(T, "vtRaw")) {
+                    if (self.parser.state == .csi_entry) {
+                        if (self.csiEntryByte(input[offset])) {
+                            offset += 1;
+                            continue;
+                        }
+                    }
+
+                    // Bulk-consume CSI parameter bytes. This can't be
+                    // used for handlers with a vtRaw hook because it
+                    // dispatches the CSI directly (see nextNonUtf8).
+                    if (self.parser.state == .csi_param) {
+                        offset += self.consumeCsiParams(input[offset..]);
+                        if (offset >= input.len) return input.len;
+                        // If we're still in csi_param then the next byte
+                        // isn't a parameter byte; let nextNonUtf8 below
+                        // handle it. Otherwise re-check our state.
+                        if (self.parser.state != .csi_param) continue;
+                    }
+
+                    // Bulk-consume APC string bytes into a single slice.
+                    // APC payloads (e.g. Kitty graphics) can be megabytes
+                    // of base64 data, so per-byte dispatch is far too slow.
+                    // This can't be used for handlers with a vtRaw hook
+                    // because it dispatches the slice directly.
+                    if (self.parser.state == .sos_pm_apc_string) {
+                        offset += self.consumeApcString(input[offset..]);
+                        if (offset >= input.len) return input.len;
+                        // The next byte exits the string state; let
+                        // nextNonUtf8 below handle it.
+                    }
+                }
+
                 self.nextNonUtf8(input[offset]);
                 offset += 1;
             }
             return offset;
+        }
+
+        /// Fast path for a byte in the csi_entry state, the state right
+        /// after "ESC [". Virtually every CSI sequence spends exactly
+        /// one byte in this state, on either a digit, a private marker,
+        /// or a final byte. Returns true if the byte was fully handled;
+        /// false means the caller must process it through the general
+        /// state machine.
+        ///
+        /// Must not be used by handlers with a vtRaw hook because the
+        /// final byte case dispatches the CSI directly.
+        inline fn csiEntryByte(self: *Self, c: u8) bool {
+            comptime assert(!@hasDecl(T, "vtRaw"));
+            assert(self.parser.state == .csi_entry);
+            switch (c) {
+                // First parameter digit.
+                '0'...'9' => {
+                    self.parser.state = .csi_param;
+                    // param_acc is zero (cleared on escape entry)
+                    // so accumulating is just the digit value.
+                    self.parser.param_acc = c - '0';
+                    self.parser.param_acc_idx = 1;
+                },
+                // An empty first parameter.
+                ';' => {
+                    self.parser.state = .csi_param;
+                    self.parser.params[0] = 0;
+                    self.parser.params_idx = 1;
+                },
+                // Private marker (e.g. '?' in "ESC [ ? 2004 h").
+                0x3C...0x3F => {
+                    self.parser.state = .csi_param;
+                    self.parser.collect(c);
+                },
+                // A final byte: a parameterless CSI.
+                0x40...0x7E => self.csiDispatchFinal(c),
+                // Defer to the state machine for anything else
+                // (C0 controls, intermediates, colon).
+                else => return false,
+            }
+            return true;
+        }
+
+        /// Bulk-consume CSI parameter bytes (digits and separators)
+        /// and, if reached, the final byte (dispatching the CSI).
+        /// Returns the number of bytes consumed. Stops at the first
+        /// byte that isn't handled here, leaving the parser in the
+        /// csi_param state so the caller can process that byte.
+        fn consumeCsiParams(self: *Self, input: []const u8) usize {
+            const p = &self.parser;
+            assert(p.state == .csi_param);
+
+            // Accumulate parser state in locals for the hot loop.
+            var acc = p.param_acc;
+            var acc_idx = p.param_acc_idx;
+            var idx = p.params_idx;
+
+            var offset: usize = 0;
+            while (offset < input.len) {
+                const c = input[offset];
+                switch (c) {
+                    // A parameter digit.
+                    '0'...'9' => {
+                        if (idx < Parser.MAX_PARAMS) {
+                            acc *|= 10;
+                            acc +|= c - '0';
+                            acc_idx |= 1;
+                        }
+                        offset += 1;
+                    },
+
+                    // A parameter separator.
+                    ':', ';' => {
+                        if (idx < Parser.MAX_PARAMS) {
+                            p.params[idx] = acc;
+                            if (c == ':') p.params_sep.set(idx);
+                            idx += 1;
+                            acc = 0;
+                            acc_idx = 0;
+                        }
+                        offset += 1;
+                    },
+
+                    // A final byte: dispatch the CSI.
+                    0x40...0x7E => {
+                        p.param_acc = acc;
+                        p.param_acc_idx = acc_idx;
+                        p.params_idx = idx;
+                        self.csiDispatchFinal(c);
+                        return offset + 1;
+                    },
+
+                    // Anything else (C0 controls, intermediates, etc.)
+                    // is handled by the caller.
+                    else => break,
+                }
+            }
+
+            p.param_acc = acc;
+            p.param_acc_idx = acc_idx;
+            p.params_idx = idx;
+            return offset;
+        }
+
+        /// Bulk-consume APC string bytes and dispatch them as a single
+        /// apc_put_slice action. Returns the number of bytes consumed.
+        /// Stops at the first byte that is not an apc_put byte in the
+        /// parse table, leaving it for the caller to process through
+        /// the state machine. CAN, SUB, ESC, and most C1 bytes exit
+        /// or abort the string state; 0xA0-0xFF are ignored by the
+        /// table (not payload), so they can't be bulk-consumed either.
+        ///
+        /// Must not be used by handlers with a vtRaw hook because it
+        /// dispatches the slice directly.
+        fn consumeApcString(self: *Self, input: []const u8) usize {
+            comptime assert(!@hasDecl(T, "vtRaw"));
+            assert(self.parser.state == .sos_pm_apc_string);
+
+            var end: usize = 0;
+            if (comptime std.simd.suggestVectorLength(u8)) |vector_len| {
+                const ByteVector = @Vector(vector_len, u8);
+                while (end + vector_len <= input.len) {
+                    const bytes: ByteVector = input[end..][0..vector_len].*;
+                    const invalid = (bytes == @as(ByteVector, @splat(0x18))) |
+                        (bytes == @as(ByteVector, @splat(0x1A))) |
+                        (bytes == @as(ByteVector, @splat(0x1B))) |
+                        (bytes >= @as(ByteVector, @splat(0x80)));
+                    if (@reduce(.Or, invalid)) break;
+                    end += vector_len;
+                }
+            }
+            while (end < input.len) {
+                switch (input[end]) {
+                    // Not apc_put bytes: CAN/SUB/ESC and most C1 exit
+                    // or abort the state; 0xA0-0xFF are ignored by it.
+                    0x18, 0x1A, 0x1B, 0x80...0xFF => break,
+                    // Everything else is an apc_put byte.
+                    else => end += 1,
+                }
+            }
+
+            if (end > 0) self.handler.vt(
+                .apc_put_slice,
+                .{ .bytes = input[0..end] },
+            );
+            return end;
         }
 
         /// Like nextSlice but takes one byte and is necessarily a scalar
@@ -697,6 +942,13 @@ pub fn Stream(comptime H: type) type {
                 self.parser.state = .csi_entry;
                 return;
             }
+
+            // The fast paths below dispatch actions directly rather than
+            // going through Parser.next, so they'd bypass a handler's
+            // vtRaw hook. Handlers with vtRaw (e.g. the inspector) use
+            // the general path for anything that produces an action.
+            const has_vt_raw = comptime @hasDecl(T, "vtRaw");
+
             // Fast path for CSI params.
             if (self.parser.state == .csi_param) csi_param: {
                 // csi_param is the most common parser state
@@ -733,6 +985,10 @@ pub fn Stream(comptime H: type) type {
                         self.parser.param_acc = 0;
                         self.parser.param_acc_idx = 0;
                     },
+                    // A final byte: dispatch the CSI directly.
+                    0x40...0x7E => if (comptime !has_vt_raw) {
+                        self.csiDispatchFinal(c);
+                    } else break :csi_param,
                     // Explicitly ignored:
                     0x7F => {},
                     // Defer to the state machine to
@@ -740,6 +996,13 @@ pub fn Stream(comptime H: type) type {
                     else => break :csi_param,
                 }
                 return;
+            }
+
+            // Fast path for CSI entry, the state right after "ESC [".
+            if (comptime !has_vt_raw) {
+                if (self.parser.state == .csi_entry) {
+                    if (self.csiEntryByte(c)) return;
+                }
             }
 
             // We explicitly inline this call here for performance reasons.
@@ -787,6 +1050,48 @@ pub fn Stream(comptime H: type) type {
                     }),
                 }
             }
+        }
+
+        /// Finalize and dispatch a CSI directly from parser state for
+        /// the fast paths in nextNonUtf8, without going through
+        /// Parser.next. This must match the behavior of the parser's
+        /// csi_dispatch action.
+        fn csiDispatchFinal(self: *Self, c: u8) void {
+            const p = &self.parser;
+            p.state = .ground;
+
+            // Ignore sequences with too many parameters, matching the
+            // parser's behavior of dropping the dispatch entirely.
+            if (p.params_idx >= Parser.MAX_PARAMS) {
+                @branchHint(.unlikely);
+                return;
+            }
+
+            // Finalize the last parameter if we have one.
+            if (p.param_acc_idx > 0) {
+                p.params[p.params_idx] = p.param_acc;
+                p.params_idx += 1;
+            }
+
+            const action: Parser.Action.CSI = .{
+                .intermediates = p.intermediates[0..p.intermediates_idx],
+                .params = p.params[0..p.params_idx],
+                .params_sep = p.params_sep,
+                .final = c,
+            };
+
+            // We only allow colon or mixed separators for the 'm' command.
+            if (c != 'm' and p.params_sep.count() > 0) {
+                @branchHint(.cold);
+                log.warn(
+                    "CSI colon or mixed separators only allowed for 'm' command, got: {f}",
+                    .{action},
+                );
+                return;
+            }
+
+            if (comptime debug) log.info("action: {f}", .{Parser.Action{ .csi_dispatch = action }});
+            self.csiDispatch(action);
         }
 
         inline fn print(self: *Self, c: u21) void {
@@ -2154,6 +2459,7 @@ pub fn Stream(comptime H: type) type {
                 .conemu_run_process,
                 .kitty_text_sizing,
                 .kitty_clipboard_protocol,
+                .kitty_dnd_protocol,
                 .context_signal,
                 => {
                     log.debug("unimplemented OSC callback: {}", .{cmd});
@@ -2574,6 +2880,7 @@ test "simd: print invalid utf-8" {
         ) void {
             switch (action) {
                 .print => self.c = value.cp,
+                .print_slice => self.c = @intCast(value.cps[value.cps.len - 1]),
                 else => {},
             }
         }
@@ -2595,6 +2902,7 @@ test "simd: complete incomplete utf-8" {
         ) void {
             switch (action) {
                 .print => self.c = value.cp,
+                .print_slice => self.c = @intCast(value.cps[value.cps.len - 1]),
                 else => {},
             }
         }
@@ -2622,6 +2930,11 @@ const PrintRecorder = struct {
         switch (action) {
             .print => {
                 self.buf[self.len] = value.cp;
+                self.len += 1;
+            },
+            // nextSlice hands printable runs over as print_slice.
+            .print_slice => for (value.cps) |cp| {
+                self.buf[self.len] = @intCast(cp);
                 self.len += 1;
             },
             else => {},
@@ -3882,4 +4195,131 @@ test "stream: tab clear with overflowing param" {
     // This is the exact input from the fuzz crash (minus the mode byte):
     // CSI with a huge numeric param that saturates to 65535, followed by 'g'.
     s.nextSlice("\x1b[388888888888888888888888888888888888g\x1b[0m");
+}
+
+/// A test handler that accumulates APC bytes regardless of whether they
+/// arrive per-byte (apc_put) or in bulk (apc_put_slice).
+const ApcTestHandler = struct {
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+    slices: usize = 0,
+    puts: usize = 0,
+    started: usize = 0,
+    ended: usize = 0,
+
+    pub fn vt(
+        self: *@This(),
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) void {
+        switch (action) {
+            .apc_start => self.started += 1,
+            .apc_end => self.ended += 1,
+            .apc_put => {
+                self.buf[self.len] = value;
+                self.len += 1;
+                self.puts += 1;
+            },
+            .apc_put_slice => {
+                @memcpy(self.buf[self.len..][0..value.bytes.len], value.bytes);
+                self.len += value.bytes.len;
+                self.slices += 1;
+            },
+            else => {},
+        }
+    }
+};
+
+test "stream: apc bulk slice" {
+    var s: Stream(ApcTestHandler) = .init(.{});
+    s.nextSlice("\x1b_Gf=24,s=10,v=20;aGVsbG8=\x1b\\");
+
+    try testing.expectEqual(@as(usize, 1), s.handler.started);
+    try testing.expectEqual(@as(usize, 1), s.handler.ended);
+    try testing.expectEqualStrings(
+        "Gf=24,s=10,v=20;aGVsbG8=",
+        s.handler.buf[0..s.handler.len],
+    );
+
+    // With SIMD enabled the body must arrive as a single slice.
+    if (comptime build_options.simd and !debug) {
+        try testing.expectEqual(@as(usize, 1), s.handler.slices);
+        try testing.expectEqual(@as(usize, 0), s.handler.puts);
+    }
+}
+
+test "stream: apc bulk slice split across inputs" {
+    var s: Stream(ApcTestHandler) = .init(.{});
+    s.nextSlice("\x1b_Gf=24,s=10");
+    s.nextSlice(",v=20;aGVs");
+    s.nextSlice("bG8=\x1b\\");
+
+    try testing.expectEqual(@as(usize, 1), s.handler.started);
+    try testing.expectEqual(@as(usize, 1), s.handler.ended);
+    try testing.expectEqualStrings(
+        "Gf=24,s=10,v=20;aGVsbG8=",
+        s.handler.buf[0..s.handler.len],
+    );
+}
+
+test "stream: apc bulk slice keeps C0 bytes as data" {
+    var s: Stream(ApcTestHandler) = .init(.{});
+    // BEL does not terminate an APC string; it is payload data.
+    s.nextSlice("\x1b_Gx\x07y\x1b\\");
+
+    try testing.expectEqual(@as(usize, 1), s.handler.ended);
+    try testing.expectEqualStrings("Gx\x07y", s.handler.buf[0..s.handler.len]);
+}
+
+test "stream: apc aborted by CAN" {
+    var s: Stream(ApcTestHandler) = .init(.{});
+    // CAN (0x18) aborts the APC string via the anywhere => ground
+    // transition. Exiting the sos_pm_apc_string state emits apc_end,
+    // and the trailing bytes are printed, not treated as APC data.
+    s.nextSlice("\x1b_Gabcdefghijklmnopqrstuvwxyz0123456789\x18def");
+
+    try testing.expectEqual(@as(usize, 1), s.handler.started);
+    try testing.expectEqual(@as(usize, 1), s.handler.ended);
+    try testing.expectEqualStrings(
+        "Gabcdefghijklmnopqrstuvwxyz0123456789",
+        s.handler.buf[0..s.handler.len],
+    );
+}
+
+test "stream: apc scalar path matches" {
+    var s: Stream(ApcTestHandler) = .init(.{});
+    for ("\x1b_Gf=24;aGVsbG8=\x1b\\") |c| s.next(c);
+
+    try testing.expectEqual(@as(usize, 1), s.handler.started);
+    try testing.expectEqual(@as(usize, 1), s.handler.ended);
+    try testing.expectEqualStrings(
+        "Gf=24;aGVsbG8=",
+        s.handler.buf[0..s.handler.len],
+    );
+}
+
+test "stream: apc vector boundaries match scalar path" {
+    const positions = [_]usize{ 15, 16, 17, 31, 32, 33, 63, 64, 65 };
+    const controls = [_]u8{ 0x18, 0x1A, 0x1B, 0x80, 0xFF };
+
+    for (positions) |position| for (controls) |control| {
+        var input: [96]u8 = undefined;
+        input[0..3].* = "\x1b_G".*;
+        @memset(input[3 .. 3 + position], 'a');
+        input[3 + position] = control;
+        input[4 + position] = '\\';
+        const bytes = input[0 .. 5 + position];
+
+        var bulk: Stream(ApcTestHandler) = .init(.{});
+        bulk.nextSlice(bytes);
+        var scalar: Stream(ApcTestHandler) = .init(.{});
+        for (bytes) |byte| scalar.next(byte);
+
+        try testing.expectEqual(scalar.handler.started, bulk.handler.started);
+        try testing.expectEqual(scalar.handler.ended, bulk.handler.ended);
+        try testing.expectEqualStrings(
+            scalar.handler.buf[0..scalar.handler.len],
+            bulk.handler.buf[0..bulk.handler.len],
+        );
+    };
 }

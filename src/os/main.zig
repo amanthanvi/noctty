@@ -94,6 +94,7 @@ pub const fixMaxFiles = file.fixMaxFiles;
 pub const restoreMaxFiles = file.restoreMaxFiles;
 pub const allocTmpDir = file.allocTmpDir;
 pub const freeTmpDir = file.freeTmpDir;
+pub const randomTmpPath = file.randomTmpPath;
 pub const isFlatpak = flatpak.isFlatpak;
 pub const FlatpakHostCommand = flatpak.FlatpakHostCommand;
 pub const home = homedir.home;

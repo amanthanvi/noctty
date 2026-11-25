@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const lut = @import("../unicode/lut.zig");
-const Constraint = @import("face.zig").RenderOptions.Constraint;
+const Constraint = @import("Glyph.zig").RenderOptions.Constraint;
 const generated = @import("nerd_font_tables.zig").Tables(?Constraint);
 
 /// 3-level codepoint lookup. Same shape as `unicode/symbols_table.zig`.

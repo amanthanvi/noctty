@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const freetype = @import("freetype");
+const Library = @import("library.zig").Library;
 const Collection = @import("main.zig").Collection;
 const DeferredFace = @import("main.zig").DeferredFace;
 const CodepointRange = @import("DeferredFace_windows.zig").CodepointRange;
@@ -138,7 +139,13 @@ pub const Windows = struct {
     const WeightRange = struct { minimum: f64, maximum: f64 };
     const weight_axis_id = Variation.Id.init("wght");
 
-    pub fn init() Windows {
+    /// `lib` is unused. Upstream's callers pass the font library
+    /// (`5aef2541b`, before the stepping stone 74d0c72fd) for its own Windows
+    /// scanner; this backend opens font files through its own FreeType
+    /// library per scan (`sharedLibrary`), so it takes the argument only to
+    /// keep those call sites as upstream wrote them.
+    pub fn init(lib: Library) Windows {
+        _ = lib;
         // Not page_allocator: that maps a 4 KiB page per allocation, and
         // the records are thousands of short strings, so a scan of 568
         // faces committed about 11 MB for about 0.6 MB of data.
@@ -1538,7 +1545,9 @@ test "windows system fallback puts DirectWrite's face first end to end" {
     // not asserted.
     if (comptime builtin.os.tag == .windows) {
         const alloc = testing.allocator;
-        var disco = Windows.init();
+        var font_lib = try Library.init(alloc);
+        defer font_lib.deinit();
+        var disco = Windows.init(font_lib);
         defer disco.deinit();
         disco.refresh();
 
@@ -1967,7 +1976,9 @@ test "windows discovery end to end" {
     if (comptime builtin.os.tag == .windows) {
         const alloc = testing.allocator;
 
-        var disco = Windows.init();
+        var font_lib = try Library.init(alloc);
+        defer font_lib.deinit();
+        var disco = Windows.init(font_lib);
         defer disco.deinit();
 
         // First refresh scans; an immediate second refresh must be a cheap
@@ -2000,7 +2011,9 @@ const Fixture = struct { name: []const u8, data: []const u8 };
 /// A discovery whose record set is exactly `fixtures`, written to `dir` and
 /// scanned in this order, as if a scan of the font sources had found them.
 fn fixtureDiscovery(dir: std.fs.Dir, fixtures: []const Fixture) !Windows {
-    var disco = Windows.init();
+    var font_lib = try Library.init(testing.allocator);
+    defer font_lib.deinit();
+    var disco = Windows.init(font_lib);
     errdefer disco.deinit();
     var lib = try freetype.Library.init();
     defer lib.deinit();
@@ -2354,7 +2367,9 @@ test "windows refreshExisting never starts or waits for a scan" {
     // Before the first scan it does nothing; whoever needs the records
     // runs that scan.
     {
-        var disco = Windows.init();
+        var font_lib = try Library.init(testing.allocator);
+        defer font_lib.deinit();
+        var disco = Windows.init(font_lib);
         defer disco.deinit();
         disco.refreshExisting();
         try testing.expect(disco.state == null);

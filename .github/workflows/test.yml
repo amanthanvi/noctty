@@ -94,6 +94,26 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Fast thread-gate self-test
+        shell: pwsh
+        timeout-minutes: 8
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $paths = Join-Path $env:RUNNER_TEMP 'thread-selftest-paths.txt'
+            $changed = @(git -c core.quotePath=false diff --name-only --no-renames "$env:PR_BASE...${env:PR_HEAD}")
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Set-Content -LiteralPath $paths -Value $changed -Encoding utf8
+            $selected = python -I ci/selftest_jobs.py $paths
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($selected -eq 'none') { return }
+          }
+          $work = Join-Path $env:RUNNER_TEMP 'fast-thread-gate-selftest'
+          python -I ci/thread_gate_smoke.py $work
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Migration lint controls
         shell: pwsh
         run: python -I ci/test_lints.py
@@ -107,6 +127,23 @@ jobs:
           LINT_BEFORE: ${{ github.event.before }}
         # A separate PR just before Phase 0b changes report to enforce here.
         run: python -I ci/run_lints.py --win32-mode report
+
+
+      - name: Armed renderer-state thread gate
+        shell: pwsh
+        run: |
+          $inventory = Join-Path $env:RUNNER_TEMP 'lock-inventory'
+          python -I ci/lock_inventory20.py . $inventory ci/lock-inventory-threads.tsv HEAD=1a
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I ci/thread_gate15.py check . HEAD 1a ci/lock-inventory-threads.tsv ci/lock-inventory-allow.txt $inventory ci/thread-entries.tsv ci/thread-anchors.tsv --arm-renderer-demand
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Thread role source checks
+        shell: pwsh
+        run: |
+          python -I ci/test_thread_role_points.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I ci/thread_role_points.py . HEAD ci/thread-entries.tsv
 
       - name: Interactive hints contract checks
         shell: pwsh
@@ -219,6 +256,7 @@ jobs:
       - name: PowerShell syntax and JSON validity
         shell: pwsh
         run: ./scripts/check-source-format.ps1
+
 
   tests:
     name: Windows Zig Tests
@@ -583,7 +621,7 @@ jobs:
         run: zig build test-lib-vt -Demit-lib-vt=true --summary all
 
       - name: Build app-profile differential oracle (no capture)
-        run: zig build oracle -Dvt-api=fork -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
+        run: zig build oracle -Dvt-api=stone_flag -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
 
   windows-conpty-probes:
     name: Windows ConPTY Probes (experimental)

@@ -33,6 +33,9 @@ pub const Action = enum {
     /// Print a deterministic VT capability summary for diagnostics
     @"vt-probe",
 
+    /// Wrap `ssh` to configure Ghostty terminal integration on remote hosts
+    ssh,
+
     /// Manage SSH terminfo cache for automatic remote host setup
     @"ssh-cache",
 
@@ -59,6 +62,9 @@ pub const Action = enum {
 
     // Use IPC to tell the running Ghostty to open a new window.
     @"new-window",
+
+    // Use IPC to tell the running Ghostty to toggle the quick terminal.
+    @"toggle-quick-terminal",
 
     // List read-only automation state for the running noctty instance.
     @"list-windows",

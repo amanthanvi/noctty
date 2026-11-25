@@ -38,7 +38,7 @@ cold-build probes with `CL` and `_CL_` produced identical oracle executables.
 From the repository root:
 
 ```text
-scripts\dev-windows.cmd zig build oracle -Dvt-api=fork -Doracle-corpus=true -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --prefix BUILD_DIR --summary all
+scripts\dev-windows.cmd zig build oracle -Dvt-api=stone_flag -Doracle-corpus=true -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --prefix BUILD_DIR --summary all
 ```
 
 Use a fresh `BUILD_DIR` outside the source tree (or a gitignored prefix), so
@@ -152,9 +152,8 @@ At **1B.3/1B.5**, delete these whole files:
 - `src/differential_oracle_corpus.zig`
 
 In `.github/workflows/test.yml`, change the **Build app-profile differential
-oracle (no capture)** step from `-Dvt-api=fork` to **`-Dvt-api=v140_fork`** for
-the retained positional-resize 1B API. If the resolved 1B API uses structured
-resize, use `-Dvt-api=v140` instead. Reuse the retained **1A-tip frozen corpus**; stop building the
+oracle (no capture)** step from `-Dvt-api=stone_flag` to **`-Dvt-api=v140`**
+(structured resize; `v140_fork` only if the flag API returns). Reuse the retained **1A-tip frozen corpus**; stop building the
 legacy generator. The build rejects legacy API/generator selection on a modern
 compiler with a clear error. For a modern **app** build, the always-run identity
 step also refuses either retained legacy file by checking its actual presence,

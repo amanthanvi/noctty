@@ -17,6 +17,7 @@ const sys = @import("sys.zig");
 const win32_theme = @import("../win32_theme.zig");
 const win32_types = @import("../win32_types.zig");
 const window_start = @import("window_start.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const App = win32.App;
 const BOOL = win32_types.BOOL;
 const HDC = win32_types.HDC;
@@ -2956,6 +2957,7 @@ test "win32 a theme change or a reload that flips the frame mode asserts blur-be
         var previous: ?*const anyopaque = null;
 
         fn proc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            thread_role.assertWindowProc();
             if (msg == c.WM_WINDOWPOSCHANGED) {
                 const pos: *const sys.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
                 if (pos.flags & c.SWP_FRAMECHANGED != 0) asserts_at_frame = test_blur_behind_asserts;
@@ -4300,11 +4302,13 @@ test "win32 Windows sends WM_GETMINMAXINFO to a top-level window and never to a 
         var child_prev: ?*const anyopaque = null;
 
         fn topProc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            thread_role.assertWindowProc();
             if (msg == c.WM_GETMINMAXINFO) top_level += 1;
             return sys.CallWindowProcW(top_prev, hwnd, msg, wp, lp);
         }
 
         fn childProc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            thread_role.assertWindowProc();
             if (msg == c.WM_GETMINMAXINFO) child += 1;
             return sys.CallWindowProcW(child_prev, hwnd, msg, wp, lp);
         }
@@ -4475,6 +4479,7 @@ test "win32 window actions and tab switches leave a fullscreen window where it i
         const swp_hidewindow: UINT = 0x0080;
 
         fn proc(hwnd: HWND, msg: UINT, wp: usize, lp: LPARAM) callconv(.winapi) isize {
+            thread_role.assertWindowProc();
             if (msg == c.WM_WINDOWPOSCHANGED) {
                 const pos: *const sys.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
                 const still: UINT = c.SWP_NOMOVE | c.SWP_NOSIZE;

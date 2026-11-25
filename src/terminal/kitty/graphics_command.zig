@@ -3,6 +3,7 @@ const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const simd = @import("../../simd/main.zig");
+const lib = @import("../lib.zig");
 
 const log = std.log.scoped(.kitty_gfx);
 
@@ -147,6 +148,26 @@ pub const Parser = struct {
                 if (self.data.items.len >= self.max_bytes) return error.OutOfMemory;
                 try self.data.append(self.arena.child_allocator, c);
             },
+        }
+    }
+
+    /// Feed a slice of bytes to the parser. This is equivalent to
+    /// calling feed for each byte in order, but once we're in the data
+    /// state the remainder of the slice is appended in bulk, avoiding
+    /// per-byte overhead for large payloads.
+    pub fn feedSlice(self: *Parser, bytes: []const u8) !void {
+        var rem = bytes;
+        while (rem.len > 0) {
+            if (self.state == .data) {
+                if (self.data.items.len + rem.len > self.max_bytes) {
+                    return error.OutOfMemory;
+                }
+                try self.data.appendSlice(self.arena.child_allocator, rem);
+                return;
+            }
+
+            try self.feed(rem[0]);
+            rem = rem[1..];
         }
     }
 
@@ -457,39 +478,28 @@ pub const Transmission = struct {
     more_chunks: bool = false, // m
     usage: Usage = .default, // N
 
-    pub const Format = enum {
-        rgb, // 24
-        rgba, // 32
-        png, // 100
-
+    pub const Format = lib.Enum(lib.target, &.{
+        "rgb", // 24
+        "rgba", // 32
+        "png", // 100
         // The following are not supported directly via the protocol
         // but they are formats that a png may decode to that we
         // support.
-        gray_alpha,
-        gray,
+        "gray_alpha",
+        "gray",
+    });
 
-        pub fn bpp(self: Format) u8 {
-            return switch (self) {
-                .gray => 1,
-                .gray_alpha => 2,
-                .rgb => 3,
-                .rgba => 4,
-                .png => unreachable, // Must be validated before
-            };
-        }
-    };
+    pub const Medium = lib.Enum(lib.target, &.{
+        "direct", // d
+        "file", // f
+        "temporary_file", // t
+        "shared_memory", // s
+    });
 
-    pub const Medium = enum {
-        direct, // d
-        file, // f
-        temporary_file, // t
-        shared_memory, // s
-    };
-
-    pub const Compression = enum {
-        none,
-        zlib_deflate, // z
-    };
+    pub const Compression = lib.Enum(lib.target, &.{
+        "none",
+        "zlib_deflate", // z
+    });
 
     /// Usage hints allow for optimising resource consumption strategies.
     ///
@@ -503,6 +513,16 @@ pub const Transmission = struct {
 
         pub const default: Usage = .{};
     };
+
+    pub fn formatBpp(format: Format) u8 {
+        return switch (format) {
+            .gray => 1,
+            .gray_alpha => 2,
+            .rgb => 3,
+            .rgba => 4,
+            .png => unreachable, // Must be validated before
+        };
+    }
 
     fn parse(kv: KV) !Transmission {
         var result: Transmission = .{};
@@ -1133,6 +1153,57 @@ test "transmission command with transient hint" {
     try testing.expectEqual(@as(u32, 10), v.width);
     try testing.expectEqual(@as(u32, 20), v.height);
     try testing.expectEqual(true, v.usage.transient);
+}
+
+test "feedSlice matches per-byte feed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const input = "f=24,s=10,v=20;aGVsbG8gd29ybGQ=";
+
+    var p1 = Parser.init(alloc, 1024 * 1024);
+    defer p1.deinit();
+    for (input) |c| try p1.feed(c);
+    const c1 = try p1.complete(alloc);
+    defer c1.deinit(alloc);
+
+    var p2 = Parser.init(alloc, 1024 * 1024);
+    defer p2.deinit();
+    try p2.feedSlice(input);
+    const c2 = try p2.complete(alloc);
+    defer c2.deinit(alloc);
+
+    try testing.expect(c1.control == .transmit);
+    try testing.expect(c2.control == .transmit);
+    try testing.expectEqualStrings(c1.data, c2.data);
+}
+
+test "feedSlice across slice boundaries" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var p = Parser.init(alloc, 1024 * 1024);
+    defer p.deinit();
+
+    try p.feedSlice("f=24,s=10");
+    try p.feedSlice(",v=20;aGVsbG8g");
+    try p.feedSlice("d29ybGQ=");
+    const command = try p.complete(alloc);
+    defer command.deinit(alloc);
+
+    try testing.expect(command.control == .transmit);
+
+    // The payload is base64-decoded on completion.
+    try testing.expectEqualStrings("hello world", command.data);
+}
+
+test "feedSlice respects max_bytes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var p = Parser.init(alloc, 4);
+    defer p.deinit();
+
+    try p.feedSlice("f=24;ab");
+    try testing.expectError(error.OutOfMemory, p.feedSlice("cde"));
 }
 
 test "transmission ignores 'm' if medium is not direct" {

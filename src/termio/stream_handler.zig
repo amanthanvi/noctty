@@ -8,6 +8,7 @@ const build_config = @import("../build_config.zig");
 const configpkg = @import("../config.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
@@ -47,12 +48,6 @@ pub const StreamHandler = struct {
     /// A handle to wake up the renderer. This hints to the renderer that
     /// a repaint should happen.
     renderer_wakeup: *xev.Async,
-
-    /// The default cursor state. This is used with CSI q. This is
-    /// set to true when we're currently in the default cursor state.
-    default_cursor: bool = true,
-    default_cursor_style: terminal.CursorStyle,
-    default_cursor_blink: ?bool,
 
     /// The response to use for ENQ requests. The memory is owned by
     /// whoever owns StreamHandler.
@@ -132,13 +127,8 @@ pub const StreamHandler = struct {
         self.osc_color_report_format = config.osc_color_report_format;
         self.clipboard_write = config.clipboard_write;
         self.enquiry_response = config.enquiry_response;
-        self.default_cursor_style = config.cursor_style;
-        self.default_cursor_blink = config.cursor_blink;
-
-        // If our cursor is the default, then we update it immediately.
-        if (self.default_cursor) self.setCursorStyle(.default) catch |err| {
-            log.warn("failed to set default cursor style: {}", .{err});
-        };
+        self.terminal.setDefaultCursorStyle(config.cursor_style);
+        self.terminal.setDefaultCursorBlink(config.cursor_blink);
 
         // The config could have changed any of our colors, but the mode
         // 2031 report is sent by Termio.changeConfig. This runs on the io
@@ -146,10 +136,18 @@ pub const StreamHandler = struct {
         // sending to it here would deadlock if the mailbox were full.
     }
 
-    inline fn surfaceMessageWriter(
+    /// Inline, as upstream's is, except in Debug, where a real function
+    /// keeps the renderer-state relock below recorded as its own: Zig 0.15.2
+    /// names the caller for a site inlined into it (PLAN.md §2.7 RQ11,
+    /// §19.1). Release code is the inline fn's, as Exec.zig's reader keeps
+    /// its always_inline processOutput call outside Debug.
+    const surface_message_writer_cc: std.builtin.CallingConvention =
+        if (builtin.mode == .Debug) .auto else .@"inline";
+
+    fn surfaceMessageWriter(
         self: *StreamHandler,
         msg: apprt.surface.Message,
-    ) void {
+    ) callconv(surface_message_writer_cc) void {
         // A stopping reader sends nothing more: a closing surface has already
         // left the app, which drops its messages, and the app thread, which
         // drains this queue, may be joining this reader's IO thread.
@@ -243,6 +241,10 @@ pub const StreamHandler = struct {
                     }
                 }
             },
+            .print_slice => {
+                @branchHint(.likely);
+                try self.printSlice(value.cps);
+            },
             .print_repeat => try self.printRepeat(value),
             .bell => self.bell(),
             .backspace => self.terminal.backspace(),
@@ -283,7 +285,7 @@ pub const StreamHandler = struct {
             .cursor_row => self.terminal.setCursorRow(value.value),
             .cursor_col_relative => self.terminal.cursorColRelative(value.value),
             .cursor_row_relative => self.terminal.cursorRowRelative(value.value),
-            .cursor_style => try self.setCursorStyle(value),
+            .cursor_style => self.terminal.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => {
@@ -319,7 +321,7 @@ pub const StreamHandler = struct {
             },
             .soft_reset => {
                 self.terminal.softReset();
-                try self.setCursorStyle(.default);
+                self.terminal.setCursorStyle(.default);
             },
             .set_mode => try self.setMode(value.mode, true),
             .reset_mode => try self.setMode(value.mode, false),
@@ -418,6 +420,7 @@ pub const StreamHandler = struct {
             .apc_start => self.apc.start(),
             .apc_end => try self.apcEnd(value.terminated),
             .apc_put => self.apc.feed(self.alloc, value),
+            .apc_put_slice => self.apc.feedSlice(self.alloc, value.bytes),
 
             // Unimplemented
             .title_push,
@@ -626,6 +629,10 @@ pub const StreamHandler = struct {
                     }
                 }
             },
+
+            // Noctty does not implement the glyph protocol. Discard the
+            // command without executing it or sending a reply.
+            .glyph => {},
         }
     }
 
@@ -667,6 +674,26 @@ pub const StreamHandler = struct {
     inline fn capturesSemanticOutput(self: *const StreamHandler) bool {
         return self.terminal.status_display == .main and
             self.terminal.screens.active_key == .primary;
+    }
+
+    /// A run of printable codepoints. Upstream's batched print runs unless
+    /// the run goes to an active spoken-output capture, which records each
+    /// committed codepoint as the `.print` arm does.
+    inline fn printSlice(self: *StreamHandler, cps: []const u32) !void {
+        if (!self.capturesSemanticOutput() or !self.semantic_output.active) {
+            try self.terminal.printSlice(cps);
+            return;
+        }
+
+        for (cps) |cp| {
+            self.terminal.print(@intCast(cp)) catch |err| {
+                self.semantic_output.omitRemainder();
+                return err;
+            };
+            if (self.terminal.committedPrintCodepoint()) |committed| {
+                self.semantic_output.recordPrint(committed);
+            }
+        }
     }
 
     inline fn printRepeat(self: *StreamHandler, count_req: usize) !void {
@@ -778,7 +805,7 @@ pub const StreamHandler = struct {
         // their shell config when they render prompts to ensure the
         // cursor is exactly as they request.
         if (mode == .cursor_blinking and
-            self.default_cursor_blink != null)
+            self.terminal.cursor.default_blink != null)
         {
             return;
         }
@@ -838,8 +865,10 @@ pub const StreamHandler = struct {
                 const grid_size = self.size.grid();
                 self.terminal.resize(
                     self.alloc,
-                    grid_size.columns,
-                    grid_size.rows,
+                    .{
+                        .cols = grid_size.columns,
+                        .rows = grid_size.rows,
+                    },
                 ) catch |err| {
                     log.err("error updating terminal size: {}", .{err});
                 };
@@ -1001,55 +1030,6 @@ pub const StreamHandler = struct {
             },
 
             .color_scheme => self.messageWriter(.{ .color_scheme_report = .{ .force = true } }),
-        }
-    }
-
-    pub fn setCursorStyle(
-        self: *StreamHandler,
-        style: terminal.CursorStyleReq,
-    ) !void {
-        // Assume we're setting to a non-default.
-        self.default_cursor = false;
-
-        switch (style) {
-            .default => {
-                self.default_cursor = true;
-                self.terminal.screens.active.cursor.cursor_style = self.default_cursor_style;
-                self.terminal.modes.set(
-                    .cursor_blinking,
-                    self.default_cursor_blink orelse true,
-                );
-            },
-
-            .blinking_block => {
-                self.terminal.screens.active.cursor.cursor_style = .block;
-                self.terminal.modes.set(.cursor_blinking, true);
-            },
-
-            .steady_block => {
-                self.terminal.screens.active.cursor.cursor_style = .block;
-                self.terminal.modes.set(.cursor_blinking, false);
-            },
-
-            .blinking_underline => {
-                self.terminal.screens.active.cursor.cursor_style = .underline;
-                self.terminal.modes.set(.cursor_blinking, true);
-            },
-
-            .steady_underline => {
-                self.terminal.screens.active.cursor.cursor_style = .underline;
-                self.terminal.modes.set(.cursor_blinking, false);
-            },
-
-            .blinking_bar => {
-                self.terminal.screens.active.cursor.cursor_style = .bar;
-                self.terminal.modes.set(.cursor_blinking, true);
-            },
-
-            .steady_bar => {
-                self.terminal.screens.active.cursor.cursor_style = .bar;
-                self.terminal.modes.set(.cursor_blinking, false);
-            },
         }
     }
 
@@ -1786,6 +1766,10 @@ pub const StreamHandler = struct {
 };
 
 test "semantic output capture follows real stream handler parser" {
+    // The pty reader feeds the stream (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -1794,7 +1778,7 @@ test "semantic output capture follows real stream handler parser" {
 
     var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
     defer termio_mailbox.deinit(std.testing.allocator);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -1820,8 +1804,6 @@ test "semantic output capture follows real stream handler parser" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .none,
         .clipboard_write = .allow,
@@ -2014,6 +1996,11 @@ test "issue149 config change queues no color scheme report, even into a full mai
     // the termio mailbox, and then writes the mode 2031 report itself. A
     // report queued here would arrive twice, and with the mailbox full the
     // send would wait for the IO thread, which is this thread, forever.
+    // So the test thread is the IO thread (PLAN.md §2.7 RQ8): a send it
+    // made with the renderer mutex would be recorded as .termio.
+    const role = thread_role.fixture(.termio);
+    defer role.exit();
+
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -2028,7 +2015,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
 
     var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
     defer termio_mailbox.deinit(std.testing.allocator);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2054,8 +2041,6 @@ test "issue149 config change queues no color scheme report, even into a full mai
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
@@ -2088,6 +2073,10 @@ test "issue149 config change queues no color scheme report, even into a full mai
 }
 
 test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
+    // The pty reader feeds the stream (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
     var term = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
@@ -2102,7 +2091,7 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
 
     var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
     defer termio_mailbox.deinit(std.testing.allocator);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2128,8 +2117,6 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
@@ -2170,13 +2157,19 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     // Feeds output with the renderer mutex held, as the reader does.
     const Feed = struct {
         stream: *StreamHandler.Stream,
-        mutex: *std.Thread.Mutex,
+        /// Not `mutex`: the lock inventory would take the queues' `.mutex`
+        /// locks below for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
+        renderer_mutex: *renderer.StateMutex,
         input: []const u8,
         done: std.Thread.ResetEvent = .{},
 
         fn run(self: *@This()) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            // As the pty reader, on a helper thread or nested in the test
+            // thread's TestStream fixture (PLAN.md §2.7 RQ9, §19.5).
+            const role = thread_role.enter(.reader);
+            defer role.exit();
+            self.renderer_mutex.lock();
+            defer self.renderer_mutex.unlock();
             self.stream.nextSlice(self.input);
             self.done.set();
         }
@@ -2206,21 +2199,74 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         }
     };
 
-    var to_surface: Feed = .{ .stream = &h.stream, .mutex = &h.renderer_mutex, .input = clipboard };
+    var to_surface: Feed = .{ .stream = &h.stream, .renderer_mutex = &h.renderer_mutex, .input = clipboard };
     try to_surface.stoppedWhileWaiting(h.app_queue, &stop);
-    var to_termio: Feed = .{ .stream = &h.stream, .mutex = &h.renderer_mutex, .input = "\x05" };
+    var to_termio: Feed = .{ .stream = &h.stream, .renderer_mutex = &h.renderer_mutex, .input = "\x05" };
     try to_termio.stoppedWhileWaiting(termio_queue, &stop);
 
     // Once stopped, a title, a status report, a clipboard write and an
     // answerback are all dropped at once, and both queues keep what they held.
     var after: Feed = .{
         .stream = &h.stream,
-        .mutex = &h.renderer_mutex,
+        .renderer_mutex = &h.renderer_mutex,
         .input = "\x1b]2;closing\x07\x1b[5n" ++ clipboard ++ "\x05",
     };
     after.run();
     try std.testing.expectEqual(@as(TestStream.AppMailbox.Queue.Size, 64), h.app_queue.len);
     try std.testing.expectEqual(@as(@TypeOf(termio_queue.len), 64), termio_queue.len);
+}
+
+test "a reader's answerback into a full termio mailbox lets the IO thread take the lock and takes it back (the relock tests' reader-side fill test)" {
+    // PLAN.md §2.7 acceptance test 7, §19.6: the UI relock test from the pty
+    // reader's side, with room made, where the test above stops the reader.
+    // The test thread feeds as the reader does (TestStream's `.reader`
+    // fixture), with the renderer-state mutex held, an answerback, so
+    // messageWriter calls send with that mutex on a full termio mailbox with
+    // a `.focused` message ahead. send drops the mutex, waits for room and
+    // takes it back; the IO thread's drain takes the mutex inside that window
+    // (its hook), and focusGained takes it for the `.focused` message.
+    var h: TestStream = undefined;
+    try h.init(std.testing.allocator, .{});
+    defer h.deinit(std.testing.allocator);
+
+    const queue = h.termio_mailbox.spsc.queue;
+    try std.testing.expect(queue.push(.{ .focused = true }, .{ .instant = {} }) > 0);
+    while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+
+    const Io = struct {
+        mailbox: *termio.Mailbox,
+        state: *renderer.State,
+        hook: termio.Thread.DrainHook = .{},
+        err: ?anyerror = null,
+
+        fn drainAsIoThread(self: *@This()) void {
+            // The IO thread's role, as its `threadMain` enters it (RQ9).
+            const role = thread_role.enter(.termio);
+            defer role.exit();
+            termio.Thread.drainForTest(self.mailbox, self.state, &self.hook) catch |err| {
+                self.err = err;
+                // Make room, so the waiting reader does not wait forever.
+                while (self.mailbox.spsc.queue.pop()) |message| message.deinit();
+            };
+        }
+    };
+    var io: Io = .{ .mailbox = &h.termio_mailbox, .state = &h.renderer_state };
+
+    // The IO thread's hook waits for the mutex until send drops it.
+    h.renderer_mutex.lock();
+    const thread = std.Thread.spawn(.{}, Io.drainAsIoThread, .{&io}) catch |err| {
+        h.renderer_mutex.unlock();
+        return err;
+    };
+    h.stream.nextSlice("\x05");
+    // send's relock took the mutex back through the wrapper (PN2).
+    h.renderer_mutex.assertHeld();
+    const drains = io.hook.count.load(.acquire);
+    h.renderer_mutex.unlock();
+    thread.join();
+    if (io.err) |err| return err;
+    try std.testing.expect(drains >= 1);
+    try std.testing.expect(h.stream.handler.termio_messaged);
 }
 
 test "PKG16 integrated cmd prompt clears stale keyboard modes" {
@@ -2277,6 +2323,10 @@ test "PKG16 integrated cmd prompt clears stale keyboard modes" {
 test "cmd OSC 9;9 URI updates terminal pwd" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
+    // The pty reader feeds the stream (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
     const alloc = std.testing.allocator;
     var term = try terminal.Terminal.init(alloc, .{
         .cols = 80,
@@ -2286,7 +2336,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
 
     var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
     defer termio_mailbox.deinit(alloc);
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: renderer.StateMutex = .{};
     var renderer_state: renderer.State = undefined;
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
@@ -2312,8 +2362,6 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
         .renderer_state = &renderer_state,
         .renderer_mailbox = undefined,
         .renderer_wakeup = undefined,
-        .default_cursor_style = .block,
-        .default_cursor_blink = true,
         .enquiry_response = "",
         .osc_color_report_format = .none,
         .clipboard_write = .allow,
@@ -2362,11 +2410,15 @@ test "OSC 7 pwd refuses network and device paths" {
 const TestStream = struct {
     term: terminal.Terminal,
     termio_mailbox: termio.Mailbox,
-    renderer_mutex: std.Thread.Mutex,
+    renderer_mutex: renderer.StateMutex,
     renderer_state: renderer.State,
     rt_app: apprt.App,
     app_queue: *AppMailbox.Queue,
     stream: StreamHandler.Stream,
+    /// The fixture's role: a test feeds the stream as the pty reader does
+    /// (PLAN.md §2.7 RQ8). Entered last in `init`, exited last in `deinit`,
+    /// so a test that holds a TestStream enters no fixture of its own.
+    role: thread_role.Scope,
 
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
 
@@ -2382,7 +2434,14 @@ const TestStream = struct {
 
     /// `self` holds pointers into itself, so it must not move after this.
     fn init(self: *TestStream, alloc: Allocator, options: Options) !void {
-        self.term = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+        // The fork's cursor defaults (block, blinking) used to be the
+        // handler's fields; upstream c594031d5 moved them into Terminal,
+        // whose `default_cursor_blink` defaults to false.
+        self.term = try terminal.Terminal.init(alloc, .{
+            .cols = 80,
+            .rows = 24,
+            .default_cursor_blink = true,
+        });
         errdefer self.term.deinit(alloc);
         self.termio_mailbox = try termio.Mailbox.initSPSC(alloc);
         errdefer self.termio_mailbox.deinit(alloc);
@@ -2408,13 +2467,12 @@ const TestStream = struct {
             .renderer_state = &self.renderer_state,
             .renderer_mailbox = undefined,
             .renderer_wakeup = undefined,
-            .default_cursor_style = .block,
-            .default_cursor_blink = true,
             .enquiry_response = options.enquiry_response,
             .osc_color_report_format = options.osc_color_report_format,
             .clipboard_write = .allow,
         });
         self.stream.handler.seen_title = options.seen_title;
+        self.role = thread_role.fixture(.reader);
     }
 
     fn deinit(self: *TestStream, alloc: Allocator) void {
@@ -2426,6 +2484,7 @@ const TestStream = struct {
         self.app_queue.destroy(alloc);
         self.termio_mailbox.deinit(alloc);
         self.term.deinit(alloc);
+        self.role.exit();
     }
 
     /// The next surface message, or null when none is left. Skips the mouse
@@ -2905,4 +2964,19 @@ test "a cancelled or aborted Kitty graphics APC runs nothing" {
     // The same command ended by ST stores the image.
     h.stream.nextSlice("\x1b_Ga=t,f=24,s=1,v=1,i=7,q=2;AAAA\x1b\\");
     try std.testing.expect(storage.imageById(7) != null);
+}
+
+test "glyph APC gets no reply from the app stream handler" {
+    const alloc = std.testing.allocator;
+    var h: TestStream = undefined;
+    try h.init(alloc, .{});
+    defer h.deinit(alloc);
+
+    // A well-formed glyph query would elicit a reply if dispatched.
+    h.stream.nextSlice("\x1b_25a1;q;cp=E0A0\x1b\\");
+    try std.testing.expect(h.termio_mailbox.spsc.queue.pop() == null);
+
+    // A supported request still reaches the same reply queue.
+    h.stream.nextSlice("\x1b[?6n");
+    try expectIssue149Write(&h.termio_mailbox, "\x1b[?1;1;1R");
 }

@@ -27,7 +27,7 @@ typedef struct GhosttyMouseEventImpl *GhosttyMouseEvent;
  *
  * @ingroup mouse
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   /** Mouse button was pressed. */
   GHOSTTY_MOUSE_ACTION_PRESS = 0,
 
@@ -36,6 +36,7 @@ typedef enum {
 
   /** Mouse moved. */
   GHOSTTY_MOUSE_ACTION_MOTION = 2,
+  GHOSTTY_MOUSE_ACTION_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyMouseAction;
 
 /**
@@ -43,7 +44,7 @@ typedef enum {
  *
  * @ingroup mouse
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_MOUSE_BUTTON_UNKNOWN = 0,
   GHOSTTY_MOUSE_BUTTON_LEFT = 1,
   GHOSTTY_MOUSE_BUTTON_RIGHT = 2,
@@ -56,6 +57,7 @@ typedef enum {
   GHOSTTY_MOUSE_BUTTON_NINE = 9,
   GHOSTTY_MOUSE_BUTTON_TEN = 10,
   GHOSTTY_MOUSE_BUTTON_ELEVEN = 11,
+  GHOSTTY_MOUSE_BUTTON_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyMouseButton;
 
 /**

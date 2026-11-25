@@ -26,6 +26,7 @@ const oni = @import("oniguruma");
 const crash = @import("crash/main.zig");
 const unicode = @import("unicode/main.zig");
 const rendererpkg = @import("renderer.zig");
+const thread_role = @import("sync/thread_role.zig");
 const termio = @import("termio.zig");
 const font = @import("font/main.zig");
 const Command = @import("Command.zig");
@@ -318,6 +319,11 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // The test thread is the app thread that owns the search (PLAN.md §2.7
+    // RQ8); the search thread's threadMain enters .search itself.
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
@@ -325,7 +331,7 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
         defer stream.deinit();
         stream.nextSlice("needle\r\nneedle\r\nneedle");
     }
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: rendererpkg.StateMutex = .{};
 
     // Only the fields that starting a search, its event callback and the
     // app wakeup read are set; the rest is zeroed so that a new read of an
@@ -377,6 +383,10 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     // End the search on another thread, as the app thread would.
     const Ender = struct {
         fn run(search: *Search, done: *std.Thread.ResetEvent) void {
+            // As the app thread: the search's deinit stops its QuerySearch,
+            // which locks (PLAN.md §2.7 RQ9, §19.5).
+            const app_thread = thread_role.enter(.ui);
+            defer app_thread.exit();
             search.deinit();
             done.set();
         }
@@ -467,7 +477,7 @@ const Mouse = struct {
     }
 
     /// Return the left-click pin only if it still belongs to the active screen.
-    fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
+    pub fn activeLeftClickPin(self: *const Mouse, screens: *const terminal.ScreenSet) ?*terminal.Pin {
         const pin = self.left_click_pin orelse return null;
         if (self.left_click_screen != screens.active_key) return null;
         _ = self.leftClickPageList(screens) orelse return null;
@@ -669,6 +679,7 @@ const DerivedConfig = struct {
     app_notifications: configpkg.Config.AppNotifications,
     copy_on_select: configpkg.CopyOnSelect,
     right_click_action: configpkg.RightClickAction,
+    middle_click_action: configpkg.MiddleClickAction,
     confirm_close_surface: configpkg.ConfirmCloseSurface,
     cursor_click_to_move: bool,
     desktop_notifications: bool,
@@ -736,6 +747,7 @@ const DerivedConfig = struct {
             .app_notifications = config.@"app-notifications",
             .copy_on_select = config.@"copy-on-select",
             .right_click_action = config.@"right-click-action",
+            .middle_click_action = config.@"middle-click-action",
             .confirm_close_surface = config.@"confirm-close-surface",
             .cursor_click_to_move = config.@"cursor-click-to-move",
             .desktop_notifications = config.@"desktop-notifications",
@@ -1030,7 +1042,7 @@ pub fn init(
     }
 
     // The mutex used to protect our renderer state.
-    const mutex = try alloc.create(std.Thread.Mutex);
+    const mutex = try alloc.create(rendererpkg.StateMutex);
     mutex.* = .{};
     errdefer alloc.destroy(mutex);
 
@@ -1457,6 +1469,220 @@ test "queueIo frees allocated writes in readonly mode" {
     } }, .unlocked);
 }
 
+/// The relock tests' surface (PLAN.md §2.7 acceptance test 7, §19.6): only
+/// what `queueIo`, the termio mailbox and the IO thread's drain read is set,
+/// the rest zeroed. Its termio mailbox is full, with a `.focused` message
+/// ahead, whose handler (`Termio.focusGained`) takes the renderer-state mutex
+/// on its first line. Each test starts the IO thread itself, a thread of
+/// its own that enters `.termio` and runs `drain` (PLAN.md §2.7 RQ9: the
+/// role is entered in test code, and the spawn is test code, no thread entry).
+const RelockSurface = struct {
+    surface: *Surface,
+    term: terminal.Terminal,
+    mutex: rendererpkg.StateMutex = .{},
+    hook: termio.Thread.DrainHook = .{},
+    io_thread: ?std.Thread = null,
+    io_error: ?anyerror = null,
+
+    /// `self` holds pointers into itself, so it must not move after this.
+    fn init(self: *RelockSurface, alloc: Allocator) !void {
+        const surface = try alloc.create(Surface);
+        errdefer alloc.destroy(surface);
+        @memset(std.mem.asBytes(surface), 0);
+        self.* = .{ .surface = surface, .term = try .init(alloc, .{ .cols = 10, .rows = 4 }) };
+        errdefer self.term.deinit(alloc);
+        surface.renderer_state.mutex = &self.mutex;
+        surface.renderer_state.terminal = &self.term;
+        surface.io.renderer_state = &surface.renderer_state;
+        surface.io.mailbox = try termio.Mailbox.initSPSC(alloc);
+        const queue = surface.io.mailbox.spsc.queue;
+        _ = queue.push(.{ .focused = true }, .{ .instant = {} });
+        while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) > 0) {}
+    }
+
+    fn deinit(self: *RelockSurface, alloc: Allocator) void {
+        if (self.io_thread) |thread| thread.join();
+        self.surface.io.mailbox.deinit(alloc);
+        self.term.deinit(alloc);
+        alloc.destroy(self.surface);
+    }
+
+    fn joinIoThread(self: *RelockSurface) !void {
+        if (self.io_thread) |thread| thread.join();
+        self.io_thread = null;
+        if (self.io_error) |err| return err;
+    }
+
+    /// The IO thread's drain, on a thread that has entered `.termio`. Its
+    /// hook waits for the mutex until a sender drops it, so the test holds
+    /// the mutex before it starts the thread.
+    fn drain(self: *RelockSurface) void {
+        termio.Thread.drainForTest(&self.surface.io.mailbox, &self.surface.renderer_state, &self.hook) catch |err| {
+            self.io_error = err;
+            // Make room, so a waiting sender does not wait forever.
+            const queue = self.surface.io.mailbox.spsc.queue;
+            while (queue.pop()) |message| message.deinit();
+        };
+    }
+};
+
+/// A pair the relock test expects in this process's recorder: its key as
+/// the compare gives it (the file under the source root and the function's
+/// bare name) and its role.
+const RecordedPair = struct {
+    key: []const u8,
+    role: thread_role.Role,
+};
+
+/// Fails unless this process's recorder holds each of `pairs` (PLAN.md §2.7
+/// acceptance test 7): a recorded site named against this exe's own PDB as
+/// `symbolise.zig` names a dump's (the function holding the call, by its
+/// file and bare name), with the pair's role. A build whose tests check no
+/// names (RQ16, `symbolise.names_checked`: a 0.15.2 ReleaseSafe build, which
+/// attributes noinline functions only, where these sites are plain ones)
+/// checks each role alone.
+/// With the layer off nothing is recorded, so nothing is checked.
+fn expectRecordedPairs(pairs: []const RecordedPair) !void {
+    if (comptime thread_role.layer == .off) return;
+    const recorder = @import("sync/recorder.zig");
+    const symbolise = @import("sync/symbolise.zig");
+    const dump = @import("sync/dump.zig");
+    const alloc = std.testing.allocator;
+
+    var session: ?symbolise.Session = null;
+    defer if (session) |*s| s.close();
+    var root: []u8 = &.{};
+    defer alloc.free(root);
+    if (symbolise.names_checked) {
+        const own = dump.selfModule() orelse return error.NoModule;
+        const pdb = own.pdb orelse return error.SkipZigTest; // a stripped build has no PDB
+        session = try symbolise.Session.openSelf(alloc);
+        const loaded = session.?.loaded() orelse return error.PdbNotLoaded;
+        if (!loaded.matches(pdb)) return error.PdbNotLoaded;
+        root = try session.?.sourceRoot(alloc);
+    }
+
+    for (pairs) |pair| {
+        const tag = @intFromEnum(std.meta.activeTag(pair.role));
+        const held = for (recorder.process.slots) |*slot| {
+            switch (slot.state.load(.acquire)) {
+                .ready, .written => {},
+                else => continue,
+            }
+            if (slot.tag != tag) continue;
+            const s = if (session) |*s| s else break true;
+            // The call instruction, as the symbolise mode names a site.
+            const location = (try s.locate(alloc, slot.site - 1)) orelse continue;
+            defer location.deinit(alloc);
+            const file = try symbolise.keyFile(alloc, location.file, root);
+            defer alloc.free(file);
+            if (pair.key.len == file.len + 1 + location.name.len and
+                std.mem.startsWith(u8, pair.key, file) and pair.key[file.len] == ':' and
+                std.mem.endsWith(u8, pair.key, location.name)) break true;
+        } else false;
+        if (!held) {
+            std.debug.print("relock test: the recorder holds no ({s}, {f})\n", .{ pair.key, pair.role });
+            return error.PairNotRecorded;
+        }
+    }
+}
+
+test "Surface: queueIo(.locked) into a full termio mailbox lets the IO thread take the lock and takes it back (UI relock test)" {
+    // PLAN.md §2.7 acceptance test 7 and RQ3, §19.6. The test holds the
+    // renderer-state mutex itself and queues one message more than the
+    // mailbox holds, as a `.locked` caller of queueIo does (the lead's 1A.2
+    // decision 10: maybePromptClick locks for itself at the fork head and
+    // asserts its caller's lock on stone-1a, so neither tree's test goes
+    // through it). send drops the mutex, waits for room and takes it back;
+    // the IO thread's drain takes the mutex inside that window (its hook),
+    // and focusGained takes it for the `.focused` message ahead.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    // queueIo runs on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
+    var f: RelockSurface = undefined;
+    try f.init(alloc);
+    defer f.deinit(alloc);
+
+    const IoThread = struct {
+        fn main(relock: *RelockSurface) void {
+            // The IO thread's role, as its `threadMain` enters it (RQ9).
+            const io_role = thread_role.enter(.termio);
+            defer io_role.exit();
+            relock.drain();
+        }
+    };
+
+    f.mutex.lock();
+    f.io_thread = std.Thread.spawn(.{}, IoThread.main, .{&f}) catch |err| {
+        f.mutex.unlock();
+        return err;
+    };
+    f.surface.queueIo(.{ .linefeed_mode = false }, .locked);
+    // send's relock took the mutex back through the wrapper (PN2).
+    f.mutex.assertHeld();
+    const drains = f.hook.count.load(.acquire);
+    f.mutex.unlock();
+    try f.joinIoThread();
+    try std.testing.expect(drains >= 1);
+
+    try expectRecordedPairs(&.{
+        .{ .key = "src/termio/mailbox.zig:send", .role = .ui },
+        .{ .key = "src/termio/Thread.zig:drainMailbox", .role = .termio },
+        .{ .key = "src/termio/Termio.zig:focusGained", .role = .termio },
+    });
+}
+
+test "isolated: a raw relock in place of send's leaves assertHeld() to panic with PN2 (UI relock test)" {
+    // The UI relock test's negative variant (PLAN.md §2.7 acceptance test 7,
+    // RQ15, §19.6), in an isolated child: the same surface and IO thread,
+    // and send's full-queue path written out (termio/mailbox.zig) with its
+    // relock raw, the inner mutex taken past the wrapper's owner, so
+    // assertHeld() must panic.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("sync/isolated.zig");
+    if (isolated.inChild()) {
+        const alloc = std.testing.allocator;
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var f: RelockSurface = undefined;
+        try f.init(alloc);
+        defer f.deinit(alloc);
+        const queue = f.surface.io.mailbox.spsc.queue;
+        const raw: *std.Thread.Mutex = &f.mutex.inner;
+        const IoThread = struct {
+            fn main(relock: *RelockSurface) void {
+                const io_role = thread_role.enter(.termio);
+                defer io_role.exit();
+                relock.drain();
+            }
+        };
+
+        f.mutex.lock();
+        f.io_thread = std.Thread.spawn(.{}, IoThread.main, .{&f}) catch |err| {
+            f.mutex.unlock();
+            return err;
+        };
+        const msg: termio.Message = .{ .linefeed_mode = false };
+        const full = queue.push(msg, .{ .instant = {} }) == 0;
+        f.mutex.unlock();
+        if (full) _ = queue.push(msg, .{ .forever = {} });
+        raw.lock();
+        f.mutex.assertHeld();
+        // Not reached when assertHeld panics; otherwise the IO thread's
+        // focusGained must get the mutex before the deinit's join.
+        raw.unlock();
+        if (!full) return error.MailboxNotFull;
+        return;
+    }
+    try isolated.expectPanic(@src(), "thread-role layer: PN2 assertHeld() on a thread that does not hold " ++
+        "the renderer-state mutex (role ui)");
+}
+
 test "Mouse.click_state holds every button" {
     var mouse: Mouse = .{};
     inline for (@typeInfo(input.MouseButton).@"enum".fields) |field| {
@@ -1537,8 +1763,8 @@ fn noteSubmittedInput(
 }
 
 fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState, lines: u32) void {
-    if (mutex == .unlocked) self.renderer_state.mutex.lock();
-    defer if (mutex == .unlocked) self.renderer_state.mutex.unlock();
+    if (mutex == .unlocked) self.renderer_state.lockDemand();
+    defer if (mutex == .unlocked) self.renderer_state.unlockDemand();
     self.io.terminal.screens.active.semanticPromptLinesSubmitted(lines);
 }
 
@@ -1676,6 +1902,183 @@ fn confirmQuitAnswer(self: *Surface, comptime wait: bool) ?bool {
             break :true !self.io.terminal.cursorIsAtPrompt();
         },
     };
+}
+
+/// A core surface that holds only what `hasSelection` and
+/// `confirmQuitAnswer` read, for the thread-role layer's isolated children:
+/// the rest is zeroed, so a read of an unset pointer faults instead of
+/// reading garbage.
+const RoleSiteSurface = struct {
+    surface: *Surface,
+    mutex: rendererpkg.StateMutex = .{},
+
+    fn init(self: *RoleSiteSurface) !void {
+        const alloc = std.testing.allocator;
+        self.surface = try alloc.create(Surface);
+        errdefer alloc.destroy(self.surface);
+        @memset(std.mem.asBytes(self.surface), 0);
+        self.surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
+        self.surface.renderer_state.mutex = &self.mutex;
+        self.surface.renderer_state.terminal = &self.surface.io.terminal;
+    }
+
+    fn deinit(self: *RoleSiteSurface) void {
+        const alloc = std.testing.allocator;
+        self.surface.io.terminal.deinit(alloc);
+        alloc.destroy(self.surface);
+    }
+};
+
+fn expectKeyDemandPairs(
+    src: std.builtin.SourceLocation,
+    expected: []const struct { key: []const u8, count: usize },
+) !void {
+    const testing = std.testing;
+    const isolated = @import("sync/isolated.zig");
+    var child = try isolated.run(src, .own);
+    defer child.deinit();
+    try testing.expect(!child.timed_out);
+    try testing.expectEqual(isolated.exit_passed, child.exit_code);
+
+    const raw = try child.dir.?.read();
+    defer testing.allocator.free(raw);
+    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
+    _ = lines.next(); // header
+    var count: usize = 0;
+    while (lines.next()) |line| : (count += 1) {
+        try testing.expect(std.mem.endsWith(u8, line, " demand ui"));
+    }
+    var total: usize = 0;
+    for (expected) |site| total += site.count;
+    try testing.expectEqual(total, count);
+
+    if (@import("sync/symbolise.zig").names_checked) {
+        var result = try isolated.compareChild(&child);
+        defer result.deinit();
+        try testing.expect(result.report.passed());
+        try testing.expectEqual(@as(usize, 1), result.dumps.len);
+        for (expected) |site| {
+            try testing.expectEqual(site.count, std.mem.count(u8, result.dumps[0].text, site.key));
+        }
+    }
+}
+
+test "isolated: surface key demand records every key callback acquisition from .ui" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (@import("sync/isolated.zig").inChild()) {
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const surface = fixture.surface;
+        var runtime: apprt.runtime.Surface = .{ .app = undefined, .cursor_pos = .{ .x = -1, .y = -1 } };
+        surface.rt_surface = &runtime;
+        surface.alloc = std.testing.allocator;
+        surface.config.keybind = .{};
+        surface.config.key_remaps = .empty;
+        surface.config.vt_kam_allowed = true;
+        surface.size = .{
+            .screen = .{ .width = 100, .height = 30 },
+            .cell = .{ .width = 10, .height = 10 },
+            .padding = .{},
+        };
+        // Exercise the KAM read, modifier and hover update, encoder read
+        // and post-encode typing path without writing to a child process.
+        surface.readonly = true;
+        try std.testing.expectEqual(.consumed, try surface.keyCallback(.{
+            .key = .key_a,
+            .mods = .{ .shift = true },
+            .utf8 = "A",
+        }));
+        try std.testing.expectEqual(@as(u32, 5), surface.renderer_state.handoff_gen.load(.monotonic));
+        return;
+    }
+    try expectKeyDemandPairs(@src(), &.{
+        .{ .key = "src/Surface.zig:keyCallback ui\n", .count = 3 },
+        .{ .key = "src/Surface.zig:encodeKeyOpts ui\n", .count = 1 },
+        .{ .key = "src/Surface.zig:modsChanged ui\n", .count = 1 },
+    });
+}
+
+test "isolated: surface key demand records preedit, IME position and input submissions from .ui" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    if (@import("sync/isolated.zig").inChild()) {
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const surface = fixture.surface;
+        var runtime: apprt.runtime.Surface = .{ .app = undefined };
+        surface.rt_surface = &runtime;
+        surface.renderer_thread.wakeup = try @TypeOf(surface.renderer_thread.wakeup).init();
+        defer surface.renderer_thread.wakeup.deinit();
+
+        try surface.preeditCaretCallback(null, null, null);
+        _ = surface.imePoint();
+        surface.markInputSubmitted(.unlocked, 1);
+        try std.testing.expectEqual(@as(u32, 3), surface.renderer_state.handoff_gen.load(.monotonic));
+        return;
+    }
+    try expectKeyDemandPairs(@src(), &.{
+        .{ .key = "src/Surface.zig:preeditCaretCallback ui\n", .count = 1 },
+        .{ .key = "src/Surface.zig:imePoint ui\n", .count = 1 },
+        .{ .key = "src/Surface.zig:markInputSubmitted ui\n", .count = 1 },
+    });
+}
+
+test "isolated: a UI-only site driven from a .termio thread is recorded, and its compare fails one PAIR-OUTSIDE-TABLE (acceptance test 4)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("sync/isolated.zig");
+    if (isolated.inChild()) {
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        const TermioThread = struct {
+            selected: bool = true,
+
+            /// The termio thread, which hasSelection's row (UI only) does
+            /// not list, asks a UI-only question.
+            fn askSelection(self: *@This(), surface: *const Surface) void {
+                const role = thread_role.enter(.termio);
+                defer role.exit();
+                self.selected = surface.hasSelection();
+            }
+        };
+        var termio_thread: TermioThread = .{};
+        const thread = try std.Thread.spawn(.{}, TermioThread.askSelection, .{ &termio_thread, fixture.surface });
+        thread.join();
+        try std.testing.expect(!termio_thread.selected);
+        return;
+    }
+    // The site is a production function, so the pair is in its row's file.
+    try isolated.expectOffTable(@src(), .{ .function = "src/Surface.zig:hasSelection", .role = "termio" });
+}
+
+test "isolated: the compare names both instantiations of confirmQuitAnswer (acceptance test 10)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("sync/isolated.zig");
+    // RQ16: names only (see isolated.zig's site-shape test).
+    if (!@import("sync/symbolise.zig").names_checked) return error.SkipZigTest;
+    if (isolated.inChild()) {
+        // The app thread asks whether a close needs confirming.
+        const role = thread_role.fixture(.ui);
+        defer role.exit();
+        var fixture: RoleSiteSurface = .{ .surface = undefined };
+        try fixture.init();
+        defer fixture.deinit();
+        fixture.surface.config.confirm_close_surface = .true;
+        // The waiting form locks; the no-wait form tries, and gets it.
+        _ = fixture.surface.needsConfirmQuit();
+        try std.testing.expect(fixture.surface.needsConfirmQuitNoWait() != null);
+        return;
+    }
+    // Each instantiation is its own symbol (`confirmQuitAnswer__anon_N`),
+    // which the compare matches to the row with the suffix stripped.
+    try isolated.expectShapes(@src(), "src/Surface.zig:", &.{
+        .{ .name = "confirmQuitAnswer", .lines = 2, .instantiated = true },
+    }, "ui");
 }
 
 /// Called from the app thread to handle mailbox messages to our specific
@@ -2391,8 +2794,8 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
         // highlight links. Additionally, mark the screen as dirty so
         // that the highlight state of all links is properly updated.
         const redraw = redraw: {
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
+            self.renderer_state.lockDemand();
+            defer self.renderer_state.unlockDemand();
             self.renderer_state.mouse.mods = self.mouseModsWithCapture(self.mouse.mods);
 
             // A frame no link can change would present for every Shift or
@@ -3110,12 +3513,12 @@ test "only a pane that is not WSL reads /c/x as C:\\x (#514)" {
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
 /// keyboard should be rendered.
-pub fn imePoint(self: *const Surface) apprt.IMEPos {
+pub fn imePoint(self: *Surface) apprt.IMEPos {
     // Our sizes are all scaled so we need to send the unscaled values back.
     const content_scale = self.rt_surface.getContentScale() catch .{ .x = 1, .y = 1 };
 
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.lockDemand();
+    defer self.renderer_state.unlockDemand();
     // TODO: need to handle when scrolling and the cursor is not
     // in the visible portion of the screen.
     const cursor = self.renderer_state.terminal.screens.active.cursor;
@@ -3426,18 +3829,45 @@ fn copySelectionToClipboards(
     return copied;
 }
 
-/// Set the selection contents.
+/// Set the active selection and notify the apprt on a genuine state
+/// transition. All selection mutations route through here rather than
+/// `screen.select` directly so the notification fires consistently. To
+/// also copy per `copy_on_select`, use `setSelectionAndCopy`.
 ///
 /// This must be called with the renderer mutex held.
 fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
+    // Compute the transition before `select` below, which untracks (frees)
+    // the previous selection's tracked pins; reading them after would be a
+    // use-after-free.
+    const prev_ = self.io.terminal.screens.active.selection;
+    const changed = changed: {
+        const prev = prev_ orelse break :changed sel_ != null;
+        const sel = sel_ orelse break :changed true;
+        break :changed !sel.eql(prev);
+    };
+
     try self.io.terminal.screens.active.select(sel_);
+
+    if (changed) {
+        _ = self.rt_app.performAction(
+            .{ .surface = self },
+            .selection_changed,
+            {},
+        ) catch |err| {
+            log.warn("apprt failed selection_changed notification err={}", .{err});
+        };
+    }
+}
+
+/// Set a selection and, per `copy_on_select`, copy it to the clipboard.
+/// For committing selection gestures (mouse release, select-all binding).
+///
+/// This must be called with the renderer mutex held.
+fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
+    try self.setSelection(sel);
 
     // If copy on select is false then exit early.
     if (self.config.copy_on_select == .false) return;
-
-    // Set our selection clipboard. If the selection is cleared we do not
-    // clear the clipboard.
-    const sel = sel_ orelse return;
 
     switch (self.config.copy_on_select) {
         .false => unreachable, // handled above with an early exit
@@ -3495,6 +3925,10 @@ test "Surface: typing redraws only what it changed on screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // Typing runs on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     // Only what dropping the selection, scrolling, a mods change and queueing
     // a render read is set; the rest is zeroed so that a new read of an unset
     // pointer faults instead of reading garbage.
@@ -3512,7 +3946,7 @@ test "Surface: typing redraws only what it changed on screen" {
     defer surface.renderer_thread.wakeup.deinit();
     surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
     defer surface.io.terminal.deinit(alloc);
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: rendererpkg.StateMutex = .{};
     surface.renderer_state.mutex = &mutex;
     surface.renderer_state.terminal = &surface.io.terminal;
     const t = &surface.io.terminal;
@@ -3875,8 +4309,8 @@ pub fn preeditCaretCallback(
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.lockDemand();
+    defer self.renderer_state.unlockDemand();
 
     // We clear our selection when ANY OF:
     // 1. We have an existing preedit
@@ -4238,8 +4672,8 @@ pub fn keyCallback(
     }
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        self.renderer_state.lockDemand();
+        defer self.renderer_state.unlockDemand();
         if (self.io.terminal.modes.get(.disable_keyboard)) return .consumed;
     }
 
@@ -4270,8 +4704,8 @@ pub fn keyCallback(
         {
             // Refresh our link state
             const pos = self.rt_surface.getCursorPos() catch break :mouse_mods;
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
+            self.renderer_state.lockDemand();
+            defer self.renderer_state.unlockDemand();
             self.mouseRefreshLinks(
                 pos,
                 self.posToViewport(pos.x, pos.y),
@@ -4376,8 +4810,8 @@ pub fn keyCallback(
     // some data to send to the pty, then we move the viewport down to the
     // bottom. We also clear the selection for any key other then modifiers.
     if (keyWriteIsTyping(event)) {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        self.renderer_state.lockDemand();
+        defer self.renderer_state.unlockDemand();
         try self.dropSelectionAndScrollForTyping(event.key == .escape);
     }
 
@@ -5114,9 +5548,9 @@ fn encodeKey(
     return write_req;
 }
 
-fn encodeKeyOpts(self: *const Surface) input.key_encode.Options {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+fn encodeKeyOpts(self: *Surface) input.key_encode.Options {
+    self.renderer_state.lockDemand();
+    defer self.renderer_state.unlockDemand();
     const t = &self.io.terminal;
     var opts: input.key_encode.Options = .fromTerminal(t);
     opts.windows_legacy = builtin.os.tag == .windows;
@@ -5746,50 +6180,80 @@ pub fn mouseButtonCallback(
     }
 
     if (button == .left and action == .release) {
-        // Stop selection scrolling when releasing the left mouse button
-        // but only when selection scrolling is active.
-        if (self.selection_scroll_active) {
-            self.queueIo(
-                .{ .selection_scroll = false },
-                .unlocked,
-            );
-        }
-
-        // The selection clipboard is only updated for left-click drag when
-        // the left button is released. This is to avoid the clipboard
-        // being updated on every mouse move which would be noisy.
-        if (self.config.copy_on_select != .false) {
+        // The renderer state mutex is held across the whole release
+        // (upstream 33f155880). A link under the pointer is only resolved
+        // and copied under it (`linkAtLocked`) and opened after the unlock
+        // (`processLinks`): the mutex is not recursive, and the opener must
+        // not run under it (PKG-23).
+        const link: ?OpenLink = released: {
             self.renderer_state.mutex.lock();
             defer self.renderer_state.mutex.unlock();
-            const prev_ = self.io.terminal.screens.active.selection;
-            if (prev_) |prev| {
-                try self.setSelection(terminal.Selection.init(
-                    prev.start(),
-                    prev.end(),
-                    prev.rectangle,
-                ));
-            }
-        }
 
-        // Handle link clicking. We want to do this before we do mouse
-        // reporting or any other mouse handling because a successfully
-        // clicked link will swallow the event.
-        if (self.mouse.over_link) {
-            const pos = try self.rt_surface.getCursorPos();
-            if (self.processLinks(pos)) |processed| {
-                if (processed) return true;
+            // Stop selection scrolling when releasing the left mouse button
+            // but only when selection scrolling is active.
+            if (self.selection_scroll_active) {
+                self.queueIo(
+                    .{ .selection_scroll = false },
+                    .locked,
+                );
+            }
+
+            // The selection clipboard is only updated for left-click drag when
+            // the left button is released. This is to avoid the clipboard
+            // being updated on every mouse move which would be noisy.
+            if (self.config.copy_on_select != .false) {
+                const prev_ = self.io.terminal.screens.active.selection;
+                if (prev_) |prev| {
+                    try self.setSelectionAndCopy(terminal.Selection.init(
+                        prev.start(),
+                        prev.end(),
+                        prev.rectangle,
+                    ));
+                }
+            }
+
+            // Handle link clicking. We want to do this before we do mouse
+            // reporting or any other mouse handling because a successfully
+            // clicked link will swallow the event.
+            if (self.mouse.over_link) {
+                // We are holding the renderer lock, but this should just be
+                // a cached value.
+                const pos = try self.rt_surface.getCursorPos();
+                if (self.linkAtLocked(pos)) |found| {
+                    if (found) |copied| break :released copied;
+                } else |err| {
+                    log.warn("error processing links err={}", .{err});
+                }
+            }
+
+            // Handle prompt clicking. If we released our mouse on a prompt
+            // and we support some kind of click events, then we need to
+            // move to it.
+            if (self.maybePromptClick()) |handled| {
+                if (handled) return true;
+            } else |err| {
+                log.warn("error processing prompt click err={}", .{err});
+            }
+            break :released null;
+        };
+
+        if (link) |copied| {
+            defer copied.deinit(self.alloc);
+            if (self.processLinks(copied)) |_| {
+                return true;
             } else |err| {
                 log.warn("error processing links err={}", .{err});
             }
-        }
 
-        // Handle prompt clicking. If we released our mouse on a prompt
-        // and we support some kind of click events, then we need to
-        // move to it.
-        if (self.maybePromptClick()) |handled| {
-            if (handled) return true;
-        } else |err| {
-            log.warn("error processing prompt click err={}", .{err});
+            // A link that did not open leaves the release to a prompt click,
+            // as it did when the link was opened under the release's lock.
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
+            if (self.maybePromptClick()) |handled| {
+                if (handled) return true;
+            } else |err| {
+                log.warn("error processing prompt click err={}", .{err});
+            }
         }
     }
 
@@ -5920,22 +6384,22 @@ pub fn mouseButtonCallback(
             log.err("error reading time, mouse multi-click won't work err={}", .{err});
         }
 
-        // In all cases below, we set the selection directly rather than use
-        // `setSelection` because we want to avoid copying the selection
-        // to the selection clipboard. For left mouse clicks we only set
-        // the clipboard on release.
+        // In all cases below we use `setSelection`, not
+        // `setSelectionAndCopy`, to avoid copying the selection to the
+        // selection clipboard. For left mouse clicks we only set the
+        // clipboard on release.
         switch (self.mouse.left_click_count) {
             // Single click
             1 => {
                 if (self.copy_mode_active) {
-                    try self.io.terminal.screens.active.select(
+                    try self.setSelection(
                         terminal.Selection.init(pin.*, pin.*, false),
                     );
                     self.copy_mode_screen = self.io.terminal.screens.active_key;
                     try self.queueRender();
                 } else if (self.io.terminal.screens.active.selection != null) {
                     // Outside copy mode a single click clears selection.
-                    try self.io.terminal.screens.active.select(null);
+                    try self.setSelection(null);
                     try self.queueRender();
                 }
             },
@@ -5959,7 +6423,7 @@ pub fn mouseButtonCallback(
                     break :sel self.io.terminal.screens.active.selectWord(pin.*, self.config.selection_word_chars);
                 };
                 if (sel_) |sel| {
-                    try self.io.terminal.screens.active.select(sel);
+                    try self.setSelection(sel);
                     if (self.copy_mode_active) {
                         self.copy_mode_screen = self.io.terminal.screens.active_key;
                     }
@@ -5974,7 +6438,7 @@ pub fn mouseButtonCallback(
                 else
                     self.io.terminal.screens.active.selectLine(.{ .pin = pin.* });
                 if (sel_) |sel| {
-                    try self.io.terminal.screens.active.select(sel);
+                    try self.setSelection(sel);
                     if (self.copy_mode_active) {
                         self.copy_mode_screen = self.io.terminal.screens.active_key;
                     }
@@ -5987,14 +6451,24 @@ pub fn mouseButtonCallback(
         }
     }
 
-    // Middle-click pastes from our selection clipboard
-    if (button == .middle and action == .press) {
-        const clipboard: apprt.Clipboard = if (self.rt_surface.supportsClipboard(.selection))
-            .selection
-        else
-            .standard;
-        _ = try self.startClipboardRequest(clipboard, .{ .paste = {} });
-    }
+    // Middle-click paste source follows copy-on-select: when copy-on-select
+    // targets the selection clipboard, middle-click reads from it; when
+    // copy-on-select targets the system clipboard, middle-click reads from
+    // that instead. Falls back to the standard clipboard on platforms that
+    // do not support the selection clipboard.
+    if (button == .middle and action == .press) switch (self.config.middle_click_action) {
+        .ignore => {},
+        .@"primary-paste" => {
+            const clipboard: apprt.Clipboard = switch (self.config.copy_on_select) {
+                .clipboard => .standard,
+                .true, .false => if (self.rt_surface.supportsClipboard(.selection))
+                    .selection
+                else
+                    .standard,
+            };
+            _ = try self.startClipboardRequest(clipboard, .{ .paste = {} });
+        },
+    };
 
     // Right-click down selects word for context menus. If the apprt
     // doesn't implement context menus this can be a bit weird but they
@@ -6038,13 +6512,13 @@ pub fn mouseButtonCallback(
                 // If there is a link at this position, we want to
                 // select the link. Otherwise, select the word.
                 if (try self.linkAtPos(pos)) |link| {
-                    try self.setSelection(link.selection);
+                    try self.setSelectionAndCopy(link.selection);
                 } else {
                     const sel = screen.selectWord(
                         pin,
                         self.config.selection_word_chars,
                     ) orelse break :sel;
-                    try self.setSelection(sel);
+                    try self.setSelectionAndCopy(sel);
                 }
                 if (self.copy_mode_active) {
                     self.copy_mode_screen = self.io.terminal.screens.active_key;
@@ -6107,9 +6581,9 @@ pub fn mouseButtonCallback(
     return false;
 }
 
+/// Requires the renderer state mutex is held.
 fn maybePromptClick(self: *Surface) !bool {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.assertHeld();
     const t: *terminal.Terminal = self.renderer_state.terminal;
     const screen: *terminal.Screen = t.screens.active;
 
@@ -6250,6 +6724,10 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     const testing = std.testing;
     const alloc = testing.allocator;
 
+    // A click runs on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
     var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
@@ -6257,7 +6735,7 @@ test "Surface: the release of a press reported to a program is not a prompt clic
         defer stream.deinit();
         stream.nextSlice("\x1b]133;A;cl=line\x07> \x1b]133;B\x07hello");
     }
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: rendererpkg.StateMutex = .{};
 
     // Only the fields a prompt click reads are set; the rest is zeroed.
     const rt_surface = try alloc.create(apprt.runtime.Surface);
@@ -6279,12 +6757,365 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     // thread is needed.
     surface.readonly = true;
 
+    // maybePromptClick requires the renderer state mutex held.
+    mutex.lock();
+    defer mutex.unlock();
+
     // Reporting a press zeroes the click count: its release is reported too.
     try testing.expect(!try surface.maybePromptClick());
 
     // An unreported click at the prompt moves the cursor.
     surface.mouse.left_click_count = 1;
     try testing.expect(try surface.maybePromptClick());
+}
+
+/// A Surface for the mouse tests below, zeroed but for what a click or a
+/// drag reads: the terminal (40x6 cells of 10x20 px) and its renderer state
+/// mutex, a default derived config with its links, the cursor position the
+/// Win32 surface caches, an apprt that only `setSelection`'s
+/// `selection_changed` reaches (Win32 ignores it), and `readonly`, so a
+/// prompt click's arrow keys are dropped instead of queued for an IO
+/// thread. Nothing may reach the clipboard: a test that selects text keeps
+/// copy-on-select off.
+const TestMouseSurface = struct {
+    alloc: Allocator,
+    mutex: rendererpkg.StateMutex,
+    config: configpkg.Config,
+    derived: DerivedConfig,
+    rt_app: *apprt.runtime.App,
+    rt_surface: *apprt.runtime.Surface,
+    surface: *Surface,
+
+    fn create(
+        alloc: Allocator,
+        copy_on_select: configpkg.CopyOnSelect,
+        vt: []const u8,
+    ) !*TestMouseSurface {
+        if (comptime !@hasField(apprt.runtime.Surface, "cursor_pos")) return error.SkipZigTest;
+
+        const self = try alloc.create(TestMouseSurface);
+        errdefer alloc.destroy(self);
+        self.alloc = alloc;
+        self.mutex = .{};
+        self.config = try configpkg.Config.default(alloc);
+        errdefer self.config.deinit();
+        self.derived = try DerivedConfig.init(alloc, &self.config);
+        errdefer self.derived.deinit();
+        self.rt_app = try alloc.create(apprt.runtime.App);
+        errdefer alloc.destroy(self.rt_app);
+        @memset(std.mem.asBytes(self.rt_app), 0);
+        self.rt_surface = try alloc.create(apprt.runtime.Surface);
+        errdefer alloc.destroy(self.rt_surface);
+        @memset(std.mem.asBytes(self.rt_surface), 0);
+        self.surface = try alloc.create(Surface);
+        errdefer alloc.destroy(self.surface);
+        @memset(std.mem.asBytes(self.surface), 0);
+
+        const surface = self.surface;
+        surface.alloc = alloc;
+        surface.rt_app = self.rt_app;
+        surface.rt_surface = self.rt_surface;
+        surface.renderer_state.mutex = &self.mutex;
+        surface.config = self.derived;
+        surface.config.copy_on_select = copy_on_select;
+        surface.config.link_osc8 = true;
+        surface.config.cursor_click_to_move = true;
+        surface.readonly = true;
+        surface.size = .{
+            .screen = .{ .width = 400, .height = 120 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        };
+        surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 6 });
+        errdefer surface.io.terminal.deinit(alloc);
+        surface.renderer_state.terminal = &surface.io.terminal;
+        var stream = surface.io.terminal.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(vt);
+        return self;
+    }
+
+    fn destroy(self: *TestMouseSurface) void {
+        const alloc = self.alloc;
+        self.surface.io.terminal.deinit(alloc);
+        alloc.destroy(self.surface);
+        alloc.destroy(self.rt_surface);
+        alloc.destroy(self.rt_app);
+        self.derived.deinit();
+        self.config.deinit();
+        alloc.destroy(self);
+    }
+
+    /// Puts the pointer over the middle of cell (`x`, `y`) and returns
+    /// where it is.
+    fn at(self: *TestMouseSurface, x: u16, y: u16) apprt.CursorPos {
+        self.rt_surface.cursor_pos = .{
+            .x = @as(f32, @floatFromInt(x)) * 10 + 5,
+            .y = @as(f32, @floatFromInt(y)) * 20 + 10,
+        };
+        return self.rt_surface.cursor_pos;
+    }
+
+    /// Presses and releases the left button over cell (`x`, `y`) on a
+    /// worker thread and waits 5 s for it. A click that does not finish
+    /// panics, naming the test, and does not return: an error would run
+    /// the test's cleanup, which would free the mutex the stuck worker
+    /// waits on.
+    fn click(self: *TestMouseSurface, comptime name: []const u8, x: u16, y: u16) !bool {
+        _ = self.at(x, y);
+        var job: Click = .{ .surface = self.surface };
+        const thread = try std.Thread.spawn(.{}, Click.run, .{&job});
+        job.done.timedWait(5 * std.time.ns_per_s) catch @panic(name ++ ": deadlock");
+        thread.join();
+        return job.result;
+    }
+
+    const Click = struct {
+        surface: *Surface,
+        done: std.Thread.ResetEvent = .{},
+        result: anyerror!bool = false,
+
+        fn run(job: *Click) void {
+            defer job.done.set();
+            // As the app thread: a click's callbacks take the renderer
+            // state mutex, and the stand-in opener tries it (PLAN.md §2.7
+            // RQ9, §19.5).
+            const app_thread = thread_role.enter(.ui);
+            defer app_thread.exit();
+            const surface = job.surface;
+            if (surface.mouseButtonCallback(.press, .left, surface.mouse.mods)) |_| {} else |err| {
+                job.result = err;
+                return;
+            }
+            job.result = surface.mouseButtonCallback(.release, .left, surface.mouse.mods);
+        }
+    };
+};
+
+/// Stands in for the apprt's opener in the left release tests: it records
+/// what it was asked to open, and whether its caller held the renderer
+/// state mutex.
+const TestLinkOpener = struct {
+    var count: usize = 0;
+    var held: bool = false;
+    var kind: apprt.action.OpenUrl.Kind = .unknown;
+    var url_buf: [64]u8 = undefined;
+    var url_len: usize = 0;
+
+    /// When set, every open is recorded and then refused, as the Win32
+    /// opener refuses a target its gate does not pass.
+    var refuse: bool = false;
+
+    fn install() void {
+        count = 0;
+        held = false;
+        url_len = 0;
+        refuse = false;
+        test_open_url = &open;
+    }
+
+    fn uninstall() void {
+        test_open_url = null;
+    }
+
+    fn open(surface: *Surface, action: apprt.action.OpenUrl) anyerror!void {
+        // The mutex is not recursive, so its holder cannot take it again;
+        // nothing else takes it while a test click runs.
+        const mutex = surface.renderer_state.mutex;
+        if (mutex.tryLock()) mutex.unlock() else held = true;
+        count += 1;
+        kind = action.kind;
+        url_len = @min(action.url.len, url_buf.len);
+        @memcpy(url_buf[0..url_len], action.url[0..url_len]);
+        if (refuse) return error.TestOpenRefused;
+    }
+
+    fn url() []const u8 {
+        return url_buf[0..url_len];
+    }
+};
+
+/// A left release over an OSC 8 link and over link text: the release holds
+/// the renderer state mutex (upstream 33f155880), the link is copied under
+/// it and opened after it.
+fn testLeftReleaseOverLink(comptime name: []const u8, copy_on_select: configpkg.CopyOnSelect) !void {
+    const testing = std.testing;
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        copy_on_select,
+        "\x1b]8;;https://example.com/osc8\x1b\\click here\x1b]8;;\x1b\\\r\n" ++
+            "see https://example.com/text",
+    );
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    TestLinkOpener.install();
+    defer TestLinkOpener.uninstall();
+
+    // An OSC 8 URI is page memory: it opens from a copy.
+    surface.mouse.over_link = true;
+    try testing.expect(try fixture.click(name, 2, 0));
+    try testing.expectEqual(1, TestLinkOpener.count);
+    try testing.expect(!TestLinkOpener.held);
+    try testing.expectEqual(apprt.action.OpenUrl.Kind.osc8, TestLinkOpener.kind);
+    try testing.expectEqualStrings("https://example.com/osc8", TestLinkOpener.url());
+
+    // Link text takes the mutex again to read the pwd before it opens.
+    surface.mouse.over_link = true;
+    try testing.expect(try fixture.click(name, 8, 1));
+    try testing.expectEqual(2, TestLinkOpener.count);
+    try testing.expect(!TestLinkOpener.held);
+    try testing.expectEqual(apprt.action.OpenUrl.Kind.unknown, TestLinkOpener.kind);
+    try testing.expectEqualStrings("https://example.com/text", TestLinkOpener.url());
+}
+
+/// A left release at the prompt moves the cursor under the release's own
+/// hold of the renderer state mutex, and opens nothing.
+fn testLeftReleaseAtPrompt(comptime name: []const u8, copy_on_select: configpkg.CopyOnSelect) !void {
+    const testing = std.testing;
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        copy_on_select,
+        "\x1b]133;A;cl=line\x07> \x1b]133;B\x07hello",
+    );
+    defer fixture.destroy();
+    TestLinkOpener.install();
+    defer TestLinkOpener.uninstall();
+
+    try testing.expect(try fixture.click(name, 4, 0));
+    try testing.expectEqual(0, TestLinkOpener.count);
+}
+
+test "Surface: a left release over a link opens it after the renderer lock" {
+    try testLeftReleaseOverLink("Surface: a left release over a link opens it after the renderer lock", .false);
+}
+
+test "Surface: a left release over a link with copy-on-select opens it after the renderer lock" {
+    try testLeftReleaseOverLink("Surface: a left release over a link with copy-on-select opens it after the renderer lock", .true);
+}
+
+test "Surface: a left release at a prompt is a prompt click under the renderer lock" {
+    try testLeftReleaseAtPrompt("Surface: a left release at a prompt is a prompt click under the renderer lock", .false);
+}
+
+test "Surface: a left release at a prompt with copy-on-select is a prompt click under the renderer lock" {
+    try testLeftReleaseAtPrompt("Surface: a left release at a prompt with copy-on-select is a prompt click under the renderer lock", .true);
+}
+
+test "Surface: a left release over a refused link in a prompt is a prompt click under a second lock" {
+    // Copy-on-select stays off: this click selects nothing, and a test
+    // must not reach the clipboard.
+    const testing = std.testing;
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        .false,
+        "\x1b]133;A;cl=line\x07> \x1b]133;B\x07open https://example.com/x",
+    );
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    surface.mouse.mods = input.ctrlOrSuper(.{});
+    TestLinkOpener.install();
+    defer TestLinkOpener.uninstall();
+    TestLinkOpener.refuse = true;
+
+    // The link opens after the release's lock and is refused; the release
+    // then falls back to the prompt click, which `maybePromptClick`
+    // handles only with the mutex held (`assertHeld`), so `true` here is
+    // that click: with no fallback the release is not consumed.
+    surface.mouse.over_link = true;
+    try testing.expect(try fixture.click(
+        "Surface: a left release over a refused link in a prompt is a prompt click under a second lock",
+        12,
+        0,
+    ));
+    try testing.expectEqual(1, TestLinkOpener.count);
+    try testing.expect(!TestLinkOpener.held);
+    try testing.expectEqual(apprt.action.OpenUrl.Kind.unknown, TestLinkOpener.kind);
+    try testing.expectEqualStrings("https://example.com/x", TestLinkOpener.url());
+}
+
+fn expectSelectionText(surface: *Surface, expected: []const u8) !void {
+    const screen = surface.io.terminal.screens.active;
+    const sel = screen.selection orelse return error.TestExpectedSelection;
+    const text = try screen.selectionString(std.testing.allocator, .{ .sel = sel, .trim = true });
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected, text);
+}
+
+test "Surface: a Ctrl+triple-click picks the output and a drag extends it by line" {
+    const testing = std.testing;
+
+    // Clicks and drags run on the app thread (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
+    const fixture = try TestMouseSurface.create(
+        testing.allocator,
+        .false,
+        "\x1b]133;A\x07> \x1b]133;B\x07cmd1\r\n" ++
+            "\x1b]133;C\x07out1a\r\nout1b\r\n" ++
+            "\x1b]133;D;0\x07\x1b]133;A\x07> \x1b]133;B\x07cmd2\r\n" ++
+            "\x1b]133;C\x07out2\r\n" ++
+            "\x1b]133;D;0\x07\x1b]133;A\x07> \x1b]133;B\x07",
+    );
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    const ctrl = input.ctrlOrSuper(.{});
+    surface.mouse.mods = ctrl;
+    surface.config.mouse_interval = 500 * std.time.ns_per_ms;
+
+    // The third click, with Ctrl, picks the command output under it.
+    _ = fixture.at(1, 1);
+    for (0..3) |click| {
+        _ = try surface.mouseButtonCallback(.press, .left, ctrl);
+        if (click < 2) _ = try surface.mouseButtonCallback(.release, .left, ctrl);
+    }
+    try testing.expectEqual(3, surface.mouse.left_click_count);
+    try expectSelectionText(surface, "out1a\nout1b");
+
+    // A drag then extends it from the clicked line by whole lines (the
+    // fork's triple-click drag), not by output blocks: into the next
+    // prompt row, across it into the next output, to a prompt with no
+    // output after it, and up into the first prompt row.
+    try surface.cursorPosCallback(fixture.at(3, 3), ctrl);
+    try expectSelectionText(surface, "out1a\nout1b\n> cmd2");
+    try surface.cursorPosCallback(fixture.at(1, 4), ctrl);
+    try expectSelectionText(surface, "out1a\nout1b\n> cmd2\nout2");
+    try surface.cursorPosCallback(fixture.at(0, 5), ctrl);
+    try expectSelectionText(surface, "out1a\nout1b\n> cmd2\nout2\n>");
+    try surface.cursorPosCallback(fixture.at(3, 0), ctrl);
+    try expectSelectionText(surface, "cmd1\nout1a");
+
+    // The release keeps it: no prompt click, nothing to copy.
+    try testing.expect(!try surface.mouseButtonCallback(.release, .left, ctrl));
+    try expectSelectionText(surface, "cmd1\nout1a");
+}
+
+test "Surface: triple-click drag extends selection through blank line" {
+    const testing = std.testing;
+    const role = thread_role.fixture(.ui);
+    defer role.exit();
+
+    const fixture = try TestMouseSurface.create(testing.allocator, .false, "alpha beta");
+    defer fixture.destroy();
+    const surface = fixture.surface;
+    surface.config.mouse_interval = 500 * std.time.ns_per_ms;
+
+    _ = fixture.at(1, 0);
+    for (0..3) |click| {
+        _ = try surface.mouseButtonCallback(.press, .left, .{});
+        if (click < 2) _ = try surface.mouseButtonCallback(.release, .left, .{});
+    }
+    try testing.expectEqual(3, surface.mouse.left_click_count);
+    try surface.cursorPosCallback(fixture.at(2, 1), .{});
+
+    const screen = surface.io.terminal.screens.active;
+    const selection = screen.selection.?;
+    try testing.expectEqualDeep(screen.pages.pin(.{ .viewport = .{} }).?, selection.start());
+    try testing.expectEqualDeep(screen.pages.pin(.{ .viewport = .{
+        .x = 39,
+        .y = 1,
+    } }).?, selection.end());
 }
 
 const Link = struct {
@@ -6501,46 +7332,67 @@ fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
     return final;
 }
 
-/// Attempt to invoke the action of any link that is under the
-/// given position.
-///
-/// Takes the renderer state mutex itself, so the caller must not hold it.
-/// The link is resolved and copied out of the terminal under the mutex,
-/// because the IO thread prunes and reuses the pages it lives in. It is
-/// opened after the mutex is released, because the Win32 opener runs
-/// ShellExecuteW, which can pump messages.
-fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
-    const action: input.Link.Action, const target: [:0]const u8 = target: {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
-        const link = try self.linkAtPos(pos) orelse return false;
-        const url: [:0]const u8 = switch (link.action) {
-            .open => try self.io.terminal.screens.active.selectionString(self.alloc, .{
-                .sel = link.selection,
-                .trim = false,
-            }),
+/// A link's target, copied out of the terminal by `linkAtLocked` for
+/// `processLinks` to open once the renderer state mutex is released.
+const OpenLink = struct {
+    action: input.Link.Action,
+    target: [:0]const u8,
 
-            // The URI is a slice of page memory, so it must be copied.
-            ._open_osc8 => try self.alloc.dupeZ(u8, self.osc8URI(link.selection.start()) orelse {
-                log.warn("failed to get URI for OSC8 hyperlink", .{});
-                return false;
-            }),
-        };
-        break :target .{ link.action, url };
-    };
-    defer self.alloc.free(target);
-
-    switch (action) {
-        .open => try self.openLinkText(target),
-        ._open_osc8 => try self.openUrl(.{ .kind = .osc8, .url = target }),
+    fn deinit(self: OpenLink, alloc: Allocator) void {
+        alloc.free(self.target);
     }
-    return true;
+};
+
+/// Resolve the link under the given position, if any, and copy its target
+/// out of the terminal: the IO thread prunes and reuses the pages it lives
+/// in, and an OSC 8 URI is a slice of page memory.
+///
+/// Requires the renderer state mutex held.
+fn linkAtLocked(self: *Surface, pos: apprt.CursorPos) !?OpenLink {
+    self.renderer_state.mutex.assertHeld();
+    const link = try self.linkAtPos(pos) orelse return null;
+    const target: [:0]const u8 = switch (link.action) {
+        .open => try self.io.terminal.screens.active.selectionString(self.alloc, .{
+            .sel = link.selection,
+            .trim = false,
+        }),
+
+        // The URI is a slice of page memory, so it must be copied.
+        ._open_osc8 => try self.alloc.dupeZ(u8, self.osc8URI(link.selection.start()) orelse {
+            log.warn("failed to get URI for OSC8 hyperlink", .{});
+            return null;
+        }),
+    };
+    return .{ .action = link.action, .target = target };
 }
+
+/// Invoke the action of a link that `linkAtLocked` copied.
+///
+/// Takes no lock itself, and must be called without the renderer state
+/// mutex held: link text takes the mutex to read the pwd
+/// (`openLinkText`), and the opener must never run under it. On Win32 the
+/// opener (`App.openLink`) checks the target, may ask in the confirm
+/// overlay, and leaves the open itself to the message loop
+/// (`App.deferShellRequest`), because ShellExecuteW pumps messages.
+fn processLinks(self: *Surface, link: OpenLink) !void {
+    switch (link.action) {
+        .open => try self.openLinkText(link.target),
+        ._open_osc8 => try self.openUrl(.{ .kind = .osc8, .url = link.target }),
+    }
+}
+
+/// A test's stand-in for the apprt's opener: when set, `openUrl` hands it
+/// the action and opens nothing.
+var test_open_url: ?*const fn (*Surface, apprt.action.OpenUrl) anyerror!void = null;
 
 fn openUrl(
     self: *Surface,
     action: apprt.action.OpenUrl,
 ) !void {
+    if (comptime builtin.is_test) {
+        if (test_open_url) |open| return open(self, action);
+    }
+
     // If the apprt handles it then we're done.
     if (try self.rt_app.performAction(
         .{ .surface = self },
@@ -6607,7 +7459,7 @@ pub fn mousePressureCallback(
             pin.*,
             self.config.selection_word_chars,
         ) orelse break :select;
-        try self.io.terminal.screens.active.select(sel);
+        try self.setSelection(sel);
         try self.queueRender();
     }
 }
@@ -6852,13 +7704,13 @@ fn dragLeftClickDouble(
     // If our current mouse position is before the starting position,
     // then the selection start is the word nearest our current position.
     if (drag_pin.before(click_pin)) {
-        try self.io.terminal.screens.active.select(.init(
+        try self.setSelection(terminal.Selection.init(
             word_current.start(),
             word_start.end(),
             false,
         ));
     } else {
-        try self.io.terminal.screens.active.select(.init(
+        try self.setSelection(terminal.Selection.init(
             word_start.start(),
             word_current.end(),
             false,
@@ -6874,9 +7726,10 @@ fn dragLeftClickTriple(
     const screen: *terminal.Screen = self.io.terminal.screens.active;
     const click_pin = (self.mouse.activeLeftClickPin(&self.io.terminal.screens) orelse return).*;
 
-    // Get the line selection under our current drag point. If there isn't a
-    // line, do nothing.
-    const line = screen.selectLine(.{ .pin = drag_pin }) orelse return;
+    // A blank line is still a valid endpoint for a line-wise drag.
+    const line = screen.selectLine(.{ .pin = drag_pin }) orelse
+        screen.selectLine(.{ .pin = drag_pin, .whitespace = null }) orelse
+        return;
 
     // Get the selection under our click point. We first try to trim
     // whitespace if we've selected a word. But if no word exists then
@@ -6890,7 +7743,7 @@ fn dragLeftClickTriple(
     } else {
         sel.endPtr().* = line.end();
     }
-    try self.io.terminal.screens.active.select(sel);
+    try self.setSelection(sel);
 }
 
 fn dragLeftClickSingle(
@@ -6900,7 +7753,7 @@ fn dragLeftClickSingle(
 ) !void {
     // This logic is in a separate function so that it can be unit tested.
     const click_pin = self.mouse.activeLeftClickPin(&self.io.terminal.screens) orelse return;
-    try self.io.terminal.screens.active.select(mouseSelection(
+    try self.setSelection(mouseSelection(
         click_pin.*,
         drag_pin,
         @intFromFloat(@max(0.0, self.mouse.left_click_xpos)),
@@ -7935,7 +8788,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             const sel = self.io.terminal.screens.active.selectAll();
             if (sel) |s| {
-                try self.setSelection(s);
+                try self.setSelectionAndCopy(s);
                 try self.queueRender();
             }
         },

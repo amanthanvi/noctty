@@ -92,15 +92,6 @@ pub const SlidingWindow = struct {
     const DataBuf = CircBuf(u8, 0);
     const MetaBuf = CircBuf(Meta, undefined);
 
-    /// Information copied from a page while appending it to the window.
-    ///
-    /// Callers use `last_row_wrapped` to decide whether an adjacent page can
-    /// contribute to a cross-page match without reading the node again.
-    pub const AppendResult = struct {
-        content_len: usize,
-        last_row_wrapped: bool,
-    };
-
     const Meta = struct {
         node: *PageList.List.Node,
         serial: u64,
@@ -118,6 +109,17 @@ pub const SlidingWindow = struct {
         pub fn deinit(self: *Meta, alloc: Allocator) void {
             self.cell_map.deinit(alloc);
         }
+    };
+
+    /// Information copied from a page while appending it to the window.
+    ///
+    /// Both values remain safe after the node's preserved page is released.
+    /// In particular, callers use `last_row_wrapped` to decide whether an
+    /// adjacent page can contribute to a cross-page match without reading the
+    /// node again.
+    pub const AppendResult = struct {
+        content_len: usize,
+        last_row_wrapped: bool,
     };
 
     pub fn init(
@@ -756,26 +758,37 @@ pub const SlidingWindow = struct {
         self: *SlidingWindow,
         node: *PageList.List.Node,
     ) Allocator.Error!AppendResult {
-        const page = node.page();
+        var preserved = try node.pagePreservingState(self.alloc);
+        defer preserved.deinit();
+
+        const page = preserved.page();
         const last_row_wrapped = page.getRow(page.size.rows - 1).wrap;
         return self.appendPage(node, page, last_row_wrapped);
     }
 
     /// Append a node only when its last row is soft wrapped.
     ///
-    /// It is used when loading the overlap around an otherwise complete
-    /// search region.
+    /// This acquires one preserved page for both the wrap check and formatting
+    /// so a compressed node is decoded at most once. It is used when loading
+    /// the overlap around an otherwise complete search region.
     pub fn appendIfWrapped(
         self: *SlidingWindow,
         node: *PageList.List.Node,
     ) Allocator.Error!?AppendResult {
-        const page = node.page();
+        var preserved = try node.pagePreservingState(self.alloc);
+        defer preserved.deinit();
+
+        const page = preserved.page();
         const last_row_wrapped = page.getRow(page.size.rows - 1).wrap;
         if (!last_row_wrapped) return null;
         return try self.appendPage(node, page, last_row_wrapped);
     }
 
-    /// Copy one page into the window's owned search buffers.
+    /// Copy one preserved page into the window's owned search buffers.
+    ///
+    /// No pointer into `page` may escape this function: compressed preserved
+    /// pages own temporary decode storage, while resident values borrow node
+    /// memory.
     fn appendPage(
         self: *SlidingWindow,
         node: *PageList.List.Node,
@@ -790,7 +803,11 @@ pub const SlidingWindow = struct {
             .cell_map = .empty,
             .before = before: {
                 const prev = node.prev orelse break :before .none;
-                const prev_page = prev.page();
+                // Read the neighbour without restoring it: a compressed
+                // previous node stays compressed.
+                var prev_preserved = try prev.pagePreservingState(self.alloc);
+                defer prev_preserved.deinit();
+                const prev_page = prev_preserved.page();
                 if (prev_page.getRow(prev_page.size.rows - 1).wrap) break :before .unknown;
                 break :before .{ .byte = '\n' };
             },

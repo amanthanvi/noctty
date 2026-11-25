@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win = @import("../os/windows.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const log = std.log.scoped(.windows_ssh_hosts);
 
 pub const max_hosts: usize = 256;
@@ -427,6 +428,8 @@ const AsyncSshConfigRead = struct {
     }
 
     fn run(self: *@This()) void {
+        const role_scope = thread_role.enter(.{ .worker = "ssh-config" });
+        defer role_scope.exit();
         const alloc = std.heap.page_allocator;
         const result = self.read_fn(alloc, self.path);
 

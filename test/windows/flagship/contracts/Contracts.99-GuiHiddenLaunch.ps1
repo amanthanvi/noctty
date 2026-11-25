@@ -890,6 +890,79 @@ foreach ($bad in @(
     if ((& $guiVerdict $bad.Rows $bad.Total $bad.Shells).passed) { throw "The process verdict passed $($bad.Name)." }
 }
 
+# ---- (9a) the role dump opt-in and the launcher-bound exit, with the supervisor replaced by a recorder.
+& {
+    foreach ($name in @('Get-GuiHiddenRoleDumpDirectory', 'Write-GuiHiddenRoleManifest')) {
+        . ([scriptblock]::Create((Get-GuiContractFunctionText $guiRunnerAst $name)))
+    }
+    $run = 'C:\gui-hidden-fixture'
+    if ((Get-GuiHiddenRoleDumpDirectory @{ id = 'role-pairs'; roleDump = $true } $run) -cne (Join-Path $run 'role-dump')) {
+        throw 'The role-pairs leaf lost its dump directory.'
+    }
+    foreach ($leaf in @(
+            @{ id = 'smoke'; roleDump = $true }
+            @{ id = 'role-pairs'; roleDump = 'true' }
+            @{ id = 'role-pairs'; roleDump = $false }
+        )) {
+        if (Get-GuiHiddenRoleDumpDirectory $leaf $run) { throw 'A leaf without the role-pairs Boolean opt-in received a dump directory.' }
+    }
+    $calls = [Collections.Generic.List[object]]::new()
+    function Invoke-GuiHiddenRoleSupervisor([string[]] $Arguments) { $calls.Add($Arguments) }
+    $app = [pscustomobject]@{ Pid = 200; Creation = [long]20; Parent = 100; InCopy = $true; Image = 'noctty.exe'; Exit = [uint32]3221226525 }
+    $launcher = @{ 200 = [long]20 }
+    $logs = Join-Path $run 'logs'
+    $manifest = Join-Path $run 'role-manifest.tsv'
+    $state = Join-Path $run 'role-supervisor'
+    $stderr = Join-Path $logs 'role-pairs-stderr.log'
+    foreach ($noLaunch in @($false, $true)) {
+        $calls.Clear()
+        Write-GuiHiddenRoleManifest @($app) $launcher 100 $run $logs -NoLaunch:$noLaunch
+        $commands = ($calls | ForEach-Object { $_[0] }) -join ','
+        $expected = if ($noLaunch) { 'exit,seal' } else { 'launch,exit,seal' }
+        if ($commands -cne $expected -or
+            ($calls[$calls.Count - 2] -join '|') -cne "exit|$state|$manifest|composite|200|20|gui|3221226525|$stderr" -or
+            ($calls[$calls.Count - 1] -join '|') -cne "seal|$state|$manifest" -or
+            (-not $noLaunch -and ($calls[0] -join '|') -cne "launch|$state|$manifest|200|20|gui")) {
+            throw 'The role supervisor received the wrong identity, exit receipt, or seal.'
+        }
+    }
+    # Model a signalled exit whose code becomes readable after the first two polls.
+    $delayed = @{ Polls = 0 }
+    $readDelayed = [Func[Nullable[uint32]]]{
+        $delayed.Polls++
+        if ($delayed.Polls -ge 3) { return [uint32]0 }
+        return $null
+    }
+    $app.Exit = $readDelayed.Invoke()
+    $calls.Clear()
+    $refused = $false
+    try { Write-GuiHiddenRoleManifest @($app) $launcher 100 $run $logs }
+    catch { $refused = $_.Exception.Message -ceq 'The role-pairs copy has no unique, launcher-bound exit.' }
+    if (-not $refused -or $calls.Count -ne 0) { throw 'The old one-shot exit read did not reproduce the missing exit.' }
+    $app.Exit = [GuiHiddenRunnerNative]::WaitForRoleExit($readDelayed, 1000)
+    Write-GuiHiddenRoleManifest @($app) $launcher 100 $run $logs
+    if ($delayed.Polls -ne 3 -or $calls.Count -ne 3 -or $calls[1][7] -cne '0') {
+        throw 'A delayed normal exit did not produce a full zero exit receipt.'
+    }
+    $missing = [GuiHiddenRunnerNative]::WaitForRoleExit([Func[Nullable[uint32]]]{ return $null }, 60)
+    foreach ($bad in @(
+            @{ Start = 21; Exit = [uint32]0; Parent = 100 }
+            @{ Start = 20; Exit = $missing; Parent = 100 }
+            @{ Start = 20; Exit = [uint32]0; Parent = 101 }
+            @{ Start = 20; Exit = [uint32]0; Parent = 100; Duplicate = $true }
+        )) {
+        $calls.Clear()
+        $launcher[200] = [long]$bad.Start
+        $app.Exit = $bad.Exit
+        $app.Parent = $bad.Parent
+        $rows = if ($bad.Duplicate) { @($app, $app) } else { @($app) }
+        $refused = $false
+        try { Write-GuiHiddenRoleManifest $rows $launcher 100 $run $logs }
+        catch { $refused = $_.Exception.Message -ceq 'The role-pairs copy has no unique, launcher-bound exit.' }
+        if (-not $refused -or $calls.Count -ne 0) { throw 'A missing or duplicate exit, mismatched launcher or wrong parent produced a role receipt.' }
+    }
+}
+
 # ---- (9b) the leaf receipt, judged strictly: a missing, null or mistyped field is invalid, never cast (Sol and
 # CodeRabbit on #740).
 $guiScratch = Join-Path ([IO.Path]::GetTempPath()) ('noctty-gui-hidden-receipt-' + [guid]::NewGuid().ToString('N'))

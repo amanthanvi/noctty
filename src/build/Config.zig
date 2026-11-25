@@ -34,12 +34,21 @@ wasm_shared: bool = true,
 /// Ghostty exe properties
 exe_entrypoint: ExeEntrypoint = .ghostty,
 version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
+lib_version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 
 /// Binary properties
 pie: bool = false,
 strip: bool = false,
 omit_frame_pointer: bool = false,
 release_symbols: bool = false,
+
+/// Whether the modules built with this config's build options get the
+/// runtime thread-role layer: `build_options.thread_roles`, which
+/// `src/sync/thread_role.zig` reads. False here, so every lib-vt build, build
+/// tool, benchmark and conpty-host gets the plain mutex; `SharedDeps.add`
+/// builds the app exe and the test exe with a copy that sets it in the modes
+/// `threadRoles` names (PLAN.md §2.7's build scope).
+thread_roles: bool = false,
 
 /// Artifacts
 emit_bench: bool = false,
@@ -65,7 +74,7 @@ is_dep: bool = false,
 /// Environmental properties
 env: std.process.EnvMap,
 
-pub fn init(b: *std.Build, appVersion: []const u8) !Config {
+pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Config {
     // Setup our standard Zig target and optimize options, i.e.
     // `-Doptimize` and `-Dtarget`.
     const optimize = b.standardOptimizeOption(.{});
@@ -213,6 +222,20 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
             .build = if (is_dep) null else "windows",
         };
     };
+
+    // libghostty-vt properties
+
+    const lib_version_string = b.option(
+        []const u8,
+        "lib-version-string",
+        "A specific version string to use for the build of libghostty-vt. " ++
+            "If not specified, git will be used. This must be a semantic version.",
+    );
+
+    config.lib_version = if (lib_version_string) |v|
+        try std.SemanticVersion.parse(v)
+    else
+        try std.SemanticVersion.parse(libVersion);
 
     //---------------------------------------------------------------
     // Binary Properties
@@ -413,6 +436,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "i18n", self.i18n);
     step.addOption(bool, "custom_shaders", self.custom_shaders);
     step.addOption(bool, "release_symbols", self.release_symbols);
+    step.addOption(bool, "thread_roles", self.thread_roles);
     step.addOption(bool, "d3d11", self.d3d11);
     step.addOption(bool, "renderer_test_tools", self.renderer_test_tools);
     step.addOption(std.builtin.OptimizeMode, "test_optimize", self.test_optimize);
@@ -426,12 +450,19 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     // Our version. We also add the string version so we don't need
     // to do any allocations at runtime. This has to be long enough to
     // accommodate realistic large branch names for dev versions.
-    var buf: [1024]u8 = undefined;
+    var app_version_buf: [1024]u8 = undefined;
     step.addOption(std.SemanticVersion, "app_version", self.version);
     step.addOption([:0]const u8, "app_version_string", try std.fmt.bufPrintZ(
-        &buf,
+        &app_version_buf,
         "{f}",
         .{self.version},
+    ));
+    var lib_version_buf: [1024]u8 = undefined;
+    step.addOption(std.SemanticVersion, "lib_version", self.lib_version);
+    step.addOption([:0]const u8, "lib_version_string", try std.fmt.bufPrintZ(
+        &lib_version_buf,
+        "{f}",
+        .{self.lib_version},
     ));
     step.addOption(
         ReleaseChannel,
@@ -458,15 +489,29 @@ pub fn testModule(
     return b.createModule(test_options);
 }
 
+/// Whether the app exe or the test exe, built in `mode`, gets the runtime
+/// thread-role layer (PLAN.md §2.7's build scope): in Debug and ReleaseSafe,
+/// never in ReleaseFast or ReleaseSmall. Every other artifact gets it in no
+/// mode.
+pub fn threadRoles(mode: std.builtin.OptimizeMode) bool {
+    return switch (mode) {
+        .Debug, .ReleaseSafe => true,
+        .ReleaseFast, .ReleaseSmall => false,
+    };
+}
+
 /// Returns the build options for the terminal module. This assumes a
 /// Ghostty executable being built. Callers should modify this as needed.
-pub fn terminalOptions(self: *const Config) TerminalBuildOptions {
+pub fn terminalOptions(self: *const Config, artifact: TerminalBuildOptions.Artifact) TerminalBuildOptions {
     return .{
-        .artifact = .ghostty,
+        .artifact = artifact,
         .simd = self.simd,
         .oniguruma = true,
         .c_abi = false,
-        .version = self.version,
+        .version = switch (artifact) {
+            .ghostty => self.version,
+            .lib => self.lib_version,
+        },
         .slow_runtime_safety = switch (self.optimize) {
             .Debug => true,
             .ReleaseSafe,
@@ -552,4 +597,23 @@ test "the test executable runs in its -Dtest-optimize mode" {
         @tagName(@import("build_options").test_optimize),
         @tagName(@import("builtin").mode),
     );
+}
+
+test "the thread-role layer is on in the test executable's Debug and ReleaseSafe only" {
+    const on = @import("build_options").thread_roles;
+    // The layer takes the build option's form.
+    try std.testing.expectEqual(on, @import("../sync/thread_role.zig").layer == .on);
+    const mode = @import("builtin").mode;
+    // Never in ReleaseFast or ReleaseSmall, in any test executable.
+    if (on) try std.testing.expect(threadRoles(mode));
+    // The fork's test executable has it in its mode; lib-vt's never does.
+    switch (@import("terminal_options").artifact) {
+        .ghostty => try std.testing.expectEqual(threadRoles(mode), on),
+        .lib => try std.testing.expect(!on),
+    }
+}
+
+test {
+    // The fork-owned build check of the layer's text, and its test.
+    _ = @import("ThreadRoleTextCheck.zig");
 }

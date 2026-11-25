@@ -117,8 +117,11 @@
         var ghostty = $E:GHOSTTY_BIN_DIR/"noctty"
         var ssh-target = $ssh-user"@"$ssh-hostname
 
-        # Check if terminfo is already cached
-        if (bool ?($ghostty +ssh-cache --host=$ssh-target)) {
+        # Check if terminfo is already cached: the positional query exits 0 on
+        # a match. Its output is discarded: a match prints the entry, and the
+        # deprecated `--host=` spelling also warned on stderr, which elvish
+        # would show in the user's terminal.
+        if (bool ?($ghostty +ssh-cache $ssh-target >/dev/null 2>/dev/null)) {
           set ssh-term = "xterm-ghostty"
         } elif (has-external infocmp) {
           var ssh-terminfo = ((external infocmp) -0 -x xterm-ghostty 2>/dev/null | slurp)

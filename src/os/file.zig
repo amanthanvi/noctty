@@ -95,6 +95,46 @@ pub fn freeTmpDir(allocator: std.mem.Allocator, dir: []const u8) void {
     allocator.free(dir);
 }
 
+const random_basename_bytes = 16;
+const b64_encoder = std.base64.url_safe_no_pad.Encoder;
+
+pub const RandomBasenameError = error{BufferTooSmall};
+
+/// Length of the basename produced by `randomBasename`.
+pub const random_basename_len = b64_encoder.calcSize(random_basename_bytes);
+
+/// Write a random filesystem-safe base64 basename of length
+/// `random_basename_len` into `buf` and return a slice over the
+/// written bytes. Returns `error.BufferTooSmall` if `buf` is too
+/// short.
+pub fn randomBasename(buf: []u8) RandomBasenameError![]const u8 {
+    if (buf.len < random_basename_len) return error.BufferTooSmall;
+    var rand_buf: [random_basename_bytes]u8 = undefined;
+    std.crypto.random.bytes(&rand_buf);
+    return b64_encoder.encode(buf[0..random_basename_len], &rand_buf);
+}
+
+/// Return a freshly-allocated path of the form `{TMPDIR}/{prefix}{random}`.
+/// The caller owns the returned slice and must free it with `allocator`.
+///
+/// Nothing is created on disk; this only builds the path string. Useful
+/// for one-shot temporary file/socket paths where a full `TempDir` is
+/// overkill.
+pub fn randomTmpPath(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    const tmp_dir = try allocTmpDir(allocator);
+    defer freeTmpDir(allocator, tmp_dir);
+    var name_buf: [random_basename_len]u8 = undefined;
+    const basename = randomBasename(&name_buf) catch unreachable;
+    return std.fmt.allocPrint(
+        allocator,
+        "{s}{c}{s}{s}",
+        .{ tmp_dir, std.fs.path.sep, prefix, basename },
+    );
+}
+
 test "allocTmpDir without TMP follows GetTempPathW to TEMP" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -145,4 +185,19 @@ test "allocTmpDir keeps the separator of a drive root" {
     const dir = try allocTmpDir(alloc);
     defer freeTmpDir(alloc, dir);
     try testing.expectEqualStrings("C:\\", dir);
+}
+
+test randomBasename {
+    const testing = std.testing;
+
+    var buf: [random_basename_len]u8 = undefined;
+    const name = try randomBasename(&buf);
+    try testing.expectEqual(random_basename_len, name.len);
+    for (name) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+        try testing.expect(ok);
+    }
+
+    var small: [random_basename_len - 1]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, randomBasename(&small));
 }

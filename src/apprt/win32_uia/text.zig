@@ -27,7 +27,7 @@ pub const DocumentWindow = struct {
 pub const RowNumbering = struct {
     active_key: u64,
     screen_generation: u64 = 0,
-    page_serial_min: u64,
+    page_serial_epoch: u64,
     first_page_serial: u64,
     row_generation: u64 = 0,
     rows: u32,
@@ -39,7 +39,7 @@ pub fn rowNumbering(state: *const terminal.Terminal) RowNumbering {
     return .{
         .active_key = @intFromEnum(state.screens.active_key),
         .screen_generation = state.screens.generation(state.screens.active_key),
-        .page_serial_min = pages.page_serial_min,
+        .page_serial_epoch = pages.page_serial_epoch,
         .first_page_serial = pages.pages.first.?.serial,
         .row_generation = pages.row_generation,
         .rows = pages.rows,
@@ -207,13 +207,14 @@ fn snapshotDocumentWindow(
     // when text happens to be equal. Pure viewport motion is geometry only.
     var hash = std.hash.Wyhash.init(0);
     hash.update(text);
+    const numbering = rowNumbering(terminal_state);
     const provenance = [_]u64{
-        @intFromEnum(terminal_state.screens.active_key),                      pages.page_serial,
-        pages.page_serial_min,                                                pages.pages.first.?.serial,
-        pages.total_rows,                                                     document_window.top,
-        document_window.bottom,                                               pages.rows,
-        pages.cols,                                                           pages.row_generation,
-        terminal_state.screens.generation(terminal_state.screens.active_key),
+        numbering.active_key,        pages.page_serial,
+        numbering.page_serial_epoch, numbering.first_page_serial,
+        pages.total_rows,            document_window.top,
+        document_window.bottom,      numbering.rows,
+        numbering.columns,           numbering.row_generation,
+        numbering.screen_generation,
     };
     hash.update(std.mem.sliceAsBytes(&provenance));
 
@@ -265,7 +266,7 @@ fn snapshotDocumentWindow(
         .scroll_token = hash.final(),
         .viewport_y = viewport_screen.screen.y,
         .document_window = document_window,
-        .row_numbering = rowNumbering(terminal_state),
+        .row_numbering = numbering,
     };
 }
 
@@ -468,10 +469,12 @@ test "PKG71 row numbering rejects partial history erasure and regrowth" {
     try t.printString("one\r\ntwo\r\nthree\r\nfour\r\nfive");
     const pages = &t.screens.active.pages;
     try std.testing.expect(pages.pages.first == pages.pages.last);
+    const first = pages.pages.first.?;
     const before = rowNumbering(&t);
     const total_before = pages.total_rows;
     t.eraseDisplay(.scrollback, false);
-    try std.testing.expectEqual(before.first_page_serial, pages.pages.first.?.serial);
+    try std.testing.expectEqual(first, pages.pages.first.?);
+    try std.testing.expect(!pages.nodeIsValid(first, before.first_page_serial));
     try std.testing.expect(pages.total_rows < total_before);
     try std.testing.expect(!std.meta.eql(before, rowNumbering(&t)));
     // Restoring the old row count must not revive the old absolute anchors.
@@ -492,13 +495,15 @@ test "PKG71 frozen scroll rejects erased history regrown with identical text" {
     defer before.deinit();
     const pages = &t.screens.active.pages;
     const total = pages.total_rows;
-    const serial = pages.page_serial;
+    const first = pages.pages.first.?;
+    const serial = first.serial;
     t.eraseDisplay(.scrollback, false);
     while (pages.total_rows < total) try t.printString("\r\nsame");
     var after = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer after.deinit();
     try std.testing.expectEqualStrings(before.text, after.text);
-    try std.testing.expectEqual(serial, pages.page_serial);
+    try std.testing.expectEqual(first, pages.pages.first.?);
+    try std.testing.expect(!pages.nodeIsValid(first, serial));
     try std.testing.expect(!try scrollFrozenRange(alloc, &t, before.scroll_token.?, before.document_window, 0, true));
 }
 
@@ -509,13 +514,15 @@ test "PKG71 held row numbering rejects no-scrollback row erasure" {
     _ = try t.switchScreen(.alternate);
     try std.testing.expect(t.screens.active.no_scrollback);
     try t.printString("old\r\nnext\r\ntail");
+    const first = t.screens.active.pages.pages.first.?;
     var held = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer held.deinit();
     // cursorDownScroll rotates rows through eraseRow, without allocating a
     // new page or changing the document dimensions.
     try t.screens.active.cursorDownScroll();
     const current = rowNumbering(&t);
-    try std.testing.expectEqual(held.row_numbering.?.first_page_serial, current.first_page_serial);
+    try std.testing.expectEqual(first, t.screens.active.pages.pages.first.?);
+    try std.testing.expect(held.row_numbering.?.first_page_serial != current.first_page_serial);
     try std.testing.expect(!std.meta.eql(held.row_numbering.?, current));
 }
 
@@ -524,11 +531,13 @@ test "PKG71 held row numbering rejects bounded row erasure" {
     var t = try terminal.Terminal.init(alloc, .{ .cols = 20, .rows = 3 });
     defer t.deinit(alloc);
     try t.printString("old\r\nnext\r\ntail");
+    const first = t.screens.active.pages.pages.first.?;
     var held = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer held.deinit();
     try t.screens.active.pages.eraseRowBounded(.{ .active = .{} }, 1);
     const current = rowNumbering(&t);
-    try std.testing.expectEqual(held.row_numbering.?.first_page_serial, current.first_page_serial);
+    try std.testing.expectEqual(first, t.screens.active.pages.pages.first.?);
+    try std.testing.expect(held.row_numbering.?.first_page_serial != current.first_page_serial);
     try std.testing.expect(!std.meta.eql(held.row_numbering.?, current));
 }
 
@@ -544,7 +553,7 @@ test "PKG71 row numbering rejects alternate screen replacement after reset" {
     try t.printString("new");
     const after = rowNumbering(&t);
     // A newly allocated screen can repeat every page-local counter.
-    try std.testing.expectEqual(before.page_serial_min, after.page_serial_min);
+    try std.testing.expectEqual(before.page_serial_epoch, after.page_serial_epoch);
     try std.testing.expectEqual(before.first_page_serial, after.first_page_serial);
     try std.testing.expectEqual(before.row_generation, after.row_generation);
     try std.testing.expect(!std.meta.eql(before, after));
@@ -568,6 +577,7 @@ fn testRowShiftInvalidates(mode: enum { reverse_index, delete_lines, scroll_abov
     defer t.deinit(alloc);
     if (mode == .reverse_index) _ = try t.switchScreen(.alternate);
     try t.printString("one\r\ntwo\r\nthree\r\nstatus");
+    const first = t.screens.active.pages.pages.first.?;
     var held = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer held.deinit();
     switch (mode) {
@@ -587,8 +597,41 @@ fn testRowShiftInvalidates(mode: enum { reverse_index, delete_lines, scroll_abov
         },
     }
     const current = rowNumbering(&t);
-    try std.testing.expectEqual(held.row_numbering.?.first_page_serial, current.first_page_serial);
+    try std.testing.expectEqual(first, t.screens.active.pages.pages.first.?);
+    try std.testing.expect(held.row_numbering.?.first_page_serial != current.first_page_serial);
     try std.testing.expect(!std.meta.eql(held.row_numbering.?, current));
+}
+
+test "PKG71 row numbering rejects a later-page shift with identical text" {
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3, .max_scrollback = 1_000_000 });
+    defer t.deinit(alloc);
+    const pages = &t.screens.active.pages;
+    const first = pages.pages.first.?;
+    const before_append = rowNumbering(&t);
+    while (pages.getTopLeft(.active).node == first) try t.printString("same\n");
+    try t.printString("same");
+    try std.testing.expectEqualDeep(before_append, rowNumbering(&t));
+
+    const later = pages.getTopLeft(.active).node;
+    const serial = later.serial;
+    var held = try snapshotTerminalAccessiblePlainText(alloc, &t);
+    defer held.deinit();
+
+    try pages.eraseRowBounded(.{ .active = .{ .y = 1 } }, 1);
+    t.screens.active.cursorReload();
+    t.setCursorPos(3, 1);
+    try t.printString("same");
+
+    var current = try snapshotTerminalAccessiblePlainText(alloc, &t);
+    defer current.deinit();
+    try std.testing.expectEqualStrings(held.text, current.text);
+    try std.testing.expectEqualDeep(held.document_window, current.document_window);
+    try std.testing.expectEqual(held.row_numbering.?.page_serial_epoch, current.row_numbering.?.page_serial_epoch);
+    try std.testing.expectEqual(held.row_numbering.?.first_page_serial, current.row_numbering.?.first_page_serial);
+    try std.testing.expect(!pages.nodeIsValid(later, serial));
+    try std.testing.expect(!std.meta.eql(held.row_numbering.?, current.row_numbering.?));
+    try std.testing.expect(!try scrollFrozenRange(alloc, &t, held.scroll_token.?, held.document_window, held.document_window.top, true));
 }
 
 test "PKG71 frozen scroll rejects identical alternate screen replacement after reset" {
@@ -614,8 +657,8 @@ test "PKG71 row numbering rejects resize round trips" {
     defer t.deinit(alloc);
     try t.printString("one\r\ntwo\r\nthree\r\nfour");
     const before = rowNumbering(&t);
-    try t.resize(alloc, 81, 3);
-    try t.resize(alloc, 80, 3);
+    try t.resize(alloc, .{ .cols = 81, .rows = 3 });
+    try t.resize(alloc, .{ .cols = 80, .rows = 3 });
     try std.testing.expect(!std.meta.eql(before, rowNumbering(&t)));
 }
 
@@ -630,7 +673,7 @@ test "PKG71 frozen scroll rejects output resize screen switch and history recycl
     try std.testing.expect(!try scrollFrozenRange(alloc, &t, original.scroll_token.?, original.document_window, 0, true));
     var before_resize = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer before_resize.deinit();
-    try t.resize(alloc, 15, 4);
+    try t.resize(alloc, .{ .cols = 15, .rows = 4 });
     try std.testing.expect(!try scrollFrozenRange(alloc, &t, before_resize.scroll_token.?, before_resize.document_window, 0, true));
     var before_switch = try snapshotTerminalAccessiblePlainText(alloc, &t);
     defer before_switch.deinit();

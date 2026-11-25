@@ -33,22 +33,6 @@ extern "C" {
  */
 
 /**
- * Output format.
- *
- * @ingroup formatter
- */
-typedef enum {
-  /** Plain text (no escape sequences). */
-  GHOSTTY_FORMATTER_FORMAT_PLAIN,
-
-  /** VT sequences preserving colors, styles, URLs, etc. */
-  GHOSTTY_FORMATTER_FORMAT_VT,
-
-  /** HTML with inline styles. */
-  GHOSTTY_FORMATTER_FORMAT_HTML,
-} GhosttyFormatterFormat;
-
-/**
  * Extra screen state to include in styled output.
  *
  * @ingroup formatter
@@ -106,13 +90,6 @@ typedef struct {
   /** Screen-level extras. */
   GhosttyFormatterScreenExtra screen;
 } GhosttyFormatterTerminalExtra;
-
-/**
- * Opaque handle to a formatter instance.
- *
- * @ingroup formatter
- */
-typedef struct GhosttyFormatterImpl* GhosttyFormatter;
 
 /**
  * Options for creating a terminal formatter.
@@ -194,6 +171,8 @@ GHOSTTY_API GhosttyResult ghostty_formatter_format_buf(GhosttyFormatter formatte
  * The caller is responsible for freeing the returned buffer with
  * ghostty_free(), passing the same allocator (or NULL for the default)
  * that was used for the allocation.
+ * Empty output returns GHOSTTY_SUCCESS with *out_ptr set to NULL and
+ * *out_len set to zero. This result can be passed to ghostty_free().
  *
  * @param formatter The formatter handle (must not be NULL)
  * @param allocator Pointer to allocator, or NULL to use the default allocator

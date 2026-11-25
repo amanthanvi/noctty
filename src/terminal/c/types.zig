@@ -7,6 +7,7 @@
 const std = @import("std");
 const lib = @import("../lib.zig");
 const color = @import("../color.zig");
+const color_c = @import("color.zig");
 const mouse_event = @import("mouse_event.zig");
 const point = @import("../point.zig");
 const size_report = @import("size_report.zig");
@@ -14,37 +15,65 @@ const size_report = @import("size_report.zig");
 const terminal = @import("terminal.zig");
 const formatter = @import("formatter.zig");
 const selection = @import("selection.zig");
+const selection_gesture = @import("selection_gesture.zig");
 const render = @import("render.zig");
 const style_c = @import("style.zig");
 const mouse_encode = @import("mouse_encode.zig");
 const grid_ref = @import("grid_ref.zig");
 
+/// C: GhosttySurfacePosition
+pub const SurfacePosition = extern struct {
+    x: f64,
+    y: f64,
+};
+
+/// C: GhosttyCodepoints
+pub const Codepoints = extern struct {
+    ptr: ?[*]const u32 = null,
+    len: usize = 0,
+};
+
 /// All C API structs and their Ghostty C names.
-pub const structs: std.StaticStringMap(StructInfo) = .initComptime(.{
-    .{ "GhosttyColorRgb", StructInfo.init(color.RGB.C) },
-    .{ "GhosttyDeviceAttributes", StructInfo.init(terminal.DeviceAttributes) },
-    .{ "GhosttyDeviceAttributesPrimary", StructInfo.init(terminal.DeviceAttributes.Primary) },
-    .{ "GhosttyDeviceAttributesSecondary", StructInfo.init(terminal.DeviceAttributes.Secondary) },
-    .{ "GhosttyDeviceAttributesTertiary", StructInfo.init(terminal.DeviceAttributes.Tertiary) },
-    .{ "GhosttyFormatterTerminalOptions", StructInfo.init(formatter.TerminalOptions) },
-    .{ "GhosttySelection", StructInfo.init(selection.CSelection) },
-    .{ "GhosttyFormatterTerminalExtra", StructInfo.init(formatter.TerminalOptions.Extra) },
-    .{ "GhosttyFormatterScreenExtra", StructInfo.init(formatter.ScreenOptions.Extra) },
-    .{ "GhosttyGridRef", StructInfo.init(grid_ref.CGridRef) },
-    .{ "GhosttyMouseEncoderSize", StructInfo.init(mouse_encode.Size) },
-    .{ "GhosttyMousePosition", StructInfo.init(mouse_event.Position) },
-    .{ "GhosttyPoint", StructInfo.init(point.Point.C) },
-    .{ "GhosttyPointCoordinate", StructInfo.init(point.Coordinate) },
-    .{ "GhosttyRenderStateColors", StructInfo.init(render.Colors) },
-    .{ "GhosttySizeReportSize", StructInfo.init(size_report.Size) },
-    .{ "GhosttyString", StructInfo.init(lib.String) },
-    .{ "GhosttyStyle", StructInfo.init(style_c.Style) },
-    .{ "GhosttyStyleColor", StructInfo.init(style_c.Color) },
-    .{ "GhosttyTerminalOptions", StructInfo.init(terminal.Options) },
-    .{ "GhosttyTerminalProgramStatus", StructInfo.init(terminal.ProgramStatus) },
-    .{ "GhosttyTerminalScrollbar", StructInfo.init(terminal.TerminalScrollbar) },
-    .{ "GhosttyTerminalScrollViewport", StructInfo.init(terminal.ScrollViewport) },
-});
+pub const structs: std.StaticStringMap(StructInfo) = structs: {
+    @setEvalBranchQuota(10_000);
+    break :structs .initComptime(.{
+        .{ "GhosttyBuffer", StructInfo.init(lib.Buffer) },
+        .{ "GhosttyClipboardContent", StructInfo.init(terminal.ClipboardContent) },
+        .{ "GhosttyClipboardWrite", StructInfo.init(terminal.ClipboardWrite) },
+        .{ "GhosttyCodepoints", StructInfo.init(Codepoints) },
+        .{ "GhosttyColorPaletteMask", StructInfo.init(color_c.PaletteMask) },
+        .{ "GhosttyColorRgb", StructInfo.init(color.RGB.C) },
+        .{ "GhosttyColorX11Entry", StructInfo.init(color_c.X11Entry) },
+        .{ "GhosttyDeviceAttributes", StructInfo.init(terminal.DeviceAttributes) },
+        .{ "GhosttyDeviceAttributesPrimary", StructInfo.init(terminal.DeviceAttributes.Primary) },
+        .{ "GhosttyDeviceAttributesSecondary", StructInfo.init(terminal.DeviceAttributes.Secondary) },
+        .{ "GhosttyDeviceAttributesTertiary", StructInfo.init(terminal.DeviceAttributes.Tertiary) },
+        .{ "GhosttyFormatterTerminalOptions", StructInfo.init(formatter.TerminalOptions) },
+        .{ "GhosttySelection", StructInfo.init(selection.CSelection) },
+        .{ "GhosttyTerminalSelectWordOptions", StructInfo.init(selection.SelectWordOptions) },
+        .{ "GhosttyTerminalSelectWordBetweenOptions", StructInfo.init(selection.SelectWordBetweenOptions) },
+        .{ "GhosttyTerminalSelectLineOptions", StructInfo.init(selection.SelectLineOptions) },
+        .{ "GhosttyFormatterTerminalExtra", StructInfo.init(formatter.TerminalOptions.Extra) },
+        .{ "GhosttyFormatterScreenExtra", StructInfo.init(formatter.ScreenOptions.Extra) },
+        .{ "GhosttyGridRef", StructInfo.init(grid_ref.CGridRef) },
+        .{ "GhosttyMouseEncoderSize", StructInfo.init(mouse_encode.Size) },
+        .{ "GhosttyMousePosition", StructInfo.init(mouse_event.Position) },
+        .{ "GhosttyPoint", StructInfo.init(point.Point.C) },
+        .{ "GhosttyPointCoordinate", StructInfo.init(point.Coordinate) },
+        .{ "GhosttyRenderStateColors", StructInfo.init(render.Colors) },
+        .{ "GhosttySelectionGestureBehaviors", StructInfo.init(selection_gesture.Behaviors) },
+        .{ "GhosttySelectionGestureGeometry", StructInfo.init(selection_gesture.Geometry) },
+        .{ "GhosttySizeReportSize", StructInfo.init(size_report.Size) },
+        .{ "GhosttyString", StructInfo.init(lib.String) },
+        .{ "GhosttySurfacePosition", StructInfo.init(SurfacePosition) },
+        .{ "GhosttyStyle", StructInfo.init(style_c.Style) },
+        .{ "GhosttyStyleColor", StructInfo.init(style_c.Color) },
+        .{ "GhosttyTerminalOptions", StructInfo.init(terminal.Options) },
+        .{ "GhosttyTerminalProgramStatus", StructInfo.init(terminal.ProgramStatus) },
+        .{ "GhosttyTerminalScrollbar", StructInfo.init(terminal.TerminalScrollbar) },
+        .{ "GhosttyTerminalScrollViewport", StructInfo.init(terminal.ScrollViewport) },
+    });
+};
 
 /// The comptime-generated JSON string of all structs.
 pub const json: [:0]const u8 = json: {
@@ -145,6 +174,11 @@ fn jsonWriteAll(writer: *std.Io.Writer) std.Io.Writer.Error!void {
 fn typeName(comptime T: type) []const u8 {
     return switch (@typeInfo(T)) {
         .bool => "bool",
+        .float => |info| switch (info.bits) {
+            32 => "f32",
+            64 => "f64",
+            else => @compileError("unsupported float size"),
+        },
         .int => |info| switch (info.signedness) {
             .signed => switch (info.bits) {
                 8 => "i8",
@@ -181,8 +215,22 @@ test "json parses" {
     const root = parsed.value.object;
 
     // Verify we have all expected structs
+    try std.testing.expect(root.contains("GhosttyClipboardContent"));
+    try std.testing.expect(root.contains("GhosttyClipboardWrite"));
     try std.testing.expect(root.contains("GhosttyTerminalOptions"));
     try std.testing.expect(root.contains("GhosttyFormatterTerminalOptions"));
+
+    const clipboard_content = root.get("GhosttyClipboardContent").?.object;
+    const clipboard_content_fields = clipboard_content.get("fields").?.object;
+    try std.testing.expect(clipboard_content_fields.contains("mime"));
+    try std.testing.expect(clipboard_content_fields.contains("data"));
+
+    const clipboard_write = root.get("GhosttyClipboardWrite").?.object;
+    const clipboard_write_fields = clipboard_write.get("fields").?.object;
+    try std.testing.expect(clipboard_write_fields.contains("size"));
+    try std.testing.expect(clipboard_write_fields.contains("location"));
+    try std.testing.expect(clipboard_write_fields.contains("contents"));
+    try std.testing.expect(clipboard_write_fields.contains("contents_len"));
 
     // Verify GhosttyTerminalOptions fields
     const term_opts = root.get("GhosttyTerminalOptions").?.object;

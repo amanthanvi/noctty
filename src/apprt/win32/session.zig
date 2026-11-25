@@ -34,6 +34,7 @@ const CoreApp = @import("../../App.zig");
 const LPCWSTR = win32_types.LPCWSTR;
 const MONITORINFO = sys.MONITORINFO;
 const ShellProjectionSteps = win32.ShellProjectionSteps;
+const StateMutex = @import("../../renderer.zig").StateMutex;
 const SurfaceInitOptions = win32.SurfaceInitOptions;
 const TestSession = win32.test_support.TestSession;
 const UINT_PTR = win32_types.UINT_PTR;
@@ -46,6 +47,7 @@ const placementTestHost = win32.test_support.placementTestHost;
 const runOnHiddenDesktop = win32.test_support.runOnHiddenDesktop;
 const shouldInheritSplitWorkingDirectory = win32.shouldInheritSplitWorkingDirectory;
 const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirectory;
+const thread_role = @import("../../sync/thread_role.zig");
 const win32_shell = @import("../win32_shell.zig");
 const win32_types = @import("../win32_types.zig");
 
@@ -1725,6 +1727,10 @@ test "win32 session and layout snapshots drop network and device cwds" {
 
 test "win32 session state scrollback capture enforces line cap budget and secure redaction" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // A session save runs on the UI thread, which takes the renderer lock
+    // to capture each pane's scrollback.
+    const role_scope = thread_role.fixture(.ui);
+    defer role_scope.exit();
 
     var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 16,
@@ -1947,7 +1953,7 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     app.registry.hosts = .empty;
     defer app.registry.hosts.deinit(std.testing.allocator);
 
-    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_mutex: StateMutex = .{};
     var secure_surface: Surface = .{ .app = &app };
     secure_surface.core_surface.renderer_state = .{
         .mutex = &renderer_mutex,

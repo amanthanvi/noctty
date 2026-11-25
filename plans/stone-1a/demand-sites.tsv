@@ -1,0 +1,13 @@
+# Step 1A.5 residual ledger for renderer-state demand acquisitions (PLAN.md §6.5).
+# The snapshot is upstream; the other eleven acquisitions are fork delta.
+path	function	acquisitions	thread	handoff	origin
+src/renderer/generic.zig	updateFrame	1	renderer|ui	yes	upstream snapshot, also reached by Win32 fallback on the UI thread
+src/renderer/Thread.zig	Frame.screen	1	renderer	no	fork Pacer read
+src/renderer/Thread.zig	Frame.cursorBlinking	1	renderer	no	fork Pacer read
+src/Surface.zig	keyCallback	3	ui	yes	fork KAM check, link refresh, and selection/viewport update
+src/Surface.zig	encodeKeyOpts	1	ui	yes	fork read of terminal encoding modes
+src/Surface.zig	preeditCaretCallback	1	ui	yes	fork composition update
+src/Surface.zig	imePoint	1	ui	yes	fork IME position read
+src/Surface.zig	modsChanged	1	ui	yes	fork link modifier update
+src/Surface.zig	markInputSubmitted	1	ui	yes	fork submission; acquires only if the caller has no lock
+src/apprt/win32/terminal_window.zig	Surface.handleKeyMessage	1	ui	yes	fork encoding mode read before dispatch

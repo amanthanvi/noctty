@@ -10,6 +10,7 @@ const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const uia_text = @import("win32_uia/text.zig");
+const thread_role = @import("../sync/thread_role.zig");
 
 const Allocator = std.mem.Allocator;
 const HWND = win32_types.HWND;
@@ -925,7 +926,7 @@ test "PKG71 scroll completes on responsive UI thread before returning without ho
             const self: *@This() = @ptrCast(@alignCast(ctx));
             if (self.geometry_blocked) return error.WouldBlock;
             return .{
-                .row_numbering = .{ .active_key = 0, .page_serial_min = 1, .first_page_serial = 1, .rows = 3, .columns = 10 },
+                .row_numbering = .{ .active_key = 0, .page_serial_epoch = 1, .first_page_serial = 1, .rows = 3, .columns = 10 },
                 .viewport_y = 42,
                 .cell_width = 8,
                 .cell_height = 16,
@@ -934,6 +935,7 @@ test "PKG71 scroll completes on responsive UI thread before returning without ho
             };
         }
         fn proc(window_handle: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) win32_types.LRESULT {
+            thread_role.assertWindowProc();
             if (msg == message and (wp == 2 or wp == 3)) {
                 const self: *@This() = @ptrFromInt(@as(usize, @bitCast(sys.GetWindowLongPtrW(window_handle, -21))));
                 const session = self.session.?;
@@ -1418,7 +1420,7 @@ test "PKG71 announcement OOM preserves coherent cached scroll geometry" {
             result.snapshot.document_window = .{ .top = @intCast(self.token), .bottom = @intCast(self.token + 2) };
             result.snapshot.row_numbering = .{
                 .active_key = 0,
-                .page_serial_min = 1,
+                .page_serial_epoch = 1,
                 .first_page_serial = 1,
                 .row_generation = self.token,
                 .rows = 3,

@@ -67,8 +67,8 @@ const cli = struct {
 const terminal = struct {
     const CursorStyle = @import("../terminal/cursor.zig").Style;
     const color = @import("../terminal/color.zig");
+    const selection_codepoints = @import("../terminal/selection_codepoints.zig");
     const style = @import("../terminal/style.zig");
-    const x11_color = @import("../terminal/x11_color.zig");
 };
 
 const log = std.log.scoped(.config);
@@ -1463,10 +1463,19 @@ input: RepeatableReadableIO = .{},
 /// When this limit is reached, the oldest lines are removed from the
 /// scrollback.
 ///
-/// Scrollback currently exists completely in memory. This means that the
-/// larger this value, the larger potential memory usage. Scrollback is
-/// allocated lazily up to this limit, so if you set this to a very large
-/// value, it will not immediately consume a lot of memory.
+/// Scrollback is stored in memory and allocated lazily up to this limit, so
+/// setting a very large limit does not immediately consume that amount of
+/// memory. On supported systems with scrollback compression enabled, Ghostty
+/// attempts to compress fully historical pages which are not currently visible
+/// while the terminal is idle. This can reduce physical memory usage, depending
+/// on the contents of the scrollback. Windows builds do not compress
+/// scrollback (see `scrollback-compression`), so on Windows the history
+/// this limit retains stays resident.
+///
+/// This limit always measures the uncompressed logical size of the terminal
+/// pages. Compression does not allow Ghostty to retain more history than the
+/// configured limit. Accessing compressed history restores it transparently
+/// and may increase the terminal's physical memory usage again.
 ///
 /// This size is per terminal surface, not for the entire application.
 ///
@@ -2770,8 +2779,11 @@ keybind: Keybinds = .{},
 /// The value `clipboard` always copies to the system clipboard and also copies
 /// to the selection clipboard when it is supported.
 ///
-/// Middle-click paste prefers the selection clipboard when it is supported.
-/// Middle-click paste remains enabled even if this is `false`.
+/// Middle-click paste (see `middle-click-action`) remains enabled even if
+/// this is `false`. With `true` or `false` it prefers the selection
+/// clipboard when it is supported; with `clipboard` it reads the system
+/// clipboard. Windows has no selection clipboard, so on Windows it always
+/// reads the system clipboard.
 ///
 /// The default value is false in the Windows-only fork.
 @"copy-on-select": CopyOnSelect = .false,
@@ -2788,6 +2800,16 @@ keybind: Keybinds = .{},
 ///
 /// The default value is `context-menu`.
 @"right-click-action": RightClickAction = .@"context-menu",
+
+/// The action to take when the user middle-clicks on the terminal surface.
+///
+/// Valid values:
+///   * `primary-paste` - Paste from the selection (or system) clipboard per
+///      `copy-on-select`.
+///   * `ignore` - Do nothing, ignore the middle click.
+///
+/// The default value is `primary-paste`.
+@"middle-click-action": MiddleClickAction = .@"primary-paste",
 
 /// The time in milliseconds between clicks to consider a click a repeat
 /// (double, triple, etc.) or an entirely new single click. A value of zero will
@@ -4920,7 +4942,15 @@ fn defaultConfigIsEmpty(path: []const u8) bool {
 ///
 /// The legacy `config` file (without extension) is first loaded,
 /// then `config.ghostty`.
+///
+/// A test build has default files only under the root its test names
+/// (`file_load.test_config_root`); with none it loads nothing and writes no
+/// template. Every load of a test-built App comes through here: `Config.load`
+/// (`App.init`, a hard `reload_config`, a Settings save's reload) and the
+/// palette's theme preview (`Host.loadPaletteThemeConfig`).
 pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
+    if (!file_load.hasConfigHome()) return;
+
     // Load XDG first
     const legacy_xdg_path = try file_load.legacyGhosttyDefaultXdgPath(alloc);
     defer alloc.free(legacy_xdg_path);
@@ -4969,34 +4999,13 @@ test "default config files: an edit to the edit-target takes effect on reload" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // `xdg.config` pins everything beside the executable in portable mode, so
-    // redirecting the config home below could not steer it. Skip rather than
-    // pass without checking anything.
-    if (try internal_os.xdg.portableRoot(alloc)) |root| {
-        alloc.free(root);
-        return error.SkipZigTest;
-    }
-
+    // Each case names its own scratch config home
+    // (`file_load.test_config_root`), which a test build reads in place of
+    // the portable root, `XDG_CONFIG_HOME` and `LOCALAPPDATA`.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(tmp_path);
-
-    // Point XDG_CONFIG_HOME (it wins over LOCALAPPDATA) at a scratch directory
-    // for the length of this test, then put the real value back.
-    const saved: ?[:0]u8 = saved: {
-        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :saved null,
-            else => return err,
-        };
-        defer alloc.free(value);
-        break :saved try alloc.dupeZ(u8, value);
-    };
-    defer if (saved) |value| alloc.free(value);
-    defer _ = if (saved) |value|
-        internal_os.setenv("XDG_CONFIG_HOME", value)
-    else
-        internal_os.unsetenv("XDG_CONFIG_HOME");
 
     const File = struct { path: []const u8, content: []const u8 };
     const Case = struct {
@@ -5090,9 +5099,8 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         try tmp.dir.makePath(home_name);
         const home = try std.fs.path.join(alloc, &.{ tmp_path, home_name });
         defer alloc.free(home);
-        const home_z = try alloc.dupeZ(u8, home);
-        defer alloc.free(home_z);
-        try testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", home_z));
+        file_load.test_config_root = home;
+        defer file_load.test_config_root = null;
 
         var home_dir = try tmp.dir.openDir(home_name, .{});
         defer home_dir.close();
@@ -5148,6 +5156,29 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         try cfg.loadDefaultFiles(alloc);
         try testing.expectEqual(@as(f32, 77), cfg.@"font-size");
     }
+}
+
+test "default config files: a test build has none until its test names a config home" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // No path to read or write (a Settings save's target, `edit.openPath`,
+    // fails before it makes a folder), whatever the environment says.
+    try testing.expect(!file_load.hasConfigHome());
+    try testing.expectError(error.NoTestConfigRoot, file_load.defaultXdgPath(alloc));
+    try testing.expectError(error.NoTestConfigRoot, file_load.legacyGhosttyDefaultXdgPath(alloc));
+    try testing.expectError(error.NoTestConfigRoot, file_load.legacyForkXdgPath(alloc));
+    try testing.expectError(error.NoTestConfigRoot, file_load.preferredDefaultFilePath(alloc));
+
+    // Named, the paths are under it.
+    const root = if (builtin.os.tag == .windows) "C:\\noctty-test-config-home" else "/noctty-test-config-home";
+    file_load.test_config_root = root;
+    defer file_load.test_config_root = null;
+    try testing.expect(file_load.hasConfigHome());
+    const path = try file_load.defaultXdgPath(alloc);
+    defer alloc.free(path);
+    try testing.expect(std.mem.startsWith(u8, path, root));
+    try testing.expect(std.mem.endsWith(u8, path, "config.ghostty"));
 }
 
 /// Load and parse the CLI args.
@@ -7359,16 +7390,8 @@ pub const Color = struct {
 
     pub fn parseCLI(input_: ?[]const u8) !Color {
         const input = input_ orelse return error.ValueRequired;
-        // Trim any whitespace before processing
-        const trimmed = std.mem.trim(u8, input, " \t");
-
-        if (terminal.x11_color.map.get(trimmed)) |rgb| return .{
-            .r = rgb.r,
-            .g = rgb.g,
-            .b = rgb.b,
-        };
-
-        return fromHex(trimmed);
+        const rgb: terminal.color.RGB = terminal.color.RGB.parse(input) catch return error.InvalidValue;
+        return .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
     }
 
     /// Deep copy of the struct. Required by Config.
@@ -7399,48 +7422,15 @@ pub const Color = struct {
         ) catch error.OutOfMemory;
     }
 
-    /// fromHex parses a color from a hex value such as #RRGGBB. The "#"
-    /// is optional.
-    pub fn fromHex(input: []const u8) !Color {
-        // Trim the beginning '#' if it exists
-        const trimmed = if (input.len != 0 and input[0] == '#') input[1..] else input;
-        if (trimmed.len != 6 and trimmed.len != 3) return error.InvalidValue;
-
-        // Expand short hex values to full hex values
-        const rgb: []const u8 = if (trimmed.len == 3) &.{
-            trimmed[0], trimmed[0],
-            trimmed[1], trimmed[1],
-            trimmed[2], trimmed[2],
-        } else trimmed;
-
-        // Parse the colors two at a time.
-        var result: Color = undefined;
-        comptime var i: usize = 0;
-        inline while (i < 6) : (i += 2) {
-            const v: u8 =
-                ((try std.fmt.charToDigit(rgb[i], 16)) * 16) +
-                try std.fmt.charToDigit(rgb[i + 1], 16);
-
-            @field(result, switch (i) {
-                0 => "r",
-                2 => "g",
-                4 => "b",
-                else => unreachable,
-            }) = v;
-        }
-
-        return result;
-    }
-
-    test "fromHex" {
+    test "parseCLI hex" {
         const testing = std.testing;
 
-        try testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0 }, try Color.fromHex("#000000"));
-        try testing.expectEqual(Color{ .r = 10, .g = 11, .b = 12 }, try Color.fromHex("#0A0B0C"));
-        try testing.expectEqual(Color{ .r = 10, .g = 11, .b = 12 }, try Color.fromHex("0A0B0C"));
-        try testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, try Color.fromHex("FFFFFF"));
-        try testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, try Color.fromHex("FFF"));
-        try testing.expectEqual(Color{ .r = 51, .g = 68, .b = 85 }, try Color.fromHex("#345"));
+        try testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0 }, try Color.parseCLI("#000000"));
+        try testing.expectEqual(Color{ .r = 10, .g = 11, .b = 12 }, try Color.parseCLI("#0A0B0C"));
+        try testing.expectEqual(Color{ .r = 10, .g = 11, .b = 12 }, try Color.parseCLI("0A0B0C"));
+        try testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, try Color.parseCLI("FFFFFF"));
+        try testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, try Color.parseCLI("FFF"));
+        try testing.expectEqual(Color{ .r = 51, .g = 68, .b = 85 }, try Color.parseCLI("#345"));
     }
 
     test "parseCLI from name" {
@@ -7786,20 +7776,12 @@ pub const Palette = struct {
         input: ?[]const u8,
     ) !void {
         const value = input orelse return error.ValueRequired;
-        const eqlIdx = std.mem.indexOf(u8, value, "=") orelse
-            return error.InvalidValue;
-
-        // Parse the key part (trim whitespace)
-        const key = try std.fmt.parseInt(
-            u8,
-            std.mem.trim(u8, value[0..eqlIdx], " \t"),
-            0,
-        );
-
-        // Parse the color part (Color.parseCLI will handle whitespace)
-        const rgb = try Color.parseCLI(value[eqlIdx + 1 ..]);
-        self.value[key] = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
-        self.mask.set(key);
+        const entry = terminal.color.parsePaletteEntry(value) catch |err| switch (err) {
+            error.Overflow => return error.Overflow,
+            error.InvalidFormat => return error.InvalidValue,
+        };
+        self.value[entry.index] = entry.color;
+        self.mask.set(entry.index);
     }
 
     /// Deep copy of the struct. Required by Config.
@@ -8076,32 +8058,8 @@ pub const RepeatableString = struct {
 pub const SelectionWordChars = struct {
     const Self = @This();
 
-    /// Default boundary characters: ` \t'"│`|:;,()[]{}<>$`
-    const default_codepoints = [_]u21{
-        0, // null
-        ' ', // space
-        '\t', // tab
-        '\'', // single quote
-        '"', // double quote
-        '│', // U+2502 box drawing
-        '`', // backtick
-        '|', // pipe
-        ':', // colon
-        ';', // semicolon
-        ',', // comma
-        '(', // left paren
-        ')', // right paren
-        '[', // left bracket
-        ']', // right bracket
-        '{', // left brace
-        '}', // right brace
-        '<', // less than
-        '>', // greater than
-        '$', // dollar
-    };
-
     /// The parsed codepoints. Always includes null (U+0000) at index 0.
-    codepoints: []const u21 = &default_codepoints,
+    codepoints: []const u21 = &terminal.selection_codepoints.default_word_boundaries,
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input: ?[]const u8) !void {
         const value = input orelse return error.ValueRequired;
@@ -8344,6 +8302,22 @@ pub const RepeatableFontVariation = struct {
         try std.testing.expectEqualSlices(u8, "a = wght=200\n", buf.written());
     }
 };
+
+/// Returns true if the given key event would trigger a keybinding
+/// if it were to be processed. This is useful for determining if
+/// a key event should be sent to the terminal or not.
+pub fn keyEventIsBinding(
+    self: *Config,
+    event: inputpkg.KeyEvent,
+) bool {
+    switch (event.action) {
+        .release => return false,
+        .press, .repeat => {},
+    }
+
+    // If we have a keybinding for this event then we return true.
+    return self.keybind.set.getEvent(event) != null;
+}
 
 /// Stores a set of keybinds.
 pub const Keybinds = struct {
@@ -11285,6 +11259,15 @@ pub const RightClickAction = enum {
 
     /// Shows a context menu with options.
     @"context-menu",
+};
+
+/// Options for middle-click actions.
+pub const MiddleClickAction = enum {
+    /// Paste from the selection/standard clipboard per `copy-on-select`.
+    @"primary-paste",
+
+    /// No action is taken on middle click.
+    ignore,
 };
 
 /// Shell integration values

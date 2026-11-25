@@ -5,6 +5,12 @@ const Api = enum { fork, stone, stone_flag, v140, v140_fork };
 const Configuration = struct {
     zig_exe_sha256: ?[]const u8 = null,
     system_requested: ?[]const u8 = null,
+    /// The build options the app oracle's terminal core takes in place of the
+    /// app exe's. A tree with the runtime thread-role layer sets the app's
+    /// options with the layer off (build.zig), since the layer is on only in
+    /// the app exe and the test exe (PLAN.md §2.7's build scope); a tree
+    /// without it leaves this null, and the core keeps the app's.
+    build_options: ?*std.Build.Step.Options = null,
 };
 
 /// Check oracle invocations before Config executes Git or configures dependencies.
@@ -94,7 +100,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, config: Conf
     const compiler = std.mem.trim(u8, b.run(&.{ b.graph.zig_exe, "version" }), " \r\n");
     const modern = (try std.SemanticVersion.parse(compiler)).minor >= 17;
     if (modern and (api == .fork or api == .stone or api == .stone_flag or corpus)) {
-        step.dependOn(&b.addFail("oracle: legacy API/generator selected on a modern compiler; at 1B.3/1B.5 delete both legacy files and change CI -Dvt-api=fork to v140_fork (or v140 for structured resize)").step);
+        step.dependOn(&b.addFail("oracle: legacy API/generator selected on a modern compiler; at 1B.3/1B.5 delete both legacy files and change CI -Dvt-api=stone_flag to v140 (structured resize; v140_fork only if the flag API returns)").step);
         return;
     }
     const core = b.createModule(.{
@@ -110,6 +116,7 @@ fn addInner(b: *std.Build, source: *std.Build.Module, public: bool, config: Conf
     } else {
         var imports = source.import_table.iterator();
         while (imports.next()) |entry| core.addImport(entry.key_ptr.*, entry.value_ptr.*);
+        if (config.build_options) |options| core.addOptions("build_options", options);
         try core.include_dirs.appendSlice(b.allocator, source.include_dirs.items);
         try core.c_macros.appendSlice(b.allocator, source.c_macros.items);
         for (source.link_objects.items) |object| switch (object) {

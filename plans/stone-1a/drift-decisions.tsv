@@ -1,0 +1,15 @@
+# Decisions for the 1A drift report (PLAN.md r46a §6.1 row 1A.7), recorded as they are taken on stone-1a. Source:
+# the lead's decisions (zig017\1a\lead-decisions-1a1.md) and the 1A.1 reviews.
+id	date	decision	applied_in
+Qg11-1	2026-11-20	§2.5's 1A exception takes the strip option: GhosttyLibVt.zig's Apple paths and build.zig's lib-vt xcframework block go; LipoStep.zig, XCFrameworkStep.zig and LibtoolStep.zig are deleted and must-be-empty (LibtoolStep's only caller was CombineArchivesStep's Darwin branch, behind Darwin host and target guards, so no non-Apple path used it); CombineArchivesStep.zig and combine_archives.zig stay for the lib-vt fat static archive on Windows	ab950cd81 (xcframework block), 23afb1ad7
+Qg07-1	2026-11-20	keep the fork's cmd.exe /C shell launch (#151); upstream ef7ecbd3e refused; its 4 tests are ledgered absences (test-absences.tsv)	ab950cd81
+Qg10-1	2026-11-20	scrollback-limit stays 10,000,000 B on Windows in 1A; upstream's 50 MB is revisited with plan row 8 in 1B	ab950cd81
+Qg10-2	2026-11-20	Ctrl+Shift+PageUp/PageDown stay on jump_to_prompt; upstream's GTK move_tab defaults do not apply	ab950cd81
+Qg09-1	2026-11-20	upstream's +ssh-cache rework with the fork's changes re-applied; elvish moved to the positional form (the only integration that showed stderr); dropped-delta entry; release notes in 1A.8	ab950cd81, 8c86b928d
+Qg04-1	2026-11-20	Screen.reset keeps image_limits: upstream bcbc93a6b taken early as a 1A.4 post-stone fix	c5c0c462b
+Qg08-1	2026-11-20	the stone's fontconfig and CoreText floor tests in DeferredFace.zig and discovery.zig are ledgered absences under decision 12	test-absences.tsv
+Qg01-1	2026-11-20	eraseTrailingRows' serial renewal is deferred to 1A.3, which adds a test that fails without it	(1A.3)
+9	2026-11-20	the 27 code and test paths in both the freeze set and the 0b allow-list leave the allow-list; the 15 docs/agents/log files stay under an append-only, date-order exception	zig017\1a\phase0b-allow-1a1.txt
+10	2026-11-20	the gate rows of gate-reread.md approved as proposed; container-qualified keys for same-named functions in one file become a 1A.5 item	zig017\ci-draft (with 1A.2)
+11	2026-11-20	the theme pin's palette capacity raise (adaptation B1) is done in 1A.1, the same change as the pin	46f03f87c
+review-r1	2026-11-20	Sol finding 1: the region linefeed fast path resets the recycled row (b31fbc846) and moves row_generation; Opus L1: scrollUp's Kitty op follows its branch; Opus L2: upstream 3b8141fbd taken early (1A.4), os/open.zig joins the 1A.4 audit list	26e1d4d29, f1ad187b4, 96d59158a

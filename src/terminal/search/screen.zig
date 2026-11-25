@@ -523,20 +523,10 @@ pub const ScreenSearch = struct {
         // Go through our history results in order (newest to oldest) and
         // keep the valid ones in place, so removing many costs one pass.
         var kept: usize = 0;
-        var i: usize = 0;
-        while (i < results.len) : (i += 1) {
-            const hl = &results[i];
-
-            // Only PageList.reset raises page_serial_min. Results are newest
-            // to oldest, so this result and every older one predate that
-            // reset: drop them without validating each chunk.
-            if (hl.chunks.items(.serial)[0] < self.screen.pages.page_serial_min) break;
-
-            // Ordinary pruning, layout changes and replacements leave
-            // page_serial_min alone, so validate the captured pointer and
-            // serial pairs against the live list. Older results may live on
-            // unrelated pages and remain usable, so only this result is
-            // removed.
+        for (results, 0..) |*hl, i| {
+            // Check every chunk against the epoch and its live generation.
+            // A renewal or replacement can give an older page a greater
+            // serial than its neighbors.
             if (!live.resultIsValid(hl)) {
                 hl.deinit(alloc);
                 continue;
@@ -549,7 +539,6 @@ pub const ScreenSearch = struct {
             results[kept] = hl.*;
             kept += 1;
         }
-        for (results[i..]) |*prune_hl| prune_hl.deinit(alloc);
         if (kept == results.len) return;
 
         if (selected != null) {
@@ -565,7 +554,7 @@ pub const ScreenSearch = struct {
     /// and pruneHistory runs on every refresh of a complete search under
     /// the terminal lock, so this walks the list once, as NodeRows does.
     const LiveNodes = struct {
-        page_serial_min: u64,
+        page_serial_epoch: u64,
         serials: std.AutoHashMapUnmanaged(*const PageList.List.Node, u64),
 
         /// Matches come in runs on the same node, so most lookups repeat
@@ -581,7 +570,7 @@ pub const ScreenSearch = struct {
                 try serials.putNoClobber(alloc, node, node.serial);
             }
             return .{
-                .page_serial_min = pages.page_serial_min,
+                .page_serial_epoch = pages.page_serial_epoch,
                 .serials = serials,
             };
         }
@@ -591,7 +580,7 @@ pub const ScreenSearch = struct {
         }
 
         fn isValid(self: *LiveNodes, node: *const PageList.List.Node, serial: u64) bool {
-            if (serial < self.page_serial_min) return false;
+            if (serial < self.page_serial_epoch) return false;
             if (self.last_node != node) {
                 self.last_node = node;
                 self.last_serial = self.serials.get(node);
@@ -1754,6 +1743,40 @@ test "select prev with history" {
     }
 }
 
+test "select prev wraps when all matches are in history" {
+    // Regression test: when every match is in scrollback (the active area
+    // has none, so active_len == 0), selecting prev from index 0 must wrap
+    // to the last result without underflowing `active_len - 1`.
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Put the only match in scrollback, then scroll the active area to all
+    // blank lines so it contains no match (active_len == 0, history_len == 1).
+    s.nextSlice("Fizz\r\n");
+    while (list.totalPages() < 3) s.nextSlice("\r\n");
+    for (0..list.rows) |_| s.nextSlice("\r\n");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Fizz");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(0, search.active_results.items.len);
+
+    // Select the first match (idx 0), then wrap backwards. This must not
+    // panic and must keep a valid selection.
+    _ = try search.select(.next);
+    _ = try search.select(.prev);
+    try testing.expect(search.selectedMatch() != null);
+}
+
 test "select prev wraps when every match is in history" {
     const alloc = testing.allocator;
     var t: Terminal = try .init(alloc, .{
@@ -1853,7 +1876,7 @@ test "select after partial history erase drops a pruned selection" {
     try testing.expect(search.selected == null);
 }
 
-test "select after a history page is replaced ignores its results" {
+test "select after history compaction ignores replaced results" {
     const alloc = testing.allocator;
     var t: Terminal = try .init(alloc, .{
         .cols = 10,
@@ -1869,23 +1892,25 @@ test "select after a history page is replaced ignores its results" {
     stream.nextSlice("error\r\n");
     const first = list.pages.first.?;
     while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    try list.split(.{
+        .node = first,
+        .y = first.rows() / 2,
+        .x = 0,
+    });
 
     var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
     defer search.deinit();
     try search.searchAll();
     try testing.expectEqual(1, search.history_results.items.len);
 
-    // compact() never replaces a page of standard size or smaller, so
-    // replace the page through increaseCapacity, as the capacity retries
-    // in Screen do.
-    const replacement = try list.increaseCapacity(first, null);
+    const replacement = (try list.compact(first)).?;
     try testing.expect(replacement != first);
 
     try testing.expect(!try search.select(.next));
     try testing.expect(search.selected == null);
 }
 
-test "reload after a history page is replaced drops the stale selection first" {
+test "select after partial history page erase ignores shifted results" {
     const alloc = testing.allocator;
     var t: Terminal = try .init(alloc, .{
         .cols = 10,
@@ -1898,29 +1923,23 @@ test "reload after a history page is replaced drops the stale selection first" {
     var stream = t.vtStream();
     defer stream.deinit();
 
-    stream.nextSlice("error\r\n");
     const first = list.pages.first.?;
-    while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
+    stream.nextSlice("error");
+    for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
+    try testing.expect(first != list.pages.last.?);
 
     var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
     defer search.deinit();
     try search.searchAll();
-    try testing.expect(try search.select(.next));
-    try testing.expect(search.selected != null);
+    try testing.expectEqual(0, search.active_results.items.len);
+    try testing.expectEqual(1, search.history_results.items.len);
 
-    // The replacement moves the selection's tracked pins to the new node,
-    // while the cached history result still names the old one.
-    _ = try list.increaseCapacity(first, null);
+    const old_rows = first.rows();
+    list.eraseHistory(.{ .history = .{ .y = 0 } });
+    try testing.expectEqual(old_rows - 1, first.rows());
 
-    // Advance the active boundary into another node and add matches so
-    // reloadActive updates the history result offsets. It must discard the
-    // stale selected result before comparing any of its captured coordinates.
-    const active_node = list.getTopLeft(.active).node;
-    while (list.getTopLeft(.active).node == active_node) {
-        stream.nextSlice("error\r\n");
-    }
-
-    try search.reloadActive();
+    try testing.expect(!try search.select(.next));
     try testing.expect(search.selected == null);
 }
 
@@ -1937,16 +1956,17 @@ test "reload defers pruning unselected history results" {
     var stream = t.vtStream();
     defer stream.deinit();
 
-    stream.nextSlice("error\r\n");
     const first = list.pages.first.?;
-    while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
+    stream.nextSlice("error");
+    for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
 
     var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
     defer search.deinit();
     try search.searchAll();
     try testing.expectEqual(1, search.history_results.items.len);
 
-    _ = try list.increaseCapacity(first, null);
+    list.eraseHistory(.{ .history = .{ .y = 0 } });
 
     // Routine active refreshes don't inspect unselected history results.
     try search.reloadActive();
@@ -1955,6 +1975,44 @@ test "reload defers pruning unselected history results" {
     // Selection prunes every candidate before attempting to track it.
     try testing.expect(!try search.select(.next));
     try testing.expectEqual(0, search.history_results.items.len);
+}
+
+test "reload after partial history page erase drops shifted selection first" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    const first = list.pages.first.?;
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
+    stream.nextSlice("error");
+    for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expect(try search.select(.next));
+    try testing.expect(search.selected != null);
+
+    list.eraseHistory(.{ .history = .{ .y = 0 } });
+
+    // Advance the active boundary into another node and add matches so
+    // reloadActive updates the history result offsets. It must discard the
+    // stale selected result before comparing any of its captured coordinates.
+    const active_node = list.getTopLeft(.active).node;
+    while (list.getTopLeft(.active).node == active_node) {
+        stream.nextSlice("error\r\n");
+    }
+
+    try search.reloadActive();
+    try testing.expect(search.selected == null);
 }
 
 test "prune keeps an older selected history match when a newer page is replaced" {
@@ -2020,6 +2078,30 @@ test "LiveNodes agrees with PageList.nodeIsValid" {
     }
     try testing.expect(!live.isValid(first, old_serial));
     try testing.expect(live.isValid(replacement, replacement.serial));
+}
+
+test "LiveNodes rejects a renewed layout on the same page" {
+    const alloc = testing.allocator;
+    var list: PageList = try .init(alloc, 10, 2, null);
+    defer list.deinit();
+    const first = list.pages.first.?;
+    while (first.rows() < first.capacity().rows) _ = try list.grow();
+    const later = (try list.grow()).?;
+    _ = try list.grow();
+    const epoch = list.page_serial_epoch;
+    const first_serial = first.serial;
+    const old_serial = later.serial;
+
+    try list.eraseRowBounded(.{ .active = .{} }, 1);
+    try testing.expectEqual(later, list.pages.last.?);
+    try testing.expectEqual(epoch, list.page_serial_epoch);
+
+    var live: ScreenSearch.LiveNodes = try .init(alloc, &list);
+    defer live.deinit(alloc);
+    try testing.expect(!list.nodeIsValid(later, old_serial));
+    try testing.expect(!live.isValid(later, old_serial));
+    try testing.expect(live.isValid(later, later.serial));
+    try testing.expect(live.isValid(first, first_serial));
 }
 
 test "prune keeps a history match across a page boundary" {

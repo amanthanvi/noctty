@@ -2036,6 +2036,17 @@ fn sweepLinkText(alphabet: []const u8, sizes: SweepSizes) !SweepCount {
 /// the rest of a line as a string of its own, a shorter string here. Returns
 /// how many strings were searched and how many matches ran.
 fn sweepRegexMatches(alphabet: []const u8, max_len: usize, dirs: []const ?[]const u8) !struct { usize, usize } {
+    // libghostty-vt compiles this file (the Kitty graphics file medium opens
+    // through it since the stepping stone turned Kitty graphics on for
+    // lib-vt) without oniguruma, so only a build that has it analyses the
+    // regex half: the branch not taken at comptime is not analysed.
+    if (comptime @import("terminal_options").oniguruma)
+        return sweepRegexMatchesOni(alphabet, max_len, dirs)
+    else
+        return error.SkipZigTest;
+}
+
+fn sweepRegexMatchesOni(alphabet: []const u8, max_len: usize, dirs: []const ?[]const u8) !struct { usize, usize } {
     const oni = @import("oniguruma");
     const url = @import("../config/url.zig");
     const alloc = std.testing.allocator;

@@ -2797,9 +2797,8 @@ pub const Set = struct {
     /// Get an entry for the given key event. This will attempt to find
     /// a binding using multiple parts of the event in the following order:
     ///
-    ///   1. Translated key (event.key)
-    ///   2. Physical key (event.physical_key)
-    ///   3. Unshifted Unicode codepoint (event.unshifted_codepoint)
+    ///   1. Physical key (event.physical_key)
+    ///   2. Unshifted Unicode codepoint (event.unshifted_codepoint)
     ///
     pub fn getEvent(self: *const Set, event: KeyEvent) ?Entry {
         var trigger: Trigger = .{

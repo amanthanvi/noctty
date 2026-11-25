@@ -12,6 +12,7 @@ const list_colors = @import("list_colors.zig");
 const list_actions = @import("list_actions.zig");
 const list_profiles = @import("list_profiles.zig");
 const vt_probe = @import("vt_probe.zig");
+const ssh = @import("ssh.zig");
 const ssh_cache = @import("ssh_cache.zig");
 const edit_config = @import("edit_config.zig");
 const show_config = @import("show_config.zig");
@@ -31,6 +32,7 @@ const new_tab = @import("new_tab.zig");
 const new_split = @import("new_split.zig");
 const register_shell_menu = @import("register_shell_menu.zig");
 const unregister_shell_menu = @import("unregister_shell_menu.zig");
+const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -72,6 +74,7 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"list-actions" => try list_actions.run(alloc),
         .@"list-profiles" => try list_profiles.run(alloc),
         .@"vt-probe" => try vt_probe.run(alloc),
+        .ssh => try ssh.run(alloc),
         .@"ssh-cache" => try ssh_cache.run(alloc),
         .@"edit-config" => try edit_config.run(alloc),
         .@"show-config" => try show_config.run(alloc),
@@ -81,6 +84,7 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"diagnostic-bundle" => try diagnostic_bundle.run(alloc),
         .@"show-face" => try show_face.run(alloc),
         .@"new-window" => try new_window.run(alloc),
+        .@"toggle-quick-terminal" => try toggle_quick_terminal.run(alloc),
         .@"list-windows" => try list_windows.run(alloc),
         .@"perform-action" => try perform_action.run(alloc),
         .@"register-default-terminal" => try register_default_terminal.run(alloc),
@@ -109,6 +113,7 @@ pub fn options(comptime self: Action) type {
             .@"list-actions" => list_actions.Options,
             .@"list-profiles" => list_profiles.Options,
             .@"vt-probe" => vt_probe.options,
+            .ssh => ssh.Options,
             .@"ssh-cache" => ssh_cache.Options,
             .@"edit-config" => edit_config.Options,
             .@"show-config" => show_config.Options,
@@ -118,6 +123,7 @@ pub fn options(comptime self: Action) type {
             .@"diagnostic-bundle" => diagnostic_bundle.Options,
             .@"show-face" => show_face.Options,
             .@"new-window" => new_window.Options,
+            .@"toggle-quick-terminal" => toggle_quick_terminal.Options,
             .@"list-windows" => list_windows.Options,
             .@"perform-action" => perform_action.Options,
             .@"register-default-terminal" => register_default_terminal.Options,

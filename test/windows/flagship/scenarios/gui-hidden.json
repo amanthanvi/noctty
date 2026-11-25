@@ -15,7 +15,8 @@
     { "id": "shell-command", "description": "Run -e cmd and PowerShell stimuli; the CLI resolves and prints its fixed strings." },
     { "id": "cli-automation", "description": "Drive a single-instance copy through the CLI's IPC actions." },
     { "id": "undo", "description": "Exact tab and pane counts across close, undo and redo." },
-    { "id": "session-restore", "description": "Saved tabs and selected tab, the session file unchanged across -e, restore and quarantine." }
+    { "id": "session-restore", "description": "Saved tabs and selected tab, the session file unchanged across -e, restore and quarantine." },
+    { "id": "role-pairs", "description": "Observe the cmd prompt, post one letter and close the copy, recording its thread-role pairs." }
   ],
   "assertions": [
     { "id": "leaves-pass", "description": "Every leaf in the plan exits 0 on the private desktop." },

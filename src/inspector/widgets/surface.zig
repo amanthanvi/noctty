@@ -462,7 +462,8 @@ fn mouseTable(
 
     {
         const left_click_point: terminal.point.Coordinate = pt: {
-            const p = surface_mouse.left_click_pin orelse break :pt .{};
+            const p = surface_mouse.activeLeftClickPin(&t.screens) orelse
+                break :pt .{};
             const pt = t.screens.active.pages.pointFromPin(
                 .active,
                 p.*,

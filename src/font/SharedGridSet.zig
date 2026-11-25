@@ -28,6 +28,7 @@ const SharedGrid = font.SharedGrid;
 const discovery = font.discovery;
 const configpkg = @import("../config/Config.zig");
 const Config = configpkg;
+const thread_role = @import("../sync/thread_role.zig");
 
 const log = std.log.scoped(.font_shared_grid_set);
 
@@ -126,6 +127,8 @@ pub fn discoveryPrefetchStarted(self: *const SharedGridSet) bool {
 }
 
 fn discoveryPrefetchMain(disco: *Discover) void {
+    const role_scope = thread_role.enter(.{ .worker = "font-prefetch" });
+    defer role_scope.exit();
     disco.refresh();
 }
 
@@ -601,7 +604,7 @@ fn discover(self: *SharedGridSet) !?*Discover {
     // If we initialized, use it
     if (self.font_discover) |*v| return v;
 
-    self.font_discover = .init();
+    self.font_discover = .init(self.font_lib);
     return &self.font_discover.?;
 }
 

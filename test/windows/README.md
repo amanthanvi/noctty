@@ -727,7 +727,8 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`, the soak,
+`-restore-quarantine`, `-app-delivery`, `-restart-manager`, `-list-profiles` and
+`-pkg23-ctrl-click`, the soak,
 `interactive-win11-soak.ps1`, for its desktop, job and driver launch, and `hidden-win11-working-set.ps1`
 for its desktop and guards); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
@@ -738,6 +739,90 @@ directory, then check the real `startup-attempts.json`, PowerShell history
 metadata, and, where the harness asks, the clipboard sequence number), the
 small helpers those harnesses had copied, and, from `hidden-win11-embedding-guard.ps1`,
 the `-Embedding` delegation guard.
+
+## Hidden CLI and UIA checks
+
+Use a clean measurement-build checkout as `-MeasureRepo` and a fresh evidence
+directory as `-Run`. The checks start on private desktops, stage portable copies
+without `noctty.ico`, and record startup, clipboard and history guards.
+
+- `hidden-win11-cli-automation.ps1 -Check ssh-cache` checks a positional miss,
+  a portable cache write through `--add`, and a positional hit.
+- `hidden-win11-cli-automation.ps1 -Check quick-terminal` starts two isolated
+  instances and checks the visible window owner after toggling each class.
+- `hidden-win11-uia-rows.ps1` reads TextPattern through a five-line scroll,
+  history erasure and a multi-page append. It compares the numbered rows and
+  rejects a held snapshot with the same oracle used for the fresh viewport.
+  It records rectangle counts as observations. The provider unit test checks
+  fresh and held geometry against the same available post-erase viewport.
+
+## hidden-win11-pkg23-ctrl-click.ps1
+
+PKG-23's regression on a private desktop: while `cmd` prints
+`https://pkg23.invalid/<eight digits>/<the same digits>` without end, with `scrollback-limit = 0`,
+the driver posts Ctrl+left clicks (move, press and release with `MK_CONTROL`;
+no key message) on row 0 and requires every click to open its whole URL. Before
+the fix in the 2026-10-11 PKG-23 entry (terminal-core.md), main opened 94 of 300
+clicks and 73 of those URLs were torn; the 2026-11-20 LEFT-RELEASE-LOCK entry
+moved the lock it guards.
+
+Use a clean checkout with a completed Debug measurement build as `-MeasureRepo`
+and a new evidence directory as `-Run`. The copy is portable, without
+`noctty.ico`, with LOCALAPPDATA, APPDATA, TEMP and TMP inside the run, and its
+own `config.ghostty` runs System32's `cmd.exe /D` directly, denies the clipboard
+and turns copy-on-select off.
+
+```powershell
+pwsh -NoProfile -File .\hidden-win11-pkg23-ctrl-click.ps1 -MeasureRepo <checkout> -Run <new dir> [-Clicks 300] [-DryClickOnly]
+pwsh -NoProfile -File .\hidden-win11-pkg23-ctrl-click.ps1 -ControlOnly
+```
+
+Every open goes to the Debug-only trace seam (`NOCTTY_WIN32_OPEN_URL_TRACE_FILE`,
+`recordOpenUrlForTest`), which writes the URL and returns before `ShellExecuteW`,
+and every URL names the reserved `.invalid` host. Before anything starts, the
+outer half checks that seam (`Get-Pkg23SeamProblems`) in the source the
+measurement build was made from, not in this checkout. One dry click on a still
+screen comes first and must prove the seam: the build's own `+version` says
+Debug and the record is exactly the dry URL. The driver's job gaining no process
+(while the same count rose by the copy and its shell at launch) supports that,
+but cannot prove it alone: an open can be handed to a broker outside the job.
+Otherwise the run exits 4 and clicks nothing more; a copy that dies or stops
+answering at that first release is a product failure (exit 1), and nothing more
+is clicked either. The trace file holds one open, so the
+driver keeps each click's record in `pkg23\records\click-NNNN.txt`, deletes
+the trace and watches 150 ms for a second open before the next click (and 1 s
+after the last). Every click is in column 0 of row 0, after a Ctrl move to a cell
+with no link, so each refreshes the link under the pointer, and
+`click-repeat-interval = 1` keeps each a single click. A run has two sets by
+default (`-Sets A`, `B` or `AB`), each its own launch with its own dry click,
+counted separately. Set A is the 2026-10-11 run: the primary screen at
+`scrollback-limit = 0`, every click at column 0, where the October probe
+clicked. Set B clicks column 3 on the alternate screen, which scrolls in place:
+there upstream 77190bd02's scroll path reset a top-row press pin to column 0,
+so the release read as a drag and opened nothing (0 of 30 on stone at
+`5c7a99a13`, 30 of 30 on main and with the fork's fix; terminal-core.md,
+CLICK-PIN-01). The harness measures lock safety and whole URLs: once the pressed
+row scrolls away, both trees open the link now under the pointer.
+
+The checker fails a click with no record, a record that is not one
+CRLF-terminated line (partial), a line that is not a whole streamed URL with its
+number twice (torn, which also catches a splice of two rows), a record or open
+for no click, a number lower than the one before, and a row 0 that never moved.
+Its 25 controls run before every launch, and `-ControlOnly` runs only them;
+`flagship/contracts/Contracts.98-Pkg23CtrlClick.ps1` runs that, refuses checker
+mutations that would pass a missing or partial record, pins the harness's
+isolation and both sets, and runs the seam check on this checkout's opener and on
+mutations of it. Results are in `pkg23-results.json` (per set its counts,
+dry-click proof and checks; no path, coordinate, command line or environment
+value) and `pkg23-guards.json`, which holds the guards' own values on every run,
+metadata only: the clipboard sequence number and each PowerShell history
+candidate's index, size and last-write ticks, before and after. Exit 0 passes; 1 is a failed check, a
+product failure at the dry click or an unfinished run; 3 a changed isolation
+guard (startup ledger, history, clipboard, a new jump-list file, a reparse point
+in the run); 4 a build that is not Debug, a source without the seam, or an
+unproven dry click.
+Posted input only: a modifier held at the real keyboard can still reach a click,
+and OSC 8 links are not streamed.
 
 ## PowerShell history isolation
 
@@ -1033,6 +1118,33 @@ python -I ci/soak_judge.py <run dir> --min-minutes 480 --other-run <the other co
 
 Release coverage runs 480 minutes; Phase 0a's runs are 120 (`-Minutes 120`,
 `--min-minutes 120`).
+
+The same night's ReleaseSafe copy runs with `-RoleDump` (PLAN.md §2.7, §19.3:
+the run `soak-releasesafe` in `ci/role-runs.tsv`). Only the copy gets
+`NOCTTY_THREAD_ROLE_DUMP=<run>\role-dump`; an inherited value is cleared, so
+`+version` and a copy without the switch write nothing. The driver is the
+run's launcher: it records the copy's launch row and receipt from the held
+handle (PID and creation time) through `ci/role_supervisor.py`, then after the
+quit the exit receipt (`GetExitCodeProcess` on that handle) and the seal, into
+`<run>\role-manifest.tsv`. It fails closed: a supervisor call that fails, a
+copy that has not ended, no dump, or any dump but the copy's own makes the
+driver exit 5 (`RoleErrors` in `harness.json`). Then symbolise the dump with
+the build's images and PDBs (the symbols ZIP) and compare it; on 0.15.2 the
+pair checks are advisory and the launch, dump and seal checks gate.
+
+```powershell
+pwsh -NoProfile -File test/windows/interactive-win11-soak.ps1 `
+    -Bin <extracted ReleaseSafe portable ZIP>\noctty -Run <new dir> `
+    -ExpectedBuildMode ReleaseSafe -Minutes 480 -SandboxName soak-safe -RoleDump
+# symbolise with the same checkout's test exe (zig build -Demit-exe=false -Demit-test-exe=true)
+$env:NOCTTY_THREAD_ROLE_SYMBOLISE = '<run>\role-dump'
+$env:NOCTTY_THREAD_ROLE_SYMBOLISED = '<new dir>'
+$env:NOCTTY_THREAD_ROLE_IMAGES = '<dir holding the copy''s noctty.exe and noctty.pdb>'
+$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = '<the build''s checkout>\'
+zig-out\bin\ghostty-test.exe
+python -I ci/role_compare3.py --runs ci/role-runs.tsv --run soak-releasesafe --compiler 0.15 `
+    <run>\role-manifest.tsv ci/lock-inventory-threads.tsv <symbolised dir> --table-scope 1a
+```
 
 `ci/soak_judge.py` fails a run by the process rules (a gone, changed or hung
 process, an early or non-zero end, an exit no quit request of the harness
@@ -1504,8 +1616,14 @@ pwsh -NoProfile -File test/windows/gui-hidden-runner.ps1 -MeasureRepo <repo> -Wo
 A run that selects fewer than all the plan's leaves (`-Leaves smoke,undo`) is for
 diagnosis: when they pass, its result and its whole-plan assertions
 (`leaves-pass`, `launch-policy`, `real-input-absent`) are `skip`, never
-`pass`. Naming all six leaves is a full run. `-Work` must be a printable ASCII
+`pass`. Naming every leaf in the plan is a full run. `-Work` must be a printable ASCII
 path: the leaves write it into ASCII fixtures (shell-command's cmd payload).
+
+The `role-pairs` leaf waits for a cmd prompt, posts one letter to the terminal
+surface and closes the copy. Its dump and sealed process manifest stay under
+`-Work`. The workflow compares the symbolised dump against the composite role
+specification and requires two failures in separate control runs. `NoKey`
+omits the letter and `NoLaunch` omits the role manifest's launch row.
 
 No release or check requires the interactive composite (the maintainer's
 decision, 2026-11-22): it stays dispatchable and optional. This lane's gate
@@ -1647,6 +1765,10 @@ environment value, screen capture or process listing; a failed leaf's receipt
 carries its failure kinds and its log's line counts, never a line. The
 console gets leaf ids and failure kinds. The logs, the runner's errors, the
 state guard's receipts and the copies stay under `-Work`.
+Beside the receipts, the hosted suite upload carries `receipts/scope.txt`, a
+fixed sentence from `gui-hidden.yml` (no run value) saying the artifact covers
+the runner's result only and pointing to the Actions job for the thread-role
+comparison and controls.
 
 **Guards and exit codes.** The state guard (the product jump list,
 `startup-attempts.json`, the clipboard sequence) and the PSReadLine history

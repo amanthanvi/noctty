@@ -9,6 +9,12 @@ const UnicodeTables = @import("UnicodeTables.zig");
 config: *const Config,
 
 options: *std.Build.Step.Options,
+/// `options` with the runtime thread-role layer on (`Config.thread_roles`),
+/// which `add` gives an artifact built in a mode that has the layer
+/// (`Config.threadRoles`): the app exe and the test exe. Null in deps whose
+/// artifacts never get it (`withoutThreadRoles`: conpty-host, the
+/// benchmarks). `options` has it off.
+thread_role_options: ?*std.Build.Step.Options,
 help_strings: HelpStrings,
 unicode_tables: UnicodeTables,
 uucode_tables: std.Build.LazyPath,
@@ -27,8 +33,9 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
 
         // Setup by retarget
         .options = undefined,
+        .thread_role_options = undefined,
     };
-    try result.initTarget(b, cfg.target);
+    try result.initTarget(b, cfg.target, true);
     if (cfg.emit_unicode_table_gen) result.unicode_tables.install(b);
     return result;
 }
@@ -40,7 +47,16 @@ pub fn retarget(
     target: std.Build.ResolvedTarget,
 ) !SharedDeps {
     var result = self.*;
-    try result.initTarget(b, target);
+    try result.initTarget(b, target, self.thread_role_options != null);
+    return result;
+}
+
+/// These deps without the runtime thread-role layer, for an artifact that
+/// shares the app's dependencies but never gets the layer, in any mode
+/// (PLAN.md §2.7's build scope: conpty-host, the benchmarks).
+pub fn withoutThreadRoles(self: *const SharedDeps) SharedDeps {
+    var result = self.*;
+    result.thread_role_options = null;
     return result;
 }
 
@@ -57,8 +73,7 @@ pub fn changeEntrypoint(
 
     var result = self.*;
     result.config = config;
-    result.options = b.addOptions();
-    try config.addOptions(result.options);
+    try result.initOptions(b, self.thread_role_options != null);
 
     return result;
 }
@@ -67,6 +82,7 @@ fn initTarget(
     self: *SharedDeps,
     b: *std.Build,
     target: std.Build.ResolvedTarget,
+    thread_roles: bool,
 ) !void {
     // Change our config
     const config = try b.allocator.create(Config);
@@ -75,8 +91,37 @@ fn initTarget(
     self.config = config;
 
     // Setup our shared build options
+    try self.initOptions(b, thread_roles);
+}
+
+/// Builds `options` from `self.config`, which has the runtime thread-role
+/// layer off, and, when `thread_roles`, `thread_role_options` from a copy
+/// that has it on.
+fn initOptions(self: *SharedDeps, b: *std.Build, thread_roles: bool) !void {
+    std.debug.assert(!self.config.thread_roles);
     self.options = b.addOptions();
     try self.config.addOptions(self.options);
+
+    self.thread_role_options = null;
+    if (!thread_roles) return;
+    const config = try b.allocator.create(Config);
+    config.* = self.config.*;
+    config.thread_roles = true;
+    const options = b.addOptions();
+    try config.addOptions(options);
+    self.thread_role_options = options;
+}
+
+/// The build options of an artifact built in `mode`: with the runtime
+/// thread-role layer when these deps give it and the mode has it.
+fn buildOptions(
+    self: *const SharedDeps,
+    mode: std.builtin.OptimizeMode,
+) *std.Build.Step.Options {
+    if (self.thread_role_options) |options| {
+        if (Config.threadRoles(mode)) return options;
+    }
+    return self.options;
 }
 
 pub fn add(
@@ -95,11 +140,12 @@ pub fn add(
     var static_libs: LazyPathList = .empty;
     errdefer static_libs.deinit(b.allocator);
 
-    // Every exe gets build options populated
-    step.root_module.addOptions("build_options", self.options);
+    // Every exe gets build options populated, with the runtime thread-role
+    // layer in the modes that have it (PLAN.md §2.7's build scope).
+    step.root_module.addOptions("build_options", self.buildOptions(optimize));
 
     // Every exe needs the terminal options
-    self.config.terminalOptions().add(b, step.root_module);
+    self.config.terminalOptions(.ghostty).add(b, step.root_module);
 
     // The bundled ConPTY pin document. scripts/conpty-redist.ps1 stages the
     // Microsoft pair from this file and the portable updater verifies the
@@ -360,7 +406,16 @@ pub fn add(
     // C files
     step.linkLibC();
     step.addIncludePath(b.path("src/stb"));
-    step.addCSourceFiles(.{ .files = &.{"src/stb/stb.c"} });
+    // Disable ubsan for MSVC: Zig's ubsan runtime cannot be bundled
+    // on Windows (LNK4229), leaving __ubsan_handle_* unresolved when
+    // the static archive is consumed by an external linker.
+    step.addCSourceFiles(.{
+        .files = &.{"src/stb/stb.c"},
+        .flags = if (step.rootModuleTarget().abi == .msvc)
+            &.{ "-fno-sanitize=undefined", "-fno-sanitize-trap=undefined" }
+        else
+            &.{},
+    });
 
     if (self.config.renderer_test_tools and target.result.os.tag == .windows) {
         step.addCSourceFile(.{ .file = b.path("src/renderer/readback.c"), .flags = &.{} });
@@ -601,6 +656,7 @@ pub fn addSimd(
 ) !void {
     const target = m.resolved_target.?;
     const optimize = m.optimize.?;
+    const system_highway = b.systemIntegrationOption("highway", .{ .default = false });
 
     // Simdutf
     if (b.systemIntegrationOption("simdutf", .{})) {
@@ -609,6 +665,7 @@ pub fn addSimd(
         if (b.lazyDependency("simdutf", .{
             .target = target,
             .optimize = optimize,
+            .no_libcxx = true,
         })) |simdutf_dep| {
             m.linkLibrary(simdutf_dep.artifact("simdutf"));
             if (static_libs) |v| try v.append(
@@ -619,7 +676,7 @@ pub fn addSimd(
     }
 
     // Highway
-    if (b.systemIntegrationOption("highway", .{ .default = false })) {
+    if (system_highway) {
         m.linkSystemLibrary("libhwy", dynamic_link_opts);
     } else {
         if (b.lazyDependency("highway", .{
@@ -632,18 +689,6 @@ pub fn addSimd(
                 highway_dep.artifact("highway").getEmittedBin(),
             );
         }
-    }
-
-    // utfcpp - This is used as a dependency on our hand-written C++ code
-    if (b.lazyDependency("utfcpp", .{
-        .target = target,
-        .optimize = optimize,
-    })) |utfcpp_dep| {
-        m.linkLibrary(utfcpp_dep.artifact("utfcpp"));
-        if (static_libs) |v| try v.append(
-            b.allocator,
-            utfcpp_dep.artifact("utfcpp").getEmittedBin(),
-        );
     }
 
     // SIMD C++ files
@@ -678,10 +723,27 @@ pub fn addSimd(
             "-std=c++17",
         );
 
-        // Disable ubsan for MSVC to avoid undefined references to
-        // __ubsan_handle_* symbols that require a runtime we don't link
-        // and bundle. Hopefully we can fix this one day since ubsan is nice!
-        if (target.result.abi == .msvc) try flags.appendSlice(b.allocator, &.{
+        // Keep our SIMD sources in the same Highway header mode as the
+        // vendored package build so HWY's inline dispatch/runtime helpers
+        // have a consistent ABI.
+        if (!system_highway) try flags.append(
+            b.allocator,
+            "-DHWY_NO_LIBCXX",
+        );
+
+        // When using the vendored simdutf, build its headers in no-libcxx
+        // mode so we don't need C++ standard library headers at all.
+        // System simdutf headers may not support this define.
+        if (!b.systemIntegrationOption("simdutf", .{})) try flags.append(
+            b.allocator,
+            "-DSIMDUTF_NO_LIBCXX",
+        );
+
+        // Disable ubsan for Windows C/C++ objects to avoid undefined
+        // __ubsan_handle_* references. The Zig libraries on Windows don't
+        // currently bundle a matching UBSan runtime for these objects in
+        // our build configurations (this affects both MSVC and GNU ABIs).
+        if (target.result.os.tag == .windows) try flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",
             // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig

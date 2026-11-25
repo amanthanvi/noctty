@@ -12,6 +12,7 @@ const windows = std.os.windows;
 const c = @import("consts.zig");
 const gl_startup = @import("gl_startup.zig");
 const sys = @import("sys.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const win32_types = @import("../win32_types.zig");
 
 const log = std.log.scoped(.win32);
@@ -1071,6 +1072,7 @@ fn wglBootstrapWindowProc(
     wParam: WPARAM,
     lParam: LPARAM,
 ) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 

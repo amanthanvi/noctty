@@ -17,6 +17,7 @@ const win32_paste_protection = @import("../win32_paste_protection.zig");
 const win32_toast_activation = @import("../win32_toast_activation.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 const BOOL = windows.BOOL;
 const scanForwardedToastActivation = win32.scanForwardedToastActivation;
 
@@ -497,6 +498,17 @@ pub fn sendPerformActionIpc(
         action_text,
         0,
     );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
+}
+
+pub fn sendToggleQuickTerminalIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    elevated: bool,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeToggleQuickTerminalRequest(alloc, 0);
     defer alloc.free(request);
     return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
@@ -1401,6 +1413,8 @@ fn ipcServerMain(
     io_event: windows.HANDLE,
     stop_event: windows.HANDLE,
 ) void {
+    const role_scope = thread_role.enter(.{ .worker = "ipc" });
+    defer role_scope.exit();
     var security = security_arg;
     defer security.deinit();
     defer _ = windows.CloseHandle(io_event);
@@ -1552,6 +1566,10 @@ fn handleIpcClient(app: *App, pipe: win32_ipc.Pipe) !void {
             log.warn("failed to process win32 automation send-text IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
+        .toggle_quick_terminal_timed => handleToggleQuickTerminalIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 quick terminal IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
     }
 }
 
@@ -1676,6 +1694,11 @@ fn handleSendTextIpcClient(app: *App, pipe: win32_ipc.Pipe, timed: bool) !void {
         .target = payload.target,
         .text = payload.text,
     } }, payload.deadline_ms);
+}
+
+fn handleToggleQuickTerminalIpcClient(app: *App, pipe: win32_ipc.Pipe) !void {
+    const deadline_ms = try win32_ipc.decodeToggleQuickTerminalDeadline(pipe);
+    try ackAutomationCommand(app, pipe, .toggle_quick_terminal, deadline_ms);
 }
 
 /// Run an automation command and answer the client: success, the status

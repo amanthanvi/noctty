@@ -706,6 +706,6 @@ test "initPattern lends one Pattern to the viewport and every screen" {
 
         // A resize replaces the active screen's searcher at its next
         // reload; the new one borrows the pattern too.
-        try t.resize(alloc, 12, 2);
+        try t.resize(alloc, .{ .cols = 12, .rows = 2 });
     }
 }

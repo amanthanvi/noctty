@@ -106,8 +106,12 @@ fn runArgs(alloc_gpa: Allocator, argsIter: anytype) !u8 {
     var families: std.ArrayList([]const u8) = .empty;
     var map: std.StringHashMap(std.ArrayListUnmanaged([]const u8)) = .init(alloc);
 
-    // Look up all available fonts
-    var disco = font.Discover.init();
+    // Look up all available fonts. The library is passed to every backend;
+    // noctty's Windows discovery ignores it and opens font files through
+    // its own FreeType library.
+    var font_lib = try font.Library.init(alloc);
+    defer font_lib.deinit();
+    var disco = font.Discover.init(font_lib);
     defer disco.deinit();
     var disco_it = try disco.discover(alloc, .{
         .family = config.family,

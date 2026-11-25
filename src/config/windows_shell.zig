@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
 const win32 = @import("../os/windows.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const Command = @import("command.zig").Command;
 const windows_shell_types = @import("windows_shell_types.zig");
 const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
@@ -4611,6 +4612,8 @@ const WslOutputDrain = struct {
     /// Reads the pipe to its end, at most 64 KiB, on its own thread, one
     /// overlapped read at a time (`readOnce`).
     fn run(self: *WslOutputDrain) void {
+        const role_scope = thread_role.enter(.{ .worker = "wsl-drain" });
+        defer role_scope.exit();
         const alloc = std.heap.page_allocator;
         var list: std.ArrayListUnmanaged(u8) = .empty;
         self.bytes = read: {
@@ -6281,6 +6284,8 @@ fn testWslPipe(read_end: *windows.HANDLE, write_end: *windows.HANDLE) !void {
 fn testJoinWithin(drain: *WslOutputDrain, thread: std.Thread, write_end: windows.HANDLE, limit_ms: u32) !void {
     const Joiner = struct {
         fn run(d: *WslOutputDrain, t: std.Thread) void {
+            const role_scope = thread_role.enter(.test_support);
+            defer role_scope.exit();
             joinWslDrains(&.{d}, &.{t});
         }
     };

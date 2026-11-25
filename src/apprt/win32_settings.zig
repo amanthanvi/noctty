@@ -44,6 +44,7 @@ const local_path = @import("../os/local_path.zig");
 const config_file_load = @import("../config/file_load.zig");
 const windows_shell = @import("../config/windows_shell.zig");
 const pane_launch = @import("../config/pane_launch.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const SetFocus = sys.SetFocus;
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
@@ -14143,6 +14144,11 @@ const dialog_test = struct {
     const WA_ACTIVE: usize = 1;
 
     fn run(desktop: *anyopaque, result: *anyerror!void, body: *const fn () anyerror!void) void {
+        // This desktop's UI thread from its first statement (test 9 wants an
+        // entry's role scope first): the Settings window is made and
+        // dispatched here, as the app's is on its main thread.
+        const role_scope = thread_role.enter(.ui);
+        defer role_scope.exit();
         if (SetThreadDesktop(desktop) == 0) {
             result.* = error.SkipZigTest;
             return;
@@ -15648,6 +15654,10 @@ test "settings the default config file is named only when every candidate it nee
             return .missing;
         }
     };
+    // A test build has default paths only under a config home its test
+    // names; the probe opens nothing there.
+    config_file_load.test_config_root = "C:\\noctty-test-config-home";
+    defer config_file_load.test_config_root = null;
     const xdg = try config_file_load.defaultXdgPath(alloc);
     defer alloc.free(xdg);
     // Nothing anywhere: the noctty file.
@@ -20126,6 +20136,7 @@ test "settings action row geometry holds for panes shorter than its gaps" {
 }
 
 fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         const previous = settings.text_uia_prev_proc;
@@ -20149,6 +20160,7 @@ fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callc
 }
 
 fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         if (settings.controlIndex(hwnd)) |index| {
@@ -20228,6 +20240,7 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
 /// made one at a time as rows come to differ from their defaults, so they are
 /// not among the indexed controls `settingsControlProc` serves.
 fn settingsResetButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         const previous = settings.reset_uia_prev_proc;
@@ -20280,6 +20293,7 @@ const SettingsComboPopup = struct {
     }
 
     fn proc(hwnd: HWND, msg: UINT, w: WPARAM, l: LPARAM, id: usize, data: usize) callconv(.winapi) LRESULT {
+        thread_role.assertWindowProc();
         if (msg == WM_NCDESTROY) _ = RemoveWindowSubclass(hwnd, &proc, id);
         const result = DefSubclassProc(hwnd, msg, w, l);
         // The stock SelectionItem proxy changes the list directly, bypassing
@@ -20294,6 +20308,7 @@ const SettingsComboPopup = struct {
 /// page past one goes to the form instead. Its previous procedure lives in
 /// GWLP_USERDATA and is restored in WM_NCDESTROY.
 fn settingsComboProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     if (msg == WM_MOUSEWHEEL and sys.SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0) == 0) {
@@ -20330,6 +20345,7 @@ fn subclassKeepingPrevious(control: HWND, proc: win32_types.WNDPROC) void {
 /// one line of text. Clicks there count as clicks in the field. The previous
 /// procedure lives in `GWLP_USERDATA`, as for the dropdowns.
 fn settingsEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
@@ -20412,6 +20428,7 @@ fn setTextCut(hwnd: HWND, proc: *const anyopaque, wParam: WPARAM, text: [*:0]con
 /// focus that reaches it by Tab is seen here and scrolls it into view. The
 /// previous procedure lives in `GWLP_USERDATA`.
 fn settingsSliderProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
@@ -20450,6 +20467,7 @@ fn paintsOwnSpins(os_build: u32) bool {
 /// until the release. The light theme and High Contrast keep the stock
 /// up-down. The previous procedure lives in `GWLP_USERDATA`.
 fn settingsSpinProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
@@ -20589,6 +20607,7 @@ fn paintSpinArrow(hdc: HDC, rect: RECT, button: SpinButton, color: COLORREF) voi
 }
 
 fn settingsToggleProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
@@ -21078,6 +21097,7 @@ fn sectionMarkerGlyph(colors: win32_theme.SettingsColors, button_background: COL
 }
 
 fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         const previous = settings.section_button_prev_proc;
@@ -21161,6 +21181,7 @@ fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPAR
 }
 
 fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (msg == WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| {
@@ -21782,6 +21803,7 @@ fn syncButtonText(button: HWND, label: [*:0]const u16) bool {
 /// provider. Escape is the window's, as on its other buttons: the dialog
 /// manager makes it Close.
 fn profileButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
@@ -21844,6 +21866,7 @@ fn profileButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) call
 /// (`WM_SETTINGS_PROFILE_BLUR`); UIA finds its provider here. The previous
 /// procedure lives in `GWLP_USERDATA` (`subclassKeepingPrevious`).
 fn profileEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
@@ -23066,6 +23089,7 @@ fn referenceListRelease(ctx: *anyopaque) void {
 /// The lists' window procedure (`ReferenceList`): the window's user data is
 /// its list.
 fn referenceListProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (msg == WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intCast(@intFromPtr(ptr)));
@@ -26282,6 +26306,19 @@ test "settings F2 on the All settings page keeps the window where it is: a maxim
     }.body);
 }
 
+test "thread_role: settings dialog tests run their body as the UI thread" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const expected: thread_role.Role = if (thread_role.layer == .on) .ui else .none;
+            try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(thread_role.current()));
+        }
+    }.body);
+}
+
+test "thread_role: a window made on the settings dialog tests' thread finds .ui in its window procedure (acceptance test 5)" {
+    try dialog_test.onHiddenDesktop(@import("win32/test_support.zig").RoleProbeWindow.expectUi);
+}
+
 test "settings dialog tests run with an empty keyboard: a modifier in the test thread's key table does not make F2 another chord" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -27422,6 +27459,7 @@ test "settings the All settings list wraps every description inside its row, and
 /// when the fields were its own children. The wheel needs nothing here:
 /// `DefWindowProc` hands it to the parent.
 fn viewportProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    thread_role.assertWindowProc();
     if (msg == WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intCast(@intFromPtr(ptr)));

@@ -32,6 +32,7 @@ pub const Overlay = @import("renderer/Overlay.zig");
 pub const Pacer = @import("renderer/Pacer.zig");
 pub const Thread = @import("renderer/Thread.zig");
 pub const State = @import("renderer/State.zig");
+pub const StateMutex = @import("sync/state_mutex.zig").StateMutex;
 pub const CursorStyle = cursor.Style;
 pub const Message = message.Message;
 pub const Size = size.Size;
@@ -74,4 +75,5 @@ test {
     _ = @import("renderer/pacer_sim.zig");
     _ = Thread;
     _ = State;
+    _ = @import("sync/state_mutex.zig");
 }

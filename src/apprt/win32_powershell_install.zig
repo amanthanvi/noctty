@@ -52,6 +52,7 @@
 const std = @import("std");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const win32_terminfo = @import("win32_terminfo.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.win32_powershell_install);
@@ -1262,6 +1263,8 @@ const TestProcessDeadline = struct {
     timed_out: bool = false,
 
     fn run(self: *@This()) void {
+        const role_scope = thread_role.enter(.test_support);
+        defer role_scope.exit();
         std.os.windows.WaitForSingleObject(self.handle, self.milliseconds) catch {
             self.timed_out = true;
             std.os.windows.TerminateProcess(self.handle, 124) catch {};
@@ -1777,8 +1780,8 @@ test "integration.ps1 changes only with its revision" {
     // to the revision and SHA-256 it now has, which puts the question of
     // whether to bump in front of the author and the reviewer; it cannot judge
     // whether the change needed one.
-    const pinned_revision: u32 = 1;
-    const pinned_sha256 = "328192524f590570ff521cd52043a6c016c86627fab3848951eea1317571d14b";
+    const pinned_revision: u32 = 2;
+    const pinned_sha256 = "0c93656fd80385c9f24d67091573ab613f3bdf7c779c7fb95309984dacfcd279";
     const hex = std.fmt.bytesToHex(integration_script_sha256, .lower);
     try std.testing.expectEqual(@as(?u32, pinned_revision), scriptRevision(integration_script));
     try std.testing.expectEqualStrings(pinned_sha256, &hex);
@@ -1970,7 +1973,7 @@ fn pwshNestedShellAfterTransientRepeat(alloc: Allocator, c_mark: []const u8) ![]
         "\x1b]133;A;cl=line\x07\x1b[?2004hinner$ ",
     });
     defer t.deinit(alloc);
-    try t.resize(alloc, 20, 8);
+    try t.resize(alloc, .{ .cols = 20, .rows = 8 });
     return try t.plainString(alloc);
 }
 
@@ -2026,7 +2029,7 @@ test "PowerShell marks: a prompt the wrapper did not draw gets its marks from th
         try std.testing.expect(t.screens.active.semanticPromptInputPending());
         // ...and the prompt says it cannot redraw, so a resize keeps it.
         try std.testing.expect(t.flags.shell_redraws_prompt == .false);
-        try t.resize(alloc, 20, 8);
+        try t.resize(alloc, .{ .cols = 20, .rows = 8 });
         const screen = try t.plainString(alloc);
         defer alloc.free(screen);
         try std.testing.expect(std.mem.indexOf(u8, screen, "RELOADED>") != null);

@@ -15,7 +15,7 @@
 #
 # Pass extra flags to the Zig build with GHOSTTY_ZIG_BUILD_FLAGS:
 #
-#   cmake -B build -DGHOSTTY_ZIG_BUILD_FLAGS="-Demit-macos-app=false"
+#   cmake -B build -DGHOSTTY_ZIG_BUILD_FLAGS="-Dsimd=false"
 #
 # Integrating into a downstream CMake project
 # ---------------------------------------------
@@ -42,8 +42,27 @@
 #   target_link_libraries(myapp PRIVATE ghostty-vt::ghostty-vt)        # shared
 #   target_link_libraries(myapp PRIVATE ghostty-vt::ghostty-vt-static) # static
 #
-# See dist/cmake/README.md for more details and example/c-vt-cmake/ for a
-# complete working example.
+# Cross-compilation
+# -------------------
+#
+# For building libghostty-vt for a non-native Zig target (e.g. cross-
+# compiling), use the ghostty_vt_add_target() function after FetchContent:
+#
+#   FetchContent_MakeAvailable(noctty)
+#   ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu)
+#
+#   target_link_libraries(myapp PRIVATE ghostty-vt-static-linux-amd64) # static
+#   target_link_libraries(myapp PRIVATE ghostty-vt-linux-amd64)        # shared
+#
+# This handles zig discovery, build-type-to-optimize mapping, and output
+# path conventions internally. Extra flags can be forwarded with ZIG_FLAGS:
+#
+#   ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu
+#                         ZIG_FLAGS -Dsimd=false)
+#
+# See dist/cmake/README.md for more details, example/c-vt-cmake/ for a
+# complete working example, and example/c-vt-cmake-cross/ for a cross-
+# compilation example.
 
 cmake_minimum_required(VERSION 3.19)
 project(ghostty-vt VERSION 0.1.0 LANGUAGES C)
@@ -52,13 +71,20 @@ project(ghostty-vt VERSION 0.1.0 LANGUAGES C)
 
 set(GHOSTTY_ZIG_BUILD_FLAGS "" CACHE STRING "Additional flags to pass to zig build")
 
-# Map CMake build types to Zig optimization levels.
+# Map CMake build types to Zig optimization levels. The result is stored in
+# _GHOSTTY_ZIG_OPT_FLAG so both the native build and ghostty_vt_add_target()
+# can reuse it without duplicating the mapping logic.
+set(_GHOSTTY_ZIG_OPT_FLAG "")
 if(CMAKE_BUILD_TYPE)
     string(TOUPPER "${CMAKE_BUILD_TYPE}" _bt)
     if(_bt STREQUAL "RELEASE" OR _bt STREQUAL "MINSIZEREL" OR _bt STREQUAL "RELWITHDEBINFO")
-        list(APPEND GHOSTTY_ZIG_BUILD_FLAGS "-Doptimize=ReleaseFast")
+        set(_GHOSTTY_ZIG_OPT_FLAG "-Doptimize=ReleaseFast")
     endif()
     unset(_bt)
+endif()
+
+if(_GHOSTTY_ZIG_OPT_FLAG)
+    list(APPEND GHOSTTY_ZIG_BUILD_FLAGS "${_GHOSTTY_ZIG_OPT_FLAG}")
 endif()
 
 # --- Find Zig ----------------------------------------------------------------
@@ -150,9 +176,8 @@ add_dependencies(ghostty-vt zig_build_lib_vt)
 # Static
 #
 # On Linux and macOS, the static library is a fat archive that bundles
-# the vendored SIMD dependencies (highway, simdutf, utfcpp). Consumers
-# only need to link libc and libc++ (LLVM's C++ runtime, not GNU
-# libstdc++). Use zig cc, clang, or any toolchain with libc++ support.
+# the vendored SIMD dependencies (highway, simdutf). Consumers
+# only need to link libc.
 #
 # On Windows, the SIMD dependencies are not bundled and must be linked
 # separately.
@@ -227,3 +252,124 @@ install(
         "${CMAKE_CURRENT_BINARY_DIR}/ghostty-vt-config-version.cmake"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/ghostty-vt"
 )
+
+# --- Cross-compilation helper ------------------------------------------------
+#
+# For downstream projects that need to build libghostty-vt for a specific
+# Zig target triple. For native builds, use the IMPORTED targets above
+# (ghostty-vt, ghostty-vt-static) directly.
+#
+# Usage (in a downstream CMakeLists.txt after FetchContent_MakeAvailable):
+#
+#   ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu)
+#
+# Creates:
+#   ghostty-vt-static-linux-amd64   (IMPORTED STATIC library)
+#   ghostty-vt-linux-amd64          (IMPORTED SHARED library)
+#
+# Optional ZIG_FLAGS to pass additional flags to zig build:
+#
+#   ghostty_vt_add_target(NAME linux-amd64 ZIG_TARGET x86_64-linux-gnu
+#                         ZIG_FLAGS -Dsimd=false)
+
+function(ghostty_vt_add_target)
+    cmake_parse_arguments(PARSE_ARGV 0 _GVT "" "NAME;ZIG_TARGET" "ZIG_FLAGS")
+
+    if(NOT _GVT_NAME)
+        message(FATAL_ERROR "ghostty_vt_add_target: NAME is required")
+    endif()
+    if(NOT _GVT_ZIG_TARGET)
+        message(FATAL_ERROR "ghostty_vt_add_target: ZIG_TARGET is required")
+    endif()
+
+    set(_src_dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    set(_prefix "${CMAKE_CURRENT_BINARY_DIR}/ghostty-${_GVT_NAME}")
+
+    # Build flags
+    set(_flags
+        -Demit-lib-vt
+        -Dtarget=${_GVT_ZIG_TARGET}
+        --prefix "${_prefix}"
+    )
+
+    # Default to ReleaseFast when no build type is set. Debug builds enable
+    # UBSan in zig, and the sanitizer runtime is not available for all
+    # cross-compilation targets.
+    if(_GHOSTTY_ZIG_OPT_FLAG)
+        list(APPEND _flags "${_GHOSTTY_ZIG_OPT_FLAG}")
+    else()
+        list(APPEND _flags "-Doptimize=ReleaseFast")
+    endif()
+
+    if(_GVT_ZIG_FLAGS)
+        list(APPEND _flags ${_GVT_ZIG_FLAGS})
+    endif()
+
+    # Output paths
+    set(_include_dir "${_prefix}/include")
+
+    if(_GVT_ZIG_TARGET MATCHES "windows")
+        set(_static_lib "${_prefix}/lib/ghostty-vt-static.lib")
+        set(_shared_lib "${_prefix}/bin/ghostty-vt.dll")
+        set(_implib "${_prefix}/lib/ghostty-vt.lib")
+    elseif(_GVT_ZIG_TARGET MATCHES "darwin|macos")
+        set(_static_lib "${_prefix}/lib/libghostty-vt.a")
+        set(_shared_lib "${_prefix}/lib/libghostty-vt.0.1.0.dylib")
+    else()
+        set(_static_lib "${_prefix}/lib/libghostty-vt.a")
+        set(_shared_lib "${_prefix}/lib/libghostty-vt.so.0.1.0")
+    endif()
+
+    file(MAKE_DIRECTORY "${_include_dir}")
+
+    # Custom command: invoke zig build
+    add_custom_command(
+        OUTPUT "${_static_lib}" "${_shared_lib}"
+        COMMAND "${ZIG_EXECUTABLE}" build ${_flags}
+        WORKING_DIRECTORY "${_src_dir}"
+        COMMENT "Building libghostty-vt for ${_GVT_ZIG_TARGET}..."
+        USES_TERMINAL
+    )
+
+    set(_build_target "zig_build_lib_vt_${_GVT_NAME}")
+    add_custom_target(${_build_target} ALL
+        DEPENDS "${_static_lib}" "${_shared_lib}"
+    )
+
+    # Static target
+    set(_static_target "ghostty-vt-static-${_GVT_NAME}")
+    add_library(${_static_target} STATIC IMPORTED GLOBAL)
+    set_target_properties(${_static_target} PROPERTIES
+        IMPORTED_LOCATION "${_static_lib}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_include_dir}"
+        INTERFACE_COMPILE_DEFINITIONS "GHOSTTY_STATIC"
+    )
+    if(_GVT_ZIG_TARGET MATCHES "windows")
+        set_target_properties(${_static_target} PROPERTIES
+            INTERFACE_LINK_LIBRARIES "ntdll;kernel32"
+        )
+    endif()
+    add_dependencies(${_static_target} ${_build_target})
+
+    # Shared target
+    set(_shared_target "ghostty-vt-${_GVT_NAME}")
+    add_library(${_shared_target} SHARED IMPORTED GLOBAL)
+    set_target_properties(${_shared_target} PROPERTIES
+        IMPORTED_LOCATION "${_shared_lib}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_include_dir}"
+    )
+    if(_GVT_ZIG_TARGET MATCHES "windows")
+        set_target_properties(${_shared_target} PROPERTIES
+            IMPORTED_IMPLIB "${_implib}"
+        )
+    elseif(_GVT_ZIG_TARGET MATCHES "darwin|macos")
+        set_target_properties(${_shared_target} PROPERTIES
+            IMPORTED_SONAME "@rpath/libghostty-vt.0.dylib"
+        )
+    else()
+        set_target_properties(${_shared_target} PROPERTIES
+            IMPORTED_SONAME "libghostty-vt.so.0"
+        )
+    endif()
+    add_dependencies(${_shared_target} ${_build_target})
+endfunction()

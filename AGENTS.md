@@ -183,6 +183,14 @@ reading step under [Self-Correction Log](#self-correction-log).
 
 - Build: `zig build -Demit-lib-vt`
 - Build WASM: `zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall`
+- Test: `zig build test-lib-vt -Demit-lib-vt=true --summary all` (CI's
+  `windows-lib-vt` job; the step errors without `-Demit-lib-vt=true` in
+  this fork). It is the only step that runs the C API tests in
+  `src/terminal/c/`, so a change in a libghostty-vt file runs it as well
+  as the full suite above. `-Dtest-filter=<token>` works here as above,
+  for iteration only.
+- All C enums in `include/ghostty/vt/` must have a `_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE`
+  sentinel as the last entry to force int enum sizing (pre-C23 portability).
 
 ## Directory Structure
 
@@ -251,7 +259,9 @@ that govern each symbol you change, or that none does.
   versus the bundled `conpty.dll`/`OpenConsole.exe`
   (`scripts/stage-conpty-redist.ps1`), what ConPTY's buffer holds after a
   resize, minimize, clear or undo and the column reflow that has to match it
-  (`Screen.resize`, the replay tests in `src/terminal/resize_replay.zig`, the
+  (`Screen.resize` and where its prompt redraw starts clearing,
+  `promptRedrawStart` and `clearPromptForRedraw`, the replay tests in
+  `src/terminal/resize_replay.zig`, the
   sync harness `test/windows/interactive-win11-conpty-sync.ps1`), which
   terminal replies reach a console program through ConPTY's input and in what
   shape (the reply-path harness
@@ -281,7 +291,9 @@ that govern each symbol you change, or that none does.
   `src/apprt/win32/session.zig` (`captureTerminalScrollbackSnapshotAlloc`,
   `terminalScreenIsUnpainted`), OSC parsers,
   OSC 133 exit codes, prompt typeahead
-  in `semantic_command.zig`, the scrollback search thread and its cached
+  in `semantic_command.zig` and what drops its last command when rows or
+  cells move (`invalidateRange`, `invalidateMarginShift`, from
+  `Terminal.scrollUp`), the scrollback search thread and its cached
   results (`ScreenSearch.pruneHistory`, `LiveNodes`), what a search window
   copies at append (`SlidingWindow.append`, `AppendResult`), the regex,
   whole-word and case matcher and its run-time failure latch
@@ -297,7 +309,13 @@ that govern each symbol you change, or that none does.
   `os/TempDir.zig`, OSC 7 and OSC 9;9 cwd reports
   (`termio/stream_handler.zig`, `os.hostname.isLocal`, `os/local_path.zig`
   `pwd`, and the stored-pwd spellings in `os/path.zig`), `src/Surface.zig`
-  locking around links,
+  locking around links (the left release: `linkAtLocked`, `processLinks`,
+  `maybePromptClick`, and the hover refresh it runs first, `mouseRefreshLinks`
+  with `Mouse.activeLeftClickPin`, and the tracked pins an in-place scroll
+  moves: `Screen.cursorScrollRegionUp`, `PageList.eraseRow`,
+  `PageList.eraseRowBounded`) and its left-click selection path
+  (`Mouse.left_click_pin`, `dragLeftClickTriple`, `selectionScrollTick`;
+  not upstream's `SelectionGesture`),
   and `ShellExecute*` calls queued for the message loop
   (`App.deferShellRequest`, `drainDeferredOpens`).
 - [renderer.md](docs/agents/log/renderer.md): `src/renderer/` and
@@ -323,8 +341,16 @@ that govern each symbol you change, or that none does.
   renderer has started, which the hidden-desktop suite reads (`logStarted`
   and its scope `renderer_start` in `src/renderer/Windows.zig`; a new line in
   the `renderer_windows` scope changes the count #738's hosted probe takes),
-  and which DLLs a CLI action or the D3D11
-  backend loads (the OpenGL32 static import).
+  which DLLs a CLI action or the D3D11
+  backend loads (the OpenGL32 static import), and the renderer-state mutex
+  with its runtime thread-role layer (`src/sync/state_mutex.zig`:
+  `StateMutex`, the types of its carriers, `assertHeld`, the demand acquire
+  `State.lockDemand` forwards to, the panics PN1 to PN7; the roles in
+  `src/sync/thread_role.zig`: `enter`, `fixture`, and `assertWindowProc`,
+  which every fork window and subclass procedure calls first; the
+  pair recorder `src/sync/recorder.zig` and its dump `src/sync/dump.zig`;
+  and a site it keys by build mode, `stream_handler.surfaceMessageWriter`'s
+  calling convention).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
@@ -419,8 +445,11 @@ that govern each symbol you change, or that none does.
   `App.reloadKeptConfig`, which reloads `app.config` in core's light/dark
   state), ranking, MRU
   and its `palette-mru.txt` lines: `writePaletteMruLine`, palette list, the
-  catalog's capacity and the installed themes that fit it:
-  `palette_catalog_capacity`, `appendInstalledThemesToPalette`, and the
+  catalog's capacities and the installed themes that fit them:
+  `palette_catalog_capacity`, `palette_catalog_label_capacity`,
+  `appendInstalledThemesToPalette`, the heavy-session test
+  `PaletteCapacityTest` in `win32/host.zig` and its theme seam
+  `palette_controller.test_installed_themes`, and the
   bundled iTerm2 theme pin in `build.zig.zon` that sets their count), the confirm
   overlay (`win32/overlay_session.zig`: `showConfirm`,
   `invokeConfirmAccept`/`Cancel` lifetime; what each prompt says and its
@@ -611,7 +640,9 @@ that govern each symbol you change, or that none does.
   identity and refcounts, BSTR and VARIANT ownership, `events.zig`); terminal
   text (`win32_terminal_accessibility.zig`, TextPattern, ScrollIntoView, the
   echo queue, and the output transport that feeds it:
-  `TerminalOutputTransport` in `apprt/surface.zig`), palette and tab-list
+  `TerminalOutputTransport` in `apprt/surface.zig`; the viewport a range's
+  `GetBoundingRectangles` reads: `terminalAccessibilityViewport`'s try-lock in
+  `src/apprt/win32.zig`, `handleViewportRefresh`, `providerViewport`), palette and tab-list
   UIA (a tab's name: `uiaName` and `Key.sameUiaName` in
   `win32/tab_label.zig`).
 - [config.md](docs/agents/log/config.md): config loading and reload outside
@@ -626,7 +657,11 @@ that govern each symbol you change, or that none does.
   and `finalizeCliLaunch` in `src/config/pane_launch.zig`), `newConfig` shallow
   clones, what `Surface.DerivedConfig` must own, `RepeatableCommand.clone`
   and its C mirror (`value_c`, `Command.cval`), UTF-16 themes
-  (`Config.textReader`, `_undecodable_theme`), `+edit-config` and opening
+  (`Config.textReader`, `_undecodable_theme`), the default config files and
+  their paths (`Config.loadDefaultFiles`, `src/config/file_load.zig`), the
+  user theme directories (`theme.Location.dir`), and the root a test build
+  reads both under (`file_load.test_config_root`, `hasConfigHome`,
+  `configHomePath`), `+edit-config` and opening
   the config file, adding config keys.
 - [app-lifecycle.md](docs/agents/log/app-lifecycle.md): `App.init` and
   startup stalls, a cold `--launch-layout` (`App.startup_launch_layout`,
@@ -729,7 +764,12 @@ that govern each symbol you change, or that none does.
   `Contracts.90-Workflows.ps1`), the soak
   (`test/windows/interactive-win11-soak.ps1`, its judge `ci/soak_judge.py`
   with `ci/test_soak_judge.py`, and the slope thresholds
-  `ci/soak-thresholds.tsv`), the hidden-desktop GUI suite
+  `ci/soak-thresholds.tsv`), the PKG-23 Ctrl+click harness
+  (`test/windows/hidden-win11-pkg23-ctrl-click.ps1`, its contract
+  `Contracts.98-Pkg23CtrlClick.ps1`) and the Debug open-URL trace it reads
+  (`recordOpenUrlForTest` and `NOCTTY_WIN32_OPEN_URL_TRACE_FILE` in
+  `src/apprt/win32.zig`, `dispatchOpenTarget` in `src/apprt/win32/app.zig`),
+  the hidden-desktop GUI suite
   (`test/windows/gui-hidden-runner.ps1`, its plan
   `test/windows/gui-hidden-plan.json`, `.github/workflows/gui-hidden.yml`
   and its selection `scripts/ci-gui-selection.ps1` with the script walker
@@ -756,10 +796,31 @@ that govern each symbol you change, or that none does.
   `addTestRuns` in `build.zig`, and the names tests share across processes), the
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
   `std.Progress.lockStdErr`, the search-thread tests in
-  `src/terminal/search/Thread.zig`), the shared Win32 test fixtures
+  `src/terminal/search/Thread.zig`), the test exe's isolated children and
+  their dispatch (`src/sync/isolated.zig`: `runChildIfRequested`, `run`,
+  `expectPanic`, `expectOffTable`, `expectShapes`, the name rule
+  `symbolise.names_checked`; `src/main.zig`'s first test), the layer's
+  acceptance tests there and in `src/sync/state_mutex.zig`, acceptance
+  test 9's checker `ci/thread_role_points.py` (its `Resolver`) with its
+  controls `ci/test_thread_role_points.py`, the
+  thread-role dumps' symboliser and the in-process compare
+  (`src/sync/symbolise.zig`, DbgHelp's `SymFromAddrW`; `src/sync/compare.zig`;
+  the table they read, `ci/lock-inventory-threads.tsv`, what its static
+  gate reads as a caller edge, and what its inventory reads as a
+  renderer-state site, by a receiver's last name), the relock tests and
+  their IO thread (`termio.Thread.drainForTest`, its `DrainHook` in
+  `drainMailbox`; `RelockSurface` and `expectRecordedPairs` in
+  `src/Surface.zig`; the reader-side fill test in
+  `src/termio/stream_handler.zig`) and where a
+  test's helper thread enters its role, the shared Win32 test
+  fixtures
   (`win32/test_support.zig`, `TestSession`, the private-desktop runners
-  `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop` and the empty
-  keyboard they pin), PSReadLine history isolation
+  `runOnHiddenDesktop` and `host.zig` `runOnPrivateDesktop`, the empty
+  keyboard they pin and the window probe that checks their role,
+  `RoleProbeWindow`), process-wide state a test leaves for the later tests
+  in its shard (the OpenGL startup diagnostics `App.createGLContext`
+  starts: `gl_startup.beginOpenGLStartupDiagnostics`,
+  `clearOpenGLStartupFailure`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`), the shell a fixture starts (the
   config line `Get-InteractiveWin11HostedPolicyConfig` writes, the shared
   helper's legacy `--command=cmd.exe`), a bash

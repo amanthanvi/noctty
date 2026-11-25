@@ -65,7 +65,7 @@ pub fn execute(
     }
 
     const resp_: ?Response = switch (cmd.control) {
-        .query => query(alloc, cmd),
+        .query => query(alloc, terminal, cmd),
         .display => display(alloc, terminal, cmd),
         .delete => delete(alloc, terminal, cmd),
 
@@ -128,7 +128,11 @@ pub fn execute(
 /// This command is used to attempt to load an image and respond with
 /// success/error but does not persist any of the command to the terminal
 /// state.
-fn query(alloc: Allocator, cmd: *const Command) Response {
+fn query(
+    alloc: Allocator,
+    terminal: *const Terminal,
+    cmd: *const Command,
+) Response {
     const t = cmd.control.query;
 
     // Query requires image ID. We can't actually send a response without
@@ -148,7 +152,8 @@ fn query(alloc: Allocator, cmd: *const Command) Response {
     // A query must attempt a complete load, then discard the result without
     // changing image storage.
     // https://sw.kovidgoyal.net/kitty/graphics-protocol/#querying-support-and-available-transmission-mediums
-    var loading = LoadingImage.init(alloc, cmd) catch |err| {
+    const storage = &terminal.screens.active.kitty_images;
+    var loading = LoadingImage.init(alloc, cmd, storage.image_limits) catch |err| {
         encodeError(&result, err);
         return result;
     };
@@ -424,7 +429,7 @@ fn loadAndAddImage(
             } });
         }
 
-        break :loading try .init(alloc, cmd);
+        break :loading try .init(alloc, cmd, storage.image_limits);
     };
 
     // We only want to deinit on error. If we're chunking, then we don't
@@ -478,7 +483,6 @@ const EncodeableError = Image.Error || Allocator.Error;
 fn encodeError(r: *Response, err: EncodeableError) void {
     switch (err) {
         error.OutOfMemory => r.message = "ENOMEM: out of memory",
-        error.InternalError => r.message = "EINVAL: internal error",
         error.InvalidData => r.message = "EINVAL: invalid data",
         error.DecompressionFailed => r.message = "EINVAL: decompression failed",
         error.FilePathTooLong => r.message = "EINVAL: file path too long",
@@ -879,7 +883,8 @@ test "kittygfx non-direct transmission abandons chunked image load" {
     defer t.deinit(alloc);
     const storage = &t.screens.active.kitty_images;
 
-    // Write a 1x1 RGB image file for a file (t=f) transmission.
+    // Allow file (t=f) transmissions and write a 1x1 RGB image file.
+    storage.image_limits.file = true;
     var tmp_dir = try TempDir.init();
     defer tmp_dir.deinit();
     const payload = try testFilePayload(alloc, tmp_dir.dir, &.{ 1, 2, 3 });
@@ -972,6 +977,9 @@ test "kittygfx query of an over-long file path answers file path too long" {
 
     var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
     defer t.deinit(alloc);
+
+    // Allow file (t=f) transmissions, so the path length check is reached.
+    t.screens.active.kitty_images.image_limits.file = true;
 
     const path = try alloc.alloc(u8, 40000);
     @memset(path, 'a');
@@ -1134,7 +1142,7 @@ test "kittygfx display clamps cell offsets" {
     try testing.expectEqual(@as(u32, 9), placement.x_offset);
     try testing.expectEqual(@as(u32, 19), placement.y_offset);
 
-    const actual = placement.calculatedSize(storage.imageById(1).?, &t);
+    const actual = placement.pixelSize(storage.imageById(1).?, &t);
     try testing.expectEqual(@as(u32, 11), actual.width);
     try testing.expectEqual(@as(u32, 1), actual.height);
 }
@@ -1663,4 +1671,88 @@ test "kittygfx implicit id assignment does not replace client image" {
     const implicit = storage.imageById(2147483648) orelse return error.TestExpectedImage;
     try testing.expect(implicit.implicit_id);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 255 }, implicit.data);
+}
+
+test "kittygfx retransmit same id gets fresh image generation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // Transmit a 1x2 RGB image with id=1.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,t=d,f=24,i=1,s=1,v=2;////////",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expect(resp.ok());
+    }
+    const gen1 = storage.imageById(1).?.generation;
+    try testing.expect(gen1 > 0);
+    try testing.expectEqual(gen1, storage.generation);
+
+    // Retransmit the same id with identical dimensions/length. The
+    // (width, height, format, len) tuple is identical, so only the
+    // generation can reveal that the contents were replaced.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,t=d,f=24,i=1,s=1,v=2;AAAAAAAA",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expect(resp.ok());
+    }
+    const gen2 = storage.imageById(1).?.generation;
+    try testing.expect(gen2 > gen1);
+    try testing.expectEqual(gen2, storage.generation);
+}
+
+test "kittygfx delete then retransmit same id gets fresh generation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // Transmit and display, then delete everything (including image
+    // data), then retransmit the same ID.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=T,t=d,f=24,i=1,s=1,v=2,c=1,r=1;////////",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expect(resp.ok());
+    }
+    const gen1 = storage.imageById(1).?.generation;
+
+    {
+        const cmd = try command.Parser.parseString(alloc, "a=d,d=A");
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd);
+        try testing.expect(resp == null);
+    }
+    try testing.expect(storage.imageById(1) == null);
+    const gen_delete = storage.generation;
+    try testing.expect(gen_delete > gen1);
+
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,t=d,f=24,i=1,s=1,v=2;////////",
+        );
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expect(resp.ok());
+    }
+    const gen2 = storage.imageById(1).?.generation;
+    try testing.expect(gen2 > gen1);
+    try testing.expect(gen2 > gen_delete);
 }

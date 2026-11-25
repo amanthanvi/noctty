@@ -2,18 +2,18 @@ const std = @import("std");
 const build_options = @import("terminal_options");
 const testing = std.testing;
 const apc = @import("apc.zig");
-const color = @import("color.zig");
+const clipboard = @import("clipboard.zig");
 const csi = @import("csi.zig");
 const device_attributes = @import("device_attributes.zig");
 const device_status = @import("device_status.zig");
 const stream = @import("stream.zig");
 const Action = stream.Action;
-const CursorStyleReq = @import("ansi.zig").CursorStyle;
 const Screen = @import("Screen.zig");
+const color = @import("color.zig");
 const modes = @import("modes.zig");
+const osc = @import("osc.zig");
 const osc_color = @import("osc/parsers/color.zig");
 const kitty_color = @import("kitty/color.zig");
-const osc = @import("osc.zig");
 const size_report = @import("size_report.zig");
 const Terminal = @import("Terminal.zig");
 
@@ -33,6 +33,20 @@ pub const Stream = stream.Stream(Handler);
 pub const Handler = struct {
     /// The terminal state to modify.
     terminal: *Terminal,
+
+    /// True after an error prevented a terminal-owned semantic update.
+    ///
+    /// When an error happens during terminal processing, streams continue
+    /// forward and remain best-effort. A terminal can't really stop in
+    /// the middle it must go on. But this is flagged to true to let
+    /// consumers know some sort of unhandle-able error state happened
+    /// (e.g. an allocation failure).
+    ///
+    /// Only non-handled outcomes set this. Gracefully handled outcomes
+    /// that don't meaningfully negatively impact the terminal state
+    /// such as hitting Kitty image limits, failure to write a response,
+    /// do not flag this.
+    semantic_failure: bool = false,
 
     /// Callbacks for certain effects that handlers may have. These
     /// may or may not fully replace internal handling of certain effects,
@@ -81,6 +95,25 @@ pub const Handler = struct {
         /// handler.terminal.getTitle().
         title_changed: ?*const fn (*Handler) void,
 
+        /// Called when the terminal pwd changes via escape sequences
+        /// (e.g. OSC 7). The new pwd can be queried via
+        /// handler.terminal.getPwd().
+        pwd_changed: ?*const fn (*Handler) void,
+
+        /// Called when the running program writes to a clipboard. The write
+        /// has a normalized destination and one or more decoded MIME
+        /// representations. All request, MIME, and data memory is borrowed
+        /// and only valid for the duration of the callback.
+        ///
+        /// A write with no contents clears the destination. A content entry
+        /// with empty data is a distinct empty representation.
+        ///
+        /// Clipboard read requests (OSC 52 with a "?" payload) are never
+        /// forwarded: answering one would let any program running in the
+        /// terminal silently read the user's clipboard, and a VT state
+        /// library has no way to mediate that with user consent.
+        clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
+
         /// Called in response to an XTVERSION query. Returns the version
         /// string to report (e.g. "ghostty 1.2.3"). The returned memory
         /// must be valid for the lifetime of the call. The maximum length
@@ -109,12 +142,14 @@ pub const Handler = struct {
         /// effects beyond that.
         pub const readonly: Effects = .{
             .bell = null,
+            .clipboard_write = null,
             .color_scheme = null,
             .device_attributes = null,
             .enquiry = null,
             .program_status = null,
             .size = null,
             .title_changed = null,
+            .pwd_changed = null,
             .write_pty = null,
             .xtversion = null,
         };
@@ -130,12 +165,45 @@ pub const Handler = struct {
         self.apc_handler.deinit();
     }
 
+    /// Resize the terminal and apply any side effects (if supported)
+    /// as a result of that.
+    ///
+    /// This is different than a direct `Terminal.resize` operation
+    /// because it also handles the side effects like mode 2048 in-band
+    /// size reports if write_pty is set.
+    pub fn resize(self: *Handler, value: Terminal.Resize) !void {
+        try self.terminal.resize(self.terminal.gpa(), value);
+
+        // Mode 2048 reports require complete, current cell pixel geometry.
+        const cell_size = value.cell_size_px orelse return;
+
+        // If we have no in-band size reports enabled then do nothing.
+        if (!self.terminal.modes.get(.in_band_size_reports)) return;
+
+        // If we have no write_pty effect, do nothing.
+        const write_pty = self.effects.write_pty orelse return;
+
+        // The maximum mode-2048 response is covered by size_report's maximum
+        // value test. Reserve the final byte for the callback's sentinel.
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
+        size_report.encode(&writer, .mode_2048, .{
+            .rows = value.rows,
+            .columns = value.cols,
+            .cell_width = cell_size.width,
+            .cell_height = cell_size.height,
+        }) catch unreachable;
+        buf[writer.end] = 0;
+        write_pty(self, buf[0..writer.end :0]);
+    }
+
     pub fn vt(
         self: *Handler,
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) void {
         self.vtFallible(action, value) catch |err| {
+            self.semantic_failure = true;
             log.warn("error handling VT action action={} err={}", .{ action, err });
         };
     }
@@ -147,6 +215,7 @@ pub const Handler = struct {
     ) !void {
         switch (action) {
             .print => try self.terminal.print(value.cp),
+            .print_slice => try self.terminal.printSlice(value.cps),
             .print_repeat => try self.terminal.printRepeat(value),
             .backspace => self.terminal.backspace(),
             .carriage_return => self.terminal.carriageReturn(),
@@ -166,7 +235,7 @@ pub const Handler = struct {
             .cursor_row => self.terminal.setCursorRow(value.value),
             .cursor_col_relative => self.terminal.cursorColRelative(value.value),
             .cursor_row_relative => self.terminal.cursorRowRelative(value.value),
-            .cursor_style => self.setCursorStyle(value),
+            .cursor_style => self.terminal.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => self.terminal.eraseDisplay(.complete, value),
@@ -211,7 +280,7 @@ pub const Handler = struct {
             .configure_charset => self.terminal.configureCharset(value.slot, value.charset),
             .set_attribute => switch (value) {
                 .unknown => {},
-                else => self.terminal.setAttribute(value) catch {},
+                else => try self.terminal.setAttribute(value),
             },
             .protected_mode_off => self.terminal.setProtectedMode(.off),
             .protected_mode_iso => self.terminal.setProtectedMode(.iso),
@@ -233,7 +302,7 @@ pub const Handler = struct {
             .decaln => try self.terminal.decaln(),
             .soft_reset => {
                 self.terminal.softReset();
-                self.setCursorStyle(.default);
+                self.terminal.setCursorStyle(.default);
             },
             .full_reset => {
                 self.terminal.fullReset();
@@ -244,12 +313,18 @@ pub const Handler = struct {
             .semantic_prompt => try self.terminal.semanticPrompt(value),
             .mouse_shape => self.terminal.mouse_shape = value,
             .mouse_shape_reset => self.terminal.mouse_shape = .text,
-            .color_operation => try self.colorOperation(value.op, &value.requests),
-            .kitty_color_report => try self.kittyColorOperation(value),
+            .color_operation => self.colorOperation(
+                &value.requests,
+                value.terminator,
+            ) catch |err| log.warn("error reporting OSC color err={}", .{err}),
+            .kitty_color_report => self.kittyColorOperation(value) catch |err| {
+                log.warn("error reporting Kitty colors err={}", .{err});
+            },
 
             // APC
             .apc_start => self.apc_handler.start(),
             .apc_put => self.apc_handler.feed(self.terminal.gpa(), value),
+            .apc_put_slice => self.apc_handler.feedSlice(self.terminal.gpa(), value.bytes),
             .apc_end => self.apcEnd(value.terminated),
 
             // Effect-based handlers
@@ -261,10 +336,18 @@ pub const Handler = struct {
             .request_mode => self.requestMode(value.mode),
             .request_mode_unknown => self.requestModeUnknown(value.mode, value.ansi),
             .size_report => self.reportSize(value),
-            .window_title => self.windowTitle(value.title),
+            .window_title => try self.windowTitle(value.title),
             // Host-window policy belongs to the app runtime.
             .window_visibility => {},
+            .report_pwd => try self.reportPwd(value.url),
             .xtversion => self.reportXtversion(),
+            .clipboard_contents => self.clipboardContents(
+                value.kind,
+                value.data,
+            ) catch |err| {
+                // Clipboard writes are external effects, not terminal state.
+                log.warn("error handling clipboard write err={}", .{err});
+            },
             .program_status => self.programStatus(value),
 
             // No supported DCS commands have any terminal-modifying effects,
@@ -275,10 +358,8 @@ pub const Handler = struct {
             => {},
 
             // Have no terminal-modifying effect
-            .report_pwd,
             .show_desktop_notification,
             .progress_report,
-            .clipboard_contents,
             .title_push,
             .title_pop,
             => {},
@@ -319,6 +400,44 @@ pub const Handler = struct {
     fn bell(self: *Handler) void {
         const func = self.effects.bell orelse return;
         func(self);
+    }
+
+    fn clipboardContents(self: *Handler, kind: u8, data: []const u8) !void {
+        const func = self.effects.clipboard_write orelse return;
+
+        // Read requests are deliberately not forwarded; see the effect docs.
+        if (data.len == 1 and data[0] == '?') return;
+
+        const location: clipboard.Location = switch (kind) {
+            's' => .selection,
+            'p' => .primary,
+            else => .standard,
+        };
+
+        // OSC 52 uses an empty payload to clear the selected clipboard.
+        if (data.len == 0) {
+            _ = func(self, .{
+                .location = location,
+                .contents = &.{},
+            });
+            return;
+        }
+
+        const decoder = std.base64.standard.Decoder;
+        const decoded_len = try decoder.calcSizeForSlice(data);
+        const alloc = self.terminal.gpa();
+        const decoded = try alloc.alloc(u8, decoded_len);
+        defer alloc.free(decoded);
+        try decoder.decode(decoded, data);
+
+        const contents = [_]clipboard.Content{.{
+            .mime = "text/plain",
+            .data = decoded,
+        }};
+        _ = func(self, .{
+            .location = location,
+            .contents = &contents,
+        });
     }
 
     fn reportDeviceAttributes(self: *Handler, req: device_attributes.Req) void {
@@ -381,10 +500,11 @@ pub const Handler = struct {
             .color_scheme => {
                 const func = self.effects.color_scheme orelse return;
                 const scheme = func(self) orelse return;
-                self.writePty(switch (scheme) {
-                    .dark => "\x1B[?997;1n",
-                    .light => "\x1B[?997;2n",
-                });
+                var buf: [device_status.max_color_scheme_report_encode_size + 1]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(buf[0..device_status.max_color_scheme_report_encode_size]);
+                device_status.encodeColorSchemeReport(&writer, scheme) catch return;
+                buf[writer.end] = 0;
+                self.writePty(buf[0..writer.end :0]);
             },
         }
     }
@@ -457,7 +577,7 @@ pub const Handler = struct {
         self.writePty(resp);
     }
 
-    fn windowTitle(self: *Handler, title_raw: []const u8) void {
+    fn windowTitle(self: *Handler, title_raw: []const u8) !void {
         // Prevent DoS attacks by limiting title length.
         const max_title_len = 1024;
         const title = if (title_raw.len > max_title_len) title: {
@@ -468,27 +588,30 @@ pub const Handler = struct {
             break :title title_raw[0..max_title_len];
         } else title_raw;
 
-        self.terminal.setTitle(title) catch |err| {
-            log.warn("error setting title err={}", .{err});
-            return;
-        };
+        try self.terminal.setTitle(title);
 
         const func = self.effects.title_changed orelse return;
         func(self);
     }
 
-    fn setCursorStyle(self: *Handler, value: CursorStyleReq) void {
-        const blink = switch (value) {
-            .default, .steady_block, .steady_bar, .steady_underline => false,
-            .blinking_block, .blinking_bar, .blinking_underline => true,
-        };
-        const style: Screen.CursorStyle = switch (value) {
-            .default, .blinking_block, .steady_block => .block,
-            .blinking_bar, .steady_bar => .bar,
-            .blinking_underline, .steady_underline => .underline,
-        };
-        self.terminal.modes.set(.cursor_blinking, blink);
-        self.terminal.screens.active.cursor.cursor_style = style;
+    fn reportPwd(self: *Handler, url_raw: []const u8) !void {
+        // Prevent DoS attacks by limiting url length. Headroom for
+        // Linux PATH_MAX (4096) plus URI scheme/host and percent-encoding.
+        const max_url_len = 4096;
+        const url = if (url_raw.len > max_url_len) url: {
+            log.warn("pwd url length {d} exceeds max length {d}, truncating", .{
+                url_raw.len,
+                max_url_len,
+            });
+            break :url url_raw[0..max_url_len];
+        } else url_raw;
+
+        // We store the raw payload unparsed. Embedders read it via
+        // getPwd() and are responsible for decoding any URI scheme.
+        try self.terminal.setPwd(url);
+
+        const func = self.effects.pwd_changed orelse return;
+        func(self);
     }
 
     fn requestMode(self: *Handler, mode: modes.Mode) void {
@@ -621,11 +744,16 @@ pub const Handler = struct {
 
     fn colorOperation(
         self: *Handler,
-        op: osc_color.Operation,
         requests: *const osc_color.List,
+        terminator: osc.Terminator,
     ) !void {
-        _ = op;
         if (requests.count() == 0) return;
+
+        var stack = std.heap.stackFallback(1024, self.terminal.gpa());
+        const alloc = stack.get();
+        var response: std.Io.Writer.Allocating = .init(alloc);
+        defer response.deinit();
+        const writer = &response.writer;
 
         var it = requests.constIterator(0);
         while (it.next()) |req| {
@@ -684,10 +812,54 @@ pub const Handler = struct {
                     mask.* = .initEmpty();
                 },
 
-                .query,
-                .reset_special,
-                => {},
+                .query => |target| {
+                    if (self.effects.write_pty == null) continue;
+                    const c = self.terminal.colorForXterm(target) orelse continue;
+                    try writeXtermColorReport(writer, target, c, terminator);
+                },
+
+                .reset_special => {},
             }
+        }
+
+        if (response.written().len > 0) {
+            const resp = try response.toOwnedSliceSentinel(0);
+            defer alloc.free(resp);
+            self.writePty(resp);
+        }
+    }
+
+    fn writeXtermColorReport(
+        writer: *std.Io.Writer,
+        target: osc_color.Target,
+        c: color.RGB,
+        terminator: osc.Terminator,
+    ) !void {
+        switch (target) {
+            .palette => |i| {
+                try writer.print("\x1b]4;{d};", .{i});
+                try c.encodeRgb16(writer);
+                try writer.writeAll(terminator.string());
+            },
+            .dynamic => |dynamic| switch (dynamic) {
+                .foreground,
+                .background,
+                .cursor,
+                => {
+                    try writer.print("\x1b]{d};", .{@intFromEnum(dynamic)});
+                    try c.encodeRgb16(writer);
+                    try writer.writeAll(terminator.string());
+                },
+                .pointer_foreground,
+                .pointer_background,
+                .tektronix_foreground,
+                .tektronix_background,
+                .highlight_background,
+                .tektronix_cursor,
+                .highlight_foreground,
+                => {},
+            },
+            .special => {},
         }
     }
 
@@ -695,6 +867,12 @@ pub const Handler = struct {
         self: *Handler,
         request: kitty_color.OSC,
     ) !void {
+        var stack = std.heap.stackFallback(1024, self.terminal.gpa());
+        const alloc = stack.get();
+        var response: std.Io.Writer.Allocating = .init(alloc);
+        defer response.deinit();
+        const writer = &response.writer;
+
         for (request.list.items) |item| {
             switch (item) {
                 .set => |v| switch (v.key) {
@@ -721,8 +899,27 @@ pub const Handler = struct {
                         else => {},
                     },
                 },
-                .query => {},
+                .query => |key| {
+                    if (self.effects.write_pty == null) continue;
+                    const c = self.terminal.colorForKitty(key) orelse {
+                        if (!key.hasTerminalQueryColor()) continue;
+                        if (response.written().len == 0) try writer.writeAll("\x1b]21");
+                        try writer.print(";{f}=", .{key});
+                        continue;
+                    };
+
+                    if (response.written().len == 0) try writer.writeAll("\x1b]21");
+                    try writer.print(";{f}=", .{key});
+                    try c.encodeRgb8(writer);
+                },
             }
+        }
+
+        if (response.written().len > 0) {
+            try writer.writeAll(request.terminator.string());
+            const resp = try response.toOwnedSliceSentinel(0);
+            defer alloc.free(resp);
+            self.writePty(resp);
         }
     }
 
@@ -757,9 +954,215 @@ pub const Handler = struct {
                     if (final.len > 3) self.writePty(final[0 .. final.len - 1 :0]);
                 }
             },
+
+            .glyph => |*glyph_req| {
+                const resp = self.terminal.glyphProtocol(alloc, glyph_req);
+                if (resp) |r| resp_block: {
+                    // Don't waste time encoding if we can't write responses
+                    // anyways.
+                    if (self.effects.write_pty == null) break :resp_block;
+
+                    // Glyph responses are short and bounded by the protocol
+                    // fields we emit, so this matches the Kitty response
+                    // buffer size above with ample headroom.
+                    var buf: [apc.glyph.Response.max_wire_bytes]u8 = undefined;
+                    var writer: std.Io.Writer = .fixed(&buf);
+                    r.formatWire(&writer) catch return;
+                    writer.writeByte(0) catch return;
+                    const final = writer.buffered();
+                    self.writePty(final[0 .. final.len - 1 :0]);
+                }
+            },
         }
     }
 };
+
+test "resize clears synchronized output on unchanged cell dimensions" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    t.modes.set(.synchronized_output, true);
+    try s.handler.resize(.{
+        .cols = 80,
+        .rows = 24,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+
+    try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expectEqual(@as(u32, 720), t.width_px);
+    try testing.expectEqual(@as(u32, 432), t.height_px);
+}
+
+test "resize reports mode 2048 geometry" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var response: [128]u8 = undefined;
+        var response_len: usize = 0;
+
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            @memcpy(response[0..data.len], data);
+            response_len = data.len;
+        }
+    };
+    S.response_len = 0;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    t.modes.set(.in_band_size_reports, true);
+    try s.handler.resize(.{
+        .cols = 100,
+        .rows = 40,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+
+    try testing.expectEqualStrings(
+        "\x1B[48;40;100;720;900t",
+        S.response[0..S.response_len],
+    );
+}
+
+test "resize suppresses mode 2048 reports" {
+    const S = struct {
+        var calls: usize = 0;
+
+        fn writePty(_: *Handler, _: [:0]const u8) void {
+            calls += 1;
+        }
+    };
+    S.calls = 0;
+
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // Disabled mode suppresses a report even with pixels and a callback.
+    try s.handler.resize(.{
+        .cols = 80,
+        .rows = 24,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+    try testing.expectEqual(@as(usize, 0), S.calls);
+
+    // Missing pixel geometry suppresses a report even with the mode enabled.
+    t.modes.set(.in_band_size_reports, true);
+    try s.handler.resize(.{ .cols = 80, .rows = 24 });
+    try testing.expectEqual(@as(usize, 0), S.calls);
+
+    // A read-only stream has no write effect and remains successful.
+    var readonly_terminal: Terminal = try .init(
+        testing.allocator,
+        .{ .cols = 80, .rows = 24 },
+    );
+    defer readonly_terminal.deinit(testing.allocator);
+    readonly_terminal.modes.set(.in_band_size_reports, true);
+    var readonly_stream: Stream = .initAlloc(
+        testing.allocator,
+        .init(&readonly_terminal),
+    );
+    defer readonly_stream.deinit();
+    try readonly_stream.handler.resize(.{
+        .cols = 80,
+        .rows = 24,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+    try testing.expectEqual(@as(usize, 0), S.calls);
+}
+
+test "resize failure preserves terminal state and does not write" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 1 });
+    defer t.deinit(alloc);
+
+    const S = struct {
+        var called: bool = false;
+
+        fn writePty(_: *Handler, _: [:0]const u8) void {
+            called = true;
+        }
+    };
+    S.called = false;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(alloc, handler);
+    defer s.deinit();
+
+    t.modes.set(.synchronized_output, true);
+    t.modes.set(.in_band_size_reports, true);
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, s.handler.resize(.{
+        .cols = 513,
+        .rows = 1,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    }));
+
+    try testing.expect(t.modes.get(.synchronized_output));
+    try testing.expect(!S.called);
+    try testing.expectEqual(@as(@TypeOf(t.cols), 10), t.cols);
+    try testing.expectEqual(@as(u32, 0), t.width_px);
+    try testing.expectEqual(@as(u32, 0), t.height_px);
+}
+
+test "resize effects do not change canonical terminal state" {
+    var authoritative: Terminal = try .init(
+        testing.allocator,
+        .{ .cols = 10, .rows = 5 },
+    );
+    defer authoritative.deinit(testing.allocator);
+    var readonly: Terminal = try .init(
+        testing.allocator,
+        .{ .cols = 10, .rows = 5 },
+    );
+    defer readonly.deinit(testing.allocator);
+
+    const S = struct {
+        fn writePty(_: *Handler, _: [:0]const u8) void {}
+    };
+    var authoritative_handler: Handler = .init(&authoritative);
+    authoritative_handler.effects.write_pty = &S.writePty;
+    var authoritative_stream: Stream = .initAlloc(
+        testing.allocator,
+        authoritative_handler,
+    );
+    defer authoritative_stream.deinit();
+    var readonly_stream: Stream = .initAlloc(
+        testing.allocator,
+        .init(&readonly),
+    );
+    defer readonly_stream.deinit();
+
+    authoritative.modes.set(.in_band_size_reports, true);
+    readonly.modes.set(.in_band_size_reports, true);
+    const value: Terminal.Resize = .{
+        .cols = 20,
+        .rows = 10,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    };
+    try authoritative_stream.handler.resize(value);
+    try readonly_stream.handler.resize(value);
+
+    try testing.expectEqual(authoritative.cols, readonly.cols);
+    try testing.expectEqual(authoritative.rows, readonly.rows);
+    try testing.expectEqual(authoritative.width_px, readonly.width_px);
+    try testing.expectEqual(authoritative.height_px, readonly.height_px);
+    try testing.expect(std.meta.eql(authoritative.modes, readonly.modes));
+    try testing.expect(std.meta.eql(
+        authoritative.scrolling_region,
+        readonly.scrolling_region,
+    ));
+}
 
 test "basic print" {
     var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
@@ -798,6 +1201,39 @@ test "SUB in the ground state takes no cell" {
         defer testing.allocator.free(str);
         try testing.expectEqualStrings("ab", str);
     }
+}
+
+test "semantic failure is sticky while processing continues" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var s: Stream = .initAlloc(alloc, .init(&t));
+    defer s.deinit();
+    try testing.expect(!s.handler.semantic_failure);
+
+    // Setting the title is a terminal-owned semantic update. Force its
+    // allocation to fail at the central vtFallible boundary.
+    failing.fail_index = failing.alloc_index;
+    s.nextSlice("\x1B]2;unavailable\x1B\\");
+    try testing.expect(s.handler.semantic_failure);
+
+    // Later input and RIS remain best-effort and never clear the diagnostic.
+    failing.fail_index = std.math.maxInt(usize);
+    s.nextSlice("ignored");
+    s.nextSlice("\x1Bc");
+    s.nextSlice("OK");
+    try testing.expect(s.handler.semantic_failure);
+
+    const str = try t.plainString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("OK", str);
+
+    // A new execution root starts without inheriting the diagnostic.
+    var fresh = Handler.init(&t);
+    defer fresh.deinit();
+    try testing.expect(!fresh.semantic_failure);
 }
 
 test "cursor movement" {
@@ -1001,6 +1437,8 @@ test "full reset" {
     s.nextSlice("\x1B[10;20H");
     s.nextSlice("\x1B[5;20r"); // Set scroll region
     s.nextSlice("\x1B[?7l"); // Disable wraparound
+    s.nextSlice("\x1B_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1B\\");
+    try testing.expect(t.glyph_glossary.contains(0xE0A0));
 
     // Full reset
     s.nextSlice("\x1Bc");
@@ -1011,6 +1449,35 @@ test "full reset" {
     try testing.expectEqual(@as(usize, 0), t.scrolling_region.top);
     try testing.expectEqual(@as(usize, 23), t.scrolling_region.bottom);
     try testing.expect(t.modes.get(.wraparound));
+    try testing.expect(!t.glyph_glossary.contains(0xE0A0));
+}
+
+test "glyph protocol APC with write_pty callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var last_response: ?[:0]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            if (last_response) |old| testing.allocator.free(old);
+            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+        }
+    };
+    S.last_response = null;
+    defer if (S.last_response) |old| testing.allocator.free(old);
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    s.nextSlice("\x1B_25a1;s\x1B\\");
+    try testing.expectEqualStrings("\x1B_25a1;s;fmt=glyf\x1B\\", S.last_response.?);
+
+    s.nextSlice("\x1B_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1B\\");
+    try testing.expectEqualStrings("\x1B_25a1;r;cp=e0a0;status=0\x1B\\", S.last_response.?);
+    try testing.expect(t.glyph_glossary.contains(0xE0A0));
 }
 
 test "ignores query actions" {
@@ -1024,6 +1491,15 @@ test "ignores query actions" {
     s.nextSlice("\x1B[c"); // Device attributes
     s.nextSlice("\x1B[5n"); // Device status report
     s.nextSlice("\x1B[6n"); // Cursor position report
+    s.nextSlice("\x1B]4;0;?\x1B\\"); // OSC color query
+    s.nextSlice("\x1B]21;foreground=?\x1B\\"); // Kitty color query
+    s.nextSlice("\x1B]52;c;%%%invalid-base64%%%\x1B\\");
+    s.nextSlice("\x1B_Ga=p,i=999\x1B\\"); // Missing Kitty image
+    s.nextSlice("\x1B_25a1;r;cp=41;%%%invalid%%%\x1B\\"); // Rejected glyph
+
+    // Query, malformed input, protocol failure responses, and external-effect
+    // failures do not imply that terminal-owned semantic state diverged.
+    try testing.expect(!s.handler.semantic_failure);
 
     // Terminal should still be functional
     s.nextSlice("Test");
@@ -1149,6 +1625,63 @@ test "OSC 12 set and reset cursor color" {
     // After reset, cursor might be null (using default)
 }
 
+test "OSC color query responses" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var last_response: ?[:0]const u8 = null;
+
+        fn reset() void {
+            if (last_response) |old| testing.allocator.free(old);
+            last_response = null;
+        }
+
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            reset();
+            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+        }
+    };
+    S.last_response = null;
+    defer S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    s.nextSlice("\x1b]10;?\x1b\\");
+    try testing.expect(S.last_response == null);
+
+    s.nextSlice("\x1b]11;?\x1b\\");
+    try testing.expect(S.last_response == null);
+
+    s.nextSlice("\x1b]4;2;rgb:12/34/56;2;?\x1b\\");
+    try testing.expectEqualStrings(
+        "\x1b]4;2;rgb:1212/3434/5656\x1b\\",
+        S.last_response.?,
+    );
+
+    s.nextSlice("\x1b]10;rgb:01/02/03\x1b\\");
+    s.nextSlice("\x1b]11;rgb:04/05/06\x1b\\");
+    s.nextSlice("\x1b]12;rgb:07/08/09\x1b\\");
+    s.nextSlice("\x1b]10;?;?;?\x1b\\");
+    try testing.expectEqualStrings(
+        "\x1b]10;rgb:0101/0202/0303\x1b\\" ++
+            "\x1b]11;rgb:0404/0505/0606\x1b\\" ++
+            "\x1b]12;rgb:0707/0808/0909\x1b\\",
+        S.last_response.?,
+    );
+
+    s.nextSlice("\x1b]112\x1b\\");
+    s.nextSlice("\x1b]12;?\x07");
+    try testing.expectEqualStrings(
+        "\x1b]12;rgb:0101/0202/0303\x07",
+        S.last_response.?,
+    );
+}
+
 test "kitty color protocol set palette" {
     var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
     defer t.deinit(testing.allocator);
@@ -1241,6 +1774,46 @@ test "kitty color protocol reset foreground" {
     s.nextSlice("\x1b]21;foreground=\x1b\\");
     // After reset, should be unset
     try testing.expect(t.colors.foreground.get() == null);
+}
+
+test "kitty color protocol query responses" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var last_response: ?[:0]const u8 = null;
+
+        fn reset() void {
+            if (last_response) |old| testing.allocator.free(old);
+            last_response = null;
+        }
+
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            reset();
+            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+        }
+    };
+    S.last_response = null;
+    defer S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    s.nextSlice("\x1b]21;background=?\x1b\\");
+    try testing.expectEqualStrings(
+        "\x1b]21;background=\x1b\\",
+        S.last_response.?,
+    );
+
+    s.nextSlice("\x1b]21;foreground=rgb:12/34/56;2=rgb:aa/bb/cc\x1b\\");
+    s.nextSlice("\x1b]21;foreground=?;background=?;2=?\x1b\\");
+    try testing.expectEqualStrings(
+        "\x1b]21;foreground=rgb:12/34/56;background=;2=rgb:aa/bb/cc\x1b\\",
+        S.last_response.?,
+    );
 }
 
 test "palette dirty flag set on color change" {
@@ -1357,7 +1930,7 @@ fn semanticPromptScreenAfterNarrowingForTest(
         }
     }
 
-    try t.resize(alloc, 12, 6);
+    try t.resize(alloc, .{ .cols = 12, .rows = 6 });
     return try t.plainString(alloc);
 }
 
@@ -1549,7 +2122,7 @@ test "semantic prompt: bash keeps redraw=last after a program reads an Enter" {
 
     // Narrowing clears only the last line, the one bash redraws, so all
     // three renderings of the upper prompt line survive.
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, screen, "u@h ~"));
@@ -1576,7 +2149,7 @@ test "semantic prompt: bash keeps redraw=last after a program reads two Enters a
     s.nextSlice("git ch\r\ncheckout  cherry\r\n" ++ bash_ps1 ++ "git ch");
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, screen, "u@h ~"));
@@ -1634,7 +2207,7 @@ test "semantic prompt: oh-my-posh keeps the PowerShell prompt after Read-Host re
     s.nextSlice("\r\n" ++ ps ++ "\x1b]133;D;0\x07\x1b]133;A\x07p2> \x1b[K\x1b]133;B\x07");
     try testing.expect(t.flags.shell_redraws_prompt == .false);
 
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expect(std.mem.indexOf(u8, screen, "p2>") != null);
@@ -1715,7 +2288,7 @@ test "semantic prompt: a shell started by a pasted line in cmd has its prompt cl
     s.nextSlice("\x1b]133;A\x07nu> \x1b]133;B\x07");
     try testing.expect(t.flags.shell_redraws_prompt == .true);
 
-    try t.resize(testing.allocator, 12, 6);
+    try t.resize(testing.allocator, .{ .cols = 12, .rows = 6 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expect(std.mem.indexOf(u8, screen, "nu>") == null);
@@ -1859,7 +2432,7 @@ test "semantic prompt: a line read by a PowerShell command that then starts cmd 
     try testing.expect(!t.screens.active.semantic_command.prompt_presubmitted);
     try testing.expect(t.flags.shell_redraws_prompt == .false);
 
-    try t.resize(testing.allocator, 20, 10);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 10 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, screen, "C:\\>"));
@@ -1907,7 +2480,7 @@ test "semantic prompt: bash keeps redraw=last after the command that started it 
     s.nextSlice("git ch\r\ncheckout  cherry\r\n" ++ bash_ps1 ++ "git ch");
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 
-    try t.resize(testing.allocator, 20, 20);
+    try t.resize(testing.allocator, .{ .cols = 20, .rows = 20 });
     const screen = try t.plainString(testing.allocator);
     defer testing.allocator.free(screen);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, screen, "u@h ~"));
@@ -2208,6 +2781,156 @@ test "bell effect callback" {
         s.nextSlice("\x07\x07");
         try testing.expectEqual(@as(usize, 3), S.bell_count);
     }
+}
+
+test "clipboard_write effect callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    // A null callback (the default readonly effects) silently ignores writes.
+    {
+        var s: Stream = .initAlloc(testing.allocator, .init(&t));
+        defer s.deinit();
+
+        s.nextSlice("\x1B]52;c;aGVsbG8=\x1B\\");
+
+        // Terminal should still be functional after the ignored sequence
+        s.nextSlice("AfterClipboard");
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("AfterClipboard", str);
+    }
+
+    t.fullReset();
+
+    const S = struct {
+        var count: usize = 0;
+        var result: clipboard.WriteResult = .success;
+        var last_location: clipboard.Location = .standard;
+        var last_contents_len: usize = 0;
+        var last_mime: ?[]u8 = null;
+        var last_data: ?[]u8 = null;
+
+        fn clearCapture() void {
+            if (last_mime) |value| testing.allocator.free(value);
+            if (last_data) |value| testing.allocator.free(value);
+            last_mime = null;
+            last_data = null;
+            last_contents_len = 0;
+        }
+
+        fn clipboardWrite(_: *Handler, write: clipboard.Write) clipboard.WriteResult {
+            clearCapture();
+            count += 1;
+            last_location = write.location;
+            last_contents_len = write.contents.len;
+            if (write.contents.len > 0) {
+                last_mime = testing.allocator.dupe(u8, write.contents[0].mime) catch
+                    @panic("failed to capture clipboard MIME type");
+                last_data = testing.allocator.dupe(u8, write.contents[0].data) catch
+                    @panic("failed to capture clipboard data");
+            }
+            return result;
+        }
+    };
+    S.count = 0;
+    S.result = .denied;
+    S.clearCapture();
+    defer S.clearCapture();
+
+    var handler: Handler = .init(&t);
+    handler.effects.clipboard_write = &S.clipboardWrite;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // Selectors are normalized and payloads are decoded before the callback.
+    const cases = [_]struct {
+        sequence: []const u8,
+        location: clipboard.Location,
+        data: []const u8,
+    }{
+        .{ .sequence = "\x1B]52;c;aGVsbG8=\x1B\\", .location = .standard, .data = "hello" },
+        .{ .sequence = "\x1B]52;s;d29ybGQ=\x07", .location = .selection, .data = "world" },
+        .{ .sequence = "\x1B]52;p;cHJpbWFyeQ==\x1B\\", .location = .primary, .data = "primary" },
+        .{ .sequence = "\x1B]52;0;Y3V0\x1B\\", .location = .standard, .data = "cut" },
+        .{ .sequence = "\x1B]52;x;ZmFsbGJhY2s=\x1B\\", .location = .standard, .data = "fallback" },
+        .{ .sequence = "\x1B]52;c;YQBi\x1B\\", .location = .standard, .data = "a\x00b" },
+    };
+
+    for (cases, 1..) |case, expected_count| {
+        s.nextSlice(case.sequence);
+        try testing.expectEqual(expected_count, S.count);
+        try testing.expectEqual(case.location, S.last_location);
+        try testing.expectEqual(@as(usize, 1), S.last_contents_len);
+        try testing.expectEqualStrings("text/plain", S.last_mime.?);
+        try testing.expectEqualSlices(u8, case.data, S.last_data.?);
+    }
+
+    // Empty data is a clear, represented by an empty contents slice.
+    s.nextSlice("\x1B]52;s;\x1B\\");
+    try testing.expectEqual(@as(usize, cases.len + 1), S.count);
+    try testing.expectEqual(clipboard.Location.selection, S.last_location);
+    try testing.expectEqual(@as(usize, 0), S.last_contents_len);
+    try testing.expect(S.last_mime == null);
+    try testing.expect(S.last_data == null);
+
+    // Reads and malformed base64 are ignored.
+    s.nextSlice("\x1B]52;c;?\x1B\\");
+    s.nextSlice("\x1B]52;c;***\x1B\\");
+    try testing.expectEqual(@as(usize, cases.len + 1), S.count);
+
+    // OSC 1337 Copy shares the normalized clipboard write path.
+    s.nextSlice("\x1B]1337;Copy=:aVRlcm0y\x1B\\");
+    try testing.expectEqual(@as(usize, cases.len + 2), S.count);
+    try testing.expectEqual(clipboard.Location.standard, S.last_location);
+    try testing.expectEqualStrings("text/plain", S.last_mime.?);
+    try testing.expectEqualStrings("iTerm2", S.last_data.?);
+
+    // Parsing across write boundaries still invokes exactly one atomic write.
+    s.nextSlice("\x1B]52;p;ZnJh");
+    s.nextSlice("Z21lbnRlZA==\x1B");
+    s.nextSlice("\\");
+    try testing.expectEqual(@as(usize, cases.len + 3), S.count);
+    try testing.expectEqual(clipboard.Location.primary, S.last_location);
+    try testing.expectEqualStrings("text/plain", S.last_mime.?);
+    try testing.expectEqualStrings("fragmented", S.last_data.?);
+
+    // Callback results are intentionally ignored for protocols without a
+    // write acknowledgement. The denied result above did not stop later writes.
+    try testing.expectEqual(clipboard.WriteResult.denied, S.result);
+}
+
+test "clipboard_write allocation failure is ignored" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var count: usize = 0;
+
+        fn clipboardWrite(_: *Handler, _: clipboard.Write) clipboard.WriteResult {
+            count += 1;
+            return .success;
+        }
+    };
+    S.count = 0;
+
+    var handler: Handler = .init(&t);
+    handler.effects.clipboard_write = &S.clipboardWrite;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // Only the decoded scratch data uses the terminal allocator here. Swap in
+    // an allocator that always fails, then restore it before terminal teardown.
+    {
+        const alloc = t.screens.active.alloc;
+        t.screens.active.alloc = testing.failing_allocator;
+        defer t.screens.active.alloc = alloc;
+        s.nextSlice("\x1B]52;c;aGVsbG8=\x1B\\");
+    }
+    try testing.expectEqual(@as(usize, 0), S.count);
+    try testing.expect(!s.handler.semantic_failure);
 }
 
 test "request mode DECRQM with write_pty callback" {

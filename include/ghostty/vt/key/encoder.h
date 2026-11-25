@@ -64,7 +64,7 @@ typedef uint8_t GhosttyKittyKeyFlags;
  *
  * @ingroup key
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
     /** Option key is not treated as alt */
     GHOSTTY_OPTION_AS_ALT_FALSE = 0,
     /** Option key is treated as alt */
@@ -73,6 +73,7 @@ typedef enum {
     GHOSTTY_OPTION_AS_ALT_LEFT = 2,
     /** Only right option key is treated as alt */
     GHOSTTY_OPTION_AS_ALT_RIGHT = 3,
+    GHOSTTY_OPTION_AS_ALT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyOptionAsAlt;
 
 /**
@@ -83,7 +84,7 @@ typedef enum {
  *
  * @ingroup key
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
     /** Terminal DEC mode 1: cursor key application mode (value: bool) */
     GHOSTTY_KEY_ENCODER_OPT_CURSOR_KEY_APPLICATION = 0,
 
@@ -111,6 +112,8 @@ typedef enum {
      * If `true`, `backspace` emits 0x08
      */
     GHOSTTY_KEY_ENCODER_OPT_BACKARROW_KEY_MODE = 7,
+
+    GHOSTTY_KEY_ENCODER_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyKeyEncoderOption;
 
 /**

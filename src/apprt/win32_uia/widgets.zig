@@ -24,6 +24,7 @@ const constants = @import("constants.zig");
 const events = @import("events.zig");
 const terminal_text = @import("text.zig");
 const win32_consts = @import("../win32/consts.zig");
+const thread_role = @import("../../sync/thread_role.zig");
 
 /// Private tab-button message. It carries a stable tab ID, never a pointer.
 pub const tab_close_message: u32 = 0x8000 + 16;
@@ -7702,7 +7703,7 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
         cell_height: f64 = 16,
         origin_x: f64 = 4,
         origin_y: f64 = 6,
-        numbering: terminal_text.RowNumbering = .{ .active_key = 0, .page_serial_min = 1, .first_page_serial = 1, .rows = 3, .columns = 10 },
+        numbering: terminal_text.RowNumbering = .{ .active_key = 0, .page_serial_epoch = 1, .first_page_serial = 1, .rows = 3, .columns = 10 },
         available: bool = true,
         snapshot_calls: usize = 0,
         fn name(_: *anyopaque, _: []u8) []const u8 {
@@ -7797,7 +7798,7 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
         switch (cause) {
             0 => ctx.available = false,
             1 => ctx.numbering.active_key += 1,
-            2 => ctx.numbering.page_serial_min += 1,
+            2 => ctx.numbering.page_serial_epoch += 1,
             3 => ctx.numbering.first_page_serial += 1,
             4 => ctx.numbering.rows += 1,
             5 => ctx.numbering.columns += 1,
@@ -7868,6 +7869,104 @@ test "PKG71 held range rectangles follow scrolling wheel motion and current metr
         try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(rects.?, 1, &upper));
         try std.testing.expectEqual(@as(i32, -1), upper);
     }
+}
+
+test "PKG71 scrollback-erase rejects held overlapping geometry" {
+    try @import("../win32/host.zig").Host.runOnPrivateDesktop(struct {
+        fn run() !void {
+            const win32 = @import("../win32/sys.zig");
+            const terminal = @import("../../terminal/main.zig");
+            const alloc = std.testing.allocator;
+            const hwnd = win32.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 100, 100, null, null, null, null) orelse return error.TestWindowCreationFailed;
+            defer _ = win32.DestroyWindow(hwnd);
+
+            const Hook = struct {
+                term: *terminal.Terminal,
+                live: ?TerminalViewportGeometry = null,
+
+                fn name(_: *anyopaque, _: []u8) []const u8 {
+                    return "terminal";
+                }
+                fn value(_: *anyopaque, allocator: std.mem.Allocator) ![]u8 {
+                    return allocator.dupe(u8, "terminal");
+                }
+                fn focused(_: *anyopaque) bool {
+                    return true;
+                }
+                fn capture(ctx: *anyopaque, allocator: std.mem.Allocator) !TerminalSnapshot {
+                    const self: *@This() = @ptrCast(@alignCast(ctx));
+                    const doc = try terminal_text.snapshotTerminalAccessiblePlainText(allocator, self.term);
+                    const live: TerminalViewportGeometry = .{
+                        .row_numbering = doc.row_numbering.?,
+                        .viewport_y = doc.viewport_y,
+                        .cell_width = 8,
+                        .cell_height = 16,
+                        .origin_x = 0,
+                        .origin_y = 0,
+                    };
+                    self.live = live;
+                    return .{
+                        .document_text = doc.text,
+                        .visible_range = doc.visible_range,
+                        .geometry = .{
+                            .viewport_y = doc.viewport_y,
+                            .document_window = doc.document_window,
+                            .row_numbering = doc.row_numbering,
+                            .cell_for_byte = doc.cell_for_byte,
+                            .viewport_rows = doc.viewport_rows,
+                            .viewport_columns = doc.viewport_columns,
+                            .cell_width = live.cell_width,
+                            .cell_height = live.cell_height,
+                            .origin_x = live.origin_x,
+                            .origin_y = live.origin_y,
+                        },
+                    };
+                }
+                fn viewport(ctx: *anyopaque) !?TerminalViewportGeometry {
+                    const self: *@This() = @ptrCast(@alignCast(ctx));
+                    return self.live;
+                }
+                fn rectangleCount(range: *com.ITextRangeProvider) !i32 {
+                    var rects: ?*com.SAFEARRAY = null;
+                    try std.testing.expectEqual(com.S_OK, range.vtbl.GetBoundingRectangles(range, &rects));
+                    try std.testing.expect(rects != null);
+                    defer _ = com.SafeArrayDestroy(rects.?);
+                    var upper: i32 = 0;
+                    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(rects.?, 1, &upper));
+                    return @divExact(upper + 1, 4);
+                }
+            };
+            var t = try terminal.Terminal.init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 100_000 });
+            defer t.deinit(alloc);
+            try t.printString("a\nb\nc\nd");
+            var ctx = Hook{ .term = &t };
+            const provider = try TerminalProvider.create(alloc, hwnd, .{
+                .ctx = &ctx,
+                .name = Hook.name,
+                .value = Hook.value,
+                .focused = Hook.focused,
+                .snapshot = Hook.capture,
+                .current_viewport = Hook.viewport,
+            });
+            defer _ = TerminalProvider.Release(&provider.base);
+
+            var held: ?*com.ITextRangeProvider = null;
+            try std.testing.expectEqual(com.S_OK, TerminalProvider.get_DocumentRange(&provider.text_iface, &held));
+            defer _ = held.?.vtbl.Release(held.?);
+            try std.testing.expectEqual(@as(usize, 1), ctx.live.?.viewport_y);
+            try std.testing.expectEqual(@as(i32, 3), try Hook.rectangleCount(held.?));
+
+            t.eraseDisplay(.scrollback, false);
+            var fresh: ?*com.ITextRangeProvider = null;
+            try std.testing.expectEqual(com.S_OK, TerminalProvider.get_DocumentRange(&provider.text_iface, &fresh));
+            defer _ = fresh.?.vtbl.Release(fresh.?);
+            try std.testing.expectEqual(@as(usize, 0), ctx.live.?.viewport_y);
+            // Both reads use this one available viewport. The held document
+            // still covers absolute rows 0–2, so it cannot clip away entirely.
+            try std.testing.expectEqual(@as(i32, 3), try Hook.rectangleCount(fresh.?));
+            try std.testing.expectEqual(@as(i32, 0), try Hook.rectangleCount(held.?));
+        }
+    }.run);
 }
 
 test "PKG71 ScrollIntoView dispatches frozen endpoint and alignment without selecting" {
@@ -8664,6 +8763,7 @@ test "settings provider behavior invoke dispatch is asynchronous and source pres
             wparam: com.WPARAM,
             lparam: com.LPARAM,
         ) callconv(.winapi) com.LRESULT {
+            thread_role.assertWindowProc();
             if (message == WM_COMMAND) {
                 command_calls += 1;
                 last_wparam = wparam;
@@ -8790,6 +8890,7 @@ test "settings provider behavior selection dispatch is synchronous and postcondi
             wparam: com.WPARAM,
             lparam: com.LPARAM,
         ) callconv(.winapi) com.LRESULT {
+            thread_role.assertWindowProc();
             if (message == WM_COMMAND) {
                 command_calls += 1;
                 last_wparam = wparam;
@@ -8974,6 +9075,7 @@ test "settings provider behavior selection dispatch is bounded for a hung owner 
             wparam: com.WPARAM,
             lparam: com.LPARAM,
         ) callconv(.winapi) com.LRESULT {
+            thread_role.assertWindowProc();
             const self = active orelse return win32.DefWindowProcW(hwnd, message, wparam, lparam);
             if (message == WM_COMMAND) {
                 _ = self.command_calls.fetchAdd(1, .acq_rel);

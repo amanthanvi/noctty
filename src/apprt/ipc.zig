@@ -169,6 +169,7 @@ pub const AutomationCommand = union(enum) {
         target: AutomationTarget,
         text: []const u8,
     },
+    toggle_quick_terminal: void,
 };
 
 pub const Action = union(enum) {
@@ -188,6 +189,9 @@ pub const Action = union(enum) {
 
     /// The arguments to pass to Ghostty as the command.
     new_window: NewWindow,
+
+    /// Toggle the quick terminal.
+    toggle_quick_terminal: void,
 
     pub const NewWindow = struct {
         /// A list of command arguments to launch in the new window. If this is
@@ -229,6 +233,7 @@ pub const Action = union(enum) {
     /// Sync with: ghostty_ipc_action_tag_e
     pub const Key = enum(c_int) {
         new_window,
+        toggle_quick_terminal,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_IPC_ACTION_");

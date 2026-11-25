@@ -4,6 +4,7 @@ const SemanticCommand = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const PageList = @import("PageList.zig");
+const pagepkg = @import("page.zig");
 const point = @import("point.zig");
 const Pin = PageList.Pin;
 
@@ -265,12 +266,18 @@ pub fn abortCommand(self: *SemanticCommand, pages: *PageList) void {
 
 /// Drop retained state whose recovered span overlaps a range about to be
 /// erased, before PageList can relocate those pins onto unrelated rows.
+/// The range is whole rows: `tl` and `bl` are widened to the first and last
+/// column, which is right for an erase or a full-width row move. A move
+/// inside left and right margins uses invalidateMarginShift.
 pub fn invalidateRange(
     self: *SemanticCommand,
     pages: *PageList,
     tl: point.Point,
     bl: ?point.Point,
 ) void {
+    // Checked before the span below is looked for: see dropUnreadable.
+    self.dropUnreadable(pages);
+
     var top = pages.pin(tl) orelse return;
     top.x = 0;
 
@@ -287,16 +294,165 @@ pub fn invalidateRange(
         if (pin.*.isBetween(top, bottom)) self.clearActive(pages);
     }
     if (self.completed) |command| {
-        const command_end = if (command.output_end) |pin|
-            pin.*
-        else if (pages.highlightSemanticContent(command.prompt.*, .input)) |hl|
-            hl.end
-        else
-            command.prompt.*;
+        const command_end = completedEnd(pages, command);
         if (pinRangesOverlap(command.prompt.*, command_end, top, bottom)) {
             self.clearCompleted(pages);
         }
     }
+}
+
+/// Active-area cells a move inside left and right margins rewrites,
+/// inclusive.
+pub const MarginRegion = struct {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+};
+
+/// Drop the completed command when a move inside left and right margins
+/// changes one of its cells. Such a move (Terminal.deleteLines in a region
+/// narrower than the screen) first normalises every row of `region` the way
+/// Terminal.rowWillBeShifted does: a wide character the left margin splits
+/// loses its head (one column outside the region) and its tail, one the
+/// right margin splits loses its head and its spill (one column outside),
+/// and a spacer head that ends the row becomes a plain cell when the region
+/// reaches the last column or the first two. It then rewrites each cell of
+/// `region` with the normalised cell `shift` rows below it, or a blank past
+/// the region's bottom, and keeps every tracked pin and, on one page, every
+/// row's metadata. So the pending and active prompts keep their rows, and a
+/// completed command keeps reading what it read unless one of those cells,
+/// as the move leaves it, falls in its recovered span.
+///
+/// Not for a move that copies a row across a page boundary: that copy takes
+/// the source row's metadata, prompt mark included (Page.clonePartialRowFrom),
+/// which this does not model, so Terminal.deleteLines and insertLines drop
+/// the record before such a move instead (dropCompleted).
+pub fn invalidateMarginShift(
+    self: *SemanticCommand,
+    pages: *PageList,
+    region: MarginRegion,
+    shift: usize,
+) void {
+    self.dropUnreadable(pages);
+    const command = self.completed orelse return;
+    const span_start = command.prompt.*;
+    const span_end = completedEnd(pages, command);
+
+    var y = region.top;
+    while (y <= region.bottom) : (y += 1) {
+        const row = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse continue;
+        const cells = row.cells(.all);
+        if (region.right >= cells.len or region.left > region.right) continue;
+        var row_start = row;
+        row_start.x = 0;
+        var row_end = row;
+        row_end.x = @intCast(cells.len - 1);
+        if (row_end.before(span_start) or span_end.before(row_start)) continue;
+
+        // The part of this row the recovered span covers.
+        const first: usize = if (sameRow(row, span_start)) span_start.x else 0;
+        const last: usize = if (sameRow(row, span_end)) span_end.x else cells.len - 1;
+        const inSpan = struct {
+            fn f(x: usize, lo: usize, hi: usize) bool {
+                return x >= lo and x <= hi;
+            }
+        }.f;
+
+        // The normalisation's own changes to this row.
+        if (region.left > 0 and cells[region.left].wide == .spacer_tail and
+            (inSpan(region.left - 1, first, last) or inSpan(region.left, first, last)))
+        {
+            self.clearCompleted(pages);
+            return;
+        }
+        if (cells[region.right].wide == .wide and region.right + 1 < cells.len and
+            (inSpan(region.right, first, last) or inSpan(region.right + 1, first, last)))
+        {
+            self.clearCompleted(pages);
+            return;
+        }
+        if ((region.right == cells.len - 1 or region.left < 2) and
+            cells[cells.len - 1].wide == .spacer_head and
+            inSpan(cells.len - 1, first, last))
+        {
+            self.clearCompleted(pages);
+            return;
+        }
+
+        // The move: each cell between the margins is overwritten by the
+        // normalised cell `shift` rows below it.
+        const lo = @max(region.left, first);
+        const hi = @min(region.right, last);
+        if (lo > hi) continue;
+        const incoming: []const pagepkg.Cell = incoming: {
+            if (y + shift > region.bottom) break :incoming &.{};
+            const p = pages.pin(.{ .active = .{ .y = @intCast(y + shift) } }) orelse
+                break :incoming &.{};
+            break :incoming p.cells(.all);
+        };
+        for (lo..hi + 1) |x| {
+            if (cellIsRead(cells[x]) or
+                (x < incoming.len and incomingIsRead(incoming, x, region)))
+            {
+                self.clearCompleted(pages);
+                return;
+            }
+        }
+    }
+}
+
+/// Whether the cell a margin move brings into column `x` is read by a
+/// recovered span, as the move's normalisation leaves it: the head of a wide
+/// character the right margin splits arrives with its text cleared.
+fn incomingIsRead(
+    src: []const pagepkg.Cell,
+    x: usize,
+    region: MarginRegion,
+) bool {
+    const cell = src[x];
+    if (x == region.right and cell.wide == .wide and x + 1 < src.len) {
+        return cell.semantic_content != .output;
+    }
+    return cellIsRead(cell);
+}
+
+/// Drop the completed command. Terminal calls this before a left/right
+/// margin line move that copies a row across a page boundary, which takes
+/// the source row's metadata, prompt mark included
+/// (Page.clonePartialRowFrom): the record's checks do not model that copy,
+/// so it fails closed.
+pub fn dropCompleted(self: *SemanticCommand, pages: *PageList) void {
+    self.clearCompleted(pages);
+}
+
+/// Drop a completed command that can no longer be read: its prompt row lost
+/// its prompt mark (or its pin is garbage), so lastCompleted refuses it, and
+/// its span cannot be found either, since highlightSemanticContent asserts
+/// that it starts on a prompt row. A move this file does not model leaves
+/// such a record: a full-width insertLines or deleteLines shifts rows under
+/// a pin that stays put, and a margin move that copies a row across a page
+/// boundary puts another row's mark on the prompt row.
+fn dropUnreadable(self: *SemanticCommand, pages: *PageList) void {
+    const command = self.completed orelse return;
+    if (!pinIsValid(command.prompt)) self.clearCompleted(pages);
+}
+
+/// The last cell of a completed command's recovered span: its frozen output
+/// end, else the end of its input, else its prompt.
+fn completedEnd(pages: *const PageList, command: Completed) Pin {
+    return if (command.output_end) |pin|
+        pin.*
+    else if (pages.highlightSemanticContent(command.prompt.*, .input)) |hl|
+        hl.end
+    else
+        command.prompt.*;
+}
+
+/// Whether a cell can change what a recovered span reads: text, or a
+/// semantic mark other than the `.output` an unwritten or erased cell has.
+fn cellIsRead(cell: pagepkg.Cell) bool {
+    return cell.hasText() or cell.semantic_content != .output;
 }
 
 fn pinRangesOverlap(a_top: Pin, a_bottom: Pin, b_top: Pin, b_bottom: Pin) bool {

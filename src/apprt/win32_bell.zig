@@ -25,6 +25,7 @@ const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const configpkg = @import("../config.zig");
 const internal_os = @import("../os/main.zig");
+const thread_role = @import("../sync/thread_role.zig");
 
 const log = std.log.scoped(.win32_bell);
 
@@ -243,6 +244,8 @@ fn startPlayThread(path: []const u8, volume: f64) !void {
 }
 
 fn playThread(job: *Job) void {
+    const role_scope = thread_role.enter(.{ .worker = "bell" });
+    defer role_scope.exit();
     const alloc = std.heap.page_allocator;
     defer {
         alloc.free(job.path);

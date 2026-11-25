@@ -7,7 +7,7 @@ const requireZig = @import("src/build/zig.zig").requireZig;
 const app_zon_version = @import("build.zig.zon").version;
 
 /// Libghostty version. We use a separate version from the app.
-const lib_version = "0.1.0";
+const lib_version = "0.1.0-dev";
 
 /// Minimum required zig version.
 const minimum_zig_version = @import("build.zig.zon").minimum_zig_version;
@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) !void {
     const config = try BuildConfig.init(
         b,
         file_version orelse app_zon_version,
+        lib_version,
     );
 
     // lld-link defaults to /OPT:NOREF,NOICF when it writes a PDB (/DEBUG), so a
@@ -124,7 +125,14 @@ pub fn build(b: *std.Build) !void {
     else
         null;
 
-    if (exe) |app| try @import("src/differential_oracle_build.zig").add(b, app.exe, oracle);
+    if (exe) |app| {
+        // The oracle is not the app exe: its terminal core takes the app's
+        // build options with the runtime thread-role layer off, in every mode
+        // (PLAN.md §2.7's build scope).
+        var app_oracle = oracle;
+        app_oracle.build_options = deps.options;
+        try @import("src/differential_oracle_build.zig").add(b, app.exe, app_oracle);
+    }
 
     // Standalone feasibility spike. This artifact is intentionally absent
     // from the normal build and every product packaging path.
@@ -143,7 +151,9 @@ pub fn build(b: *std.Build) !void {
         });
         conpty_host.subsystem = .Console;
         conpty_host.linkSystemLibrary("advapi32");
-        _ = try deps.add(conpty_host);
+        // It shares the app's deps, but never the runtime thread-role layer.
+        const conpty_host_deps = deps.withoutThreadRoles();
+        _ = try conpty_host_deps.add(conpty_host);
         b.installArtifact(conpty_host);
     }
 
@@ -204,6 +214,12 @@ pub fn build(b: *std.Build) !void {
 
     if (config.emit_exe and config.app_runtime != .none) {
         exe.?.install();
+        // An app exe built without the runtime thread-role layer holds none
+        // of its text (PLAN.md §2.7 acceptance test 14): checked at install.
+        if (!BuildConfig.threadRoles(config.optimize)) {
+            const check = ThreadRoleTextCheck.create(b, exe.?.exe.getEmittedBin());
+            b.getInstallStep().dependOn(&check.step);
+        }
         if (resources) |r| r.install();
         if (config.target.result.os.tag == .windows) {
             const TerminalHandoffProxy = @import("src/build/TerminalHandoffProxy.zig");
@@ -371,7 +387,8 @@ pub fn build(b: *std.Build) !void {
         // otherwise release binary.
         var bench_config = config;
         bench_config.optimize = .ReleaseFast;
-        const bench_deps = try SharedDeps.init(b, &bench_config);
+        // Never with the runtime thread-role layer, whatever the mode.
+        const bench_deps = (try SharedDeps.init(b, &bench_config)).withoutThreadRoles();
         inline for (benches) |bench| {
             try addBenchStep(b, &bench_deps, config.baselineTarget(), bench.name, bench.root);
         }
@@ -453,3 +470,7 @@ fn addBenchCoreImport(
     }
     compile.root_module.addImport("bench_core", bench_core);
 }
+
+/// Fails the install when an app exe built without the runtime thread-role
+/// layer holds its text (PLAN.md §2.7 acceptance test 14).
+const ThreadRoleTextCheck = @import("src/build/ThreadRoleTextCheck.zig");

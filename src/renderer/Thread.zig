@@ -8,8 +8,10 @@ const xev = @import("../global.zig").xev;
 const crash = @import("../crash/main.zig");
 const internal_os = @import("../os/main.zig");
 const rendererpkg = @import("../renderer.zig");
+const thread_role = @import("../sync/thread_role.zig");
 const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
+const terminalpkg = @import("../terminal/main.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
@@ -111,6 +113,9 @@ draw_now_c: xev.Completion = .{},
 cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
 
+/// Incremental scrollback compression scheduling.
+compression: Compression = undefined,
+
 /// The surface we're rendering to.
 surface: *apprt.Surface,
 
@@ -153,11 +158,13 @@ flags: packed struct {
 pub const DerivedConfig = struct {
     custom_shader_animation: configpkg.CustomShaderAnimation,
     pacing: Pacer.Config,
+    scrollback_compression: bool,
 
     pub fn init(config: *const configpkg.Config) DerivedConfig {
         return .{
             .custom_shader_animation = config.@"custom-shader-animation",
             .pacing = .init(config),
+            .scrollback_compression = config.@"scrollback-compression",
         };
     }
 };
@@ -206,7 +213,7 @@ pub fn init(
     var mailbox = try Mailbox.create(alloc);
     errdefer mailbox.destroy(alloc);
 
-    return .{
+    var result: Thread = .{
         .alloc = alloc,
         .config = .init(config),
         .pacer = .init(if (@hasDecl(apprt.App, "renderer_pacing_clock"))
@@ -227,6 +234,14 @@ pub fn init(
         .mailbox = mailbox,
         .app_mailbox = app_mailbox,
     };
+
+    // Only enable compression if we have it enabled... save some
+    // minor resources.
+    if (comptime terminalpkg.compression_enabled) {
+        result.compression = try .init();
+    }
+
+    return result;
 }
 
 /// Clean up the thread. This is only safe to call once the thread
@@ -238,6 +253,8 @@ pub fn deinit(self: *Thread) void {
     self.draw_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
+    if (comptime terminalpkg.compression_enabled)
+        self.compression.deinit();
     self.loop.deinit();
 
     // Nothing can possibly access the mailbox anymore, destroy it.
@@ -246,6 +263,12 @@ pub fn deinit(self: *Thread) void {
 
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread) void {
+    // The renderer's role, for every renderer-state acquisition this thread
+    // makes (PLAN.md §2.7 RQ5; PN3 holds it to the demand acquire and
+    // tryLock).
+    const role = thread_role.enter(.renderer);
+    defer role.exit();
+
     // Call child function so we can use errors...
     self.threadMain_() catch |err| {
         // In the future, we should expose this on the thread struct.
@@ -479,6 +502,16 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
 }
 
 fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
+    // A newly enabled scheduler must reconsider existing history even when no
+    // terminal activity occurred while compression was disabled.
+    if (comptime terminalpkg.compression_enabled) {
+        if (!self.config.scrollback_compression and
+            config.scrollback_compression)
+        {
+            self.compression.activity = null;
+        }
+    }
+
     self.config = config.*;
 }
 
@@ -568,11 +601,13 @@ const Frame = struct {
         };
     }
 
-    /// Takes State.mutex once.
+    /// Takes State.mutex once, through the demand acquire, the renderer's
+    /// way in (PLAN.md §2.7 PN3), as a read: through a `*const State`, so
+    /// without the frame snapshot's demand handoff (State.lockDemand).
     pub fn screen(f: Frame) Pacer.Screen {
-        const state = f.t.state;
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        const state: *const rendererpkg.State = f.t.state;
+        state.lockDemand();
+        defer state.unlockDemand();
         return .{
             .needs_frame = terminal_render_dirty.needsFrame(state.terminal, state.drawn_undirtied),
             .cursor_blinking = state.terminal.modes.get(.cursor_blinking),
@@ -585,9 +620,10 @@ const Frame = struct {
     /// Reads only the mode, so a blink decision does not walk the rows
     /// `needsFrame` checks on a clean terminal.
     pub fn cursorBlinking(f: Frame) bool {
-        const state = f.t.state;
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        // A read, as in `screen`.
+        const state: *const rendererpkg.State = f.t.state;
+        state.lockDemand();
+        defer state.unlockDemand();
         return state.terminal.modes.get(.cursor_blinking);
     }
 
@@ -735,6 +771,10 @@ fn wakeupCallback(
         t.surface.noteRendererWakeupCallback(wake_sources);
     }
     t.pacer.turn(.{ .wake = wake_sources }, Frame{ .t = t });
+
+    // PageList mutations maintain their own compression dirty state. Checking
+    // it here covers output, resize, and viewport scrolling uniformly.
+    t.compression.wake(t);
 
     return .rearm;
 }
@@ -1006,3 +1046,235 @@ test "send wakes the renderer before waiting on a full mailbox" {
     try testing.expect(std.meta.activeTag(delivered.?) == .focus);
     try testing.expect(mailbox.pop() == null);
 }
+
+/// The renderer's state for a `Frame` whose reads a test calls: `screen` and
+/// `cursorBlinking` read only `t.state`.
+const FrameReadTest = struct {
+    term: terminalpkg.Terminal,
+    renderer_mutex: rendererpkg.StateMutex = .{},
+    state: rendererpkg.State,
+    t: Thread,
+
+    fn init(self: *FrameReadTest) !void {
+        self.* = .{ .term = undefined, .state = undefined, .t = undefined };
+        self.term = try terminalpkg.Terminal.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+        self.state = .{ .mutex = &self.renderer_mutex, .terminal = &self.term };
+        self.t.state = &self.state;
+    }
+
+    fn deinit(self: *FrameReadTest) void {
+        self.term.deinit(std.testing.allocator);
+    }
+
+    fn frame(self: *FrameReadTest) Frame {
+        return .{ .t = &self.t };
+    }
+};
+
+test "the Pacer's reads take the mutex without the frame snapshot's demand handoff" {
+    // Frame.screen and Frame.cursorBlinking read through a *const State,
+    // which State.lockDemand tells apart by its type, not by the layer, so
+    // this holds in every build: with the layer off their demand acquire is
+    // the plain inner lock, as before the layer. They run on the renderer
+    // thread (PLAN.md §2.7 RQ8).
+    const testing = std.testing;
+    const role = thread_role.fixture(.renderer);
+    defer role.exit();
+    var reads: FrameReadTest = undefined;
+    try reads.init();
+    defer reads.deinit();
+    const state = &reads.state;
+
+    _ = reads.frame().screen();
+    try testing.expectEqual(reads.term.modes.get(.cursor_blinking), reads.frame().cursorBlinking());
+    // Neither read counted demand or bumped the handoff generation, and so
+    // neither woke a loop parked in yieldToDemand: unlockDemand's wake is in
+    // the one branch with the bump.
+    try testing.expectEqual(@as(u32, 0), state.demand.load(.monotonic));
+    try testing.expectEqual(@as(u32, 0), state.handoff_gen.load(.monotonic));
+
+    // The positive control: the frame snapshot's receiver, a *State, hands
+    // off. Its lock also shows both reads released the mutex: a read that
+    // kept it would make this a re-entry (PN1).
+    state.lockDemand();
+    try testing.expectEqual(@as(u32, 0), state.demand.load(.monotonic));
+    state.unlockDemand();
+    try testing.expectEqual(@as(u32, 1), state.handoff_gen.load(.monotonic));
+}
+
+test "isolated: the Pacer's reads record the demand acquire with the renderer role" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const testing = std.testing;
+    const isolated = @import("../sync/isolated.zig");
+    const symbolise = @import("../sync/symbolise.zig");
+    if (isolated.inChild()) {
+        // On the renderer thread a plain lock panics (PN3).
+        const role = thread_role.fixture(.renderer);
+        defer role.exit();
+        var reads: FrameReadTest = undefined;
+        try reads.init();
+        defer reads.deinit();
+        _ = reads.frame().screen();
+        _ = reads.frame().cursorBlinking();
+        return;
+    }
+    var child = try isolated.run(@src(), .own);
+    defer child.deinit();
+    if (child.timed_out or child.exit_code != isolated.exit_passed) {
+        std.debug.print("isolated parent: expected the child to exit successfully; exit code 0x{x}, its stderr's end:\n{s}\n", .{
+            child.exit_code, child.stderr[child.stderr.len -| 4000..],
+        });
+        return error.IsolatedChildFailed;
+    }
+
+    // The raw dump keeps each pair's acquire kind: exactly two pairs, both
+    // the demand acquire from the renderer.
+    const raw = try child.dir.?.read();
+    defer testing.allocator.free(raw);
+    var lines = std.mem.splitScalar(u8, raw, '\n');
+    _ = lines.next();
+    var pairs: usize = 0;
+    var demand_pairs: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        pairs += 1;
+        demand_pairs += @intFromBool(std.mem.endsWith(u8, line, " demand renderer"));
+    }
+    if (pairs != 2 or demand_pairs != 2) {
+        std.debug.print("isolated parent: expected two demand renderer pairs; the child's dump:\n{s}\n", .{raw});
+        return error.IsolatedChildCompare;
+    }
+
+    // And they name the two reads, each a row of the table (RQ16: their
+    // roles alone where this build checks no names).
+    var result = try isolated.compareChild(&child);
+    defer result.deinit();
+    const want: []const isolated.Pair = &.{
+        .{ .function = "src/renderer/Thread.zig:screen", .role = "renderer" },
+        .{ .function = "src/renderer/Thread.zig:cursorBlinking", .role = "renderer" },
+    };
+    const held = if (symbolise.names_checked)
+        result.report.passed() and result.holdsExactly(want)
+    else
+        result.holdsRoles(want);
+    if (!held) {
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        result.report.format(&w) catch {};
+        for (result.dumps) |d| w.print("-- {s}\n{s}", .{ d.name, d.text }) catch {};
+        std.debug.print("isolated parent: expected the compare to pass with the two reads\n{s}\n", .{w.buffered()});
+        return error.IsolatedChildCompare;
+    }
+}
+
+/// Schedules incremental terminal compression after renderer activity stops.
+///
+/// This owns all renderer-specific compression state. The terminal decides
+/// when compression-relevant activity changes and performs the actual work;
+/// the renderer only provides idle scheduling and avoids waiting for the
+/// terminal lock.
+const Compression = struct {
+    const idle_interval = 250;
+    const step_interval = 1;
+
+    timer: xev.Timer,
+    completion: xev.Completion = .{},
+    reset_completion: xev.Completion = .{},
+    activity: ?u64 = null,
+
+    fn init() !Compression {
+        return .{ .timer = try xev.Timer.init() };
+    }
+
+    fn deinit(self: *Compression) void {
+        self.timer.deinit();
+    }
+
+    /// Start or postpone compression after a renderer wake.
+    fn wake(self: *Compression, thread: *Thread) void {
+        // If we have no compression then don't do anything.
+        if (comptime !terminalpkg.compression_enabled) return;
+        if (!thread.config.scrollback_compression) return;
+
+        // PageList activity, rather than a generic renderer wake, restarts the
+        // idle interval. In particular, the inspector wakes the renderer every
+        // frame without changing terminal contents and must not starve this
+        // timer indefinitely.
+        if (thread.state.mutex.tryLock()) {
+            defer thread.state.mutex.unlock();
+            const activity = thread.state.terminal.compressionActivity();
+            if (self.activity == activity) return;
+            self.activity = activity;
+        } else if (self.completion.state() == .active) {
+            // Contention doesn't prove that compression-relevant activity
+            // changed. Keep an existing deadline so frequent inspector frames
+            // cannot postpone compression forever. The timer rechecks both the
+            // activity token and lock availability before doing any work.
+            return;
+        }
+
+        // Contention may mean parsing is active. Scheduling is a harmless
+        // false positive when no compression work is actually pending, but is
+        // necessary when no timer is already active.
+        self.schedule(thread, idle_interval);
+    }
+
+    /// Start the one-shot timer, or move its deadline if it is already active.
+    fn schedule(self: *Compression, thread: *Thread, delay_ms: u64) void {
+        self.timer.reset(
+            &thread.loop,
+            &self.completion,
+            &self.reset_completion,
+            delay_ms,
+            Thread,
+            thread,
+            // Qualified: the file-level `timerCallback` (the pacer's timers)
+            // makes the bare name ambiguous here.
+            Compression.timerCallback,
+        );
+    }
+
+    fn timerCallback(
+        thread_: ?*Thread,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        _ = result catch |err| switch (err) {
+            error.Canceled => return .disarm,
+            else => {
+                log.warn("error in compression timer err={}", .{err});
+                return .disarm;
+            },
+        };
+
+        const thread = thread_ orelse return .disarm;
+        const self = &thread.compression;
+
+        if (self.step(thread)) |delay| self.schedule(thread, delay);
+        return .disarm;
+    }
+
+    /// Try one bounded step without waiting for the terminal lock. The return
+    /// value is the delay before another attempt, or null when work is done.
+    fn step(self: *Compression, thread: *Thread) ?u64 {
+        if (!thread.config.scrollback_compression) return null;
+
+        const state = thread.state;
+        if (!state.mutex.tryLock()) return idle_interval;
+        defer state.mutex.unlock();
+
+        const activity = state.terminal.compressionActivity();
+        if (self.activity != activity) {
+            self.activity = activity;
+            return idle_interval;
+        }
+
+        return switch (state.terminal.compress(.incremental)) {
+            .pending => step_interval,
+            .unsupported,
+            .complete,
+            => null,
+        };
+    }
+};

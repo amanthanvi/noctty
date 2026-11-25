@@ -1,18 +1,25 @@
 //! This is the render state that is given to a renderer.
 
+const State = @This();
+
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Inspector = @import("../inspector/main.zig").Inspector;
 const terminalpkg = @import("../terminal/main.zig");
 const render_dirty = @import("../terminal/render_dirty.zig");
 const inputpkg = @import("../input.zig");
 const monotonic = @import("../os/monotonic.zig");
+const StateMutex = @import("../sync/state_mutex.zig").StateMutex;
+const thread_role = @import("../sync/thread_role.zig");
 
 /// The mutex that must be held while reading any of the data in the
 /// members of this state. Note that the state itself is NOT protected
 /// by the mutex and is NOT thread-safe, only the members values of the
-/// state (i.e. the terminal, devmode, etc. values).
-mutex: *std.Thread.Mutex,
+/// state (i.e. the terminal, devmode, etc. values). Every pointer that
+/// carries it is a `*StateMutex`, so a relock through one keeps the
+/// thread-role layer's owner.
+mutex: *StateMutex,
 
 /// The terminal data.
 terminal: *terminalpkg.Terminal,
@@ -62,6 +69,17 @@ last_process_output_tick_ms: u64 = 0,
 benchmark_end_marker_generation: u64 = 0,
 benchmark_end_marker_output_bytes: u64 = 0,
 
+/// The number of threads currently waiting to acquire `mutex` via
+/// `lockDemand`. This is not protected by the mutex; it is read by
+/// hot lock/unlock loops (the IO parse thread) in `yieldToDemand` to
+/// decide whether to hand the mutex off before relocking it.
+demand: std.atomic.Value(u32) = .init(0),
+
+/// Handoff generation counter. Incremented (with a futex wake) by
+/// `unlockDemand` after a demanding waiter releases the mutex, so that
+/// `yieldToDemand` knows the waiter had its turn.
+handoff_gen: std.atomic.Value(u32) = .init(0),
+
 pub const OutputProgress = struct {
     generation: u64,
     bytes: u64,
@@ -69,6 +87,101 @@ pub const OutputProgress = struct {
     benchmark_end_marker_generation: u64,
     benchmark_end_marker_output_bytes: u64,
 };
+
+/// How long `yieldToDemand` sleeps waiting for a demanding waiter to
+/// take its turn before giving up. This bounds how long the IO parse
+/// thread can stall if a wake is lost or the waiter is descheduled; a
+/// demanding critical section (the renderer's frame snapshot) is
+/// microseconds, so one millisecond is generous.
+const handoff_timeout_ns = 1 * std.time.ns_per_ms;
+
+/// Acquire `mutex` while signaling demand for it. Use this instead of
+/// locking the mutex directly on threads that must not be starved by
+/// a hot lock/unlock loop (the renderer's frame snapshot). Must be
+/// released with `unlockDemand`; releasing with `mutex.unlock` keeps
+/// the data safe but makes parked `yieldToDemand` callers wait out
+/// their full timeout.
+///
+/// Both `std.Thread.Mutex` and os_unfair_lock are unfair: a running
+/// thread that unlocks and immediately relocks beats a sleeping
+/// waiter every time, because the waiter must first be woken and
+/// scheduled. Under sustained pty output the IO parse thread is
+/// exactly such a loop, so without this signal the renderer can
+/// starve for as long as the output lasts.
+///
+/// The acquire itself is the `StateMutex` wrapper's demand acquire, the
+/// renderer's way in: the thread-role layer allows it from `.renderer`,
+/// where a plain `lock` panics (PLAN.md §2.7 PN3, RQ4). It must stay an
+/// `inline fn` (RQ11, the one intended inline site): the layer records the
+/// function whose code takes the demand acquire's return address, which
+/// inlined here is this forwarder's caller. The thread gate fails
+/// FORWARDER-NOT-INLINE otherwise.
+///
+/// A `*State` caller (the frame snapshot or a UI input site) signals
+/// demand. Other callers pass a `*const State` (the Pacer's reads,
+/// `Thread.Frame.screen` and `cursorBlinking`): it takes the demand acquire
+/// alone, with no demand count, no handoff generation and no wake, since
+/// those write State's own counters. With the layer off the demand acquire
+/// is the plain inner lock (`StateMutexOf(.off)`), so such a read is the
+/// plain lock it was before the layer; with the layer on it keeps PN3's
+/// demand kind and its caller's attribution. `unlockDemand` takes the same
+/// receiver.
+pub inline fn lockDemand(self: anytype) void {
+    const handoff = comptime signalsDemand(@TypeOf(self));
+    if (handoff) _ = self.demand.fetchAdd(1, .monotonic);
+    self.mutex.demand();
+    if (handoff) {
+        const prev = self.demand.fetchSub(1, .monotonic);
+        assert(prev > 0);
+    }
+}
+
+/// Release `mutex` acquired via `lockDemand` (through the wrapper's
+/// `unlock`), with the receiver `lockDemand` took. A `*State` then notifies
+/// hot loops parked in `yieldToDemand` that the demanding waiter had its
+/// turn; a `*const State` read only unlocks.
+pub fn unlockDemand(self: anytype) void {
+    self.mutex.unlock();
+    if (comptime signalsDemand(@TypeOf(self))) {
+        _ = self.handoff_gen.fetchAdd(1, .monotonic);
+        std.Thread.Futex.wake(&self.handoff_gen, 1);
+    }
+}
+
+/// Whether a `lockDemand` receiver signals demand: a `*State` does (the
+/// frame snapshot), a `*const State` does not (a read).
+fn signalsDemand(comptime Receiver: type) bool {
+    return switch (Receiver) {
+        *State => true,
+        *const State => false,
+        else => @compileError("lockDemand and unlockDemand take a *State (the frame snapshot, " ++
+            "with the demand handoff) or a *const State (a read, without it), not " ++ @typeName(Receiver)),
+    };
+}
+
+/// Called by hot lock/unlock loops between critical sections, with
+/// `mutex` NOT held: if a `lockDemand` waiter exists, sleep until it
+/// has acquired and released the mutex (or the timeout passes). This
+/// is the handoff that unfair mutexes never do on their own.
+///
+/// The orderings here are all monotonic because these atomics are a
+/// scheduling heuristic, not a synchronization boundary: the mutex
+/// itself orders the protected data, and the timeout bounds any
+/// staleness.
+pub fn yieldToDemand(self: *State) void {
+    if (self.demand.load(.monotonic) == 0) return;
+
+    // Snapshot the generation before rechecking demand: if the waiter
+    // acquires and releases between our check and the wait below, the
+    // generation no longer matches and timedWait returns immediately.
+    const gen = self.handoff_gen.load(.monotonic);
+    if (self.demand.load(.monotonic) == 0) return;
+    std.Thread.Futex.timedWait(
+        &self.handoff_gen,
+        gen,
+        handoff_timeout_ns,
+    ) catch {};
+}
 
 pub const Mouse = struct {
     /// The point on the viewport where the mouse currently is. We use
@@ -168,7 +281,10 @@ pub fn outputProgress(self: *const @This()) OutputProgress {
 }
 
 test "renderer state records PTY output progress" {
-    var mutex: std.Thread.Mutex = .{};
+    // The pty reader notes its output (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var state: @This() = .{
         .mutex = &mutex,
         .terminal = undefined,
@@ -505,7 +621,10 @@ test "preedit clone keeps the caret" {
 }
 
 test "renderer state accumulates wake sources until taken" {
-    var mutex: std.Thread.Mutex = .{};
+    // The renderer takes the wake sources (PLAN.md §2.7 RQ8).
+    const role = thread_role.fixture(.renderer);
+    defer role.exit();
+    var mutex: StateMutex = .{};
     var state: @This() = .{
         .mutex = &mutex,
         .terminal = undefined,
@@ -535,4 +654,52 @@ test "renderer wake source bits are distinct and fit the mask" {
         try std.testing.expectEqual(@as(u32, 0), seen & bit);
         seen |= bit;
     }
+}
+
+test "isolated: demand acquires through lockDemand from .renderer and .ui record their callers (acceptance test 2)" {
+    if (thread_role.layer == .off) return error.SkipZigTest;
+    const isolated = @import("../sync/isolated.zig");
+    // A renderer site and a UI site, each a noinline function whose body
+    // differs from the other's, so every build names it and none folds the
+    // two (PLAN.md §2.7 RQ16). The forwarder is inlined into each, so each
+    // is the function its pair names, not lockDemand or the wrapper.
+    const Sites = struct {
+        var renderer_frames: u32 = 0;
+        var ui_frames: u64 = 0;
+
+        noinline fn rendererDemandSite(state: *State) void {
+            state.lockDemand();
+            defer state.unlockDemand();
+            state.mutex.assertHeld();
+            renderer_frames += 1;
+        }
+
+        noinline fn uiDemandSite(state: *State) void {
+            state.lockDemand();
+            defer state.unlockDemand();
+            state.mutex.assertHeld();
+            ui_frames +%= 0x5eed;
+        }
+    };
+    if (isolated.inChild()) {
+        var mutex: StateMutex = .{};
+        var state: State = .{ .mutex = &mutex, .terminal = undefined };
+        {
+            // PN3 allows the demand acquire from the renderer, where a
+            // plain lock panics (acceptance test 1).
+            const role = thread_role.fixture(.renderer);
+            defer role.exit();
+            Sites.rendererDemandSite(&state);
+        }
+        {
+            const role = thread_role.fixture(.ui);
+            defer role.exit();
+            Sites.uiDemandSite(&state);
+        }
+        return;
+    }
+    try isolated.expectPairs(@src(), &.{
+        .{ .function = "src/renderer/State.zig:rendererDemandSite", .role = "renderer" },
+        .{ .function = "src/renderer/State.zig:uiDemandSite", .role = "ui" },
+    });
 }

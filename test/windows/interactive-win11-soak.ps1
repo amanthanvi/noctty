@@ -57,6 +57,18 @@ before its minute's sample, the kill
 did not end it with exit code 3, an injection failed) fails the harness itself: the driver exits 4, and
 harness.json lists each in ControlMisses.
 
+Thread roles (-RoleDump; PLAN.md §2.7 and §19.3, the run soak-releasesafe in ci/role-runs.tsv). The copy alone
+gets NOCTTY_THREAD_ROLE_DUMP=<run>\role-dump (the +version check and every other process run without it, and
+an inherited value is cleared), so a layer-on build (Debug or ReleaseSafe) writes its one dump there. The driver
+is the run's launcher (§19.3 AD1): it records the copy's launch row and receipt from the held handle (its PID and
+creation time) through ci/role_supervisor.py, then after the quit the exit receipt (GetExitCodeProcess on that
+handle, and whether the copy's stderr log, noctty.log, carries the layer's marker) and the seal, into
+<run>\role-manifest.tsv and <run>\role-supervisor\. It fails closed: a supervisor call that fails fails the
+driver; a copy that has not ended (no exit receipt), no dump, or any dump but the copy's own fails the harness
+(the driver exits 5 and harness.json lists RoleErrors). Symbolise the dump with the build's images and PDBs and
+compare it with `ci/role_compare3.py --run soak-releasesafe`: on 0.15.2 its pair checks are advisory and its
+launch, dump and seal checks gate.
+
 Safety (AGENTS.md "Running noctty"). Every process starts on the private desktop, named in lpDesktop, inside
 the job; input is posted, never SendInput, and nothing takes the foreground. The copy is portable with
 LOCALAPPDATA and APPDATA redirected, so the real %LOCALAPPDATA%\noctty is never written: the outer half
@@ -79,6 +91,7 @@ param(
     [ValidatePattern('^[a-z0-9][a-z0-9.-]{0,23}$')] [string] $SandboxName,
     [ValidateRange(0, 1440)] [int] $KillAtMinute = 0,
     [switch] $InjectHandleEachMinute,
+    [switch] $RoleDump,
     [ValidateRange(0, 1440)] [int] $HangAtMinute = 0,
     [ValidateSet('resize', 'sample')] [string] $HangAt = 'resize',
     [ValidateRange(1, 3600)] [int] $HangSeconds = 120,
@@ -524,6 +537,15 @@ function Invoke-SoakQuit {
     return [pscustomobject]@{ End = "stuck`t-"; Posts = $quitPosts; QuitMs = $null }
 }
 
+# The launcher's records (PLAN.md §19.3 AD1, AH3): ci/role_supervisor.py appends a launch row and its receipt, the
+# exit receipt and the seal. A call that fails throws, which fails the driver (a launcher whose append fails
+# fails the harness). Nothing is written to the pipeline: the driver's last output is its exit code.
+function Invoke-SoakRoleSupervisor([string[]] $Arguments) {
+    $supervisor = Join-Path $repoRoot 'ci\role_supervisor.py'
+    $null = & python -I $supervisor @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "The thread-role supervisor refused its $($Arguments[0]) record (exit $LASTEXITCODE)." }
+}
+
 function Invoke-SoakDriver {
     $driverLog = Join-Path $Run 'driver.log'
     function Log([string] $Message) { Add-Line $driverLog ('{0:o} {1}' -f [DateTime]::UtcNow, $Message) }
@@ -535,6 +557,7 @@ function Invoke-SoakDriver {
         BuildMode = $null; Launched = $false; Injected = 0; Killed = $null; Churn = 0; Missed = 0
         LateSamples = 0; WorstLatenessMs = 0; HardErrorModes = @(); ErrorModeChanges = @(); JobLimitFlags = $null
         QuitMs = $null; QuitPosts = $null; ControlMisses = [Collections.Generic.List[string]]::new(); Error = $null
+        RoleDump = [bool]$RoleDump; RoleErrors = [Collections.Generic.List[string]]::new()
     }
     $harnessPath = Join-Path $Run 'harness.json'
     $process = [IntPtr]::Zero
@@ -559,6 +582,12 @@ function Invoke-SoakDriver {
         $harness.JobLimitFlags = [SoakNative]::JobLimitFlags([IntPtr]::Zero)
         $jobDies = ($harness.JobLimitFlags -band 0x2400) -eq 0x2400
 
+        # No inherited dump directory reaches +version or any copy: only -RoleDump's copy gets one, below. NullString
+        # removes the key ($null would leave it empty: the 2026-11-22 GUI-HIDDEN-ROLE-ENV-01 entry in test-harnesses.md).
+        [Environment]::SetEnvironmentVariable('NOCTTY_THREAD_ROLE_DUMP', [Management.Automation.Language.NullString]::Value, 'Process')
+        $roleDumpDir = Join-Path $Run 'role-dump'
+        $roleState = Join-Path $Run 'role-supervisor'
+        $roleManifest = Join-Path $Run 'role-manifest.tsv'
         # The build mode, from the copy's own `+version` (src/cli/version.zig); no launch on a mismatch.
         $versionPath = Join-Path $Run 'version.txt'
         $check = [SoakNative]::Spawn($exe, ('"{0}" +version' -f $exe), $work, $desktopPath, $versionPath, 0x20)
@@ -594,7 +623,13 @@ function Invoke-SoakDriver {
         $commandLine = ('"{0}" ' -f $exe) + (@($launchArguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
         [void][SoakNative]::SetErrorMode([SoakNative]::GetErrorMode() -bor 2)   # SEM_NOGPFAULTERRORBOX, inherited
         $env:GHOSTTY_LOG = 'stderr'
+        if ($RoleDump) {
+            if (Test-Path -LiteralPath $roleDumpDir) { throw 'The role dump directory already exists.' }
+            [void](New-Item -ItemType Directory -Path $roleDumpDir)
+            [Environment]::SetEnvironmentVariable('NOCTTY_THREAD_ROLE_DUMP', $roleDumpDir, 'Process')
+        }
         $pi = [SoakNative]::Spawn($exe, $commandLine, $work, $desktopPath, (Join-Path $Run 'noctty.log'), 0x20)
+        [Environment]::SetEnvironmentVariable('NOCTTY_THREAD_ROLE_DUMP', [Management.Automation.Language.NullString]::Value, 'Process')
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $process = $pi.process
         [void][SoakNative]::CloseHandle($pi.thread)
@@ -610,6 +645,7 @@ function Invoke-SoakDriver {
         Add-Line $runTsv "exe`t$exe"
         Add-Line $runTsv "planned`t$Minutes"
         Log "launched pid $nocttyPid, build mode $($harness.BuildMode), $mode, $Minutes minutes planned"
+        if ($RoleDump) { Invoke-SoakRoleSupervisor @('launch', $roleState, $roleManifest, [string]$nocttyPid, [string]$start, 'gui') }
 
         function Get-Mine {
             $pairs = [SoakNative]::Hosts(); $mine = @(); $others = @()
@@ -931,6 +967,27 @@ function Invoke-SoakDriver {
         Add-Line $runTsv ("wer`t" + $(if ($suppressed) { 'suppressed' } else { 'default' }))
         Add-Line $runTsv "end`t$end"
         Log "ended: $($end -replace "`t", ' ')"
+        if ($RoleDump) {
+            # The exit receipt from the held handle only: a copy that has not ended leaves none and fails closed.
+            if ([SoakNative]::WaitForSingleObject($process, 0) -ne 0) {
+                $harness.RoleErrors.Add('ROLE-EXIT-MISSING: the copy has not ended, so it has no exit receipt')
+            } else {
+                $roleCode = [SoakNative]::ExitCode($process)
+                Invoke-SoakRoleSupervisor @('exit', $roleState, $roleManifest, 'soak-releasesafe', [string]$nocttyPid, [string]$start, 'gui', [string]$roleCode, (Join-Path $Run 'noctty.log'))
+            }
+            Invoke-SoakRoleSupervisor @('seal', $roleState, $roleManifest)
+            $roleDumps = @(Get-ChildItem -LiteralPath $roleDumpDir -Force)
+            if ($roleDumps.Count -eq 0) {
+                $harness.RoleErrors.Add('ROLE-DUMP-MISSING: the copy wrote no thread-role dump')
+            } elseif ($roleDumps.Count -ne 1 -or $roleDumps[0].Name -cne "noctty-$nocttyPid-$start.pairs") {
+                $harness.RoleErrors.Add("ROLE-DUMP-UNEXPECTED: $($roleDumps.Count) entries in role-dump, not the copy's one dump")
+            }
+            if ($harness.RoleErrors.Count -gt 0) {
+                Log "thread-role records failed closed: $($harness.RoleErrors -join '; ')"
+                return 5
+            }
+            Log 'thread-role records: launch row, exit receipt and seal written; the copy wrote its one dump'
+        }
         if ($harness.ControlMisses.Count -gt 0) {
             Log "control not applied: $($harness.ControlMisses -join '; ')"
             return 4
@@ -1115,6 +1172,7 @@ function Invoke-SoakOuter {
             $pwsh, $PSCommandPath, $copy, $Run, $ExpectedBuildMode, $Minutes, $SandboxName, $KillAtMinute, $QuitSeconds, $desktopName,
             $HangAtMinute, $HangAt, $HangSeconds
         if ($InjectHandleEachMinute) { $line += ' -InjectHandleEachMinute' }
+        if ($RoleDump) { $line += ' -RoleDump' }
         $pi = [HiddenLocal]::Launch($pwsh, $line, $Run, "WinSta0\$desktopName", $job)
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
         Write-Host "soak driver PID=$($pi.pid); $Minutes minutes planned; evidence=$Run"
@@ -1167,6 +1225,7 @@ function Invoke-SoakOuter {
     if ($outerError) { $failed += $outerError }
     if ($driverExit -eq 3) { $failed += "the copy's build mode is not $ExpectedBuildMode; it was not launched" }
     elseif ($driverExit -eq 4) { $failed += 'a control asked for did not take effect (see ControlMisses in harness.json)' }
+    elseif ($driverExit -eq 5) { $failed += 'the thread-role records failed closed (see RoleErrors in harness.json)' }
     elseif ($null -ne $driverExit -and $driverExit -ne 0) { $failed += "the driver failed with exit $driverExit (see driver.log and harness.json)" }
     Write-Host "soak records: $Run"
     Write-Host "clipboard sequence number before $($before.Clipboard), after $($after.Clipboard)"
