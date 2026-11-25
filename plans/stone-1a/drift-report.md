@@ -56,7 +56,7 @@ C9, D83).
 
 ## Plan deltas in force
 
-The plan's Phase 0a delta, items 15–22:
+The plan's Phase 0a delta, items 15–22, and the 1A gate's own deltas:
 
 - 15: no interactive or visible test requirements;
 - 16: the self-test split;
