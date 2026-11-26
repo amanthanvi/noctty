@@ -10194,9 +10194,13 @@ pub const App = struct {
         if (uri.user != null or uri.password != null or uri.port != null or
             uri.query != null or uri.fragment != null) return null;
 
-        if (uri.host) |_| {
-            var host_buf: [std.Uri.host_name_max]u8 = undefined;
-            const host = uri.getHost(&host_buf) catch return null;
+        if (uri.host) |component| {
+            // 0.15's `Uri.getHost`: the raw host, unvalidated, in its
+            // 255-byte `host_name_max` buffer. Zig 0.17's replacement,
+            // `Io.net.HostName.fromUri`, also refuses an empty host, which
+            // `file:///C:/...` has and this check admits.
+            var host_buf: [255]u8 = undefined;
+            const host = component.toRaw(&host_buf) catch return null;
             if (host.len != 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) return null;
         }
 

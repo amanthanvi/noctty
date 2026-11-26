@@ -11592,8 +11592,10 @@ pub const Host = struct {
     /// (client coordinates), with the panes laid out in `content`.
     pub fn paneDividerAt(self: *Host, content: RECT, point: POINT) ?PaneDividers.Divider {
         const tab = self.paneDividerTab() orelse return null;
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         return PaneDividers.hitTest(
@@ -11855,8 +11857,10 @@ pub const Host = struct {
         const along = paneDividerAlong(drag.layout, point);
         const same_content = paneDividerSameRect(content, drag.anchor_content);
         const ratio = if (same_content and along == drag.press_along and drag.anchor_along == drag.press_along) drag.start_ratio else ratio: {
-            var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-            const alloc = fallback.get();
+            // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+            var fallback_buf: [2048]u8 = undefined;
+            var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+            const alloc = fallback.allocator();
             var spatial = tab.tree.spatial(alloc) catch return;
             defer spatial.deinit(alloc);
             const area = paneDividerArea(content);
@@ -11898,8 +11902,10 @@ pub const Host = struct {
         const now = tab.tree.nodes[handle.idx()].split.ratio;
         defer tab.tree.resizeInPlace(handle, now);
         tab.tree.resizeInPlace(handle, ratio);
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         const area = paneDividerArea(content);
@@ -11940,8 +11946,10 @@ pub const Host = struct {
     /// Where the divider at `handle` sits in `content`, along its axis.
     fn paneDividerPosition(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle, content: RECT) ?i32 {
         if (builtin.is_test and self.test_pane_divider_lookup_fails) return null;
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         const found = PaneDividers.divider(&tab.tree, spatial, paneDividerArea(content), handle, 0) orelse return null;
