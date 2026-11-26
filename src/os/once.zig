@@ -3,8 +3,11 @@
 //! has returned. 0.15.2's took a `std.Thread.Mutex` on its slow path; this one
 //! is a three-state atomic, so it needs no `Io` from its caller: the first
 //! caller runs `f`, and a caller that arrives while `f` runs waits on the
-//! state's address (`futexWait`, WaitOnAddress on Windows) until `f` is done
-//! and the first caller wakes every waiter. The callers are the portable-root
+//! state's address (std's `futexWait`) until `f` is done and the first caller
+//! wakes every waiter. On Windows 0.17.1's futex parks the waiting thread
+//! itself (`Io.Threaded`'s `parking_futex`, through
+//! `NtWaitForAlertByThreadId` and `NtAlertThreadByThreadId`), not through
+//! WaitOnAddress. The callers are the portable-root
 //! cache, the pty resolver (a LoadLibrary), the search icon font and the hint
 //! scheme regex.
 //!
@@ -68,9 +71,10 @@ pub fn Once(comptime f: fn () void) type {
     };
 }
 
-/// The `Io` of the waits and wakes: std's single-threaded one, whose futex
-/// calls are the OS's (WaitOnAddress and WakeByAddressAll on Windows) on any
-/// thread, as `sync/state_mutex.zig`'s `innerIo` (QR-16).
+/// The `Io` of the waits and wakes: std's single-threaded one, as
+/// `sync/state_mutex.zig`'s `innerIo` (QR-16). Its futex is process-wide, so
+/// a wake on one thread reaches a waiter on any other: on Windows the waiters
+/// are parked threads in `parking_futex`'s buckets, found by the address.
 inline fn waitIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
