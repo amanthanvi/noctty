@@ -54,9 +54,9 @@ test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
 pub fn attachParentConsole() void {
     if (comptime builtin.os.tag != .windows) return;
 
-    const std_in = -10;
-    const std_out = -11;
-    const std_err = -12;
+    const std_in = win32_types.STD_INPUT_HANDLE;
+    const std_out = win32_types.STD_OUTPUT_HANDLE;
+    const std_err = win32_types.STD_ERROR_HANDLE;
 
     // ATTACH_PARENT_PROCESS. Fails when the launcher has no console (started
     // from Explorer, a service, or a detached process), which is fine. A GUI
@@ -71,22 +71,22 @@ pub fn attachParentConsole() void {
 
 /// Both helpers below are only ever reached from attachParentConsole, which has
 /// already established that this is Windows.
-fn stdHandleUsable(id: i32) bool {
-    const handle = GetStdHandle(id);
+fn stdHandleUsable(id: win32_types.DWORD) bool {
+    const handle = win32_sys.GetStdHandle(id);
     if (handle == null or handle == windows.INVALID_HANDLE_VALUE) return false;
     // FILE_TYPE_UNKNOWN (0) is both the error return and a legitimate answer
     // for a valid handle whose type Windows cannot classify. `GetFileType`
     // documents the difference as "clear the last error first; on success it
     // is left at NO_ERROR", so a device redirection we cannot classify must
     // stay untouched rather than be replaced with CONOUT$.
-    SetLastError(0);
+    win32_sys.SetLastError(0);
     if (GetFileType(handle.?) != 0) return true;
     return GetLastError() == 0;
 }
 
-fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
+fn bindStdHandleToConsole(id: win32_types.DWORD, comptime name: []const u8) void {
     const path = std.unicode.utf8ToUtf16LeStringLiteral(name);
-    const handle = CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path,
         0x80000000 | 0x40000000, // GENERIC_READ | GENERIC_WRITE
         0x00000001 | 0x00000002, // FILE_SHARE_READ | FILE_SHARE_WRITE
@@ -100,20 +100,11 @@ fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
 }
 
 extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) win32_types.BOOL;
-extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?windows.HANDLE;
-extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
+// GetStdHandle, SetLastError and CreateFileW are win32/sys.zig's (council P6:
+// this file's GetStdHandle took an i32, the SDK's takes a DWORD).
+extern "kernel32" fn SetStdHandle(nStdHandle: win32_types.DWORD, hHandle: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) u32;
-extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(.winapi) void;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
-extern "kernel32" fn CreateFileW(
-    lpFileName: [*:0]const u16,
-    dwDesiredAccess: u32,
-    dwShareMode: u32,
-    lpSecurityAttributes: ?*anyopaque,
-    dwCreationDisposition: u32,
-    dwFlagsAndAttributes: u32,
-    hTemplateFile: ?windows.HANDLE,
-) callconv(.winapi) windows.HANDLE;
 
 pub fn reportStateInitError(err: anyerror) !void {
     attachParentConsole();
@@ -300,12 +291,12 @@ fn releasePanic(msg: []const u8, _: ?usize) noreturn {
 test "cli console attach leaves working std handles alone" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const std_out = -11;
+    const std_out = win32_types.STD_OUTPUT_HANDLE;
     try std.testing.expect(stdHandleUsable(std_out));
 
-    const before = GetStdHandle(std_out);
+    const before = win32_sys.GetStdHandle(std_out);
     attachParentConsole();
-    try std.testing.expectEqual(before, GetStdHandle(std_out));
+    try std.testing.expectEqual(before, win32_sys.GetStdHandle(std_out));
 }
 
 test "cli help output failures get a text output hint" {
