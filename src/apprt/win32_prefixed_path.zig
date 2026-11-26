@@ -51,9 +51,17 @@ fn convert(path: []const u8) Error!PathSpace {
     // forms allow is refused before anything converts it (PATH-BOUND, the
     // 2026-10-30 entry in launch-and-paths.md: 40,000 bytes ended the Debug
     // test binary with "index out of bounds" in 0.15.2's conversion;
-    // ReleaseFast would write past the buffer, inferred).
-    if ((std.unicode.calcWtf16LeLen(path) catch return error.InvalidWtf8) > path_max_wide)
-        return error.NameTooLong;
+    // ReleaseFast would write past the buffer, inferred). WTF-16 units never
+    // outnumber WTF-8 bytes, so only a path of more bytes than that is
+    // counted. It is validated first: std's `calcWtf16LeLen` slices a whole
+    // sequence by its lead byte before it checks the bytes are there, so a
+    // truncated sequence at the end would read past the path (council T1).
+    // `wtf8ToWtf16Le` validates what it converts.
+    if (path.len > path_max_wide) {
+        if (!std.unicode.wtf8ValidateSlice(path)) return error.InvalidWtf8;
+        if ((std.unicode.calcWtf16LeLen(path) catch return error.InvalidWtf8) > path_max_wide)
+            return error.NameTooLong;
+    }
     var wide: std.Io.Threaded.WindowsPathSpace = undefined;
     wide.len = try std.unicode.wtf8ToWtf16Le(&wide.data, path);
     wide.data[wide.len] = 0;
@@ -127,4 +135,13 @@ test "a path longer than the NT forms allow is refused before it converts" {
 
 test "bytes that are not WTF-8 fail with the error std gave" {
     try std.testing.expectError(error.InvalidWtf8, sliceToPrefixedFileW("\xff"));
+    // A sequence its lead byte says is longer than what is left (council T1):
+    // a lone lead byte at the end, and a three-byte sequence cut after two.
+    try std.testing.expectError(error.InvalidWtf8, sliceToPrefixedFileW("C:\\a\xc3"));
+    try std.testing.expectError(error.InvalidWtf8, sliceToPrefixedFileW("\xe4\xb8"));
+    // The same past the length bound, where the units are counted: 40,000
+    // bytes ending in a lone lead byte fail as invalid, before the count.
+    var long: [40000]u8 = @splat('a');
+    long[long.len - 1] = 0xc3;
+    try std.testing.expectError(error.InvalidWtf8, sliceToPrefixedFileW(&long));
 }
