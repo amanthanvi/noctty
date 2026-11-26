@@ -211,6 +211,18 @@ control("the build's own artifact selector selects its arm", tree(**{
                                  '    self.config.terminalOptions(.ghostty).add(b, step.root_module);\n}\n')}), 0,
         "ENTRY-OK app src/worker.zig startSelected -> Target.run: src/worker.zig:23 run enters worker:probe",
         "RESULT PASS", registry=SWITCH_REGISTRY)
+control("the build's artifact selector in upstream 1.4's spelling, with the optimize mode, selects its arm", tree(**{
+    "src/worker.zig": SWITCH_WORKER + (
+        'const options = @import("terminal_options");\n'
+        'const Target = switch (options.artifact) {\n    .ghostty => Scoped,\n    .other => Unscoped,\n};\n'),
+    "src/terminal/build_options.zig": ('pub fn add(self: Options, b: *Build, m: *Module) void {\n'
+                                       '    const opts = b.addOptions();\n'
+                                       '    opts.addOption(Artifact, "artifact", self.artifact);\n'
+                                       '    m.addOptions("terminal_options", opts);\n}\n'),
+    "src/build/SharedDeps.zig": ('pub fn add(self: *const SharedDeps, step: *Compile) void {\n'
+                                 '    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);\n}\n')}), 0,
+        "ENTRY-OK app src/worker.zig startSelected -> Target.run: src/worker.zig:23 run enters worker:probe",
+        "RESULT PASS", registry=SWITCH_REGISTRY)
 
 # Stone round 4, Opus L1: a guarded role call (`if (false) ...`) may never run, so it is no scope; and the scope is
 # the first statement executed, so a statement before it fails, while a `defer` before it (which runs nothing where

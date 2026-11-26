@@ -453,7 +453,8 @@ class Resolver:
         """The `artifact` every exe's `terminal_options` module holds, read the way the build sets it:
         `src/terminal/build_options.zig` adds the option `artifact` to the module `terminal_options`, and
         `src/build/SharedDeps.zig`, which every exe's root module goes through (the app and the fork test exe),
-        adds `terminalOptions(.X)`. X, or None unless the build holds exactly that."""
+        adds `terminalOptions(.X)` (upstream 1.4, e8525c0fd: `terminalOptions(.X, optimize)`, the mode an
+        identifier). X, or None unless the build holds exactly one."""
         if hasattr(self, "_artifact"):
             return self._artifact
         self._artifact = None
@@ -469,9 +470,15 @@ class Resolver:
                 or not any(at(ot, i, ("addOption", "(", "Artifact", ",", '"artifact"')) for i in range(len(ot))):
             return None
         dt = deps.toks
-        tags = [dt[i + 3].text for i in range(len(dt) - 7)
-                if at(dt, i, ("terminalOptions", "(", ".")) and dt[i + 3].kind == "identifier"
-                and at(dt, i + 4, (")", ".", "add", "("))]
+        tags = []
+        for i in range(len(dt) - 7):
+            if not (at(dt, i, ("terminalOptions", "(", ".")) and dt[i + 3].kind == "identifier"):
+                continue
+            j = i + 4
+            if j + 1 < len(dt) and dt[j].text == "," and dt[j + 1].kind == "identifier":
+                j += 2
+            if at(dt, j, (")", ".", "add", "(")):
+                tags.append(dt[i + 3].text)
         if len(tags) == 1:
             self._artifact = tags[0]
         return self._artifact
