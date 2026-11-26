@@ -1121,8 +1121,11 @@ pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
 
 /// Whether any process this user can query runs an image directly inside a
 /// version directory of `updates_dir` (`isStagedImage`). The directory is
-/// compared by its final path, which is how Windows reports a process's
-/// image, so a junction or another spelling of it still matches. It asks each
+/// compared by the name its handle was opened by
+/// (`getFinalPathNameByHandle`, FILE_NAME_OPENED), the form in which Windows
+/// reports a process's image: a junction to it still matches, and so does a
+/// Setup started by an 8.3 spelling of the stage, against that spelling
+/// (council P1; a normalized name expands it and missed). It asks each
 /// process for `PROCESS_QUERY_LIMITED_INFORMATION` only, which an elevated
 /// process of the same user grants (not measured with an elevated Setup); a
 /// process that refuses even that is skipped.
@@ -4202,6 +4205,75 @@ test "a staged installer reads as running only while a process runs from it" {
     try std.testing.expect(processRunsFromStage(alloc, std.fs.path.dirname(self_dir).?));
     // One level off is not.
     try std.testing.expect(!processRunsFromStage(alloc, self_dir));
+}
+
+test "a staged Setup started by the stage's 8.3 spelling reads as running (council P1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    // In the temp folder: the checkout's drive may make no 8.3 names (a ReFS
+    // Dev Drive, a CI work volume). The state folder's own name has an alias,
+    // so the stage's short spelling differs from its long one.
+    var tmp = try internal_os.TempDir.init();
+    defer tmp.deinit();
+    const state = "noctty state folder";
+    const version = "1.3.200 staged version";
+    const name = "noctty staged setup.exe";
+    try tmp.dir.createDirPath(io, state ++ "\\updates\\" ++ version);
+    const state_long = try tmp.dir.realPathFileAlloc(io, state, alloc);
+    defer alloc.free(state_long);
+    const image_long = try std.fs.path.join(alloc, &.{ state_long, "updates", version, name });
+    defer alloc.free(image_long);
+    // A real image, never run: the system's cmd.exe, copied into the stage.
+    var system_w: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
+    const system_len = win32_sys.GetSystemDirectoryW(&system_w, system_w.len);
+    if (system_len == 0 or system_len >= system_w.len) return error.Unexpected;
+    const system = try std.unicode.wtf16LeToWtf8Alloc(alloc, system_w[0..system_len]);
+    defer alloc.free(system);
+    const cmd = try std.fs.path.join(alloc, &.{ system, "cmd.exe" });
+    defer alloc.free(cmd);
+    try std.Io.Dir.copyFileAbsolute(cmd, image_long, io, .{});
+
+    const state_short = try testShortPath(alloc, state_long);
+    defer alloc.free(state_short);
+    const image_short = try testShortPath(alloc, image_long);
+    defer alloc.free(image_short);
+    if (std.mem.eql(u8, state_short, state_long)) {
+        std.log.warn("no 8.3 alias for the fixture; 8.3 names are off on this volume", .{});
+        return error.SkipZigTest;
+    }
+    const state_path = try std.fs.path.join(alloc, &.{ state_short, "update-state.json" });
+    defer alloc.free(state_path);
+    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+
+    // Setup started by the stage's short spelling, as a short-spelled state
+    // path launches it: suspended and detached, so it never runs, and ended
+    // before the folder goes.
+    const image_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, image_short);
+    defer alloc.free(image_w);
+    var startup = std.mem.zeroes(std.os.windows.STARTUPINFOW);
+    startup.cb = @sizeOf(std.os.windows.STARTUPINFOW);
+    var process: internal_os.windows.PROCESS_INFORMATION = undefined;
+    if (internal_os.windows_ext.CreateProcessW(image_w, null, null, null, 0, .{ .detached_process = true, .create_suspended = true }, null, null, &startup, &process) == 0)
+        return error.Unexpected;
+    defer {
+        _ = win32_sys.TerminateProcess(process.hProcess, 1);
+        _ = win32_sys.WaitForSingleObject(process.hProcess, 10_000);
+        std.os.windows.CloseHandle(process.hThread);
+        std.os.windows.CloseHandle(process.hProcess);
+    }
+    try std.testing.expect(stagedInstallerRunning(alloc, state_path));
+}
+
+/// For tests: `long` as GetShortPathNameW spells it, every component that has
+/// an 8.3 alias shortened.
+fn testShortPath(alloc: Allocator, long: []const u8) ![]u8 {
+    const long_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, long);
+    defer alloc.free(long_w);
+    var short_w: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
+    const len = win32_sys.GetShortPathNameW(long_w.ptr, &short_w, short_w.len);
+    if (len == 0 or len >= short_w.len) return error.Unexpected;
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, short_w[0..len]);
 }
 
 test "a running staged Setup stays found after another feed's check drops the staged record" {
