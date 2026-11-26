@@ -145,7 +145,7 @@ pub fn processTokenElevationType() !TokenElevationType {
         return windows.unexpectedError(std.os.windows.GetLastError());
     }
     if (returned_size < @sizeOf(windows.DWORD)) return error.Unexpected;
-    return std.meta.intToEnum(TokenElevationType, raw_type) catch error.Unexpected;
+    return std.enums.fromInt(TokenElevationType, raw_type) orelse error.Unexpected;
 }
 
 /// Whether UAC elevates this process as the same account, which then reads

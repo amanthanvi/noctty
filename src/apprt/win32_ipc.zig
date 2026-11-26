@@ -397,7 +397,7 @@ pub fn decodeRequestKind(pipe: Pipe) !RequestKind {
     try readExactUntil(pipe, &header, deadline());
 
     if (readU32(header[0..4]) != wire_version) return error.InvalidIpcRequest;
-    return std.meta.intToEnum(RequestKind, header[4]) catch error.InvalidIpcRequest;
+    return std.enums.fromInt(RequestKind, header[4]) orelse error.InvalidIpcRequest;
 }
 
 pub fn decodeNewWindowPayload(

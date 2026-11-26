@@ -1721,7 +1721,7 @@ pub const SettingsControlProvider = struct {
     pub fn handleAction(self: *SettingsControlProvider, raw_action: usize, index: isize) com.HRESULT {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (IsWindowEnabled(self.hwnd) == 0) return com.UIA_E_ELEMENTNOTENABLED;
-        const action = std.meta.intToEnum(Action, raw_action) catch return com.E_INVALIDARG;
+        const action = std.enums.fromInt(Action, raw_action) orelse return com.E_INVALIDARG;
         const parent = GetParent(self.hwnd) orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
         switch (action) {
             .toggle => {

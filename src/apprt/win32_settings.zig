@@ -751,7 +751,7 @@ comptime {
 /// The complete persistence allowlist. Effective config contains derived fields
 /// and expanded include/shader paths which the native form does not edit.
 pub const editable_keys = .{
-    Config.Key.@"scrollback-limit",       Config.Key.@"font-size",         Config.Key.@"background-opacity",
+    Config.Key.@"scrollback-limit-bytes", Config.Key.@"font-size",         Config.Key.@"background-opacity",
     Config.Key.@"window-padding-x",       Config.Key.@"window-padding-y",  Config.Key.@"clipboard-trim-trailing-spaces",
     Config.Key.@"desktop-notifications",  Config.Key.@"app-notifications", Config.Key.@"confirm-close-surface",
     Config.Key.@"copy-on-select",         Config.Key.@"clipboard-read",    Config.Key.@"clipboard-write",
@@ -1347,10 +1347,11 @@ const viewport_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32
 const edit_text_max_code_units: usize = 4096;
 const edit_text_max_utf8: usize = edit_text_max_code_units * 3;
 
-/// `scrollback-limit` is a byte budget per terminal, and 0 turns scrollback off
-/// (Config.zig, Screen.zig); there is no "unlimited". Only new terminals read it.
+/// `scrollback-limit-bytes` is a byte budget per terminal, and 0 turns
+/// scrollback off (Config.zig, Screen.zig); its `unlimited` is a config-file
+/// value this number field does not offer. Only new terminals read it.
 /// The accessible name stays the prefix, "Scrollback limit".
-const scrollback_label = field_model.forKey(.@"scrollback-limit").?.native.?.form_label.?;
+const scrollback_label = field_model.forKey(.@"scrollback-limit-bytes").?.native.?.form_label.?;
 
 const SettingsControlRole = win32_uia.SettingsControlProvider.Role;
 const FormControl = struct {
@@ -10478,7 +10479,7 @@ test "settings save preserves untouched scalar precision and legacy ranges" {
         original.@"background-opacity" = 0.875;
         var pending = try original.clone(std.testing.allocator);
         defer pending.deinit();
-        pending.@"copy-on-select" = .true;
+        pending.@"copy-on-select" = .clipboard;
         var capture: Capture = .{};
         var settings: SettingsWindow = .{
             .handle = .{ .ctx = &capture, .alloc = std.testing.allocator, .hinstance = undefined, .chromeBg = undefined, .textPrimary = undefined, .openInEditor = undefined, .currentConfig = undefined, .saveAndReload = Capture.save, .notifySuccess = undefined, .onClosed = undefined },
@@ -14171,7 +14172,7 @@ const dialog_test = struct {
             pinned.release();
         }
         body() catch |err| {
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             result.* = err;
         };
     }
@@ -16575,7 +16576,7 @@ test "settings a search and an edit of a found field change only that field's dr
             const field = settings.fields.edit_scrollback.?;
             try std.testing.expectEqual(field, GetFocus().?);
             _ = sys.SetWindowTextW(field, std.unicode.utf8ToUtf16LeStringLiteral("5000"));
-            try std.testing.expectEqual(@as(usize, 5000), settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(@as(usize, 5000), settings.pending.?.@"scrollback-limit-bytes".value);
             try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
             // Save hands that draft to the App, whose save patches only the
             // keys a draft changed (`persistSettings`, tested with the file).
@@ -17437,7 +17438,7 @@ test "settings pending changes read in the form's words" {
     current.@"font-size" = 12;
     current.@"window-padding-x" = .{ .top_left = 2, .bottom_right = 2 };
     current.@"clipboard-trim-trailing-spaces" = true;
-    current.@"copy-on-select" = .false;
+    current.@"copy-on-select" = .none;
     current.@"window-theme" = .auto;
     current.@"cursor-style" = .block;
     var settings: SettingsWindow = .{
@@ -17459,7 +17460,7 @@ test "settings pending changes read in the form's words" {
     settings.trackEdit(.window_padding_x, true);
     pending.@"clipboard-trim-trailing-spaces" = false;
     settings.trackEdit(.trim_trailing_spaces, false);
-    pending.@"copy-on-select" = .true;
+    pending.@"copy-on-select" = .clipboard;
     settings.trackEdit(.copy_on_select, false);
     pending.@"window-theme" = .dark;
     settings.trackEdit(.window_theme, true);
@@ -17633,10 +17634,11 @@ test "settings diff writes every field's values without debug syntax" {
 }
 
 test "settings scrollback label states the unit, that 0 turns scrollback off, and who it applies to" {
-    // `scrollback-limit` is bytes per terminal, 0 disables scrollback and
-    // there is no unlimited setting (Config.zig, Screen.zig); a change reaches
-    // terminals created afterwards. The old label said "rows, 0 = unlimited".
-    comptime std.debug.assert(@FieldType(Config, "scrollback-limit") == usize);
+    // `scrollback-limit-bytes` is bytes per terminal, 0 disables scrollback
+    // and `unlimited` is a config-file value the field does not offer
+    // (Config.zig, Screen.zig); a change reaches terminals created
+    // afterwards. The old label said "rows, 0 = unlimited".
+    comptime std.debug.assert(@FieldType(@FieldType(Config, "scrollback-limit-bytes"), "value") == usize);
     try std.testing.expectEqualStrings(scrollback_label, settings_label_specs[0]);
     for ([_][]const u8{ "bytes", "0 = off", "new terminals" }) |fact| {
         try std.testing.expect(std.mem.indexOf(u8, scrollback_label, fact) != null);
@@ -17783,7 +17785,7 @@ fn expectComboMapping(
 
 test "settings dropdown text changes while the index and the saved token stay put" {
     try expectComboMapping(&confirm_close_labels, confirmCloseFromComboIndex, comboIndexFromConfirmClose, &.{ "false", "true", "always" });
-    try expectComboMapping(&copy_on_select_labels, copyOnSelectFromComboIndex, comboIndexFromCopyOnSelect, &.{ "false", "true", "clipboard" });
+    try expectComboMapping(&copy_on_select_labels, copyOnSelectFromComboIndex, comboIndexFromCopyOnSelect, &.{ "none", "clipboard", "both", "primary" });
     try expectComboMapping(&clipboard_access_labels, clipboardAccessFromComboIndex, comboIndexFromClipboardAccess, &.{ "ask", "allow", "deny" });
     try expectComboMapping(&link_previews_labels, linkPreviewsFromComboIndex, comboIndexFromLinkPreviews, &.{ "true", "osc8", "false" });
     try expectComboMapping(&window_theme_labels, windowThemeFromComboIndex, comboIndexFromWindowTheme, &.{ "auto", "system", "light", "dark", "ghostty" });
@@ -19198,7 +19200,7 @@ test "settings a row says where its saved value comes from, in its label and its
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
             const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
             defer alloc.free(theme_path);
-            const text = try std.fmt.allocPrint(alloc, "scrollback-limit = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
+            const text = try std.fmt.allocPrint(alloc, "scrollback-limit-bytes = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
             defer alloc.free(text);
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = text });
             const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
@@ -19471,7 +19473,7 @@ test "settings an origin-note says when the line it names has changed since the 
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit-bytes = 5000\n" });
             const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
@@ -19489,7 +19491,7 @@ test "settings an origin-note says when the line it names has changed since the 
 
             // The first line taken out, and the config not read again: both
             // lines named no longer hold what was read there.
-            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "scrollback-limit = 5000\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "scrollback-limit-bytes = 5000\n" });
             settings.externalConfigChanged(&fixture.config, 2);
             try std.testing.expectEqualStrings("Set in noctty.conf, line 1; the file has changed since", settings.origin_notes[font].text());
             try std.testing.expectEqualStrings("Set in noctty.conf, line 2; the file has changed since", settings.origin_notes[scrollback].text());
@@ -28710,15 +28712,15 @@ test "settings an up-down steps its number field, held to the field's range, and
             settings.showSection(.terminal, false);
             const scrollback = settings.fields.edit_scrollback.?;
             const scrollback_spin = settings.companions[@backingInt(Companion.scrollback_spin)].?;
-            const limit = settings.pending.?.@"scrollback-limit";
+            const limit = settings.pending.?.@"scrollback-limit-bytes".value;
             _ = sys.SetFocus(scrollback);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
-            try std.testing.expectEqual(limit + 1_000_000, settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(limit + 1_000_000, settings.pending.?.@"scrollback-limit-bytes".value);
             try std.testing.expectEqual(@as(LRESULT, @intCast(@min(limit + 1_000_000, std.math.maxInt(i32)))), position(scrollback_spin));
             typeInto(scrollback, "0");
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
             try std.testing.expectEqualStrings("0", readEditUtf8(scrollback, &buf).?);
-            try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"scrollback-limit-bytes".value);
             // Nor above what the limit holds, and exactly: a step from the
             // top is held there, and one down is a megabyte less.
             const top = std.math.maxInt(@TypeOf(limit));
@@ -28727,7 +28729,7 @@ test "settings an up-down steps its number field, held to the field's range, and
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
             try std.testing.expectEqualStrings(top_text, readEditUtf8(scrollback, &buf).?);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
-            try std.testing.expectEqual(top - 1_000_000, settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(top - 1_000_000, settings.pending.?.@"scrollback-limit-bytes".value);
         }
     }.body);
 }
@@ -28756,7 +28758,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
             const settings = &fixture.settings;
             try settings.open();
             const size = settings.pending.?.@"font-size";
-            const limit = settings.pending.?.@"scrollback-limit";
+            const limit = settings.pending.?.@"scrollback-limit-bytes".value;
 
             // The opacity, which the file sets: a step down on its trackbar.
             const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
@@ -28784,7 +28786,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
                 "  # an indented comment, and a line Settings has no control for\n" ++
                 "keybind = ctrl+shift+t=new_tab\n" ++
                 "font-size = {d}\n" ++
-                "scrollback-limit = {d}\n", .{ size + 1, limit + 1_000_000 }), after);
+                "scrollback-limit-bytes = {d}\n", .{ size + 1, limit + 1_000_000 }), after);
         }
     }.body);
 }

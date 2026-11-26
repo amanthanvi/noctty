@@ -488,7 +488,7 @@ test "homeTerminfoDir follows where Git's tools look" {
     // Where git.exe and the MSYS2 runtime would disagree, there is none.
     try env.put("HOMEPATH", "\\does\\not\\exist");
     try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
-    env.remove("HOMEDRIVE");
+    _ = env.swapRemove("HOMEDRIVE");
     try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
 
     // HOME wins over all of them; one Git's tools cannot use, or a remote

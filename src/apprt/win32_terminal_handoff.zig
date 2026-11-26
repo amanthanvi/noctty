@@ -1930,7 +1930,7 @@ test "handoff is visible before the UI can defer adopting it" {
     };
     var signal_read: HANDLE = undefined;
     var signal_write: HANDLE = undefined;
-    try std.testing.expect(@import("../os/main.zig").windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try std.testing.expect(@import("../os/main.zig").windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0).toBool());
     defer _ = windows.CloseHandle(signal_read);
     const current = windows.GetCurrentProcess();
     var pending: PendingSession = .{

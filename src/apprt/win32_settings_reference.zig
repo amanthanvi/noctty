@@ -891,7 +891,7 @@ test "settings reference rows carry the effective value, its count and the locat
     try testing.expectEqual(@as(u32, 1), font.set.count);
     try testing.expect(std.mem.indexOf(u8, font.search, "font-size\n15\n") != null);
 
-    const scrollback = &model.rows[index(.@"scrollback-limit")];
+    const scrollback = &model.rows[index(.@"scrollback-limit-bytes")];
     try testing.expect(!scrollback.differs);
 
     // A repeatable key shows its first value and how many follow.
@@ -1018,7 +1018,7 @@ test "settings reference finds where a BOM or UTF-16 config sets a key, and @mod
     defer defaults.deinit();
     const extra: [key_count][]const u8 = @splat("");
     // The third line names a key with a value the loader refuses.
-    const text = "click-repeat-interval = 500\r\nfont-size = 15\r\nscrollback-limit = lots\r\n";
+    const text = "click-repeat-interval = 500\r\nfont-size = 15\r\nscrollback-limit-bytes = lots\r\n";
     const files = [_][]const u8{ "\xef\xbb\xbf" ++ text, &utf16File(text, .little), &utf16File(text, .big) };
     var buf: [1024]u8 = undefined;
     var expected: [1024]u8 = undefined;
@@ -1042,7 +1042,7 @@ test "settings reference finds where a BOM or UTF-16 config sets a key, and @mod
         try model.writeLocation(&writer, &model.rows[index(.@"font-size")]);
         try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Set on line 2 of {s}.", .{path}), writer.buffered());
         writer = .fixed(&buf);
-        try model.writeLocation(&writer, &model.rows[index(.@"scrollback-limit")]);
+        try model.writeLocation(&writer, &model.rows[index(.@"scrollback-limit-bytes")]);
         try testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Not set in {s}. Line 3 of {s} mentions it, and does not take effect.", .{ path, path }), writer.buffered());
     }
 
@@ -1113,7 +1113,7 @@ test "settings reference says where a value comes from: an included file, the th
     var current = try Config.default(alloc);
     defer current.deinit();
     try current.loadFile(alloc, path);
-    var args: TestArgs = .{ .list = &.{"--scrollback-limit=7"} };
+    var args: TestArgs = .{ .list = &.{"--scrollback-limit-bytes=7"} };
     try current.loadIter(alloc, &args);
     try current.loadRecursiveFiles(alloc);
     try current.finalize();
@@ -1141,7 +1141,7 @@ test "settings reference says where a value comes from: an included file, the th
         try testing.expectEqualStrings(case.text, writer.buffered());
     }
     var writer: std.Io.Writer = .fixed(&buf);
-    try model.writeLocation(&writer, &model.rows[index(.@"scrollback-limit")]);
+    try model.writeLocation(&writer, &model.rows[index(.@"scrollback-limit-bytes")]);
     try testing.expectEqualStrings("Set on the command line.", writer.buffered());
     // A key whose lines can add up: the included file's line is the last
     // one, and this file's is only said to be there, for whether it still
@@ -1525,9 +1525,9 @@ test "settings reference changed file: the same line, now another value the load
 }
 
 test "settings reference changed file: the line taken out, and the next one moved up" {
-    try expectChangedFile("font-size = 13\nscrollback-limit = 5000\n", "scrollback-limit = 5000\n", &.{
+    try expectChangedFile("font-size = 13\nscrollback-limit-bytes = 5000\n", "scrollback-limit-bytes = 5000\n", &.{
         .{ .key = .@"font-size", .text = "Set on line 1 of @" ++ changed_since },
-        .{ .key = .@"scrollback-limit", .text = "Set on line 2 of @" ++ changed_since ++ " Line 1 of @ mentions it, and does not take effect." },
+        .{ .key = .@"scrollback-limit-bytes", .text = "Set on line 2 of @" ++ changed_since ++ " Line 1 of @ mentions it, and does not take effect." },
     });
 }
 
@@ -1546,16 +1546,16 @@ test "settings reference changed file: written differently and read the same, th
 }
 
 /// A config of `lines` generated lines: every tenth sets `font-size` to a
-/// value the loader refuses, every tenth after it `scrollback-limit`, and the
-/// rest are assignments it takes and comments.
+/// value the loader refuses, every tenth after it `scrollback-limit-bytes`,
+/// and the rest are assignments it takes and comments.
 fn generatedConfig(alloc: std.mem.Allocator, lines: usize) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     for (0..lines) |i| switch (i % 10) {
         0 => try out.writer.writeAll("font-size = abc\n"),
-        1 => try out.writer.writeAll("scrollback-limit = lots\n"),
+        1 => try out.writer.writeAll("scrollback-limit-bytes = lots\n"),
         2, 3, 4 => try out.writer.print("font-size = {d}\n", .{8 + i % 20}),
-        5, 6 => try out.writer.print("scrollback-limit = {d}\n", .{1000 + i}),
+        5, 6 => try out.writer.print("scrollback-limit-bytes = {d}\n", .{1000 + i}),
         7 => try out.writer.writeAll(if (i % 20 == 7) "cursor-style = bar\n" else "cursor-style = block\n"),
         8 => try out.writer.print("window-padding-x = {d}\n", .{i % 9}),
         else => try out.writer.print("# comment {d}\n", .{i}),
@@ -1587,7 +1587,7 @@ test "settings reference counts the lines of a large generated config" {
     try testing.expectEqual(Lines{ .count = 900, .last = 2995 }, font.set);
     try testing.expectEqual(Lines{ .count = 300, .last = 2991 }, font.untaken);
     try testing.expectEqualStrings("22", font.value);
-    const scrollback = &model.rows[index(.@"scrollback-limit")];
+    const scrollback = &model.rows[index(.@"scrollback-limit-bytes")];
     try testing.expectEqual(Lines{ .count = 600, .last = 2997 }, scrollback.set);
     try testing.expectEqual(Lines{ .count = 300, .last = 2992 }, scrollback.untaken);
     const cursor = &model.rows[index(.@"cursor-style")];
@@ -1657,9 +1657,9 @@ fn generatedRefusedConfig(alloc: std.mem.Allocator, lines: usize) ![]u8 {
     errdefer out.deinit();
     for (0..lines) |i| switch (i % 4) {
         0 => try out.writer.writeAll("font-size = abc\n"),
-        1 => try out.writer.writeAll("scrollback-limit = lots\n"),
+        1 => try out.writer.writeAll("scrollback-limit-bytes = lots\n"),
         2 => try out.writer.print("font-size = {d}\n", .{8 + i % 20}),
-        else => try out.writer.print("scrollback-limit = {d}\n", .{1000 + i}),
+        else => try out.writer.print("scrollback-limit-bytes = {d}\n", .{1000 + i}),
     };
     return out.toOwnedSlice();
 }
@@ -1689,7 +1689,7 @@ test "settings reference counts the lines of a generated config with 5000 refuse
     try testing.expectEqual(Lines{ .count = 2500, .last = 9999 }, font.set);
     try testing.expectEqual(Lines{ .count = 2500, .last = 9997 }, font.untaken);
     try testing.expectEqualStrings("26", font.value);
-    const scrollback = &model.rows[index(.@"scrollback-limit")];
+    const scrollback = &model.rows[index(.@"scrollback-limit-bytes")];
     try testing.expectEqual(Lines{ .count = 2500, .last = 10000 }, scrollback.set);
     try testing.expectEqual(Lines{ .count = 2500, .last = 9998 }, scrollback.untaken);
 

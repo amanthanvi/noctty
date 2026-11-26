@@ -135,6 +135,15 @@ pub const Projection = struct {
     native: NativeNames,
 };
 
+/// The number a `Limit(T, default)` Config key (upstream's
+/// `scrollback-limit-bytes`) holds in `value`, or null for any other type.
+/// Settings edits that number; the key keeps its type, and with it the
+/// config file's `unlimited`.
+fn limitValue(comptime T: type) ?type {
+    if (@typeInfo(T) != .@"struct" or !@hasField(T, "value") or !@hasDecl(T, "optional")) return null;
+    return @FieldType(T, "value");
+}
+
 /// One descriptor per persisted Config key. `app-notifications` has two scalar
 /// projections, not two independently saved keys. The three owned fields stay
 /// out of SettingValue so replacing a Config arena cannot invalidate a draft.
@@ -193,22 +202,30 @@ pub const Descriptor = struct {
             " " ++ self.applyNote();
     }
 
+    /// The type Settings edits: the Config field's, or the number a `Limit`
+    /// key holds (`limitValue`).
     pub fn Value(comptime self: Descriptor) type {
-        return Config.Value(self.key);
+        const T = Config.Value(self.key);
+        return limitValue(T) orelse T;
     }
     pub fn read(comptime self: Descriptor, config: *const Config) self.Value() {
-        return @field(config, @tagName(self.key));
+        const raw = @field(config, @tagName(self.key));
+        return if (comptime limitValue(Config.Value(self.key)) != null) raw.value else raw;
     }
     /// Owned/composite keys require their explicit adapters; never borrow an
     /// owned value from another Config arena through this scalar seam.
     pub fn write(comptime self: Descriptor, config: *Config, value: self.Value()) void {
         if (self.field == null) @compileError("Owned and composite Settings keys require an explicit adapter");
-        @field(config, @tagName(self.key)) = value;
+        if (comptime limitValue(Config.Value(self.key)) != null) {
+            @field(config, @tagName(self.key)).value = value;
+        } else {
+            @field(config, @tagName(self.key)) = value;
+        }
     }
     // Standalone test input, not an override serializer: production saves use
     // patchOrAppendEdits, including its font-family reset and text preservation.
     fn writeTestEntry(comptime self: Descriptor, writer: *std.Io.Writer, config: *const Config) !void {
-        try formatter.formatEntry(self.Value(), @tagName(self.key), self.read(config), writer);
+        try formatter.formatEntry(Config.Value(self.key), @tagName(self.key), @field(config, @tagName(self.key)), writer);
     }
     /// Defaults come from Config.default for this platform/build, never from
     /// a second hard-coded set. Settings' per-field reset names the default
@@ -231,7 +248,7 @@ pub const Descriptor = struct {
 // effect while enabling it but turning it off does not restore plain padding;
 // new_terminals is the guaranteed policy for every value, not an overpromise.
 pub const descriptors = [_]Descriptor{
-    .{ .key = .@"scrollback-limit", .native = .{ .binding = "edit_scrollback", .id = 401, .order = 0, .form_label = "Scrollback limit (bytes; 0 = off; new terminals only)", .accessible_name = "Scrollback limit" }, .field = .scrollback_limit, .label = "Scrollback limit", .help = "Bytes retained for each terminal. Zero disables scrollback.", .unit = "bytes", .section = .terminal, .kind = .integer, .apply = .new_terminals, .validation = .unsigned_integer, .keywords = "settings preferences configuration scrollback-limit history lines buffer" },
+    .{ .key = .@"scrollback-limit-bytes", .native = .{ .binding = "edit_scrollback", .id = 401, .order = 0, .form_label = "Scrollback limit (bytes; 0 = off; new terminals only)", .accessible_name = "Scrollback limit" }, .field = .scrollback_limit, .label = "Scrollback limit", .help = "Bytes retained for each terminal. Zero disables scrollback.", .unit = "bytes", .section = .terminal, .kind = .integer, .apply = .new_terminals, .validation = .unsigned_integer, .keywords = "settings preferences configuration scrollback-limit-bytes scrollback-limit history lines buffer" },
     .{ .key = .@"font-size", .native = .{ .binding = "edit_font_size", .id = 402, .order = 1, .form_label = "Font size (pt)", .accessible_name = "Font size" }, .field = .font_size, .label = "Font size", .help = "Text size in points. Saved changes respect a terminal that was zoomed manually.", .unit = "pt", .section = .appearance, .kind = .number, .apply = .live, .validation = .{ .finite_range = .{ .min = 6, .max = 72 } }, .keywords = "settings preferences configuration font-size text zoom" },
     .{ .key = .@"background-opacity", .native = .{ .binding = "edit_bg_opacity", .id = 408, .order = 3, .form_label = "Background opacity (0.0 .. 1.0)", .accessible_name = "Background opacity" }, .field = .background_opacity, .label = "Background opacity", .help = "Window opacity. Draft previews have a visibility floor; Save keeps the exact value.", .section = .appearance, .kind = .number, .apply = .live, .validation = .{ .finite_range = .{ .min = 0, .max = 1 } }, .keywords = "settings preferences configuration background-opacity transparency transparent", .preview = .opacity },
     .{ .key = .@"window-padding-x", .native = .{ .binding = "edit_pad_x", .id = 415, .order = 6, .form_label = "Window padding X (left/right or single value)", .accessible_name = "Window padding X" }, .field = .window_padding_x, .label = "Window padding X", .help = "Left and right terminal padding. Enter one value or a comma-separated pair.", .unit = "pt", .section = .appearance, .kind = .padding, .apply = .new_terminals, .validation = .{ .padding_max = 200 }, .keywords = "settings preferences configuration window-padding-x margin" },
@@ -437,11 +454,15 @@ pub fn Combo(comptime field: SettingField) type {
             .{ .value = .true, .label = "Unless at a shell prompt" },
             .{ .value = .always, .label = "Always" },
         },
-        // Windows has one clipboard, so true and clipboard have the same effect.
+        // Windows has one clipboard: clipboard and both copy to it, and
+        // primary, the selection clipboard, copies nothing there. Off, On
+        // and the same-as-On row keep their positions (0.15's false, true
+        // and clipboard; true is clipboard on Windows).
         .copy_on_select => &.{
-            .{ .value = .false, .label = "Off" },
-            .{ .value = .true, .label = "On" },
-            .{ .value = .clipboard, .label = "On (same as On on Windows)" },
+            .{ .value = .none, .label = "Off" },
+            .{ .value = .clipboard, .label = "On" },
+            .{ .value = .both, .label = "On (same as On on Windows)" },
+            .{ .value = .primary, .label = "Selection clipboard only (copies nothing on Windows)" },
         },
         .clipboard_read, .clipboard_write => &.{
             .{ .value = .ask, .label = "Ask each time" },
@@ -643,7 +664,7 @@ pub fn writeSettingValue(writer: *std.Io.Writer, value: SettingValue) !void {
 
 /// Shared non-default fixture for model and production patcher contracts.
 pub const round_trip_config =
-    \\scrollback-limit = 123456
+    \\scrollback-limit-bytes = 123456
     \\font-size = 13.25
     \\background-opacity = 0.875
     \\window-padding-x = 5,7
@@ -749,7 +770,7 @@ test "settings model validates scalar ranges with the form's exact types" {
 
 test "settings model separates saved apply timing from edit previews and Windows support" {
     for (descriptors) |spec| {
-        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile";
+        const new_terminal = spec.key == .@"scrollback-limit-bytes" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile";
         try std.testing.expectEqual(if (new_terminal) ApplyPolicy.new_terminals else ApplyPolicy.live, spec.apply);
         const unavailable = spec.key == .@"background-blur" or spec.key == .@"link-previews";
         try std.testing.expectEqual(if (unavailable) Support.unsupported_on_windows else Support.available, spec.support);
