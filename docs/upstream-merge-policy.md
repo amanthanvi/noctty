@@ -554,7 +554,11 @@ If that run fails, re-run each failed job once: the tree has already passed,
 so a first failure is not yet a regression. A job that never reached a verdict
 (a hosted outage, a cancellation) has not failed the tree: start it again when
 the runner is back, as often as that takes, and the prerelease waits for it.
-A failure that reproduces is fixed on `main`, which is still held. The
+The same holds for a job that failed only in a step that does not run the
+tree's code (checkout, toolchain setup, an artifact download or upload, a lost
+runner), once its log shows that step as the first failure. Record the log
+line in the drift report. A failure that reproduces in the tree's own build,
+tests or gates is fixed on `main`, which is still held. The
 maintainer disables the hold for the fix's pull request alone and re-enables
 it at once, as for the landing merge. The commit the fix lands as becomes the
 gated tip, and the whole pass repeats on it: every gate, not only the ones the
