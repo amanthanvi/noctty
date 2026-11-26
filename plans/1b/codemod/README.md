@@ -32,7 +32,19 @@ The engine, for every rule:
 
 test-dir-io (also):
 - arguments that change places must lie on one line, with no comment between the call's arguments;
-- makeOpenPath with options that are not a `.{ ... }` literal;
+- makeOpenPath with any options but the two exact translations: `.{}` stays, `.{ .no_follow = true }` becomes
+  `.{ .open_options = .{ .follow_symlinks = false } }` (0.17 renamed the field and inverted it);
+- realpathAlloc anywhere but the whole initializer of an untyped `const` (`const p = try tmp.dir.realpathAlloc(..);`):
+  0.17's result is a `[:0]u8`, so a `[]u8` binding, a field, an argument or a `var` could drop the sentinel and a
+  later free would get the wrong size. An untyped `const` keeps the type, and `free(p)` frees the sentinel too; a
+  copy of `p` coerced elsewhere to `[]u8` and freed through that copy is not traced;
+- openFile outside a test. 0.15.2's Windows openFile refused a directory (`error.IsDir`, `std.os.windows.OpenFile`'s
+  `.file_only`), and 0.17.1's opens one unless `.allow_directory = false` (both measured). The rule rewrites only test
+  blocks, since product code has no `std.testing.io` and needs a reader to thread its caller's Io; so the product
+  choice is the bail-out, and the hand edit that threads the Io adds `.allow_directory = false`. A 0.15 openFile on
+  `std.fs.cwd()`, and `std.fs.openFileAbsolute`, outside a test are reported as such (another receiver, whose type the
+  tokens do not show, is not). An openFile inside a test keeps 0.17's default: a test opens the path it just made,
+  and the report notes each one (`rewritten; 0.17's openFile opens a directory ...`);
 - readFileAlloc's bound `n` becomes `.limited(n + 1)`: 0.15 read a file of exactly `n` bytes and 0.17's `Io.Limit`
   refuses a file that reaches it (measured on both toolchains). Only a literal or a simple name takes the `+ 1`;
   any other bound is a hand edit (`1 << 20 + 1` is `1 << 21`; `maxInt(usize) + 1` overflows). A name whose value

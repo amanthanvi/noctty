@@ -124,17 +124,76 @@ class RuleTests(unittest.TestCase):
 
     # --- the council's round-1 findings (E3, E4, E5, O3, O6) ---------------------------------------------------
 
-    def test_make_open_path_options_move_under_open_options(self):
-        src = ('test "m" {\n    var tmp = std.testing.tmpDir(.{});\n'
-               '    var a = try tmp.dir.makeOpenPath("a", .{ .iterate = true });\n'
-               '    var b = try tmp.dir.makeOpenPath("b", .{});\n'
-               '    var c = try tmp.dir.makeOpenPath("c", opts);\n}\n')
-        got, hits = codemod.rewrite(src, {"test-dir-io"})
-        self.assertIn('try tmp.dir.createDirPathOpen(std.testing.io, "a", .{ .open_options = .{ .iterate = true } })',
-                      got)
-        self.assertIn('try tmp.dir.createDirPathOpen(std.testing.io, "b", .{})', got)
-        # Options the tokens cannot read stay for a hand edit.
-        self.assertIn('try tmp.dir.makeOpenPath("c", opts)', got)
+    def test_make_open_path_translates_no_follow_and_nothing_else(self):
+        # council F3: `.no_follow = true` is 0.17's `.open_options = .{ .follow_symlinks = false }`, one to one;
+        # any other option is a hand edit, reported.
+        head = 'test "m" {\n    var tmp = std.testing.tmpDir(.{});\n'
+        for opts, want in ((".{}", ".{}"),
+                           (".{ .no_follow = true }", ".{ .open_options = .{ .follow_symlinks = false } }"),
+                           (".{ .no_follow = true, }", ".{ .open_options = .{ .follow_symlinks = false } }")):
+            with self.subTest(opts=opts):
+                got, hits = codemod.rewrite(head + f'    var a = try tmp.dir.makeOpenPath("a", {opts});\n}}\n')
+                self.assertIn(f'    var a = try tmp.dir.createDirPathOpen(std.testing.io, "a", {want});\n', got)
+        for opts in (".{ .iterate = true }", ".{ .no_follow = true, .iterate = true }", ".{ .no_follow = false }",
+                     ".{ .access_sub_paths = false }", "opts"):
+            with self.subTest(opts=opts):
+                src = head + f'    var a = try tmp.dir.makeOpenPath("a", {opts});\n}}\n'
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.OPEN_OPTIONS)])
+        # The one translation over several lines would drop its line breaks: the engine's hand edit.
+        src = head + '    var a = try tmp.dir.makeOpenPath("a", .{\n        .no_follow = true,\n    });\n}\n'
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+        self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.LINE_COUNT)])
+
+    def test_realpath_alloc_keeps_its_sentinel_type_or_is_a_hand_edit(self):
+        # council F3: 0.17's realPathFileAlloc returns `[:0]u8`. Into an untyped const it stays one, and
+        # `free(p)` frees the sentinel too; into a `[]u8` (or anywhere it may coerce) a later free would get the
+        # wrong size: a hand edit, reported.
+        head = 'test "rp" {\n    var tmp = std.testing.tmpDir(.{});\n'
+        for call, want in (('tmp.dir.realpathAlloc(alloc, ".")', 'tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc)'),
+                           ('std.fs.cwd().realpathAlloc(alloc, ".")',
+                            'std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", alloc)')):
+            with self.subTest(call=call):
+                got, hits = codemod.rewrite(head + f'    const p = try {call};\n    defer alloc.free(p);\n}}\n')
+                self.assertIn(f'    const p = try {want};\n    defer alloc.free(p);\n', got)
+                self.assertEqual(len(hits), 1)
+        for line in ('    const p: []u8 = try tmp.dir.realpathAlloc(alloc, ".");\n    defer alloc.free(p);\n',
+                     '    const p: [:0]u8 = try tmp.dir.realpathAlloc(alloc, ".");\n',
+                     '    var p = try tmp.dir.realpathAlloc(alloc, ".");\n',
+                     '    const p = tmp.dir.realpathAlloc(alloc, ".") catch return;\n',
+                     '    s.path = try tmp.dir.realpathAlloc(alloc, ".");\n',
+                     '    const s: S = .{ .path = try tmp.dir.realpathAlloc(alloc, ".") };\n',
+                     '    try list.append(alloc, try tmp.dir.realpathAlloc(alloc, "."));\n'):
+            with self.subTest(line=line):
+                src = head + line + '}\n'
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.REALPATH_SHAPE)])
+
+    def test_open_file_and_the_directory_it_may_open(self):
+        # council F3: 0.15.2's openFile refused a directory on Windows (error.IsDir); 0.17.1's opens one unless
+        # `.allow_directory = false`. A test's rewrite keeps 0.17's default and the report lists it; product code is
+        # never rewritten (it has no std.testing.io), and its 0.15 openFile is a reported hand edit.
+        src = ('test "of" {\n    var tmp = std.testing.tmpDir(.{});\n    const f = try tmp.dir.openFile("a", .{});\n'
+               '    defer f.close();\n}\n')
+        rows = []
+        got, hits = codemod.rewrite(src, None, None, rows)
+        self.assertIn('    const f = try tmp.dir.openFile(std.testing.io, "a", .{});\n', got)
+        self.assertEqual(rows, [("test-dir-io", 3, "rewritten; " + codemod.OPEN_FILE_NOTE)])
+        product = ('fn load() !void {\n    const f = try std.fs.cwd().openFile("a", .{});\n    defer f.close();\n'
+                   '    const g = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });\n    defer g.close();\n'
+                   '    const h = try std.Io.Dir.cwd().openFile(io, "a", .{});\n    const k = try dir.openFile("a", .{});\n'
+                   '}\n')
+        rows = []
+        self.assertEqual(codemod.rewrite(product, None, None, rows), (product, []))
+        self.assertEqual(rows, [("test-dir-io", 2, "hand edit: " + codemod.PRODUCT_OPEN_FILE),
+                                ("test-dir-io", 4, "hand edit: " + codemod.PRODUCT_OPEN_FILE)])
+        # With --fork-lines, only the fork's.
+        rows = []
+        codemod.rewrite(product, None, {1, 4}, rows)
+        self.assertEqual([r[:2] for r in rows], [("test-dir-io", 4)])
 
     def test_read_link_is_left_alone(self):
         # 0.17's readLink returns a byte count where 0.15's returned the slice.

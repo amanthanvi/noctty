@@ -46,11 +46,12 @@ class Edit:
 
 
 class Hit:
-    """One rewrite: its edits, applied together or not at all, and the 1-based line it is reported at."""
-    __slots__ = ("edits", "line")
+    """One rewrite: its edits, applied together or not at all, the 1-based line it is reported at, and a note the
+    report gives beside it (what a reader should know of the rewrite), or None."""
+    __slots__ = ("edits", "line", "note")
 
-    def __init__(self, line, edits):
-        self.line, self.edits = line, list(edits)
+    def __init__(self, line, edits, note=None):
+        self.line, self.edits, self.note = line, list(edits), note
 
     @property
     def start(self):
@@ -267,14 +268,32 @@ IO_ARG_NAMES = ("io", "testing.io", "std.testing.io")
 # the slice, so a call's value changes meaning (a hand edit).
 
 
+OPEN_OPTIONS = ("makeOpenPath's options are not `.{}` or `.{ .no_follow = true }`, the two the rule translates "
+                "exactly")
+REALPATH_SHAPE = ("realpathAlloc's 0.17 result is a `[:0]u8`: outside an untyped `const` it may lose the sentinel, "
+                  "and a later free would get the wrong size")
+OPEN_FILE_NOTE = ("0.17's openFile opens a directory, which 0.15's refused on Windows (error.IsDir); a test keeps "
+                  "0.17's default")
+PRODUCT_OPEN_FILE = ("outside a test the rule has no Io to pass; 0.17's openFile opens a directory, which 0.15's "
+                     "refused on Windows, so the hand edit gives it `.allow_directory = false`")
+
+
 def _open_options(texts):
-    """makeOpenPath's 0.15 `OpenOptions` become 0.17's `CreateDirPathOpenOptions.open_options`."""
-    opts = texts[1].strip()
-    if opts == ".{}":
-        return ".{}"
-    if opts.startswith(".{") and opts.endswith("}"):
-        return ".{ .open_options = " + texts[1] + " }"
-    raise HandEdit("makeOpenPath's options are no literal the rule can read")
+    """makeOpenPath's 0.15 `OpenOptions`: `.{}` stays, and `.{ .no_follow = true }` is 0.17's
+    `.{ .open_options = .{ .follow_symlinks = false } }`, both exact; any other option is a hand edit."""
+    words = [t.text for t in code_tokens(texts[1])]
+    if words == [".", "{", "}"]:
+        return texts[1]
+    if words in ([".", "{", ".", "no_follow", "=", "true", "}"], [".", "{", ".", "no_follow", "=", "true", ",", "}"]):
+        return ".{ .open_options = .{ .follow_symlinks = false } }"
+    raise HandEdit(OPEN_OPTIONS)
+
+
+def _untyped_const_init(toks, s, close):
+    """toks[s:close + 1] is the whole initializer of an untyped `const` (`const p = [try] <call>;`)."""
+    k = s - 1 if is_tok(at(toks, s - 1), "keyword", "try") else s
+    return (is_tok(at(toks, k - 1), "op", "=") and is_tok(at(toks, k - 2), "identifier")
+            and is_tok(at(toks, k - 3), "keyword", "const") and is_tok(at(toks, close + 1), "op", ";"))
 
 
 FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
@@ -395,13 +414,31 @@ def rule_test_dir_io(text, toks):
     the `Io.Limit` `.limited(n + 1)`, since 0.15 accepted a file of exactly `n` bytes and 0.17's limit refuses a file
     that reaches it; a bound that is not a literal or a simple name is a hand edit. Its oversize error is
     `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a helper outside the
-    test may consume it), every readFileAlloc is a hand edit. A file or directory such a call opened
-    (`const f = try tmp.dir.createFile(...)`) closes with the
+    test may consume it), every readFileAlloc is a hand edit. realpathAlloc's 0.17 result is a `[:0]u8`, so it is
+    rewritten only as the whole initializer of an untyped `const`, whose `free` keeps the sentinel's size.
+    makeOpenPath's options are rewritten only where the translation is exact (`.{}`, `.{ .no_follow = true }`).
+    openFile in a test keeps 0.17's default, which opens a directory where 0.15's refused one on Windows, and the
+    report notes each; outside a test nothing is rewritten (no `std.testing.io` there), and a 0.15 openFile on
+    `std.fs.cwd()` or `std.fs.openFileAbsolute` is a reported hand edit that should pass `.allow_directory = false`.
+    A file or directory such a call opened (`const f = try tmp.dir.createFile(...)`) closes with the
     Io, in the same hit as its open, so the two are rewritten together or not at all; one whose open is already
     0.17's closes with the Io alone. Only the 0.15 arity is rewritten, so a ported call is left alone."""
     hits = []
     names_file_too_big = "FileTooBig" in text   # code, a string or a comment: when in doubt, a hand edit
-    for lo, hi in test_blocks(toks):
+    blocks = test_blocks(toks)
+    for i, t in enumerate(toks):
+        # Product code: a 0.15 openFile the rule knows the receiver of, outside every test block.
+        if not (t.kind == "identifier" and t.text in ("openFile", "openFileAbsolute")
+                and is_tok(at(toks, i - 1), "op", ".") and is_tok(at(toks, i + 1), "op", "(")):
+            continue
+        if not (_receiver(toks, i, ()) == "cwd" if t.text == "openFile" else qualified_at(toks, i, ("std", "fs"))):
+            continue
+        if any(lo <= i <= hi for lo, hi in blocks):
+            continue
+        args, close = zigtok.split_args(toks, i + 1)
+        if len(args) == 2:
+            hits.append(Bail(t.line + 1, PRODUCT_OPEN_FILE, range(t.line + 1, toks[close].line + 2)))
+    for lo, hi in blocks:
         tmp_names = _tmp_bindings(toks, lo, hi)
         call_hits = {}   # method-name token index -> Hit
         for i in range(lo, hi):
@@ -420,6 +457,8 @@ def rule_test_dir_io(text, toks):
             try:
                 if t.text == "readFileAlloc" and names_file_too_big:
                     raise HandEdit(FILE_TOO_BIG)
+                if t.text == "realpathAlloc" and not _untyped_const_init(toks, i - (4 if recv == "tmp" else 8), close):
+                    raise HandEdit(REALPATH_SHAPE)
                 edits = _dir_call_edits(text, toks, i, args)
             except HandEdit as e:
                 hits.append(Bail(t.line + 1, str(e), call_lines))
@@ -427,7 +466,7 @@ def rule_test_dir_io(text, toks):
             if recv == "cwd":
                 fs = toks[i - 6]   # std.fs.cwd() -> std.Io.Dir.cwd()
                 edits.append(rename(fs, "Io.Dir"))
-            hit = Hit(t.line + 1, edits)
+            hit = Hit(t.line + 1, edits, OPEN_FILE_NOTE if t.text == "openFile" else None)
             hits.append(hit)
             call_hits[i] = hit
         # What such a call opened closes with the Io.
@@ -589,7 +628,7 @@ def rewrite(text, rule_ids=None, lines=None, rows=None):
             text = new
             hits_out.extend((rule_id, h.line) for h in hits)
             if rows is not None:
-                rows.extend((rule_id, h.line, "rewritten") for h in hits)
+                rows.extend((rule_id, h.line, "rewritten" + (f"; {h.note}" if h.note else "")) for h in hits)
         else:
             raise ValueError(f"rule {rule_id} did not settle in {MAX_PASSES} passes")
         if rows is not None:
