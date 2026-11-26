@@ -766,9 +766,12 @@ function Get-TestShardProblems {
     $sharded = $RunnerText.Remove($simple.Index, $simple.Length)
     $lookups = [regex]::Matches($sharded, 'builtin\.test_functions\[').Count
     $throughShard = [regex]::Matches($sharded, 'builtin\.test_functions\[shard\.testIndex\((?:i|index)\)\]').Count
-    # Test metadata, run_test, start_fuzzing and the terminal loop.
-    if ($lookups -ne 4 -or $throughShard -ne 4) {
-        $problems.Add("src/test_runner.zig must look up its 4 tests through shard.testIndex ($throughShard of $lookups do)")
+    # Fuzzing finds its tests by the names the build runner sends (Zig 0.17's
+    # start_fuzzing), so its 3 lookups index the whole table.
+    $byName = [regex]::Matches($sharded, 'builtin\.test_functions\[(?:i\.\*|fuzz_runner\.indexes\[i\])\]').Count
+    # Test metadata, run_test and the terminal loop.
+    if ($lookups -ne 6 -or $throughShard -ne 3 -or $byName -ne 3) {
+        $problems.Add("src/test_runner.zig must look up its 3 indexed tests through shard.testIndex and its 3 fuzzed tests by name ($throughShard and $byName of $lookups do)")
     }
     $lengths = [regex]::Matches($sharded, 'builtin\.test_functions\.len').Count
     $shardLengths = [regex]::Matches($sharded, 'shard\.len\(builtin\.test_functions\.len\)').Count
@@ -817,6 +820,7 @@ $testShardMutations = @(
     @{ Runner = $testRunnerText; Build = $buildZigText.Replace('        step.dependOn(&b.addRunArtifact(test_exe).step);', '        _ = b.addRunArtifact(test_exe);') }
     @{ Runner = $testRunnerText; Build = $buildZigText.Replace('        addTestRuns(b, test_step, test_exe, test_shards);', '        test_step.dependOn(&b.addRunArtifact(test_exe).step);') }
     @{ Runner = $testRunnerText.Replace('            shard = Shard.parse(arg["--shard=".len..]) orelse', '            _ = Shard.parse(arg["--shard=".len..]) orelse'); Build = $buildZigText }
+    @{ Runner = $testRunnerText.Replace('builtin.test_functions[i.*]', 'builtin.test_functions[shard.testIndex(i.*)]'); Build = $buildZigText }
 )
 foreach ($mutation in $testShardMutations) {
     if ($mutation.Runner -ceq $testRunnerText -and $mutation.Build -ceq $buildZigText) {
