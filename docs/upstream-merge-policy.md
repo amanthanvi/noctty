@@ -76,6 +76,7 @@ Upstream wins on VT and protocol correctness and on memory-safety fixes, but
 those changes must be adapted around fork-owned Windows behavior rather than
 overwriting it. If neither rule resolves a conflict cleanly, add the change to
 the window's deferred list with a written reason; do not force it through.
+Deferral, below, says what a deferral costs in a real merge.
 
 `PageList.Node` takes upstream's page model as written from the Ghostty
 1.4.0 catch-up's stepping-stone merge (`74d0c72fd`) on. Upstream gave the
@@ -172,28 +173,57 @@ timers). Adapt an upstream hunk that changes the render pass, its timers or
 the drain's timer arms in `src/renderer/Thread.zig` into one of those two;
 Thread's timer and wakeup callbacks stay one `turn` call each.
 
-The ConPTY path is fork-owned by thread and function, not only by file. The
-pty reader (`ReadThread.threadMainWindows` and `readUntilStopped` in
-`src/termio/Exec.zig`), the IO thread, which starts the child, resizes the
-pseudo console under the renderer-state mutex and cancels the reader, and the
-UI thread, which closes the pty, are OS threads the fork spawns. The
-`v1.4.0` merge brings `std.Io`, and none of the three becomes an `Io` task.
-They read, write, cancel and close pty handles and pipes through Win32
-externs, one declaration per symbol: upstream's `exp.kernel32` block in
-`src/os/windows.zig` stays as upstream wrote it, on std's `BOOL`, and what
-upstream lacks goes in one fork-added file under `src/os/` with
-`BOOL = c_int`. Re-read that `exp.kernel32` block at every merge: a name it
-newly declares leaves the fork file, so each symbol on the path keeps one
-declaration. On this path `std.Io` is for locks taken with
+The ConPTY path is fork-owned by thread and function, not only by file. Three
+threads own the pty: the reader (`ReadThread.threadMainWindows` and
+`readUntilStopped` in `src/termio/Exec.zig`); the IO thread, which starts the
+child, writes the pty's input, resizes the pseudo console under the
+renderer-state mutex and cancels the reader; and the UI thread, the process's
+main thread, which closes the pty. The fork spawns the first two with
+`std.Thread.spawn`. The `v1.4.0` merge brings `std.Io`, and none of the three
+becomes an `Io` task.
+
+The reader reads, and the IO thread cancels that read, through Win32 externs.
+Pty handles and pipes are closed the same way. The IO thread writes the pty's
+input through libxev's stream. None of it goes through `Io.File`. Each symbol
+has one declaration:
+
+- Upstream's `exp` struct in `src/os/windows.zig` (`exp.kernel32` and
+  `exp.ntdll`) stays as upstream wrote it, on std's `BOOL`. That makes the
+  struct upstream's inside a class 2 file.
+- What upstream lacks goes in one fork-added file, `src/os/windows_ext.zig`,
+  with `BOOL = c_int`. The three externs `main` has inside the struct
+  (`ResumeThread`, `GetComputerNameExW`, `ReOpenFile`) move there in the
+  merge.
+- Re-read the struct at every merge: a name it newly declares leaves the fork
+  file, so each symbol on the path keeps one declaration.
+
+On this path `std.Io` is for locks taken with
 `lockUncancelable`, timestamps, thread names, passing the handle on, and
 regular files that are not pty handles (the working-directory check before a
-spawn, the `input` files, the bundled ConPTY loader). `Io.File` on a pty
+spawn, the `input` files, the bundled ConPTY loader). The reader's
+`yieldToDemand` keeps upstream's timed wait between chunks. `Io.File` on a pty
 handle or pipe, `Io.async`, `Io.concurrent`, the cancel APIs and `Io.sleep`
-stay out of it. Upstream's own Windows lines in these files are not taken
-where they stop the reader with one pipe byte and one `CancelIoEx`, spawn it
-with the default stack, wait without a bound for a killed child, or write in
-64-byte chunks; `docs/agents/log/conpty.md` says why (2026-10-10 F1,
-2026-10-31 SURFACE-STACK, 2026-11-18 REPLY-PATH-01).
+stay out of it; upstream's POSIX `killPid` and `getpgid` keep their
+`Io.sleep`, which no Windows build reaches.
+
+Upstream's own Windows lines in these files are not taken where they would
+undo a fork fix. They:
+
+- stop the reader with one pipe byte and one `CancelIoEx`;
+- read in a loop that has no arm for the end of the output;
+- spawn the reader with the default stack;
+- wait without a bound for a killed child;
+- write in 64-byte chunks;
+- make the terminal's first resize with `catch unreachable`;
+- fail the terminal's resize when the pty's resize fails;
+- close all four pipe ends of a pty, two of which a handoff session no longer
+  owns;
+- call `CreateProcessW` without the fork's inherit lock and job object.
+
+`docs/agents/log/conpty.md` says why (2026-10-10 F1, 2026-10-11 PKG-14,
+2026-10-31 SURFACE-STACK, 2026-11-18 REPLY-PATH-01), and
+`docs/agents/log/app-lifecycle.md` has the inherit lock (2026-10-15
+JUMPLIST-02).
 
 The merge scope above decides which paths a window merges from upstream. It is
 not a reason to defer an upstream memory-safety fix (a use-after-free, double
@@ -217,16 +247,35 @@ also match.
 | Class | Paths                                                                                                                                                                                                             | Default side                                                                                                                                                                                     |
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1     | `src/apprt/**`, and the fork-owned seams listed above wherever they live                                                                                                                                          | The fork wins on Windows behaviour and fork-owned features; upstream wins on VT and protocol correctness and memory safety, adapted around the fork                                              |
-| 2     | Windows platform and process: `src/os/**`, `src/pty.zig`, `src/termio/**`, `src/crash/**`, `src/global.zig`, `src/main_ghostty.zig`, `src/App.zig`                                                                | Fork                                                                                                                                                                                             |
+| 2     | Windows platform and process: `src/os/**`, `src/pty.zig`, `src/termio/**`, `src/crash/**`, `src/global.zig`, `src/main_ghostty.zig`, `src/App.zig`                                                                | Fork, except the `exp` struct of `src/os/windows.zig` (`exp.kernel32` and `exp.ntdll`), which stays upstream's as written (the ConPTY paragraphs above)                                          |
 | 3     | Terminal core: the rest of `src/terminal/**`                                                                                                                                                                      | Upstream, re-applying the fork-owned delta (the written override below)                                                                                                                          |
 | 4     | The libghostty-vt C API: `src/terminal/c/**`, `include/ghostty/**`, `src/lib_vt.zig`                                                                                                                              | Upstream                                                                                                                                                                                         |
-| 5     | Other shared core: everything no other class names                                                                                                                                                                | Per file                                                                                                                                                                                         |
+| 5     | Other shared core: everything no other class names                                                                                                                                                                | Per file, which means no default: each hunk is decided and recorded with its rule and its reason                                                                                                 |
 | 6     | Shell integration: `src/shell-integration/**`                                                                                                                                                                     | Fork, taking upstream's security fixes                                                                                                                                                           |
 | 7     | Build, CI, packaging, repository files and tests, as `owner()` matches them: `build.zig*`, `src/build/**`, `pkg/**`, `.github/**`, `nix*`, `flake*`, `CODEOWNERS`, `typos*`, `valgrind*`, `.gitignore`, `test/**` | Fork for CI, packaging and repository files; upstream's build port, adapted; a test hunk takes the side the code it tests took, and the fork's own harnesses (`test/windows/**`) stay the fork's |
 | 8     | Docs: top-level Markdown and Markdown under `src/`                                                                                                                                                                | Fork                                                                                                                                                                                             |
 
-A class chooses a default side and nothing else. The two rules below say when
-the default does not hold.
+A class chooses a default side and nothing else. Three things say when the
+default does not hold: the seam paragraphs under Fork-owned files (the
+`PageList.Node` model, renderer scheduling, the ConPTY path), and the two
+rules below.
+
+Every conflict hunk is decided on its own and recorded, whatever its class.
+Class 5 shows why: the stepping stone's 48 class 5 hunks went 17 to the fork,
+14 to upstream, 12 rewritten by hand, 4 keeping both sides and 1 neither. A
+merge keeps three ledgers, and `plans/stone-1a/` holds the stepping stone's as
+the model:
+
+- **The resolution ledger** (`resolution-ledger.tsv`): one row per conflict
+  hunk, with the side taken (fork, upstream, both, hand or neither), the rule
+  that decided it and one line of why.
+- **The dropped-delta ledger** (`dropped-delta.tsv`): what the result dropped
+  from either side, each with a disposition. A hunk resolved to the fork's
+  side owes one for the upstream lines it leaves out: kept, mapped onto the
+  fork's equivalent by name, or refused with a reason.
+- **The residual ledger** (`residual-ledger.tsv`): every difference that
+  remains between the merged tree and the upstream revision on shared paths,
+  each with why it stays.
 
 ## The written override and its exceptions
 
@@ -240,24 +289,26 @@ above are this rule applied to the page model.
 
 **The exceptions.** The override does not apply to the behaviours below. In
 each, the fork's side wins, and upstream's change is adapted around it or
-recorded as dropped.
+recorded as dropped. An exception covers the hunks of its named behaviour, not
+every hunk in the files its Where column lists; the other hunks in those files
+follow their class.
 
-| Fork-owned behaviour                                                                                                                              | Where                                                                                                                | Commit                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| The ConPTY resize policy (PKG-14): `keepRowActive`; on a shrink, rows below the cursor are dropped; `Exec.initTerminal` turns scrollback pull off | `src/terminal/Screen.zig`, `src/terminal/PageList.zig`, `src/termio/Exec.zig`                                        | `e7ac5d003` (#328)                                     |
-| OSC 7501's Windows half: tab badges, the taskbar, toasts, UIA and `goto_attention`                                                                | `src/termio/stream_handler.zig`, `src/apprt/win32_program_status.zig`                                                | `a4de01394` (#301)                                     |
-| The bound on Kitty placement geometry, adapted away from upstream `afb61e1b6`                                                                     | `src/terminal/kitty/graphics_*.zig`                                                                                  | `a603eeac9` (#510)                                     |
-| `QuerySearch` orchestration over upstream's search layers                                                                                         | `src/terminal/search/query_search.zig`, `src/terminal/search/terminal.zig`, `src/terminal/search/Thread.zig`         | `2c0571c66` (#636)                                     |
-| One `Pattern` matcher under upstream's search layers                                                                                              | `src/terminal/search/pattern.zig`                                                                                    | `78d5671b3` (#635)                                     |
-| Undo snapshots restore the cursor; Copy as HTML anchors only web, mail and ftp links (PKG-53)                                                     | `src/terminal/formatter.zig`, `src/terminal/hyperlink.zig`                                                           | `9a624aac9` (#377)                                     |
-| A link opens from the message loop, never with the renderer-state mutex held across `ShellExecuteW` (PKG-23, LIFE-01)                             | `src/Surface.zig`                                                                                                    | `9ddd6c5e1` (#326), `369d953af` (#332)                 |
-| Program-reported paths go through `os/local_path.zig`: link text, the OSC 7 working directory, Kitty graphics files                               | `src/terminal/kitty/graphics_image.zig`, `src/termio/stream_handler.zig`, `src/Surface.zig`, `src/os/local_path.zig` | `6a5fd27cd` (#638)                                     |
-| The `+new-tab` automation verb                                                                                                                    | `src/cli/new_tab.zig`                                                                                                | `461580c9b` (#196)                                     |
-| The fork's CI                                                                                                                                     | `.github/workflows/**`                                                                                               | None: a path rule (see "What the tree may hold" below) |
-| One WUFFS zlib decoder, taking upstream's alignment fix                                                                                           | `pkg/wuffs/src/zlib.zig`                                                                                             | `a167b852c` (#609)                                     |
-| The D3D11 backend refuses images (`.image`, `.bg_image`) until it can draw them                                                                   | `src/renderer/d3d11/RenderPass.zig`                                                                                  | `e6dae0919` (#303)                                     |
-| The fork's Windows font backend, under its own name `.windows_freetype`                                                                           | `src/font/**`                                                                                                        | `cb6ba9f83`                                            |
-| Sentry is off in the default build                                                                                                                | `src/build/Config.zig`, `src/crash/sentry.zig`                                                                       | `1ba1d5e43` (#431)                                     |
+| Fork-owned behaviour                                                                                                                              | Where                                                                                                                                                                                                                                                                                                | Commit                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| The ConPTY resize policy (PKG-14): `keepRowActive`; on a shrink, rows below the cursor are dropped; `Exec.initTerminal` turns scrollback pull off | `src/terminal/Screen.zig`, `src/terminal/PageList.zig`, `src/termio/Exec.zig`                                                                                                                                                                                                                        | `e7ac5d003` (#328)                                                                       |
+| OSC 7501's Windows half: tab badges, the taskbar, toasts, UIA and `goto_attention`                                                                | `src/termio/stream_handler.zig`, `src/apprt/win32_program_status.zig`                                                                                                                                                                                                                                | `a4de01394` (#301)                                                                       |
+| The bound on Kitty placement geometry, adapted away from upstream `afb61e1b6`                                                                     | `src/terminal/kitty/graphics_exec.zig`, `src/terminal/kitty/graphics_storage.zig`                                                                                                                                                                                                                    | `a603eeac9` (#510)                                                                       |
+| `QuerySearch` orchestration over upstream's search layers                                                                                         | `src/terminal/search/query_search.zig`, `src/terminal/search/terminal.zig`, `src/terminal/search/Thread.zig`                                                                                                                                                                                         | `2c0571c66` (#636)                                                                       |
+| One `Pattern` matcher under upstream's search layers                                                                                              | `src/terminal/search/pattern.zig`                                                                                                                                                                                                                                                                    | `78d5671b3` (#635)                                                                       |
+| Undo snapshots restore the cursor; Copy as HTML anchors only web, mail and ftp links (PKG-53)                                                     | `src/terminal/formatter.zig`, `src/terminal/hyperlink.zig`                                                                                                                                                                                                                                           | `9a624aac9` (#377)                                                                       |
+| A link opens from the message loop, never with the renderer-state mutex held across `ShellExecuteW` (PKG-23, LIFE-01)                             | `src/Surface.zig`, and `App.deferShellRequest` in `src/apprt/win32/app.zig` (in `src/apprt/win32.zig` when `369d953af` wrote it)                                                                                                                                                                     | `9ddd6c5e1` (#326), `369d953af` (#332)                                                   |
+| Program-reported paths go through `os/local_path.zig`: link text, the OSC 7 working directory, Kitty graphics files                               | `src/terminal/kitty/graphics_image.zig`, `src/termio/stream_handler.zig`, `src/Surface.zig`, `src/os/local_path.zig`                                                                                                                                                                                 | `6a5fd27cd` (#638)                                                                       |
+| The `+new-tab` automation verb                                                                                                                    | `src/cli/new_tab.zig`                                                                                                                                                                                                                                                                                | `461580c9b` (#196)                                                                       |
+| The fork's CI                                                                                                                                     | `.github/workflows/**`                                                                                                                                                                                                                                                                               | None: a path rule (see "What the tree may hold" below)                                   |
+| One WUFFS zlib decoder, taking upstream's alignment fix (`42049f1c4`)                                                                             | `pkg/wuffs/src/zlib.zig`                                                                                                                                                                                                                                                                             | `a167b852c` (#609)                                                                       |
+| The D3D11 backend refuses images (`.image`, `.bg_image`) until it can draw them                                                                   | `src/renderer/d3d11/RenderPass.zig`                                                                                                                                                                                                                                                                  | `e6dae0919` (#303)                                                                       |
+| The fork's Windows font backend, under its own name `.windows_freetype`, decided arm by arm in the files it shares with upstream                  | `src/font/backend.zig`, `src/font/discovery_windows.zig`, `src/font/discovery_windows_dwrite.zig`, `src/font/DeferredFace_windows.zig`, and the `.windows_freetype` arms of `Collection.zig`, `DeferredFace.zig`, `discovery.zig`, `face.zig`, `library.zig`, `main.zig` and `shape.zig` beside them | `cb6ba9f83` (the name and its arms), `ff7414fe0` (the registry scan), `5e6e930c6` (#280) |
+| Sentry is off in the default build                                                                                                                | `src/build/Config.zig`                                                                                                                                                                                                                                                                               | `1ba1d5e43` (#431)                                                                       |
 
 ## Ported changes
 
@@ -269,7 +320,7 @@ same change from both sides.
    `adapted from upstream`, a cited upstream SHA, a `sync(` subject) is a hint
    for one hunk and nothing more.
 2. The ownership class decides the side. A citation never moves a class 1 or
-   class 2 hunk, or an exception above, to upstream's side.
+   class 2 hunk, or a hunk of an exception's behaviour, to upstream's side.
 3. The citations a search finds are the identified ports, not a complete
    count.
 4. **The ancestry clause.** A port-cited hunk may take upstream's text only
@@ -294,8 +345,13 @@ same change from both sides.
      collapse punctuation.
    - A fork commit that names `(upstream #N)` names upstream's pull request.
      With no subject match, it is matched to the upstream commit whose
-     subject ends `(#N)`. `f1158e2e9` (#617) names upstream #14420, which is
-     `b1d2b7ef1` in `v1.4.0`.
+     subject ends `(#N)`. `f1158e2e9` (#617) cites `837c77305`, a commit of
+     its own branch that the squash replaced, whose subject names
+     `(upstream #14420)`. That SHA is on no upstream history, and it is
+     matched to `b1d2b7ef1` in `v1.4.0`, whose subject ends `(#14420)`. The
+     change is in the Nerd Font tables under `src/font/`, which are class 5
+     and no part of the font-backend exception, so the ancestry clause decides
+     those hunks.
    - A match by subject is a lead. The reviewer's confirmation is what makes
      it count.
 6. **Ledgers follow the same rule.** A dropped-delta entry may say
@@ -312,11 +368,24 @@ touches is resolved by its class (Default sides, above) and checked by the
 build, the test suite and the resolution ledger, not by a tree comparison.
 
 **Must be empty.** No tracked file under these paths, after any merge. The
-gate is `git ls-files` finding nothing for each;
-`test/windows/flagship/contracts/Contracts.15-PathKinds.ps1` holds the
-pathspecs and a negative control. Upstream carries them: `v1.4.0` has 271
-files under `macos/`, 79 under `src/apprt/gtk*`, 37 under `po/` and 16 under
-`nix/vm/`.
+gate is `git ls-files` finding nothing for each. Upstream carries them:
+`v1.4.0` has 271 files under `macos/`, 79 under `src/apprt/gtk*`, 37 under
+`po/` and 16 under `nix/vm/`.
+
+`test/windows/flagship/contracts/Contracts.15-PathKinds.ps1` runs that gate
+with a negative control, for the pathspecs it lists and no others. A bullet
+below that has no pathspec there is a rule the contract does not check, and
+the merge's own delete list has to carry it. At `63a4c3969` the contract lists
+nothing for:
+
+- the i18n, Xcode and Metal build steps `v1.4.0` has under `src/build/`:
+  `GhosttyI18n.zig`, `GhosttyXcodebuild.zig`, `MetallibStep.zig` and
+  `xcframework.zig`;
+- the three Apple steps named below;
+- three of upstream's workflows: `clean-artifacts.yml`, `milestone.yml` and
+  `publish-tag.yml`.
+
+The paths of this kind:
 
 - `macos/**`, `dist/macos/**`, `dist/linux/**`, `flatpak/**`, `snap/**`,
   `po/**`;
@@ -328,7 +397,7 @@ files under `macos/`, 79 under `src/apprt/gtk*`, 37 under `po/` and 16 under
   the three Apple steps its `GhosttyLibVt.zig` referenced (`LipoStep.zig`,
   `LibtoolStep.zig`, `XCFrameworkStep.zig`; row Qg11-1 of
   `plans/stone-1a/drift-decisions.tsv`), so they are in this kind from then
-  on, though the contract's list does not name them yet;
+  on;
 - `LibsystemOverride*`;
 - `nix/package.nix`, `nix/tests.nix`, `nix/vm/**`,
   `nix/patches/zig-0.17-ios-process-replace.patch`;
@@ -345,9 +414,10 @@ equals the content before it, or the diff is reviewed.
   templates, `actions/release-preflight` and 4 top-level files).
 - `CONTRIBUTING.md`, `CODEOWNERS`, `README.md`, `HACKING.md`, `PACKAGING.md`.
 - The libghostty-vt-only Nix layout (the 2026-04-15 entry in
-  `docs/agents/log/build-release-ci.md`): `flake.nix`, `flake.lock`,
-  `default.nix`, `shell.nix`, `build.zig.zon.nix`, `nix/devShell.nix`,
-  `nix/libghostty-vt.nix`, `nix/zigCacheHash.nix`, `nix/build-support/*`.
+  `docs/agents/log/build-release-ci.md` that says to preserve the curated
+  layout): `flake.nix`, `flake.lock`, `default.nix`, `shell.nix`,
+  `build.zig.zon.nix`, `nix/devShell.nix`, `nix/libghostty-vt.nix`,
+  `nix/zigCacheHash.nix`, `nix/build-support/*`.
 
 **Track upstream.** The gate is that the directory's tree equals the merged
 revision's, with the allowances the table names and no others: fontconfig's
@@ -356,12 +426,12 @@ listed adds, deletes and rename, and in `pkg/breakpad` one file,
 exactly the fork changes its row names. Every other file in `pkg/breakpad`
 compares equal.
 
-| Directory                                                    | Stepping stone (`74d0c72fd`), as landed                                                                                                    | `v1.4.0`                                                                  |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `pkg/fontconfig`                                             | 22 files, equal to the stone's                                                                                                             | 29 files: the gate allow-lists upstream's 11 adds, 4 deletes and 1 rename |
-| `pkg/apple-sdk`                                              | 2 files, equal                                                                                                                             | 5 files                                                                   |
-| `pkg/libxml2`, `pkg/libintl`, `pkg/macos`, `pkg/android-ndk` | 5, 5, 59 and 2 files, equal                                                                                                                | The same counts, with upstream's content                                  |
-| `pkg/breakpad`                                               | Equal but for two fork changes in `build.zig`: no `linkLibCpp` under the MSVC ABI, and #718's `-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` | Keeps the first; the toolchain cutover removes #718's define              |
+| Directory                                                    | Stepping stone (`74d0c72fd`), as landed                                                                                                    | `v1.4.0`                                                                                                                                                                            |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pkg/fontconfig`                                             | 22 files, equal to the stone's                                                                                                             | 29 files: the gate allow-lists upstream's 11 adds, 4 deletes and 1 rename                                                                                                           |
+| `pkg/apple-sdk`                                              | 2 files, equal                                                                                                                             | 5 files                                                                                                                                                                             |
+| `pkg/libxml2`, `pkg/libintl`, `pkg/macos`, `pkg/android-ndk` | 5, 5, 59 and 2 files, equal                                                                                                                | The same counts, with upstream's content                                                                                                                                            |
+| `pkg/breakpad`                                               | Equal but for two fork changes in `build.zig`: no `linkLibCpp` under the MSVC ABI, and #718's `-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` | Keeps the first, rewritten for `v1.4.0`'s file, which sets `.link_libcpp = true` on the module where the stone's called `linkLibCpp()`; the toolchain cutover removes #718's define |
 
 Two rules ride on these kinds.
 
@@ -370,19 +440,39 @@ Two rules ride on these kinds.
   fork's `build.zig.zon` has neither and does not take them.
 - **A clean delete needs a user check.** A file upstream deleted and the fork
   never changed is deleted by the merge with no conflict. Before accepting
-  each one, check what in the fork still uses it.
+  each one, check what in the fork still uses it, fork-only files first:
+  upstream's own importers arrive already changed, and the fork's do not.
   - The stepping stone had five: `pkg/highway/main.zig` and
     `pkg/highway/bridge.cpp`, whose code upstream moved under
     `pkg/highway/src/`, and the three `pkg/utfcpp` files, which lost their
     last user in the same merge.
-  - The `v1.4.0` merge has ten at `3c622793c`: `pkg/harfbuzz/c.zig`,
-    `pkg/opengl/c.zig` and `pkg/wuffs/src/c.zig`; `src/datastruct/lru.zig`
-    (imported by `src/datastruct/main.zig`); `src/lib/string.zig` (imported by
-    `src/lib/main.zig`); `src/renderer/WebGL.zig` (imported by
-    `src/renderer.zig`); and the four fontconfig alias headers under
-    `pkg/fontconfig/override/include/`. An eleventh file is not clean:
-    upstream renamed `src/terminal/osc/parsers/context_signal.zig` to
-    `hierarchical_context.zig` and the fork has changed it, so it conflicts
+  - The `v1.4.0` merge has ten at `3c622793c`:
+    - `pkg/harfbuzz/c.zig` and `pkg/opengl/c.zig`;
+    - `pkg/wuffs/src/c.zig`, which the fork-only `pkg/wuffs/src/deflate.zig`
+      imports, and so does `pkg/wuffs/src/zlib.zig`, whose fork side an
+      exception keeps;
+    - `src/datastruct/lru.zig`, imported by `src/datastruct/main.zig`;
+    - `src/lib/string.zig`, imported by `src/lib/main.zig` for `cutPrefix`,
+      which the fork-only `src/cli/perform_action.zig` and
+      `src/cli/send_text.zig` call;
+    - `src/renderer/WebGL.zig`, imported by `src/renderer.zig`;
+    - the four fontconfig alias headers under
+      `pkg/fontconfig/override/include/`.
+- **A modify/delete conflict is decided by who deleted, not by class.**
+  - The fork deleted the file and upstream changed it: it stays deleted. The
+    fork removed it on purpose, and most such files are of the must-be-empty
+    kind. What upstream changed in it gets a dropped-delta row.
+  - Upstream deleted the file and the fork changed it: keep the fork's file
+    only if the merged tree still uses it, with a residual-ledger row that
+    names the user. Otherwise take the delete. A must-keep-fork path is kept.
+  - The `v1.4.0` merge has five of the second sort at `63a4c3969`:
+    `src/os/args.zig`, `src/os/env.zig`,
+    `src/datastruct/array_list_collection.zig`,
+    `src/lib/allocator/convenience.zig`, and
+    `.github/ISSUE_TEMPLATE/config.yml`, which is a must-keep-fork path. A
+    sixth file upstream renamed instead:
+    `src/terminal/osc/parsers/context_signal.zig` became
+    `hierarchical_context.zig`, and the fork has changed it, so it conflicts
     at the new name.
 
 ## Landing a merge
@@ -407,34 +497,44 @@ The landing:
    the last forward merge: `git merge-base --is-ancestor origin/main <gated tip>`.
    The tip then contains `main`, so the merge commit's tree will equal the
    tip's.
-2. Disable the hold, merge, and re-enable the hold at once, with nothing else
+2. With the hold still on, read the required status checks as passed on the
+   gated tip, and confirm no other open pull request could merge while the
+   hold is down. Leaving out `--admin` only refuses on the client side, so
+   this reading is the real check.
+3. Disable the hold, merge, and re-enable the hold at once, with nothing else
    merged while it is down (the stepping stone's was down for six seconds).
    Merge the pull request as a merge commit pinned to the gated tip, never with
    `--admin`:
    `gh pr merge <PR> --repo amanthanvi/noctty --merge --match-head-commit <gated tip>`.
-   Squash and rebase merging stay enabled for ordinary pull requests; the
-   explicit method and the pin are what rule a squash out here. The pin fixes
-   the head, not the base, so step 3 is what proves the base did not move.
-3. Fetch again, then verify all three. If one fails, the merge is not the
+   - Re-enable the hold whether or not the merge call succeeds, and read it
+     back as active before anything else.
+   - A merge call that fails goes to the maintainer. It is not retried with
+     other flags.
+   - Squash and rebase merging stay enabled for ordinary pull requests; the
+     explicit method and the pin are what rule a squash out here. The pin
+     fixes the head, not the base, so step 4 is what proves the base did not
+     move.
+4. Fetch again, then verify all four. If one fails, the merge is not the
    gated candidate: keep the hold on, stop, and take it to the maintainer,
    with no revert (see Rollback):
+   - `git rev-parse origin/main` equals the merge commit, read after the hold
+     reads back as active, so nothing landed behind the merge while the hold
+     was down;
    - `git merge-base --is-ancestor <merged upstream revision> origin/main`;
    - `git rev-parse <merge>^{tree}` equals `git rev-parse <gated tip>^{tree}`;
    - the merge's first parent is the previous `main`.
 
 The gated tip and the merge commit are one tree under two SHAs. Evidence
 bound to the tree carries over from the tip. The Test workflow runs again on
-the merge SHA, because `release.yml` requires a successful Test run for the
-exact SHA it releases.
+the merge SHA, because `release.yml` releases only `main`'s head, and only
+with a successful Test run for that exact SHA.
 
-If that run fails, re-run it once only when the failure is the runner's, not
-the code's (a hosted outage, a cancelled job). A failure in the code is a
-regression in the candidate, and it is fixed forward, as below: the
-maintainer disables the hold for the fix's pull request alone and re-enables
-it at once, as for the landing merge. The fix's merge commit is the new
-candidate. The Test workflow must pass on that exact SHA before the
-prerelease is cut, and any gate whose evidence the fix's diff touches runs
-again on it.
+If that run fails, re-run each failed job once: the tree has already passed,
+so a first failure is not yet a regression. A failure that reproduces is fixed
+on `main`, which is still held. The maintainer disables the hold for the
+fix's pull request alone and re-enables it at once, as for the landing merge.
+The commit the fix lands as becomes the gated tip, and the whole pass repeats
+on it: every gate, not only the ones the fix's diff touches.
 
 The stepping stone landed this way as `f739b4c7b` (#748): its first parent is
 `358ce0f6a`, and its tree equals the gated tip `f0a5dc507`'s.
@@ -512,6 +612,14 @@ breakage before.
 A pick that conflicts structurally is deferred to the next merge window with a
 written reason in the dated drift report. It is never forced into the current
 window.
+
+That holds for a window of picks, where a deferred change is still unmerged
+upstream history and the next window can pick it. A real merge is different.
+Once it lands, Git counts every upstream commit up to the merged revision as
+merged, so a hunk resolved to the fork's side is never offered again: no
+later merge brings it back, with or without a conflict. A change deferred in
+a real merge is a ledger row that someone re-applies by hand, in that window
+or a later one.
 
 ## How to check drift
 
