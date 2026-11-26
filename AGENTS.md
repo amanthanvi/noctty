@@ -865,7 +865,8 @@ that govern each symbol you change, or that none does.
   (`@hasDecl(apprt.Surface, ...)` in `src/Surface.zig` and
   `src/renderer/Thread.zig`, the runtime hooks such as
   `noteRendererFollowupCallback`) or its own file probes (on Zig 0.17,
-  `Minimums` in `src/font/Metrics.zig`),
+  `Minimums` in `src/font/Metrics.zig`), a `std.Io.Dir` `openFile` or
+  `openFileAbsolute` that means a file (0.17's `allow_directory`),
   adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
   (the budget in `win32/facade_budget.zig`, and the facade importer list in
   `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps
