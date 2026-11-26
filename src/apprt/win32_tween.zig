@@ -95,7 +95,7 @@ pub const Tween = struct {
 /// `must_draw_from_app_thread = true`.
 pub const Scheduler = struct {
     alloc: std.mem.Allocator = undefined,
-    tweens: std.AutoHashMapUnmanaged(TweenId, Tween) = .{},
+    tweens: std.AutoHashMapUnmanaged(TweenId, Tween) = .empty,
     next_id: TweenId = 1,
     timer_active: bool = false,
 

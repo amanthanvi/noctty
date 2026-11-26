@@ -235,7 +235,7 @@ fn survivesNormalization(path: []const u8) bool {
 fn isDeviceName(component: []const u8) bool {
     // A device name is the stem before the first dot, whatever follows, and
     // trailing spaces do not count.
-    const stem = std.mem.trimRight(u8, component[0 .. std.mem.indexOfScalar(u8, component, '.') orelse component.len], " ");
+    const stem = std.mem.trimEnd(u8, component[0 .. std.mem.indexOfScalar(u8, component, '.') orelse component.len], " ");
     for ([_][]const u8{ "CON", "PRN", "AUX", "NUL" }) |device| {
         if (std.ascii.eqlIgnoreCase(stem, device)) return true;
     }
@@ -416,7 +416,7 @@ pub const Scratch = struct {
 
     /// The entries of the scratch directory, to show a save left nothing else.
     pub fn expectNames(self: *const Scratch, expected: []const []const u8) !void {
-        var names: std.ArrayListUnmanaged([]u8) = .{};
+        var names: std.ArrayListUnmanaged([]u8) = .empty;
         defer {
             for (names.items) |name| testing.allocator.free(name);
             names.deinit(testing.allocator);

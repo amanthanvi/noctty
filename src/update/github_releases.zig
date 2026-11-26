@@ -2371,7 +2371,7 @@ const ChecksumLine = struct {
 fn checksumLine(line: []const u8) ?ChecksumLine {
     const separator = std.mem.indexOfAny(u8, line, " \t") orelse return null;
     const hex = line[0..separator];
-    const raw_filename = std.mem.trimLeft(u8, line[separator..], " \t");
+    const raw_filename = std.mem.trimStart(u8, line[separator..], " \t");
     if (raw_filename.len == 0) return null;
     const filename = if (raw_filename[0] == '*') raw_filename[1..] else raw_filename;
     if (filename.len == 0) return null;
@@ -2436,7 +2436,7 @@ fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
     if (iterator.cd_record_count == 0) return error.InvalidPortableArchive;
     if (iterator.cd_record_count > max_portable_entries) return error.PortableArchiveTooLarge;
 
-    var names: std.StringHashMapUnmanaged(void) = .{};
+    var names: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var keys = names.keyIterator();
         while (keys.next()) |key| alloc.free(key.*);

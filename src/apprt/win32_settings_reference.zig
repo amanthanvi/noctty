@@ -162,7 +162,7 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
     // A heading ends its line, so the text after it starts a new one.
     var after_heading = false;
     while (lines.next()) |line_crlf| {
-        const line = std.mem.trimRight(u8, line_crlf, "\r");
+        const line = std.mem.trimEnd(u8, line_crlf, "\r");
         if (std.mem.trim(u8, line, " \t").len == 0) {
             block = .none;
             continue;
@@ -179,11 +179,11 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
             .code => {
                 if (line_open) try writer.writeByte('\n');
                 try writer.writeAll("  ");
-                try writer.writeAll(if (std.mem.startsWith(u8, line, "    ")) line[4..] else std.mem.trimLeft(u8, line, " \t"));
+                try writer.writeAll(if (std.mem.startsWith(u8, line, "    ")) line[4..] else std.mem.trimStart(u8, line, " \t"));
                 line_open = true;
             },
             .text => {
-                const trimmed = std.mem.trimLeft(u8, line, " \t");
+                const trimmed = std.mem.trimStart(u8, line, " \t");
                 if (bulletText(trimmed)) |item| {
                     if (line_open) try writer.writeByte('\n');
                     try writer.writeAll("\u{2022} ");
@@ -191,7 +191,7 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
                     after_heading = false;
                 } else if (trimmed[0] == '#') {
                     if (line_open) try writer.writeByte('\n');
-                    try writeInline(writer, std.mem.trimLeft(u8, std.mem.trimLeft(u8, trimmed, "#"), " \t"));
+                    try writeInline(writer, std.mem.trimStart(u8, std.mem.trimStart(u8, trimmed, "#"), " \t"));
                     after_heading = true;
                 } else {
                     if (line_open) try writer.writeByte(if (after_heading) '\n' else ' ');
@@ -206,7 +206,7 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
 
 fn bulletText(trimmed: []const u8) ?[]const u8 {
     if (trimmed.len >= 2 and (trimmed[0] == '*' or trimmed[0] == '-' or trimmed[0] == '+') and trimmed[1] == ' ')
-        return std.mem.trimLeft(u8, trimmed[2..], " \t");
+        return std.mem.trimStart(u8, trimmed[2..], " \t");
     return null;
 }
 

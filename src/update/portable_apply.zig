@@ -1053,7 +1053,7 @@ fn verifyBackupManifest(
     const contents = try std.fs.cwd().readFileAlloc(alloc, marker_path, max_backup_manifest_bytes);
     defer alloc.free(contents);
 
-    var seen: std.StringHashMapUnmanaged(void) = .{};
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var keys = seen.keyIterator();
         while (keys.next()) |key| alloc.free(key.*);
@@ -1068,7 +1068,7 @@ fn verifyBackupManifest(
             return error.IncompletePortableUpdateBackup;
         }
         const hex = line[0 .. std.crypto.hash.sha2.Sha256.digest_length * 2];
-        const name_raw = std.mem.trimLeft(
+        const name_raw = std.mem.trimStart(
             u8,
             line[std.crypto.hash.sha2.Sha256.digest_length * 2 ..],
             " \t",

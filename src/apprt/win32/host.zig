@@ -12452,7 +12452,7 @@ test "win32 settings patch persists a palette theme selection" {
 
     var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
     edited.set(@intFromEnum(ConfigKey.theme));
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);
     try patchOrAppendEdits(
         testing.allocator,
