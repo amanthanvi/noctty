@@ -1,7 +1,7 @@
 //! The fork's own `PathSpace` and the WTF-8 to NT-prefixed WTF-16 conversion
 //! its file code needs.
 //!
-//! Zig 0.17 removed `std.os.windows.sliceToPrefixedFileW` and `PathSpace`
+//! Zig 0.17 removed std's `sliceToPrefixedFileW` and `PathSpace` from `os.windows`
 //! (the conversion lives on in `std.Io.Threaded`, with another error set).
 //! Until the 1B cutover this bridges to std's form on 0.15.2, whose behaviour
 //! every caller was written against (PLAN section 5, "sliceToPrefixedFileW").
