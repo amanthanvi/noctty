@@ -34,9 +34,10 @@ def parse_map(path):
 
 
 def windows_bindings(toks, rel):
-    """Names bound to the fork's os/windows module, and the file's windows_ext binding name (or None), and the
-    index of the token that ends the first windows binding's declaration (for an added import)."""
-    names, ext, decl_end, import_path = set(), None, None, None
+    """Names bound to the fork's os/windows module, the file's windows_ext binding name (or None), the index of
+    the token that ends the first windows binding's declaration (for an added binding), and that binding's
+    import path (for `@import(".../windows.zig")`) or else None, and its initializer's text."""
+    names, ext, decl_end, import_path, init = set(), None, None, None, None
     is_os = rel.startswith("src/os/")
     for i, t in enumerate(toks):
         if not (t.kind == "keyword" and t.text == "const" and codemod.is_tok(codemod.at(toks, i + 1), "identifier")
@@ -52,23 +53,23 @@ def windows_bindings(toks, rel):
         if m and (m.group(1).endswith("os/") or (is_os and m.group(1) == "")):
             names.add(name)
             if decl_end is None:
-                decl_end, import_path = semi, m.group(1)
+                decl_end, import_path, init = semi, m.group(1), value
         elif re.fullmatch(r"(internal_os|os)\.windows", value) or re.fullmatch(
                 r'@import\("(?:\.\./)*(?:os/)?main\.zig"\)\.windows', value):
             names.add(name)
             if decl_end is None:
-                decl_end, import_path = semi, None
+                decl_end, import_path, init = semi, None, value
         m = re.fullmatch(r'@import\("((?:\.\./)*(?:os/)?)windows_ext\.zig"\)', value)
         if (m and (m.group(1).endswith("os/") or (is_os and m.group(1) == ""))) or re.fullmatch(
                 r"(internal_os|os)\.windows_ext", value) or re.fullmatch(
                 r'@import\("(?:\.\./)*(?:os/)?main\.zig"\)\.windows_ext', value):
             ext = name
-    return names, ext, decl_end, import_path
+    return names, ext, decl_end, import_path, init
 
 
 def sweep(text, rel, entries):
     toks = codemod.code_tokens(text)
-    names, ext, decl_end, import_path = windows_bindings(toks, rel)
+    names, ext, decl_end, import_path, init = windows_bindings(toks, rel)
     edits, hits = [], []
     need_ext = False
     ext_name = ext or "windows_ext"
@@ -123,7 +124,9 @@ def sweep(text, rel, entries):
             raise ValueError(f"{rel}: no windows binding to add windows_ext beside")
         semi = toks[decl_end]
         if import_path is None:
-            decl = f"\nconst windows_ext = {'internal_os' if 'internal_os' in text else 'os'}.windows_ext;"
+            # The matched binding's own initializer names the module windows_ext sits beside (`os.windows` ->
+            # `os.windows_ext`), never a name taken from elsewhere in the text, such as a comment.
+            decl = f"\nconst windows_ext = {init[:-len('windows')]}windows_ext;"
         else:
             decl = f'\nconst windows_ext = @import("{import_path}windows_ext.zig");'
         edits.append(codemod.Edit(semi.start + 1, semi.start + 1, decl))

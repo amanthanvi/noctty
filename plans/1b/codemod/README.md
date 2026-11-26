@@ -9,6 +9,10 @@ migration re-runs at every forward merge through 1B.9 (PLAN.md row 1B.5, U7).
   line a config adds), with the file looked up by `git ls-tree -z` (a non-ASCII name is not quoted into a miss).
 - `test_codemod.py`: each rule over its fixture, what it leaves alone, idempotence, and the rules run together.
   `python -I plans/1b/codemod/test_codemod.py`.
+- `b1_sweep.py` (with `b1-moved-users.txt`, its map, and `test_b1_sweep.py`): re-points the callers of the
+  declarations 1B.1 moved to `src/os/windows_ext.zig`. A `windows_ext` binding it adds beside a file's windows
+  binding is derived from that binding's own initializer (`const w = os.windows;` gives `os.windows_ext`), never from
+  a name found elsewhere in the text, such as a comment. `python -I plans/1b/codemod/test_b1_sweep.py`.
 - `census.py`: the distinct compile errors of a `zig build` log, by file and by kind, for the waves that follow.
 - `residue.tsv`: the hand edits, each with its file and why no rule makes it.
 
