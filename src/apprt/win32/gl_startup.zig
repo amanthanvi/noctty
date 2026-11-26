@@ -141,29 +141,37 @@ pub fn openGLUnavailable() bool {
     return opengl_unavailable.load(.acquire);
 }
 
-var opengl_startup_diagnostics_mutex: std.Thread.Mutex = .{};
+var opengl_startup_diagnostics_mutex: std.Io.Mutex = .init;
+
+/// The `Io` of the diagnostics mutex's futex waits and wakes:
+/// `lockUncancelable` and `unlock` reach only the OS futex whatever the
+/// `std.Io.Threaded` instance (`sync/state_mutex.zig`'s `innerIo`), and a
+/// startup failure can be reported before the global state exists.
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 var opengl_startup_diagnostics_active = false;
 var last_opengl_startup_failure: ?OpenGLStartupFailure = null;
 
 pub fn beginOpenGLStartupDiagnostics() void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     opengl_startup_diagnostics_active = true;
     last_opengl_startup_failure = null;
 }
 
 pub fn clearOpenGLStartupFailure() void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     opengl_startup_diagnostics_active = false;
     last_opengl_startup_failure = null;
 }
 
 fn recordOpenGLStartupFailure(failure: OpenGLStartupFailure) bool {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     if (!opengl_startup_diagnostics_active) return false;
     if (last_opengl_startup_failure) |previous| {
@@ -175,8 +183,8 @@ fn recordOpenGLStartupFailure(failure: OpenGLStartupFailure) bool {
 }
 
 fn openGLStartupDiagnosticsActive() bool {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     return opengl_startup_diagnostics_active;
 }
@@ -202,8 +210,8 @@ fn launchEndingOpenGLFailure() ?OpenGLStartupFailure {
 }
 
 fn currentOpenGLStartupFailure() ?OpenGLStartupFailure {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     return last_opengl_startup_failure;
 }
@@ -233,8 +241,8 @@ pub fn recordOpenGLStartupError(step: OpenGLStartupStep, err: anyerror) void {
 /// The Direct3D 11 beta, tried because OpenGL could not start, failed too.
 /// Kept on the OpenGL failure so the dialog can say both were tried.
 pub fn recordDirect3D11StartupError(err: anyerror) void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
+    opengl_startup_diagnostics_mutex.lockUncancelable(mutexIo());
+    defer opengl_startup_diagnostics_mutex.unlock(mutexIo());
 
     if (!opengl_startup_diagnostics_active) return;
     if (last_opengl_startup_failure) |*failure| failure.d3d11_error_name = @errorName(err);

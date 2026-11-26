@@ -194,7 +194,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     body() catch |err| {
                         // The test fails at `return result` on the runner's thread;
                         // this trace shows which check failed.
-                        if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+                        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
                         result.* = err;
                     };
                 }

@@ -13,6 +13,7 @@ const win32_sys = @import("sys.zig");
 const win32_types = @import("../win32_types.zig");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
+const global = @import("../../global.zig");
 const sys = @import("sys.zig");
 const c = @import("consts.zig");
 
@@ -83,21 +84,25 @@ pub fn digestOf(bytes: []const u8) Digest {
 /// meanwhile are read too. A size that differs before, during and after the
 /// read is `Unstable`.
 pub fn read(alloc: Allocator, path: []const u8) ReadError![]u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const io = global.io();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return alloc.dupe(u8, ""),
         else => return error.ReadFailed,
     };
-    defer file.close();
-    const before = file.stat() catch return error.ReadFailed;
+    defer file.close(io);
+    const before = file.stat(io) catch return error.ReadFailed;
     if (before.size > max_bytes) return error.TooLarge;
     if (@import("builtin").is_test) if (test_during_read) |hook| hook();
-    const bytes = file.readToEndAlloc(alloc, max_bytes) catch |err| switch (err) {
+    // Streaming to the end, as 0.15's `readToEndAlloc` read: `.limited(n)`
+    // accepts exactly `max_bytes` as it did, and StreamTooLong is FileTooBig.
+    var reader = file.readerStreaming(io, &.{});
+    const bytes = reader.interface.allocRemaining(alloc, .limited(max_bytes)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.FileTooBig => return error.TooLarge,
+        error.StreamTooLong => return error.TooLarge,
         else => return error.ReadFailed,
     };
     errdefer alloc.free(bytes);
-    const after = file.stat() catch return error.ReadFailed;
+    const after = file.stat(io) catch return error.ReadFailed;
     if (before.size != bytes.len or after.size != bytes.len) return error.Unstable;
     return bytes;
 }
@@ -265,22 +270,23 @@ pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy:
     const tmp_path = try std.fmt.allocPrint(
         alloc,
         "{s}.tmp-{x}-{x}",
-        .{ target.path, sys.GetCurrentProcessId(), @as(u64, @intCast(@max(std.time.milliTimestamp(), 0))) },
+        .{ target.path, sys.GetCurrentProcessId(), @as(u64, @intCast(@max(std.Io.Timestamp.now(global.io(), .real).toMilliseconds(), 0))) },
     );
     defer alloc.free(tmp_path);
+    const io = global.io();
 
     // Closed before the replace: Windows blocks it while the temp handle is open.
     var temp_pending = false;
-    defer if (temp_pending) std.fs.cwd().deleteFile(tmp_path) catch {}; // Best-effort temp cleanup.
+    defer if (temp_pending) std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {}; // Best-effort temp cleanup.
     {
-        const tmp = std.fs.cwd().createFile(tmp_path, .{}) catch return error.TempCreateFailed;
+        const tmp = std.Io.Dir.cwd().createFile(io, tmp_path, .{}) catch return error.TempCreateFailed;
         temp_pending = true;
-        defer tmp.close();
+        defer tmp.close(io);
         var write_buf: [4096]u8 = undefined;
-        var fw = tmp.writer(&write_buf);
+        var fw = tmp.writer(io, &write_buf);
         fw.interface.writeAll(bytes) catch return error.SerializeFailed;
         fw.interface.flush() catch return error.SerializeFailed;
-        tmp.sync() catch return error.SerializeFailed;
+        tmp.sync(io) catch return error.SerializeFailed;
     }
 
     if (read_as) |digest| {
@@ -300,11 +306,11 @@ pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy:
         // file (creating over one fails). A file that cannot be opened is
         // untouched, so the copy goes with it; from the first byte on the copy
         // is the only complete one, and the log says where it is.
-        const file = std.fs.cwd().openFile(target.path, .{ .mode = .write_only }) catch return error.ReplaceFailed;
-        defer file.close();
+        const file = std.Io.Dir.cwd().openFile(io, target.path, .{ .mode = .write_only }) catch return error.ReplaceFailed;
+        defer file.close(io);
         temp_pending = false;
         try rewriteOpened(alloc, file, target.path, tmp_path, bytes, kept_copy);
-        std.fs.cwd().deleteFile(tmp_path) catch {}; // The rewrite finished: the copy is no longer needed.
+        std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {}; // The rewrite finished: the copy is no longer needed.
         return;
     }
 
@@ -327,7 +333,7 @@ pub fn writeOver(alloc: Allocator, target: Target, bytes: []const u8, kept_copy:
 /// complete copy's path handed to `kept_copy`.
 fn rewriteOpened(
     alloc: Allocator,
-    file: std.fs.File,
+    file: std.Io.File,
     target_path: []const u8,
     tmp_path: []const u8,
     bytes: []const u8,
@@ -340,10 +346,12 @@ fn rewriteOpened(
     };
 }
 
-fn replaceContents(file: std.fs.File, bytes: []const u8) !void {
-    try file.writeAll(bytes);
-    try file.setEndPos(bytes.len);
-    try file.sync();
+fn replaceContents(file: std.Io.File, bytes: []const u8) !void {
+    const io = global.io();
+    // From the handle's offset (0, just opened), as 0.15's `writeAll`.
+    try file.writeStreamingAll(io, bytes);
+    try file.setLength(io, bytes.len);
+    try file.sync(io);
 }
 
 const testing = std.testing;
@@ -355,13 +363,14 @@ extern "kernel32" fn CreateHardLinkW(link: [*:0]const u16, existing: [*:0]const 
 /// tests of the code that saves through it.
 pub const Scratch = struct {
     tmp: testing.TmpDir,
-    /// The directory's absolute path.
-    root: []u8,
+    /// The directory's absolute path (0.17's realPathFileAlloc is
+    /// sentinel-terminated, and is freed as it was allocated).
+    root: [:0]u8,
 
     pub fn init() !Scratch {
         var tmp = testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        return .{ .tmp = tmp, .root = try tmp.dir.realpathAlloc(testing.allocator, ".") };
+        return .{ .tmp = tmp, .root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator) };
     }
 
     pub fn deinit(self: *Scratch) void {
@@ -409,7 +418,7 @@ pub const Scratch = struct {
     }
 
     pub fn expectContent(self: *const Scratch, name: []const u8, expected: []const u8) !void {
-        const content = try self.tmp.dir.readFileAlloc(testing.allocator, name, 1 << 20);
+        const content = try self.tmp.dir.readFileAlloc(testing.io, name, testing.allocator, .limited(1 << 20));
         defer testing.allocator.free(content);
         try testing.expectEqualStrings(expected, content);
     }
@@ -421,10 +430,10 @@ pub const Scratch = struct {
             for (names.items) |name| testing.allocator.free(name);
             names.deinit(testing.allocator);
         }
-        var dir = try self.tmp.dir.openDir(".", .{ .iterate = true });
-        defer dir.close();
+        var dir = try self.tmp.dir.openDir(testing.io, ".", .{ .iterate = true });
+        defer dir.close(testing.io);
         var it = dir.iterate();
-        while (try it.next()) |entry| try names.append(testing.allocator, try testing.allocator.dupe(u8, entry.name));
+        while (try it.next(testing.io)) |entry| try names.append(testing.allocator, try testing.allocator.dupe(u8, entry.name));
         std.mem.sort([]u8, names.items, {}, struct {
             fn less(_: void, a: []u8, b: []u8) bool {
                 return std.mem.lessThan(u8, a, b);
@@ -438,17 +447,20 @@ pub const Scratch = struct {
 test "a read during which the file grows is unstable" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
     const path = try scratch.path("config.ghostty");
     defer testing.allocator.free(path);
     const Grow = struct {
         threadlocal var target: []const u8 = "";
         fn append() void {
             test_during_read = null;
-            const file = std.fs.openFileAbsolute(target, .{ .mode = .read_write }) catch return;
-            defer file.close();
-            file.seekFromEnd(0) catch return;
-            file.writeAll("copy-on-select = true\n") catch return;
+            const file = std.Io.Dir.openFileAbsolute(testing.io, target, .{ .mode = .read_write }) catch return;
+            defer file.close(testing.io);
+            // 0.15's seekFromEnd(0) and writeAll: a streaming writer seeked
+            // to the end (0.17's File has no seek of its own).
+            var appender = file.writerStreaming(testing.io, &.{});
+            appender.seekTo(file.length(testing.io) catch return) catch return;
+            appender.interface.writeAll("copy-on-select = true\n") catch return;
         }
     };
     Grow.target = path;
@@ -480,7 +492,7 @@ test "save target of a missing file is the name itself, and the first save creat
 test "save target of a plain file is replaced atomically and leaves no temporary file" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "old\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config.ghostty", .data = "old\n" });
     const path = try scratch.path("config.ghostty");
     defer testing.allocator.free(path);
 
@@ -496,8 +508,8 @@ test "save target of a plain file is replaced atomically and leaves no temporary
 test "save target follows a symbolic link and keeps it" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.makeDir("dotfiles");
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "dotfiles/config.ghostty", .data = "old\n" });
+    try scratch.tmp.dir.createDir(testing.io, "dotfiles", .default_dir);
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "dotfiles/config.ghostty", .data = "old\n" });
     // A relative link, as a dotfiles manager makes it.
     try scratch.symlink("config.ghostty", "dotfiles\\config.ghostty");
     try testing.expect(try scratch.isLink("config.ghostty"));
@@ -518,18 +530,18 @@ test "save target follows a symbolic link and keeps it" {
     try scratch.expectContent("config.ghostty", "new\n");
     try scratch.expectContent("dotfiles/config.ghostty", "new\n");
     try scratch.expectNames(&.{ "config.ghostty", "dotfiles" });
-    var dotfiles = try scratch.tmp.dir.openDir("dotfiles", .{ .iterate = true });
-    defer dotfiles.close();
+    var dotfiles = try scratch.tmp.dir.openDir(testing.io, "dotfiles", .{ .iterate = true });
+    defer dotfiles.close(testing.io);
     var it = dotfiles.iterate();
     var count: usize = 0;
-    while (try it.next()) |_| count += 1;
+    while (try it.next(testing.io)) |_| count += 1;
     try testing.expectEqual(@as(usize, 1), count);
 }
 
 test "save target follows a chain of links" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "real.conf", .data = "old\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "real.conf", .data = "old\n" });
     try scratch.symlink("middle.conf", "real.conf");
     try scratch.symlink("config.ghostty", "middle.conf");
     const link = try scratch.path("config.ghostty");
@@ -560,7 +572,7 @@ test "save target refuses a dangling link instead of replacing it" {
 test "save target writes through hard links so every name sees the bytes" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "old\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config.ghostty", .data = "old\n" });
     try scratch.hardlink("dotfile", "config.ghostty");
     const path = try scratch.path("config.ghostty");
     defer testing.allocator.free(path);
@@ -583,7 +595,7 @@ extern "kernel32" fn SetFileAttributesW(name: [*:0]const u16, attributes: u32) c
 test "save target keeps a hard-linked file that cannot be opened as it was, with no copy left behind" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "old\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config.ghostty", .data = "old\n" });
     try scratch.hardlink("dotfile", "config.ghostty");
     const path = try scratch.path("config.ghostty");
     defer testing.allocator.free(path);
@@ -605,7 +617,7 @@ test "save target rewrites a hidden hard-linked file in place" {
     // Creating over a hidden file fails with access denied; opening it does not.
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "old and longer than the new text\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config.ghostty", .data = "old and longer than the new text\n" });
     try scratch.hardlink("dotfile", "config.ghostty");
     const path = try scratch.path("config.ghostty");
     defer testing.allocator.free(path);
@@ -626,10 +638,10 @@ test "save target rewrites a hidden hard-linked file in place" {
 test "an in-place rewrite that fails after it started reports where the complete copy is" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "old\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config.ghostty", .data = "old\n" });
     // A handle that cannot write stands in for a disk that fills up part way.
-    const file = try scratch.tmp.dir.openFile("config.ghostty", .{ .mode = .read_only });
-    defer file.close();
+    const file = try scratch.tmp.dir.openFile(testing.io, "config.ghostty", .{ .mode = .read_only });
+    defer file.close(testing.io);
 
     var kept: ?[]u8 = null;
     defer if (kept) |path| testing.allocator.free(path);
@@ -655,7 +667,7 @@ test "save target keeps the extended form for a name with a trailing dot and wri
     const dotted = try std.fmt.allocPrint(testing.allocator, "\\\\?\\{s}\\config.", .{scratch.root});
     defer testing.allocator.free(dotted);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = dotted, .data = "old\n" });
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config", .data = "sibling\n" });
+    try scratch.tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = "sibling\n" });
 
     const target = try resolve(testing.allocator, dotted);
     defer target.deinit(testing.allocator);

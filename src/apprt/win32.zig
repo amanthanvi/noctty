@@ -27,6 +27,7 @@ const windows_shell = @import("../config/windows_shell.zig");
 const windows_ssh_hosts = @import("../config/windows_ssh_hosts.zig");
 const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const thread_role = @import("../sync/thread_role.zig");
@@ -815,7 +816,16 @@ const clipboard_open_budget_ns = 5 * std.time.ns_per_ms;
 const clipboard_open_interval_ns = std.time.ns_per_ms / 2;
 
 fn openClipboardWith(open: *const fn (?HWND) callconv(.winapi) BOOL, hwnd: ?HWND) bool {
-    var timer = std.time.Timer.start() catch return open(hwnd) != 0;
+    // QPC, as 0.15's `std.time.Timer` read it on Windows (Zig 0.17 removed
+    // the Timer; `os/monotonic.zig` is the fork's QPC clock).
+    const Qpc = struct {
+        start: u64,
+
+        fn read(self: *@This()) u64 {
+            return internal_os.monotonic.nowNs() -| self.start;
+        }
+    };
+    var timer: Qpc = .{ .start = internal_os.monotonic.nowNs() };
     return openClipboardWithClock(open, hwnd, &timer);
 }
 
@@ -1403,29 +1413,30 @@ const recovery_ledger_lock_poll_ms: u32 = 10;
 /// another instance waits on its own handle would let a third instance create
 /// a fresh file and lock that instead, splitting the lock in two.
 pub const RecoveryLedgerLock = struct {
-    file: std.fs.File,
+    file: std.Io.File,
 
     /// Returns null when the lock could not be taken inside `wait_ms`; the
     /// caller decides whether that means skip or retry. Errors are the
     /// sibling file itself being unusable, which usually means the ledger
     /// directory is too.
     pub fn acquire(alloc: Allocator, ledger_path: []const u8, wait_ms: u32) !?RecoveryLedgerLock {
+        const io = global.io();
         try makeParentDirAbsolute(ledger_path);
         const lock_path = try std.fmt.allocPrint(alloc, "{s}.lock", .{ledger_path});
         defer alloc.free(lock_path);
         // Open-if-exists, never truncate: the file's bytes are irrelevant and
         // every instance must land on the same one.
-        const file = try std.fs.createFileAbsolute(lock_path, .{ .truncate = false, .read = true });
-        errdefer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(io, lock_path, .{ .truncate = false, .read = true });
+        errdefer file.close(io);
 
-        const deadline = std.time.milliTimestamp() + wait_ms;
+        const deadline = std.Io.Timestamp.now(io, .real).toMilliseconds() + wait_ms;
         while (true) {
             if (try tryLockExclusive(file)) return .{ .file = file };
-            if (std.time.milliTimestamp() >= deadline) {
-                file.close();
+            if (std.Io.Timestamp.now(io, .real).toMilliseconds() >= deadline) {
+                file.close(io);
                 return null;
             }
-            std.Thread.sleep(recovery_ledger_lock_poll_ms * std.time.ns_per_ms);
+            std.Io.sleep(io, .fromMilliseconds(recovery_ledger_lock_poll_ms), .awake) catch {};
         }
     }
 
@@ -1441,7 +1452,7 @@ pub const RecoveryLedgerLock = struct {
             // Closing the handle drops the lock regardless.
             log.warn("win32 recovery: ledger unlock failed err={}", .{err});
         };
-        self.file.close();
+        self.file.close(global.io());
         self.* = undefined;
     }
 
@@ -1451,7 +1462,7 @@ pub const RecoveryLedgerLock = struct {
     /// `std.fs.File.tryLock` does not compile on Windows in Zig 0.15.2 (its
     /// `.none` arm returns `void` from a `!bool` function), so the NT call is
     /// made directly with the same one-byte range `std` uses.
-    fn tryLockExclusive(file: std.fs.File) !bool {
+    fn tryLockExclusive(file: std.Io.File) !bool {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
         sys.lockFile(
             file.handle,
@@ -1502,20 +1513,25 @@ pub fn readRecoveryLedgerAlloc(
     // A ledger that exists but cannot be read now (a scanner holds it, the
     // allocator failed) may be a newer build's: reading it as empty would
     // replace it.
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const io = global.io();
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return .empty,
         else => {
             log.warn("win32 recovery: {s} open failed err={}; leaving it untouched", .{ context, err });
             return .unreadable;
         },
     };
-    defer file.close();
-    const raw = file.readToEndAlloc(alloc, 64 * 1024) catch |err| {
-        if (err == error.FileTooBig) {
+    defer file.close(io);
+    // Streaming from the current offset, as 0.15's `readToEndAlloc` read;
+    // `.limited(n)` accepts a file of exactly n bytes as it did, and
+    // StreamTooLong is its FileTooBig.
+    var reader = file.readerStreaming(io, &.{});
+    const raw = reader.interface.allocRemaining(alloc, .limited(64 * 1024)) catch |err| {
+        if (err == error.StreamTooLong) {
             log.warn("win32 recovery: {s} history is larger than this build writes; leaving it untouched", .{context});
             return .left_alone;
         }
-        log.warn("win32 recovery: {s} read failed err={}; leaving it untouched", .{ context, err });
+        log.warn("win32 recovery: {s} read failed err={}; leaving it untouched", .{ context, reader.err orelse err });
         return .unreadable;
     };
     defer alloc.free(raw);
@@ -1682,14 +1698,14 @@ pub fn markRecoveryAttemptAtPath(
 /// level: its own parent must already exist.
 fn makeParentDirAbsolute(path: []const u8) !void {
     const dir = std.fs.path.dirname(path) orelse return;
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(global.io(), dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 }
 
 pub fn unixMillis() u64 {
-    return @intCast(@max(std.time.milliTimestamp(), 0));
+    return @intCast(@max(std.Io.Timestamp.now(global.io(), .real).toMilliseconds(), 0));
 }
 
 fn utf8PrefixLen(value: []const u8, capacity: usize) usize {
@@ -1706,7 +1722,7 @@ pub fn settingsUserEditedKeys(
     original: *const configpkg.Config,
     pending: *const configpkg.Config,
 ) SettingsEditedKeySet {
-    var edited: SettingsEditedKeySet = .initEmpty();
+    var edited: SettingsEditedKeySet = .empty;
     inline for (win32_settings.editable_keys) |key| {
         if (original.changed(pending, key)) edited.set(@backingInt(key));
     }
@@ -1866,7 +1882,8 @@ fn settingsFileProbe(
     what: []const u8,
     path: []const u8,
 ) win32_settings.SaveError!bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const io = global.io();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return false,
         error.IsDir => return true,
         else => {
@@ -1875,7 +1892,7 @@ fn settingsFileProbe(
             return error.FileUnopenable;
         },
     };
-    file.close();
+    file.close(io);
     return true;
 }
 
@@ -2045,19 +2062,19 @@ test "win32 settings save rejects files above the read cap" {
     defer alloc.free(path);
     // One byte past the cap: refused, and left as it was.
     {
-        const file = try scratch.tmp.dir.createFile("config.ghostty", .{});
-        defer file.close();
-        try file.setEndPos(save_target.max_bytes + 1);
+        const file = try scratch.tmp.dir.createFile(std.testing.io, "config.ghostty", .{});
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, save_target.max_bytes + 1);
     }
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
     try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null));
-    try std.testing.expectEqual(@as(u64, save_target.max_bytes + 1), (try scratch.tmp.dir.statFile("config.ghostty")).size);
+    try std.testing.expectEqual(@as(u64, save_target.max_bytes + 1), (try scratch.tmp.dir.statFile(std.testing.io, "config.ghostty", .{})).size);
     // At the cap it is read.
     {
-        const file = try scratch.tmp.dir.openFile("config.ghostty", .{ .mode = .read_write });
-        defer file.close();
-        try file.setEndPos(save_target.max_bytes);
+        const file = try scratch.tmp.dir.openFile(std.testing.io, "config.ghostty", .{ .mode = .read_write });
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, save_target.max_bytes);
     }
     const bytes = try save_target.read(alloc, path);
     defer alloc.free(bytes);
@@ -2135,7 +2152,7 @@ pub fn installTerminfo(alloc: Allocator, term: []const u8) void {
         if (std.mem.eql(u8, name, term)) break;
     } else return;
 
-    var env = std.process.getEnvMap(alloc) catch return;
+    var env = global.environ().createMap(alloc) catch return;
     defer env.deinit();
     const dir = (win32_terminfo.homeTerminfoDir(alloc, &env) catch null) orelse {
         log.info("terminfo install skipped: no local home that git.exe and the MSYS2 runtime agree on", .{});
@@ -2163,7 +2180,7 @@ pub fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
         return std.fs.path.join(alloc, &.{ root, name }) catch null;
     }
 
-    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch known: {
+    const local = global.environ().getAlloc(alloc, "LOCALAPPDATA") catch known: {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = internal_os.windows_ext.knownFolderPathUtf8(
             &internal_os.windows_ext.FOLDERID_LocalAppData,
@@ -2178,7 +2195,7 @@ pub fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
 pub fn warnPortableIgnoredLocalData(alloc: Allocator) void {
     const portable_root = (internal_os.xdg.portableRoot(alloc) catch return) orelse return;
     defer alloc.free(portable_root);
-    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch known: {
+    const local = global.environ().getAlloc(alloc, "LOCALAPPDATA") catch known: {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = internal_os.windows_ext.knownFolderPathUtf8(
             &internal_os.windows_ext.FOLDERID_LocalAppData,
@@ -2190,10 +2207,11 @@ pub fn warnPortableIgnoredLocalData(alloc: Allocator) void {
     const ignored_path = std.fs.path.join(alloc, &.{ local, build_config.data_dir_name }) catch return;
     defer alloc.free(ignored_path);
     if (std.ascii.eqlIgnoreCase(portable_root, ignored_path)) return;
-    var ignored_dir = std.fs.openDirAbsolute(ignored_path, .{ .iterate = true }) catch return;
-    defer ignored_dir.close();
+    const io = global.io();
+    var ignored_dir = std.Io.Dir.openDirAbsolute(io, ignored_path, .{ .iterate = true }) catch return;
+    defer ignored_dir.close(io);
     var iter = ignored_dir.iterate();
-    if ((iter.next() catch return) == null) return;
+    if ((iter.next(io) catch return) == null) return;
     log.warn(
         "portable mode active root={s}; existing data under {s} is not being used",
         .{ portable_root, ignored_path },
@@ -2258,12 +2276,13 @@ fn beginRecoveryStartupAtPath(
     }
     var retained_merge_buffers: [2][win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
     var retained_merge_buffer_index: usize = 0;
+    const io = global.io();
     if (std.fs.path.dirname(path)) |dir_path| retained: {
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
+        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch |err| {
             log.warn("win32 recovery: retained history directory open failed err={}", .{err});
             break :retained;
         };
-        defer dir.close();
+        defer dir.close(io);
         // Only `.pending-` records are folded and deleted here. They are
         // written exclusively by `retainRecoveryPersistDiagnosis`, i.e. after
         // a ledger write has already definitively failed, and are never used
@@ -2284,18 +2303,19 @@ fn beginRecoveryStartupAtPath(
         defer alloc.free(retained_prefix);
         var entries = dir.iterate();
         while (true) {
-            const entry = entries.next() catch |err| {
+            const entry = entries.next(io) catch |err| {
                 log.warn("win32 recovery: retained history enumeration failed err={}", .{err});
                 break;
             } orelse break;
             if (!std.mem.startsWith(u8, entry.name, retained_prefix)) continue;
             const retained_path = std.fs.path.join(alloc, &.{ dir_path, entry.name }) catch continue;
-            const retained_file = std.fs.openFileAbsolute(retained_path, .{}) catch {
+            const retained_file = std.Io.Dir.openFileAbsolute(io, retained_path, .{ .allow_directory = false }) catch {
                 alloc.free(retained_path);
                 continue;
             };
-            defer retained_file.close();
-            const raw = retained_file.readToEndAlloc(alloc, 64 * 1024) catch {
+            defer retained_file.close(io);
+            var retained_reader = retained_file.readerStreaming(io, &.{});
+            const raw = retained_reader.interface.allocRemaining(alloc, .limited(64 * 1024)) catch {
                 alloc.free(retained_path);
                 continue;
             };
@@ -2459,7 +2479,7 @@ pub fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []cons
     if (std.fs.path.dirname(path)) |dir| {
         // Recursive: `layouts\` sits one level below `%LOCALAPPDATA%\noctty`,
         // which itself may not exist yet on a first save.
-        std.fs.cwd().makePath(dir) catch |err| switch (err) {
+        std.Io.Dir.cwd().createDirPath(global.io(), dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -2482,9 +2502,9 @@ const SessionRestoreTransaction = session_module.SessionRestoreTransaction;
 
 pub const SessionOwnerLock = session_module.SessionOwnerLock;
 
-fn writeOpenUrlTrace(file: std.fs.File, url: []const u8) !void {
+fn writeOpenUrlTrace(io: std.Io, file: std.Io.File, url: []const u8) !void {
     var buffer: [1024]u8 = undefined;
-    var writer = file.writer(&buffer);
+    var writer = file.writer(io, &buffer);
     try writer.interface.print("{s}\r\n", .{url});
     try writer.interface.flush();
 }
@@ -2493,20 +2513,21 @@ fn writeOpenUrlTrace(file: std.fs.File, url: []const u8) !void {
 /// runtime records the requested URL instead of dispatching an uncontrolled
 /// ShellExecuteW. Release builds always use the system URL handler.
 pub fn recordOpenUrlForTest(alloc: Allocator, url: []const u8) !bool {
-    const raw_path = std.process.getEnvVarOwned(
+    const raw_path = global.environ().getAlloc(
         alloc,
         "NOCTTY_WIN32_OPEN_URL_TRACE_FILE",
     ) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return false,
+        error.EnvironmentVariableMissing => return false,
         else => return err,
     };
     defer alloc.free(raw_path);
     const path = std.mem.trim(u8, raw_path, " \t\r\n");
     if (path.len == 0) return false;
 
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
-    try writeOpenUrlTrace(file, url);
+    const io = global.io();
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+    defer file.close(io);
+    try writeOpenUrlTrace(io, file, url);
     return true;
 }
 
@@ -3235,7 +3256,7 @@ test "a manual update check reports a failure as an error and a result as inform
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
     var state: updatepkg.State = .{
-        .last_checked_at = std.time.timestamp() - 60,
+        .last_checked_at = std.Io.Timestamp.now(std.testing.io, .real).toSeconds() - 60,
         .release_feed_url = try alloc.dupe(u8, "https://feed.invalid/releases/latest"),
         .release_url = try alloc.dupe(u8, "https://example.invalid/releases/tag/v99.0.0"),
     };
@@ -3400,10 +3421,12 @@ pub fn updateApplyFailureMessage(err: anyerror) []const u8 {
 }
 
 pub fn currentInstallDir(alloc: Allocator) ![]u8 {
-    const exe_path = try std.fs.selfExePathAlloc(alloc);
-    errdefer alloc.free(exe_path);
+    // 0.17's path is sentinel-terminated, so the directory is copied out
+    // rather than shrunk in place (a realloc would free the wrong length).
+    const exe_path = try std.process.executablePathAlloc(global.io(), alloc);
+    defer alloc.free(exe_path);
     const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidInstallPath;
-    return alloc.realloc(exe_path, dir.len);
+    return alloc.dupe(u8, dir);
 }
 
 pub fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: []const u8) ![]u8 {
@@ -4241,7 +4264,7 @@ pub fn captureTerminalUndoStateBytes(
 
 test "win32 terminal undo shifts restored rows to the live ConPTY cursor" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 12, .rows = 5 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 5 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -4272,7 +4295,7 @@ test "win32 terminal undo shifts restored rows to the live ConPTY cursor" {
 
 test "win32 terminal undo keeps nonzero live rows, wrap and snapshot margins" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 12, .rows = 6 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 6 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -4300,7 +4323,7 @@ test "win32 terminal undo keeps nonzero live rows, wrap and snapshot margins" {
 
 test "win32 terminal undo keeps alternate screen rows while preserving the live cursor" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 12, .rows = 5 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 5 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -4320,7 +4343,7 @@ test "win32 terminal undo keeps alternate screen rows while preserving the live 
 test "win32 terminal undo anchors a cursor above or below the last text row" {
     const alloc = std.testing.allocator;
     for ([_]terminal.size.CellCountInt{ 1, 5 }) |saved_y| {
-        var t = try terminal.Terminal.init(alloc, .{ .cols = 12, .rows = 6 });
+        var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 6 });
         defer t.deinit(alloc);
         var stream = t.vtStream();
         defer stream.deinit();
@@ -4339,7 +4362,7 @@ test "win32 terminal undo anchors a cursor above or below the last text row" {
 
 test "win32 terminal undo aligns content after replay prunes history" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 5, .max_scrollback = 16 * 1024 * 1024 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 5, .max_scrollback_bytes = 16 * 1024 * 1024 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -4365,7 +4388,7 @@ test "win32 terminal undo aligns content after replay prunes history" {
 
 test "win32 terminal undo aligns content with scrollback and trailing blank rows" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 12, .rows = 5 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 5 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -6277,9 +6300,18 @@ comptime {
 /// unpackaged app: Action Center clicks arrive through the COM activator.
 /// This reads a launch by hand or a script.
 pub fn scanToastActivationArg(alloc: std.mem.Allocator) ?win32_toast_activation.ActivationTarget {
-    const argv = std.process.argsAlloc(alloc) catch return null;
-    defer std.process.argsFree(alloc, argv);
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const argv = processArgs().toSlice(arena.allocator()) catch return null;
     return win32_toast_activation.scanLaunchArgs(argv[1..]);
+}
+
+/// This process's command line, read from the PEB as 0.15's
+/// `std.process.argsAlloc` did (and as `WinMain` builds `main`'s), so a test
+/// and code before the global state see the real one. Zig 0.17 removed
+/// `argsAlloc`; `global.args()` is empty under test.
+fn processArgs() std.process.Args {
+    return .{ .vector = std.os.windows.peb().ProcessParameters.CommandLine.slice() };
 }
 
 pub fn scanForwardedToastActivation(
@@ -6298,8 +6330,9 @@ pub fn forwardedActivationExtraArgCount(arguments: ?[]const [:0]const u8) usize 
 /// The last `--visual-studio-profiles=` argument on this process's command
 /// line, as written (`App.cli_visual_studio_profiles_arg`).
 pub fn cliVisualStudioProfilesArg(alloc: std.mem.Allocator) !?[]u8 {
-    const argv = std.process.argsAlloc(alloc) catch return null;
-    defer std.process.argsFree(alloc, argv);
+    var args_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer args_arena.deinit();
+    const argv = processArgs().toSlice(args_arena.allocator()) catch return null;
     return cliVisualStudioProfilesArgArgs(alloc, argv);
 }
 
@@ -6361,8 +6394,9 @@ test "the jump list passes on only a visual-studio-profiles argument noctty was 
 /// Settings save targets the last file because later config files
 /// override earlier ones.
 pub fn cliConfigFileOverride(alloc: std.mem.Allocator) !?[]u8 {
-    const argv = std.process.argsAlloc(alloc) catch return null;
-    defer std.process.argsFree(alloc, argv);
+    var args_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer args_arena.deinit();
+    const argv = processArgs().toSlice(args_arena.allocator()) catch return null;
     return cliConfigFileOverrideArgs(alloc, argv);
 }
 
@@ -6406,8 +6440,9 @@ pub fn cliConfigFileOverrideArgs(alloc: std.mem.Allocator, argv: []const []const
 
 /// The value of the last CLI `--class=` override.
 pub fn cliClass(alloc: std.mem.Allocator) !?[]u8 {
-    const argv = std.process.argsAlloc(alloc) catch return null;
-    defer std.process.argsFree(alloc, argv);
+    var args_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer args_arena.deinit();
+    const argv = processArgs().toSlice(args_arena.allocator()) catch return null;
     const class = cliClassArgs(argv) orelse return null;
     return try alloc.dupe(u8, class);
 }
@@ -6477,7 +6512,7 @@ fn absolutizePath(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) {
         return try alloc.dupe(u8, path);
     }
-    const cwd = try std.process.getCwdAlloc(alloc);
+    const cwd = try std.process.currentPathAlloc(global.io(), alloc);
     defer alloc.free(cwd);
     return try std.fs.path.join(alloc, &.{ cwd, path });
 }
@@ -6625,10 +6660,11 @@ pub fn persistSettings(
     // names Win32 normalization would change, and a drive root, so a config
     // that exists there could otherwise never be saved.
     if (std.fs.path.dirname(target.path)) |parent| {
-        if (std.fs.cwd().openDir(parent, .{})) |opened| {
+        const io = global.io();
+        if (std.Io.Dir.cwd().openDir(io, parent, .{})) |opened| {
             var dir = opened;
-            dir.close();
-        } else |_| std.fs.cwd().makePath(parent) catch |err| {
+            dir.close(io);
+        } else |_| std.Io.Dir.cwd().createDirPath(io, parent) catch |err| {
             std.log.warn("settings save: couldn't create parent dir path={s} err={}", .{ parent, err });
             return error.TempCreateFailed;
         };
@@ -6685,11 +6721,12 @@ pub fn patchOrAppendEdits(
         if (user_edited.isSet(@backingInt(key))) last_line[@backingInt(key)] = index;
     }
 
-    var written: SettingsEditedKeySet = .initEmpty();
+    var written: SettingsEditedKeySet = .empty;
     for (lines.items, 0..) |line, index| {
         var handled = false;
         const line_key = settingsAssignmentKey(line);
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
+        inline for (SettingsField.config.field_names, SettingsField.config.field_types) |field_name, field_type| {
+            const field: SettingsField = .{ .name = field_name, .type = field_type };
             if (field.name[0] == '_') continue;
             const key = @field(SettingsConfigKey, field.name);
             if (line_key == key and user_edited.isSet(@backingInt(key))) {
@@ -6723,7 +6760,8 @@ pub fn patchOrAppendEdits(
         }
     }
 
-    inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
+    inline for (SettingsField.config.field_names, SettingsField.config.field_types) |field_name, field_type| {
+        const field: SettingsField = .{ .name = field_name, .type = field_type };
         if (field.name[0] == '_') continue;
         const key = @field(SettingsConfigKey, field.name);
         if (user_edited.isSet(@backingInt(key)) and !written.isSet(@backingInt(key)) and
@@ -6746,11 +6784,22 @@ fn settingsEditRemovesLines(pending: *const configpkg.Config, comptime key: Sett
     return key == .@"default-profile" and pending.@"default-profile" == null;
 }
 
+/// A `Config` field's name and type: what 0.15's `std.builtin.Type.StructField`
+/// gave the save (Zig 0.17's type info lists names and types apart).
+const SettingsField = struct {
+    name: [:0]const u8,
+    type: type,
+
+    // Nested, not a root declaration: the facade budget counts a root
+    // field access as a forwarding alias.
+    const config = @typeInfo(configpkg.Config).@"struct";
+};
+
 /// One edited setting as config text, each line ending in a newline. A
 /// repeatable list that is not empty starts with `<key> = `, which resets
 /// what lower layers set; an empty list's formatter already emits that reset.
 fn writeSettingsEntry(
-    comptime field: std.builtin.Type.StructField,
+    comptime field: SettingsField,
     value: field.type,
     writer: *std.Io.Writer,
 ) !void {
@@ -6790,7 +6839,7 @@ test "win32 settings save names the edited keys a later config layer overrides" 
     var pending = try original.clone(alloc);
     defer pending.deinit();
     pending.@"font-size" = 14;
-    pending.@"copy-on-select" = .true;
+    pending.@"copy-on-select" = .clipboard;
     const edited = settingsUserEditedKeys(&original, &pending);
     try std.testing.expectEqual(@as(usize, 2), edited.count());
 
@@ -6842,7 +6891,7 @@ test "win32 settings save names the edited keys a later config layer overrides" 
         \\theme = light:Light,dark:Dark
         \\command = direct:pwsh.exe -NoLogo
     );
-    var all: SettingsEditedKeySet = .initEmpty();
+    var all: SettingsEditedKeySet = .empty;
     inline for (win32_settings.editable_keys) |key| all.set(@backingInt(key));
     var defaults = try configpkg.Config.default(alloc);
     defer defaults.deinit();
@@ -7272,7 +7321,7 @@ test "win32 settings disk edit is a conflict only for an edited setting the file
     // An edit to a setting the user is not changing is merged by the save and
     // applied by its reload, not a conflict.
     disk.@"font-size" = 12;
-    disk.@"copy-on-select" = .true;
+    disk.@"copy-on-select" = .clipboard;
     try std.testing.expect(!try settingsDiskEditConflict(&original, &pending, &disk, light, edited));
     // Nothing edited, nothing to lose.
     try std.testing.expect(!try settingsDiskEditConflict(&original, &original, &disk, light, settingsUserEditedKeys(&original, &original)));
@@ -7468,7 +7517,7 @@ test "win32 settings disk check stops at a config file it cannot open, not at a 
     // save's own reload would apply the partial load too.
     var same = try configpkg.Config.default(std.testing.allocator);
     defer same.deinit();
-    const edited: SettingsEditedKeySet = .initEmpty();
+    const edited: SettingsEditedKeySet = .empty;
     const state: configpkg.ConditionalState = .{};
     try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, null, &same, &same, &config, state, edited));
     try std.testing.expect(!try settingsDiskVerdict(alloc, null, &same, &same, &same, state, edited));
@@ -7705,8 +7754,8 @@ test "win32 the installer restart replays only the launch's last config file and
 fn settingsTestLoadText(config: *configpkg.Config, text: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", std.testing.allocator);
     defer std.testing.allocator.free(path);
     try config.loadFile(std.testing.allocator, path);
     try std.testing.expect(config._diagnostics.empty());
@@ -7717,7 +7766,7 @@ test "win32 settings patch replaces the whole font list and resets lower layers"
     var pending = try configpkg.Config.default(alloc);
     defer pending.deinit();
     try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "C");
-    var edited: SettingsEditedKeySet = .initEmpty();
+    var edited: SettingsEditedKeySet = .empty;
     edited.set(@backingInt(SettingsConfigKey.@"font-family"));
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
@@ -7741,18 +7790,18 @@ test "win32 settings save preserves CRLF including multiline and appended edits,
     pending.@"font-size" = 13.25;
     try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "A");
     try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "B");
-    var edited: SettingsEditedKeySet = .initEmpty();
+    var edited: SettingsEditedKeySet = .empty;
     edited.set(@backingInt(SettingsConfigKey.@"font-size"));
     edited.set(@backingInt(SettingsConfigKey.@"font-family"));
     var scratch = try save_target.Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "# keep\r\nfont-size = 12\r\ncopy-on-select = false" });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "# keep\r\nfont-size = 12\r\ncopy-on-select = false" });
     const path = try scratch.path("config.ghostty");
     defer alloc.free(path);
     // Through the save: the file had no final newline and still has none
     // (it used to gain one), while every line the save wrote ends in CRLF.
     try persistSettings(alloc, path, &pending, edited, &.{}, null, null);
-    const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    const saved = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 16));
     defer alloc.free(saved);
     try std.testing.expectEqualStrings("# keep\r\nfont-size = 13.25\r\ncopy-on-select = false\r\nfont-family = \r\nfont-family = A\r\nfont-family = B", saved);
 }
@@ -7760,8 +7809,8 @@ test "win32 settings save preserves CRLF including multiline and appended edits,
 /// A draft that turns `copy-on-select` on, and the set naming it as the edit.
 fn settingsTestCopyOnSelectEdit(alloc: Allocator) !struct { pending: configpkg.Config, edited: SettingsEditedKeySet } {
     var pending = try configpkg.Config.default(alloc);
-    pending.@"copy-on-select" = .true;
-    var edited: SettingsEditedKeySet = .initEmpty();
+    pending.@"copy-on-select" = .clipboard;
+    var edited: SettingsEditedKeySet = .empty;
     edited.set(@backingInt(SettingsConfigKey.@"copy-on-select"));
     return .{ .pending = pending, .edited = edited };
 }
@@ -7770,8 +7819,8 @@ test "win32 settings save follows a symbolic link and keeps it" {
     const alloc = std.testing.allocator;
     var scratch = try save_target.Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.makeDir("dotfiles");
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "dotfiles/config.ghostty", .data = "# kept\ncopy-on-select = false\n" });
+    try scratch.tmp.dir.createDir(std.testing.io, "dotfiles", .default_dir);
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dotfiles/config.ghostty", .data = "# kept\ncopy-on-select = false\n" });
     try scratch.symlink("config.ghostty", "dotfiles\\config.ghostty");
     const link = try scratch.path("config.ghostty");
     defer alloc.free(link);
@@ -7805,7 +7854,7 @@ test "win32 settings save keeps hard links together" {
     const alloc = std.testing.allocator;
     var scratch = try save_target.Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "copy-on-select = false\n" });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "copy-on-select = false\n" });
     try scratch.hardlink("dotfile", "config.ghostty");
     const path = try scratch.path("config.ghostty");
     defer alloc.free(path);
@@ -7838,14 +7887,14 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
         errdefer std.debug.print("case {d}\n", .{index});
         var scratch = try save_target.Scratch.init();
         defer scratch.deinit();
-        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = case.raw });
+        try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = case.raw });
         const path = try scratch.path("config.ghostty");
         defer alloc.free(path);
         var draft = try settingsTestCopyOnSelectEdit(alloc);
         defer draft.pending.deinit();
         try persistSettings(alloc, path, &draft.pending, draft.edited, case.edits, null, null);
         // Compared without printing: the bytes hold command lines.
-        const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+        const saved = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
         defer alloc.free(saved);
         try std.testing.expect(std.mem.eql(u8, case.expected, saved));
         // It reads back as the edits asked for.
@@ -7853,7 +7902,7 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
         defer loaded.deinit();
         try loaded.loadFile(alloc, path);
         try std.testing.expect(loaded._diagnostics.empty());
-        try std.testing.expect(loaded.@"copy-on-select" == .true);
+        try std.testing.expect(loaded.@"copy-on-select" == .clipboard);
         if (case.edits.ptr == label.ptr) {
             try std.testing.expect(std.mem.eql(u8, "Python", loaded.@"profile-name".get("py").?));
         } else try std.testing.expect(std.mem.eql(u8, "cmd.exe", loaded.@"profile-command".get("dev").?));
@@ -7866,13 +7915,13 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
     }) |case| {
         var scratch = try save_target.Scratch.init();
         defer scratch.deinit();
-        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = case.raw });
+        try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = case.raw });
         const path = try scratch.path("config.ghostty");
         defer alloc.free(path);
         var draft = try settingsTestCopyOnSelectEdit(alloc);
         defer draft.pending.deinit();
         try persistSettings(alloc, path, &draft.pending, draft.edited, case.edits, null, null);
-        const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+        const saved = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
         defer alloc.free(saved);
         try std.testing.expect(std.mem.eql(u8, case.expected, saved));
     }
@@ -7886,14 +7935,14 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
 fn settingsTestProfileSave(alloc: Allocator, raw: []const u8, ordinary: bool, edits: []const @import("win32/settings_patch.zig").Edit, expected: []const u8) !configpkg.Config {
     var scratch = try save_target.Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = raw });
     const path = try scratch.path("config.ghostty");
     defer alloc.free(path);
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
-    const edited: SettingsEditedKeySet = if (ordinary) draft.edited else .initEmpty();
+    const edited: SettingsEditedKeySet = if (ordinary) draft.edited else .empty;
     try persistSettings(alloc, path, &draft.pending, edited, edits, null, null);
-    const saved = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+    const saved = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
     defer alloc.free(saved);
     try std.testing.expect(std.mem.eql(u8, expected, saved));
     var loaded = try configpkg.Config.default(alloc);
@@ -7924,7 +7973,7 @@ test "win32 settings save of a profile edit beside a setting keeps a profile lin
     // The label still loads, and so do the new lines.
     try std.testing.expect(std.mem.eql(u8, label, loaded.@"profile-name".get("py") orelse return error.TestExpectedLabel));
     try std.testing.expect(std.mem.eql(u8, "C:\\src", loaded.@"profile-working-directory".get("py").?));
-    try std.testing.expect(loaded.@"copy-on-select" == .true);
+    try std.testing.expect(loaded.@"copy-on-select" == .clipboard);
     _ = Edit;
 }
 
@@ -7953,7 +8002,7 @@ test "win32 settings save that removes a file's only line beside a new setting e
     var loaded = try settingsTestProfileSave(alloc, "profile-command = py: cmd\r", true, removal, "copy-on-select = true\r\n");
     defer loaded.deinit();
     try std.testing.expect(loaded.@"profile-command".get("py") == null);
-    try std.testing.expect(loaded.@"copy-on-select" == .true);
+    try std.testing.expect(loaded.@"copy-on-select" == .clipboard);
     // A file whose only line goes, with nothing else saved, is empty.
     var empty = try settingsTestProfileSave(alloc, "profile-command = py: cmd", false, removal, "");
     defer empty.deinit();
@@ -7973,7 +8022,7 @@ test "win32 settings save beside a setting that deletes the final profile line l
         var loaded = try settingsTestProfileSave(alloc, case[0], true, removal, case[1]);
         defer loaded.deinit();
         try std.testing.expect(loaded.@"profile-command".get("py") == null);
-        try std.testing.expect(loaded.@"copy-on-select" == .true);
+        try std.testing.expect(loaded.@"copy-on-select" == .clipboard);
     }
 }
 
@@ -8035,13 +8084,13 @@ test "win32 settings save of a removal whose loaded variable name holds a NUL st
     }) |edits| {
         var scratch = try save_target.Scratch.init();
         defer scratch.deinit();
-        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+        try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = raw });
         const path = try scratch.path("config.ghostty");
         defer alloc.free(path);
         var pending = try configpkg.Config.default(alloc);
         defer pending.deinit();
-        try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, .initEmpty(), edits, null, null));
-        const after = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+        try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, .empty, edits, null, null));
+        const after = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 16));
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, raw, after));
     }
@@ -8092,7 +8141,7 @@ test "win32 settings save of ordinary settings alone keeps a file's missing fina
     }) |case| {
         var loaded = try settingsTestProfileSave(alloc, case[0], true, &.{}, case[1]);
         defer loaded.deinit();
-        try std.testing.expect(loaded.@"copy-on-select" == .true);
+        try std.testing.expect(loaded.@"copy-on-select" == .clipboard);
         try std.testing.expect(loaded.@"font-size" == 12);
     }
 }
@@ -8109,22 +8158,22 @@ test "win32 settings save writes no NUL, with or without a profile edit, and lea
     // the file-end step's own check skips): `patchProfileEdits` refuses it,
     // and the save stops before it writes.
     const profiles = "profile-command = py: python.exe\n";
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = profiles });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = profiles });
     const folder: []const @import("win32/settings_patch.zig").Edit = &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\a\x00b" } }};
-    try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, .initEmpty(), folder, null, null));
-    const after_profiles = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, .empty, folder, null, null));
+    const after_profiles = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 16));
     defer alloc.free(after_profiles);
     try std.testing.expect(std.mem.eql(u8, profiles, after_profiles));
     // An ordinary setting whose value holds one, which nothing in the
     // window lets through and only the check on the final text looks for:
     // stopped the same way.
     const raw = "font-size = 12\n";
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = raw });
     try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "a\x00b");
-    var edited: SettingsEditedKeySet = .initEmpty();
+    var edited: SettingsEditedKeySet = .empty;
     edited.set(@backingInt(SettingsConfigKey.@"font-family"));
     try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &pending, edited, &.{}, null, null));
-    const after = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    const after = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 16));
     defer alloc.free(after);
     try std.testing.expect(std.mem.eql(u8, raw, after));
 }
@@ -8140,7 +8189,7 @@ test "win32 settings disk check stops an ordinary save on an included file whose
     defer same.deinit();
     var detail: win32_settings.FailureDetail = .{};
     defer detail.clear(alloc);
-    var edited: SettingsEditedKeySet = .initEmpty();
+    var edited: SettingsEditedKeySet = .empty;
     edited.set(@backingInt(SettingsConfigKey.@"font-size"));
     try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, edited));
     try std.testing.expect(std.mem.eql(u8, "the included file C:\\noctty-test\\more.conf", detail.text orelse return error.TestExpectedDetail));
@@ -8150,7 +8199,7 @@ test "win32 settings disk check stops an ordinary save on an included file whose
     var reader: std.Io.Reader = .fixed("font-size = 13\n");
     try whole.loadReader(alloc, &reader, "C:\\noctty-test\\more.conf");
     detail.clear(alloc);
-    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &whole, .{}, .initEmpty()));
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &whole, .{}, .empty));
 }
 
 test "win32 settings disk check stops a save when the config cannot be put in the app's light/dark state" {
@@ -8182,9 +8231,9 @@ test "win32 settings disk check stops a save when the config cannot be put in th
     defer detail.clear(alloc);
     failing.fail_index = failing.alloc_index;
     // Not judged on the light reading instead: the save stops.
-    try std.testing.expectError(error.OutOfMemory, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .initEmpty()));
+    try std.testing.expectError(error.OutOfMemory, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .empty));
     // In the state it was loaded in there is no switch to fail.
-    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
 }
 
 test "win32 settings disk check stops a save on a theme that does not decode, in the state that reads it" {
@@ -8212,13 +8261,13 @@ test "win32 settings disk check stops a save on a theme that does not decode, in
     var detail: win32_settings.FailureDetail = .{};
     defer detail.clear(alloc);
     // The app runs dark: the save's reload would skip the dark theme whole.
-    try std.testing.expectError(error.UnsupportedEncoding, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .initEmpty()));
+    try std.testing.expectError(error.UnsupportedEncoding, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{ .theme = .dark }, .empty));
     const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{dark});
     defer alloc.free(expected);
     try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
     // Light reads the light theme alone.
     detail.clear(alloc);
-    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
 }
 
 test "win32 settings disk check does not stop a save on a theme only the other light/dark state reads" {
@@ -8252,10 +8301,10 @@ test "win32 settings disk check does not stop a save on a theme only the other l
         try disk.finalize();
         // The app runs dark: the save's reload reads the dark theme alone,
         // which decodes.
-        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .empty));
         try std.testing.expect(detail.text == null);
         // In the light state the reload would skip the light theme whole.
-        try std.testing.expectError(error.UnsupportedEncoding, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        try std.testing.expectError(error.UnsupportedEncoding, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
         const expected = try std.fmt.allocPrint(alloc, "the file {s}", .{light});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
@@ -8274,9 +8323,9 @@ test "win32 settings disk check does not stop a save on a theme only the other l
         try disk.loadRecursiveFiles(alloc);
         try disk.finalize();
         detail.clear(alloc);
-        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .empty));
         try std.testing.expect(detail.text == null);
-        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
         const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{light});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
@@ -8303,7 +8352,7 @@ test "win32 settings disk check stops a save on a default config file that will 
         var disk = try configpkg.Config.default(alloc);
         defer disk.deinit();
         _ = disk.loadOptionalFile(alloc, path);
-        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
         const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
@@ -8317,7 +8366,7 @@ test "win32 settings disk check stops a save on a default config file that will 
         defer disk.deinit();
         _ = disk.loadOptionalFile(alloc, path);
         detail.clear(alloc);
-        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
         const expected = try std.fmt.allocPrint(alloc, "the config file {s}", .{path});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
@@ -8327,7 +8376,7 @@ test "win32 settings disk check stops a save on a default config file that will 
     defer disk.deinit();
     try std.testing.expectEqual(configpkg.Config.OptionalFileAction.loaded, disk.loadOptionalFile(alloc, path));
     detail.clear(alloc);
-    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
 }
 
 test "win32 settings disk check stops an ordinary save on the theme of the app's light/dark state whose read failed" {
@@ -8362,24 +8411,24 @@ test "win32 settings disk check stops an ordinary save on the theme of the app's
         // probe sees, and its read fails, which only the dark reading reads.
         var lock = try tmp.dir.openFile(std.testing.io, "dark", .{ .mode = .read_write, .lock = .exclusive });
         defer lock.close(std.testing.io);
-        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+        try std.testing.expectError(error.FileUnopenable, settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .empty));
         const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{dark});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
         // In the light state the reload reads the light theme alone.
         detail.clear(alloc);
-        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .initEmpty()));
+        try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, .{}, .empty));
     }
     // Read whole: no problem.
     detail.clear(alloc);
-    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .initEmpty()));
+    try std.testing.expect(!try settingsDiskVerdict(alloc, &detail, &same, &same, &disk, dark_state, .empty));
 }
 
 test "win32 settings save does not write over bytes another program appends while the save reads the file last" {
     const alloc = std.testing.allocator;
     var scratch = try save_target.Scratch.init();
     defer scratch.deinit();
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
     const path = try scratch.path("config.ghostty");
     defer alloc.free(path);
     const Append = struct {
@@ -8390,10 +8439,13 @@ test "win32 settings save does not write over bytes another program appends whil
         }
         fn append() void {
             save_target.test_during_read = null;
-            const file = std.fs.openFileAbsolute(target, .{ .mode = .read_write }) catch return;
-            defer file.close();
-            file.seekFromEnd(0) catch return;
-            file.writeAll("font-family = Other\n") catch return;
+            const file = std.Io.Dir.openFileAbsolute(std.testing.io, target, .{ .mode = .read_write }) catch return;
+            defer file.close(std.testing.io);
+            // 0.15's seekFromEnd(0) and writeAll: a streaming writer seeked
+            // to the end (0.17's File has no seek of its own).
+            var appender = file.writerStreaming(std.testing.io, &.{});
+            appender.seekTo(file.length(std.testing.io) catch return) catch return;
+            appender.interface.writeAll("font-family = Other\n") catch return;
         }
     };
     Append.target = path;
@@ -8405,7 +8457,7 @@ test "win32 settings save does not write over bytes another program appends whil
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
     try std.testing.expectError(error.DiskChanged, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null));
-    const after = try scratch.tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 16);
+    const after = try scratch.tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 16));
     defer alloc.free(after);
     try std.testing.expectEqualStrings("font-size = 12\nfont-family = Other\n", after);
 }
@@ -8418,10 +8470,10 @@ test "win32 settings save writes no file larger than the next save could read" {
     defer alloc.free(path);
     // Comment lines up to a few bytes under the cap, which a save reads.
     {
-        const file = try scratch.tmp.dir.createFile("config.ghostty", .{});
-        defer file.close();
+        const file = try scratch.tmp.dir.createFile(std.testing.io, "config.ghostty", .{});
+        defer file.close(std.testing.io);
         var buf: [4096]u8 = undefined;
-        var writer = file.writer(&buf);
+        var writer = file.writer(std.testing.io, &buf);
         const line = "#" ++ comptime win32_repeat.repeat("x", 4094) ++ "\n";
         var left: usize = save_target.max_bytes - 8;
         while (left >= line.len) : (left -= line.len) try writer.interface.writeAll(line);
@@ -8429,12 +8481,12 @@ test "win32 settings save writes no file larger than the next save could read" {
         try writer.interface.writeAll("\n");
         try writer.interface.flush();
     }
-    try std.testing.expectEqual(@as(u64, save_target.max_bytes - 8), (try scratch.tmp.dir.statFile("config.ghostty")).size);
+    try std.testing.expectEqual(@as(u64, save_target.max_bytes - 8), (try scratch.tmp.dir.statFile(std.testing.io, "config.ghostty", .{})).size);
     // A setting added at its end would take it past the cap: not written.
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
     try std.testing.expectError(error.SerializeFailed, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null));
-    try std.testing.expectEqual(@as(u64, save_target.max_bytes - 8), (try scratch.tmp.dir.statFile("config.ghostty")).size);
+    try std.testing.expectEqual(@as(u64, save_target.max_bytes - 8), (try scratch.tmp.dir.statFile(std.testing.io, "config.ghostty", .{})).size);
 }
 
 test "win32 settings save writes a config only the extended path form reaches" {
@@ -8447,7 +8499,7 @@ test "win32 settings save writes a config only the extended path form reaches" {
     const dotted = try std.fmt.allocPrint(alloc, "\\\\?\\{s}\\config.", .{scratch.root});
     defer alloc.free(dotted);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = dotted, .data = "# kept\ncopy-on-select = false\n" });
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config", .data = "sibling\n" });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "sibling\n" });
     var draft = try settingsTestCopyOnSelectEdit(alloc);
     defer draft.pending.deinit();
 
@@ -8499,7 +8551,7 @@ test "win32 settings save refuses UTF-16 text and leaves the file as it was" {
     };
     for (refused) |case| {
         const bytes = case.bytes;
-        try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = bytes });
+        try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = bytes });
         detail.clear(alloc);
         try std.testing.expectError(case.err, persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, &detail, null));
         // The status line is told which file.
@@ -8511,7 +8563,7 @@ test "win32 settings save refuses UTF-16 text and leaves the file as it was" {
     // Text in an ASCII-compatible encoding is patched line by line, so a UTF-8
     // byte order mark and a legacy code page (byte 0xE9 is an accented "e")
     // survive the save.
-    try scratch.tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "\xef\xbb\xbf# caf\xe9\ncopy-on-select = false\n" });
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "\xef\xbb\xbf# caf\xe9\ncopy-on-select = false\n" });
     try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null);
     try scratch.expectContent("config.ghostty", "\xef\xbb\xbf# caf\xe9\ncopy-on-select = true\n");
 }
@@ -8545,7 +8597,7 @@ test "win32 settings clone does not edit include or shader paths" {
     var pending = try original.clone(alloc);
     defer pending.deinit();
     try std.testing.expectEqual(@as(usize, 0), settingsUserEditedKeys(&original, &pending).count());
-    pending.@"copy-on-select" = .true;
+    pending.@"copy-on-select" = .clipboard;
     const edited = settingsUserEditedKeys(&original, &pending);
     try std.testing.expectEqual(@as(usize, 1), edited.count());
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -8564,7 +8616,7 @@ test "win32 settings every editable key round trips through a file" {
     try settingsTestLoadText(&pending, @import("win32_settings_fields.zig").round_trip_config);
     inline for (win32_settings.editable_keys) |key| {
         try std.testing.expect(defaults.changed(&pending, key));
-        var edited: SettingsEditedKeySet = .initEmpty();
+        var edited: SettingsEditedKeySet = .empty;
         edited.set(@backingInt(key));
         var old: std.Io.Writer.Allocating = .init(alloc);
         defer old.deinit();
@@ -8631,7 +8683,7 @@ test "win32 settings a reset of each kind of field saves its default and leaves 
     try settingsTestLoadText(&original, text);
     var defaults = try configpkg.Config.default(alloc);
     defer defaults.deinit();
-    var kinds: std.EnumSet(field_model.Kind) = .initEmpty();
+    var kinds: std.EnumSet(field_model.Kind) = .empty;
     inline for (field_model.form_fields) |row| if (comptime row.resettable()) {
         errdefer std.debug.print("settings reset of {s}\n", .{row.native.binding});
         kinds.insert(row.descriptor.kind);
@@ -8883,11 +8935,11 @@ const settings_test_profiles_config = settings_test_profiles_head ++ "font-size 
 fn settingsTestSave(alloc: Allocator, text: []const u8, original: *const configpkg.Config, pending: *const configpkg.Config) ![]u8 {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
     try persistSettings(alloc, path, pending, settingsUserEditedKeys(original, pending), &.{}, null, null);
-    return try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+    return try tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
 }
 
 test "win32 settings save writes the chosen default profile as one line and reads it back" {
@@ -9125,7 +9177,7 @@ test "stripHtmlTags preserves plain text" {
 test "copied terminal text keeps only web and mail links as anchors" {
     const alloc = std.testing.allocator;
 
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 4 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 4 });
     defer t.deinit(alloc);
     var stream = t.vtStream();
     defer stream.deinit();
@@ -10532,7 +10584,7 @@ pub fn infoBannersExpire() bool {
 /// default test build, which is what CI runs, checks both.
 fn infoBannersExpireIn(comptime test_tools: bool) bool {
     if (!test_tools) return true;
-    return !std.process.hasEnvVarConstant("NOCTTY_RENDERER_KEEP_NOTICES");
+    return !global.environ().containsConstant("NOCTTY_RENDERER_KEEP_NOTICES");
 }
 
 test "infoBannersExpire reads NOCTTY_RENDERER_KEEP_NOTICES only with test tools" {
@@ -12566,14 +12618,14 @@ fn startupProfilePickerEnabled(raw: []const u8) bool {
 }
 
 pub fn detectStartupProfilePicker(alloc: Allocator) bool {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_STARTUP_PROFILE_PICKER") catch
+    const raw = global.environ().getAlloc(alloc, "NOCTTY_WIN32_STARTUP_PROFILE_PICKER") catch
         return false;
     defer alloc.free(raw);
     return startupProfilePickerEnabled(raw);
 }
 
 pub fn detectDefaultProfileHint(alloc: Allocator) ?[:0]const u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE") catch
+    const raw = global.environ().getAlloc(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE") catch
         return null;
     if (raw.len == 0) {
         alloc.free(raw);
@@ -12588,7 +12640,7 @@ pub fn detectDefaultProfileHint(alloc: Allocator) ?[:0]const u8 {
 }
 
 pub fn detectDefaultProfileTarget(alloc: Allocator) profile_pick.OpenTarget {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE_TARGET") catch
+    const raw = global.environ().getAlloc(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE_TARGET") catch
         return .tab;
     defer alloc.free(raw);
     return profile_pick.OpenTarget.parse(raw) orelse .tab;
@@ -12696,14 +12748,15 @@ pub fn writeImeWindowFormsTrace(
 ) void {
     const trace_path = imeWindowFormsTracePath(alloc) orelse return;
 
-    const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+    const io = global.io();
+    const file = std.Io.Dir.createFileAbsolute(io, trace_path, .{ .truncate = true }) catch |err| {
         log.warn("win32 IME form trace create failed path={s} err={}", .{ trace_path, err });
         return;
     };
-    defer file.close();
+    defer file.close(io);
 
     var buffer: [1024]u8 = undefined;
-    var writer = file.writer(&buffer);
+    var writer = file.writer(io, &buffer);
     const stream = &writer.interface;
     stream.print("{f}", .{std.json.fmt(.{
         .ime_pos = .{
@@ -15350,7 +15403,7 @@ const ClipboardReplyFixture = struct {
         core.io.mailbox = try @import("../termio.zig").Mailbox.initSPSC(self.core_app.alloc);
         errdefer core.io.mailbox.deinit(self.core_app.alloc);
         // The terminal's modes decide whether a paste is bracketed.
-        core.io.terminal = try terminal.Terminal.init(self.core_app.alloc, .{ .cols = 10, .rows = 10 });
+        core.io.terminal = try terminal.Terminal.init(std.testing.io, self.core_app.alloc, .{ .cols = 10, .rows = 10 });
         core.renderer_state = .{ .mutex = &self.renderer_mutex, .terminal = &core.io.terminal };
         self.surface.core_initialized = true;
     }
@@ -18889,7 +18942,7 @@ test "win32 pane divider loop looks an IME key up with the message's window and 
         try std.testing.expectEqual(case.cancels, host.pane_divider_drag == null);
         host.cancelPaneDividerDrag();
         host.pane_divider_button_held = false;
-        app.pane_divider_held_keys = .initEmpty();
+        app.pane_divider_held_keys = .empty;
     }
 }
 
@@ -20298,7 +20351,7 @@ test "win32 terminal undo snapshot restores terminal state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{
         .cols = 12,
         .rows = 2,
     });
@@ -23058,6 +23111,13 @@ test "automation-action win32 ipc rejects oversized action before encode" {
     );
 }
 
+/// 0.15's `File.seekTo` for the IPC tests, which read through the handle's
+/// own offset: Zig 0.17's File has no seek, and a streaming writer's moves it.
+fn testSeekFile(file: std.Io.File, offset: u64) !void {
+    var writer = file.writerStreaming(std.testing.io, &.{});
+    try writer.seekTo(offset);
+}
+
 test "automation-action win32 ipc rejects oversized decoded action" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -23075,8 +23135,8 @@ test "automation-action win32 ipc rejects oversized decoded action" {
     header[8] = 0;
     std.mem.writeInt(u64, header[9..17], 0, .little);
     std.mem.writeInt(u32, header[17..21], win32_ipc.max_action_text_len + 1, .little);
-    try file.writeAll(&header);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &header);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
@@ -23097,7 +23157,7 @@ test "automation-action win32 ipc maps specific failure ack" {
     defer file.close(std.testing.io);
 
     try win32_ipc.writeAckStatus(.{ .handle = file.handle }, win32_ipc.ack_invalid_automation_target);
-    try file.seekTo(0);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidAutomationTarget,
@@ -23116,9 +23176,10 @@ test "hints: recorded URL launch trace preserves the exact request" {
     });
     defer file.close(std.testing.io);
 
-    try writeOpenUrlTrace(file, "https://example.com/a?x=1&y=2");
-    try file.seekTo(0);
-    const recorded = try file.readToEndAlloc(std.testing.allocator, 1024);
+    try writeOpenUrlTrace(std.testing.io, file, "https://example.com/a?x=1&y=2");
+    // A positional reader starts at offset 0 (0.15 seeked there first).
+    var reader = file.reader(std.testing.io, &.{});
+    const recorded = try reader.interface.allocRemaining(std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(recorded);
     try std.testing.expectEqualStrings(
         "https://example.com/a?x=1&y=2\r\n",
@@ -23141,8 +23202,8 @@ test "win32 win32_ipc.readDataResponse treats legacy failure ack as IPCFailed" {
     var header: [5]u8 = undefined;
     std.mem.writeInt(u32, header[0..4], win32_ipc.wire_version, .little);
     header[4] = win32_ipc.ack_failure;
-    try file.writeAll(&header);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &header);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.IPCFailed,
@@ -23166,8 +23227,8 @@ test "win32 win32_ipc.readDataResponse rejects oversized body length" {
     std.mem.writeInt(u32, header[0..4], win32_ipc.wire_version, .little);
     header[4] = win32_ipc.ack_success;
     std.mem.writeInt(u32, header[5..9], win32_ipc.max_data_response_len + 1, .little);
-    try file.writeAll(&header);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &header);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidIpcResponse,
@@ -23189,8 +23250,8 @@ test "win32 win32_ipc.decodeNewWindowPayload rejects oversized argc" {
 
     var argc_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &argc_buf, win32_ipc.max_new_window_argc + 1, .little);
-    try file.writeAll(&argc_buf);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &argc_buf);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidIpcRequest,
@@ -23213,8 +23274,8 @@ test "win32 win32_ipc.decodeNewWindowPayload rejects oversized argument length b
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], 1, .little);
     std.mem.writeInt(u32, buf[4..8], win32_ipc.max_new_window_arg_len + 1, .little);
-    try file.writeAll(&buf);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &buf);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidIpcRequest,
@@ -23238,8 +23299,8 @@ test "win32 win32_ipc.decodeNewWindowPayload rejects aggregate argument bytes be
     std.mem.writeInt(u32, buf[0..4], 2, .little);
     std.mem.writeInt(u32, buf[4..8], win32_ipc.max_new_window_args_bytes, .little);
     std.mem.writeInt(u32, buf[8..12], 1, .little);
-    try file.writeAll(&buf);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &buf);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.InvalidIpcRequest,
@@ -23264,8 +23325,8 @@ test "win32 win32_ipc.decodeNewWindowPayload cleans up initialized args on parti
     std.mem.writeInt(u32, header[4..8], 1, .little);
     header[8] = 'x';
     std.mem.writeInt(u32, header[9..13], 1, .little);
-    try file.writeAll(&header);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &header);
+    try testSeekFile(file, 0);
 
     try std.testing.expectError(
         error.EndOfStream,
@@ -23754,7 +23815,7 @@ test "win32 an elevated window names a file-defined user profile and passes a co
         const parameters = try win32_elevation.buildRelaunchParameters(alloc, &noctty_argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &vs_argv } } });
         defer alloc.free(parameters);
         var other = try tmp.dir.createFile(std.testing.io, "other-account.ghostty", .{});
-        try other.writeAll("visual-studio-profiles = none\n");
+        try other.writeStreamingAll(std.testing.io, "visual-studio-profiles = none\n");
         other.close(std.testing.io);
         const other_path = try tmp.dir.realPathFileAlloc(std.testing.io, "other-account.ghostty", alloc);
         defer alloc.free(other_path);
@@ -24262,7 +24323,7 @@ test "win32 recovery next startup folds retained diagnosis before append" {
     try std.testing.expectEqual(win32_recovery.StartupPhase.ready_persist_failed, startup.attempts[0].phase);
     try std.testing.expectEqual(@as(?u32, 32), startup.attempts[0].last_win32_error);
     try std.testing.expectEqual(win32_recovery.StartupPhase.init, startup.attempts[1].phase);
-    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(std.testing.io, pending, .{}));
 }
 
 test "win32 recovery startup leaves another instance's in-flight write temp alone" {
@@ -24314,7 +24375,7 @@ test "win32 recovery startup leaves another instance's in-flight write temp alon
         startup.attempts[0].phase,
     );
     try std.testing.expectEqual(@as(?u32, 32), startup.attempts[0].last_win32_error);
-    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(std.testing.io, pending, .{}));
 
     // The other instance's replacement source survives untouched and its
     // uncommitted ready marker was not folded in.
@@ -24357,10 +24418,10 @@ test "win32 recovery startup keeps a newer build's history and counts one with a
     {
         const file = try tmp.dir.createFile(std.testing.io, "startup-attempts.json", .{});
         defer file.close(std.testing.io);
-        try file.writeAll("{\"schema_version\":3,\"pad\":\"");
+        try file.writeStreamingAll(std.testing.io, "{\"schema_version\":3,\"pad\":\"");
         const chunk = @as([4096]u8, @splat('x'));
-        for (0..17) |_| try file.writeAll(&chunk);
-        try file.writeAll("\"}");
+        for (0..17) |_| try file.writeStreamingAll(std.testing.io, &chunk);
+        try file.writeStreamingAll(std.testing.io, "\"}");
     }
     const big_before = try tmp.dir.statFile(std.testing.io, "startup-attempts.json", .{});
     const big = beginRecoveryStartupAtPath(std.testing.allocator, target, null, 600, recovery_ledger_lock_wait_ms);
@@ -24373,7 +24434,7 @@ test "win32 recovery startup keeps a newer build's history and counts one with a
     {
         const file = try tmp.dir.createFile(std.testing.io, "startup-attempts.json", .{});
         defer file.close(std.testing.io);
-        try file.writeAll(newer);
+        try file.writeStreamingAll(std.testing.io, newer);
     }
     {
         const held = try tmp.dir.openFile(std.testing.io, "startup-attempts.json", .{ .mode = .read_write, .lock = .exclusive });
@@ -24386,7 +24447,7 @@ test "win32 recovery startup keeps a newer build's history and counts one with a
     try std.testing.expectEqualStrings(newer, unblocked);
 
     var names = tmp.dir.iterate();
-    while (try names.next()) |entry| {
+    while (try names.next(std.testing.io)) |entry| {
         try std.testing.expect(std.mem.eql(u8, entry.name, "startup-attempts.json") or
             std.mem.endsWith(u8, entry.name, ".lock"));
     }
@@ -24582,12 +24643,12 @@ test "win32 recovery ledger lock excludes a second holder until released" {
     // A second acquisition against the same ledger must time out rather than
     // succeed, and must time out promptly: the wait is the bound on how long
     // a startup can be held behind a sibling.
-    const started = std.time.milliTimestamp();
+    const started = std.Io.Timestamp.now(std.testing.io, .real).toMilliseconds();
     try std.testing.expectEqual(
         @as(?RecoveryLedgerLock, null),
         try RecoveryLedgerLock.acquire(std.testing.allocator, target, 50),
     );
-    try std.testing.expect(std.time.milliTimestamp() - started < 1000);
+    try std.testing.expect(std.Io.Timestamp.now(std.testing.io, .real).toMilliseconds() - started < 1000);
     first.release();
 
     // Released, the next taker gets it. The sibling file is left behind on
@@ -24597,8 +24658,8 @@ test "win32 recovery ledger lock excludes a second holder until released" {
     second.release();
     const lock_path = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".lock" });
     defer std.testing.allocator.free(lock_path);
-    const lock_file = try std.fs.openFileAbsolute(lock_path, .{});
-    lock_file.close();
+    const lock_file = try std.Io.Dir.openFileAbsolute(std.testing.io, lock_path, .{});
+    lock_file.close(std.testing.io);
 }
 
 test "win32 recovery startup fails open when the ledger lock is held" {
@@ -24636,14 +24697,14 @@ test "win32 recovery startup fails open when the ledger lock is held" {
     const untouched = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, target, std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(untouched);
     try std.testing.expectEqualStrings(disk_json, untouched);
-    const pending_file = try std.fs.openFileAbsolute(pending, .{});
-    pending_file.close();
+    const pending_file = try std.Io.Dir.openFileAbsolute(std.testing.io, pending, .{});
+    pending_file.close(std.testing.io);
 
     // With the lock free the same launch records itself and folds the
     // retained record.
     const recorded = beginRecoveryStartupAtPath(std.testing.allocator, target, null, 200, recovery_ledger_lock_wait_ms);
     try std.testing.expectEqual(@as(usize, 4), recorded.count);
-    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(std.testing.io, pending, .{}));
 }
 
 const ConcurrentStartupWorker = struct {
@@ -24754,10 +24815,10 @@ test "win32 recovery fallback failure is consumed by next startup" {
 
     // The dead replacement source is dropped by the writer, and the folded
     // `.pending-` diagnosis is dropped by the next startup: no leftovers.
-    var root_dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
-    defer root_dir.close();
+    var root_dir = try std.Io.Dir.openDirAbsolute(std.testing.io, root, .{ .iterate = true });
+    defer root_dir.close(std.testing.io);
     var entries = root_dir.iterate();
-    while (try entries.next()) |entry| {
+    while (try entries.next(std.testing.io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "startup-attempts.json.tmp-"));
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "startup-attempts.json.pending-"));
     }
@@ -24841,10 +24902,10 @@ test "win32 recovery ready-write failure before atomic replace leaves nothing fo
 
     // And nothing was left behind for a later startup to fold, which is the
     // whole point: without the retry this ready marker is simply gone.
-    var dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
     var entries = dir.iterate();
-    while (try entries.next()) |entry| {
+    while (try entries.next(std.testing.io)) |entry| {
         try std.testing.expect(std.mem.indexOf(u8, entry.name, recovery_pending_suffix) == null);
         try std.testing.expect(std.mem.indexOf(u8, entry.name, ".tmp-") == null);
     }
@@ -25589,7 +25650,7 @@ test "win32 session state file write replaces through temp file" {
     var iterable_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer iterable_dir.close(std.testing.io);
     var entries = iterable_dir.iterate();
-    while (try entries.next()) |entry| {
+    while (try entries.next(std.testing.io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "session-state.json.tmp-"));
     }
 }

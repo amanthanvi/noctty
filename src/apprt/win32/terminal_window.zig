@@ -69,6 +69,7 @@ const imeWindowForms = win32.imeWindowForms;
 const input = @import("../../input.zig");
 const inspectorChromeVisible = win32.inspectorChromeVisible;
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const isAutomaticSshCommandTitle = win32.isAutomaticSshCommandTitle;
 const isHighContrastActive = win32.isHighContrastActive;
 const lParamBits = win32.lParamBits;
@@ -1896,8 +1897,10 @@ pub const Surface = struct {
         }
     }
 
-    pub fn defaultTermioEnv(self: *const Surface) !std.process.EnvMap {
-        var env = try internal_os.getEnvMap(self.app.core_app.alloc);
+    pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
+        // The process environment, as 0.15's `internal_os.getEnvMap` read it
+        // on Windows (its Flatpak arm is Linux's).
+        var env = try global.environ().createMap(self.app.core_app.alloc);
         errdefer env.deinit();
 
         if (env.get("USERPROFILE") == null) {
@@ -4350,7 +4353,7 @@ pub const Surface = struct {
         defer role_scope.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
-        surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
+        surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 10 });
         defer surface.core_surface.io.terminal.deinit(std.testing.allocator);
         surface.core_surface.mouse = .{ .link_point = .{ .x = 4, .y = 4 } };
         surface.core_surface.renderer_state = .{
@@ -5814,7 +5817,7 @@ test "isolated: Win32 surface key demand records the key-message options read fr
         defer role.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
-        var term = try terminal.Terminal.init(testing.allocator, .{ .cols = 10, .rows = 3 });
+        var term = try terminal.Terminal.init(std.testing.io, testing.allocator, .{ .cols = 10, .rows = 3 });
         defer term.deinit(testing.allocator);
         surface.core_surface.renderer_state = .{ .mutex = &mutex, .terminal = &term };
 

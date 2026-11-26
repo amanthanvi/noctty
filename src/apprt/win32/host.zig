@@ -124,6 +124,7 @@ const host_titlebar_action_button_size = win32.host_titlebar_action_button_size;
 const infoBannersExpire = win32.infoBannersExpire;
 const input = @import("../../input.zig");
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const isHighContrastActive = win32.isHighContrastActive;
 const keyEventFromWin32Message = win32.keyEventFromWin32Message;
 const keyPressed = win32.keyPressed;
@@ -2611,15 +2612,16 @@ pub const Host = struct {
 
     fn loadPaletteThemeConfig(self: *Host, name: []const u8) !configpkg.Config {
         const alloc = self.app.core_app.alloc;
-        const cwd_before = try std.process.getCwdAlloc(alloc);
+        const io = global.io();
+        const cwd_before = try std.process.currentPathAlloc(io, alloc);
         defer alloc.free(cwd_before);
 
         var changed_cwd = false;
         if (self.app.startup_cwd) |cwd| {
-            try std.process.changeCurDir(cwd);
+            try std.process.setCurrentPath(io, cwd);
             changed_cwd = true;
         }
-        defer if (changed_cwd) std.process.changeCurDir(cwd_before) catch |err| {
+        defer if (changed_cwd) std.process.setCurrentPath(io, cwd_before) catch |err| {
             log.warn("palette theme cwd restore failed path={f} err={}", .{ internal_os.redact.bytes(cwd_before), err });
         };
 
@@ -12450,7 +12452,7 @@ test "win32 settings patch persists a palette theme selection" {
     defer pending.deinit();
     try Host.setConfigTheme(&pending, "0x96f");
 
-    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
+    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .empty;
     edited.set(@backingInt(ConfigKey.theme));
     var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);

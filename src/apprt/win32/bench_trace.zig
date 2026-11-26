@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const win32_sys = @import("sys.zig");
+const global = @import("../../global.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
@@ -33,7 +34,15 @@ extern "kernel32" fn K32GetProcessMemoryInfo(
 ) callconv(.winapi) BOOL;
 
 var process_origin_tick_ms = std.atomic.Value(u64).init(0);
-var memory_stage_trace_write_mutex: std.Thread.Mutex = .{};
+var memory_stage_trace_write_mutex: std.Io.Mutex = .init;
+
+/// The `Io` of the trace mutex's futex waits and wakes: `lockUncancelable` and
+/// `unlock` reach only the OS futex whatever the `std.Io.Threaded` instance
+/// (`sync/state_mutex.zig`'s `innerIo`), so the renderer and IO threads lock
+/// it as they did on 0.15.
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
 pub const SettingsOpenStage = enum {
     f9_keydown,
@@ -92,7 +101,7 @@ pub const SettingsOpenTrace = struct {
     pub const max_records = 1024;
     pub const max_record_bytes = 128;
 
-    file: ?std.fs.File = null,
+    file: ?std.Io.File = null,
     records: u16 = 0,
 
     /// Read the opt-in once per App lifetime. An inherited environment must
@@ -103,7 +112,7 @@ pub const SettingsOpenTrace = struct {
 
     fn initEnv(alloc: Allocator, name: []const u8) SettingsOpenTrace {
         if (builtin.is_test) return .{};
-        const path = std.process.getEnvVarOwned(alloc, name) catch return .{};
+        const path = global.environ().getAlloc(alloc, name) catch return .{};
         defer alloc.free(path);
         return initPath(path) catch .{};
     }
@@ -116,7 +125,7 @@ pub const SettingsOpenTrace = struct {
         // Require a drive/share so the destination cannot depend on cwd.
         if (builtin.os.tag == .windows and std.fs.path.diskDesignatorWindows(path).len == 0)
             return error.RelativeTracePath;
-        return .{ .file = try std.fs.createFileAbsolute(path, .{ .exclusive = true, .truncate = false }) };
+        return .{ .file = try std.Io.Dir.createFileAbsolute(global.io(), path, .{ .exclusive = true, .truncate = false }) };
     }
 
     pub fn enabled(self: *const SettingsOpenTrace) bool {
@@ -124,7 +133,7 @@ pub const SettingsOpenTrace = struct {
     }
 
     pub fn deinit(self: *SettingsOpenTrace) void {
-        if (self.file) |file| file.close();
+        if (self.file) |file| file.close(global.io());
         self.file = null;
     }
 
@@ -161,7 +170,7 @@ pub const SettingsOpenTrace = struct {
             count += 1;
         }
         if (count == 0) return;
-        file.writeAll(buf[0..used]) catch {
+        file.writeStreamingAll(global.io(), buf[0..used]) catch {
             self.deinit();
             return;
         };
@@ -169,8 +178,8 @@ pub const SettingsOpenTrace = struct {
         if (self.records == max_records) self.deinit();
     }
 
-    fn writeRecord(self: *SettingsOpenTrace, file: std.fs.File, line: []const u8) void {
-        file.writeAll(line) catch {
+    fn writeRecord(self: *SettingsOpenTrace, file: std.Io.File, line: []const u8) void {
+        file.writeStreamingAll(global.io(), line) catch {
             self.deinit();
             return;
         };
@@ -380,7 +389,7 @@ test "Settings creation stamps are written once, in order, within the record cap
 pub fn absolutizeTracePath(alloc: Allocator, owned: []const u8) ![]const u8 {
     if (std.fs.path.isAbsolute(owned)) return owned;
     defer alloc.free(owned);
-    const cwd = try std.process.getCwdAlloc(alloc);
+    const cwd = try std.process.currentPathAlloc(global.io(), alloc);
     defer alloc.free(cwd);
     return try std.fs.path.join(alloc, &.{ cwd, owned });
 }
@@ -457,7 +466,7 @@ pub const MemoryStageTrace = struct {
     first_swap_recorded: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: Allocator) MemoryStageTrace {
-        const raw = std.process.getEnvVarOwned(
+        const raw = global.environ().getAlloc(
             alloc,
             "NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE",
         ) catch return .{};
@@ -504,8 +513,8 @@ pub const MemoryStageTrace = struct {
         const path = self.path orelse return false;
         const resolved_surface_id = self.surfaceId(surface_id);
 
-        memory_stage_trace_write_mutex.lock();
-        defer memory_stage_trace_write_mutex.unlock();
+        memory_stage_trace_write_mutex.lockUncancelable(mutexIo());
+        defer memory_stage_trace_write_mutex.unlock(mutexIo());
         const private_bytes = queryProcessPrivateBytes() orelse return false;
         const trace_sequence = self.trace_sequence.fetchAdd(1, .acq_rel) + 1;
         const surface_width_px = self.surface_width_px.load(.acquire);
@@ -516,18 +525,20 @@ pub const MemoryStageTrace = struct {
         const rows = self.rows.load(.acquire);
         const wgl_pixel_format = self.wglPixelFormat();
 
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch |err| {
+        const io = global.io();
+        const file = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = false }) catch |err| {
             log.warn("memory stage trace open failed path={s} err={}", .{ path, err });
             return false;
         };
-        defer file.close();
-        file.seekFromEnd(0) catch return false;
+        defer file.close(io);
 
         var buffer: [512]u8 = undefined;
         // This trace is JSONL. The positional writer starts at offset zero
-        // even after seekFromEnd and would overwrite every earlier surface
-        // identity record; streaming mode honors the append seek.
-        var writer = file.writerStreaming(&buffer);
+        // and would overwrite every earlier surface identity record; a
+        // streaming writer seeked to the end appends (0.15's seekFromEnd(0);
+        // Zig 0.17's File has no seek of its own).
+        var writer = file.writerStreaming(io, &buffer);
+        writer.seekTo(file.length(io) catch return false) catch return false;
         const stream = &writer.interface;
         stream.print("{f}\n", .{std.json.fmt(.{
             .stage = @tagName(stage),

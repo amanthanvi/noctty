@@ -102,6 +102,7 @@ const input = @import("../../input.zig");
 const installTerminfo = win32.installTerminfo;
 const installerRestartCommandLine = win32.installerRestartCommandLine;
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const ipc_server = @import("ipc_server.zig");
 const isHighContrastActive = win32.isHighContrastActive;
 const isLaunchArgumentDiagnostic = win32.isLaunchArgumentDiagnostic;
@@ -275,6 +276,23 @@ const windows_shell = @import("../../config/windows_shell.zig");
 const winrtToastActivationCallback = win32.winrtToastActivationCallback;
 const withoutAppWideArguments = win32.withoutAppWideArguments;
 const writePersistentFileAlloc = win32.writePersistentFileAlloc;
+
+/// The process's current directory, owned and not sentinel-terminated, as
+/// 0.15's `std.process.getCwdAlloc` returned it: 0.17's `currentPathAlloc`
+/// adds a sentinel that a `free` of the `[]u8` the callers keep (or mix with
+/// a `dupe`) would not count. The same `max_path_bytes` buffer std uses.
+fn currentDirAlloc(alloc: Allocator) ![]u8 {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try std.process.currentPath(global.io(), &buf);
+    return alloc.dupe(u8, buf[0..len]);
+}
+
+/// This process's command line from the PEB, as 0.15's `std.process.argsAlloc`
+/// read it (and `WinMain` builds `main`'s): `global.args()` is empty under
+/// test. Parse it with `toSlice` into an arena.
+fn processArgs() std.process.Args {
+    return .{ .vector = std.os.windows.peb().ProcessParameters.CommandLine.slice() };
+}
 
 // Test dependencies.
 const LRESULT = win32.LRESULT;
@@ -963,7 +981,7 @@ pub const App = struct {
     /// Physical keys pressed while a split divider drag held the mouse,
     /// whose repeats and releases are swallowed too (`paneDividerDragKey`,
     /// indexed by `paneDividerPhysicalKey`).
-    pane_divider_held_keys: std.StaticBitSet(768) = .initEmpty(),
+    pane_divider_held_keys: std.StaticBitSet(768) = .empty,
     /// For each held physical key, the virtual key that asks its state
     /// (`reconcilePaneDividerHeldKeys`): VK_LSHIFT or VK_RSHIFT rather than
     /// VK_SHIFT, and so on.
@@ -1245,7 +1263,7 @@ pub const App = struct {
         self.cli_visual_studio_profiles_arg = cliVisualStudioProfilesArg(core_app.alloc) catch null;
         self.cli_class = cliClass(core_app.alloc) catch null;
         // Snapshot the startup cwd for reload-time restoration.
-        self.startup_cwd = std.process.getCwdAlloc(core_app.alloc) catch null;
+        self.startup_cwd = currentDirAlloc(core_app.alloc) catch null;
         // AUMID registration MUST precede any HWND creation so
         // taskbar-grouping / toast attribution picks up our identity
         // on the first window. Both swallow failures (warn +
@@ -1549,7 +1567,7 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         try self.sanitizeCurrentDirectory();
-        const cwd = std.process.getCwdAlloc(self.core_app.alloc) catch null;
+        const cwd = currentDirAlloc(self.core_app.alloc) catch null;
         defer if (cwd) |v| self.core_app.alloc.free(v);
         if (cwd) |v| {
             log.debug("win32 current directory cwd={f}", .{internal_os.redact.bytes(v)});
@@ -3860,7 +3878,7 @@ pub const App = struct {
         const stage_dir = std.fs.path.dirname(staged.artifact_path) orelse return error.InvalidStagedInstallerPath;
         const log_path = try updatepkg.applyLogPathAlloc(self.core_app.alloc, staged.artifact_path);
         defer self.core_app.alloc.free(log_path);
-        try std.fs.cwd().makePath(std.fs.path.dirname(log_path).?);
+        try std.Io.Dir.cwd().createDirPath(global.io(), std.fs.path.dirname(log_path).?);
 
         const params = try buildInstallerApplyArgs(self.core_app.alloc, install_dir, log_path);
         defer self.core_app.alloc.free(params);
@@ -4378,7 +4396,7 @@ pub const App = struct {
                     if (self.startup_cwd) |startup_cwd| {
                         if (startup_cwd.len > 0) break :cwd try alloc.dupe(u8, startup_cwd);
                     }
-                    break :cwd try std.process.getCwdAlloc(alloc);
+                    break :cwd try currentDirAlloc(alloc);
                 };
                 defer alloc.free(cwd);
 
@@ -4423,8 +4441,9 @@ pub const App = struct {
                         };
                 }
 
-                const process_argv = try std.process.argsAlloc(alloc);
-                defer std.process.argsFree(alloc, process_argv);
+                var args_arena: std.heap.ArenaAllocator = .init(alloc);
+                defer args_arena.deinit();
+                const process_argv = try processArgs().toSlice(args_arena.allocator());
                 const argv = try alloc.alloc([]const u8, process_argv.len);
                 defer alloc.free(argv);
                 for (process_argv, 0..) |arg, i| argv[i] = arg;
@@ -5508,7 +5527,7 @@ pub const App = struct {
         target: apprt.ipc.Target,
         value: apprt.ipc.Action.NewWindow,
     ) !bool {
-        const exe_path = try std.fs.selfExePathAlloc(alloc);
+        const exe_path = try std.process.executablePathAlloc(global.io(), alloc);
         defer alloc.free(exe_path);
 
         var argv: std.ArrayList([]const u8) = .empty;
@@ -5524,11 +5543,13 @@ pub const App = struct {
             for (arguments) |arg| try argv.append(alloc, arg);
         }
 
-        var child = std.process.Child.init(argv.items, alloc);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        try internal_os.windows_ext.spawnChildHoldingInheritLock(&child);
+        // Not waited on, as 0.15's `Child` was not.
+        _ = try internal_os.windows_ext.spawnChildHoldingInheritLock(global.io(), .{
+            .argv = argv.items,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        });
         return true;
     }
 
@@ -6807,7 +6828,7 @@ pub const App = struct {
         var previous = self.settings_preview orelse return;
         self.settings_preview = null;
         defer previous.deinit();
-        var changed = std.EnumSet(win32_settings.PreviewEffect).initEmpty();
+        var changed = std.EnumSet(win32_settings.PreviewEffect).empty;
         for (std.enums.values(win32_settings.SettingField)) |field| {
             const effect = win32_settings.previewEffect(field);
             if (effect == .none) continue;
@@ -9271,7 +9292,7 @@ pub const App = struct {
     pub const rollbackSessionRestoreHost = session_module.rollbackSessionRestoreHost;
 
     fn sanitizeCurrentDirectory(self: *App) !void {
-        const cwd = std.process.getCwdAlloc(self.core_app.alloc) catch null;
+        const cwd = currentDirAlloc(self.core_app.alloc) catch null;
         defer if (cwd) |v| self.core_app.alloc.free(v);
 
         if (cwd) |v| {
@@ -10232,7 +10253,7 @@ pub const App = struct {
         const file = found.file;
         // The exact dispatched path had to exist for that open. Query its
         // handle: reopening the path here could follow a swapped junction.
-        const stat = file.stat() catch return null;
+        const stat = file.stat(global.io()) catch return null;
         if (stat.kind == .directory) return normalized;
         // The open also takes a name's 8.3 alias (`CMD~1` for `.cmd`,
         // `PAYLOA~1.LIB` for `payload.library-ms`), which the shell namespace
@@ -10246,7 +10267,8 @@ pub const App = struct {
             // A file opened without its data (the spelled name has an
             // extension) cannot be read here, and is refused.
             var magic: [2]u8 = undefined;
-            const count = file.readAll(&magic) catch return null;
+            // From offset 0 of the just-opened handle, as 0.15's `readAll`.
+            const count = file.readPositionalAll(global.io(), &magic, 0) catch return null;
             if (count >= 2 and std.mem.eql(u8, &magic, "MZ")) return null;
         }
         for ([_][]const u8{ extension, long_extension }) |screened| {
@@ -10659,7 +10681,7 @@ pub const App = struct {
         };
         defer disk.deinit();
         detail.clear(alloc);
-        _ = try settingsDiskVerdict(alloc, detail, original, pending, &disk, state, .initEmpty());
+        _ = try settingsDiskVerdict(alloc, detail, original, pending, &disk, state, .empty);
         // Each reading in the app's state first: switching it reads the
         // selected theme again, and that read is what the removal is decided
         // from, so it is the one whose problems count. A reading already in
@@ -10781,7 +10803,7 @@ pub const App = struct {
             defer if (self.before) |path| self.alloc.free(path);
             if (!self.moved) return;
             const cwd = self.before orelse return;
-            std.process.changeCurDir(cwd) catch |err| {
+            std.process.setCurrentPath(global.io(), cwd) catch |err| {
                 std.log.warn("config load: couldn't restore sanitized cwd path={f} err={}", .{ internal_os.redact.bytes(cwd), err });
             };
         }
@@ -10790,11 +10812,11 @@ pub const App = struct {
     fn enterStartupCwd(self: *const App) StartupCwd {
         var scope: StartupCwd = .{
             .alloc = self.core_app.alloc,
-            .before = std.process.getCwdAlloc(self.core_app.alloc) catch null,
+            .before = currentDirAlloc(self.core_app.alloc) catch null,
             .moved = false,
         };
         if (self.startup_cwd) |cwd| {
-            if (std.process.changeCurDir(cwd)) |_| {
+            if (std.process.setCurrentPath(global.io(), cwd)) |_| {
                 scope.moved = true;
             } else |err| {
                 std.log.warn("config load: couldn't restore startup cwd path={f} err={}", .{ internal_os.redact.bytes(cwd), err });
@@ -10828,12 +10850,12 @@ pub const App = struct {
         // The test borrows the process cwd. It goes back before the
         // temporary directory, which Windows cannot delete while it is the
         // cwd, is cleaned up.
-        const original_cwd = try std.process.getCwdAlloc(alloc);
+        const original_cwd = try std.process.currentPathAlloc(std.testing.io, alloc);
         defer alloc.free(original_cwd);
-        defer std.process.changeCurDir(original_cwd) catch |err| {
+        defer std.process.setCurrentPath(std.testing.io, original_cwd) catch |err| {
             std.debug.panic("could not restore the test's cwd err={}", .{err});
         };
-        try std.process.changeCurDir(sanitized);
+        try std.process.setCurrentPath(std.testing.io, sanitized);
         defer app.startup_cwd = null;
 
         const Cases = struct {
@@ -10852,7 +10874,7 @@ pub const App = struct {
                 };
                 try config.loadIter(load_alloc, &args);
                 var base_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const base = try std.fs.cwd().realpath(".", &base_buf);
+                const base = base_buf[0..try std.Io.Dir.cwd().realPathFile(std.testing.io, ".", &base_buf)];
                 try std.testing.expectEqualStrings(expected_cwd, base);
                 try config.@"config-file".expand(config._arena.?.allocator(), base, &config._diagnostics);
                 try config.loadRecursiveFiles(load_alloc);
@@ -10876,7 +10898,7 @@ pub const App = struct {
             defer config.deinit();
             try std.testing.expectEqual(@as(f32, 17), config.@"font-size");
         }
-        const after = try std.process.getCwdAlloc(alloc);
+        const after = try std.process.currentPathAlloc(std.testing.io, alloc);
         defer alloc.free(after);
         try std.testing.expectEqualStrings(sanitized, after);
 
@@ -10889,15 +10911,15 @@ pub const App = struct {
             defer config.deinit();
             try std.testing.expectEqual(@as(f32, 12), config.@"font-size");
         }
-        try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(missing, .{}));
-        const after_missing = try std.process.getCwdAlloc(alloc);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.testing.io, missing, .{}));
+        const after_missing = try std.process.currentPathAlloc(std.testing.io, alloc);
         defer alloc.free(after_missing);
         try std.testing.expectEqualStrings(sanitized, after_missing);
 
         // A failure inside the scope still puts the sanitized cwd back.
         app.startup_cwd = launch;
         try std.testing.expectError(error.TestInjectedLoadFailure, Cases.failInside(&app));
-        const after_failure = try std.process.getCwdAlloc(alloc);
+        const after_failure = try std.process.currentPathAlloc(std.testing.io, alloc);
         defer alloc.free(after_failure);
         try std.testing.expectEqualStrings(sanitized, after_failure);
     }
@@ -11132,10 +11154,10 @@ pub const App = struct {
         threadlocal var hook_append: bool = false;
         /// A file the other program holds locked from then on.
         threadlocal var lock_path: []const u8 = "";
-        threadlocal var lock: ?std.fs.File = null;
+        threadlocal var lock: ?std.Io.File = null;
         /// A lock taken while a read is under way (`lockDuringRead`), let go
         /// before the next load.
-        threadlocal var brief_lock: ?std.fs.File = null;
+        threadlocal var brief_lock: ?std.Io.File = null;
         /// What happens to the load after the write (`starveNext` or
         /// `failNext`, set as `hook` is; `starvedLoad`): it is read whole and
         /// from then on its allocator has no memory, so a light/dark switch
@@ -11191,7 +11213,7 @@ pub const App = struct {
         };
 
         fn load(alloc: Allocator) anyerror!configpkg.Config {
-            if (brief_lock) |file| file.close();
+            if (brief_lock) |file| file.close(std.testing.io);
             brief_lock = null;
             var cfg = try configpkg.Config.default(alloc);
             errdefer cfg.deinit();
@@ -11204,12 +11226,16 @@ pub const App = struct {
         fn hook() void {
             save_target.test_before_compare = null;
             if (hook_path.len != 0) {
-                const file = (if (hook_append) std.fs.openFileAbsolute(hook_path, .{ .mode = .read_write }) else std.fs.createFileAbsolute(hook_path, .{})) catch return;
-                defer file.close();
-                if (hook_append) file.seekFromEnd(0) catch return;
-                file.writeAll(hook_text) catch return;
+                const io = std.testing.io;
+                const file = (if (hook_append) std.Io.Dir.openFileAbsolute(io, hook_path, .{ .mode = .read_write }) else std.Io.Dir.createFileAbsolute(io, hook_path, .{})) catch return;
+                defer file.close(io);
+                // 0.15's seekFromEnd(0) and writeAll: a streaming writer
+                // seeked to the end (0.17's File has no seek of its own).
+                var writer = file.writerStreaming(io, &.{});
+                if (hook_append) writer.seekTo(file.length(io) catch return) catch return;
+                writer.interface.writeAll(hook_text) catch return;
             }
-            if (lock_path.len != 0) lock = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
+            if (lock_path.len != 0) lock = std.Io.Dir.openFileAbsolute(std.testing.io, lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
         }
 
         fn starveNext() void {
@@ -11249,7 +11275,7 @@ pub const App = struct {
 
         fn lockDuringRead() void {
             save_target.test_during_read = null;
-            brief_lock = std.fs.openFileAbsolute(lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
+            brief_lock = std.Io.Dir.openFileAbsolute(std.testing.io, lock_path, .{ .mode = .read_write, .lock = .exclusive }) catch null;
         }
 
         fn begin(app: *App, target: []const u8) !void {
@@ -11268,7 +11294,7 @@ pub const App = struct {
             save_target.test_before_compare = null;
             save_target.test_during_read = null;
             settings_patch.test_config_load = null;
-            if (brief_lock) |file| file.close();
+            if (brief_lock) |file| file.close(std.testing.io);
             brief_lock = null;
             starve = .none;
             fail_next = null;
@@ -11279,14 +11305,15 @@ pub const App = struct {
             hook_text = "";
             hook_append = false;
             lock_path = "";
-            if (lock) |file| file.close();
+            if (lock) |file| file.close(std.testing.io);
             lock = null;
         }
 
         fn read(path: []const u8) ![]u8 {
-            const file = try std.fs.openFileAbsolute(path, .{});
-            defer file.close();
-            return file.readToEndAlloc(std.testing.allocator, 1 << 20);
+            const file = try std.Io.Dir.openFileAbsolute(std.testing.io, path, .{});
+            defer file.close(std.testing.io);
+            var reader = file.readerStreaming(std.testing.io, &.{});
+            return reader.interface.allocRemaining(std.testing.allocator, .limited(1 << 20));
         }
     };
 
@@ -11367,7 +11394,7 @@ pub const App = struct {
         defer alloc.free(after);
         try std.testing.expectEqualStrings("font-size = 15\ncopy-on-select = true\n", after);
         try std.testing.expectEqual(@as(f32, 15), app.config.@"font-size");
-        try std.testing.expect(app.config.@"copy-on-select" == .true);
+        try std.testing.expect(app.config.@"copy-on-select" == .clipboard);
     }
 
     test "win32 settings save checking the file again stops on a profile field another program changed, and saves over one it did not" {
@@ -11712,7 +11739,7 @@ pub const App = struct {
         save_target.test_before_compare = SaveTest.hook;
         try std.testing.expectError(error.SavedButUnread, app.settingsSaveAndReload(&pending, &original));
         try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
-        try std.testing.expect(app.config.@"copy-on-select" == .true);
+        try std.testing.expect(app.config.@"copy-on-select" == .clipboard);
         const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{more});
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
@@ -11754,7 +11781,7 @@ pub const App = struct {
         defer alloc.free(after);
         try std.testing.expect(std.mem.indexOf(u8, after, picked) != null);
         // the running settings kept, and the window says why.
-        try std.testing.expect(app.config.@"copy-on-select" == .true);
+        try std.testing.expect(app.config.@"copy-on-select" == .clipboard);
         try std.testing.expectEqualStrings("Theme saved, but a config file could not be read whole. Reload the configuration once it can be read.", host.banner_text orelse return error.TestExpectedBanner);
     }
 
@@ -12227,7 +12254,7 @@ pub const App = struct {
             // but the partial reload is not applied: the running settings,
             // the include's among them, stay as they were.
             try std.testing.expectEqual(@as(f32, 12), app.config.@"font-size");
-            try std.testing.expect(app.config.@"copy-on-select" == .true);
+            try std.testing.expect(app.config.@"copy-on-select" == .clipboard);
             try std.testing.expect(app.config.@"profile-name".get("py") == null);
             // And the status names the file.
             const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{more});
@@ -13336,7 +13363,7 @@ pub const App = struct {
                 defer std.testing.allocator.free(dir);
                 const trace_path = try std.fs.path.join(std.testing.allocator, &.{ dir, "settings-open.jsonl" });
                 defer std.testing.allocator.free(trace_path);
-                app.settings_open_trace = .{ .file = try std.fs.createFileAbsolute(trace_path, .{ .exclusive = true }) };
+                app.settings_open_trace = .{ .file = try std.Io.Dir.createFileAbsolute(std.testing.io, trace_path, .{ .exclusive = true }) };
                 defer app.settings_open_trace.deinit();
 
                 // open_config creates the window and writes its steps.
@@ -14384,8 +14411,9 @@ const ComStart = enum {
     }
 
     fn ofProcess(alloc: std.mem.Allocator) ComStart {
-        const argv = std.process.argsAlloc(alloc) catch return .none;
-        defer std.process.argsFree(alloc, argv);
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const argv = processArgs().toSlice(arena.allocator()) catch return .none;
         return ofArgs(argv);
     }
 };
@@ -14425,7 +14453,7 @@ test "-ToastActivated is a launch argument, not a config diagnostic" {
     const command_line = "--font-size=13 -ToastActivated -Embedding";
     var cfg = try configpkg.Config.default(alloc);
     defer cfg.deinit();
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, command_line);
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(alloc, command_line);
     defer iter.deinit();
     try cli_args.parse(configpkg.Config, alloc, &cfg, &iter);
     try std.testing.expect(cfg._diagnostics.empty());
@@ -14664,8 +14692,8 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
     // Point LOCALAPPDATA at an empty directory for the length of this test,
     // then put the real value back.
     const saved: ?[:0]u8 = saved: {
-        const value = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :saved null,
+        const value = std.testing.environ.getAlloc(alloc, "LOCALAPPDATA") catch |err| switch (err) {
+            error.EnvironmentVariableMissing => break :saved null,
             else => return err,
         };
         defer alloc.free(value);
@@ -14699,11 +14727,11 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
     defer data_dir.close(std.testing.io);
     try std.testing.expectError(
         error.FileNotFound,
-        data_dir.access("startup-attempts.json", .{}),
+        data_dir.access(std.testing.io, "startup-attempts.json", .{}),
     );
     try std.testing.expectError(
         error.FileNotFound,
-        data_dir.access("shell-integration", .{}),
+        data_dir.access(std.testing.io, "shell-integration", .{}),
     );
 }
 
@@ -14714,7 +14742,8 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
 /// the guard then reads beside the executable, which no variable steers.
 const TestConfigHomeEnv = struct {
     tmp: std.testing.TmpDir,
-    path: []u8,
+    /// Sentinel-terminated, as 0.17's realPathFileAlloc allocates it.
+    path: [:0]u8,
     saved: ?[:0]u8,
 
     fn init(alloc: Allocator) !?TestConfigHomeEnv {
@@ -14724,11 +14753,11 @@ const TestConfigHomeEnv = struct {
         }
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        const path = try tmp.dir.realpathAlloc(alloc, ".");
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
         errdefer alloc.free(path);
         const saved: ?[:0]u8 = saved: {
-            const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
-                error.EnvironmentVariableNotFound => break :saved null,
+            const value = std.testing.environ.getAlloc(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+                error.EnvironmentVariableMissing => break :saved null,
                 else => return err,
             };
             defer alloc.free(value);
@@ -14762,7 +14791,7 @@ const TestConfigHomeEnv = struct {
 
     /// Fails, naming `route`, when a config template is now in this home.
     fn expectNoTemplate(self: *const TestConfigHomeEnv, route: []const u8) !void {
-        self.tmp.dir.access(config_path, .{}) catch |err| switch (err) {
+        self.tmp.dir.access(std.testing.io, config_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -14779,8 +14808,8 @@ test "win32 a test-built App reads no default config file, wherever the environm
     // pass without checking anything.
     var env = (try TestConfigHomeEnv.init(alloc)) orelse return error.SkipZigTest;
     defer env.deinit(alloc);
-    try env.tmp.dir.makePath(build_config.data_dir_name);
-    try env.tmp.dir.writeFile(.{
+    try env.tmp.dir.createDirPath(std.testing.io, build_config.data_dir_name);
+    try env.tmp.dir.writeFile(std.testing.io, .{
         .sub_path = TestConfigHomeEnv.config_path,
         .data = "title = " ++ TestConfigHomeEnv.probe_title ++ "\n",
     });
@@ -14849,7 +14878,7 @@ test "win32 a test-built App writes no config template, wherever the environment
     var config = try configpkg.Config.default(alloc);
     defer config.deinit();
     try config.loadDefaultFiles(alloc);
-    const template = try env.tmp.dir.readFileAlloc(alloc, TestConfigHomeEnv.config_path, 1 << 16);
+    const template = try env.tmp.dir.readFileAlloc(std.testing.io, TestConfigHomeEnv.config_path, alloc, .limited(1 << 16));
     defer alloc.free(template);
     try std.testing.expect(std.mem.indexOf(u8, template, "# This is the configuration file for noctty.") != null);
 }
@@ -14955,7 +14984,7 @@ test "security regression win32 link opener allows local junctions without PATHE
     defer alloc.free(junction);
     // Junction creation needs no symlink privilege or developer mode. Windows
     // need not live in C:\Windows, so take cmd.exe from SystemRoot.
-    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    const system_root = try std.testing.environ.getAlloc(alloc, "SystemRoot");
     defer alloc.free(system_root);
     const cmd_exe = try std.fs.path.join(alloc, &.{ system_root, "System32", "cmd.exe" });
     defer alloc.free(cmd_exe);
@@ -15419,7 +15448,7 @@ test "security regression win32 link opener dispatches the exact decoded file UR
 
 test "security regression win32 link opener PATHEXT live probe on hidden desktop" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const enabled = std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_RUN_LINK_PATHEXT_PROBE") catch return error.SkipZigTest;
+    const enabled = std.testing.environ.getAlloc(std.testing.allocator, "NOCTTY_RUN_LINK_PATHEXT_PROBE") catch return error.SkipZigTest;
     defer std.testing.allocator.free(enabled);
     if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
 
@@ -15441,18 +15470,18 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
         }
         /// Waits up to five seconds for `probe.cmd` to write its marker, then
         /// removes it for the next check.
-        fn expectMarker(dir: std.fs.Dir) !void {
+        fn expectMarker(dir: std.Io.Dir) !void {
             var seen = false;
             for (0..100) |_| {
-                dir.access("marker", .{}) catch {
-                    std.Thread.sleep(50 * std.time.ns_per_ms);
+                dir.access(std.testing.io, "marker", .{}) catch {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
                     continue;
                 };
                 seen = true;
                 break;
             }
             try std.testing.expect(seen);
-            try dir.deleteFile("marker");
+            try dir.deleteFile(std.testing.io, "marker");
         }
         fn run(desktop: *anyopaque, result: *anyerror!void) void {
             result.* = body(desktop);
@@ -15489,7 +15518,7 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
             try std.testing.expectEqual(@as(usize, 0), probe.calls);
             try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "marker", .{}));
 
-            try tmp.dir.copyFile("probe.cmd", tmp.dir, ".cmd", .{});
+            try tmp.dir.copyFile("probe.cmd", tmp.dir, ".cmd", std.testing.io, .{});
             const dotfile = try std.fs.path.join(alloc, &.{ root, ".cmd" });
             defer alloc.free(dotfile);
             try shell(dotfile);
@@ -15516,14 +15545,14 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
     try result;
     // A successful filtered build is not proof this named test ran. The
     // wrapper supplies a fresh receipt path and requires this final sentinel.
-    const receipt_path = try std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_LINK_PATHEXT_PROBE_RECEIPT");
+    const receipt_path = try std.testing.environ.getAlloc(std.testing.allocator, "NOCTTY_LINK_PATHEXT_PROBE_RECEIPT");
     defer std.testing.allocator.free(receipt_path);
     if (!windows_shell.isSafeWindowsPath(receipt_path) or
         !windows_shell.isDriveAbsolutePath(receipt_path) or
         internal_os.path.isNetworkOrDevicePath(receipt_path)) return error.UnsafeProbeReceiptPath;
-    const receipt = try std.fs.createFileAbsolute(receipt_path, .{ .exclusive = true });
-    defer receipt.close();
-    try receipt.writeAll("NOCTTY_LINK_PATHEXT_PROBE_COMPLETE\n");
+    const receipt = try std.Io.Dir.createFileAbsolute(std.testing.io, receipt_path, .{ .exclusive = true });
+    defer receipt.close(std.testing.io);
+    try receipt.writeStreamingAll(std.testing.io, "NOCTTY_LINK_PATHEXT_PROBE_COMPLETE\n");
 }
 
 test "win32 recovery ready marker keeps retrying transient write failures" {
@@ -17103,7 +17132,7 @@ test "win32 a tab move whose wake a nested loop took wakes the pump again until 
                     if (app.takeTabMoveWakeTick(&msg)) break :tick true;
                     _ = sys.DispatchMessageW(&msg);
                 }
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
             } else false;
             try std.testing.expect(ticked);
             try std.testing.expect(app.tab_move_wake_timer == null);
@@ -17846,7 +17875,7 @@ test "win32 tab-move wakes a nested loop took from two windows leave nothing wak
                     }
                     _ = sys.DispatchMessageW(&msg);
                 }
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
             }
             try std.testing.expectEqual(@as(usize, 0), fired);
         }
@@ -18832,7 +18861,7 @@ test "win32 a tab move whose wake cannot be posted is woken by the re-wake timer
                     if (app.takeTabMoveWakeTick(&msg)) break :tick true;
                     _ = sys.DispatchMessageW(&msg);
                 }
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
             } else false;
             try std.testing.expect(ticked);
             app.drainPendingTabMoves();

@@ -2205,8 +2205,8 @@ const ForwardedKeysTest = struct {
     /// `--window-position-x/y` at (`x`, `y`), formatted into `buf`.
     fn placedAt(buf: *[2][32]u8, x: i32, y: i32) ![2][:0]const u8 {
         return .{
-            try std.fmt.bufPrintZ(&buf[0], "--window-position-x={d}", .{x}),
-            try std.fmt.bufPrintZ(&buf[1], "--window-position-y={d}", .{y}),
+            try std.mem.printSentinel(&buf[0], "--window-position-x={d}", .{x}, 0),
+            try std.mem.printSentinel(&buf[1], "--window-position-y={d}", .{y}, 0),
         };
     }
 

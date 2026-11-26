@@ -2369,17 +2369,17 @@ test "settings patch: FileEnd hands the patchers a complete, marked last line, a
 /// path, the caller's to free.
 fn testThemedProfile(tmp: *std.testing.TmpDir) ![]u8 {
     const alloc = testing.allocator;
-    try tmp.dir.writeFile(.{ .sub_path = "none.conf", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "none.conf", .data = "\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "light", .data = "\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+    const light = try tmp.dir.realPathFileAlloc(testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(testing.io, "dark", alloc);
     defer alloc.free(dark);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    return tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "config", .data = text });
+    return tmp.dir.realPathFileAlloc(testing.io, "config", alloc);
 }
 
 /// The op `editsForSave` gives the removal of `py`'s command, read from
@@ -2459,15 +2459,15 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     try tmp.dir.createDirPath(std.testing.io, themes_dir);
     var themes = try tmp.dir.openDir(std.testing.io, themes_dir, .{});
     defer themes.close(std.testing.io);
-    try themes.writeFile(.{ .sub_path = "Mine", .data = "font-size = 14\n" });
-    try themes.makeDir("Dir");
+    try themes.writeFile(testing.io, .{ .sub_path = "Mine", .data = "font-size = 14\n" });
+    try themes.createDir(testing.io, "Dir", .default_dir);
     try tmp.dir.createDir(std.testing.io, "dir", .default_dir);
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", alloc);
     defer alloc.free(home);
     const file_load = @import("../../config/file_load.zig");
     file_load.test_config_root = home;
     defer file_load.test_config_root = null;
-    const mine = try themes.realpathAlloc(alloc, "Mine");
+    const mine = try themes.realPathFileAlloc(testing.io, "Mine", alloc);
     defer alloc.free(mine);
     const gone = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(dark) orelse return error.TestExpectedDir, "gone" });
     defer alloc.free(gone);
@@ -2476,11 +2476,11 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     const check = struct {
         /// The switch to dark, with `dark_theme` as the dark half, names
         /// `expected` as the unread theme, or nothing when it is null.
-        fn darkTheme(a: Allocator, at: std.fs.Dir, earlier: []const u8, light_theme: []const u8, dark_theme: []const u8, expected: ?[]const u8) !void {
+        fn darkTheme(a: Allocator, at: std.Io.Dir, earlier: []const u8, light_theme: []const u8, dark_theme: []const u8, expected: ?[]const u8) !void {
             const config_text = try std.fmt.allocPrint(a, "theme = light:{s},dark:{s}\n", .{ light_theme, dark_theme });
             defer a.free(config_text);
-            try at.writeFile(.{ .sub_path = "config", .data = config_text });
-            const config_path = try at.realpathAlloc(a, "config");
+            try at.writeFile(testing.io, .{ .sub_path = "config", .data = config_text });
+            const config_path = try at.realPathFileAlloc(testing.io, "config", a);
             defer a.free(config_path);
             var loaded = try testLoad(a, earlier, config_path);
             defer loaded.deinit();

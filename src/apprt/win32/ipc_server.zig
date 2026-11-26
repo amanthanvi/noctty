@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const log = std.log.scoped(.win32);
+const global = @import("../../global.zig");
 const apprt = @import("../../apprt.zig");
 const CoreApp = @import("../../App.zig");
 const cli_args = @import("../../cli/args.zig");
@@ -1119,11 +1120,11 @@ fn normalizeForwardedStartupArg(
             return try alloc.dupeSentinel(u8, arg, 0);
         }
 
-        const cwd = std.fs.cwd();
+        const cwd = std.Io.Dir.cwd();
         var home_buf: [std.fs.max_path_bytes]u8 = undefined;
         const expanded = homedir.expandHome(trimmed, &home_buf) catch trimmed;
         var realpath_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const normalized = cwd.realpath(expanded, &realpath_buf) catch expanded;
+        const normalized = if (cwd.realPathFile(global.io(), expanded, &realpath_buf)) |len| realpath_buf[0..len] else |_| expanded;
 
         // The key check above is not enough for this one option: the server
         // refuses the ENTIRE argv on a bad working-directory VALUE, and it
@@ -1194,9 +1195,9 @@ fn collectStartupForwardArguments(alloc: Allocator, forward_cwd: bool) !?[]const
     }
 
     if (forward_cwd and !working_directory_seen) {
-        const cwd = std.fs.cwd();
+        const cwd = std.Io.Dir.cwd();
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const wd = try cwd.realpath(".", &cwd_buf);
+        const wd = cwd_buf[0..try cwd.realPathFile(global.io(), ".", &cwd_buf)];
         if (try allocForwardedWorkingDirectoryArg(alloc, wd)) |arg| {
             try argv.insert(alloc, 0, arg);
         }
@@ -1863,7 +1864,7 @@ fn waitForAutomationCompletion(
             // could encourage a duplicate retry.
             .claimed => {},
         }
-        std.Thread.sleep(std.time.ns_per_ms);
+        std.Io.sleep(global.io(), .fromMilliseconds(1), .awake) catch {};
     }
 }
 
@@ -2335,7 +2336,9 @@ fn testCreateSecuredPipe(name: [:0]const u16, descriptor: *anyopaque) windows.HA
     var security_attributes: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
         .lpSecurityDescriptor = descriptor,
-        .bInheritHandle = win32_types.FALSE,
+        // std's SECURITY_ATTRIBUTES, which sys.CreateNamedPipeW takes: its
+        // BOOL is an enum on 0.17.
+        .bInheritHandle = .FALSE,
     };
     return sys.CreateNamedPipeW(
         name.ptr,
@@ -2727,7 +2730,7 @@ test "win32 forwarded working-directory rejects UNC syntax and keeps legal forms
     // it has to keep working or single-instance launches break.
     if (builtin.os.tag == .windows) {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+        const cwd = cwd_buf[0..try std.Io.Dir.cwd().realPathFile(std.testing.io, ".", &cwd_buf)];
         try expect(forwardedWorkingDirectoryAllowed(cwd));
     }
 }
@@ -3013,10 +3016,11 @@ const TestIpcServer = struct {
         self.app.config = try configpkg.Config.default(alloc);
         errdefer self.app.config.deinit();
         self.app.config.@"single-instance" = .true;
-        self.app.config.class = try std.fmt.bufPrintZ(
+        self.app.config.class = try std.mem.printSentinel(
             &self.class_buf,
             "noctty-test-pkg67-{d}-{d}",
             .{ sys.GetCurrentProcessId(), next_id.fetchAdd(1, .monotonic) },
+            0,
         );
         self.app.is_elevated = false;
         self.app.ipc_pipe_name = null;
@@ -3075,7 +3079,7 @@ test "win32 IPC server thread does not busy-poll while it waits for a client" {
     var cycles = try testThreadCycles(thread);
     var cycle_deltas: [10]u64 = undefined;
     for (&cycle_deltas) |*delta| {
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, .fromMilliseconds(300), .awake) catch {};
         const now = try testThreadCycles(thread);
         delta.* = now - cycles;
         if (now == cycles) return;
@@ -3153,7 +3157,7 @@ test "win32 IPC server stops promptly while a client holds a request open" {
     // the request's first bytes when it is asked to stop.
     const client = try server.connect();
     defer _ = windows.CloseHandle(client);
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
 
     const started = sys.GetTickCount64();
     server.stop();
@@ -3299,6 +3303,13 @@ test "win32 startup layout forwarding intercepts before generic argv" {
     );
 }
 
+/// 0.15's `File.seekTo`: Zig 0.17's File has no seek, and a streaming
+/// writer's moves the handle's offset, which the IPC readers read through.
+fn testSeekFile(file: std.Io.File, offset: u64) !void {
+    var writer = file.writerStreaming(std.testing.io, &.{});
+    try writer.seekTo(offset);
+}
+
 test "win32 handleIpcClient bounds truncated request failures with an ack" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -3313,13 +3324,13 @@ test "win32 handleIpcClient bounds truncated request failures with an ack" {
 
     var request: [4]u8 = undefined;
     std.mem.writeInt(u32, request[0..4], win32_ipc.wire_version, .little);
-    try file.writeAll(&request);
-    try file.seekTo(0);
+    try file.writeStreamingAll(std.testing.io, &request);
+    try testSeekFile(file, 0);
 
     var app: App = undefined;
     try std.testing.expectError(error.EndOfStream, handleIpcClient(&app, .{ .handle = file.handle }));
 
-    try file.seekTo(request.len);
+    try testSeekFile(file, request.len);
     try std.testing.expectError(
         error.IPCFailed,
         win32_ipc.readDataResponse(std.testing.allocator, file.handle),

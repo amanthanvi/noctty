@@ -3,6 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const global = @import("../../global.zig");
 const renderer_state = @import("../../renderer/State.zig");
 const sys = @import("sys.zig");
 const bench_trace = @import("bench_trace.zig");
@@ -18,12 +19,20 @@ const queryPerformanceCounter = bench_trace.queryPerformanceCounter;
 const queryPerformanceFrequency = bench_trace.queryPerformanceFrequency;
 
 fn renderTraceLiveEnabled(alloc: Allocator) bool {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_RENDER_TRACE_LIVE") catch return false;
+    const raw = global.environ().getAlloc(alloc, "NOCTTY_RENDER_TRACE_LIVE") catch return false;
     defer alloc.free(raw);
     return std.mem.eql(u8, std.mem.trim(u8, raw, &std.ascii.whitespace), "1");
 }
 
 var render_trace_file_claimed = std.atomic.Value(bool).init(false);
+
+/// The `Io` of `target_mutex`'s futex waits and wakes: `lockUncancelable`
+/// and `unlock` reach only the OS futex whatever the `std.Io.Threaded`
+/// instance (`sync/state_mutex.zig`'s `innerIo`), so the renderer and UI
+/// threads lock it as they did on 0.15.
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
 pub const RenderTrace = struct {
     pub const OutputProgress = struct {
@@ -120,7 +129,7 @@ pub const RenderTrace = struct {
     first_target_swap_benchmark_end_marker_generation: std.atomic.Value(u64) = .init(0),
     first_target_swap_benchmark_end_marker_output_bytes: std.atomic.Value(u64) = .init(0),
     first_target_swap_qpc_ticks: std.atomic.Value(u64) = .init(0),
-    target_mutex: std.Thread.Mutex = .{},
+    target_mutex: std.Io.Mutex = .init,
     target_swap_interval_qpc_ticks: ?[]u64 = null,
     target_swap_interval_count: usize = 0,
     target_swap_interval_overflow_count: u64 = 0,
@@ -133,7 +142,7 @@ pub const RenderTrace = struct {
     process_start_to_first_swap_ms: std.atomic.Value(u64) = .init(0),
 
     pub fn init(alloc: Allocator) RenderTrace {
-        const raw = std.process.getEnvVarOwned(
+        const raw = global.environ().getAlloc(
             alloc,
             "NOCTTY_RENDER_TRACE_FILE",
         ) catch return .{};
@@ -369,8 +378,8 @@ pub const RenderTrace = struct {
         self.last_swap_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
         self.last_swap_qpc_ticks.store(qpc_ticks, .release);
         {
-            self.target_mutex.lock();
-            defer self.target_mutex.unlock();
+            self.target_mutex.lockUncancelable(mutexIo());
+            defer self.target_mutex.unlock(mutexIo());
             const target_active = self.target_active.load(.acquire);
             self.noteTargetSwapIntervalLocked(qpc_ticks);
             const target_bytes = self.target_process_output_bytes.load(.acquire);
@@ -476,8 +485,8 @@ pub const RenderTrace = struct {
     }
 
     pub fn noteTargetSwapInterval(self: *RenderTrace, qpc_ticks: u64) void {
-        self.target_mutex.lock();
-        defer self.target_mutex.unlock();
+        self.target_mutex.lockUncancelable(mutexIo());
+        defer self.target_mutex.unlock(mutexIo());
         self.noteTargetSwapIntervalLocked(qpc_ticks);
     }
 
@@ -498,8 +507,8 @@ pub const RenderTrace = struct {
 
     pub fn setTargetOutputBytes(self: *RenderTrace, target_bytes: u64) void {
         if (!self.live_snapshot) return;
-        self.target_mutex.lock();
-        defer self.target_mutex.unlock();
+        self.target_mutex.lockUncancelable(mutexIo());
+        defer self.target_mutex.unlock(mutexIo());
         self.target_active.store(false, .release);
         self.target_process_output_bytes.store(0, .release);
         self.first_target_swap_process_output_generation.store(0, .release);
@@ -522,17 +531,18 @@ pub const RenderTrace = struct {
 
     pub fn writeSnapshot(self: *RenderTrace) void {
         const trace_path = self.path orelse return;
-        self.target_mutex.lock();
-        defer self.target_mutex.unlock();
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+        self.target_mutex.lockUncancelable(mutexIo());
+        defer self.target_mutex.unlock(mutexIo());
+        const io = global.io();
+        const file = std.Io.Dir.createFileAbsolute(io, trace_path, .{ .truncate = true }) catch |err| {
             log.warn("render trace snapshot open failed path={s} err={}", .{ trace_path, err });
             return;
         };
-        defer file.close();
+        defer file.close(io);
         const snapshot_sequence = self.snapshot_sequence.fetchAdd(1, .acq_rel) + 1;
 
         var buffer: [1024]u8 = undefined;
-        var writer = file.writer(&buffer);
+        var writer = file.writer(io, &buffer);
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = GetTickCount64() - self.start_tick_ms,

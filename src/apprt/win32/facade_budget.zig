@@ -134,24 +134,24 @@ const import_the_owner = "import the name from the module that owns it; do not a
 
 test "win32 facade budget: bags, aliases, pub surface and App test hooks do not grow" {
     @setEvalBranchQuota(100_000);
-    const decls = @typeInfo(win32).@"struct".decls;
-    inline for (decls) |decl| {
-        if (comptime !std.mem.endsWith(u8, decl.name, "_runtime")) continue;
-        if (!@hasField(@TypeOf(budget.bags), decl.name)) {
-            std.debug.print("win32.{s} is a new dependency bag: {s}\n", .{ decl.name, import_the_owner });
+    const decls = @typeInfo(win32).@"struct".decl_names;
+    inline for (decls) |decl_name| {
+        if (comptime !std.mem.endsWith(u8, decl_name, "_runtime")) continue;
+        if (!@hasField(@TypeOf(budget.bags), decl_name)) {
+            std.debug.print("win32.{s} is a new dependency bag: {s}\n", .{ decl_name, import_the_owner });
             return error.NewDependencyBag;
         }
         try ratchet(
-            "win32." ++ decl.name ++ " entries",
-            @typeInfo(@TypeOf(@field(win32, decl.name))).@"struct".fields.len,
-            @field(budget.bags, decl.name),
+            "win32." ++ decl_name ++ " entries",
+            @typeInfo(@TypeOf(@field(win32, decl_name))).@"struct".field_names.len,
+            @field(budget.bags, decl_name),
             error.FacadeBudgetExceeded,
             import_the_owner,
         );
     }
-    inline for (@typeInfo(@TypeOf(budget.bags)).@"struct".fields) |row| {
-        if (!@hasDecl(win32, row.name)) {
-            std.debug.print("win32.{s} is gone: delete its row from the budget\n", .{row.name});
+    inline for (@typeInfo(@TypeOf(budget.bags)).@"struct".field_names) |row_name| {
+        if (!@hasDecl(win32, row_name)) {
+            std.debug.print("win32.{s} is gone: delete its row from the budget\n", .{row_name});
             return error.FacadeBudgetStale;
         }
     }
@@ -186,7 +186,7 @@ test "win32 leaf modules import no facade owner and keep their pub surface" {
         }
         try ratchet(
             leaf.file ++ " pub declarations",
-            @typeInfo(leaf.module).@"struct".decls.len,
+            @typeInfo(leaf.module).@"struct".decl_names.len,
             leaf.pub_decls,
             error.LeafSurfaceGrew,
             "keep the new declaration private to the leaf",
@@ -264,8 +264,8 @@ fn rejectPrivateBags(gpa: std.mem.Allocator, source: [:0]const u8) !void {
 
 fn testHookCount(comptime T: type) usize {
     var count: usize = 0;
-    for (@typeInfo(T).@"struct".fields) |field| {
-        if (std.mem.startsWith(u8, field.name, "test_")) count += 1;
+    for (@typeInfo(T).@"struct".field_names) |field_name| {
+        if (std.mem.startsWith(u8, field_name, "test_")) count += 1;
     }
     return count;
 }

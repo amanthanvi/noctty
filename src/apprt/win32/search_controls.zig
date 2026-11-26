@@ -143,13 +143,13 @@ fn registerSearchIconFont() void {
     }
 }
 
-pub var search_icon_font_registration = std.once(registerSearchIconFont);
+pub var search_icon_font_registration = @import("../../os/once.zig").once(registerSearchIconFont);
 
 fn logSearchIconFontRejected() void {
     log.warn("search bar icon font lacks a Codicon glyph; drawing geometric search icons", .{});
 }
 
-var search_icon_font_rejection_log = std.once(logSearchIconFontRejected);
+var search_icon_font_rejection_log = @import("../../os/once.zig").once(logSearchIconFontRejected);
 
 /// The search bar's Codicons font at `dpi`, or null when it is unavailable,
 /// in which case `win32_icons` draws the buttons.
@@ -199,7 +199,7 @@ const search_bar_button_roles = std.enums.values(Role);
 
 /// The docked search bar's keyboard stops in Tab order: the query, then each
 /// button in the order the bar lays them out.
-pub const search_focus_stop_count = 1 + std.meta.fields(Role).len;
+pub const search_focus_stop_count = 1 + @typeInfo(Role).@"enum".field_names.len;
 
 pub fn searchFocusStopOfRole(role: Role) usize {
     return 1 + @backingInt(role);
