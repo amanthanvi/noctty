@@ -6513,7 +6513,6 @@ test "portable payload PEs are publisher-pinned except the bundled ConPTY pair" 
     for ([_][]const u8{
         "noctty.exe",
         "noctty.com",
-        "ghostty-vt.dll",
         "noctty-terminal-handoff-proxy.dll",
         "share/conpty.dll",
         "attacker.dll",

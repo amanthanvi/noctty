@@ -26,7 +26,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "signing-trust.ps1")
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 . (Join-Path $PSScriptRoot "conpty-redist.ps1")
-. (Join-Path $PSScriptRoot "ghostty-vt-stub.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
@@ -64,13 +63,10 @@ $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    # The ghostty-vt.dll placeholder (src/build/GhosttyVtStub.zig), not
-    # libghostty-vt: it exports nothing and fails to load. The portable
-    # updater of 1.3.125 to 1.3.136 refuses a ZIP without a ghostty-vt.dll.
-    # Never stage zig-out\bin\ghostty-vt.dll, the -Demit-lib-vt=true library:
-    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig
-    # says when the placeholder goes.
-    "ghostty-vt-stub\ghostty-vt.dll",
+    # Nothing under the retired name ghostty-vt.dll: v1.4.100 dropped the
+    # placeholder the portable ZIP carried there, and zig-out\bin\ghostty-vt.dll,
+    # the -Demit-lib-vt=true library, never ships
+    # (portable_zip_carries_legacy_entries in src/update/portable_apply.zig).
     "noctty-terminal-handoff-proxy.dll"
 )
 $licensePath = Join-Path $repoRoot "LICENSE"
@@ -656,10 +652,6 @@ try {
         }
     }
 
-    # The portable root's ghostty-vt.dll is the placeholder, never the
-    # library: a stub's size, no export or import table, its FileDescription.
-    Assert-GhosttyVtStub -Path (Join-Path $portableRoot "ghostty-vt.dll")
-
     # Portable staging's downgrade guard reads noctty.exe's fixed PE version.
     # Check both the display string and numeric fields, including the zero
     # fourth component, before producing any release artifacts.
@@ -783,8 +775,8 @@ try {
             $identity = Get-PeCodeViewIdentity -Path (Join-Path $portableRoot $binaryName)
             if ($null -eq $identity) { continue }
             # A PDB sits beside the build output its binary was staged from,
-            # so the placeholder's ghostty-vt.pdb comes from ghostty-vt-stub\
-            # and never from a library build's zig-out\bin\ghostty-vt.pdb.
+            # so it is the PDB of the file staged, not of another build's
+            # output under the same name.
             $runtimeSource = @($runtimeFiles | Where-Object { (Split-Path -Leaf $_) -ceq $binaryName })
             if ($runtimeSource.Count -ne 1) {
                 throw "Expected one runtime file staged as $binaryName, found $($runtimeSource.Count)."

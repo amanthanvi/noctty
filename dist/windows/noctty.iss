@@ -75,10 +75,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
 ; The recursive stage rule includes the bundled ConPTY pair and its license.
-; The portable ZIP carries a noctty placeholder named ghostty-vt.dll (no
-; exports; it refuses to load) until v1.4.100, because the portable updaters
-; of 1.3.125 to 1.3.136 refuse a payload without that name. Setup runs this
-; script, so it excludes it (retired_entries in src/update/portable_apply.zig).
+; ghostty-vt.dll is a retired name (retired_entries in
+; src/update/portable_apply.zig): from v1.4.100 the portable ZIP carries
+; nothing under it, and Setup excludes it should a stage ever hold one.
 Source: "{#StageDir}\*"; DestDir: "{app}"; Excludes: "\ghostty-vt.dll"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]

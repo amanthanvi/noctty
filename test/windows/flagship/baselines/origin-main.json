@@ -19,7 +19,7 @@
       "id": "portable-cli-harness",
       "kind": "contract",
       "path": "test/windows/package-portable-cli.ps1",
-      "sha256": "ffcba2b3c6b617a3952e5dcccf2742ad2967f6c7346fb4843d4f03cf953de88a",
+      "sha256": "edc0919e5e2951aba80f461be21cf8ba19911810454af00e6508c6c6af0b6f2b",
       "scenario_id": "windows.portable-cli.x64"
     }
   ]

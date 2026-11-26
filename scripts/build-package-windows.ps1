@@ -30,13 +30,10 @@ $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    # The ghostty-vt.dll placeholder (src/build/GhosttyVtStub.zig), not
-    # libghostty-vt: it exports nothing and fails to load. The portable
-    # updater of 1.3.125 to 1.3.136 refuses a ZIP without a ghostty-vt.dll.
-    # Never stage zig-out\bin\ghostty-vt.dll, the -Demit-lib-vt=true library:
-    # portable_zip_carries_legacy_entries in src/update/portable_apply.zig
-    # says when the placeholder goes.
-    "ghostty-vt-stub\ghostty-vt.dll",
+    # Nothing under the retired name ghostty-vt.dll: v1.4.100 dropped the
+    # placeholder the portable ZIP carried there, and zig-out\bin\ghostty-vt.dll,
+    # the -Demit-lib-vt=true library, never ships
+    # (portable_zip_carries_legacy_entries in src/update/portable_apply.zig).
     "noctty-terminal-handoff-proxy.dll"
 )
 

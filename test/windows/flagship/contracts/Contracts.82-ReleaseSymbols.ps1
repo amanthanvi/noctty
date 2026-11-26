@@ -19,8 +19,6 @@ $ghosttyExe82 = Join-Path $repoRoot 'src\build\GhosttyExe.zig'
 $ghosttyExeText82 = Get-Content -LiteralPath $ghosttyExe82 -Raw
 $proxyBuild82 = Join-Path $repoRoot 'src\build\TerminalHandoffProxy.zig'
 $proxyBuildText82 = Get-Content -LiteralPath $proxyBuild82 -Raw
-$vtStubBuild82 = Join-Path $repoRoot 'src\build\GhosttyVtStub.zig'
-$vtStubBuildText82 = Get-Content -LiteralPath $vtStubBuild82 -Raw
 $buildConfig82 = Join-Path $repoRoot 'src\build\Config.zig'
 $buildConfigText82 = Get-Content -LiteralPath $buildConfig82 -Raw
 $buildZig82 = Join-Path $repoRoot 'build.zig'
@@ -146,18 +144,11 @@ Invoke-ContractTable -Contracts @(
         Description = 'the handoff proxy (C only, blind to build options) hashes release_symbols, so a DLL linked without /OPT:REF is not reused'
     }
     @{
-        File = $vtStubBuild82
-        Content = { $vtStubBuildText82 }
-        Pattern = '(?s)\.strip = cfg\.strip,.*?module\.addCMacro\("NOCTTY_RELEASE_SYMBOLS", if \(cfg\.release_symbols\) "1" else "0"\);.*?library\.producesPdbFile\(\).*?addInstallFileWithDir\(\s*library\.getEmittedPdb\(\),\s*\.\{ \.custom = "bin/" \+\+ install_dir \},\s*name \+\+ "\.pdb",'
-        Kind = 'Text'
-        Description = 'the ghostty-vt.dll placeholder keeps debug info with the exe, hashes release_symbols and installs ghostty-vt.pdb beside itself in zig-out\bin\ghostty-vt-stub'
-    }
-    @{
         File = $windowsPackager82
         Content = { $windowsPackagerText82 }
         Pattern = '(?s)foreach \(\$binaryName in \(Get-WindowsSymbolBinaryNames\)\).*?\$runtimeSource = @\(\$runtimeFiles \| Where-Object \{ \(Split-Path -Leaf \$_\) -ceq \$binaryName \}\).*?\$pdbSource = Join-Path \(Split-Path -Parent \(Join-Path \$zigOutBin \$runtimeSource\[0\]\)\) \$identity\.PdbName'
         Kind = 'Text'
-        Description = 'a PDB is taken from beside the build output its binary was staged from, so ghostty-vt.pdb is the placeholder''s and never a lib-vt build''s'
+        Description = 'a PDB is taken from beside the build output its binary was staged from, so it is the staged file''s and never another build''s under the same name'
     }
 )
 
@@ -290,19 +281,16 @@ try {
     $guids = @{
         'noctty.pdb' = [guid]'5d6c9221-c4d6-a0f5-4c4c-44205044422e'
         'noctty-command.pdb' = [guid]'70e653e4-9f2a-4622-4c4c-44205044422e'
-        'ghostty-vt.pdb' = [guid]'41a76387-36f3-935c-4c4c-44205044422e'
     }
     # The CodeView record carries the build machine's absolute path; only the
-    # file name is looked up. ghostty-vt.dll stands for the placeholder the
-    # portable ZIP carries (src/build/GhosttyVtStub.zig), whose CodeView
-    # record names ghostty-vt.pdb; the doc comment on
-    # portable_zip_carries_legacy_entries says what changes here when it goes.
+    # file name is looked up, so noctty.com's record is a bare file name. Its
+    # age is not 1, so the readers are seen to return the age written. (Until
+    # v1.4.100 the portable ZIP's ghostty-vt.dll placeholder held both cases.)
     New-SymbolsTestPe -Path (Join-Path $payload 'noctty.exe') -PdbPath 'D:\a\noctty\.zig-cache\o\x\noctty.pdb' -Guid $guids['noctty.pdb'] -Age 1
-    New-SymbolsTestPe -Path (Join-Path $payload 'noctty.com') -PdbPath 'D:\a\noctty\.zig-cache\o\y\noctty-command.pdb' -Guid $guids['noctty-command.pdb'] -Age 1
-    New-SymbolsTestPe -Path (Join-Path $payload 'ghostty-vt.dll') -PdbPath 'ghostty-vt.pdb' -Guid $guids['ghostty-vt.pdb'] -Age 3
+    New-SymbolsTestPe -Path (Join-Path $payload 'noctty.com') -PdbPath 'noctty-command.pdb' -Guid $guids['noctty-command.pdb'] -Age 3
     New-SymbolsTestPe -Path (Join-Path $payload 'noctty-terminal-handoff-proxy.dll')   # no CodeView record
     foreach ($name in $guids.Keys) {
-        New-SymbolsTestPdb -Path (Join-Path $symbols $name) -Guid $guids[$name] -Age $(if ($name -eq 'ghostty-vt.pdb') { 3 } else { 1 })
+        New-SymbolsTestPdb -Path (Join-Path $symbols $name) -Guid $guids[$name] -Age $(if ($name -eq 'noctty-command.pdb') { 3 } else { 1 })
     }
 
     # Identity readers return exactly what was written.
@@ -313,8 +301,8 @@ try {
     if ($null -ne (Get-PeCodeViewIdentity -Path (Join-Path $payload 'noctty-terminal-handoff-proxy.dll'))) {
         throw 'Get-PeCodeViewIdentity must return $null for a PE with no CodeView record.'
     }
-    $pdbIdentity = Get-PdbIdentity -Path (Join-Path $symbols 'ghostty-vt.pdb')
-    if ($pdbIdentity.Guid -ne $guids['ghostty-vt.pdb'] -or $pdbIdentity.Age -ne 3) {
+    $pdbIdentity = Get-PdbIdentity -Path (Join-Path $symbols 'noctty-command.pdb')
+    if ($pdbIdentity.Guid -ne $guids['noctty-command.pdb'] -or $pdbIdentity.Age -ne 3) {
         throw 'Get-PdbIdentity must return the GUID and age of the PDB info stream.'
     }
     # A real, Authenticode-signed system DLL: the reader works on shipped binaries, not just fixtures.
@@ -325,7 +313,7 @@ try {
 
     # Matching symbols are accepted and reported.
     $evidence = @(Assert-SymbolsMatchBinaries -SymbolsRoot $symbols -PayloadRoot $payload -Label 'Symbols test')
-    if ($evidence.Count -ne 3 -or
+    if ($evidence.Count -ne 2 -or
         @($evidence | Where-Object { $_.Binary -ceq 'noctty.com' -and $_.Pdb -ceq 'noctty-command.pdb' }).Count -ne 1) {
         throw 'Matching symbols must be reported per binary, with noctty.com mapped to noctty-command.pdb.'
     }
@@ -338,11 +326,11 @@ try {
         New-SymbolsTestPdb -Path (Join-Path $other 'noctty.pdb') -Guid ([guid]'00000000-0000-0000-0000-000000000001') -Age 1
         Assert-SymbolsMatchBinaries -SymbolsRoot $other -PayloadRoot $payload -Label 'Symbols test'
     }
-    Assert-SymbolsCheckRejects -Label 'age mismatch' -Pattern 'does not match ghostty-vt\.dll' -Check {
+    Assert-SymbolsCheckRejects -Label 'age mismatch' -Pattern 'does not match noctty\.com' -Check {
         $other = Join-Path $symbolsProbeRoot 'other-age'
         [void][IO.Directory]::CreateDirectory($other)
         foreach ($file in Get-ChildItem -LiteralPath $symbols) { Copy-Item -LiteralPath $file.FullName -Destination $other }
-        New-SymbolsTestPdb -Path (Join-Path $other 'ghostty-vt.pdb') -Guid $guids['ghostty-vt.pdb'] -Age 2
+        New-SymbolsTestPdb -Path (Join-Path $other 'noctty-command.pdb') -Guid $guids['noctty-command.pdb'] -Age 2
         Assert-SymbolsMatchBinaries -SymbolsRoot $other -PayloadRoot $payload -Label 'Symbols test'
     }
     Assert-SymbolsCheckRejects -Label 'missing PDB' -Pattern 'has no noctty-command\.pdb' -Check {
@@ -389,7 +377,7 @@ try {
         -PayloadRoot $payload `
         -ExtractRoot (Join-Path $symbolsProbeRoot 'unzip-good') `
         -Label 'Symbols zip test')
-    if ($zipEvidence.Count -ne 3) { throw 'A well-formed symbols zip must verify against the portable payload.' }
+    if ($zipEvidence.Count -ne 2) { throw 'A well-formed symbols zip must verify against the portable payload.' }
     $flatZip = Join-Path $symbolsProbeRoot 'flat-symbols.zip'
     [IO.Compression.ZipFile]::CreateFromDirectory($symbols, $flatZip, [IO.Compression.CompressionLevel]::Optimal, $false)
     Assert-SymbolsCheckRejects -Label 'zip without the symbols folder' -Pattern 'exactly one top-level symbols folder' -Check {

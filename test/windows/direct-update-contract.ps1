@@ -288,7 +288,7 @@ function Invoke-DirectUpdateVerdicts([string] $Text,[string] $Root) {
         function Refuses($Name,[scriptblock] $Body){$threw=$false;try{& $Body}catch{$threw=$true};if(-not $threw){$failures.Add($Name)}}
         function Get-DefaultWindowRows($Job){@($script:fakeRows)}
         function Get-StubLoadError($Path){$script:fakeLoadError}
-        function Assert-GhosttyVtStub($Path){}
+        function Assert-RetiredVtPlaceholder($Path){}
         function Get-UpdaterPublisherSpkiPins($SourcePath){'fixture-pin'}
         function Get-StubPublisherPins {'fixture-pin'}
         function Assert-ReleaseSignature($Path,$Label,$AllowedPins,$TrustSelfSigned){@{Status='fixture';Thumbprint='fixture';SpkiSha256='fixture'}}
