@@ -7,6 +7,7 @@
 //! the first time. `resolve` finds the file the name reaches, `write` puts the
 //! bytes there.
 const std = @import("std");
+const prefixed_path = @import("../win32_prefixed_path.zig");
 const win32_sys = @import("sys.zig");
 const win32_types = @import("../win32_types.zig");
 const windows = std.os.windows;
@@ -125,7 +126,7 @@ pub threadlocal var test_during_read: if (@import("builtin").is_test) ?*const fn
 /// the name as it was: the read and the write that follow report the real
 /// problem, as they did before links were followed.
 pub fn resolve(alloc: Allocator, path: []const u8) ResolveError!Target {
-    const wide = windows.sliceToPrefixedFileW(null, path) catch return named(alloc, path);
+    const wide = prefixed_path.sliceToPrefixedFileW(path) catch return named(alloc, path);
     // No access is asked for, so a read-only or busy file still opens; the
     // handle only answers questions about the file.
     const handle = win32_sys.CreateFileW(

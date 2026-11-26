@@ -1151,7 +1151,7 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
 fn isStagedImage(updates: []const u16, image: []const u16) bool {
     const sep: u16 = '\\';
     if (image.len <= updates.len + 1 or image[updates.len] != sep) return false;
-    if (!std.os.windows.eqlIgnoreCaseWTF16(image[0..updates.len], updates)) return false;
+    if (!win32_sys.eqlIgnoreCaseWtf16(image[0..updates.len], updates)) return false;
     const rest = image[updates.len + 1 ..];
     const split = std.mem.indexOfScalar(u16, rest, sep) orelse return false;
     if (split == 0) return false;
@@ -1159,7 +1159,7 @@ fn isStagedImage(updates: []const u16, image: []const u16) bool {
     if (std.mem.indexOfScalar(u16, name, sep) != null) return false;
     const exe = std.unicode.utf8ToUtf16LeStringLiteral(".exe");
     if (name.len <= exe.len) return false;
-    return std.os.windows.eqlIgnoreCaseWTF16(name[name.len - exe.len ..], exe);
+    return win32_sys.eqlIgnoreCaseWtf16(name[name.len - exe.len ..], exe);
 }
 
 const process_query_limited_information: u32 = 0x1000;
@@ -1676,7 +1676,7 @@ fn launchPortableHelper(
     try internal_os.windows.spawnChildHoldingInheritLock(&child);
     var child_open = true;
     errdefer if (child_open) {
-        std.os.windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id, 1) catch {};
         std.os.windows.CloseHandle(child.thread_handle);
         std.os.windows.CloseHandle(child.id);
     };
@@ -1811,7 +1811,7 @@ fn runPortableUpdateHelper(
                 _ = try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args);
                 return err;
             };
-            std.os.windows.WaitForSingleObject(child.id, 15_000) catch |err| switch (err) {
+            win32_sys.waitForSingleObject(child.id, 15_000) catch |err| switch (err) {
                 error.WaitTimeOut => {
                     std.os.windows.CloseHandle(child.thread_handle);
                     std.os.windows.CloseHandle(child.id);
@@ -2023,7 +2023,7 @@ fn buildInstalledNocttyArgv(
 fn waitForProcessExit(pid: u32, timeout_ms: u32) !void {
     const handle = OpenProcess(win32_types.SYNCHRONIZE, 0, pid) orelse return;
     defer std.os.windows.CloseHandle(handle);
-    return std.os.windows.WaitForSingleObject(handle, timeout_ms);
+    return win32_sys.waitForSingleObject(handle, timeout_ms);
 }
 
 fn clearStagedPortableState(alloc: Allocator, state: *State) void {
@@ -2998,15 +2998,14 @@ test "portable staging downgrade guard reads the built exe version" {
 fn readWindowsFileVersion(alloc: Allocator, path: []const u8) !WindowsFileVersion {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
-    const windows = std.os.windows;
     const GetFileVersionInfoSizeWFn = *const fn ([*:0]const u16, *u32) callconv(.winapi) u32;
     const GetFileVersionInfoWFn = *const fn ([*:0]const u16, u32, u32, *anyopaque) callconv(.winapi) win32_types.BOOL;
     const VerQueryValueWFn = *const fn (*const anyopaque, [*:0]const u16, *?*anyopaque, *u32) callconv(.winapi) win32_types.BOOL;
 
-    const module = windows.LoadLibraryW(
+    const module = win32_sys.loadLibraryW(
         std.unicode.utf8ToUtf16LeStringLiteral("version.dll"),
     ) catch return error.InstallerVersionInfoUnavailable;
-    defer windows.FreeLibrary(module);
+    defer win32_sys.freeLibrary(module);
 
     const size_proc = win32_sys.GetProcAddress(module, "GetFileVersionInfoSizeW") orelse
         return error.InstallerVersionInfoUnavailable;
@@ -3088,8 +3087,8 @@ fn verifyAuthenticodeSignatureFor(
         win32_types.BOOL,
         u32,
     ) callconv(.winapi) ?*CryptProviderSgnr;
-    const module = try windows.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("wintrust.dll"));
-    defer windows.FreeLibrary(module);
+    const module = try win32_sys.loadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("wintrust.dll"));
+    defer win32_sys.freeLibrary(module);
 
     const proc = win32_sys.GetProcAddress(module, "WinVerifyTrust") orelse return error.SignatureVerifierUnavailable;
     const winVerifyTrust: WinVerifyTrustFn = @ptrCast(@alignCast(proc));

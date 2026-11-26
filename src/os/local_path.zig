@@ -8,6 +8,7 @@
 //! reached through another local symlink, so nothing it opens contacts a
 //! share.
 const std = @import("std");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -844,7 +845,7 @@ pub const test_links = struct {
     /// Make the empty folder `dir` (absolute) a junction to `nt_target`, an
     /// NT path such as `\??\UNC\host\share`. Needs no privilege.
     pub fn junction(alloc: Allocator, dir: []const u8, nt_target: []const u8) !void {
-        var dir_w = try windows.sliceToPrefixedFileW(null, dir);
+        var dir_w = try prefixed_path.sliceToPrefixedFileW(dir);
         const handle = try windows.OpenFile(dir_w.span(), .{
             .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
             .creation = win32_types.FILE_OPEN,

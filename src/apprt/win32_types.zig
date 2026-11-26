@@ -174,6 +174,13 @@ pub const FILETIME = extern struct {
     dwHighDateTime: DWORD,
 };
 
+/// winternl.h `UNICODE_STRING`, natural packing.
+pub const UNICODE_STRING = extern struct {
+    Length: u16,
+    MaximumLength: u16,
+    Buffer: ?[*]u16,
+};
+
 /// minwinbase.h `OVERLAPPED`, natural packing.
 pub const OVERLAPPED = extern struct {
     Internal: usize,
@@ -279,4 +286,10 @@ test "shared Win32 type layouts" {
     try testing.expectEqual(@as(usize, 40), @offsetOf(BY_HANDLE_FILE_INFORMATION, "nNumberOfLinks"));
     try testing.expectEqual(@as(usize, 44), @offsetOf(BY_HANDLE_FILE_INFORMATION, "nFileIndexHigh"));
     try testing.expectEqual(@as(usize, 48), @offsetOf(BY_HANDLE_FILE_INFORMATION, "nFileIndexLow"));
+
+    // winternl.h declares it outside any pshpack block: natural packing.
+    try testing.expectEqual(@as(usize, @alignOf(?[*]u16) + @sizeOf(usize)), @sizeOf(UNICODE_STRING));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(UNICODE_STRING, "Length"));
+    try testing.expectEqual(@as(usize, 2), @offsetOf(UNICODE_STRING, "MaximumLength"));
+    try testing.expectEqual(@as(usize, @alignOf(?[*]u16)), @offsetOf(UNICODE_STRING, "Buffer"));
 }

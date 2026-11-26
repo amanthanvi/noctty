@@ -4,13 +4,13 @@
 //! the wall clock steps.
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
 const builtin = @import("builtin");
 
 /// Monotonic nanoseconds from an arbitrary start.
 pub fn nowNs() u64 {
     if (comptime builtin.os.tag == .windows) {
-        const windows = std.os.windows;
-        return nsFromCounter(windows.QueryPerformanceCounter(), windows.QueryPerformanceFrequency());
+        return nsFromCounter(win32_sys.queryPerformanceCounter(), win32_sys.queryPerformanceFrequency());
     }
     const ts = (std.time.Instant.now() catch return 0).timestamp;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));

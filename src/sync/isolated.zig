@@ -222,9 +222,9 @@ const Deadline = struct {
     fn run(self: *Deadline) void {
         const role_scope = thread_role.enter(.test_support);
         defer role_scope.exit();
-        windows.WaitForSingleObject(self.handle, child_deadline_ms) catch {
+        win32_sys.waitForSingleObject(self.handle, child_deadline_ms) catch {
             self.timed_out = true;
-            windows.TerminateProcess(self.handle, 124) catch {};
+            win32_sys.terminateProcess(self.handle, 124) catch {};
         };
     }
 };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
 const win32_sys = @import("../apprt/win32/sys.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
@@ -2393,7 +2394,7 @@ test "PKG48 only shell wrappers receive the inherited cwd search guard" {
 fn windowsNonDirectoryPathExists(path: []const u8) bool {
     // Explicit commands retain Windows link semantics, including Scoop's
     // current junction and paths with spaces. Only discovery refuses redirects.
-    const path_w = windows.sliceToPrefixedFileW(null, path) catch return false;
+    const path_w = prefixed_path.sliceToPrefixedFileW(path) catch return false;
     const attributes = win32_sys.GetFileAttributesW(path_w.span().ptr);
     if (attributes == windows.INVALID_FILE_ATTRIBUTES) return false;
     return attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY == 0;
@@ -2635,7 +2636,7 @@ test "PKG08 round3 child lookup accepts a real App Execution Alias" {
     // launcher. Do not launch them: an unconfigured alias can open the Store.
     for ([_][]const u8{ "pwsh.exe", "python.exe", "python3.exe" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ dir, name });
-        const attributes = windows.GetFileAttributes(path) catch continue;
+        const attributes = win32_sys.getFileAttributes(path) catch continue;
         if (attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
             attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
         const result = try lookupChildExecutable(alloc, name, &env);
@@ -4739,7 +4740,7 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // No thread reads the pipes yet: the errdefer may kill.
     const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
     const errors_thread = std.Thread.spawn(.{}, WslOutputDrain.run, .{&errors}) catch |err| {
-        windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id, 1) catch {};
         joinWslDrains(&.{&drain}, &.{drain_thread});
         _ = child.wait() catch {};
         child_running = false;
@@ -4753,7 +4754,7 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
             exe_path,
             wsl_list_timeout_ms,
         });
-        windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id, 1) catch {};
         joinWslDrains(&drains, &threads);
         _ = child.wait() catch {};
         child_running = false;
@@ -5382,7 +5383,7 @@ fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) 
     (try dir.createFile(name, .{})).close();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try dir.realpath(name, &path_buf);
-    const path_w = try windows.sliceToPrefixedFileW(null, path);
+    const path_w = try prefixed_path.sliceToPrefixedFileW(path);
     const handle = win32_sys.CreateFileW(
         path_w.span().ptr,
         win32_types.GENERIC_WRITE,
@@ -5509,7 +5510,7 @@ fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !voi
     defer alloc.free(nt_target);
     const target_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, nt_target);
     defer alloc.free(target_w);
-    const link_w = try windows.sliceToPrefixedFileW(null, link);
+    const link_w = try prefixed_path.sliceToPrefixedFileW(link);
     const handle = win32_sys.CreateFileW(link_w.span().ptr, win32_types.GENERIC_WRITE, 0, null, win32_types.OPEN_EXISTING, win32_types.FILE_FLAG_OPEN_REPARSE_POINT | win32_types.FILE_FLAG_BACKUP_SEMANTICS, null);
     if (handle == windows.INVALID_HANDLE_VALUE) return error.AccessDenied;
     defer windows.CloseHandle(handle);
@@ -6321,7 +6322,7 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         defer windows.CloseHandle(read_end);
         var drain: WslOutputDrain = try .init(.{ .handle = read_end });
         defer drain.deinit();
-        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         windows.CloseHandle(write_end);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
         joinWslDrains(&.{&drain}, &.{thread});
@@ -6340,7 +6341,7 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         defer if (write_open) |handle| windows.CloseHandle(handle);
         var drain: WslOutputDrain = try .init(.{ .handle = read_end });
         defer drain.deinit();
-        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
         // The reader and the write end are `testJoinWithin`'s from here.
         write_open = null;
