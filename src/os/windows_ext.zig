@@ -32,16 +32,20 @@ pub const FALSE: BOOL = 0;
 /// discovery was creating `wsl.exe -l -q` could otherwise inherit the write
 /// end of `wsl.exe`'s stdout pipe, and discovery's read of that pipe would
 /// never see end of file.
-pub var inheritable_spawn_lock: std.Thread.Mutex = .{};
+/// Take it with `lockUncancelable` (never the cancelable `lock`).
+pub var inheritable_spawn_lock: std.Io.Mutex = .init;
 
-/// `std.process.Child.spawn` holding `inheritable_spawn_lock`. Child creates
+/// `std.process.spawn` holding `inheritable_spawn_lock`. The spawn creates
 /// inheritable ends for its pipes (and NUL) and closes them in this process
 /// before it returns, so holding the lock across it keeps them out of a
 /// concurrent spawn, and keeps this child from inheriting another's.
-pub fn spawnChildHoldingInheritLock(child: *std.process.Child) !void {
-    inheritable_spawn_lock.lock();
-    defer inheritable_spawn_lock.unlock();
-    try child.spawn();
+pub fn spawnChildHoldingInheritLock(
+    io: std.Io,
+    options: std.process.SpawnOptions,
+) std.process.SpawnError!std.process.Child {
+    inheritable_spawn_lock.lockUncancelable(io);
+    defer inheritable_spawn_lock.unlock(io);
+    return std.process.spawn(io, options);
 }
 
 // Export any constants or functions we need from the Windows API so
@@ -49,20 +53,55 @@ pub fn spawnChildHoldingInheritLock(child: *std.process.Child) !void {
 
 // Re-exports `main` kept in `os/windows.zig` that upstream's file does not
 // have. The std names among them are 1B.5's re-homing.
-pub const kernel32 = windows.kernel32;
-pub const OpenFile = windows.OpenFile;
+/// The kernel32 calls `main` made through std's `kernel32`, which Zig 0.17
+/// cut to `CreateProcessW` alone. Upstream's `exp.kernel32` declares five
+/// (their `BOOL` is std's enum: compare with `windows.FALSE`); the rest are
+/// the fork's, with this file's integer `BOOL`.
+pub const kernel32 = struct {
+    pub const GetLastError = windows.GetLastError;
+    pub const CancelIoEx = os_windows.exp.kernel32.CancelIoEx;
+    pub const GetExitCodeProcess = os_windows.exp.kernel32.GetExitCodeProcess;
+    pub const ReadFile = os_windows.exp.kernel32.ReadFile;
+    pub const TerminateProcess = os_windows.exp.kernel32.TerminateProcess;
+    pub const WaitForSingleObject = os_windows.exp.kernel32.WaitForSingleObject;
+    pub const GetProcAddress = windows_ext.GetProcAddress;
+    pub const WriteFile = windows_ext.WriteFile;
+
+    pub extern "kernel32" fn DuplicateHandle(
+        hSourceProcessHandle: windows.HANDLE,
+        hSourceHandle: windows.HANDLE,
+        hTargetProcessHandle: windows.HANDLE,
+        lpTargetHandle: *windows.HANDLE,
+        dwDesiredAccess: windows.DWORD,
+        bInheritHandle: BOOL,
+        dwOptions: windows.DWORD,
+    ) callconv(.winapi) BOOL;
+    pub extern "kernel32" fn LoadLibraryExW(
+        lpLibFileName: windows.LPCWSTR,
+        hFile: ?windows.HANDLE,
+        dwFlags: windows.DWORD,
+    ) callconv(.winapi) ?windows.HMODULE;
+    pub extern "kernel32" fn FreeLibrary(
+        hModule: windows.HMODULE,
+    ) callconv(.winapi) BOOL;
+};
+const windows_ext = @This();
 pub const CloseHandle = windows.CloseHandle;
-pub const SetHandleInformation = windows.SetHandleInformation;
 pub const HWND = windows.HWND;
 pub const HMODULE = windows.HMODULE;
+/// Zig 0.17 dropped std's `KNOWNFOLDERID`, `FOLDERID_LocalAppData`,
+/// `KF_FLAG_DONT_VERIFY` and `S_OK`; these are 0.15.2's values.
+pub const KNOWNFOLDERID = windows.GUID;
 pub const FOLDERID_Profile = windows.GUID.parse("{5E6C858F-0E22-4760-9AFE-EA3317B67173}");
-pub const FOLDERID_LocalAppData = windows.FOLDERID_LocalAppData;
+pub const FOLDERID_LocalAppData = windows.GUID.parse("{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}");
+pub const KF_FLAG_DONT_VERIFY: windows.DWORD = 16384;
+pub const S_OK: os_windows.HRESULT = 0;
 
 pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
 pub extern "kernel32" fn GetOEMCP() callconv(.winapi) windows.UINT;
 /// The one declaration: the text editor opener and the Win32 runtime's
 /// link prompt both use it.
-pub extern "shlwapi" fn AssocQueryStringW(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) callconv(.winapi) windows.HRESULT;
+pub extern "shlwapi" fn AssocQueryStringW(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) callconv(.winapi) os_windows.HRESULT;
 /// std's `DeviceIoControl` wrapper drops the byte count, which a reader of
 /// variable-length output (reparse data) needs.
 pub extern "kernel32" fn DeviceIoControl(
@@ -504,25 +543,25 @@ pub const KnownFolderPathError = error{
 };
 
 extern "shell32" fn SHGetKnownFolderPath(
-    rfid: *const windows.KNOWNFOLDERID,
+    rfid: *const KNOWNFOLDERID,
     dwFlags: windows.DWORD,
     hToken: ?windows.HANDLE,
     ppszPath: *?windows.PWSTR,
-) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) os_windows.HRESULT;
 extern "ole32" fn CoTaskMemFree(pv: ?*anyopaque) callconv(.winapi) void;
 
 pub fn knownFolderPathUtf8(
-    folder_id: *const windows.KNOWNFOLDERID,
+    folder_id: *const KNOWNFOLDERID,
     buf: []u8,
 ) KnownFolderPathError!?[]const u8 {
     var path_w: ?windows.PWSTR = null;
     const hr = SHGetKnownFolderPath(
         folder_id,
-        windows.KF_FLAG_DONT_VERIFY,
+        KF_FLAG_DONT_VERIFY,
         null,
         &path_w,
     );
-    if (hr != windows.S_OK) return null;
+    if (hr != S_OK) return null;
 
     const w = path_w orelse return null;
     defer CoTaskMemFree(w);
@@ -571,13 +610,11 @@ pub fn innoUninstallRegistryMatchesInstallDir(install_dir: []const u8) bool {
     const install_location_name = std.unicode.utf8ToUtf16LeStringLiteral("InstallLocation");
     var registered_buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
     var registered_bytes: windows.DWORD = @sizeOf(@TypeOf(registered_buf));
-    const status = windows.advapi32.RegGetValueW(
+    const status = RegGetValueW(
         windows.HKEY_LOCAL_MACHINE,
         uninstall_subkey,
         install_location_name,
-        windows.advapi32.RRF.RT_REG_SZ |
-            windows.advapi32.RRF.SUBKEY_WOW6464KEY |
-            windows.advapi32.RRF.ZEROONFAILURE,
+        RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY | RRF_ZEROONFAILURE,
         null,
         @ptrCast(&registered_buf),
         &registered_bytes,
@@ -624,6 +661,22 @@ fn trimTrailingWindowsSeparators(path: []const u16) []const u16 {
 
 // CSTR_EQUAL from CompareStringOrdinal's Microsoft Win32 contract.
 const cstr_equal: i32 = 2;
+
+// Zig 0.17 dropped std's `advapi32`. The fork's other declaration of
+// `RegGetValueW` is `apprt/win32/sys.zig`'s, which this file cannot import.
+extern "advapi32" fn RegGetValueW(
+    hkey: windows.HKEY,
+    lpSubKey: windows.LPCWSTR,
+    lpValue: windows.LPCWSTR,
+    dwFlags: windows.DWORD,
+    pdwType: ?*windows.DWORD,
+    pvData: ?*anyopaque,
+    pcbData: ?*windows.DWORD,
+) callconv(.winapi) windows.LSTATUS;
+// `RegGetValueW`'s `dwFlags` (winreg.h).
+const RRF_RT_REG_SZ: windows.DWORD = 0x00000002;
+const RRF_SUBKEY_WOW6464KEY: windows.DWORD = 0x00010000;
+const RRF_ZEROONFAILURE: windows.DWORD = 0x20000000;
 
 extern "kernel32" fn CompareStringOrdinal(
     string1: [*]const u16,
@@ -675,11 +728,11 @@ pub const CreatePseudoConsoleFn = *const fn (
     hOutput: windows.HANDLE,
     dwFlags: windows.DWORD,
     phPC: *os_windows.HPCON,
-) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) os_windows.HRESULT;
 pub const ResizePseudoConsoleFn = *const fn (
     hPC: os_windows.HPCON,
     size: windows.COORD,
-) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) os_windows.HRESULT;
 pub const ClosePseudoConsoleFn = *const fn (
     hPC: os_windows.HPCON,
 ) callconv(.winapi) void;
@@ -687,15 +740,15 @@ pub const ClosePseudoConsoleFn = *const fn (
 pub const ClearPseudoConsoleFn = *const fn (
     hPC: os_windows.HPCON,
     keepCursorRow: BOOL,
-) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) os_windows.HRESULT;
 pub const ShowHidePseudoConsoleFn = *const fn (
     hPC: os_windows.HPCON,
     show: BOOL,
-) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) os_windows.HRESULT;
 pub const ReparentPseudoConsoleFn = *const fn (
     hPC: os_windows.HPCON,
     newParent: windows.HWND,
-) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) os_windows.HRESULT;
 pub const PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH = 0x10;
 
 pub const CREATE_SUSPENDED = 0x00000004;
@@ -704,6 +757,10 @@ pub const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
 
 pub const STATUS_PENDING = 0x00000103;
 pub const STILL_ACTIVE = STATUS_PENDING;
+
+/// `WaitForSingleObject` results (winbase.h), which Zig 0.17's std dropped.
+pub const WAIT_OBJECT_0: windows.DWORD = 0x00000000;
+pub const WAIT_TIMEOUT: windows.DWORD = 0x00000102;
 
 // The three externs `main` had inside upstream's `exp.kernel32`.
 pub extern "kernel32" fn ResumeThread(
@@ -738,6 +795,97 @@ pub extern "kernel32" fn WriteFile(
     lpNumberOfBytesWritten: ?*windows.DWORD,
     lpOverlapped: ?*os_windows.OVERLAPPED,
 ) callconv(.winapi) BOOL;
+
+/// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+/// Zig 0.15.2's `std.os.windows.CreateProcessW` shape (an optional
+/// `lpApplicationName`, std's `CreateProcessFlags`), which `Command.zig`
+/// calls with an exact application name.
+pub extern "kernel32" fn CreateProcessW(
+    lpApplicationName: ?windows.LPCWSTR,
+    lpCommandLine: ?windows.LPWSTR,
+    lpProcessAttributes: ?*windows.SECURITY_ATTRIBUTES,
+    lpThreadAttributes: ?*windows.SECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: windows.CreateProcessFlags,
+    lpEnvironment: ?*anyopaque,
+    lpCurrentDirectory: ?windows.LPCWSTR,
+    lpStartupInfo: *windows.STARTUPINFOW,
+    lpProcessInformation: *os_windows.PROCESS_INFORMATION,
+) callconv(.winapi) BOOL;
+
+pub const CreateProcessError = error{
+    FileNotFound,
+    AccessDenied,
+    InvalidName,
+    NameTooLong,
+    InvalidExe,
+    SystemResources,
+    Unexpected,
+};
+
+/// Zig 0.15.2's `std.os.windows.CreateProcessW` wrapper, which 0.17 removed,
+/// with its error mapping unchanged.
+pub fn createProcessW(
+    lpApplicationName: ?windows.LPCWSTR,
+    lpCommandLine: ?windows.LPWSTR,
+    lpProcessAttributes: ?*windows.SECURITY_ATTRIBUTES,
+    lpThreadAttributes: ?*windows.SECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: windows.CreateProcessFlags,
+    lpEnvironment: ?*anyopaque,
+    lpCurrentDirectory: ?windows.LPCWSTR,
+    lpStartupInfo: *windows.STARTUPINFOW,
+    lpProcessInformation: *os_windows.PROCESS_INFORMATION,
+) CreateProcessError!void {
+    if (CreateProcessW(
+        lpApplicationName,
+        lpCommandLine,
+        lpProcessAttributes,
+        lpThreadAttributes,
+        bInheritHandles,
+        dwCreationFlags,
+        lpEnvironment,
+        lpCurrentDirectory,
+        lpStartupInfo,
+        lpProcessInformation,
+    ) == 0) {
+        switch (windows.GetLastError()) {
+            .FILE_NOT_FOUND => return error.FileNotFound,
+            .PATH_NOT_FOUND => return error.FileNotFound,
+            .DIRECTORY => return error.FileNotFound,
+            .ACCESS_DENIED => return error.AccessDenied,
+            .INVALID_PARAMETER => unreachable,
+            .INVALID_NAME => return error.InvalidName,
+            .FILENAME_EXCED_RANGE => return error.NameTooLong,
+            // These are all the system errors that are mapped to ENOEXEC by
+            // the undocumented _dosmaperr (old CRT) or __acrt_errno_map_os_error
+            // (newer CRT) functions. Their code can be found in crt/src/dosmap.c (old SDK)
+            // or urt/misc/errno.cpp (newer SDK) in the Windows SDK.
+            .BAD_FORMAT,
+            .INVALID_STARTING_CODESEG, // MIN_EXEC_ERROR in errno.cpp
+            .INVALID_STACKSEG,
+            .INVALID_MODULETYPE,
+            .INVALID_EXE_SIGNATURE,
+            .EXE_MARKED_INVALID,
+            .BAD_EXE_FORMAT,
+            .ITERATED_DATA_EXCEEDS_64k,
+            .INVALID_MINALLOCSIZE,
+            .DYNLINK_FROM_INVALID_RING,
+            .IOPL_NOT_ENABLED,
+            .INVALID_SEGDPL,
+            .AUTODATASEG_EXCEEDS_64k,
+            .RING2SEG_MUST_BE_MOVABLE,
+            .RELOC_CHAIN_XEEDS_SEGLIM,
+            .INFLOOP_IN_RELOC_CHAIN, // MAX_EXEC_ERROR in errno.cpp
+            // This one is not mapped to ENOEXEC but it is possible, for example
+            // when calling CreateProcessW on a plain text file with a .exe extension
+            .EXE_MACHINE_TYPE_MISMATCH,
+            => return error.InvalidExe,
+            .COMMITMENT_LIMIT => return error.SystemResources,
+            else => |err| return windows.unexpectedError(err),
+        }
+    }
+}
 
 /// The `NameType` values of `GetComputerNameExW` that name this machine.
 pub const COMPUTER_NAME_FORMAT = enum(c_int) {

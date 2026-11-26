@@ -244,7 +244,7 @@ test "StringMap searchIterator Windows path with click position" {
     var re = try oni.Regex.init(url.regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
     defer re.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 60, .rows = 5, .max_scrollback = 0 });
+    var s = try Screen.init(std.testing.io, alloc, .{ .cols = 60, .rows = 5, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("see C:\\Users\\amant\\file.txt:12:5 end");
 
@@ -252,8 +252,7 @@ test "StringMap searchIterator Windows path with click position" {
     for ([_]u16{ 4, 5, 14, 31 }) |x| {
         const click_pin = s.pages.pin(.{ .active = .{ .x = x, .y = 0 } }).?;
         const line = s.selectLine(.{ .pin = click_pin }).?;
-        var map: StringMap = undefined;
-        alloc.free(try s.selectionString(alloc, .{ .sel = line, .trim = false, .map = &map }));
+        const map = try s.selectionStringMap(alloc, .{ .sel = line, .trim = false });
         defer map.deinit(alloc);
 
         var it = map.searchIterator(re);

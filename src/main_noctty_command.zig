@@ -8,13 +8,21 @@ const k = w.kernel32;
 const cli_action = @import("cli/action.zig");
 const Action = @import("cli/ghostty_action.zig").Action;
 const jobs = @import("apprt/win32_job_object.zig");
+const os_windows = @import("os/windows.zig");
+const windows_ext = @import("os/windows_ext.zig");
 
 pub const panic = std.debug.no_panic;
 
-pub fn main() void {
-    const code = forward() catch |err| {
+/// This launcher has no global state: its file and process calls run on the
+/// calling thread.
+inline fn launcherIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+pub fn main(init: std.process.Init.Minimal) void {
+    const code = forward(init.args) catch |err| {
         var buffer: [256]u8 = undefined;
-        var writer = std.fs.File.stderr().writer(&buffer);
+        var writer = std.Io.File.stderr().writer(launcherIo(), &buffer);
         writer.interface.print("noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch {};
         writer.interface.flush() catch {};
         win32_sys.ExitProcess(1);
@@ -22,12 +30,12 @@ pub fn main() void {
     win32_sys.ExitProcess(code);
 }
 
-fn forward() !u32 {
+fn forward(args: std.process.Args) !u32 {
     const alloc = std.heap.page_allocator;
     // Detection errors are actions too: noctty.exe owns their diagnostics.
-    const wait = if (cli_action.detectArgs(Action, alloc)) |action| action != null else |_| true;
-    // selfExePath resolves symlinks, preserving the old launcher's sibling rule.
-    const self_path = try std.fs.selfExePathAlloc(alloc);
+    const wait = if (cli_action.detectArgs(Action, alloc, args)) |action| action != null else |_| true;
+    // executablePath resolves symlinks, preserving the old launcher's sibling rule.
+    const self_path = try std.process.executablePathAlloc(launcherIo(), alloc);
     defer alloc.free(self_path);
     const image_path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(self_path) orelse return error.ExecutablePathUnavailable, "noctty.exe" });
     defer alloc.free(image_path);
@@ -73,8 +81,8 @@ fn forward() !u32 {
     // dispatch. Editors or GUI processes the action launches may outlive it.
     const job = if (wait) actionJob() catch null else null;
     defer if (job) |handle| w.CloseHandle(handle);
-    var process: w.PROCESS_INFORMATION = undefined;
-    if (k.CreateProcessW(image_z, raw, null, null, @intFromBool(wait), .{ .detached_process = !wait, .create_suspended = wait }, null, null, &startup, &process) == 0)
+    var process: os_windows.PROCESS_INFORMATION = undefined;
+    if (windows_ext.CreateProcessW(image_z, raw, null, null, @intFromBool(wait), .{ .detached_process = !wait, .create_suspended = wait }, null, null, &startup, &process) == 0)
         return switch (std.os.windows.GetLastError()) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             .ACCESS_DENIED => error.AccessDenied,
@@ -118,7 +126,7 @@ fn actionJob() !w.HANDLE {
     return job;
 }
 
-fn ignoreControl(kind: w.DWORD) callconv(.winapi) w.BOOL {
+fn ignoreControl(kind: w.DWORD) callconv(.winapi) win32_types.BOOL {
     return @intFromBool(kind == 0 or kind == 1); // CTRL_C_EVENT / CTRL_BREAK_EVENT
 }
 

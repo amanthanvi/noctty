@@ -2,6 +2,7 @@
 pub const OpenGL = @This();
 
 const std = @import("std");
+const internal_os = @import("../os/main.zig");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
@@ -299,7 +300,7 @@ fn prepareContext(getProcAddress: anytype) !void {
     if (comptime build_config.renderer_test_tools) {
         // A real context and pixel format exist by now, as on a machine whose
         // only OpenGL is GDI Generic 1.1; only the version is made up.
-        if (std.process.hasEnvVarConstant("NOCTTY_RENDERER_FAIL_OPENGL_VERSION")) {
+        if (internal_os.hasEnvVarConstant("NOCTTY_RENDERER_FAIL_OPENGL_VERSION")) {
             major = 1;
             minor = 1;
         }

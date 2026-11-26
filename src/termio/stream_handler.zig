@@ -455,7 +455,6 @@ pub const StreamHandler = struct {
             .title_pop,
             .kitty_dnd,
             .osc_unknown,
-            .program_status,
             => {},
         }
     }
@@ -1681,9 +1680,11 @@ pub const StreamHandler = struct {
         // its own, so upstream's below stays where upstream has it.
         if (comptime builtin.os.tag == .windows) if (conemu) plain: {
             var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
-            var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
+            // 0.15's `stackFallback(1024, ...)`: 0.17's BufferFirstAllocator.
+            var stack_alloc_buf: [1024]u8 = undefined;
+            var stack_alloc: std.heap.BufferFirstAllocator = .init(&stack_alloc_buf, arena_alloc.allocator());
             defer arena_alloc.deinit();
-            const path = internal_os.local_path.pwd(stack_alloc.get(), .{ .conemu = url }) catch |err| switch (err) {
+            const path = internal_os.local_path.pwd(stack_alloc.allocator(), .{ .conemu = url }) catch |err| switch (err) {
                 // Not a plain path: a URL, read below (noctty's cmd
                 // integration sends `kitty-shell-cwd://localhost/%P`).
                 error.NotPlainPath => break :plain,
@@ -2189,7 +2190,7 @@ test "semantic output capture follows real stream handler parser" {
     const role = thread_role.fixture(.reader);
     defer role.exit();
 
-    var term = try terminal.Terminal.init(std.testing.allocator, .{
+    var term = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
     });
@@ -2214,18 +2215,23 @@ test "semantic output capture follows real stream handler parser" {
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
-        .alloc = std.testing.allocator,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .none,
-        .clipboard_write = .allow,
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = std.testing.allocator,
+        .handler = .{
+            .alloc = std.testing.allocator,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
     });
     defer stream.deinit();
 
@@ -2385,7 +2391,7 @@ test "semantic output capture asks the consumer to forget typed input on a scree
 
 fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {
     const message = switch (mailbox.*) {
-        .spsc => |*value| value.queue.pop() orelse return error.TestExpectedEqual,
+        .spsc => |*value| value.queue.pop(std.testing.io) orelse return error.TestExpectedEqual,
     };
     switch (message) {
         .write_small => |value| try std.testing.expectEqualStrings(
@@ -2403,7 +2409,7 @@ fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {
 fn countIssue149ColorSchemeReports(mailbox: *termio.Mailbox) usize {
     var count: usize = 0;
     switch (mailbox.*) {
-        .spsc => |*value| while (value.queue.pop()) |message| {
+        .spsc => |*value| while (value.queue.pop(std.testing.io)) |message| {
             if (message == .color_scheme_report) count += 1;
         },
     }
@@ -2420,7 +2426,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
     const role = thread_role.fixture(.termio);
     defer role.exit();
 
-    var term = try terminal.Terminal.init(std.testing.allocator, .{
+    var term = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
         .colors = .{
@@ -2451,18 +2457,23 @@ test "issue149 config change queues no color scheme report, even into a full mai
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
-        .alloc = std.testing.allocator,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .@"16-bit",
-        .clipboard_write = .allow,
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = std.testing.allocator,
+        .handler = .{
+            .alloc = std.testing.allocator,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
     });
     defer stream.deinit();
     _ = countIssue149ColorSchemeReports(&termio_mailbox);
@@ -2481,7 +2492,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
     // A burst of query replies from the reader can fill the mailbox before a
     // reload reaches the IO thread.
     const queue = termio_mailbox.spsc.queue;
-    while (queue.push(.{ .inspector = false }, .{ .instant = {} }) > 0) {}
+    while (queue.push(std.testing.io, .{ .inspector = false }, .{ .instant = {} }) > 0) {}
     var light = try termio.DerivedConfig.init(std.testing.allocator, &config, .{ .theme = .light });
     defer light.deinit();
     stream.handler.changeConfig(&light);
@@ -2496,7 +2507,7 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
     const role = thread_role.fixture(.reader);
     defer role.exit();
 
-    var term = try terminal.Terminal.init(std.testing.allocator, .{
+    var term = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
         .colors = .{
@@ -2527,18 +2538,23 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
-        .alloc = std.testing.allocator,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .@"16-bit",
-        .clipboard_write = .allow,
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = std.testing.allocator,
+        .handler = .{
+            .alloc = std.testing.allocator,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
     });
     defer stream.deinit();
 
@@ -2565,9 +2581,9 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     });
     defer h.deinit(std.testing.allocator);
 
-    while (h.app_queue.push(.{ .quit = {} }, .{ .instant = {} }) != 0) {}
+    while (h.app_queue.push(std.testing.io, .{ .quit = {} }, .{ .instant = {} }) != 0) {}
     const termio_queue = h.termio_mailbox.spsc.queue;
-    while (termio_queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+    while (termio_queue.push(std.testing.io, .{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
 
     // An OSC 52 write longer than a small surface message, so it owns its
     // bytes too; the testing allocator reports a dropped message not freed.
@@ -2580,7 +2596,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         /// locks below for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
         renderer_mutex: *renderer.StateMutex,
         input: []const u8,
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
 
         fn run(self: *@This()) void {
             // As the pty reader, on a helper thread or nested in the test
@@ -2590,7 +2606,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
             self.renderer_mutex.lock();
             defer self.renderer_mutex.unlock();
             self.stream.nextSlice(self.input);
-            self.done.set();
+            self.done.set(std.testing.io);
         }
 
         /// Feed on another thread until it waits on the full `queue`, stop
@@ -2598,18 +2614,19 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         fn stoppedWhileWaiting(self: *@This(), queue: anytype, flag: *std.atomic.Value(bool)) !void {
             flag.store(false, .release);
             const thread = try std.Thread.spawn(.{}, run, .{self});
-            var timer = try std.time.Timer.start();
-            const waited = while (timer.read() < 5 * std.time.ns_per_s and !self.done.isSet()) {
-                queue.mutex.lock();
+            const io = std.testing.io;
+            const started: std.Io.Timestamp = .now(io, .awake);
+            const waited = while (started.untilNow(io, .awake).toNanoseconds() < 5 * std.time.ns_per_s and !self.done.isSet()) {
+                queue.mutex.lockUncancelable(io);
                 const waiting = queue.not_full_waiters;
-                queue.mutex.unlock();
+                queue.mutex.unlock(io);
                 if (waiting == 1) break true;
                 std.Thread.yield() catch {};
             } else false;
             flag.store(true, .release);
-            self.done.timedWait(5 * std.time.ns_per_s) catch {
+            self.done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {
                 // Make room so the waiting feed can finish, then fail.
-                _ = queue.pop();
+                _ = queue.pop(io);
                 thread.join();
                 return error.StoppedReaderKeptWaiting;
             };
@@ -2649,8 +2666,8 @@ test "a reader's answerback into a full termio mailbox lets the IO thread take t
     defer h.deinit(std.testing.allocator);
 
     const queue = h.termio_mailbox.spsc.queue;
-    try std.testing.expect(queue.push(.{ .focused = true }, .{ .instant = {} }) > 0);
-    while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+    try std.testing.expect(queue.push(std.testing.io, .{ .focused = true }, .{ .instant = {} }) > 0);
+    while (queue.push(std.testing.io, .{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
 
     const Io = struct {
         mailbox: *termio.Mailbox,
@@ -2665,7 +2682,7 @@ test "a reader's answerback into a full termio mailbox lets the IO thread take t
             termio.Thread.drainForTest(self.mailbox, self.state, &self.hook) catch |err| {
                 self.err = err;
                 // Make room, so the waiting reader does not wait forever.
-                while (self.mailbox.spsc.queue.pop()) |message| message.deinit();
+                while (self.mailbox.spsc.queue.pop(std.testing.io)) |message| message.deinit();
             };
         }
     };
@@ -2700,7 +2717,7 @@ test "PKG16 integrated cmd prompt clears stale keyboard modes" {
     // default cmd prompt codes into the bytes ConPTY forwards to this handler.
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    var env = std.process.EnvMap.init(arena.allocator());
+    var env = std.process.Environ.Map.init(arena.allocator());
     const integration = try @import("shell_integration.zig").setup(
         arena.allocator(),
         "C:\\unused",
@@ -2747,7 +2764,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     defer role.exit();
 
     const alloc = std.testing.allocator;
-    var term = try terminal.Terminal.init(alloc, .{
+    var term = try terminal.Terminal.init(std.testing.io, alloc, .{
         .cols = 80,
         .rows = 24,
     });
@@ -2772,18 +2789,23 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(alloc, .{
-        .alloc = alloc,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .none,
-        .clipboard_write = .allow,
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
     });
     defer stream.deinit();
     stream.handler.seen_title = true;
@@ -2791,9 +2813,9 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     stream.nextSlice("\x1b]9;9;kitty-shell-cwd://localhost/C:\\Users\\test\\project\x1b\\");
     try std.testing.expectEqualStrings("C:\\Users\\test\\project", term.getPwd().?);
 
-    var message = app_queue.pop().?;
+    var message = app_queue.pop(std.testing.io).?;
     message.deinit(alloc);
-    try std.testing.expect(app_queue.pop() == null);
+    try std.testing.expect(app_queue.pop(std.testing.io) == null);
 
     // A network or device cwd is refused whole: the previous pwd stays and
     // the surface is not told about a change.
@@ -2801,7 +2823,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     stream.nextSlice("\x1b]7;file://localhost/%5C%5Cserver%5Cshare\x1b\\");
     stream.nextSlice("\x1b]7;file://localhost//server/share\x1b\\");
     try std.testing.expectEqualStrings("C:\\Users\\test\\project", term.getPwd().?);
-    try std.testing.expect(app_queue.pop() == null);
+    try std.testing.expect(app_queue.pop(std.testing.io) == null);
 }
 
 test "OSC 7 pwd refuses network and device paths" {
@@ -2856,7 +2878,7 @@ const TestStream = struct {
         // The fork's cursor defaults (block, blinking) used to be the
         // handler's fields; upstream c594031d5 moved them into Terminal,
         // whose `default_cursor_blink` defaults to false.
-        self.term = try terminal.Terminal.init(alloc, .{
+        self.term = try terminal.Terminal.init(std.testing.io, alloc, .{
             .cols = 80,
             .rows = 24,
             .default_cursor_blink = true,
@@ -2873,22 +2895,27 @@ const TestStream = struct {
         self.app_queue = try AppMailbox.Queue.create(alloc);
         errdefer self.app_queue.destroy(alloc);
 
-        self.stream = StreamHandler.Stream.initAlloc(alloc, .{
-            .alloc = alloc,
-            .size = undefined,
-            .terminal = &self.term,
-            .termio_mailbox = &self.termio_mailbox,
-            .stopping = options.stopping,
-            .surface_mailbox = .{
-                .surface = undefined,
-                .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_queue },
+        self.stream = StreamHandler.Stream.init(.{
+            .allocator = alloc,
+            .handler = .{
+                .alloc = alloc,
+                .size = undefined,
+                .terminal = &self.term,
+                .termio_mailbox = &self.termio_mailbox,
+                .stopping = options.stopping,
+                .surface_mailbox = .{
+                    .surface = undefined,
+                    .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_queue },
+                },
+                .renderer_state = &self.renderer_state,
+                .renderer_mailbox = undefined,
+                .renderer_wakeup = undefined,
+                .enquiry_response = options.enquiry_response,
+                .osc_color_report_format = options.osc_color_report_format,
+                .clipboard_write = .allow,
+                .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+                .xt_checksum_report = false, // vt-xt-checksum-report's default
             },
-            .renderer_state = &self.renderer_state,
-            .renderer_mailbox = undefined,
-            .renderer_wakeup = undefined,
-            .enquiry_response = options.enquiry_response,
-            .osc_color_report_format = options.osc_color_report_format,
-            .clipboard_write = .allow,
         });
         self.stream.handler.seen_title = options.seen_title;
         self.role = thread_role.fixture(.reader);
@@ -2896,7 +2923,7 @@ const TestStream = struct {
 
     fn deinit(self: *TestStream, alloc: Allocator) void {
         self.stream.deinit();
-        while (self.app_queue.pop()) |value| {
+        while (self.app_queue.pop(std.testing.io)) |value| {
             var message = value;
             message.deinit(alloc);
         }
@@ -2909,7 +2936,7 @@ const TestStream = struct {
     /// The next surface message, or null when none is left. Skips the mouse
     /// shape a full reset sends.
     fn nextSurfaceMessage(self: *TestStream) ?apprt.surface.Message {
-        while (self.app_queue.pop()) |message| {
+        while (self.app_queue.pop(std.testing.io)) |message| {
             const payload = message.surface_message.message;
             if (payload == .set_mouse_shape) continue;
             return payload;
@@ -3018,7 +3045,7 @@ test "OSC 9;9 pwd keeps the network and device screening" {
     for ([_][]const u8{ "\\\\server\\share", "C:\\a\x7fb" }) |value| {
         var seq: std.ArrayList(u8) = .empty;
         defer seq.deinit(alloc);
-        try seq.writer(alloc).print("\x1b]9;9;{s}\x1b\\", .{value});
+        try seq.print(alloc, "\x1b]9;9;{s}\x1b\\", .{value});
         h.stream.nextSlice(seq.items);
         h.expectPwd("C:\\Users\\test") catch |err| {
             std.debug.print("accepted: {s}\n", .{value});
@@ -3077,7 +3104,7 @@ test "OSC 7 accepts this machine's name in any letter case" {
     for ([_][]const u8{ ours, lower, upper, absolute, "LocalHost" }) |host| {
         var seq: std.ArrayList(u8) = .empty;
         defer seq.deinit(alloc);
-        try seq.writer(alloc).print("\x1b]7;file://{s}/C:/Users/test\x1b\\", .{host});
+        try seq.print(alloc, "\x1b]7;file://{s}/C:/Users/test\x1b\\", .{host});
         h.stream.nextSlice(seq.items);
         h.expectPwd("C:\\Users\\test") catch |err| {
             std.debug.print("rejected host: {s}\n", .{host});
@@ -3154,7 +3181,7 @@ test "desktop notifications are cut on a code point boundary" {
 fn popProgramStatusTestWrite(mailbox: *termio.Mailbox) ?[]const u8 {
     while (true) {
         const message = switch (mailbox.*) {
-            .spsc => |*value| value.queue.pop() orelse return null,
+            .spsc => |*value| value.queue.pop(std.testing.io) orelse return null,
         };
         switch (message) {
             .write_stable => |value| return value,
@@ -3242,7 +3269,7 @@ test "OSC 22 with an empty shape gives the pointer back" {
 
     const S = struct {
         fn nextShape(queue: anytype) ?terminal.MouseShape {
-            while (queue.pop()) |message| switch (message.surface_message.message) {
+            while (queue.pop(std.testing.io)) |message| switch (message.surface_message.message) {
                 .set_mouse_shape => |shape| return shape,
                 else => {},
             };
@@ -3361,7 +3388,7 @@ test "CSI 19 t asks for the size in characters" {
 
     h.stream.nextSlice("\x1b[19t");
     const message = switch (h.termio_mailbox) {
-        .spsc => |*value| value.queue.pop() orelse return error.NoTermioMessage,
+        .spsc => |*value| value.queue.pop(std.testing.io) orelse return error.NoTermioMessage,
     };
     try std.testing.expectEqual(termio.Message.SizeReport.csi_19_t, message.size_report);
 }
@@ -3393,7 +3420,7 @@ test "glyph APC gets no reply from the app stream handler" {
 
     // A well-formed glyph query would elicit a reply if dispatched.
     h.stream.nextSlice("\x1b_25a1;q;cp=E0A0\x1b\\");
-    try std.testing.expect(h.termio_mailbox.spsc.queue.pop() == null);
+    try std.testing.expect(h.termio_mailbox.spsc.queue.pop(std.testing.io) == null);
 
     // A supported request still reaches the same reply queue.
     h.stream.nextSlice("\x1b[?6n");

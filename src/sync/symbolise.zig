@@ -177,6 +177,33 @@ const ImagehlpModuleW64 = extern struct {
     Reserved: u32,
 };
 
+// DbgHelp.h's `IMAGEHLP_MODULEW64` (10.0.28000.0 SDK): the header packs with
+// pshpack8, which leaves every member here at its natural alignment, so the
+// DWORD64 after the first DWORD starts at 8, the GUID (`PdbSig70`, 4-aligned
+// in C) at 3,204, and the struct is 3,260 bytes rounded up to 3,264. A
+// `SizeOfStruct` DbgHelp does not know makes `SymGetModuleInfoW64` fail.
+test "ImagehlpModuleW64 matches DbgHelp.h's IMAGEHLP_MODULEW64" {
+    const T = ImagehlpModuleW64;
+    try std.testing.expectEqual(@as(usize, 3264), @sizeOf(T));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(T));
+    const offsets = .{
+        .{ "SizeOfStruct", 0 },      .{ "BaseOfImage", 8 },      .{ "ImageSize", 16 },
+        .{ "TimeDateStamp", 20 },    .{ "CheckSum", 24 },        .{ "NumSyms", 28 },
+        .{ "SymType", 32 },          .{ "ModuleName", 36 },      .{ "ImageName", 100 },
+        .{ "LoadedImageName", 612 }, .{ "LoadedPdbName", 1124 }, .{ "CVSig", 1636 },
+        .{ "CVData", 1640 },         .{ "PdbSig", 3200 },        .{ "PdbSig70", 3204 },
+        .{ "PdbAge", 3220 },         .{ "PdbUnmatched", 3224 },  .{ "DbgUnmatched", 3228 },
+        .{ "LineNumbers", 3232 },    .{ "GlobalSymbols", 3236 }, .{ "TypeInfo", 3240 },
+        .{ "SourceIndexed", 3244 },  .{ "Publics", 3248 },       .{ "MachineType", 3252 },
+        .{ "Reserved", 3256 },
+    };
+    inline for (offsets) |entry| {
+        try std.testing.expectEqual(@as(usize, entry[1]), @offsetOf(T, entry[0]));
+    }
+    // Every member is pinned: none was added or dropped.
+    try std.testing.expectEqual(offsets.len, @typeInfo(T).@"struct".field_names.len);
+}
+
 const sym_pdb = 3;
 const sym_dia = 7;
 
@@ -221,7 +248,7 @@ extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) win3
 
 /// DbgHelp is single-threaded: one session at a time, held from `open` to
 /// `close`.
-var session_lock: std.Thread.Mutex = .{};
+var session_lock: std.Io.Mutex = .init;
 /// Loaded at the first session, kept for the process (under the lock).
 var api: ?Api = null;
 /// Its address names this file's DbgHelp sessions: `SymInitializeW` takes
@@ -237,12 +264,12 @@ fn loadApi() error{NoDbgHelp}!*const Api {
     const lib = LoadLibraryExW(std.unicode.utf8ToUtf16LeStringLiteral("dbghelp.dll"), null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse
         return error.NoDbgHelp;
     var fns: Api = undefined;
-    inline for (@typeInfo(Api).@"struct".fields) |field| {
-        const proc = GetProcAddress(lib, field.name) orelse return error.NoDbgHelp;
+    inline for (@typeInfo(Api).@"struct".field_names) |field_name| {
+        const proc = GetProcAddress(lib, field_name) orelse return error.NoDbgHelp;
         // A function pointer is aligned 4 on aarch64 and 1 on x86_64, so only an
         // aarch64 build rejects the cast without the assertion (tabs-panes.md,
         // 2026-11-08 TEAROFF-01, review round 2).
-        @field(fns, field.name) = @ptrCast(@alignCast(proc));
+        @field(fns, field_name) = @ptrCast(@alignCast(proc));
     }
     api = fns;
     return &api.?;
@@ -293,8 +320,8 @@ pub const Session = struct {
         const dir_z = try a.dupeSentinel(u16, image[0..dir_len], 0);
         defer a.free(dir_z);
 
-        session_lock.lock();
-        errdefer session_lock.unlock();
+        session_lock.lockUncancelable(std.testing.io);
+        errdefer session_lock.unlock(std.testing.io);
         const fns = try loadApi();
         _ = fns.SymSetOptions(sym_options);
         if (fns.SymInitializeW(sessionHandle(), dir_z.ptr, win32_types.FALSE) == 0) return error.SymInitializeFailed;
@@ -316,7 +343,7 @@ pub const Session = struct {
 
     pub fn close(self: *Session) void {
         _ = self.api.SymCleanup(sessionHandle());
-        session_lock.unlock();
+        session_lock.unlock(std.testing.io);
     }
 
     /// What DbgHelp loaded for the image.
@@ -551,8 +578,8 @@ pub fn runFromEnvironment() noreturn {
 /// environment is drive-absolute or refused (error.NotDriveAbsolute), as
 /// the dump directory is (`dump.isDriveAbsolute`).
 pub fn envPath(a: Allocator, name: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(a, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
+    const value = std.testing.environ.getAlloc(a, name) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return null,
         else => return err,
     };
     errdefer a.free(value);
@@ -575,7 +602,7 @@ fn runDirectories(a: Allocator) !u8 {
     const raw_path = (try envPath(a, raw_env)) orelse return error.NoRawDirectory;
     const out_path = (try envPath(a, out_env)) orelse return error.NoOutputDirectory;
     const images_path = (try envPath(a, images_env)) orelse images: {
-        const self_exe = try std.fs.selfExePathAlloc(a);
+        const self_exe = try std.process.executablePathAlloc(std.testing.io, a);
         break :images try a.dupe(u8, std.fs.path.dirname(self_exe) orelse return error.NoImagesDirectory);
     };
     const root = (try envPath(a, root_env)) orelse root: {
@@ -584,14 +611,15 @@ fn runDirectories(a: Allocator) !u8 {
         break :root try own.sourceRoot(a);
     };
 
-    var raw_dir = try std.fs.openDirAbsolute(raw_path, .{ .iterate = true });
-    defer raw_dir.close();
-    var out_dir = try std.fs.openDirAbsolute(out_path, .{});
-    defer out_dir.close();
+    const io = std.testing.io;
+    var raw_dir = try std.Io.Dir.openDirAbsolute(io, raw_path, .{ .iterate = true });
+    defer raw_dir.close(io);
+    var out_dir = try std.Io.Dir.openDirAbsolute(io, out_path, .{});
+    defer out_dir.close(io);
 
     var names: std.ArrayListUnmanaged([]u8) = .empty;
     var it = raw_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, dump.extension)) continue;
         try names.append(a, try a.dupe(u8, entry.name));
     }
@@ -603,13 +631,13 @@ fn runDirectories(a: Allocator) !u8 {
 
     var totals: struct { dumps: usize = 0, pairs: usize = 0, unresolved: usize = 0, problems: usize = 0 } = .{};
     for (names.items) |name| {
-        const raw = try raw_dir.readFileAlloc(a, name, 16 << 20);
+        const raw = try raw_dir.readFileAlloc(io, name, a, .limited(16 << 20));
         defer a.free(raw);
         const result = try symboliseFile(a, raw, images_path, root);
         defer result.deinit(a);
-        const file = try out_dir.createFile(name, .{ .exclusive = true });
-        defer file.close();
-        try file.writeAll(result.text);
+        const file = try out_dir.createFile(io, name, .{ .exclusive = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, result.text);
         totals.dumps += 1;
         totals.pairs += result.pairs;
         totals.unresolved += result.unresolved;

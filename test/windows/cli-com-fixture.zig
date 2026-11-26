@@ -19,12 +19,13 @@ extern "kernel32" fn ExitProcess(uExitCode: w.UINT) callconv(.winapi) noreturn;
 
 pub const panic = std.debug.no_panic;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.page_allocator;
-    const path = try std.process.getEnvVarOwned(alloc, "NOCTTY_COM_FIXTURE_RECEIPT");
-    defer alloc.free(path);
-    const exit_code = envU32(alloc, "NOCTTY_COM_FIXTURE_EXIT", 0);
-    const hold_ms = envU32(alloc, "NOCTTY_COM_FIXTURE_HOLD_MS", 3000);
+    const io = init.io;
+    const env = init.environ_map;
+    const path = env.get("NOCTTY_COM_FIXTURE_RECEIPT") orelse return error.EnvironmentVariableNotFound;
+    const exit_code = envU32(env, "NOCTTY_COM_FIXTURE_EXIT", 0);
+    const hold_ms = envU32(env, "NOCTTY_COM_FIXTURE_HOLD_MS", 3000);
 
     var startup: w.STARTUPINFOW = std.mem.zeroes(w.STARTUPINFOW);
     startup.cb = @sizeOf(w.STARTUPINFOW);
@@ -35,12 +36,12 @@ pub fn main() !void {
 
     var stdin_bytes: u64 = 0;
     var digest: [32]u8 = undefined;
-    if (envSet(alloc, "NOCTTY_COM_FIXTURE_STDIN")) {
+    if (env.contains("NOCTTY_COM_FIXTURE_STDIN")) {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         var buffer: [4096]u8 = undefined;
-        const stdin = std.fs.File.stdin();
+        const stdin = std.Io.File.stdin();
         while (true) {
-            const n = stdin.read(&buffer) catch break;
+            const n = stdin.readStreaming(io, &.{&buffer}) catch break;
             if (n == 0) break;
             hasher.update(buffer[0..n]);
             stdin_bytes += n;
@@ -50,9 +51,9 @@ pub fn main() !void {
     const hex = std.fmt.bytesToHex(digest, .lower);
     const hex_slice: []const u8 = hex[0..];
 
-    if (envSet(alloc, "NOCTTY_COM_FIXTURE_OUT")) {
-        if (isUsable(stdout_kind)) std.fs.File.stdout().writeAll("fixture-out\n") catch {};
-        if (isUsable(stderr_kind)) std.fs.File.stderr().writeAll("fixture-err\n") catch {};
+    if (env.contains("NOCTTY_COM_FIXTURE_OUT")) {
+        if (isUsable(stdout_kind)) std.Io.File.stdout().writeStreamingAll(io, "fixture-out\n") catch {};
+        if (isUsable(stderr_kind)) std.Io.File.stderr().writeStreamingAll(io, "fixture-err\n") catch {};
     }
 
     var name: [256]u16 = undefined;
@@ -83,24 +84,17 @@ pub fn main() !void {
         .stdin_sha256 = hex_slice,
     }, .{});
     defer alloc.free(json);
-    const file = try std.fs.createFileAbsolute(path, .{ .exclusive = true });
-    try file.writeAll(json);
-    file.close();
+    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
+    try file.writeStreamingAll(io, json);
+    file.close(io);
 
     // Stay alive long enough for the harness to see that the launcher returned.
     if (hold_ms != 0) Sleep(hold_ms);
     ExitProcess(exit_code);
 }
 
-fn envSet(alloc: std.mem.Allocator, name: []const u8) bool {
-    const text = std.process.getEnvVarOwned(alloc, name) catch return false;
-    alloc.free(text);
-    return true;
-}
-
-fn envU32(alloc: std.mem.Allocator, name: []const u8, default: u32) u32 {
-    const text = std.process.getEnvVarOwned(alloc, name) catch return default;
-    defer alloc.free(text);
+fn envU32(env: *const std.process.Environ.Map, name: []const u8, default: u32) u32 {
+    const text = env.get(name) orelse return default;
     return std.fmt.parseInt(u32, text, 10) catch default;
 }
 
@@ -127,4 +121,5 @@ extern "kernel32" fn GetFileType(w.HANDLE) callconv(.winapi) u32;
 extern "kernel32" fn GetConsoleProcessList([*]u32, u32) callconv(.winapi) u32;
 extern "user32" fn GetThreadDesktop(u32) callconv(.winapi) ?w.HANDLE;
 extern "user32" fn GetProcessWindowStation() callconv(.winapi) ?w.HANDLE;
-extern "user32" fn GetUserObjectInformationW(?w.HANDLE, c_int, *anyopaque, u32, *u32) callconv(.winapi) w.BOOL;
+// A Win32 BOOL as the ABI has it (Zig 0.17's `std.os.windows.BOOL` is an enum).
+extern "user32" fn GetUserObjectInformationW(?w.HANDLE, c_int, *anyopaque, u32, *u32) callconv(.winapi) c_int;

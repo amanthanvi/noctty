@@ -1420,7 +1420,7 @@ test "isolated: a full disk that stops both a pair and the in-place mark panics 
     if (thread_role.layer == .off) return error.SkipZigTest;
     const isolated = @import("isolated.zig");
     if (isolated.inChild()) {
-        const dir_utf8 = try std.process.getEnvVarOwned(testing.allocator, env_var);
+        const dir_utf8 = try testing.environ.getAlloc(testing.allocator, env_var);
         defer testing.allocator.free(dir_utf8);
         const dir = try std.unicode.wtf8ToWtf16LeAllocZ(testing.allocator, dir_utf8);
         defer testing.allocator.free(dir);

@@ -381,6 +381,9 @@ pub const Face = struct {
     }
 
     test "face name keeps the raw bytes of a malformed name" {
+        // Zig 0.17's `std.simd.repeat` builds its index vector at comptime,
+        // one branch per byte.
+        @setEvalBranchQuota(4096);
         const malformed = [_][]const u8{
             "", // empty
             "\x00A\x00", // odd length
@@ -412,6 +415,9 @@ pub const Face = struct {
         // 342 x U+4E00 is 684 bytes of UTF-16, under the 1,024-byte input
         // limit, and 1,026 bytes of UTF-8: one character more than the 1,024
         // bytes `+show-face` passes. 341 fill it to 1,023 bytes.
+        // Zig 0.17's `std.simd.repeat` builds its index vector at comptime,
+        // one branch per byte.
+        @setEvalBranchQuota(4096);
         try expectUtf16Family(&@as(["一".len * 341]u8, std.simd.repeat("一".len * 341, "一".*)), true, 1024);
         try expectUtf16Family(&@as(["一".len * 342]u8, std.simd.repeat("一".len * 342, "一".*)), false, 1024);
         try expectUtf16Family(&@as([512]u8, @splat('a')), true, 1024);
@@ -1507,8 +1513,8 @@ fn fontThickenSample(face: *Face, cp: u21, thicken: bool, strength: u8, format: 
     };
     // FT_Render_Glyph preserves the loaded outline while adding its bitmap.
     // Measure the actual production outline, not a separate embolden call.
-    face.ft_mutex.lock();
-    defer face.ft_mutex.unlock();
+    face.ft_mutex.lockUncancelable(std.testing.io);
+    defer face.ft_mutex.unlock(std.testing.io);
     const outline = &face.face.handle.*.glyph.*.outline;
     if (outline.n_points > 0) {
         var box: freetype.c.FT_BBox = undefined;

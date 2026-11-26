@@ -53,15 +53,14 @@ const WRITE_BUF_SIZE = 4 * 1024;
 // bottleneck on high-throughput output. 64 KiB is the product default.
 const WINDOWS_READ_BUF_SIZE = 64 * 1024;
 
-fn traceInstant(enabled: bool) ?std.time.Instant {
+fn traceInstant(enabled: bool) ?std.Io.Timestamp {
     if (!enabled) return null;
-    return std.time.Instant.now() catch null;
+    return .now(global.io(), .awake);
 }
 
-fn traceElapsedNs(started: ?std.time.Instant) u64 {
+fn traceElapsedNs(started: ?std.Io.Timestamp) u64 {
     const start = started orelse return 0;
-    const now = std.time.Instant.now() catch return 0;
-    return now.since(start);
+    return @intCast(@max(0, start.untilNow(global.io(), .awake).toNanoseconds()));
 }
 
 fn pathEntryEquals(a: []const u8, b: []const u8) bool {
@@ -127,7 +126,7 @@ fn putTermEnv(env: *EnvMap, term: []const u8, dir: []const u8) !void {
     }
 
     if (env.get("TERMINFO")) |inherited| {
-        if (samePath(inherited, dir)) env.remove("TERMINFO");
+        if (samePath(inherited, dir)) _ = env.orderedRemove("TERMINFO");
     }
 }
 
@@ -350,7 +349,7 @@ pub fn threadEnter(
         .read_thread_fd = pty_fds.read,
         .stopping = &io.stopping,
         .termios_timer = termios_timer,
-        .write_pool = .init(alloc),
+        .write_pool = .empty,
     } };
 
     // Start our process watcher. If we have an xev.Process use it.
@@ -608,8 +607,8 @@ fn termiosTimer(
         // If our password input state changed on the terminal then
         // we notify the surface.
         {
-            td.renderer_state.mutex.lockUncancelable(global.io());
-            defer td.renderer_state.mutex.unlock(global.io());
+            td.renderer_state.mutex.lockUncancelable();
+            defer td.renderer_state.mutex.unlock();
             const t = td.renderer_state.terminal;
             if (t.flags.password_input == password_input) {
                 break :mode_change;
@@ -647,9 +646,6 @@ pub fn queueWrite(
     linefeed: bool,
 ) !void {
     _ = self;
-    // The write pool owns its allocator; the parameter is kept for the
-    // backend interface.
-    _ = alloc;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
@@ -662,7 +658,7 @@ pub fn queueWrite(
     // still queued (see `ThreadData.Write`).
     var i: usize = 0;
     while (i < data.len) {
-        const w = try exec.write_pool.create();
+        const w = try exec.write_pool.create(alloc);
         w.td = exec;
         const buf = &w.buf;
         const slice = slice: {
@@ -812,8 +808,7 @@ pub const ThreadData = struct {
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
         // drop this.
-        _ = alloc;
-        self.write_pool.deinit();
+        self.write_pool.deinit(alloc);
 
         // Stop our process watcher
         if (self.process) |*p| p.deinit();
@@ -1612,8 +1607,8 @@ const Subprocess = struct {
                     // returns, and a process stuck in its kernel teardown
                     // would hold it for good.
                     switch (windows_ext.kernel32.WaitForSingleObject(pid, kill_wait_ms)) {
-                        std.os.windows.WAIT_OBJECT_0 => {},
-                        std.os.windows.WAIT_TIMEOUT => log.warn("child process still exiting after {d} ms", .{kill_wait_ms}),
+                        windows_ext.WAIT_OBJECT_0 => {},
+                        windows_ext.WAIT_TIMEOUT => log.warn("child process still exiting after {d} ms", .{kill_wait_ms}),
                         else => return windows.unexpectedError(windows_ext.kernel32.GetLastError()),
                     }
                 },
@@ -2239,7 +2234,7 @@ pub const ReadThread = struct {
         io: *termio.Termio,
         quit: posix.fd_t,
         adopted_client_process: ?windows.HANDLE,
-        process_start: std.time.Instant,
+        process_start: std.Io.Timestamp,
     ) void {
         // The pty reader's role, for the renderer-state mutex it takes in
         // processOutput (PLAN.md §2.7 RQ5).
@@ -2309,7 +2304,7 @@ pub const ReadThread = struct {
         while (!stop.load(.acquire)) {
             var n: windows.DWORD = 0;
             const read_started = traceInstant(trace);
-            if (windows_ext.kernel32.ReadFile(fd, buf.ptr, @intCast(buf.len), &n, null) == 0) {
+            if (windows_ext.kernel32.ReadFile(fd, buf.ptr, @intCast(buf.len), &n, null) == windows.FALSE) {
                 switch (windows_ext.kernel32.GetLastError()) {
                     // `cancelReadUntilExit`; `stop` decides.
                     .OPERATION_ABORTED => continue,
@@ -2337,7 +2332,7 @@ pub const ReadThread = struct {
     fn cancelReadUntilExit(fd: windows.HANDLE, reader: std.Thread) void {
         var warned = false;
         while (true) {
-            if (windows_ext.kernel32.CancelIoEx(fd, null) == 0) switch (windows_ext.kernel32.GetLastError()) {
+            if (windows_ext.kernel32.CancelIoEx(fd, null) == windows.FALSE) switch (windows_ext.kernel32.GetLastError()) {
                 .NOT_FOUND => {},
                 else => |err| if (!warned) {
                     warned = true;
@@ -2345,7 +2340,7 @@ pub const ReadThread = struct {
                 },
             };
             switch (windows_ext.kernel32.WaitForSingleObject(reader.getHandle(), cancel_retry_ms)) {
-                std.os.windows.WAIT_TIMEOUT => {},
+                windows_ext.WAIT_TIMEOUT => {},
                 else => return,
             }
         }
@@ -2356,10 +2351,10 @@ pub const ReadThread = struct {
     fn notifyAdoptedExit(
         io: *termio.Termio,
         client_process: windows.HANDLE,
-        process_start: std.time.Instant,
+        process_start: std.Io.Timestamp,
     ) void {
         var exit_code: windows.DWORD = 0;
-        if (windows_ext.kernel32.GetExitCodeProcess(client_process, &exit_code) == 0) {
+        if (windows_ext.kernel32.GetExitCodeProcess(client_process, &exit_code) == windows.FALSE) {
             log.warn("adopted client exit-code query failed err={}", .{windows_ext.kernel32.GetLastError()});
             exit_code = 1;
         } else if (exit_code == windows_ext.STILL_ACTIVE) {
@@ -2369,10 +2364,10 @@ pub const ReadThread = struct {
             exit_code = 0;
         }
 
-        const runtime_ms = runtime: {
-            const process_end = std.time.Instant.now() catch break :runtime 0;
-            break :runtime process_end.since(process_start) / std.time.ns_per_ms;
-        };
+        const runtime_ms: u64 = @intCast(@max(
+            0,
+            process_start.untilNow(global.io(), .awake).toMilliseconds(),
+        ));
         _ = io.surface_mailbox.push(.{
             .child_exited = .{
                 .exit_code = exit_code,
@@ -2392,7 +2387,7 @@ const TestPipe = struct {
     fn init() !TestPipe {
         var read: windows.HANDLE = undefined;
         var write: windows.HANDLE = undefined;
-        if (windows.exp.kernel32.CreatePipe(&read, &write, null, 0) == 0) {
+        if (windows.exp.kernel32.CreatePipe(&read, &write, null, 0) == windows.FALSE) {
             return windows.unexpectedError(windows_ext.kernel32.GetLastError());
         }
         return .{ .read = read, .write = write };
@@ -2420,13 +2415,20 @@ const TestPipe = struct {
 
 /// Runs `cancelReadUntilExit` and reports when it returned.
 const TestStopper = struct {
-    done: std.Thread.ResetEvent = .{},
+    done: std.Io.Event = .unset,
 
     fn run(self: *TestStopper, fd: windows.HANDLE, reader: std.Thread) void {
         ReadThread.cancelReadUntilExit(fd, reader);
-        self.done.set();
+        self.done.set(std.testing.io);
     }
 };
+
+fn testWait(event: *std.Io.Event, ms: i64) !void {
+    return event.waitTimeout(std.testing.io, .{ .duration = .{
+        .raw = .fromMilliseconds(ms),
+        .clock = .awake,
+    } });
+}
 
 test "Windows pty reader busy with output when stopped exits at its next read" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -2437,14 +2439,14 @@ test "Windows pty reader busy with output when stopped exits at its next read" {
     // Holds the reader in its first chunk, outside ReadFile, where the cancel
     // that used to be the only stop signal finds nothing to cancel.
     const Sink = struct {
-        entered: std.Thread.ResetEvent = .{},
-        release: std.Thread.ResetEvent = .{},
+        entered: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
         chunks: std.atomic.Value(u32) = .init(0),
 
         fn output(self: *@This(), _: []const u8, _: u64) void {
             if (self.chunks.fetchAdd(1, .acq_rel) == 0) {
-                self.entered.set();
-                self.release.wait();
+                self.entered.set(std.testing.io);
+                self.release.waitUncancelable(std.testing.io);
             }
         }
 
@@ -2464,9 +2466,9 @@ test "Windows pty reader busy with output when stopped exits at its next read" {
     var end: ReadThread.ReadEnd = .eof;
     try pipe.put("first");
     const reader = try std.Thread.spawn(.{}, Sink.read, .{ pipe.read, &stop, &sink, &end });
-    sink.entered.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&sink.entered, 5000) catch {
         pipe.closeWrite();
-        sink.release.set();
+        sink.release.set(std.testing.io);
         reader.join();
         return error.ReaderNeverRead;
     };
@@ -2477,10 +2479,10 @@ test "Windows pty reader busy with output when stopped exits at its next read" {
     stop.store(true, .release);
     var stopper: TestStopper = .{};
     const stopping = try std.Thread.spawn(.{}, TestStopper.run, .{ &stopper, pipe.read, reader });
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    sink.release.set();
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+    sink.release.set(std.testing.io);
 
-    stopper.done.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&stopper.done, 5000) catch {
         pipe.closeWrite();
         stopping.join();
         reader.join();
@@ -2502,14 +2504,14 @@ test "Windows pty reader cancel is retried for a read that starts after the firs
     // ReadFile only after the first cancel found no read to cancel. One
     // cancel left this read, and the joins behind it, blocked for good.
     const LateReader = struct {
-        go: std.Thread.ResetEvent = .{},
+        go: std.Io.Event = .unset,
         err: std.os.windows.Win32Error = .SUCCESS,
 
         fn run(self: *@This(), fd: windows.HANDLE) void {
-            self.go.wait();
+            self.go.waitUncancelable(std.testing.io);
             var buf: [16]u8 = undefined;
             var n: windows.DWORD = 0;
-            if (windows_ext.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == 0) {
+            if (windows_ext.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == windows.FALSE) {
                 self.err = windows_ext.kernel32.GetLastError();
             }
         }
@@ -2519,10 +2521,10 @@ test "Windows pty reader cancel is retried for a read that starts after the firs
     const reader = try std.Thread.spawn(.{}, LateReader.run, .{ &late, pipe.read });
     var stopper: TestStopper = .{};
     const stopping = try std.Thread.spawn(.{}, TestStopper.run, .{ &stopper, pipe.read, reader });
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    late.go.set();
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+    late.go.set(std.testing.io);
 
-    stopper.done.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&stopper.done, 5000) catch {
         pipe.closeWrite();
         stopping.join();
         reader.join();
@@ -2540,7 +2542,7 @@ test "child exit report gives up on a full app mailbox once the surface is closi
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);
     defer app_queue.destroy(alloc);
-    while (app_queue.push(.{ .quit = {} }, .{ .instant = {} }) != 0) {}
+    while (app_queue.push(std.testing.io, .{ .quit = {} }, .{ .instant = {} }) != 0) {}
 
     // The app thread set this before joining the IO thread, so it drains
     // nothing until that thread exits.
@@ -2554,7 +2556,7 @@ test "child exit report gives up on a full app mailbox once the surface is closi
             .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
         },
         .backend = .{ .exec = .{
-            .start = try std.time.Instant.now(),
+            .start = .now(std.testing.io, .awake),
             .write_stream = undefined,
             .process = null,
             .read_thread = undefined,
@@ -2568,18 +2570,18 @@ test "child exit report gives up on a full app mailbox once the surface is closi
     };
 
     const Exit = struct {
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
 
         fn run(self: *@This(), data: *termio.Termio.ThreadData) void {
             processExitCommon(data, 0);
-            self.done.set();
+            self.done.set(std.testing.io);
         }
     };
     var exit: Exit = .{};
     const thread = try std.Thread.spawn(.{}, Exit.run, .{ &exit, &td });
-    exit.done.timedWait(5 * std.time.ns_per_s) catch {
+    testWait(&exit.done, 5000) catch {
         // Make room so the waiting report can finish, then fail.
-        _ = app_queue.pop();
+        _ = app_queue.pop(std.testing.io);
         thread.join();
         return error.ChildExitReportWaitedOnClosingSurface;
     };
@@ -2600,7 +2602,7 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
                 current,
                 &result,
                 0,
-                std.os.windows.FALSE,
+                windows_ext.FALSE,
                 std.os.windows.DUPLICATE_SAME_ACCESS,
             ) == 0) return windows.unexpectedError(windows_ext.kernel32.GetLastError());
             return result;
@@ -2609,7 +2611,7 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     defer _ = windows_ext.CloseHandle(signal_read);
 
     const current = std.os.windows.GetCurrentProcess();
@@ -2650,10 +2652,10 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
     subprocess.stop();
     var byte: [1]u8 = undefined;
     var read: windows.DWORD = 0;
-    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &byte, byte.len, &read, null) == 0);
+    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &byte, byte.len, &read, null) == windows.FALSE);
     try std.testing.expectEqual(std.os.windows.Win32Error.BROKEN_PIPE, windows_ext.kernel32.GetLastError());
     var exit_code: windows.DWORD = 0;
-    try std.testing.expect(windows_ext.kernel32.GetExitCodeProcess(subprocess.adopted_client_process.?, &exit_code) != 0);
+    try std.testing.expect(windows_ext.kernel32.GetExitCodeProcess(subprocess.adopted_client_process.?, &exit_code) != windows.FALSE);
     try std.testing.expectEqual(windows_ext.STILL_ACTIVE, exit_code);
     try std.testing.expectError(error.ResizeFailed, subprocess.resize(
         .{ .columns = 80, .rows = 24 },
@@ -2870,7 +2872,7 @@ fn execCommand(
 
                 // Note we don't free any of the memory below since it is
                 // allocated in the arena.
-                const windir = std.process.getEnvVarOwned(
+                const windir = global.environ().getAlloc(
                     alloc,
                     "WINDIR",
                 ) catch |err| {
@@ -3445,7 +3447,7 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
     // gets the identity too. It names no distribution, so nothing asks one
     // for TERM: that stays wsl.exe's unless the configuration sets it.
     {
-        const system_root = try std.process.getEnvVarOwned(arena.allocator(), "SystemRoot");
+        const system_root = try std.testing.environ.getAlloc(arena.allocator(), "SystemRoot");
         const bash = try std.fs.path.joinZ(arena.allocator(), &.{ system_root, "System32", "bash.exe" });
         var overrides: configpkg.RepeatableStringMap = .{};
         try overrides.parseCLI(arena.allocator(), "WSLENV=GOPATH/l");
@@ -3578,7 +3580,7 @@ test "a pane that starts WSL's bash.exe launcher runs WSL (#520 review)" {
     const apps = try tmp.dir.realPathFileAlloc(std.testing.io, "WindowsApps", a);
     const git = try tmp.dir.realPathFileAlloc(std.testing.io, "Git\\bin", a);
 
-    const system_root = try std.process.getEnvVarOwned(a, "SystemRoot");
+    const system_root = try std.testing.environ.getAlloc(a, "SystemRoot");
     const system_bash = try std.fs.path.joinZ(a, &.{ system_root, "System32", "bash.exe" });
     const system_argv = [_][:0]const u8{system_bash};
     const alias_argv = [_][:0]const u8{"C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe"};
@@ -3647,14 +3649,14 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     const name = try std.fmt.bufPrint(
         &name_buf,
         "\\\\.\\pipe\\LOCAL\\noctty-exec-write-order-{d}-{d}",
-        .{ windows.GetCurrentProcessId(), std.time.nanoTimestamp() },
+        .{ windows.GetCurrentProcessId(), std.Io.Timestamp.now(std.testing.io, .real).toNanoseconds() },
     );
     var name_w_buf: [128]u16 = undefined;
     const name_w_len = try std.unicode.utf8ToUtf16Le(&name_w_buf, name);
     name_w_buf[name_w_len] = 0;
     const name_w = name_w_buf[0..name_w_len :0];
 
-    const server = k32.CreateNamedPipeW(
+    const server = windows.exp.kernel32.CreateNamedPipeW(
         name_w.ptr,
         windows.PIPE_ACCESS_OUTBOUND |
             windows.FILE_FLAG_FIRST_PIPE_INSTANCE |
@@ -3671,7 +3673,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     }
     defer _ = windows_ext.CloseHandle(server);
 
-    const client = k32.CreateFileW(
+    const client = windows.exp.kernel32.CreateFileW(
         name_w.ptr,
         windows.GENERIC_READ,
         0,
@@ -3703,11 +3705,11 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
 
     // Two large writes of distinct bytes, each far more chunks than the
     // old 32-slot preallocation.
@@ -3767,14 +3769,14 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
             var idle: usize = 0;
             while (self.len < target) {
                 var available: windows.DWORD = 0;
-                if (windows.exp.kernel32.PeekNamedPipe(self.pipe, null, 0, null, &available, null) == 0) {
+                if (windows.exp.kernel32.PeekNamedPipe(self.pipe, null, 0, null, &available, null) == windows.FALSE) {
                     return windows.unexpectedError(k32.GetLastError());
                 }
                 if (available > 0) {
                     idle = 0;
                     const want: windows.DWORD = @intCast(@min(available, target - self.len));
                     var got: windows.DWORD = 0;
-                    if (k32.ReadFile(self.pipe, self.out[self.len..].ptr, want, &got, null) == 0) {
+                    if (k32.ReadFile(self.pipe, self.out[self.len..].ptr, want, &got, null) == windows.FALSE) {
                         return windows.unexpectedError(k32.GetLastError());
                     }
                     self.len += got;

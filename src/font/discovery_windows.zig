@@ -1,4 +1,5 @@
 const std = @import("std");
+const global = @import("../global.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const freetype = @import("freetype");
@@ -45,12 +46,12 @@ pub const Windows = struct {
     /// `generation` and `coverage_reads`. Discovery can be called
     /// concurrently from multiple renderer threads via codepoint-fallback
     /// resolution while a refresh swaps the record set.
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     /// Serializes `refresh`, so a caller that needs the record set waits
     /// for a scan already in flight instead of starting a second one.
     /// Taken before `mutex`, never while holding it.
-    scan_mutex: std.Thread.Mutex = .{},
+    scan_mutex: std.Io.Mutex = .init,
 
     /// Set by `stopScan` when the owner is going away. Read without a lock
     /// by a scan in progress before each file.
@@ -158,7 +159,7 @@ pub const Windows = struct {
             },
             .user_dir = userFontsDir(alloc) catch null,
             .records = alloc.alloc(Record, 0) catch unreachable,
-            .mutex = .{},
+            .mutex = .init,
             .state = null,
         };
     }
@@ -180,8 +181,8 @@ pub const Windows = struct {
     /// `discover` calls are safe because the record swap happens under
     /// `mutex` and iterators hold deep copies.
     pub fn refresh(self: *Windows) void {
-        self.scan_mutex.lock();
-        defer self.scan_mutex.unlock();
+        self.scan_mutex.lockUncancelable(global.io());
+        defer self.scan_mutex.unlock(global.io());
         self.refreshScanLocked();
     }
 
@@ -193,7 +194,7 @@ pub const Windows = struct {
     pub fn refreshExisting(self: *Windows) void {
         if (!self.hasScanned()) return;
         if (!self.scan_mutex.tryLock()) return;
-        defer self.scan_mutex.unlock();
+        defer self.scan_mutex.unlock(global.io());
         self.refreshScanLocked();
     }
 
@@ -213,8 +214,8 @@ pub const Windows = struct {
     fn refreshScanLocked(self: *Windows) void {
         const state = self.scanState();
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(global.io());
+            defer self.mutex.unlock(global.io());
             if (self.state) |prev| if (prev.eql(state)) return;
         }
 
@@ -234,12 +235,12 @@ pub const Windows = struct {
             log.info("windows font discovery found {d} font faces", .{records.len});
         }
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(global.io());
         const old = self.records;
         self.records = records;
         self.state = state;
         self.generation +%= 1;
-        self.mutex.unlock();
+        self.mutex.unlock(global.io());
 
         for (old) |*record| record.deinit(self.alloc);
         self.alloc.free(old);
@@ -267,8 +268,8 @@ pub const Windows = struct {
         // in flight (the startup prefetch) is waited for, not repeated.
         if (!self.hasScanned()) self.refresh();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
 
         const sources = try self.candidatesLocked(alloc, desc);
         errdefer alloc.free(sources);
@@ -318,8 +319,8 @@ pub const Windows = struct {
     }
 
     fn hasScanned(self: *Windows) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
         return self.state != null;
     }
 
@@ -352,8 +353,8 @@ pub const Windows = struct {
         // Only a pure codepoint query: a named family keeps its own matching.
         if (desc.family != null or desc.codepoint == 0) return null;
         const codepoint = std.math.cast(u21, desc.codepoint) orelse return null;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
         return try self.system_fallback.map(alloc, codepoint, desc.bold, desc.italic);
     }
 
@@ -512,7 +513,12 @@ pub const Windows = struct {
     }
 
     fn envDir(alloc: Allocator, key: []const u8) ![]u8 {
-        return try std.process.getEnvVarOwned(alloc, key);
+        // A live read, as 0.15's `getEnvVarOwned`, keeping its error name
+        // for a missing variable, which `systemFontsDir` switches on.
+        return global.environ().getAlloc(alloc, key) catch |err| switch (err) {
+            error.EnvironmentVariableMissing => error.EnvironmentVariableNotFound,
+            else => |e| e,
+        };
     }
 
     /// Scan all font sources and return the records. Individual files and
@@ -572,15 +578,16 @@ pub const Windows = struct {
         paths: *std.ArrayListUnmanaged([:0]const u8),
         seen: *std.StringHashMapUnmanaged(void),
     ) error{OutOfMemory}!void {
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
+        const io = global.io();
+        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch |err| {
             log.warn("windows font discovery cannot open dir={s} err={}", .{ dir_path, err });
             return;
         };
-        defer dir.close();
+        defer dir.close(io);
 
         var iter = dir.iterate();
         while (true) {
-            const entry = iter.next() catch |err| {
+            const entry = iter.next(io) catch |err| {
                 log.warn("windows font discovery dir iteration failed dir={s} err={}", .{ dir_path, err });
                 break;
             } orelse break;
@@ -979,8 +986,8 @@ pub const Windows = struct {
         copy: Record,
         codepoint: u32,
     ) Allocator.Error!?[]const CodepointRange {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global.io());
+        defer self.mutex.unlock(global.io());
 
         if (generation == self.generation) {
             const kept = try self.ensureCoverageLocked(lib, &self.records[index]);
@@ -1310,10 +1317,11 @@ pub const Windows = struct {
     }
 
     fn dirMtime(path: [:0]const u8) ?i128 {
-        var dir = std.fs.openDirAbsolute(path, .{}) catch return null;
-        defer dir.close();
-        const stat = dir.stat() catch return null;
-        return stat.mtime;
+        const io = global.io();
+        var dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return null;
+        defer dir.close(io);
+        const stat = dir.stat(io) catch return null;
+        return stat.mtime.nanoseconds;
     }
 
     fn registryLastWrite(root: winreg.HKEY) ?u64 {
@@ -2010,7 +2018,7 @@ const Fixture = struct { name: []const u8, data: []const u8 };
 
 /// A discovery whose record set is exactly `fixtures`, written to `dir` and
 /// scanned in this order, as if a scan of the font sources had found them.
-fn fixtureDiscovery(dir: std.fs.Dir, fixtures: []const Fixture) !Windows {
+fn fixtureDiscovery(dir: std.Io.Dir, fixtures: []const Fixture) !Windows {
     var font_lib = try Library.init(testing.allocator);
     defer font_lib.deinit();
     var disco = Windows.init(font_lib);
@@ -2024,8 +2032,8 @@ fn fixtureDiscovery(dir: std.fs.Dir, fixtures: []const Fixture) !Windows {
         records.deinit(disco.alloc);
     }
     for (fixtures) |fixture| {
-        try dir.writeFile(.{ .sub_path = fixture.name, .data = fixture.data });
-        const path = try dir.realpathAlloc(testing.allocator, fixture.name);
+        try dir.writeFile(testing.io, .{ .sub_path = fixture.name, .data = fixture.data });
+        const path = try dir.realPathFileAlloc(testing.io, fixture.name, testing.allocator);
         defer testing.allocator.free(path);
         const path_z = try testing.allocator.dupeSentinel(u8, path, 0);
         defer testing.allocator.free(path_z);
@@ -2094,7 +2102,7 @@ test "FONTVF HKLM paths and last-write changes reach the scan" {
         .system_dir = null,
         .user_dir = null,
         .records = try testing.allocator.alloc(Windows.Record, 0),
-        .mutex = .{},
+        .mutex = .init,
         .state = null,
         .test_registry = .{ .ctx = &registry, .collect = FixtureRegistry.collect, .last_write = FixtureRegistry.lastWrite },
         .test_scan_hook = .{ .ctx = &registry, .call = FixtureRegistry.scan },
@@ -2346,8 +2354,8 @@ test "windows discovery iterator outlives a refresh that replaces the records" {
     // under it (here the same records, reordered, so a stale index names
     // the wrong face) and the generation moves on.
     {
-        disco.mutex.lock();
-        defer disco.mutex.unlock();
+        disco.mutex.lockUncancelable(global.io());
+        defer disco.mutex.unlock(global.io());
         std.mem.reverse(Windows.Record, disco.records);
         disco.generation +%= 1;
     }
@@ -2382,9 +2390,9 @@ test "windows refreshExisting never starts or waits for a scan" {
     defer tmp.cleanup();
     var disco = try fixtureDiscovery(tmp.dir, &fixtureFonts());
     defer disco.deinit();
-    disco.scan_mutex.lock();
+    disco.scan_mutex.lockUncancelable(global.io());
     disco.refreshExisting();
-    disco.scan_mutex.unlock();
+    disco.scan_mutex.unlock(global.io());
     try testing.expectEqual(@as(usize, 3), disco.records.len);
     try testing.expectEqual(@as(u64, 0), disco.generation);
 }

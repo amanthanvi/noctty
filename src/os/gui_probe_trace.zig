@@ -7,6 +7,7 @@
 //! existing `initialized driver=WARP` line and the absence of every logged backend switch bind the backend.
 
 const std = @import("std");
+const env = @import("env.zig");
 
 const log = std.log.scoped(.gui_probe);
 
@@ -42,7 +43,7 @@ pub fn enabled() bool {
     // A small fixed buffer, not page_allocator (renderer.md 2026-10-11, trap (1)); a longer value is off.
     var storage: [64]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&storage);
-    const raw: ?[]u8 = std.process.getEnvVarOwned(fba.allocator(), env_var) catch null;
+    const raw: ?[]u8 = env.getEnvVarOwned(fba.allocator(), env_var) catch null;
     const on = parseEnabled(raw);
     state.store(if (on) 2 else 1, .release);
     return on;

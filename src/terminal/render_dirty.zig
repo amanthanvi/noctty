@@ -6,7 +6,9 @@ pub fn needsRendererWake(t: *const terminalpkg.Terminal) bool {
 
     if (packedStructDirty(t.flags.dirty)) return true;
     if (packedStructDirty(screen.dirty)) return true;
-    if (screen.kitty_images.dirty) return true;
+    // The Kitty image storage's `dirty` is a counter that nothing clears
+    // (upstream 1.4.0), not a flag the renderer resets, so whether it changed
+    // since the last frame is `Undirtied.kitty_dirty`'s, in `needsFrame`.
 
     var row_it = screen.pages.rowIterator(.left_up, .{ .viewport = .{} }, null);
     while (row_it.next()) |pin| {
@@ -22,9 +24,12 @@ pub fn needsRendererWake(t: *const terminalpkg.Terminal) bool {
 /// shape, visibility or blinking, or setting a color with OSC 10, 11 or 12
 /// marks nothing dirty. The renderer keeps this snapshot as of its last frame
 /// update (`renderer.State.drawn_undirtied`), and a terminal that no longer
-/// matches it needs a frame just as a dirty one does.
+/// matches it needs a frame just as a dirty one does. The Kitty image
+/// storage's change counter is here too: since upstream 1.4.0 it is never
+/// cleared, so a change shows only against the value the last frame saw.
 pub const Undirtied = struct {
     screen: terminalpkg.ScreenSet.Key,
+    kitty_dirty: u64,
     cursor_x: terminalpkg.size.CellCountInt,
     cursor_y: terminalpkg.size.CellCountInt,
     cursor_style: terminalpkg.CursorStyle,
@@ -38,6 +43,7 @@ pub const Undirtied = struct {
         const cursor = &t.screens.active.cursor;
         return .{
             .screen = t.screens.active_key,
+            .kitty_dirty = t.screens.active.kitty_images.dirty,
             .cursor_x = cursor.x,
             .cursor_y = cursor.y,
             .cursor_style = cursor.cursor_style,
@@ -68,7 +74,7 @@ fn packedStructDirty(value: anytype) bool {
 test "needsRendererWake tracks visible terminal dirtiness" {
     const testing = @import("std").testing;
 
-    var term = try terminalpkg.Terminal.init(testing.allocator, .{
+    var term = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 4,
         .rows = 3,
     });
@@ -80,9 +86,14 @@ test "needsRendererWake tracks visible terminal dirtiness" {
     try testing.expect(needsRendererWake(&term));
     term.flags.dirty = .{};
 
-    term.screens.active.kitty_images.dirty = true;
-    try testing.expect(needsRendererWake(&term));
-    term.screens.active.kitty_images.dirty = false;
+    // A Kitty image change needs a frame: its counter moved past the one
+    // the last frame update saw.
+    {
+        const drawn: Undirtied = .init(&term);
+        try testing.expect(!needsFrame(&term, drawn));
+        term.screens.active.kitty_images.markDirty();
+        try testing.expect(needsFrame(&term, drawn));
+    }
 
     try term.printString("x");
     try testing.expect(needsRendererWake(&term));
@@ -91,7 +102,7 @@ test "needsRendererWake tracks visible terminal dirtiness" {
 test "output that only moves the cursor or sets a color still needs a frame" {
     const testing = std.testing;
 
-    var term = try terminalpkg.Terminal.init(testing.allocator, .{
+    var term = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 10,
         .rows = 3,
     });

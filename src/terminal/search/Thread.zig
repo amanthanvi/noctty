@@ -11,6 +11,7 @@
 pub const Thread = @This();
 
 const std = @import("std");
+const global = @import("../../global.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -213,7 +214,7 @@ fn threadMain_(self: *Thread) !void {
     while (true) {
         // If our loop is canceled then we drain our messages and quit.
         if (self.loop.stopped()) {
-            while (self.mailbox.pop()) |message| {
+            while (self.mailbox.pop(global.io())) |message| {
                 log.debug("mailbox message ignored during shutdown={}", .{message});
             }
 
@@ -265,7 +266,7 @@ pub fn send(self: *Thread, msg: Message) void {
     self.notify();
 
     // Search messages may transfer ownership or required state.
-    _ = self.mailbox.push(msg, .{ .forever = {} });
+    _ = self.mailbox.push(global.io(), msg, .{ .forever = {} });
 
     self.notify();
 }
@@ -278,7 +279,7 @@ fn notify(self: *Thread) void {
 
 /// Drain the mailbox.
 fn drainMailbox(self: *Thread) void {
-    while (self.mailbox.pop()) |message| {
+    while (self.mailbox.pop(global.io())) |message| {
         log.debug("mailbox message={}", .{message});
         switch (message) {
             .change_query => |v| {
@@ -488,7 +489,7 @@ pub const Event = union(enum) {
 
 const TestUserData = struct {
     const Self = @This();
-    reset: std.Thread.ResetEvent = .{},
+    reset: std.Io.Event = .unset,
     events_seen: std.atomic.Value(u32) = .init(0),
     total: usize = 0,
     viewport: []FlattenedHighlight = &.{},
@@ -506,7 +507,7 @@ const TestUserData = struct {
         _ = ud.events_seen.fetchOr(@as(u32, 1) << @backingInt(std.meta.activeTag(event)), .release);
         switch (event) {
             .quit, .invalid_query, .selected_match => {},
-            .complete => ud.reset.set(),
+            .complete => ud.reset.set(testing.io),
             .total_matches => |v| ud.total = v,
             .viewport_matches => |v| {
                 for (ud.viewport) |*hl| hl.deinit(testing.allocator);
@@ -537,7 +538,7 @@ test {
 
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -566,7 +567,7 @@ test {
         }
     };
     var worker: Worker = .{ .thread = &thread };
-    var timer = try std.time.Timer.start();
+    const timer: std.Io.Timestamp = .now(testing.io, .awake);
     {
         const os_thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
         // In particular, a timed-out wait must not free the mailbox, IOCP
@@ -582,6 +583,7 @@ test {
 
         // Start our search.
         _ = thread.mailbox.push(
+            testing.io,
             .{ .change_query = .{
                 .generation = 1,
                 .options = .{},
@@ -594,10 +596,10 @@ test {
         // Wait for the .complete callback, not a scheduling performance target.
         // The generous timeout only guards against a hung search. Atomic
         // observations diagnose failure without racing the worker's callbacks.
-        ud.reset.timedWait(30 * std.time.ns_per_s) catch |err| {
+        ud.reset.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } }) catch |err| {
             std.debug.print("search-test wait failed err={} elapsed_ns={d} started={} exited={} events:", .{
                 err,
-                timer.read(),
+                timer.untilNow(testing.io, .awake).toNanoseconds(),
                 worker.started.load(.acquire),
                 worker.exited.load(.acquire),
             });
@@ -642,7 +644,7 @@ test "search refresh timer requires active visible focused search" {
     defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -677,7 +679,7 @@ test "a clear sends the total first and the selection last" {
     defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -710,7 +712,7 @@ test "a query that runs out of memory does not stop the mailbox drain" {
     defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = std.math.maxInt(usize) });
@@ -718,12 +720,12 @@ test "a query that runs out of memory does not stop the mailbox drain" {
     defer thread.deinit();
 
     failing.fail_index = failing.alloc_index;
-    _ = thread.mailbox.push(.{ .change_query = .{
+    _ = thread.mailbox.push(testing.io, .{ .change_query = .{
         .generation = 1,
         .options = .{},
         .req = try .init(alloc, @as([]const u8, "world")),
     } }, .forever);
-    _ = thread.mailbox.push(.{ .visible = false }, .forever);
+    _ = thread.mailbox.push(testing.io, .{ .visible = false }, .forever);
     thread.drainMailbox();
     try testing.expect(failing.has_induced_failure);
     try testing.expect(!thread.visible);

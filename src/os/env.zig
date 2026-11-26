@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
+const global = @import("../global.zig");
 const flatpak = if (builtin.os.tag == .linux) @import("flatpak.zig") else struct {
     pub fn isFlatpak() bool {
         return false;
@@ -11,11 +12,39 @@ const flatpak = if (builtin.os.tag == .linux) @import("flatpak.zig") else struct
 pub const Error = Allocator.Error;
 
 /// Get the environment map.
-pub fn getEnvMap(alloc: Allocator) !std.process.EnvMap {
+pub fn getEnvMap(alloc: Allocator) !std.process.Environ.Map {
     return if (flatpak.isFlatpak())
-        std.process.EnvMap.init(alloc)
+        .init(alloc)
     else
-        try std.process.getEnvMap(alloc);
+        try global.environ().createMap(alloc);
+}
+
+pub const GetEnvVarOwnedError = error{
+    OutOfMemory,
+    EnvironmentVariableNotFound,
+    InvalidWtf8,
+};
+
+/// Zig 0.15.2's `std.process.getEnvVarOwned`, which 0.17 removed: one
+/// variable of the live process environment (looked up case-insensitively
+/// on Windows), owned by the caller, with 0.15's error names. Unlike
+/// `std.process.Environ.getAlloc` it copies the one value only, not the
+/// whole block, so a small fixed buffer still holds it.
+pub fn getEnvVarOwned(alloc: Allocator, key: []const u8) GetEnvVarOwnedError![]u8 {
+    if (comptime builtin.os.tag != .windows) {
+        @compileError("getEnvVarOwned is the fork's Windows port");
+    }
+    const key_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, key);
+    defer alloc.free(key_w);
+    const value = global.environ().getWindows(key_w) orelse
+        return error.EnvironmentVariableNotFound;
+    return std.unicode.wtf16LeToWtf8Alloc(alloc, value);
+}
+
+/// Zig 0.15.2's `std.process.hasEnvVarConstant`, over the live process
+/// environment.
+pub fn hasEnvVarConstant(comptime key: []const u8) bool {
+    return global.environ().containsConstant(key);
 }
 
 /// Append a value to an environment variable such as PATH.
@@ -89,7 +118,7 @@ pub fn getenv(alloc: Allocator, key: []const u8) Error!?GetEnvResult {
         else => if (posix.getenv(key)) |v| .{ .value = v } else null,
 
         // Windows needs to allocate
-        .windows => if (std.process.getEnvVarOwned(alloc, key)) |v| .{
+        .windows => if (getEnvVarOwned(alloc, key)) |v| .{
             .value = v,
         } else |err| switch (err) {
             error.EnvironmentVariableNotFound => null,
@@ -120,7 +149,7 @@ pub fn getEnvVarOwnedTrimmedNotEmpty(
     alloc: Allocator,
     key: []const u8,
 ) Error!?[]const u8 {
-    const raw = std.process.getEnvVarOwned(alloc, key) catch |err| switch (err) {
+    const raw = getEnvVarOwned(alloc, key) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         error.InvalidWtf8 => return null,
         else => |e| return e,

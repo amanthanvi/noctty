@@ -325,13 +325,14 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     // `endSearch`, `setSearchQuery("")` and `deinit` all end with.
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
     // The test thread is the app thread that owns the search (PLAN.md §2.7
     // RQ8); the search thread's threadMain enters .search itself.
     const role = thread_role.fixture(.ui);
     defer role.exit();
 
-    var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+    var t: terminal.Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
         var stream = t.vtStream();
@@ -371,46 +372,52 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     // busy panes would. The search's first event (the total) takes it, and
     // the next, the viewport matches with their arena, waits for room; the
     // testing allocator then checks that dropping it freed the arena.
-    while (app.mailbox.push(.quit, .instant) > 0) {}
-    app.mailbox.pop().?.deinit(alloc);
-    defer while (app.mailbox.pop()) |message| message.deinit(alloc);
+    while (app.mailbox.push(io, .quit, .instant) > 0) {}
+    app.mailbox.pop(io).?.deinit(alloc);
+    defer while (app.mailbox.pop(io)) |message| message.deinit(alloc);
 
     // Start a search; its first results wait for room in the mailbox.
     try testing.expect(try surface.setSearchQuery("needle", .{}));
     var search_waited = false;
-    var waiting = try std.time.Timer.start();
-    while (waiting.read() < 10 * std.time.ns_per_s) {
-        app.mailbox.mutex.lock();
+    const waiting: std.Io.Timestamp = .now(io, .awake);
+    while (waiting.untilNow(io, .awake).toNanoseconds() < 10 * std.time.ns_per_s) {
+        app.mailbox.mutex.lockUncancelable(io);
         search_waited = app.mailbox.not_full_waiters > 0;
-        app.mailbox.mutex.unlock();
+        app.mailbox.mutex.unlock(io);
         if (search_waited) break;
-        std.Thread.sleep(std.time.ns_per_ms);
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     }
 
     // End the search on another thread, as the app thread would.
     const Ender = struct {
-        fn run(search: *Search, done: *std.Thread.ResetEvent) void {
+        fn run(search: *Search, done: *std.Io.Event) void {
             // As the app thread: the search's deinit stops its QuerySearch,
             // which locks (PLAN.md §2.7 RQ9, §19.5).
             const app_thread = thread_role.enter(.ui);
             defer app_thread.exit();
             search.deinit();
-            done.set();
+            done.set(std.testing.io);
         }
     };
-    var done: std.Thread.ResetEvent = .{};
+    var done: std.Io.Event = .unset;
     const ender = std.Thread.spawn(.{}, Ender.run, .{ &surface.search.?, &done }) catch |err| {
-        while (app.mailbox.pop()) |message| message.deinit(alloc);
+        while (app.mailbox.pop(io)) |message| message.deinit(alloc);
         surface.search.?.deinit();
         surface.search = null;
         return err;
     };
-    const ended = if (done.timedWait(10 * std.time.ns_per_s)) |_| true else |_| false;
+    const ended = if (done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    } })) |_| true else |_| false;
     if (!ended) {
         // Make room so the search thread, and with it the join, can finish.
         while (true) {
-            while (app.mailbox.pop()) |message| message.deinit(alloc);
-            done.timedWait(std.time.ns_per_ms) catch continue;
+            while (app.mailbox.pop(io)) |message| message.deinit(alloc);
+            done.waitTimeout(io, .{ .duration = .{
+                .raw = .fromMilliseconds(1),
+                .clock = .awake,
+            } }) catch continue;
             break;
         }
     }
@@ -452,7 +459,7 @@ const Mouse = struct {
     /// The left click time was the last time the left click was done. This
     /// is always set on the first left click.
     left_click_count: u8 = 0,
-    left_click_time: std.time.Instant = undefined,
+    left_click_time: std.Io.Timestamp = undefined,
 
     /// The last x/y sent for mouse reports.
     event_point: ?terminal.point.Coordinate = null,
@@ -495,7 +502,7 @@ const Mouse = struct {
 test "Surface: a left-click pin does not outlive its screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
-    var t: terminal.Terminal = try .init(alloc, .{ .cols = 10, .rows = 5 });
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{ .cols = 10, .rows = 5 });
     defer t.deinit(alloc);
 
     // Click on the alternate screen.
@@ -1502,15 +1509,15 @@ const RelockSurface = struct {
         const surface = try alloc.create(Surface);
         errdefer alloc.destroy(surface);
         @memset(std.mem.asBytes(surface), 0);
-        self.* = .{ .surface = surface, .term = try .init(alloc, .{ .cols = 10, .rows = 4 }) };
+        self.* = .{ .surface = surface, .term = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 4 }) };
         errdefer self.term.deinit(alloc);
         surface.renderer_state.mutex = &self.mutex;
         surface.renderer_state.terminal = &self.term;
         surface.io.renderer_state = &surface.renderer_state;
         surface.io.mailbox = try termio.Mailbox.initSPSC(alloc);
         const queue = surface.io.mailbox.spsc.queue;
-        _ = queue.push(.{ .focused = true }, .{ .instant = {} });
-        while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) > 0) {}
+        _ = queue.push(std.testing.io, .{ .focused = true }, .{ .instant = {} });
+        while (queue.push(std.testing.io, .{ .linefeed_mode = false }, .{ .instant = {} }) > 0) {}
     }
 
     fn deinit(self: *RelockSurface, alloc: Allocator) void {
@@ -1534,7 +1541,7 @@ const RelockSurface = struct {
             self.io_error = err;
             // Make room, so a waiting sender does not wait forever.
             const queue = self.surface.io.mailbox.spsc.queue;
-            while (queue.pop()) |message| message.deinit();
+            while (queue.pop(std.testing.io)) |message| message.deinit();
         };
     }
 };
@@ -1666,7 +1673,7 @@ test "isolated: a raw relock in place of send's leaves assertHeld() to panic wit
         try f.init(alloc);
         defer f.deinit(alloc);
         const queue = f.surface.io.mailbox.spsc.queue;
-        const raw: *std.Thread.Mutex = &f.mutex.inner;
+        const raw: *std.Io.Mutex = &f.mutex.inner;
         const IoThread = struct {
             fn main(relock: *RelockSurface) void {
                 const io_role = thread_role.enter(.termio);
@@ -1681,14 +1688,14 @@ test "isolated: a raw relock in place of send's leaves assertHeld() to panic wit
             return err;
         };
         const msg: termio.Message = .{ .linefeed_mode = false };
-        const full = queue.push(msg, .{ .instant = {} }) == 0;
+        const full = queue.push(std.testing.io, msg, .{ .instant = {} }) == 0;
         f.mutex.unlock();
-        if (full) _ = queue.push(msg, .{ .forever = {} });
-        raw.lock();
+        if (full) _ = queue.push(std.testing.io, msg, .{ .forever = {} });
+        raw.lockUncancelable(std.testing.io);
         f.mutex.assertHeld();
         // Not reached when assertHeld panics; otherwise the IO thread's
         // focusGained must get the mutex before the deinit's join.
-        raw.unlock();
+        raw.unlock(std.testing.io);
         if (!full) return error.MailboxNotFull;
         return;
     }
@@ -1837,8 +1844,8 @@ pub fn activateInspector(self: *Surface) !void {
 
     // Put the inspector onto the render state
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         assert(self.renderer_state.inspector == null);
         self.renderer_state.inspector = self.inspector;
     }
@@ -1867,8 +1874,8 @@ pub fn deactivateInspector(self: *Surface) void {
 
     // Remove the inspector from the render state
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         assert(self.renderer_state.inspector != null);
         self.renderer_state.inspector = null;
     }
@@ -1933,7 +1940,7 @@ const RoleSiteSurface = struct {
         self.surface = try alloc.create(Surface);
         errdefer alloc.destroy(self.surface);
         @memset(std.mem.asBytes(self.surface), 0);
-        self.surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
+        self.surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 3 });
         self.surface.renderer_state.mutex = &self.mutex;
         self.surface.renderer_state.terminal = &self.surface.io.terminal;
     }
@@ -2399,8 +2406,8 @@ fn selectionScrollTick(self: *Surface) !void {
     const delta: isize = if (pos.y < 0) -1 else 1;
 
     // We need our locked state for the remainder
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const t: *terminal.Terminal = self.renderer_state.terminal;
 
     // If our left-click pin no longer belongs to the active screen, we stop
@@ -2510,8 +2517,8 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 
         // If the native GUI can't be shown, display a text message in the
         // terminal.
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         t.carriageReturn();
         t.linefeed() catch break :terminal;
@@ -2556,8 +2563,8 @@ fn childExitedAbnormally(
     });
     const runtime_str = try alloc.print("{d} ms", .{info.runtime_ms});
 
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const t: *terminal.Terminal = self.renderer_state.terminal;
 
     // No matter what move the cursor back to the column 0.
@@ -2619,8 +2626,8 @@ fn childExitedAbnormally(
 /// Called when the terminal detects there is a password input prompt.
 fn passwordInput(self: *Surface, v: bool) !void {
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // If our password input state is unchanged then we don't
         // waste time doing anything more.
@@ -3358,8 +3365,8 @@ pub fn dumpText(
     alloc: Allocator,
     sel: terminal.Selection,
 ) !Text {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return try self.dumpTextLocked(alloc, sel);
 }
 
@@ -3491,15 +3498,15 @@ pub fn missingFontFamilies(self: *const Surface) []const [:0]const u8 {
 
 /// Returns true if the terminal has a selection.
 pub fn hasSelection(self: *const Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return self.io.terminal.screens.active.selection != null;
 }
 
 /// Returns the selected text. This is allocated.
 pub fn selectionString(self: *Surface, alloc: Allocator) !?[:0]const u8 {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const sel = self.io.terminal.screens.active.selection orelse return null;
     return try self.io.terminal.screens.active.selectionString(alloc, .{
         .sel = sel,
@@ -3514,8 +3521,8 @@ pub fn pwd(
     self: *const Surface,
     alloc: Allocator,
 ) Allocator.Error!?[]const u8 {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const terminal_pwd = self.io.terminal.getPwd() orelse return null;
     return try alloc.dupe(u8, terminal_pwd);
 }
@@ -3555,7 +3562,7 @@ fn resolvePathForOpening(
 
     const base = terminal_pwd orelse return null;
     const resolved = try std.fs.path.resolve(self.alloc, &.{ base, path });
-    std.fs.accessAbsolute(resolved, .{}) catch {
+    std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
         self.alloc.free(resolved);
         return null;
     };
@@ -4020,7 +4027,7 @@ test "Surface: typing redraws only what it changed on screen" {
     surface.config.scroll_to_bottom = .{ .keystroke = true };
     surface.renderer_thread.wakeup = try @TypeOf(surface.renderer_thread.wakeup).init();
     defer surface.renderer_thread.wakeup.deinit();
-    surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
+    surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 3 });
     defer surface.io.terminal.deinit(alloc);
     var mutex: rendererpkg.StateMutex = .{};
     surface.renderer_state.mutex = &mutex;
@@ -4166,8 +4173,8 @@ test "Surface: resizes inside a batch reach termio once, with the final size and
 
     // Outside a batch a resize goes straight to termio.
     try surface.resizeWithIoMode(.{ .width = 300, .height = 200 }, .queue);
-    try testing.expectEqual(@as(u32, 300), queue.pop().?.resize.screen.width);
-    try testing.expect(queue.pop() == null);
+    try testing.expectEqual(@as(u32, 300), queue.pop(testing.io).?.resize.screen.width);
+    try testing.expect(queue.pop(testing.io) == null);
 
     // A DPI change: the size in the old cells, the new cells, the new size.
     surface.beginResizeBatch();
@@ -4176,13 +4183,13 @@ test "Surface: resizes inside a batch reach termio once, with the final size and
     surface.size.cell = .{ .width = 14, .height = 31 };
     try surface.resizeWithIoMode(.{ .width = 500, .height = 310 }, .queue);
     surface.endResizeBatch();
-    try testing.expect(queue.pop() == null);
+    try testing.expect(queue.pop(testing.io) == null);
     surface.endResizeBatch();
-    const size = queue.pop().?.resize;
+    const size = queue.pop(testing.io).?.resize;
     try testing.expectEqual(@as(u32, 500), size.screen.width);
     try testing.expectEqual(@as(u32, 310), size.screen.height);
     try testing.expectEqual(@as(u32, 14), size.cell.width);
-    try testing.expect(queue.pop() == null);
+    try testing.expect(queue.pop(testing.io) == null);
 }
 
 /// Hold the terminal's resizes until `endResizeBatch`, which sends one with
@@ -5161,10 +5168,10 @@ fn copyModeStartPin(
 
 test "copy mode starts at a visible cursor or the viewport edge" {
     const testing = std.testing;
-    var screen = try terminal.Screen.init(testing.allocator, .{
+    var screen = try terminal.Screen.init(testing.io, testing.allocator, .{
         .cols = 8,
         .rows = 4,
-        .max_scrollback = 0,
+        .max_scrollback_bytes = 0,
     });
     defer screen.deinit();
     try screen.testWriteString("one\ntwo\nthree");
@@ -5817,9 +5824,9 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
 
     // Update the focus state and notify the terminal
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
+        self.renderer_state.mutex.lockUncancelable();
         self.io.terminal.flags.focused = focused;
-        self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.unlock();
         self.queueIo(.{ .focused = focused }, .unlocked);
     }
 }
@@ -5981,8 +5988,8 @@ pub fn scrollCallback(
     // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
 
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // If we have an active mouse reporting mode, clear the selection.
         // The selection can occur if the user uses the shift mod key to
@@ -6116,8 +6123,8 @@ fn isMouseReporting(self: *const Surface) bool {
 }
 
 pub fn mouseReportingActive(self: *Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return self.isMouseReporting();
 }
 
@@ -6196,8 +6203,8 @@ fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
         .false, .true => {},
     }
 
-    if (lock) self.renderer_state.mutex.lockUncancelable(global.io());
-    defer if (lock) self.renderer_state.mutex.unlock(global.io());
+    if (lock) self.renderer_state.mutex.lockUncancelable();
+    defer if (lock) self.renderer_state.mutex.unlock();
 
     // If the terminal explicitly requests it then we always allow it
     // since we processed never/always at this point.
@@ -6218,8 +6225,8 @@ fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
 /// Returns true if the mouse is currently captured by the terminal
 /// (i.e. reporting events).
 pub fn mouseCaptured(self: *Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return self.io.terminal.flags.mouse_event != .none;
 }
 
@@ -6275,20 +6282,13 @@ pub fn mouseButtonCallback(
 
             // If we are within the interval that the click would register
             // an increment then we do not extend the selection.
-            if (std.time.Instant.now()) |now| {
-                const since = now.since(self.mouse.left_click_time);
-                if (since <= self.config.mouse_interval) {
+            {
+                const since = self.mouse.left_click_time.untilNow(global.io(), .awake);
+                if (since.toNanoseconds() <= self.config.mouse_interval) {
                     // Click interval very short, we may be increasing
                     // click counts so we don't extend the selection.
                     break :extend_selection;
                 }
-            } else |err| {
-                // This is a weird behavior, I think either behavior is actually
-                // fine. This failure should be exceptionally rare anyways.
-                // My thinking here is that we can't be sure if we should extend
-                // the selection or not so we just don't.
-                log.warn("failed to get time, not extending selection err={}", .{err});
-                break :extend_selection;
             }
 
             const pos = try self.rt_surface.getCursorPos();
@@ -6377,8 +6377,8 @@ pub fn mouseButtonCallback(
 
     // Report mouse events if enabled
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         if (self.isMouseReporting()) report: {
             // If we have shift-pressed and we aren't allowed to capture it,
             // then we do not do a mouse report.
@@ -6431,8 +6431,8 @@ pub fn mouseButtonCallback(
     // For left button clicks we always record some information for
     // selection/highlighting purposes.
     if (button == .left and action == .press) click: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
 
@@ -6482,12 +6482,13 @@ pub fn mouseButtonCallback(
         self.mouse.left_click_ypos = pos.y;
 
         // Setup our click counter and timer
-        if (std.time.Instant.now()) |now| {
+        {
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
             // If we have mouse clicks, then we check if the time elapsed
             // is less than and our interval and if so, increase the count.
             if (self.mouse.left_click_count > 0) {
-                const since = now.since(self.mouse.left_click_time);
-                if (since > self.config.mouse_interval) {
+                const since = self.mouse.left_click_time.durationTo(now);
+                if (since.toNanoseconds() > self.config.mouse_interval) {
                     self.mouse.left_click_count = 0;
                 }
             }
@@ -6497,9 +6498,6 @@ pub fn mouseButtonCallback(
 
             // We only support up to triple-clicks.
             if (self.mouse.left_click_count > 3) self.mouse.left_click_count = 1;
-        } else |err| {
-            self.mouse.left_click_count = 1;
-            log.err("error reading time, mouse multi-click won't work err={}", .{err});
         }
 
         // In all cases below we use `setSelection`, not
@@ -6598,8 +6596,8 @@ pub fn mouseButtonCallback(
     // want to be careful in the future we can add a function to apprts
     // that let's us know.
     if (button == .right and action == .press) sel: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // Get our viewport pin
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
@@ -6675,8 +6673,8 @@ pub fn mouseButtonCallback(
             } else {
                 // Pasting can trigger a lock grab in complete clipboard
                 // request so we need to unlock.
-                self.renderer_state.mutex.unlock(global.io());
-                defer self.renderer_state.mutex.lockUncancelable(global.io());
+                self.renderer_state.mutex.unlock();
+                defer self.renderer_state.mutex.lockUncancelable();
                 _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
 
                 // We don't need to clear selection because we didn't have
@@ -6690,8 +6688,8 @@ pub fn mouseButtonCallback(
 
                 // Pasting can trigger a lock grab in complete clipboard
                 // request so we need to unlock.
-                self.renderer_state.mutex.unlock(global.io());
-                defer self.renderer_state.mutex.lockUncancelable(global.io());
+                self.renderer_state.mutex.unlock();
+                defer self.renderer_state.mutex.lockUncancelable();
                 _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
             },
         }
@@ -6850,7 +6848,7 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     const role = thread_role.fixture(.ui);
     defer role.exit();
 
-    var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+    var t: terminal.Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
         var stream = t.vtStream();
@@ -6948,7 +6946,7 @@ const TestMouseSurface = struct {
             .cell = .{ .width = 10, .height = 20 },
             .padding = .{},
         };
-        surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 6 });
+        surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 40, .rows = 6 });
         errdefer surface.io.terminal.deinit(alloc);
         surface.renderer_state.terminal = &surface.io.terminal;
         var stream = surface.io.terminal.vtStream();
@@ -6987,18 +6985,21 @@ const TestMouseSurface = struct {
         _ = self.at(x, y);
         var job: Click = .{ .surface = self.surface };
         const thread = try std.Thread.spawn(.{}, Click.run, .{&job});
-        job.done.timedWait(5 * std.time.ns_per_s) catch @panic(name ++ ": deadlock");
+        job.done.waitTimeout(std.testing.io, .{ .duration = .{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        } }) catch @panic(name ++ ": deadlock");
         thread.join();
         return job.result;
     }
 
     const Click = struct {
         surface: *Surface,
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
         result: anyerror!bool = false,
 
         fn run(job: *Click) void {
-            defer job.done.set();
+            defer job.done.set(std.testing.io);
             // As the app thread: a click's callbacks take the renderer
             // state mutex, and the stand-in opener tries it (PLAN.md §2.7
             // RQ9, §19.5).
@@ -7130,7 +7131,7 @@ test "Surface: a left release over a refused link in a prompt is a prompt click 
     const testing = std.testing;
     const fixture = try TestMouseSurface.create(
         testing.allocator,
-        .false,
+        .none,
         "\x1b]133;A;cl=line\x07> \x1b]133;B\x07open https://example.com/x",
     );
     defer fixture.destroy();
@@ -7173,7 +7174,7 @@ test "Surface: a Ctrl+triple-click picks the output and a drag extends it by lin
 
     const fixture = try TestMouseSurface.create(
         testing.allocator,
-        .false,
+        .none,
         "\x1b]133;A\x07> \x1b]133;B\x07cmd1\r\n" ++
             "\x1b]133;C\x07out1a\r\nout1b\r\n" ++
             "\x1b]133;D;0\x07\x1b]133;A\x07> \x1b]133;B\x07cmd2\r\n" ++
@@ -7218,7 +7219,7 @@ test "Surface: triple-click drag extends selection through blank line" {
     const role = thread_role.fixture(.ui);
     defer role.exit();
 
-    const fixture = try TestMouseSurface.create(testing.allocator, .false, "alpha beta");
+    const fixture = try TestMouseSurface.create(testing.allocator, .none, "alpha beta");
     defer fixture.destroy();
     const surface = fixture.surface;
     surface.config.mouse_interval = 500 * std.time.ns_per_ms;
@@ -7303,7 +7304,7 @@ test "Surface: link-osc8 = false finds no OSC 8 link, only the text's own" {
         .cell = .{ .width = 10, .height = 10 },
         .padding = .{},
     };
-    surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 2 });
+    surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 40, .rows = 2 });
     defer surface.io.terminal.deinit(alloc);
     surface.renderer_state.terminal = &surface.io.terminal;
     {
@@ -7400,7 +7401,7 @@ test "Surface: a link does not run from a prompt into the command after it" {
     @memset(std.mem.asBytes(surface), 0);
     surface.alloc = alloc;
     surface.config.links = derived.links;
-    surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 3 });
+    surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 40, .rows = 3 });
     defer surface.io.terminal.deinit(alloc);
     surface.renderer_state.terminal = &surface.io.terminal;
     {
@@ -7568,8 +7569,8 @@ pub fn mousePressureCallback(
     if (self.mouse.click_state[left_idx] == .press and
         stage == .deep)
     select: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // This should always be set in this state but we don't want
         // to handle state inconsistency here.
@@ -7627,8 +7628,8 @@ pub fn cursorPosCallback(
             try self.queueRender();
         }
 
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // No mouse point so we don't highlight links
         self.renderer_state.mouse.point = null;
@@ -7654,8 +7655,8 @@ pub fn cursorPosCallback(
     self.mouse.over_link = false;
 
     // We are reading/writing state for the remainder
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     // Stop selection scrolling when inside the viewport within a 1px buffer
     // for fullscreen windows, but only when selection scrolling is active.
@@ -8169,8 +8170,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             // CSI/ESC triggers a scroll.
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 self.scrollToBottom() catch |err| {
                     log.warn("error scrolling to bottom err={}", .{err});
                 };
@@ -8197,8 +8198,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             // Text triggers a scroll.
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 self.scrollToBottom() catch |err| {
                     log.warn("error scrolling to bottom err={}", .{err});
                 };
@@ -8210,8 +8211,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // in cursor keys mode. We're in "normal" mode if cursor
             // keys mode is NOT set.
             const normal = normal: {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
 
                 // With the lock held, we must scroll to the bottom.
                 // We always scroll to the bottom for these inputs.
@@ -8451,8 +8452,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (!self.mouse.over_link) return false;
             const pos = try self.rt_surface.getCursorPos();
 
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.lockUncancelable();
+            defer self.renderer_state.mutex.unlock();
             if (try self.linkAtPos(pos)) |link_info| {
                 const url_text = switch (link_info.action) {
                     .open => url_text: {
@@ -8613,8 +8614,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // alternate screen then clear screen does nothing so we want to
             // return false so the keybind can be unconsumed.
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 if (self.io.terminal.screens.active_key == .alternate) return false;
             }
 
@@ -8645,8 +8646,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .scroll_to_row => |n| {
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 const t: *terminal.Terminal = self.renderer_state.terminal;
                 t.screens.active.scroll(.{ .row = n });
             }
@@ -8656,8 +8657,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .scroll_to_selection => {
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 const sel = self.io.terminal.screens.active.selection orelse return false;
                 const tl = sel.topLeft(self.io.terminal.screens.active);
                 self.io.terminal.screens.active.scroll(.{ .pin = tl });
@@ -8919,8 +8920,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         ),
 
         .select_all => {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.lockUncancelable();
+            defer self.renderer_state.mutex.unlock();
 
             const sel = self.io.terminal.screens.active.selectAll();
             if (sel) |s| {
@@ -9074,8 +9075,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .adjust_selection => |direction| {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.lockUncancelable();
+            defer self.renderer_state.mutex.unlock();
 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (self.copy_mode_active and
@@ -9239,7 +9240,7 @@ pub fn setSearchQuery(
             terminal.search.Thread.threadMain,
             .{&state.state},
         );
-        state.thread.setName("search") catch {};
+        state.thread.setName(global.io(), "search") catch {};
 
         break :init state;
     };
@@ -10247,8 +10248,8 @@ fn writeScreenFile(
 
     // Write the scrollback contents. This requires a lock.
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // We only dump history if we have history. We still keep
         // the file and write the empty file to the pty so that this
@@ -10614,9 +10615,9 @@ fn startClipboardRequest(
             // Snapshot the mode before asking the apprt for clipboard data.
             // Event pastes request only a MIME listing, while ordinary
             // pastes request the text representation as before.
-            self.renderer_state.mutex.lockUncancelable(global.io());
+            self.renderer_state.mutex.lockUncancelable();
             const event = self.io.terminal.modes.get(.kitty_paste_events);
-            self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.unlock();
 
             break :effective if (event)
                 .{ .list = clipboard }
@@ -10657,8 +10658,8 @@ fn completeClipboardPaste(
     if (data.len == 0) return;
 
     const encode_opts: input.paste.Options = encode_opts: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);
 
         // If we have paste protection enabled, we detect unsafe pastes and return
@@ -10854,8 +10855,8 @@ fn completeClipboardPasteEvent(
     var aw: std.Io.Writer.Allocating = .init(self.alloc);
     defer aw.deinit();
 
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     const pasted = try terminal.paste.paste(.{
         .terminal = &self.io.terminal,
@@ -11191,7 +11192,7 @@ fn testMouseSelection(
         .padding = .{ .left = 5, .top = 5, .right = 5, .bottom = 5 },
         .screen = .{ .width = 110, .height = 110 },
     };
-    var screen = try terminal.Screen.init(std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    var screen = try terminal.Screen.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback_bytes = 0 });
     defer screen.deinit();
 
     // We hold both ctrl and alt for rectangular
@@ -11260,7 +11261,7 @@ fn testMouseSelectionIsNull(
         .padding = .{ .left = 5, .top = 5, .right = 5, .bottom = 5 },
         .screen = .{ .width = 110, .height = 110 },
     };
-    var screen = try terminal.Screen.init(std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    var screen = try terminal.Screen.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback_bytes = 0 });
     defer screen.deinit();
 
     // We hold both ctrl and alt for rectangular

@@ -1,5 +1,6 @@
 //! Open a local configuration document using the user's text editor association.
 const std = @import("std");
+const global = @import("../global.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
@@ -78,7 +79,7 @@ fn openWith(alloc: std.mem.Allocator, path: []const u8, comptime query_associati
         .missing, .refused => return error.OpenConfigRejected,
     };
     defer found.deinit(alloc);
-    if ((try found.file.stat()).kind != .file) return error.OpenConfigRejected;
+    if ((try found.file.stat(global.io())).kind != .file) return error.OpenConfigRejected;
 
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, found.path);
     defer alloc.free(path_w);

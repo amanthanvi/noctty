@@ -549,8 +549,8 @@ test "windowsDwriteSystemFallbackMapsToALocalFontFile" {
             defer mapped.deinit(testing.allocator);
             try testing.expect(mapped.path.len > 0);
             try testing.expect(mapped.face_index >= 0);
-            const file = try std.fs.openFileAbsolute(mapped.path, .{});
-            file.close();
+            const file = try std.Io.Dir.openFileAbsolute(testing.io, mapped.path, .{});
+            file.close(testing.io);
         }
     } else return error.SkipZigTest;
 }

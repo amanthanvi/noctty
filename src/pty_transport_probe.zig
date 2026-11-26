@@ -188,7 +188,7 @@ const key_input_cases = [_]KeyInputCase{
 pub fn runChildIfRequested() void {
     if (comptime builtin.os.tag != .windows) return;
 
-    const child = std.process.getEnvVarOwned(
+    const child = std.testing.environ.getAlloc(
         std.heap.page_allocator,
         child_env_name,
     ) catch return;
@@ -202,7 +202,8 @@ pub fn runChildIfRequested() void {
     // redraw can replace/interleave any probe protocol. Hold the public
     // progress lock through these noreturn children, including final output.
     // Their native writes do not acquire this lock.
-    std.Progress.lockStdErr();
+    var stderr_lock_buffer: [0]u8 = undefined;
+    _ = std.debug.lockStderr(&stderr_lock_buffer);
     if (std.mem.eql(u8, child, graphics_child_mode)) {
         const GraphicsChild = struct {
             extern "kernel32" fn GetConsoleMode(
@@ -215,7 +216,7 @@ pub fn runChildIfRequested() void {
             ) callconv(.winapi) c_int;
 
             fn run() noreturn {
-                const stdout = std.fs.File.stdout().handle;
+                const stdout = std.Io.File.stdout().handle;
                 var mode: windows.DWORD = 0;
                 if (GetConsoleMode(stdout, &mode) == 0) std.process.exit(91);
                 if (SetConsoleMode(stdout, mode | 0x0001 | 0x0004) == 0) {
@@ -275,8 +276,8 @@ pub fn runChildIfRequested() void {
             }
 
             fn run() noreturn {
-                const stdin = std.fs.File.stdin().handle;
-                const stdout = std.fs.File.stdout().handle;
+                const stdin = std.Io.File.stdin().handle;
+                const stdout = std.Io.File.stdout().handle;
 
                 // Raw VT input: no line editing, no echo, and no processed
                 // input so Ctrl+C arrives as a 0x03 byte instead of a console
@@ -405,8 +406,8 @@ pub fn runChildIfRequested() void {
         }
 
         fn run() noreturn {
-            const stdin = std.fs.File.stdin().handle;
-            const stdout = std.fs.File.stdout().handle;
+            const stdin = std.Io.File.stdin().handle;
+            const stdout = std.Io.File.stdout().handle;
 
             var input_mode: windows.DWORD = 0;
             if (GetConsoleMode(stdin, &input_mode) == 0) std.process.exit(91);
@@ -542,9 +543,9 @@ pub fn runParentIfRequested() !void {
             require_exit: bool,
             timeout_ns: u64,
         ) !void {
-            var timer = try std.time.Timer.start();
+            const timer: std.Io.Timestamp = .now(std.testing.io, .awake);
             var process_exited = false;
-            while (timer.read() < timeout_ns) {
+            while (timer.untilNow(std.testing.io, .awake).toNanoseconds() < timeout_ns) {
                 var available: windows.DWORD = 0;
                 if (windows.exp.kernel32.PeekNamedPipe(
                     pty.out_pipe,
@@ -553,7 +554,7 @@ pub fn runParentIfRequested() !void {
                     null,
                     &available,
                     null,
-                ) == 0) {
+                ) == windows.FALSE) {
                     if (std.os.windows.GetLastError() == .BROKEN_PIPE) {
                         if (std.mem.indexOf(u8, output.items, marker) == null) {
                             return error.ConptyMissingMarker;
@@ -588,7 +589,7 @@ pub fn runParentIfRequested() !void {
                 }
                 if ((!require_exit or process_exited) and
                     std.mem.indexOf(u8, output.items, marker) != null) return;
-                if (available == 0) std.Thread.sleep(5 * std.time.ns_per_ms);
+                if (available == 0) try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
             }
             return error.ConptyReadTimeout;
         }
@@ -620,11 +621,11 @@ pub fn runParentIfRequested() !void {
             std.debug.print("ConPTY transport parent_pid={d}\n", .{
                 windows.GetCurrentProcessId(),
             });
-            const self_path = try std.fs.selfExePathAlloc(allocator);
+            const self_path = try std.process.executablePathAlloc(std.testing.io, allocator);
             defer allocator.free(self_path);
             const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
             defer allocator.free(self_path_z);
-            var child_env = try std.process.getEnvMap(allocator);
+            var child_env = try std.testing.environ.createMap(allocator);
             defer child_env.deinit();
             try child_env.put(child_env_name, "1");
 
@@ -727,7 +728,7 @@ pub fn runParentIfRequested() !void {
         }
     };
 
-    const enabled = std.process.getEnvVarOwned(
+    const enabled = std.testing.environ.getAlloc(
         std.testing.allocator,
         run_env_name,
     ) catch return error.SkipZigTest;
@@ -807,7 +808,7 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
             buffer: []u8,
         ) ![]const u8 {
             var total: usize = 0;
-            const process_deadline = std.time.nanoTimestamp() + (timeout_ms * std.time.ns_per_ms);
+            const process_deadline = monotonicNs() + (timeout_ms * std.time.ns_per_ms);
             var process_signaled = false;
             var quiet_since: i128 = 0;
 
@@ -820,7 +821,7 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
                     null,
                     &available,
                     null,
-                ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
+                ) == windows.FALSE) return windows.unexpectedError(std.os.windows.GetLastError());
 
                 if (available > 0) {
                     if (total == buffer.len) return error.TransportProbeOutputTooLarge;
@@ -834,17 +835,17 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
                         null,
                     ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
                     total += read;
-                    if (process_signaled) quiet_since = std.time.nanoTimestamp();
+                    if (process_signaled) quiet_since = monotonicNs();
                 }
 
                 const wait_result = win32_sys.WaitForSingleObject(process, 0);
                 if (wait_result == 0) {
                     if (!process_signaled) {
                         process_signaled = true;
-                        quiet_since = std.time.nanoTimestamp();
+                        quiet_since = monotonicNs();
                     }
                     if (available == 0 and
-                        std.time.nanoTimestamp() - quiet_since >= quiet_ns)
+                        monotonicNs() - quiet_since >= quiet_ns)
                     {
                         return buffer[0..total];
                     }
@@ -853,21 +854,21 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
                 } else if (wait_result != wait_timeout) {
                     return error.TransportProbeUnexpectedWaitResult;
                 }
-                if (!process_signaled and std.time.nanoTimestamp() >= process_deadline) {
+                if (!process_signaled and monotonicNs() >= process_deadline) {
                     return error.TransportProbeChildTimedOut;
                 }
-                if (available == 0) std.Thread.sleep(10 * std.time.ns_per_ms);
+                if (available == 0) try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
             }
         }
 
         fn run() !void {
             const allocator = std.testing.allocator;
             std.debug.print("transport-probe parent_pid={d}\n", .{windows.GetCurrentProcessId()});
-            const self_path = try std.fs.selfExePathAlloc(allocator);
+            const self_path = try std.process.executablePathAlloc(std.testing.io, allocator);
             defer allocator.free(self_path);
             const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
             defer allocator.free(self_path_z);
-            var child_env = try std.process.getEnvMap(allocator);
+            var child_env = try std.testing.environ.createMap(allocator);
             defer child_env.deinit();
             try child_env.put(child_env_name, graphics_child_mode);
 
@@ -925,7 +926,7 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
         }
     };
 
-    const enabled = std.process.getEnvVarOwned(
+    const enabled = std.testing.environ.getAlloc(
         std.testing.allocator,
         graphics_run_env_name,
     ) catch return error.SkipZigTest;
@@ -990,7 +991,7 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
                     null,
                     &available,
                     null,
-                ) == 0) {
+                ) == windows.FALSE) {
                     if (std.os.windows.GetLastError() == .BROKEN_PIPE) return;
                     return windows.unexpectedError(std.os.windows.GetLastError());
                 }
@@ -1017,11 +1018,11 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
             marker: []const u8,
             timeout_ns: u64,
         ) !void {
-            var timer = try std.time.Timer.start();
-            while (timer.read() < timeout_ns) {
+            const timer: std.Io.Timestamp = .now(std.testing.io, .awake);
+            while (timer.untilNow(std.testing.io, .awake).toNanoseconds() < timeout_ns) {
                 try pump(pty, output);
                 if (std.mem.indexOf(u8, output.items, marker) != null) return;
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
             }
             return error.KeyInputProbeReadTimeout;
         }
@@ -1055,11 +1056,11 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
 
         fn run() !void {
             const allocator = std.testing.allocator;
-            const self_path = try std.fs.selfExePathAlloc(allocator);
+            const self_path = try std.process.executablePathAlloc(std.testing.io, allocator);
             defer allocator.free(self_path);
             const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
             defer allocator.free(self_path_z);
-            var child_env = try std.process.getEnvMap(allocator);
+            var child_env = try std.testing.environ.createMap(allocator);
             defer child_env.deinit();
             try child_env.put(child_env_name, key_input_child_mode);
 
@@ -1095,13 +1096,13 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
             defer output.deinit(allocator);
             var stage: enum { ready, write_payload, write_delimiter, sentinel, read_report, decode, compare, exit } = .ready;
             var case_index: usize = 0;
-            var timer = try std.time.Timer.start();
+            const timer: std.Io.Timestamp = .now(std.testing.io, .awake);
             errdefer {
                 var exit_code: windows.DWORD = 0;
                 const have_exit_code = win32_sys.GetExitCodeProcess(process, &exit_code) != 0;
                 const child_running = win32_sys.WaitForSingleObject(process, 0) == win32_types.WAIT_TIMEOUT;
                 std.debug.print("key-input-probe failure stage={t} case_index={d} elapsed_ns={d} output_bytes={d} child_running={} child_exit_available={} child_exit={d}\n", .{
-                    stage, case_index, timer.read(), output.items.len, child_running, have_exit_code, exit_code,
+                    stage, case_index, timer.untilNow(std.testing.io, .awake).toNanoseconds(), output.items.len, child_running, have_exit_code, exit_code,
                 });
                 if (std.mem.indexOf(u8, output.items, key_input_report_marker)) |report_start| {
                     const tail = output.items[report_start..];
@@ -1127,11 +1128,11 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
                 case_index = index;
                 stage = .write_payload;
                 try writeFragment(pty.in_pipe, case.payload, 2000);
-                std.Thread.sleep(settle_ms * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(settle_ms), .awake);
                 try pump(&pty, &output);
                 stage = .write_delimiter;
                 try writeFragment(pty.in_pipe, &[_]u8{case.delimiter}, 2000);
-                std.Thread.sleep(settle_ms * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(settle_ms), .awake);
                 try pump(&pty, &output);
             }
             stage = .sentinel;
@@ -1231,7 +1232,7 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
         }
     };
 
-    const enabled = std.process.getEnvVarOwned(
+    const enabled = std.testing.environ.getAlloc(
         std.testing.allocator,
         key_input_run_env_name,
     ) catch return error.SkipZigTest;
@@ -1239,4 +1240,10 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
     if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
 
     try Probe.run();
+}
+
+/// The test Io's monotonic clock in nanoseconds, for the probe's deadlines
+/// (0.15's `std.time.nanoTimestamp` arithmetic).
+fn monotonicNs() i128 {
+    return std.Io.Timestamp.now(std.testing.io, .awake).toNanoseconds();
 }
