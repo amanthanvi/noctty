@@ -1,5 +1,6 @@
 //! Open a local configuration document using the user's text editor association.
 const std = @import("std");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const os_path = @import("path.zig");
@@ -38,15 +39,15 @@ comptime {
     }
 }
 
-extern "shell32" fn ShellExecuteExW(info: *ShellExecuteInfo) callconv(.winapi) windows.BOOL;
-extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, flags: u32) callconv(.winapi) windows.HRESULT;
+extern "shell32" fn ShellExecuteExW(info: *ShellExecuteInfo) callconv(.winapi) win32_types.BOOL;
+extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, flags: u32) callconv(.winapi) win32_types.HRESULT;
 extern "ole32" fn CoUninitialize() callconv(.winapi) void;
 
 pub fn open(alloc: std.mem.Allocator, path: []const u8) !void {
     return openWith(alloc, path, queryAssociation, execute);
 }
 
-fn queryAssociation(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
+fn queryAssociation(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
     return os_windows.AssocQueryStringW(flags, str, assoc, extra, out, len);
 }
 
@@ -54,7 +55,7 @@ fn execute(info: *ShellExecuteInfo) !bool {
     // Shell extensions may require COM. The CLI has no app runtime to set it
     // up, while the app may already have an apartment on this thread.
     const hr = CoInitializeEx(null, 0x2 | 0x4); // STA, disable OLE1 DDE
-    const changed_mode: windows.HRESULT = @bitCast(@as(u32, 0x80010106));
+    const changed_mode: win32_types.HRESULT = @bitCast(@as(u32, 0x80010106));
     if (hr < 0 and hr != changed_mode) return error.EditorComInitializationFailed;
     defer if (hr >= 0) CoUninitialize();
     return ShellExecuteExW(info) != 0;
@@ -110,7 +111,7 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
         var calls: usize = 0;
         var expected: []const u8 = "";
         var queries: usize = 0;
-        fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
+        fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
             queries += 1;
             try std.testing.expectEqual(@as(u32, 0), flags);
             try std.testing.expectEqual(@as(u32, 20), str); // ASSOCSTR_PROGID
@@ -161,7 +162,7 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
 test "SET text editor safety gates reject unsafe targets before shell dispatch" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const Fake = struct {
-        fn unexpectedQuery(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, _: ?[*]u16, _: *u32) !windows.HRESULT {
+        fn unexpectedQuery(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, _: ?[*]u16, _: *u32) !win32_types.HRESULT {
             return error.UnexpectedAssociationQuery;
         }
         fn unexpected(_: *ShellExecuteInfo) !bool {
@@ -186,7 +187,7 @@ test "SET text editor query failure and invalid bounded ProgID never dispatch th
     const Fake = struct {
         const Mode = enum { failure, partial_success, oversized, zero_length, empty, unterminated, embedded_null, short_count };
         var mode: Mode = .failure;
-        fn query(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, out: ?[*]u16, len: *u32) !windows.HRESULT {
+        fn query(_: u32, _: u32, _: [*:0]const u16, _: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
             switch (mode) {
                 .failure => return @bitCast(@as(u32, 0x80070483)),
                 .partial_success => return 1,

@@ -56,7 +56,7 @@ const win32_elevation = @import("win32_elevation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
 const os_windows = @import("../os/windows.zig");
 
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const LPCWSTR = win32_types.LPCWSTR;
 const HKEY = sys.HKEY;
 const REGSAM = u32;

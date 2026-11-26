@@ -4,12 +4,13 @@
 //! additional UIA interface with the widget or provider that consumes it.
 
 const std = @import("std");
+const win32_types = @import("../win32_types.zig");
 const windows = std.os.windows;
 
-pub const HRESULT = windows.HRESULT;
+pub const HRESULT = win32_types.HRESULT;
 pub const HWND = windows.HWND;
 pub const GUID = windows.GUID;
-pub const BOOL = windows.BOOL;
+pub const BOOL = win32_types.BOOL;
 pub const LRESULT = isize;
 pub const WPARAM = usize;
 pub const LPARAM = isize;

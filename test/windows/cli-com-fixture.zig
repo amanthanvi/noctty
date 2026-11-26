@@ -9,6 +9,14 @@
 const std = @import("std");
 const w = std.os.windows;
 
+// This fixture builds on its own (`zig build-exe`, no build graph), so it
+// declares what it calls instead of importing the fork's declarations.
+const std_input_handle: w.DWORD = std.math.maxInt(w.DWORD) - 10 + 1;
+const std_output_handle: w.DWORD = std.math.maxInt(w.DWORD) - 11 + 1;
+const std_error_handle: w.DWORD = std.math.maxInt(w.DWORD) - 12 + 1;
+extern "kernel32" fn Sleep(dwMilliseconds: w.DWORD) callconv(.winapi) void;
+extern "kernel32" fn ExitProcess(uExitCode: w.UINT) callconv(.winapi) noreturn;
+
 pub const panic = std.debug.no_panic;
 
 pub fn main() !void {
@@ -21,9 +29,9 @@ pub fn main() !void {
     var startup: w.STARTUPINFOW = std.mem.zeroes(w.STARTUPINFOW);
     startup.cb = @sizeOf(w.STARTUPINFOW);
     GetStartupInfoW(&startup);
-    const stdin_kind = handleKind(w.STD_INPUT_HANDLE);
-    const stdout_kind = handleKind(w.STD_OUTPUT_HANDLE);
-    const stderr_kind = handleKind(w.STD_ERROR_HANDLE);
+    const stdin_kind = handleKind(std_input_handle);
+    const stdout_kind = handleKind(std_output_handle);
+    const stderr_kind = handleKind(std_error_handle);
 
     var stdin_bytes: u64 = 0;
     var digest: [32]u8 = undefined;
@@ -80,8 +88,8 @@ pub fn main() !void {
     file.close();
 
     // Stay alive long enough for the harness to see that the launcher returned.
-    if (hold_ms != 0) w.kernel32.Sleep(hold_ms);
-    w.kernel32.ExitProcess(exit_code);
+    if (hold_ms != 0) Sleep(hold_ms);
+    ExitProcess(exit_code);
 }
 
 fn envSet(alloc: std.mem.Allocator, name: []const u8) bool {

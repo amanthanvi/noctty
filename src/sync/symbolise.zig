@@ -41,6 +41,8 @@
 //! `problem=` header as BAD-DUMP.
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const dump = @import("dump.zig");
@@ -164,13 +166,13 @@ const ImagehlpModuleW64 = extern struct {
     PdbSig: u32,
     PdbSig70: [16]u8,
     PdbAge: u32,
-    PdbUnmatched: windows.BOOL,
-    DbgUnmatched: windows.BOOL,
-    LineNumbers: windows.BOOL,
-    GlobalSymbols: windows.BOOL,
-    TypeInfo: windows.BOOL,
-    SourceIndexed: windows.BOOL,
-    Publics: windows.BOOL,
+    PdbUnmatched: win32_types.BOOL,
+    DbgUnmatched: win32_types.BOOL,
+    LineNumbers: win32_types.BOOL,
+    GlobalSymbols: win32_types.BOOL,
+    TypeInfo: win32_types.BOOL,
+    SourceIndexed: win32_types.BOOL,
+    Publics: win32_types.BOOL,
     MachineType: u32,
     Reserved: u32,
 };
@@ -192,8 +194,8 @@ const sym_options: u32 = 0x10 | // SYMOPT_LOAD_LINES
 
 const Api = struct {
     SymSetOptions: *const fn (options: u32) callconv(.winapi) u32,
-    SymInitializeW: *const fn (process: windows.HANDLE, search_path: ?[*:0]const u16, invade: windows.BOOL) callconv(.winapi) windows.BOOL,
-    SymCleanup: *const fn (process: windows.HANDLE) callconv(.winapi) windows.BOOL,
+    SymInitializeW: *const fn (process: windows.HANDLE, search_path: ?[*:0]const u16, invade: win32_types.BOOL) callconv(.winapi) win32_types.BOOL,
+    SymCleanup: *const fn (process: windows.HANDLE) callconv(.winapi) win32_types.BOOL,
     SymLoadModuleExW: *const fn (
         process: windows.HANDLE,
         file: ?windows.HANDLE,
@@ -204,9 +206,9 @@ const Api = struct {
         data: ?*anyopaque,
         flags: u32,
     ) callconv(.winapi) u64,
-    SymGetModuleInfoW64: *const fn (process: windows.HANDLE, address: u64, info: *ImagehlpModuleW64) callconv(.winapi) windows.BOOL,
-    SymFromAddrW: *const fn (process: windows.HANDLE, address: u64, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) windows.BOOL,
-    SymGetLineFromAddrW64: *const fn (process: windows.HANDLE, address: u64, displacement: *u32, line: *ImagehlpLineW64) callconv(.winapi) windows.BOOL,
+    SymGetModuleInfoW64: *const fn (process: windows.HANDLE, address: u64, info: *ImagehlpModuleW64) callconv(.winapi) win32_types.BOOL,
+    SymFromAddrW: *const fn (process: windows.HANDLE, address: u64, displacement: ?*u64, symbol: *SymbolInfoW) callconv(.winapi) win32_types.BOOL,
+    SymGetLineFromAddrW64: *const fn (process: windows.HANDLE, address: u64, displacement: *u32, line: *ImagehlpLineW64) callconv(.winapi) win32_types.BOOL,
 };
 
 const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x2;
@@ -215,7 +217,7 @@ const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 
 extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?windows.HANDLE, flags: u32) callconv(.winapi) ?windows.HMODULE;
 extern "kernel32" fn GetProcAddress(module: windows.HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) win32_types.BOOL;
 
 /// DbgHelp is single-threaded: one session at a time, held from `open` to
 /// `close`.
@@ -295,7 +297,7 @@ pub const Session = struct {
         errdefer session_lock.unlock();
         const fns = try loadApi();
         _ = fns.SymSetOptions(sym_options);
-        if (fns.SymInitializeW(sessionHandle(), dir_z.ptr, windows.FALSE) == 0) return error.SymInitializeFailed;
+        if (fns.SymInitializeW(sessionHandle(), dir_z.ptr, win32_types.FALSE) == 0) return error.SymInitializeFailed;
         errdefer _ = fns.SymCleanup(sessionHandle());
         if (fns.SymLoadModuleExW(sessionHandle(), null, image_z.ptr, null, base, size, null, 0) == 0) {
             return error.LoadModuleFailed;
@@ -307,7 +309,7 @@ pub const Session = struct {
     pub fn openSelf(a: Allocator) (OpenError || error{NoModule})!Session {
         const module = dump.selfModule() orelse return error.NoModule;
         var buf: [32768]u16 = undefined;
-        const n = windows.kernel32.GetModuleFileNameW(@ptrFromInt(module.base), &buf, buf.len);
+        const n = win32_sys.GetModuleFileNameW(@ptrFromInt(module.base), &buf, buf.len);
         if (n == 0 or n >= buf.len) return error.NoModule;
         return open(a, buf[0..n], module.base, module.size);
     }
@@ -896,7 +898,7 @@ test "the image file's own CodeView record is this process's" {
     const own = dump.selfModule().?;
     const pdb = own.pdb orelse return error.SkipZigTest;
     var buf: [32768]u16 = undefined;
-    const n = windows.kernel32.GetModuleFileNameW(null, &buf, buf.len - 1);
+    const n = win32_sys.GetModuleFileNameW(null, &buf, buf.len - 1);
     buf[n] = 0;
     const file_pdb = (try imagePdb(buf[0..n :0])) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(pdb.guid, file_pdb.guid);

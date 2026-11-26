@@ -28,7 +28,7 @@ const ownedStringEquals = paint_text.ownedStringEquals;
 const rectEquals = chrome_layout.rectEquals;
 
 pub fn lastError() std.posix.UnexpectedError {
-    return windows.unexpectedError(windows.kernel32.GetLastError());
+    return windows.unexpectedError(std.os.windows.GetLastError());
 }
 
 pub fn setWindowData(hwnd: HWND, ptr: ?*anyopaque) void {

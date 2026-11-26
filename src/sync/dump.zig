@@ -66,6 +66,8 @@
 //! Zig 0.15.2: conpty.md, 2026-10-31 SURFACE-STACK).
 
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const thread_role = @import("thread_role.zig");
@@ -353,13 +355,13 @@ pub const Dump = struct {
         // Write access, not append access alone: a failure overwrites the
         // header's first byte (`markFailed`); every line is written at the
         // end-of-file offset.
-        const handle = windows.kernel32.CreateFileW(
+        const handle = win32_sys.CreateFileW(
             path_buf[0..len :0].ptr,
-            windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA,
-            windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE,
+            win32_types.FILE_WRITE_DATA | win32_types.FILE_APPEND_DATA,
+            win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_DELETE,
             null, // not inheritable
-            windows.CREATE_NEW,
-            windows.FILE_ATTRIBUTE_NORMAL,
+            win32_types.CREATE_NEW,
+            win32_types.FILE_ATTRIBUTE_NORMAL,
             null,
         );
         if (handle == windows.INVALID_HANDLE_VALUE) {
@@ -430,13 +432,13 @@ pub const Fault = struct {
 fn writeAt(handle: windows.HANDLE, bytes: []const u8, offset: u64) ?u32 {
     var written: windows.DWORD = 0;
     const len: windows.DWORD = @intCast(bytes.len);
-    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.DUMMYUNIONNAME.DUMMYSTRUCTNAME = .{
         .Offset = @truncate(offset),
         .OffsetHigh = @truncate(offset >> 32),
     };
     // The handle is synchronous: the call returns once the write is done.
-    if (windows.kernel32.WriteFile(handle, bytes.ptr, len, &written, &overlapped) == 0) {
+    if (win32_sys.WriteFile(handle, bytes.ptr, len, &written, &overlapped) == 0) {
         return @intFromEnum(windows.GetLastError());
     }
     if (written != len) return @intFromEnum(windows.Win32Error.WRITE_FAULT);
@@ -498,7 +500,7 @@ fn lower(unit: u16) u16 {
 /// The file name of the image at `base`, in `module_buf` (under
 /// `open_lock`).
 fn moduleFileName(base: usize) ?[]const u16 {
-    const n = windows.kernel32.GetModuleFileNameW(@ptrFromInt(base), &module_buf, module_buf.len);
+    const n = win32_sys.GetModuleFileNameW(@ptrFromInt(base), &module_buf, module_buf.len);
     if (n == 0 or n >= module_buf.len) return null;
     return baseName(u16, module_buf[0..n]);
 }
@@ -887,7 +889,7 @@ extern "kernel32" fn GetModuleHandleExW(
     flags: u32,
     name: ?*const anyopaque,
     module: *?windows.HMODULE,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn GetProcessTimes(
     process: windows.HANDLE,
@@ -895,7 +897,7 @@ extern "kernel32" fn GetProcessTimes(
     exit: *windows.FILETIME,
     kernel: *windows.FILETIME,
     user: *windows.FILETIME,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 
 extern "kernel32" fn GetEnvironmentVariableW(
     name: [*:0]const u16,

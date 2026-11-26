@@ -15,6 +15,8 @@
 //! the user's own entries, flags and order stay as they are, and no Windows
 //! path is exported (`TERMINFO` never is).
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const EnvMap = std.process.EnvMap;
@@ -128,11 +130,11 @@ pub fn cmdAutoRunAbsent() bool {
     return cmdAutoRunAbsentWithQuery(struct {
         fn query(root: windows.HKEY, view: windows.DWORD) windows.LSTATUS {
             var bytes: windows.DWORD = 0;
-            return windows.advapi32.RegGetValueW(
+            return win32_sys.RegGetValueW(
                 root,
                 std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Command Processor"),
                 std.unicode.utf8ToUtf16LeStringLiteral("AutoRun"),
-                windows.advapi32.RRF.RT_ANY | windows.advapi32.RRF.NOEXPAND | view,
+                win32_types.RRF.RT_ANY | win32_types.RRF.NOEXPAND | view,
                 null,
                 null,
                 &bytes,
@@ -143,7 +145,7 @@ pub fn cmdAutoRunAbsent() bool {
 
 fn cmdAutoRunAbsentWithQuery(query: anytype) bool {
     for ([_]windows.HKEY{ windows.HKEY_CURRENT_USER, windows.HKEY_LOCAL_MACHINE }) |root| {
-        for ([_]windows.DWORD{ windows.advapi32.RRF.SUBKEY_WOW6432KEY, windows.advapi32.RRF.SUBKEY_WOW6464KEY }) |view| {
+        for ([_]windows.DWORD{ win32_types.RRF.SUBKEY_WOW6432KEY, win32_types.RRF.SUBKEY_WOW6464KEY }) |view| {
             if (query(root, view) != @intFromEnum(windows.Win32Error.FILE_NOT_FOUND)) return false;
         }
     }
@@ -293,12 +295,12 @@ fn readDefaultDistribution() ?DefaultDistribution {
     if (comptime builtin.os.tag != .windows) return null;
     return defaultDistributionWithQuery(struct {
         fn query(buf: *[39]u16, bytes: *windows.DWORD) windows.LSTATUS {
-            return windows.advapi32.RegGetValueW(
+            return win32_sys.RegGetValueW(
                 windows.HKEY_CURRENT_USER,
                 std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"),
                 std.unicode.utf8ToUtf16LeStringLiteral("DefaultDistribution"),
-                windows.advapi32.RRF.RT_REG_SZ | windows.advapi32.RRF.NOEXPAND |
-                    windows.advapi32.RRF.SUBKEY_WOW6464KEY,
+                win32_types.RRF.RT_REG_SZ | win32_types.RRF.NOEXPAND |
+                    win32_types.RRF.SUBKEY_WOW6464KEY,
                 null,
                 @ptrCast(buf),
                 bytes,
@@ -336,12 +338,12 @@ fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
     subkey[subkey.len] = 0;
     return distributionNameWithQuery(alloc, &subkey, struct {
         fn query(key: [*:0]const u16, buf: *[257]u16, bytes: *windows.DWORD) windows.LSTATUS {
-            return windows.advapi32.RegGetValueW(
+            return win32_sys.RegGetValueW(
                 windows.HKEY_CURRENT_USER,
                 key,
                 std.unicode.utf8ToUtf16LeStringLiteral("DistributionName"),
-                windows.advapi32.RRF.RT_REG_SZ | windows.advapi32.RRF.NOEXPAND |
-                    windows.advapi32.RRF.SUBKEY_WOW6464KEY,
+                win32_types.RRF.RT_REG_SZ | win32_types.RRF.NOEXPAND |
+                    win32_types.RRF.SUBKEY_WOW6464KEY,
                 null,
                 @ptrCast(buf),
                 bytes,
@@ -391,7 +393,7 @@ fn localPathState(path: []const u8) LocalPath {
     if (comptime builtin.os.tag != .windows) return .unsafe;
     if (!isLocalAbsolute(path)) return .unsafe;
     var handle: windows.HANDLE = undefined;
-    const status = windows_shell.ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle) orelse
+    const status = windows_shell.ntOpenDontReparse(path, win32_types.FILE_READ_ATTRIBUTES, 0, &handle) orelse
         return .unsafe;
     switch (status) {
         .SUCCESS => {},
@@ -645,13 +647,13 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
     for (probe, args) |arg, *dest| dest.* = temp.dupeZ(u8, arg) catch return null;
     var sa: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
-        .bInheritHandle = windows.TRUE,
+        .bInheritHandle = win32_types.TRUE,
         .lpSecurityDescriptor = null,
     };
     const nul = windows.OpenFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
-        .access_mask = windows.GENERIC_READ | windows.GENERIC_WRITE | windows.SYNCHRONIZE,
-        .share_access = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
-        .creation = windows.OPEN_EXISTING,
+        .access_mask = win32_types.GENERIC_READ | win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
+        .share_access = win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
+        .creation = win32_types.OPEN_EXISTING,
         .sa = &sa,
     }) catch return null;
     defer std.posix.close(nul);
@@ -678,10 +680,10 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
     };
 
     defer std.posix.close(child.pid.?);
-    windows.WaitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
+    win32_sys.waitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
         log.warn("terminfo probe did not finish err={}", .{err});
-        _ = windows.kernel32.TerminateProcess(child.pid.?, 1);
-        windows.WaitForSingleObjectEx(child.pid.?, 5000, false) catch {};
+        _ = win32_sys.TerminateProcess(child.pid.?, 1);
+        win32_sys.waitForSingleObjectEx(child.pid.?, 5000, false) catch {};
         return probeExitAnswer(null);
     };
     const result = child.wait(true) catch return null;

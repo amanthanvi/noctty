@@ -1123,7 +1123,7 @@ fn chooseClassicCompatibilityPixelFormat(hdc: HDC) !WglPixelFormatSelection {
     const requested = compatibilityPixelFormatDescriptor();
     const pixel_format = ChoosePixelFormat(hdc, &requested);
     if (pixel_format == 0) {
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         gl_startup.recordOpenGLStartupWin32Failure(.choose_pixel_format, err);
         return windows.unexpectedError(err);
     }
@@ -1134,7 +1134,7 @@ fn chooseClassicCompatibilityPixelFormat(hdc: HDC) !WglPixelFormatSelection {
         @sizeOf(PIXELFORMATDESCRIPTOR),
         &descriptor,
     ) == 0) {
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         gl_startup.recordOpenGLStartupWin32Failure(.describe_pixel_format, err);
         return windows.unexpectedError(err);
     }
@@ -1206,7 +1206,7 @@ fn enumerateClassicPixelFormat(hdc: HDC) !WglPixelFormatSelection {
             @sizeOf(PIXELFORMATDESCRIPTOR),
             &descriptor,
         ) == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             gl_startup.recordOpenGLStartupWin32Failure(.describe_pixel_format, err);
             return windows.unexpectedError(err);
         }
@@ -1251,7 +1251,7 @@ pub fn chooseRealPixelFormat(
     if (GetWindowRect(hwnd, &child_rect) == 0) {
         log.warn(
             "unable to anchor a display-local WGL bootstrap; retaining classic selection err={}",
-            .{windows.kernel32.GetLastError()},
+            .{std.os.windows.GetLastError()},
         );
         return enumerateClassicPixelFormat(hdc);
     }

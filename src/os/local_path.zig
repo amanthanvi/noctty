@@ -8,6 +8,7 @@
 //! reached through another local symlink, so nothing it opens contacts a
 //! share.
 const std = @import("std");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
@@ -80,7 +81,7 @@ pub const Found = struct {
         var pattern = unicodeString(leaf_w);
         var buffer: [@sizeOf(windows.FILE_DIRECTORY_INFORMATION) + windows.NAME_MAX * 2]u8 align(@alignOf(windows.FILE_DIRECTORY_INFORMATION)) = undefined;
         var io: windows.IO_STATUS_BLOCK = undefined;
-        if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .FileDirectoryInformation, windows.TRUE, &pattern, windows.TRUE) != .SUCCESS) return null;
+        if (windows.ntdll.NtQueryDirectoryFile(dir.handle, null, null, null, &io, &buffer, buffer.len, .FileDirectoryInformation, win32_types.TRUE, &pattern, win32_types.TRUE) != .SUCCESS) return null;
         const info: *const windows.FILE_DIRECTORY_INFORMATION = @ptrCast(&buffer);
         const name_w: [*]const u16 = @ptrCast(&info.FileName);
         return std.unicode.utf16LeToUtf8Alloc(alloc, name_w[0 .. info.FileNameLength / 2]) catch null;
@@ -581,16 +582,16 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
     var io: windows.IO_STATUS_BLOCK = undefined;
     return windows.ntdll.NtCreateFile(
         handle,
-        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE | (if (options.read_data) @as(u32, windows.FILE_READ_DATA) else 0),
+        win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE | (if (options.read_data) @as(u32, win32_types.FILE_READ_DATA) else 0),
         &attrs,
         &io,
         null,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         // Pin only reparse objects against replacement and reparse-data writes.
         // Ordinary files (including actively written logs) retain shared access.
-        if (options.pin_reparse) windows.FILE_SHARE_READ else windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
-        windows.FILE_OPEN,
-        windows.FILE_SYNCHRONOUS_IO_NONALERT | (if (options.no_follow) @as(u32, windows.FILE_OPEN_REPARSE_POINT) else 0),
+        if (options.pin_reparse) win32_types.FILE_SHARE_READ else win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
+        win32_types.FILE_OPEN,
+        win32_types.FILE_SYNCHRONOUS_IO_NONALERT | (if (options.no_follow) @as(u32, win32_types.FILE_OPEN_REPARSE_POINT) else 0),
         null,
         0,
     );
@@ -610,7 +611,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
     var own_parent = true;
     defer if (own_parent) windows.CloseHandle(parent);
     const root_info = attributeTag(parent) orelse return null;
-    if (root_info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 or !hasLocalFinalPath(parent)) return null;
+    if (root_info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 or !hasLocalFinalPath(parent)) return null;
     var start = root_len;
     while (start < path.len) {
         if (state.remaining == 0) return null;
@@ -630,11 +631,11 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
         defer if (own_child) windows.CloseHandle(child);
         const info = componentInfo(child, path[start..end]) orelse return null;
         if (state.cloud == .refuse and recalls(info)) return null;
-        if (info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+        if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0) {
             var pinned: windows.HANDLE = undefined;
             if (create(name_w, parent, 0, .{ .no_follow = true, .read_data = last and read_data, .pin_reparse = true }, &pinned) != .SUCCESS) return null;
             const still_same = if (componentInfo(pinned, path[start..end])) |pinned_info|
-                pinned_info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 and pinned_info.ReparseTag == info.ReparseTag
+                pinned_info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 and pinned_info.ReparseTag == info.ReparseTag
             else
                 false;
             if (!still_same) {
@@ -643,7 +644,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
             }
             windows.CloseHandle(child);
             child = pinned;
-            if (info.ReparseTag == windows.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == windows.IO_REPARSE_TAG_MOUNT_POINT) {
+            if (info.ReparseTag == win32_types.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == win32_types.IO_REPARSE_TAG_MOUNT_POINT) {
                 const target = readLinkTarget(alloc, child, info.ReparseTag, path[0..start]) orelse return null;
                 defer alloc.free(target);
                 const joined = std.fs.path.resolve(alloc, &.{ target, path[if (last) end else end + 1..] }) catch return null;
@@ -722,9 +723,9 @@ fn isCloudTag(tag: u32) bool {
 /// A cloud placeholder, or anything else marked for recall from remote
 /// storage: reading it (for some, opening it) fetches it from there first.
 fn recalls(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
-    if (info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 and isCloudTag(info.ReparseTag)) return true;
-    return info.FileAttributes & (windows.FILE_ATTRIBUTE_OFFLINE | windows.FILE_ATTRIBUTE_RECALL_ON_OPEN |
-        windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
+    if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 and isCloudTag(info.ReparseTag)) return true;
+    return info.FileAttributes & (win32_types.FILE_ATTRIBUTE_OFFLINE | win32_types.FILE_ATTRIBUTE_RECALL_ON_OPEN |
+        win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
 }
 
 /// `attributeTag` for the component `name`, which `test_cloud` can make look
@@ -733,7 +734,7 @@ fn componentInfo(handle: windows.HANDLE, name: []const u8) ?windows.FILE_ATTRIBU
     var info = attributeTag(handle) orelse return null;
     if (builtin.is_test) if (test_cloud.name) |cloud| if (std.mem.eql(u8, cloud, name)) {
         info.FileAttributes |= test_cloud.attributes;
-        if (test_cloud.attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) info.ReparseTag = test_cloud.tag;
+        if (test_cloud.attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0) info.ReparseTag = test_cloud.tag;
     };
     return info;
 }
@@ -744,13 +745,13 @@ fn componentInfo(handle: windows.HANDLE, name: []const u8) ?windows.FILE_ATTRIBU
 /// presents it, the open that can recall it.
 pub const test_cloud = struct {
     pub var name: ?[]const u8 = null;
-    pub var attributes: u32 = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    pub var attributes: u32 = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
     pub var tag: u32 = IO_REPARSE_TAG_CLOUD | 0x6000;
     pub var reopened: usize = 0;
 
     pub fn reset() void {
         name = null;
-        attributes = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+        attributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
         tag = IO_REPARSE_TAG_CLOUD | 0x6000;
         reopened = 0;
     }
@@ -762,13 +763,13 @@ fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const
     const length: usize = std.mem.readInt(u16, buffer[4..6], .little);
     const offset: usize = std.mem.readInt(u16, buffer[8..10], .little);
     const name_len: usize = std.mem.readInt(u16, buffer[10..12], .little);
-    const base: usize = if (tag == windows.IO_REPARSE_TAG_SYMLINK) 20 else 16;
+    const base: usize = if (tag == win32_types.IO_REPARSE_TAG_SYMLINK) 20 else 16;
     if (length + 8 > buffer.len or base + offset + name_len > length + 8 or (offset | name_len) & 1 != 0) return null;
     const name_w: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, buffer[base + offset ..][0..name_len]));
     const target = std.unicode.utf16LeToUtf8Alloc(alloc, name_w) catch return null;
     defer alloc.free(target);
     if (std.mem.indexOfScalar(u8, target, 0) != null) return null;
-    const relative = tag == windows.IO_REPARSE_TAG_SYMLINK and std.mem.readInt(u32, buffer[16..20], .little) & windows.SYMLINK_FLAG_RELATIVE != 0;
+    const relative = tag == win32_types.IO_REPARSE_TAG_SYMLINK and std.mem.readInt(u32, buffer[16..20], .little) & windows.SYMLINK_FLAG_RELATIVE != 0;
     if (relative) {
         // Relative targets must not be rooted, drive-relative, streams or UNC.
         if (target.len == 0 or target[0] == '\\' or target[0] == '/' or std.mem.indexOfScalar(u8, target, ':') != null) return null;
@@ -778,7 +779,7 @@ fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const
     if (os_path.isDriveAbsolutePath(stripped)) return alloc.dupe(u8, stripped) catch null;
     // Volume mount points (including volumes without a drive letter) use this
     // exact local-volume namespace. Other device/NT namespaces remain refused.
-    if (tag == windows.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
+    if (tag == win32_types.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
         return std.fmt.allocPrint(alloc, "\\\\?\\{s}", .{stripped}) catch null;
     return null;
 }
@@ -834,7 +835,7 @@ pub const test_links = struct {
         defer alloc.free(target_w);
         const flags: u32 = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE | (if (is_dir) @as(u32, SYMBOLIC_LINK_FLAG_DIRECTORY) else 0);
         if (CreateSymbolicLinkW(link_w, target_w, flags) != 0) return true;
-        return switch (windows.kernel32.GetLastError()) {
+        return switch (std.os.windows.GetLastError()) {
             .PRIVILEGE_NOT_HELD => false,
             else => error.Unexpected,
         };
@@ -845,8 +846,8 @@ pub const test_links = struct {
     pub fn junction(alloc: Allocator, dir: []const u8, nt_target: []const u8) !void {
         var dir_w = try windows.sliceToPrefixedFileW(null, dir);
         const handle = try windows.OpenFile(dir_w.span(), .{
-            .access_mask = windows.GENERIC_WRITE | windows.SYNCHRONIZE,
-            .creation = windows.FILE_OPEN,
+            .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
+            .creation = win32_types.FILE_OPEN,
             .filter = .dir_only,
             .follow_symlinks = false,
         });
@@ -860,7 +861,7 @@ pub const test_links = struct {
         const buffer = try alloc.alloc(u8, 8 + data_len);
         defer alloc.free(buffer);
         @memset(buffer, 0);
-        std.mem.writeInt(u32, buffer[0..4], windows.IO_REPARSE_TAG_MOUNT_POINT, .little);
+        std.mem.writeInt(u32, buffer[0..4], win32_types.IO_REPARSE_TAG_MOUNT_POINT, .little);
         std.mem.writeInt(u16, buffer[4..6], @intCast(data_len), .little);
         std.mem.writeInt(u16, buffer[10..12], @intCast(target_bytes), .little);
         std.mem.writeInt(u16, buffer[12..14], @intCast(target_bytes + 2), .little);
@@ -996,15 +997,15 @@ test "local path open refuses a cloud placeholder before opening it as its provi
     // A plain local file made to read as a placeholder. Behind a junction
     // the direct open stops at the link, so `.open` walks to it too.
     const Case = struct { name: []const u8, attributes: u32, rel: []const u8 };
-    const placeholder = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    const placeholder = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
     for ([_]Case{
         .{ .name = "cloud.ghostty", .attributes = placeholder, .rel = "to-real\\cloud.ghostty" },
         .{ .name = "cloud.ghostty", .attributes = placeholder, .rel = "real\\cloud.ghostty" },
         // A placeholder folder on the way.
-        .{ .name = "real", .attributes = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_RECALL_ON_OPEN, .rel = "to-real\\cloud.ghostty" },
+        .{ .name = "real", .attributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_RECALL_ON_OPEN, .rel = "to-real\\cloud.ghostty" },
         // Marked for recall without a cloud tag (another provider).
-        .{ .name = "cloud.ghostty", .attributes = windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, .rel = "real\\cloud.ghostty" },
-        .{ .name = "cloud.ghostty", .attributes = windows.FILE_ATTRIBUTE_OFFLINE, .rel = "real\\cloud.ghostty" },
+        .{ .name = "cloud.ghostty", .attributes = win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, .rel = "real\\cloud.ghostty" },
+        .{ .name = "cloud.ghostty", .attributes = win32_types.FILE_ATTRIBUTE_OFFLINE, .rel = "real\\cloud.ghostty" },
     }) |case| {
         errdefer std.debug.print("local path open of {s} with {s} as a placeholder ({x})\n", .{ case.rel, case.name, case.attributes });
         test_cloud.reset();
@@ -1113,7 +1114,7 @@ test "local path open allows only the cloud reparse tag family" {
         try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .cloud = .refuse }));
     }
     // Any other tag on a file that is no link is refused, under either policy.
-    for ([_]u32{ windows.IO_REPARSE_TAG_SYMLINK, windows.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
+    for ([_]u32{ win32_types.IO_REPARSE_TAG_SYMLINK, win32_types.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
         errdefer std.debug.print("local path open of a reparse tag {x}\n", .{tag});
         test_cloud.reset();
         test_cloud.name = "cloud.ghostty";

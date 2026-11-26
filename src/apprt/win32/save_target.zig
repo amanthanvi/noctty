@@ -7,6 +7,8 @@
 //! the first time. `resolve` finds the file the name reaches, `write` puts the
 //! bytes there.
 const std = @import("std");
+const win32_sys = @import("sys.zig");
+const win32_types = @import("../win32_types.zig");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
 const sys = @import("sys.zig");
@@ -16,8 +18,8 @@ const log = std.log.scoped(.save_target);
 
 extern "kernel32" fn GetFileInformationByHandle(
     handle: windows.HANDLE,
-    info: *windows.BY_HANDLE_FILE_INFORMATION,
-) callconv(.winapi) windows.BOOL;
+    info: *win32_types.BY_HANDLE_FILE_INFORMATION,
+) callconv(.winapi) win32_types.BOOL;
 
 pub const Target = struct {
     /// The file the configured name reaches now, as `C:\...` or
@@ -126,12 +128,12 @@ pub fn resolve(alloc: Allocator, path: []const u8) ResolveError!Target {
     const wide = windows.sliceToPrefixedFileW(null, path) catch return named(alloc, path);
     // No access is asked for, so a read-only or busy file still opens; the
     // handle only answers questions about the file.
-    const handle = windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         wide.span().ptr,
         0,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         0,
         null,
     );
@@ -140,16 +142,16 @@ pub fn resolve(alloc: Allocator, path: []const u8) ResolveError!Target {
             // The open follows a link and fails on a missing target, so it
             // cannot tell a first save from a dangling link; the attributes of
             // the name itself can.
-            const attributes = windows.kernel32.GetFileAttributesW(wide.span().ptr);
+            const attributes = win32_sys.GetFileAttributesW(wide.span().ptr);
             if (attributes != windows.INVALID_FILE_ATTRIBUTES and
-                attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0) return error.DanglingLink;
+                attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0) return error.DanglingLink;
             return named(alloc, path);
         },
         else => return named(alloc, path),
     };
     defer windows.CloseHandle(handle);
 
-    var info: windows.BY_HANDLE_FILE_INFORMATION = undefined;
+    var info: win32_types.BY_HANDLE_FILE_INFORMATION = undefined;
     const hard_linked = GetFileInformationByHandle(handle, &info) != 0 and info.nNumberOfLinks > 1;
     const final = finalPath(alloc, handle) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -345,7 +347,7 @@ fn replaceContents(file: std.fs.File, bytes: []const u8) !void {
 const testing = std.testing;
 
 extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const u16, target: [*:0]const u16, flags: u32) callconv(.winapi) windows.BOOLEAN;
-extern "kernel32" fn CreateHardLinkW(link: [*:0]const u16, existing: [*:0]const u16, security: ?*anyopaque) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn CreateHardLinkW(link: [*:0]const u16, existing: [*:0]const u16, security: ?*anyopaque) callconv(.winapi) win32_types.BOOL;
 
 /// A scratch directory and the absolute path of a name in it. Public for the
 /// tests of the code that saves through it.
@@ -400,8 +402,8 @@ pub const Scratch = struct {
     pub fn isLink(self: *const Scratch, name: []const u8) !bool {
         const w = try self.pathW(name);
         defer testing.allocator.free(w);
-        const attributes = windows.kernel32.GetFileAttributesW(w);
-        return attributes != windows.INVALID_FILE_ATTRIBUTES and attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        const attributes = win32_sys.GetFileAttributesW(w);
+        return attributes != windows.INVALID_FILE_ATTRIBUTES and attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0;
     }
 
     pub fn expectContent(self: *const Scratch, name: []const u8, expected: []const u8) !void {
@@ -574,7 +576,7 @@ test "save target writes through hard links so every name sees the bytes" {
     try scratch.expectNames(&.{ "config.ghostty", "dotfile" });
 }
 
-extern "kernel32" fn SetFileAttributesW(name: [*:0]const u16, attributes: u32) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetFileAttributesW(name: [*:0]const u16, attributes: u32) callconv(.winapi) win32_types.BOOL;
 
 test "save target keeps a hard-linked file that cannot be opened as it was, with no copy left behind" {
     var scratch = try Scratch.init();
@@ -586,8 +588,8 @@ test "save target keeps a hard-linked file that cannot be opened as it was, with
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, path);
     defer testing.allocator.free(path_w);
     // The attribute belongs to the file, so both names are read-only.
-    try testing.expect(SetFileAttributesW(path_w, windows.FILE_ATTRIBUTE_READONLY) != 0);
-    defer _ = SetFileAttributesW(path_w, windows.FILE_ATTRIBUTE_NORMAL);
+    try testing.expect(SetFileAttributesW(path_w, win32_types.FILE_ATTRIBUTE_READONLY) != 0);
+    defer _ = SetFileAttributesW(path_w, win32_types.FILE_ATTRIBUTE_NORMAL);
 
     const target = try resolve(testing.allocator, path);
     defer target.deinit(testing.allocator);
@@ -607,8 +609,8 @@ test "save target rewrites a hidden hard-linked file in place" {
     defer testing.allocator.free(path);
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, path);
     defer testing.allocator.free(path_w);
-    try testing.expect(SetFileAttributesW(path_w, windows.FILE_ATTRIBUTE_HIDDEN) != 0);
-    defer _ = SetFileAttributesW(path_w, windows.FILE_ATTRIBUTE_NORMAL);
+    try testing.expect(SetFileAttributesW(path_w, win32_types.FILE_ATTRIBUTE_HIDDEN) != 0);
+    defer _ = SetFileAttributesW(path_w, win32_types.FILE_ATTRIBUTE_NORMAL);
 
     const target = try resolve(testing.allocator, path);
     defer target.deinit(testing.allocator);

@@ -37,8 +37,14 @@ pub const Ops = struct {
     empty: *const fn () callconv(.winapi) BOOL = sys.EmptyClipboard,
     setData: *const fn (UINT, ?*anyopaque) callconv(.winapi) ?*anyopaque = sys.SetClipboardData,
     close: *const fn () callconv(.winapi) BOOL = sys.CloseClipboard,
-    lastError: *const fn () callconv(.winapi) Win32Error = std.os.windows.kernel32.GetLastError,
+    lastError: *const fn () callconv(.winapi) Win32Error = nativeLastError,
 };
+
+/// `GetLastError` as a function pointer. Std's wrapper reads the thread's last
+/// error where the extern it replaces did, and nothing runs in between.
+fn nativeLastError() callconv(.winapi) Win32Error {
+    return std.os.windows.GetLastError();
+}
 
 /// One clipboard format and the bytes it carries.
 pub const Format = struct {
