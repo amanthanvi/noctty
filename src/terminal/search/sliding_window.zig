@@ -1052,7 +1052,7 @@ test "SlidingWindow single append case sensitive" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "Boo!", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello. boo! hello. boo!");
 
@@ -1073,7 +1073,7 @@ test "SlidingWindow non-regex regex engine prunes no-match pages" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "Needle", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 20, .rows = 4, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 20, .rows = 4, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_cells = s.pages.cols * s.pages.pages.first.?.capacity().rows;
@@ -1100,7 +1100,7 @@ test "SlidingWindow single append whole word" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("booo boo barbar");
 
@@ -1131,7 +1131,7 @@ test "SlidingWindow whole word matches true page edge" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_rows = s.pages.pages.first.?.capacity().rows;
@@ -1166,7 +1166,7 @@ test "SlidingWindow whole word does not match synthetic page edge" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_rows = s.pages.pages.first.?.capacity().rows;
@@ -1194,7 +1194,7 @@ test "SlidingWindow whole-word literal retains full synthetic edge match" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "boo", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_rows = s.pages.pages.first.?.capacity().rows;
@@ -1225,7 +1225,7 @@ test "SlidingWindow single append regex" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "b[o]{2}!", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello. baa! hello. boo!");
 
@@ -1256,7 +1256,7 @@ test "SlidingWindow regex no match preserves window state" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "boo!", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello. bo");
 
@@ -1280,7 +1280,7 @@ test "SlidingWindow regex no match defers pruning" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "b[o]{2}!", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_rows = s.pages.pages.first.?.capacity().rows;
@@ -1310,7 +1310,7 @@ test "SlidingWindow regex no match keeps bounded suffix" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "y+z", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 120, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 120, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     var text: std.ArrayList(u8) = .empty;
@@ -1340,7 +1340,7 @@ test "SlidingWindow regex match can span more than literal overlap" {
     var w: SlidingWindow = try .initPattern(alloc, .forward, "startx+end", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 20, .rows = 4, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 20, .rows = 4, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_cells = s.pages.cols * s.pages.pages.first.?.capacity().rows;
@@ -1396,7 +1396,7 @@ test "SlidingWindow edge decision uses the page state captured at append" {
     const p = try testPattern(.{ .needle = "boo", .options = .{ .whole_word = true } });
     defer p.destroy(alloc);
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     const first_page_rows = s.pages.pages.first.?.capacity().rows;
@@ -1450,7 +1450,7 @@ test "SlidingWindow reverse search works with non-default query options" {
     var w: SlidingWindow = try .initPattern(alloc, .reverse, "boo!", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello. boo! hello. boo!");
 
@@ -1479,7 +1479,7 @@ test "SlidingWindow reverse regex searches UTF-8 haystack in forward order" {
     var w: SlidingWindow = try .initPattern(alloc, .reverse, "caf.", p);
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("caf\xc3\xa9 one caf\xc3\xa9");
 
@@ -1502,10 +1502,10 @@ test "SlidingWindow next does not allocate once pages are appended" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var s = try Screen.init(alloc, .{
+    var s = try Screen.init(testing.io, alloc, .{
         .cols = 20,
         .rows = 4,
-        .max_scrollback = std.math.maxInt(usize),
+        .max_scrollback_bytes = std.math.maxInt(usize),
     });
     defer s.deinit();
     const first_page_cells = s.pages.cols * s.pages.pages.first.?.capacity().rows;
@@ -1594,7 +1594,7 @@ test "SlidingWindow literal no match keeps whole pages and moves the offset" {
     var w: SlidingWindow = try .init(alloc, .forward, "nope!");
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 0 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 0 });
     defer s.deinit();
     try s.testWriteString("hello. boo! hello. boo!");
     _ = try w.append(s.pages.pages.first.?);
@@ -1615,7 +1615,7 @@ test "SlidingWindow literal no match keeps exactly needle.len - 1 bytes" {
     var w: SlidingWindow = try .init(alloc, .forward, "nope!");
     defer w.deinit();
 
-    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    var s = try Screen.init(testing.io, alloc, .{ .cols = 80, .rows = 24, .max_scrollback_bytes = 1000 });
     defer s.deinit();
 
     // A full first page with no match, then a page holding only "zzz".

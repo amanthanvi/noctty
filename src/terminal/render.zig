@@ -3500,7 +3500,7 @@ test "grapheme" {
 test "render update retries a full redraw after OOM" {
     const testing = std.testing;
     const alloc = testing.allocator;
-    var t = try Terminal.init(alloc, .{ .cols = 2, .rows = 2 });
+    var t = try Terminal.init(testing.io, alloc, .{ .cols = 2, .rows = 2 });
     defer t.deinit(alloc);
     try t.print('x');
 
@@ -3523,7 +3523,7 @@ test "render update retries a full redraw after OOM" {
 test "render update retries rows after OOM" {
     const testing = std.testing;
     const alloc = testing.allocator;
-    var t = try Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+    var t = try Terminal.init(testing.io, alloc, .{ .cols = 2, .rows = 1 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();

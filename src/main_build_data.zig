@@ -50,19 +50,19 @@ pub fn main(init: std.process.Init) !void {
         .@"vim-ftplugin" => try writer.writeAll(@import("extra/vim.zig").ftplugin),
         .@"vim-compiler" => try writer.writeAll(@import("extra/vim.zig").compiler),
         .terminfo => try @import("terminfo/ghostty.zig").ghostty.encode(writer),
-        .@"terminfo-database" => try writeTerminfoDatabase(alloc),
+        .@"terminfo-database" => try writeTerminfoDatabase(init, alloc),
     }
     try stdout_writer.end();
 }
 
-fn writeTerminfoDatabase(alloc: Allocator) !void {
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+fn writeTerminfoDatabase(init: std.process.Init, alloc: Allocator) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 3) return error.MissingOutputDirectory;
 
-    var dir = try std.fs.cwd().makeOpenPath(args[args.len - 1], .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(init.io, args[args.len - 1], .{});
+    defer dir.close(init.io);
     try @import("terminfo/compiled.zig").writeDatabase(
+        init.io,
         alloc,
         @import("terminfo/ghostty.zig").ghostty,
         dir,

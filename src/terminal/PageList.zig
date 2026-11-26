@@ -9923,9 +9923,7 @@ test "PageList init error" {
         tw.errorAlways(.viewport_pin_track, error.OutOfMemory);
         try std.testing.expectError(error.OutOfMemory, init(
             std.testing.allocator,
-            std_capacity.maxCols().? + 1,
-            1,
-            null,
+            .{ .cols = std_capacity.maxCols().? + 1, .rows = 1 },
         ));
     }
 }
@@ -20407,10 +20405,10 @@ test "PageList resize backfill keeps source pins when a replacement allocation f
 
     const serial = s.page_serial;
     const page_size = s.page_size;
-    const page_alloc = s.pool.pages.arena.child_allocator;
+    const page_alloc = s.pool.pages.allocator;
     var failing = testing.FailingAllocator.init(page_alloc, .{ .fail_index = 1 });
-    s.pool.pages.arena.child_allocator = failing.allocator();
-    defer s.pool.pages.arena.child_allocator = page_alloc;
+    s.pool.pages.allocator = failing.allocator();
+    defer s.pool.pages.allocator = page_alloc;
 
     // Check the pins ourselves before any integrity check can dereference
     // a stale one. Restore the pins for teardown if an assertion fails.

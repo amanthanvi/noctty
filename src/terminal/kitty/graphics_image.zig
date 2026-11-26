@@ -2543,7 +2543,7 @@ test "image load: rgba, zlib with fixed Huffman blocks past 64 KiB (#570)" {
         var img = try loadZlibRgba(alloc, fixed_huffman_frame, 160, 120, chunk_len);
         defer img.deinit(alloc);
         try testing.expect(img.compression == .none);
-        try testing.expectEqualSlices(u8, expected, img.data);
+        try testing.expectEqualSlices(u8, expected, img.data.bytes().?);
     }
 }
 
@@ -2628,7 +2628,7 @@ test "image load: bounded fuzz of mutated zlib frames" {
         if (loadZlibRgba(alloc, buf[0..len], 160, 120, chunk_len)) |img| {
             var owned = img;
             defer owned.deinit(alloc);
-            try testing.expectEqual(@as(usize, 160 * 120 * 4), owned.data.len);
+            try testing.expectEqual(@as(usize, 160 * 120 * 4), owned.data.bytes().?.len);
         } else |err| switch (err) {
             error.DecompressionFailed, error.InvalidData => {},
             else => return err,

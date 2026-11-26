@@ -302,20 +302,21 @@ test "timed push" {
 test "forever push waits again when a wake leaves the queue full" {
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
     const Q = BlockingQueue(u64, 1);
     const q = try Q.create(alloc);
     defer q.destroy(alloc);
 
-    try testing.expectEqual(@as(Q.Size, 1), q.push(1, .{ .instant = {} }));
-    try testing.expectEqual(@as(Q.Size, 0), q.push(2, .{ .instant = {} }));
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+    try testing.expectEqual(@as(Q.Size, 0), q.push(io, 2, .{ .instant = {} }));
 
     const Pusher = struct {
         q: *Q,
         result: Q.Size = 0,
 
         fn run(self: *@This()) void {
-            self.result = self.q.push(99, .{ .forever = {} });
+            self.result = self.q.push(testing.io, 99, .{ .forever = {} });
         }
     };
 
@@ -324,9 +325,9 @@ test "forever push waits again when a wake leaves the queue full" {
 
     // Wait until the pusher is parked on the condition variable.
     while (true) {
-        q.mutex.lock();
+        q.mutex.lockUncancelable(io);
         const waiting = q.not_full_waiters;
-        q.mutex.unlock();
+        q.mutex.unlock(io);
         if (waiting == 1) break;
         std.Thread.yield() catch {};
     }
@@ -336,34 +337,35 @@ test "forever push waits again when a wake leaves the queue full" {
     // reacquire the mutex. Doing both under the lock makes that
     // deterministic -- the waiter cannot observe the opening. A single-wait
     // `.forever` gives up here and returns 0.
-    q.mutex.lock();
+    q.mutex.lockUncancelable(io);
     q.len -= 1;
-    q.cond_not_full.signal();
+    q.cond_not_full.signal(io);
     q.len += 1;
-    q.mutex.unlock();
+    q.mutex.unlock(io);
 
     // Let the woken pusher reacquire the mutex and observe the still-full
     // queue before we free a slot for real. Without this the pusher races
     // the pop below and a single-wait `.forever` can pass by luck.
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
 
     // Now genuinely make room for it.
-    try testing.expectEqual(@as(u64, 1), q.pop().?);
+    try testing.expectEqual(@as(u64, 1), q.pop(io).?);
     thread.join();
 
     // The push waited rather than reporting failure, and the value landed.
     try testing.expect(pusher.result != 0);
-    try testing.expectEqual(@as(u64, 99), q.pop().?);
+    try testing.expectEqual(@as(u64, 99), q.pop(io).?);
 }
 
 test "forever_unless push waits for room and gives up once its flag is set" {
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
     const Q = BlockingQueue(u64, 1);
     const q = try Q.create(alloc);
     defer q.destroy(alloc);
-    try testing.expectEqual(@as(Q.Size, 1), q.push(1, .{ .instant = {} }));
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
 
     // Every wait is bounded, so a broken push fails the test instead of
     // hanging the suite.
@@ -372,20 +374,20 @@ test "forever_unless push waits for room and gives up once its flag is set" {
         stop: *const std.atomic.Value(bool),
         value: u64,
         result: Q.Size = 0,
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
 
         fn run(self: *@This()) void {
-            self.result = self.q.push(self.value, .{ .forever_unless = self.stop });
-            self.done.set();
+            self.result = self.q.push(testing.io, self.value, .{ .forever_unless = self.stop });
+            self.done.set(testing.io);
         }
 
         /// Whether the push parked on the full queue.
         fn parked(self: *@This()) bool {
-            var timer = std.time.Timer.start() catch return false;
-            while (timer.read() < 5 * std.time.ns_per_s and !self.done.isSet()) {
-                self.q.mutex.lock();
+            const start = std.Io.Timestamp.now(testing.io, .awake);
+            while (start.untilNow(testing.io, .awake).toNanoseconds() < 5 * std.time.ns_per_s and !self.done.isSet()) {
+                self.q.mutex.lockUncancelable(testing.io);
                 const waiting = self.q.not_full_waiters;
-                self.q.mutex.unlock();
+                self.q.mutex.unlock(testing.io);
                 if (waiting == 1) return true;
                 std.Thread.yield() catch {};
             }
@@ -394,8 +396,11 @@ test "forever_unless push waits for room and gives up once its flag is set" {
 
         /// Join the pusher, making room for a push that did not return.
         fn finish(self: *@This(), thread: std.Thread) !void {
-            self.done.timedWait(5 * std.time.ns_per_s) catch {
-                _ = self.q.pop();
+            self.done.waitTimeout(testing.io, .{ .duration = .{
+                .raw = .fromSeconds(5),
+                .clock = .awake,
+            } }) catch {
+                _ = self.q.pop(testing.io);
                 thread.join();
                 return error.PushDidNotReturn;
             };
@@ -409,7 +414,7 @@ test "forever_unless push waits for room and gives up once its flag is set" {
     var waits: Pusher = .{ .q = q, .stop = &stop, .value = 2 };
     const waiting = try std.Thread.spawn(.{}, Pusher.run, .{&waits});
     const waited = waits.parked();
-    try testing.expectEqual(@as(u64, 1), q.pop().?);
+    try testing.expectEqual(@as(u64, 1), q.pop(io).?);
     try waits.finish(waiting);
     try testing.expect(waited);
     try testing.expectEqual(@as(Q.Size, 1), waits.result);
@@ -425,7 +430,7 @@ test "forever_unless push waits for room and gives up once its flag is set" {
 
     // Once the flag is set a push to a full queue fails without waiting,
     // and the queue keeps what it held.
-    try testing.expectEqual(@as(Q.Size, 0), q.push(4, .{ .forever_unless = &stop }));
-    try testing.expectEqual(@as(u64, 2), q.pop().?);
-    try testing.expect(q.pop() == null);
+    try testing.expectEqual(@as(Q.Size, 0), q.push(io, 4, .{ .forever_unless = &stop }));
+    try testing.expectEqual(@as(u64, 2), q.pop(io).?);
+    try testing.expect(q.pop(io) == null);
 }

@@ -17603,9 +17603,9 @@ test "Terminal: fullReset resets the palette to the configured one" {
     defer t.deinit(testing.allocator);
 
     // A theme the configuration set, then a program's change on top.
-    var theme = t.colors.palette.original;
+    var theme = t.colors.palette.original.*;
     theme[1] = .{ .r = 0xAA, .g = 0, .b = 0 };
-    t.colors.palette.changeDefault(theme);
+    try t.colors.palette.changeDefault(testing.allocator, theme);
     t.colors.palette.set(1, .{ .r = 1, .g = 2, .b = 3 });
     t.colors.palette.set(200, .{ .r = 4, .g = 5, .b = 6 });
 

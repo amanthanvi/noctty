@@ -6773,7 +6773,8 @@ test "color scheme callback defaults to light" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -6794,7 +6795,8 @@ test "color scheme callback rejects an invalid value" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+        80,
+        24,
     ));
     defer free(t);
 

@@ -3903,7 +3903,7 @@ pub fn lastCommandOutputString(
 ) Allocator.Error!?[:0]const u8 {
     const region = switch (self.semantic_command.outputRegion(&self.pages)) {
         .unavailable => return null,
-        .empty => return try alloc.dupeZ(u8, ""),
+        .empty => return try alloc.dupeSentinel(u8, "", 0),
         .region => |region| region,
     };
 

@@ -2083,7 +2083,7 @@ test "prune keeps an older selected history match when a newer page is replaced"
 
 test "LiveNodes agrees with PageList.nodeIsValid" {
     const alloc = testing.allocator;
-    var list: PageList = try .init(alloc, 10, 2, null);
+    var list: PageList = try .init(alloc, .{ .cols = 10, .rows = 2 });
     defer list.deinit();
     const first = list.pages.first.?;
     while (first.rows() < first.capacity().rows) _ = try list.grow();
@@ -2111,7 +2111,7 @@ test "LiveNodes agrees with PageList.nodeIsValid" {
 
 test "LiveNodes rejects a renewed layout on the same page" {
     const alloc = testing.allocator;
-    var list: PageList = try .init(alloc, 10, 2, null);
+    var list: PageList = try .init(alloc, .{ .cols = 10, .rows = 2 });
     defer list.deinit();
     const first = list.pages.first.?;
     while (first.rows() < first.capacity().rows) _ = try list.grow();

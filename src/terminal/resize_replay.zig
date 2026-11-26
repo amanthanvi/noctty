@@ -187,14 +187,14 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
         if (line.len == 0 or line[0] == '#') continue;
         var words = std.mem.tokenizeScalar(u8, line, ' ');
         const cmd = words.next().?;
-        const rest = std.mem.trimLeft(u8, line[cmd.len..], " ");
+        const rest = std.mem.trimStart(u8, line[cmd.len..], " ");
 
         if (std.mem.eql(u8, cmd, "size")) {
             if (term != null) return scriptError(name, line_no, "size given twice");
             const cols = try parseInt(name, line_no, words.next());
             const rows = try parseInt(name, line_no, words.next());
             try noMoreWords(name, line_no, &words);
-            term = try Terminal.init(alloc, .{ .cols = cols, .rows = rows });
+            term = try Terminal.init(std.testing.io, alloc, .{ .cols = cols, .rows = rows });
             stream = term.?.vtStream();
             pty_allowed = true;
             continue;
@@ -245,7 +245,7 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
             while (true) {
                 const next = lines.next() orelse return scriptError(name, check.line_no, "expect without end");
                 line_no += 1;
-                const row = std.mem.trimRight(u8, next, "\r");
+                const row = std.mem.trimEnd(u8, next, "\r");
                 if (std.mem.eql(u8, row, "end")) break;
                 if (std.mem.eql(u8, row, "?")) {
                     try expected.append(alloc, null);
@@ -292,7 +292,7 @@ fn viewportMatches(
     var actual: std.ArrayList([]const u8) = .empty;
     defer actual.deinit(alloc);
     var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |row| try actual.append(alloc, std.mem.trimRight(u8, row, " "));
+    while (it.next()) |row| try actual.append(alloc, std.mem.trimEnd(u8, row, " "));
 
     if (expected.len > t.rows) return scriptError(check.name, check.line_no, "more expected rows than the terminal has");
     var ok = true;
@@ -300,7 +300,7 @@ fn viewportMatches(
         const want: ?[]const u8 = if (y < expected.len) expected[y] else "";
         const exp = want orelse continue;
         const got = if (y < actual.items.len) actual.items[y] else "";
-        if (!std.mem.eql(u8, std.mem.trimRight(u8, exp, " "), got)) {
+        if (!std.mem.eql(u8, std.mem.trimEnd(u8, exp, " "), got)) {
             ok = false;
             if (check.printing()) std.debug.print(
                 "{s}:{d}: row {d}\n  expected: |{s}\n  actual:   |{s}\n",
@@ -319,7 +319,7 @@ fn xfailReason(
 ) !?[]const u8 {
     const word = words.next() orelse return null;
     if (!std.mem.eql(u8, word, "xfail")) return scriptError(name, line_no, "expected `xfail <reason>` or nothing");
-    const reason = std.mem.trimLeft(u8, words.rest(), " ");
+    const reason = std.mem.trimStart(u8, words.rest(), " ");
     if (reason.len == 0) return scriptError(name, line_no, "xfail needs a reason");
     return reason;
 }

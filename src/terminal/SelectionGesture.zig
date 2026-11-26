@@ -1948,14 +1948,14 @@ test "SelectionGesture triple-click drag selects by line backwards" {
 }
 
 test "SelectionGesture triple-click drag extends selection through blank line" {
-    var t = try Terminal.init(testing.allocator, .{ .cols = 20, .rows = 5 });
+    var t = try Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
     defer t.deinit(testing.allocator);
     try t.printString("alpha beta");
 
     var gesture: SelectionGesture = .init;
     defer gesture.deinit(&t);
 
-    const time = try std.time.Instant.now();
+    const time = std.Io.Timestamp.now(testing.io, .awake);
     for (0..3) |_| _ = try gesture.press(&t, testPress(&t, 1, 0, time));
 
     const sel = gesture.drag(&t, testDrag(&t, 2, 1, 20, 50)).?;
