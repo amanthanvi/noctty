@@ -14,7 +14,7 @@ pub fn dataFile(path_: ?[]const u8) !?std.Io.File {
     if (std.mem.eql(u8, path, "-")) return .stdin();
 
     // Normal file
-    const file = try std.Io.Dir.cwd().openFile(global.io(), path, .{});
+    const file = try std.Io.Dir.cwd().openFile(global.io(), path, .{ .allow_directory = false });
     errdefer file.close(global.io());
 
     return file;

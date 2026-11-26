@@ -535,7 +535,7 @@ const ThreadEnterState = struct {
                     const f = std.Io.Dir.cwd().openFile(
                         global.io(),
                         path,
-                        .{},
+                        .{ .allow_directory = false },
                     ) catch |err| {
                         log.warn("failed to open input file={s} err={}", .{
                             path,

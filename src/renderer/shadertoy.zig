@@ -94,7 +94,7 @@ pub fn loadFromFile(
     const src = src: {
         // Load the shader file
         const cwd = std.Io.Dir.cwd();
-        const file = try cwd.openFile(global.io(), path, .{});
+        const file = try cwd.openFile(global.io(), path, .{ .allow_directory = false });
         defer file.close(global.io());
         break :src try compat_file.readToEndAlloc(
             file,

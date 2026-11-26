@@ -716,7 +716,7 @@ const WindowsConPty = struct {
 
     fn openConsoleMatchesArchitecture(path: []const u8) !bool {
         const io = global.io();
-        var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+        var file = try std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false });
         defer file.close(io);
 
         var dos_header: [64]u8 = undefined;

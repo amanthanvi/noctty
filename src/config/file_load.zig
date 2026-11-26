@@ -179,10 +179,12 @@ const OpenFileError = error{
 pub fn open(io: std.Io, path: []const u8) OpenFileError!std.Io.File {
     assert(std.fs.path.isAbsolute(path));
 
+    // A directory fails the open (`error.IsDir`, so `FileOpenFailed`), as
+    // Zig 0.15's open did on Windows; `NotAFile` takes the other kinds.
     var file = std.Io.Dir.openFileAbsolute(
         io,
         path,
-        .{},
+        .{ .allow_directory = false },
     ) catch |err| switch (err) {
         error.FileNotFound => return OpenFileError.FileNotFound,
         else => {
