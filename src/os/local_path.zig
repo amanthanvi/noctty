@@ -803,8 +803,14 @@ fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const
 /// does for a relative link. So such a root goes through `resolve` spelled as
 /// a share's (`\\v\`) and comes back; that gave 0.15.2's results for 11 GUID
 /// shapes (measured with both compilers). A drive path resolves the same in
-/// both. A `rest` that moves the result off the share is refused.
+/// both. A `rest` that moves the result off the share is refused, and so is
+/// one that is no relative path: two separators first (a UNC or device path,
+/// which the share spelling would turn into another volume: `\\v\Volume{O}\z`
+/// comes back as `\\?\Volume{O}\z`, where 0.15.2 left it UNC for `walk` to
+/// refuse) or a `:` anywhere (a drive or a stream). Both fail closed.
 fn resolveBelow(alloc: Allocator, base: []const u8, rest: []const u8) ?[]u8 {
+    if (rest.len >= 2 and isSeparator(rest[0]) and isSeparator(rest[1])) return null;
+    if (std.mem.indexOfScalar(u8, rest, ':') != null) return null;
     if (!std.mem.startsWith(u8, base, "\\\\?\\Volume{")) return std.fs.path.resolve(alloc, &.{ base, rest }) catch null;
     const share = alloc.dupe(u8, base) catch return null;
     defer alloc.free(share);
@@ -816,6 +822,10 @@ fn resolveBelow(alloc: Allocator, base: []const u8, rest: []const u8) ?[]u8 {
     }
     resolved[2] = '?';
     return resolved;
+}
+
+fn isSeparator(c: u8) bool {
+    return c == '\\' or c == '/';
 }
 
 fn localRoot(path: []const u8) ?usize {
@@ -1239,8 +1249,25 @@ test "local path walk joins a link's target below a volume GUID root as Zig 0.15
         // A drive path is `resolve`'s own.
         .{ "C:\\x\\", "..\\..\\..\\y", "C:\\y" },
         .{ "C:\\real", "", "C:\\real" },
-        // Nothing the walk joins leaves the volume this way.
+        // Nothing the walk joins leaves the volume this way: a `rest` with
+        // two separators first or a `:` is no relative path, refused on
+        // either base (the share spelling would read `\\v\...` as a path
+        // on this volume's own share and turn it into another volume).
         .{ g ++ "\\x", "D:\\y", null },
+        .{ g ++ "\\x", "\\\\v\\Volume{fedcba98-7654-3210-fedc-ba9876543210}\\z", null },
+        .{ g ++ "\\x\\", "\\\\v\\Volume{fedcba98-7654-3210-fedc-ba9876543210}\\z", null },
+        .{ g ++ "\\x", "//v/Volume{fedcba98-7654-3210-fedc-ba9876543210}/z", null },
+        .{ g ++ "\\x", "\\/server/share", null },
+        .{ g ++ "\\x", "/\\server\\share", null },
+        .{ g ++ "\\x", "\\\\?\\C:\\y", null },
+        .{ g ++ "\\x", "y:stream", null },
+        .{ "C:\\x", "\\\\server\\share\\y", null },
+        .{ "C:\\x", "\\\\.\\pipe\\y", null },
+        .{ "C:\\x", "D:y", null },
+        .{ "C:\\x", "y:stream", null },
+        // One separator first stays rooted on the base's own volume.
+        .{ g ++ "\\x\\", "\\y", g ++ "\\y" },
+        .{ "C:\\x\\", "\\y", "C:\\y" },
     }) |case| {
         const got = resolveBelow(alloc, case[0], case[1]);
         defer if (got) |p| alloc.free(p);
