@@ -122,6 +122,101 @@ class RuleTests(unittest.TestCase):
                     self.assertEqual(once, twice)
                     self.assertEqual(hits, [])
 
+    # --- the council's round-1 findings (E3, E4, E5, O3, O6) ---------------------------------------------------
+
+    def test_make_open_path_options_move_under_open_options(self):
+        src = ('test "m" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    var a = try tmp.dir.makeOpenPath("a", .{ .iterate = true });\n'
+               '    var b = try tmp.dir.makeOpenPath("b", .{});\n'
+               '    var c = try tmp.dir.makeOpenPath("c", opts);\n}\n')
+        got, hits = codemod.rewrite(src, {"test-dir-io"})
+        self.assertIn('try tmp.dir.createDirPathOpen(std.testing.io, "a", .{ .open_options = .{ .iterate = true } })',
+                      got)
+        self.assertIn('try tmp.dir.createDirPathOpen(std.testing.io, "b", .{})', got)
+        # Options the tokens cannot read stay for a hand edit.
+        self.assertIn('try tmp.dir.makeOpenPath("c", opts)', got)
+
+    def test_read_link_is_left_alone(self):
+        # 0.17's readLink returns a byte count where 0.15's returned the slice.
+        src = 'test "l" {\n    var tmp = std.testing.tmpDir(.{});\n    const t = try tmp.dir.readLink("x", &buf);\n}\n'
+        self.assertEqual(codemod.rewrite(src)[0], src)
+
+    def test_a_block_naming_file_too_big_keeps_its_read_file_alloc(self):
+        src = ('test "big" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    try tmp.dir.writeFile(.{ .sub_path = "a", .data = "x" });\n'
+               '    try testing.expectError(error.FileTooBig, tmp.dir.readFileAlloc(alloc, "a", 0));\n}\n')
+        got, _ = codemod.rewrite(src)
+        self.assertIn('tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "x" })', got)
+        self.assertIn('tmp.dir.readFileAlloc(alloc, "a", 0)', got)
+
+    def test_reorder_keeps_line_breaks_and_leaves_commented_arguments(self):
+        # Each argument's span takes the 0.17 argument at its place; the line breaks stay.
+        src = ('test "r" {\n    var tmp = std.testing.tmpDir(.{});\n    const d = try tmp.dir.readFileAlloc(\n'
+               '        alloc,\n        "a.txt",\n        1 << 20,\n    );\n}\n')
+        got, hits = codemod.rewrite(src)
+        self.assertEqual(got.count("\n"), src.count("\n"))
+        self.assertIn('readFileAlloc(\n        std.testing.io, "a.txt",\n        alloc,\n'
+                      '        .limited(1 << 20),\n    );', got)
+        self.assertEqual(len(hits), 1)
+        # A comment between arguments that change places would sit beside the wrong one: left for a hand edit.
+        commented = src.replace("        alloc,\n", "        alloc, // the allocator\n")
+        self.assertEqual(codemod.rewrite(commented)[0], commented)
+
+    def test_open_and_close_are_one_hit(self):
+        src = ('test "oc" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    const f = try tmp.dir.createFile("a", .{});\n    defer f.close();\n'
+               '    const g = try std.fs.cwd().openFile("b", .{});\n    g.close();\n}\n')
+        # Only the close lines are the fork's: neither the open nor its close changes.
+        self.assertEqual(codemod.rewrite(src, None, {4, 6})[0], src)
+        # Only the open lines: the same.
+        self.assertEqual(codemod.rewrite(src, None, {3, 5})[0], src)
+        # Both: each open and its close, cwd's included.
+        got, hits = codemod.rewrite(src, None, {3, 4, 5, 6})
+        self.assertIn('const f = try tmp.dir.createFile(std.testing.io, "a", .{});\n'
+                      '    defer f.close(std.testing.io);', got)
+        self.assertIn('const g = try std.Io.Dir.cwd().openFile(std.testing.io, "b", .{});\n'
+                      '    g.close(std.testing.io);', got)
+        self.assertEqual(len(hits), 2)
+
+    def test_nested_calls_are_rewritten_in_turns(self):
+        src = ('test "n" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    try tmp.dir.writeFile(.{ .sub_path = "a", .data = try tmp.dir.readFileAlloc(alloc, "b", 10) });\n}\n')
+        got, hits = codemod.rewrite(src)
+        self.assertIn('tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = try '
+                      'tmp.dir.readFileAlloc(std.testing.io, "b", alloc, .limited(10)) })', got)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(codemod.rewrite(got)[0], got)
+
+    def test_multi_line_reorder_in_fork_line_mode(self):
+        src = ('test "f" {\n    var tmp = std.testing.tmpDir(.{});\n    const d = try tmp.dir.readFileAlloc(\n'
+               '        alloc,\n        "a.txt",\n        1 << 20,\n    );\n}\n')
+        got, hits = codemod.rewrite(src, None, set(range(1, 9)))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(got.count("\n"), src.count("\n"))
+
+    def test_parse_changed_lines(self):
+        diff = ("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,0 +2,3 @@ fn a\n+a\n+b\n+c\n"
+                "@@ -5 +7 @@\n-x\n+y\n@@ -9,2 +11,0 @@\n-p\n-q\n")
+        self.assertEqual(codemod.parse_changed_lines(diff), {2, 3, 4, 7})
+
+    def test_bad_baseline_writes_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.zig"
+            p.write_text("const t = std.mem.trimLeft(u8, s, \" \");\n", encoding="utf-8", newline="\n")
+            code = codemod.main(["--fork-lines", "no-such-ref-1b5", str(p)])
+            self.assertEqual(code, 2)
+            self.assertIn("trimLeft", p.read_text(encoding="utf-8"))
+
+    def test_a_failing_file_writes_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            a, b = Path(d) / "a.zig", Path(d) / "b.zig"
+            a.write_text("const t = std.mem.trimLeft(u8, s, \" \");\n", encoding="utf-8", newline="\n")
+            b.write_bytes(b"const t = std.mem.trimLeft(u8, s, \" \");\r\n")
+            self.assertEqual(codemod.main([str(a), str(b)]), 2)
+            self.assertIn("trimLeft", a.read_text(encoding="utf-8"))
+
     def test_fork_lines_only(self):
         # Only the allowed lines are rewritten, and a hit whose halves straddle a disallowed line is dropped whole.
         src = ("const a = std.mem.trimLeft(u8, s, \" \");\nconst b = std.mem.trimLeft(u8, s, \" \");\n"

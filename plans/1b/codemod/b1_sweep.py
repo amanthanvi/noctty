@@ -116,7 +116,7 @@ def sweep(text, rel, entries):
                 raise ValueError(f"unknown target {target} in {rel}")
             if text[span_start:span_end] == new:
                 continue
-            edits.append(codemod.Edit(span_start, span_end, new, t.line + 1))
+            edits.append(codemod.Edit(span_start, span_end, new))
             hits.append((name_path, target, t.line + 1))
     if need_ext and edits:
         if decl_end is None:
@@ -126,7 +126,7 @@ def sweep(text, rel, entries):
             decl = f"\nconst windows_ext = {'internal_os' if 'internal_os' in text else 'os'}.windows_ext;"
         else:
             decl = f'\nconst windows_ext = @import("{import_path}windows_ext.zig");'
-        edits.append(codemod.Edit(semi.start + 1, semi.start + 1, decl, None))
+        edits.append(codemod.Edit(semi.start + 1, semi.start + 1, decl))
     if not edits:
         return text, hits
     return codemod.apply_edits(text, edits), hits

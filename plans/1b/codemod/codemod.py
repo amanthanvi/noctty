@@ -6,29 +6,54 @@ rewrites a form only where the rewrite is safe from the tokens alone; what needs
 changed signature, a behaviour) is a hand edit, recorded in residue.tsv with its file and reason.
 
 Usage:
-  python plans/1b/codemod/codemod.py [--check] [--rules id,id] [--report out.tsv] <file or directory>...
+  python plans/1b/codemod/codemod.py [--check] [--rules id,id] [--report out.tsv] [--fork-lines REV] <path>...
 
 Without --check it rewrites the files in place (LF kept; a file with CR bytes is refused) and prints one line per rule
 with its hit count; with --check it rewrites nothing and exits 1 when a rule would. Directories are walked for *.zig,
 skipping `.zig-cache`, `zig-out` and `zig-pkg`. --report writes `<file>\t<rule>\t<line>` per hit.
+
+Every file is rewritten in memory first; nothing is written unless every file rewrote cleanly (a failure, such as an
+unreadable baseline, writes nothing). A rule's hit is one group of edits, kept or dropped whole: with --fork-lines a
+group is kept only when every edit in it lies on a line that differs from REV, and two groups that overlap (a call
+nested in another's arguments) are applied in turns until the rule finds nothing more. No rule adds or removes a
+line, so the line ownership the filter reads stays true.
 """
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ci"))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "ci"))
 import zigtok  # noqa: E402
 
 DIALECT = "0.17.1"
 SKIP_DIRS = {".zig-cache", "zig-cache", "zig-out", "zig-pkg", ".git"}
+MAX_PASSES = 8
 
 
 class Edit:
-    __slots__ = ("start", "end", "text", "line")
+    __slots__ = ("start", "end", "text")
 
-    def __init__(self, start, end, text, line):
-        self.start, self.end, self.text, self.line = start, end, text, line
+    def __init__(self, start, end, text):
+        self.start, self.end, self.text = start, end, text
+
+
+class Hit:
+    """One rewrite: its edits, applied together or not at all, and the 1-based line it is reported at."""
+    __slots__ = ("edits", "line")
+
+    def __init__(self, line, edits):
+        self.line, self.edits = line, list(edits)
+
+    @property
+    def start(self):
+        return min(e.start for e in self.edits)
+
+    @property
+    def end(self):
+        return max(e.end for e in self.edits)
 
 
 def code_tokens(text):
@@ -75,13 +100,17 @@ def qualified_at(toks, i, names):
     return True
 
 
+def rename(tok, new):
+    return Edit(tok.start, tok.start + len(tok.text), new)
+
+
 # --- rules -------------------------------------------------------------------------------------------------------
-# Each rule: (id, description, function(text, toks) -> [Edit]).
+# Each rule: (id, description, function(text, toks) -> [Hit]).
 
 def rule_arraylist_empty(text, toks):
     """`ArrayListUnmanaged(T) = .{}` (and ArrayList, ArrayListAlignedUnmanaged, ArrayListAligned): Zig 0.17's
     array list has no default for its fields; its empty value is `.empty`."""
-    edits = []
+    hits = []
     for i, t in enumerate(toks):
         if t.kind != "identifier" or t.text not in ("ArrayListUnmanaged", "ArrayList", "ArrayListAlignedUnmanaged",
                                                     "ArrayListAligned"):
@@ -93,23 +122,20 @@ def rule_arraylist_empty(text, toks):
             continue
         eq, dot, lb, rb = at(toks, close + 1), at(toks, close + 2), at(toks, close + 3), at(toks, close + 4)
         if is_tok(eq, "op", "=") and is_tok(dot, "op", ".") and is_tok(lb, "op", "{") and is_tok(rb, "op", "}"):
-            edits.append(Edit(dot.start, rb.start + 1, ".empty", dot.line + 1))
-    return edits
+            hits.append(Hit(dot.line + 1, [Edit(dot.start, rb.start + 1, ".empty")]))
+    return hits
 
 
 def rule_mem_trim(text, toks):
     """`mem.trimLeft` and `mem.trimRight` are `trimStart` and `trimEnd` in Zig 0.17."""
-    edits = []
     names = {"trimLeft": "trimStart", "trimRight": "trimEnd"}
-    for i, t in enumerate(toks):
-        if t.kind == "identifier" and t.text in names and qualified_at(toks, i, ("mem",)):
-            edits.append(Edit(t.start, t.start + len(t.text), names[t.text], t.line + 1))
-    return edits
+    return [Hit(t.line + 1, [rename(t, names[t.text])]) for i, t in enumerate(toks)
+            if t.kind == "identifier" and t.text in names and qualified_at(toks, i, ("mem",))]
 
 
 def rule_dupe_z(text, toks):
     """`<allocator>.dupeZ(T, x)` is `dupeSentinel(T, x, 0)` in Zig 0.17."""
-    edits = []
+    hits = []
     for i, t in enumerate(toks):
         if not (t.kind == "identifier" and t.text == "dupeZ" and is_tok(at(toks, i - 1), "op", ".")
                 and is_tok(at(toks, i + 1), "op", "(")):
@@ -120,21 +146,18 @@ def rule_dupe_z(text, toks):
         args, _ = zigtok.split_args(toks, i + 1)
         if len(args) != 2:
             continue
-        edits.append(Edit(t.start, t.start + len(t.text), "dupeSentinel", t.line + 1))
         trailing_comma = is_tok(at(toks, close - 1), "op", ",")
-        edits.append(Edit(toks[close].start, toks[close].start, " 0," if trailing_comma else ", 0", None))
-    return edits
+        hits.append(Hit(t.line + 1, [rename(t, "dupeSentinel"),
+                                     Edit(toks[close].start, toks[close].start, " 0," if trailing_comma else ", 0")]))
+    return hits
 
 
 def rule_ascii_find(text, toks):
     """`ascii.indexOfIgnoreCase*` are `findIgnoreCase*` in Zig 0.17 (std.mem keeps its indexOf aliases)."""
-    edits = []
     names = {"indexOfIgnoreCase": "findIgnoreCase", "indexOfIgnoreCasePos": "findIgnoreCasePos",
              "indexOfIgnoreCasePosLinear": "findIgnoreCasePosLinear"}
-    for i, t in enumerate(toks):
-        if t.kind == "identifier" and t.text in names and qualified_at(toks, i, ("ascii",)):
-            edits.append(Edit(t.start, t.start + len(t.text), names[t.text], t.line + 1))
-    return edits
+    return [Hit(t.line + 1, [rename(t, names[t.text])]) for i, t in enumerate(toks)
+            if t.kind == "identifier" and t.text in names and qualified_at(toks, i, ("ascii",))]
 
 
 MODE_NAMES = {"Debug": "debug", "ReleaseSafe": "safe", "ReleaseFast": "fast", "ReleaseSmall": "small"}
@@ -152,23 +175,23 @@ def _is_builtin_mode(toks, i):
 def rule_optimize_mode(text, toks):
     """`builtin.mode` is a `std.lang.Optimize` in Zig 0.17, whose tags are `.debug`, `.safe`, `.fast` and `.small`:
     the 0.15 tag literals compared with it, or switched on it, are renamed."""
-    edits = []
+    hits = []
 
-    def rename(k):
+    def tag(k):
         t = at(toks, k)
         if is_tok(at(toks, k - 1), "op", ".") and is_tok(t, "identifier") and t.text in MODE_NAMES:
-            edits.append(Edit(t.start, t.start + len(t.text), MODE_NAMES[t.text], t.line + 1))
+            hits.append(Hit(t.line + 1, [rename(t, MODE_NAMES[t.text])]))
 
     for i, t in enumerate(toks):
         if not _is_builtin_mode(toks, i):
             continue
         # builtin.mode == .Debug / != .Debug
         if is_tok(at(toks, i + 1), "op") and toks[i + 1].text in ("==", "!="):
-            rename(i + 3)
+            tag(i + 3)
         # .Debug == builtin.mode
         start = i - 2 if is_tok(at(toks, i - 2), "identifier", "builtin") else i - 5
         if is_tok(at(toks, start - 1), "op") and toks[start - 1].text in ("==", "!="):
-            rename(start - 2)
+            tag(start - 2)
         # switch (builtin.mode) { .Debug, .ReleaseSafe => ..., }
         if is_tok(at(toks, i + 1), "op", ")") and is_tok(at(toks, i + 2), "op", "{"):
             paren = start - 1
@@ -179,17 +202,17 @@ def rule_optimize_mode(text, toks):
                 depth, prong_start = 0, True
                 for k in range(i + 3, body_end):
                     tk = toks[k]
-                    if tk.kind == "op" and tk.text in "([{" and tk.text:
+                    if tk.kind == "op" and tk.text in ("(", "[", "{"):
                         depth += 1
-                    elif tk.kind == "op" and tk.text in ")]}" and tk.text:
+                    elif tk.kind == "op" and tk.text in (")", "]", "}"):
                         depth -= 1
                     elif depth == 0 and tk.kind == "op" and tk.text == "=>":
                         prong_start = False
                     elif depth == 0 and tk.kind == "op" and tk.text == "," and not prong_start:
                         prong_start = True
                     elif depth == 0 and prong_start and tk.kind == "identifier" and tk.text in MODE_NAMES:
-                        rename(k)
-    return edits
+                        tag(k)
+    return hits
 
 
 def test_blocks(toks):
@@ -208,101 +231,162 @@ def test_blocks(toks):
     return out
 
 
+IO = "std.testing.io"
 IO_ARG_NAMES = ("io", "testing.io", "std.testing.io")
 
-# 0.15 std.fs.Dir method -> (0.17 std.Io.Dir method, the 0.15 arity, how the 0.15 arguments become 0.17's).
-# "io+" inserts the Io first and keeps the rest; the others reorder (`a`, `p`, `m`: the 0.15 arguments by position).
+# 0.15 std.fs.Dir method -> (0.17 std.Io.Dir method, the 0.15 arity, the 0.17 arguments after the Io). An entry of
+# the argument list is the 0.15 argument by position (an int), a literal (a str), or a function of the 0.15 argument
+# texts that gives the text or None (no safe rewrite). Each 0.15 argument's span is replaced in place by the 0.17
+# argument at its position, so line breaks and comments between arguments stay where they were; an extra 0.17
+# argument is appended after the last span. readLink is not here: 0.17's returns a byte count where 0.15's returned
+# the slice, so a call's value changes meaning (a hand edit).
+
+
+def _open_options(texts):
+    """makeOpenPath's 0.15 `OpenOptions` become 0.17's `CreateDirPathOpenOptions.open_options`."""
+    opts = texts[1].strip()
+    if opts == ".{}":
+        return ".{}"
+    if opts.startswith(".{") and opts.endswith("}"):
+        return ".{ .open_options = " + texts[1] + " }"
+    return None
+
+
 DIR_METHODS = {
-    "writeFile": ("writeFile", 1, "io+"),
-    "access": ("access", 2, "io+"),
-    "openDir": ("openDir", 2, "io+"),
-    "openFile": ("openFile", 2, "io+"),
-    "createFile": ("createFile", 2, "io+"),
-    "deleteFile": ("deleteFile", 1, "io+"),
-    "deleteDir": ("deleteDir", 1, "io+"),
-    "deleteTree": ("deleteTree", 1, "io+"),
-    "readLink": ("readLink", 2, "io+"),
-    "symLink": ("symLink", 3, "io+"),
-    "statFile": ("statFile", 1, "{io}, {0}, .{{}}"),
-    "makeDir": ("createDir", 1, "{io}, {0}, .default_dir"),
-    "makePath": ("createDirPath", 1, "{io}, {0}"),
-    "makeOpenPath": ("createDirPathOpen", 2, "{io}, {0}, {1}"),
-    "realpathAlloc": ("realPathFileAlloc", 2, "{io}, {1}, {0}"),
-    "readFileAlloc": ("readFileAlloc", 3, "{io}, {1}, {0}, .limited({2})"),
+    "writeFile": ("writeFile", 1, [0]),
+    "access": ("access", 2, [0, 1]),
+    "openDir": ("openDir", 2, [0, 1]),
+    "openFile": ("openFile", 2, [0, 1]),
+    "createFile": ("createFile", 2, [0, 1]),
+    "deleteFile": ("deleteFile", 1, [0]),
+    "deleteDir": ("deleteDir", 1, [0]),
+    "deleteTree": ("deleteTree", 1, [0]),
+    "symLink": ("symLink", 3, [0, 1, 2]),
+    "statFile": ("statFile", 1, [0, ".{}"]),
+    "makeDir": ("createDir", 1, [0, ".default_dir"]),
+    "makePath": ("createDirPath", 1, [0]),
+    "makeOpenPath": ("createDirPathOpen", 2, [0, _open_options]),
+    "realpathAlloc": ("realPathFileAlloc", 2, [1, 0]),
+    "readFileAlloc": ("readFileAlloc", 3, [1, 0, lambda texts: ".limited(" + texts[2] + ")"]),
 }
+OPENING = ("createFile", "openFile", "openDir", "makeOpenPath")
 
 
-def _arg_text(text, run):
-    return text[run[0].start:run[-1].start + len(run[-1].text)]
+def _span(run):
+    return run[0].start, run[-1].start + len(run[-1].text)
+
+
+def _dir_call_edits(text, toks, i, args):
+    """The edits that turn the 0.15 Dir call whose method name is toks[i] into the 0.17 call, or None."""
+    t = toks[i]
+    new_name, arity, shape = DIR_METHODS[t.text]
+    spans = [_span(a) for a in args]
+    texts = [text[s:e] for s, e in spans]
+    new_args = []
+    for item in shape:
+        if isinstance(item, int):
+            new_args.append(texts[item])
+        elif isinstance(item, str):
+            new_args.append(item)
+        else:
+            value = item(texts)
+            if value is None:
+                return None
+            new_args.append(value)
+    moved = any(isinstance(item, int) and item != k for k, item in enumerate(shape[:len(spans)]))
+    if moved and any("//" in text[spans[k][1]:spans[k + 1][0]] for k in range(len(spans) - 1)):
+        # A comment between arguments that change places would end up beside the wrong one: a hand edit.
+        return None
+    edits = [Edit(spans[0][0], spans[0][0], IO + ", ")]
+    for k, (s, e) in enumerate(spans):
+        if new_args[k] != texts[k]:
+            edits.append(Edit(s, e, new_args[k]))
+    if len(new_args) > len(spans):
+        tail = spans[-1][1]
+        edits.append(Edit(tail, tail, "".join(", " + a for a in new_args[len(spans):])))
+    if new_name != t.text:
+        edits.append(rename(t, new_name))
+    return edits
+
+
+def _receiver(toks, i, tmp_names):
+    """'tmp' for `<tmp>.dir.<method>` with <tmp> a known temporary directory, 'cwd' for `std.fs.cwd().<method>`,
+    else None (toks[i] is the method name)."""
+    if (is_tok(at(toks, i - 2), "op", ")") and is_tok(at(toks, i - 3), "op", "(")
+            and is_tok(at(toks, i - 4), "identifier", "cwd") and qualified_at(toks, i - 4, ("std", "fs"))):
+        return "cwd"
+    if (is_tok(at(toks, i - 2), "identifier", "dir") and is_tok(at(toks, i - 3), "op", ".")
+            and is_tok(at(toks, i - 4), "identifier") and toks[i - 4].text in tmp_names
+            and not is_tok(at(toks, i - 5), "op", ".")):
+        return "tmp"
+    return None
+
+
+def _tmp_bindings(toks, lo, hi):
+    names = set()
+    for i in range(lo, hi):
+        if not (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
+                and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
+            continue
+        k = i + 3
+        if is_tok(at(toks, k), "keyword", "try"):
+            k += 1
+        j = k
+        if is_tok(at(toks, j), "identifier", "std") and is_tok(at(toks, j + 1), "op", "."):
+            j += 2
+        if (is_tok(at(toks, j), "identifier", "testing") and is_tok(at(toks, j + 1), "op", ".")
+                and is_tok(at(toks, j + 2), "identifier", "tmpDir")):
+            names.add(toks[i + 1].text)
+            continue
+        # var tmp = try TempDir.init(); (the fork's os/TempDir.zig, whose `dir` is a std.Io.Dir), qualified or not.
+        while is_tok(at(toks, k), "identifier") and is_tok(at(toks, k + 1), "op", ".") and toks[k].text != "TempDir":
+            k += 2
+        if (is_tok(at(toks, k), "identifier", "TempDir") and is_tok(at(toks, k + 1), "op", ".")
+                and is_tok(at(toks, k + 2), "identifier", "init") and is_tok(at(toks, k + 3), "op", "(")
+                and is_tok(at(toks, k + 4), "op", ")")):
+            names.add(toks[i + 1].text)
+    return names
 
 
 def rule_test_dir_io(text, toks):
-    """In a test block, a 0.15 `std.fs.Dir` call on a `std.testing.tmpDir` directory (`<tmp>.dir.<method>(`) or on
-    `std.fs.cwd()` becomes the 0.17 `std.Io.Dir` call with `std.testing.io` (renamed where 0.17 renamed it:
-    makeDir, makePath, makeOpenPath, realpathAlloc; readFileAlloc's byte bound becomes an `Io.Limit`, which refuses
-    a file of exactly that size where 0.15 accepted it). Only the 0.15 arity is rewritten, so a ported call is left
-    alone; other methods (realpath, iterate, close) are hand edits."""
-    edits = []
+    """In a test block, a 0.15 `std.fs.Dir` call on a `std.testing.tmpDir` or fork TempDir directory
+    (`<tmp>.dir.<method>(`) or on `std.fs.cwd()` becomes the 0.17 `std.Io.Dir` call with `std.testing.io`, renamed
+    where 0.17 renamed it (makeDir, makePath, makeOpenPath, realpathAlloc). readFileAlloc's byte bound becomes an
+    `Io.Limit`, which refuses a file of exactly that size where 0.15 accepted it, and its oversize error is
+    `StreamTooLong` where 0.15's was `FileTooBig`: a test block that names `FileTooBig` keeps its readFileAlloc calls
+    for a hand edit. A file or directory such a call opened (`const f = try tmp.dir.createFile(...)`) closes with the
+    Io, in the same hit as its open, so the two are rewritten together or not at all; one whose open is already
+    0.17's closes with the Io alone. Only the 0.15 arity is rewritten, so a ported call is left alone."""
+    hits = []
     for lo, hi in test_blocks(toks):
-        tmp_names = set()
-        for i in range(lo, hi):
-            # var tmp = std.testing.tmpDir(.{}); / testing.tmpDir(...)
-            if (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
-                    and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
-                k = i + 3
-                if is_tok(at(toks, k), "keyword", "try"):
-                    k += 1
-                if (is_tok(at(toks, k), "identifier", "std") and is_tok(at(toks, k + 1), "op", ".")):
-                    k += 2
-                if (is_tok(at(toks, k), "identifier", "testing") and is_tok(at(toks, k + 1), "op", ".")
-                        and is_tok(at(toks, k + 2), "identifier", "tmpDir")):
-                    tmp_names.add(toks[i + 1].text)
-                # var tmp = try TempDir.init(); (the fork's os/TempDir.zig, whose `dir` is a std.Io.Dir),
-                # qualified or not: internal_os.TempDir.init(), os.TempDir.init().
-                while is_tok(at(toks, k), "identifier") and is_tok(at(toks, k + 1), "op", ".") \
-                        and toks[k].text != "TempDir":
-                    k += 2
-                if (is_tok(at(toks, k), "identifier", "TempDir") and is_tok(at(toks, k + 1), "op", ".")
-                        and is_tok(at(toks, k + 2), "identifier", "init") and is_tok(at(toks, k + 3), "op", "(")
-                        and is_tok(at(toks, k + 4), "op", ")")):
-                    tmp_names.add(toks[i + 1].text)
+        tmp_names = _tmp_bindings(toks, lo, hi)
+        names_file_too_big = any(toks[k].text == "FileTooBig" for k in range(lo, hi))
+        call_hits = {}   # method-name token index -> Hit
         for i in range(lo, hi):
             t = toks[i]
             if t.kind != "identifier" or t.text not in DIR_METHODS or not is_tok(at(toks, i - 1), "op", "."):
                 continue
             if not is_tok(at(toks, i + 1), "op", "("):
                 continue
-            cwd = (is_tok(at(toks, i - 2), "op", ")") and is_tok(at(toks, i - 3), "op", "(")
-                   and is_tok(at(toks, i - 4), "identifier", "cwd") and qualified_at(toks, i - 4, ("std", "fs")))
-            tmp = (is_tok(at(toks, i - 2), "identifier", "dir") and is_tok(at(toks, i - 3), "op", ".")
-                   and is_tok(at(toks, i - 4), "identifier") and toks[i - 4].text in tmp_names
-                   and not is_tok(at(toks, i - 5), "op", "."))
-            if not (cwd or tmp):
+            recv = _receiver(toks, i, tmp_names)
+            if recv is None:
                 continue
-            new_name, arity, shape = DIR_METHODS[t.text]
-            args, close = zigtok.split_args(toks, i + 1)
-            if len(args) != arity:
+            if t.text == "readFileAlloc" and names_file_too_big:
                 continue
-            first = "".join(x.text for x in args[0]) if args else ""
-            if first in IO_ARG_NAMES:
+            args, _ = zigtok.split_args(toks, i + 1)
+            if len(args) != DIR_METHODS[t.text][1] or "".join(x.text for x in args[0]) in IO_ARG_NAMES:
                 continue
-            io = "std.testing.io"
-            if shape == "io+":
-                new_args = io + ", " + _arg_text(text, (args[0][0], args[-1][-1]))
-            else:
-                new_args = shape.format(*[_arg_text(text, (a[0], a[-1])) for a in args], io=io)
-            # Keep a trailing comma's layout: rewrite only the argument span.
-            span_start, span_end = args[0][0].start, args[-1][-1].start + len(args[-1][-1].text)
-            edits.append(Edit(span_start, span_end, new_args, t.line + 1))
-            if new_name != t.text:
-                edits.append(Edit(t.start, t.start + len(t.text), new_name, None))
-            if cwd:
-                # std.fs.cwd() -> std.Io.Dir.cwd()
-                fs = toks[i - 6]
-                edits.append(Edit(fs.start, fs.start + len(fs.text), "Io.Dir", None))
-        # A file or directory such a call opened (`const f = try tmp.dir.createFile(...)`) is a std.Io.File or
-        # std.Io.Dir, whose close takes the Io: `f.close()` -> `f.close(std.testing.io)`.
-        opened = set()
+            edits = _dir_call_edits(text, toks, i, args)
+            if edits is None:
+                continue
+            if recv == "cwd":
+                fs = toks[i - 6]   # std.fs.cwd() -> std.Io.Dir.cwd()
+                edits.append(rename(fs, "Io.Dir"))
+            hit = Hit(t.line + 1, edits)
+            hits.append(hit)
+            call_hits[i] = hit
+        # What such a call opened closes with the Io.
+        opened = {}   # name -> the open's Hit, or "ported" when the open is already 0.17's
         for i in range(lo, hi):
             if not (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
                     and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
@@ -310,18 +394,43 @@ def rule_test_dir_io(text, toks):
             k = i + 3
             if is_tok(at(toks, k), "keyword", "try"):
                 k += 1
+            # the method name of `<tmp>.dir.m(` or `std.fs.cwd().m(` / `std.Io.Dir.cwd().m(`
+            m = None
             if (is_tok(at(toks, k), "identifier") and toks[k].text in tmp_names and is_tok(at(toks, k + 1), "op", ".")
-                    and is_tok(at(toks, k + 2), "identifier", "dir") and is_tok(at(toks, k + 3), "op", ".")
-                    and is_tok(at(toks, k + 4), "identifier")
-                    and toks[k + 4].text in ("createFile", "openFile", "openDir", "makeOpenPath", "createDirPathOpen")
-                    and is_tok(at(toks, k + 5), "op", "(")):
-                opened.add(toks[i + 1].text)
+                    and is_tok(at(toks, k + 2), "identifier", "dir") and is_tok(at(toks, k + 3), "op", ".")):
+                m = k + 4
+            elif (is_tok(at(toks, k), "identifier", "std") and is_tok(at(toks, k + 1), "op", ".")):
+                j = k + 2
+                if is_tok(at(toks, j), "identifier", "fs") and is_tok(at(toks, j + 1), "op", "."):
+                    j += 2
+                elif (is_tok(at(toks, j), "identifier", "Io") and is_tok(at(toks, j + 1), "op", ".")
+                      and is_tok(at(toks, j + 2), "identifier", "Dir") and is_tok(at(toks, j + 3), "op", ".")):
+                    j += 4
+                else:
+                    continue
+                if (is_tok(at(toks, j), "identifier", "cwd") and is_tok(at(toks, j + 1), "op", "(")
+                        and is_tok(at(toks, j + 2), "op", ")") and is_tok(at(toks, j + 3), "op", ".")):
+                    m = j + 4
+            if m is None or not is_tok(at(toks, m), "identifier") or not is_tok(at(toks, m + 1), "op", "("):
+                continue
+            name, method = toks[i + 1].text, toks[m].text
+            if m in call_hits and method in OPENING:
+                opened[name] = call_hits[m]
+            elif method in ("createFile", "openFile", "openDir", "createDirPathOpen"):
+                args, _ = zigtok.split_args(toks, m + 1)
+                if args and "".join(x.text for x in args[0]) in IO_ARG_NAMES:
+                    opened[name] = "ported"
         for i in range(lo, hi):
             if (is_tok(at(toks, i), "identifier") and toks[i].text in opened and is_tok(at(toks, i + 1), "op", ".")
                     and is_tok(at(toks, i + 2), "identifier", "close") and is_tok(at(toks, i + 3), "op", "(")
                     and is_tok(at(toks, i + 4), "op", ")") and not is_tok(at(toks, i - 1), "op", ".")):
-                edits.append(Edit(toks[i + 4].start, toks[i + 4].start, "std.testing.io", toks[i].line + 1))
-    return edits
+                edit = Edit(toks[i + 4].start, toks[i + 4].start, IO)
+                owner = opened[toks[i].text]
+                if owner == "ported":
+                    hits.append(Hit(toks[i].line + 1, [edit]))
+                else:
+                    owner.edits.append(edit)
+    return hits
 
 
 RULES = [
@@ -339,7 +448,7 @@ RULES = [
 def apply_edits(text, edits):
     edits = sorted(edits, key=lambda e: (e.start, e.end))
     for a, b in zip(edits, edits[1:]):
-        if b.start < a.end:
+        if b.start < a.end or (b.start == a.start and a.start == a.end and b.start == b.end):
             raise ValueError(f"overlapping edits at offsets {a.start} and {b.start}")
     out, pos = [], 0
     for e in edits:
@@ -354,69 +463,94 @@ def _line_of(text, offset):
     return text.count("\n", 0, offset) + 1
 
 
+def _on_lines(text, hit, lines):
+    return all(_line_of(text, e.start) in lines and _line_of(text, max(e.start, e.end - 1)) in lines
+               for e in hit.edits)
+
+
+def _conflict(a, b):
+    """Two edits touch the same text (or insert at one point)."""
+    if a.start == a.end and b.start == b.end:
+        return a.start == b.start
+    return a.start < b.end and b.start < a.end or (a.start == a.end and b.start < a.start < b.end) or (
+        b.start == b.end and a.start < b.start < a.end)
+
+
+def _disjoint(hits):
+    """The hits that can be applied in one pass, outermost first; one with an edit that overlaps a kept hit's edit
+    (a call nested in another's arguments) waits for the next pass."""
+    kept, taken = [], []
+    for h in sorted(hits, key=lambda h: (h.start, -h.end)):
+        if any(_conflict(e, t) for e in h.edits for t in taken):
+            continue
+        kept.append(h)
+        taken.extend(h.edits)
+    return kept
+
+
 def rewrite(text, rule_ids=None, lines=None):
     """(new text, [(rule id, line)]) for one file's text: each selected rule in order, over the previous rule's
-    output. With `lines` (a set of 1-based line numbers of the input), a hit is kept only when every edit of it
-    lies on those lines, so upstream's own lines in a shared file are left as upstream wrote them."""
-    hits = []
+    output, repeated while it finds more (a call nested in another's arguments is rewritten in a later pass). With
+    `lines` (a set of 1-based line numbers), a hit is kept only when every edit of it lies on those lines."""
+    hits_out = []
     for rule_id, _, fn in RULES:
         if rule_ids is not None and rule_id not in rule_ids:
             continue
-        edits = fn(text, code_tokens(text))
-        if lines is not None:
-            # A rule emits each hit's edit (the one with a line) and then its other halves (line-less), so the
-            # emission order groups them; a group is kept only if every edit in it sits on an allowed line.
-            groups, cur = [], []
-            for e in edits:
-                if e.line is not None and cur:
-                    groups.append(cur)
-                    cur = []
-                cur.append(e)
-            if cur:
-                groups.append(cur)
-            kept = []
-            for g in groups:
-                if all(_line_of(text, e.start) in lines and _line_of(text, max(e.start, e.end - 1)) in lines
-                       for e in g):
-                    kept.extend(g)
-            edits = kept
-        if edits:
-            new = apply_edits(text, edits)
+        for _ in range(MAX_PASSES):
+            hits = fn(text, code_tokens(text))
             if lines is not None:
-                lines = _shift_lines(text, new, lines)
+                hits = [h for h in hits if _on_lines(text, h, lines)]
+            hits = _disjoint(hits)
+            if not hits:
+                break
+            new = apply_edits(text, [e for h in hits for e in h.edits])
+            if new.count("\n") != text.count("\n"):
+                raise ValueError(f"rule {rule_id} changed the number of lines")
             text = new
-            # An edit with no line is the second half of a hit (an inserted argument), not a hit of its own.
-            hits.extend((rule_id, e.line) for e in edits if e.line is not None)
-    return text, hits
+            hits_out.extend((rule_id, h.line) for h in hits)
+        else:
+            raise ValueError(f"rule {rule_id} did not settle in {MAX_PASSES} passes")
+    return text, hits_out
 
 
-def _shift_lines(old, new, lines):
-    """The allowed line set after a rewrite. Rules never add or remove a newline, so line numbers are stable."""
-    if old.count("\n") != new.count("\n"):
-        raise ValueError("a rule changed the number of lines")
+def parse_changed_lines(diff_text):
+    """The 1-based new-side lines a `git diff -U0` output's hunks cover."""
+    lines = set()
+    for line in diff_text.splitlines():
+        if not line.startswith("@@ "):
+            continue
+        plus = line.split(" +", 1)[1].split(" ", 1)[0]
+        start, _, count = plus.partition(",")
+        start, count = int(start), int(count) if count else 1
+        lines.update(range(start, start + count))
     return lines
+
+
+def check_rev(rev):
+    """Stop unless `rev` names a commit."""
+    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ValueError(f"--fork-lines: {rev!r} is no commit")
 
 
 def changed_lines(path, rev):
     """The 1-based lines of `path` (as it is in the work tree) that differ from `rev`, or None when `rev` lacks
-    the file (fork-only: every line). An empty set means the file is upstream's as it stands."""
-    import subprocess
-    root = Path(__file__).resolve().parents[3]
-    rel = Path(path).resolve().relative_to(root).as_posix()
-    exists = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{rev}:{rel}"],
-                            capture_output=True).returncode == 0
-    if not exists:
+    the file (fork-only: every line). An empty set means the file is upstream's as it stands. A git failure other
+    than a path `rev` lacks stops the run."""
+    rel = Path(path).resolve().relative_to(ROOT).as_posix()
+    listed = subprocess.run(["git", "-C", str(ROOT), "--no-optional-locks", "ls-tree", "--name-only", rev, "--", rel],
+                            capture_output=True, text=True, encoding="utf-8")
+    if listed.returncode != 0:
+        raise ValueError(f"git ls-tree {rev} {rel} failed: {listed.stderr.strip()[:200]}")
+    if listed.stdout.strip() != rel:
         return None
-    out = subprocess.run(["git", "-C", str(root), "--no-optional-locks", "diff", "-U0", rev, "--", rel],
-                         capture_output=True, text=True, encoding="utf-8", check=True).stdout
-    lines = set()
-    for line in out.splitlines():
-        if line.startswith("@@"):
-            plus = line.split("+", 1)[1].split(" ", 1)[0]
-            start, _, count = plus.partition(",")
-            start, count = int(start), int(count) if count else 1
-            lines.update(range(start, start + count))
-    return lines
+    out = subprocess.run(["git", "-C", str(ROOT), "--no-optional-locks", "diff", "--no-color", "--no-ext-diff",
+                          "--no-textconv", "-U0", rev, "--", rel],
+                         capture_output=True, text=True, encoding="utf-8")
+    if out.returncode != 0:
+        raise ValueError(f"git diff {rev} {rel} failed: {out.stderr.strip()[:200]}")
+    return parse_changed_lines(out.stdout)
 
 
 def zig_files(paths):
@@ -448,31 +582,39 @@ def main(argv=None):
         if unknown:
             ap.error(f"unknown rules: {', '.join(sorted(unknown))}")
     counts = {r[0]: 0 for r in RULES if rule_ids is None or r[0] in rule_ids}
-    report = []
-    changed = 0
-    for path in zig_files(args.paths):
-        raw = path.read_bytes()
-        if b"\r" in raw:
-            print(f"refused (CR bytes): {path}", file=sys.stderr)
-            return 2
-        text = raw.decode("utf-8")
-        lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
-        if lines is not None and not lines:
-            continue
-        new, hits = rewrite(text, rule_ids, lines)
-        for rule_id, line in hits:
-            counts[rule_id] += 1
-            report.append(f"{path.as_posix()}\t{rule_id}\t{line}")
-        if new != text:
-            changed += 1
-            if not args.check:
-                path.write_bytes(new.encode("utf-8"))
+    report, pending = [], []
+    try:
+        if args.fork_lines:
+            check_rev(args.fork_lines)
+        for path in zig_files(args.paths):
+            raw = path.read_bytes()
+            if b"\r" in raw:
+                raise ValueError(f"refused (CR bytes): {path}")
+            text = raw.decode("utf-8")
+            lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
+            if lines is not None and not lines:
+                continue
+            try:
+                new, hits = rewrite(text, rule_ids, lines)
+            except ValueError as e:
+                raise ValueError(f"{path}: {e}") from e
+            for rule_id, line in hits:
+                counts[rule_id] += 1
+                report.append(f"{path.as_posix()}\t{rule_id}\t{line}")
+            if new != text:
+                pending.append((path, new))
+    except ValueError as e:
+        print(f"codemod: {e}; nothing written", file=sys.stderr)
+        return 2
+    if not args.check:
+        for path, new in pending:
+            path.write_bytes(new.encode("utf-8"))
     for rule_id, n in counts.items():
         print(f"{rule_id}\t{n}")
-    print(f"files {'to change' if args.check else 'changed'}\t{changed}")
+    print(f"files {'to change' if args.check else 'changed'}\t{len(pending)}")
     if args.report:
         Path(args.report).write_text("".join(r + "\n" for r in report), encoding="utf-8", newline="\n")
-    return 1 if args.check and changed else 0
+    return 1 if args.check and pending else 0
 
 
 if __name__ == "__main__":
