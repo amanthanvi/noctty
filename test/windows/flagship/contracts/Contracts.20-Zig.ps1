@@ -137,7 +137,8 @@ function Get-AbiPinProblems {
         $aliases["$($alias.Groups[2].Value).$($alias.Groups[3].Value)"] = $alias.Groups[1].Value
     }
     $pending = [Collections.Generic.Queue[object]]::new()
-    foreach ($declaration in [regex]::Matches($Source, '(?m)^pub const ([A-Za-z_][A-Za-z0-9_]*) = extern (struct|union) \{')) {
+    # Private declarations too (council T4): a file-local extern struct crosses the ABI as much as a public one.
+    foreach ($declaration in [regex]::Matches($Source, '(?m)^(?:pub )?const ([A-Za-z_][A-Za-z0-9_]*) = extern (struct|union) \{')) {
         $pending.Enqueue(@{ Name = $declaration.Groups[1].Value; Path = $declaration.Groups[1].Value; Kind = $declaration.Groups[2].Value; Open = $declaration.Index + $declaration.Length })
     }
     $top = $pending.Count
@@ -201,6 +202,8 @@ $abiPinControls = @(
     @{ Source = $abiPinSource.Replace('@offsetOf(BY_HANDLE_FILE_INFORMATION, "nFileIndexLow")', '@offsetOf(FILETIME, "dwLowDateTime")'); Expect = 'BY_HANDLE_FILE_INFORMATION.nFileIndexLow has no offset pin' }
     # A struct the floor finds by itself: renamed, its pins name nothing.
     @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', 'pub const FILETIME_ = extern struct {'); Expect = 'FILETIME_ has no size pin' }
+    # A private one with no pins (council T4).
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', "const PRIVATE_PROBE = extern struct {`n    value: u32,`n};`n`npub const FILETIME = extern struct {"); Expect = 'PRIVATE_PROBE has no size pin' }
     @{ Source = $abiPinSource.Replace("    try testing.expectEqual(@as(usize, 0), @offsetOf(OverlappedOffsets, `"Offset`"));`n", ''); Expect = 'OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME.Offset has no offset pin' }
     @{ Source = $abiPinSource.Replace('const OverlappedOffsets = @FieldType(OverlappedUnion, "DUMMYSTRUCTNAME");', 'const OverlappedOffsets = @TypeOf(OverlappedUnion);'); Expect = 'OVERLAPPED.DUMMYUNIONNAME.DUMMYSTRUCTNAME has no @FieldType alias in a test' }
     # The seats' S3 mutation: Offset and OffsetHigh swapped.
