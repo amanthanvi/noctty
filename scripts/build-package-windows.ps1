@@ -57,7 +57,21 @@ try {
 
     Write-Host "Build phase: $($archInfo.Name) ($($archInfo.ZigTarget))"
     Remove-Item -LiteralPath $buildCapabilitiesPath -Force -ErrorAction SilentlyContinue
-    & zig @buildArgs
+    # -Dstrip=false keeps the debug info the symbols zip is made from, and
+    # lld-link keeps every unreferenced function once it writes a PDB, so a
+    # release link needs /OPT:REF. On Zig 0.17 build.zig cannot put it into
+    # the links' environment (it runs in its own configure process), so it is
+    # set here, for this build only, as in package-windows.ps1; build.zig
+    # refuses a release build with -Dstrip=false without it.
+    $previousLinkEnv = $env:_LINK_
+    if ($Optimize -in @('ReleaseFast', 'ReleaseSmall')) {
+        $env:_LINK_ = (@($previousLinkEnv, '-OPT:REF') | Where-Object { $_ }) -join ' '
+    }
+    try {
+        & zig @buildArgs
+    } finally {
+        $env:_LINK_ = $previousLinkEnv
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "zig build failed for $($archInfo.Name) with exit code $LASTEXITCODE."
     }

@@ -164,24 +164,42 @@ fn initOptions(self: *SharedDeps, b: *std.Build, thread_roles: bool) !void {
     self.thread_role_options = options;
 }
 
+/// The uucode module of every artifact of one target and mode, made once for
+/// the whole build (every `SharedDeps` value, the bench deps' own `init`
+/// included, shares it), keyed as vaxis's dependency instance is keyed: by the
+/// target query, its CPU and the mode (`uucodeModule`).
+var uucode_modules: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
+
 /// The uucode module for an artifact of `target` built in `optimize`, which
-/// the artifact and vaxis share. Zig 0.17 caches a dependency instance by its
-/// arguments, so every call with the same target and mode returns the same
-/// module, and each (target, mode) gets its own: the singleton `uucode_mod`
-/// would carry the first artifact's mode into the next (a ReleaseFast bench
-/// beside a Debug app fails `assertModuleOptimizeMode`).
+/// the artifact and vaxis share. vaxis takes only scalar arguments, so Zig
+/// 0.17.1 hands out one vaxis instance per (target, mode) and each `add`
+/// sets that instance's uucode import; a uucode dependency, whose arguments
+/// are paths, is never found again (`LazyPath.eql` still has the inverted
+/// `.src_path` test this file's `uucode_mod` comment describes), so a fresh
+/// module per call would leave every earlier artifact of that target and mode
+/// with two uucode modules ("file exists in modules 'uucode' and 'uucode0'").
+/// Hence the memo. Each (target, mode) gets its own: the singleton
+/// `uucode_mod` would carry the first artifact's mode into the next (a
+/// ReleaseFast bench beside a Debug app fails `assertModuleOptimizeMode`).
 fn uucodeModule(
     self: *const SharedDeps,
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
 ) *std.Build.Module {
-    return b.dependency("uucode", .{
+    const key = b.fmt("{s}|{s}|{t}", .{
+        target.query.zigTriple(b.allocator) catch @panic("OOM"),
+        target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM"),
+        optimize,
+    });
+    const entry = uucode_modules.getOrPut(b.allocator, key) catch @panic("OOM");
+    if (!entry.found_existing) entry.value_ptr.* = b.dependency("uucode", .{
         .target = target,
         .optimize = optimize,
         .tables_path = self.uucode_tables,
         .build_config_path = b.path("src/build/uucode_config.zig"),
     }).module("uucode");
+    return entry.value_ptr.*;
 }
 
 /// The build options of an artifact built in `mode`: with the runtime
@@ -257,10 +275,11 @@ pub fn add(
     // (note: errno is C stdlib but we just include it here because that's
     // where it's generally included otherwise)
     //
-    // Gated off Windows: the MSVC C runtime has no pwd.h, sys/types.h or
-    // unistd.h, so translating them fails the build, and only POSIX paths
-    // use them. A Windows module keeps the two headers the C runtime has, so
-    // a POSIX-only `@import("posix_c")` still names a module there.
+    // Gated off Windows: the MSVC C runtime has no pwd.h or unistd.h, so
+    // translating them fails the build, and only POSIX paths use these
+    // headers (sys/types.h among them). A Windows module keeps errno.h and
+    // signal.h, so a POSIX-only `@import("posix_c")` still names a module
+    // there.
     const posix_c_files: []const translate_c.Options.IncludeFile = if (target.result.os.tag == .windows) &.{
         .{ .path = "errno.h" },
         .{ .path = "signal.h" },

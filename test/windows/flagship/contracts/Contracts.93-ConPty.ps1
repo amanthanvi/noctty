@@ -69,7 +69,7 @@ Assert-WorkflowContract `
     -Description 'source builds stage the bundled ConPTY unless the builder opts out'
 Assert-WorkflowContract `
     -Path $conptyBuildStep `
-    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?run\.has_side_effects = true;.*?run\.addFileArg\(b\.path\(stage_script\)\);.*?b\.getInstallStep\(\)\.dependOn\(&run\.step\);.*?if \(installedMatches\(io, arena, bin, &staged\)\) return;.*?_ = env\.swapRemove\("PSModulePath"\);.*?\.environ_map = &env,.*?"-File",\s*script,.*?0 => \{\s*if \(installedMatches\(io, arena, bin, &staged\)\) return;\s*fail\(.*?exit_not_downloaded => \{.*?break :reason "the package could not be fetched";.*?fail\(.*?bin\.deleteFile\(io, file\.name\)' `
+    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?run\.has_side_effects = true;.*?run\.addFileArg\(b\.path\(stage_script\)\);.*?run\.addDirectoryArg\(b\.graph\.path\(\.install_bin, ""\)\);.*?b\.getInstallStep\(\)\.dependOn\(&run\.step\);.*?if \(installedMatches\(io, arena, bin, &staged\)\) return;.*?_ = env\.swapRemove\("PSModulePath"\);.*?\.environ_map = &env,.*?"-File",\s*script,.*?0 => \{\s*if \(installedMatches\(io, arena, bin, &staged\)\) return;\s*fail\(.*?exit_not_downloaded => \{.*?break :reason "the package could not be fetched";.*?fail\(.*?bin\.deleteFile\(io, file\.name\)' `
     -Description 'source builds restage only through the release helper with a clean PSModulePath, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
 Assert-WorkflowContract `
     -Path $conptyStageScript `

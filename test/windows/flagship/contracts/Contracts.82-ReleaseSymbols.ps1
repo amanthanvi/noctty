@@ -90,9 +90,16 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $buildZig82
         Content = { $buildZigText82 }
-        Pattern = '(?s)if \(config\.release_symbols\) \{\s*// The configure cache does not key on the environment\.\s*b\.graph\.poisonCache\(\);\s*const link_env = b\.graph\.environ_map\.get\("_LINK_"\) orelse "";\s*if \(std\.mem\.indexOf\(u8, link_env, "-OPT:REF"\) == null\) \{\s*b\.getInstallStep\(\)\.dependOn\(&b\.addFail\('
+        Pattern = '(?s)if \(config\.release_symbols\) \{\s*// The configure cache does not key on the environment\.\s*b\.graph\.poisonCache\(\);\s*const link_env = b\.graph\.environ_map\.get\("_LINK_"\) orelse "";\s*if \(std\.ascii\.findIgnoreCase\(link_env, "-OPT:REF"\) == null and\s*std\.ascii\.findIgnoreCase\(link_env, "/OPT:REF"\) == null\)\s*\{\s*std\.debug\.print\([^\r\n]*\);\s*std\.process\.exit\(1\);'
         Kind = 'Text'
-        Description = 'a Windows release build that keeps its PDB fails its install unless _LINK_ carries /OPT:REF, which lld-link drops once /DEBUG is on (Zig 0.17: build.zig cannot set the links'' environment)'
+        Description = 'a Windows release build that keeps its PDB stops at configure, before anything links, unless _LINK_ carries /OPT:REF, which lld-link drops once /DEBUG is on (Zig 0.17: build.zig cannot set the links'' environment)'
+    }
+    @{
+        File = $windowsPackageBuilder82
+        Content = { $windowsPackageBuilderText82 }
+        Pattern = '(?s)\$previousLinkEnv = \$env:_LINK_\s*if \(\$Optimize -in @\(''ReleaseFast'', ''ReleaseSmall''\)\) \{\s*\$env:_LINK_ = \(@\(\$previousLinkEnv, ''-OPT:REF''\) \| Where-Object \{ \$_ \}\) -join '' ''\s*\}\s*try \{\s*& zig @buildArgs\s*\} finally \{\s*\$env:_LINK_ = \$previousLinkEnv'
+        Kind = 'Text'
+        Description = 'the release build wrapper, which release.yml and windows-arm64.yml run, links its release builds with /OPT:REF through _LINK_'
     }
     @{
         File = $windowsPackager82

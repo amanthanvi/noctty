@@ -60,17 +60,20 @@ pub fn build(b: *std.Build) !void {
     // From Zig 0.17 this script runs in its own configure process, and the
     // links run in the make process, which reads its own environment: a
     // value put into `b.graph.environ_map` here never reaches lld. So the
-    // caller sets `_LINK_` (scripts/package-windows.ps1 does), and a release
-    // build that keeps its symbols without it fails at install rather than
-    // linking 2 MB of dead code.
+    // caller sets `_LINK_` (scripts/build-package-windows.ps1 and
+    // scripts/package-windows.ps1 do), and a release build that keeps its
+    // symbols without it stops here, before anything links: a Fail step
+    // would stop only its dependents, and the make process would still link
+    // (and cache) the 2 MB of dead code.
     if (config.release_symbols) {
         // The configure cache does not key on the environment.
         b.graph.poisonCache();
         const link_env = b.graph.environ_map.get("_LINK_") orelse "";
-        if (std.mem.indexOf(u8, link_env, "-OPT:REF") == null) {
-            b.getInstallStep().dependOn(&b.addFail(
-                "a Windows release build with -Dstrip=false links with /OPT:REF: set _LINK_ to include -OPT:REF (scripts/package-windows.ps1 does)",
-            ).step);
+        if (std.ascii.findIgnoreCase(link_env, "-OPT:REF") == null and
+            std.ascii.findIgnoreCase(link_env, "/OPT:REF") == null)
+        {
+            std.debug.print("a Windows release build with -Dstrip=false links with -OPT:REF: set _LINK_ to include -OPT:REF (scripts/package-windows.ps1 does)\n", .{});
+            std.process.exit(1);
         }
     }
 
@@ -253,8 +256,14 @@ pub fn build(b: *std.Build) !void {
     // path as the toast IconUri, and Windows then caches that icon-less
     // resolution for the rest of the logon session. The installed exe finds
     // zig-out/share/ghostty by climbing from its own path
-    // (src/os/resourcesdir.zig), so it needs no GHOSTTY_RESOURCES_DIR (Zig
-    // 0.17 knows the install prefix only when the build runs).
+    // (src/os/resourcesdir.zig), so the step sets no GHOSTTY_RESOURCES_DIR
+    // (Zig 0.17 knows the install prefix only when the build runs). One
+    // difference from the 0.15 build: in a release mode a
+    // GHOSTTY_RESOURCES_DIR the shell already has wins over the climb, so
+    // `zig build run -Doptimize=ReleaseFast` from inside a noctty or Ghostty
+    // shell reads that installation's resources. Removing the variable in
+    // the step would copy the configure-time environment into the cached
+    // configuration.
     if (config.app_runtime != .none) {
         const run_cmd = if (config.emit_exe) run: {
             const cmd = std.Build.Step.Run.create(b, "run noctty");
@@ -266,8 +275,12 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
     }
 
-    // Zig module tests
-    if (lib_vt_mod) |mod| {
+    // Zig module tests, on modules of their own: the libraries above write
+    // into their root modules (GhosttyLibVt: pic, and no stack protector on
+    // MSVC for the static library), and the tests run as the 0.15 build ran
+    // them, from a second set (anonymous, so no second named module).
+    if (lib_vt_mod) |lib_mod| {
+        const mod = try lib_mod.retarget(b, &config, &deps, config.target);
         const mod_vt_test = b.addTest(.{
             .name = "ghostty-vt-test",
             .root_module = mod.vt,
