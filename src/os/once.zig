@@ -69,6 +69,12 @@ pub fn Once(comptime f: fn () void) type {
             }
         }
 
+        /// Whether `f` is running now, on any thread. For a test's reset of a
+        /// once it means to run again, which must not race a running `f`.
+        pub fn isRunning(self: *const Self) bool {
+            return self.state.load(.acquire) == running;
+        }
+
         /// The calling thread is the one running `f` (runtime safety only).
         fn reentered(self: *const Self) bool {
             if (!std.debug.runtime_safety) return false;

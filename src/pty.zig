@@ -747,6 +747,8 @@ const WindowsConPty = struct {
     fn resetForTest() void {
         std.debug.assert(builtin.is_test);
         // No live HPCON may cross this reset or its module provenance would change.
+        // Nor a resolve: a reset under a running `initialize` would race it (council F12).
+        std.debug.assert(!resolver_once.isRunning());
 
         selected.store(&inbox_functions, .release);
         if (bundled_functions.module) |module| _ = windows_ext.kernel32.FreeLibrary(module);
@@ -1476,7 +1478,7 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
 
 /// Install a bundled-looking backend without loading conpty.dll, so the
 /// selection bookkeeping can be exercised without creating a pseudo console.
-/// The resolver `std.once` is burned first, otherwise the next `functions()`
+/// The resolver's once (`os/once.zig`) is burned first, otherwise the next `functions()`
 /// call would overwrite the fake selection with a real resolve.
 fn installFakeBundledBackendForTest() void {
     std.debug.assert(builtin.is_test);

@@ -696,7 +696,9 @@ that govern each symbol you change, or that none does.
   module modes, `SharedDeps.assertModuleOptimizeMode` and
   `SharedDeps.uucodeModule`; what a `Run` step hands its child, as
   `src/build/GhosttyPkgConfig.zig` does its generator
-  `src/extra/pkg-config.zig`; which files `test-lib-vt` parses and
+  `src/extra/pkg-config.zig`, and the two checks that no build file copies
+  the environment into a step, `Contracts.21-BuildEnvironment.ps1` and
+  `scripts/check-configure-environment.ps1`; which files `test-lib-vt` parses and
   compiles), the
   Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
   `scripts/dev-windows.cmd` keeps when set and otherwise sets to
