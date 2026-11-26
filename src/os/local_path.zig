@@ -821,6 +821,17 @@ fn resolveBelow(alloc: Allocator, base: []const u8, rest: []const u8) ?[]u8 {
         return null;
     }
     resolved[2] = '?';
+    // A bare `\\?\Volume{GUID}` base with nothing after it: 0.15.2's resolve
+    // gave the root with its `\` (`localRoot` needs it); the share spelling
+    // gives `\\v\Volume{GUID}` without one, so the separator goes back.
+    if (std.mem.indexOfScalarPos(u8, resolved, 4, '\\') == null) {
+        const rooted = std.mem.concat(alloc, u8, &.{ resolved, "\\" }) catch {
+            alloc.free(resolved);
+            return null;
+        };
+        alloc.free(resolved);
+        return rooted;
+    }
     return resolved;
 }
 
@@ -1236,8 +1247,11 @@ test "local path walk joins a link's target below a volume GUID root as Zig 0.15
     const g = "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}";
     for ([_]struct { []const u8, []const u8, ?[]const u8 }{
         .{ g ++ "\\", "safe.txt", g ++ "\\safe.txt" },
-        // A mount point to a volume's root, as the last name.
+        // A mount point to a volume's root, as the last name, with or without
+        // the root's separator.
         .{ g ++ "\\", "", g ++ "\\" },
+        .{ g, "", g ++ "\\" },
+        .{ g, "safe.txt", g ++ "\\safe.txt" },
         .{ g ++ "\\folder", "safe.txt", g ++ "\\folder\\safe.txt" },
         .{ g ++ "\\folder\\", "", g ++ "\\folder" },
         // A relative link's target against its folder.
