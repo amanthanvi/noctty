@@ -130,7 +130,7 @@ pub fn runChildIfRequested() void {
             if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             std.process.exit(exit_failed);
         };
-        if (std.testing.allocator_instance.deinit() == .leak) std.process.exit(exit_leaked);
+        if (std.testing.allocator_instance.deinit() != 0) std.process.exit(exit_leaked);
         std.debug.print("isolated child: the test returned\n", .{});
         std.process.exit(exit_passed);
     }
