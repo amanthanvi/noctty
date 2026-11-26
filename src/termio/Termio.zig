@@ -1563,7 +1563,7 @@ test "clear screen at a prompt above blank rows leaves no scrollback" {
     const alloc = testing.allocator;
 
     for ([_]bool{ true, false }) |history| {
-        var t = try terminalpkg.Terminal.init(alloc, .{ .cols = 10, .rows = 15 });
+        var t = try terminalpkg.Terminal.init(std.testing.io, alloc, .{ .cols = 10, .rows = 15 });
         defer t.deinit(alloc);
 
         // Command output, then a prompt in the middle of the screen with
@@ -1596,7 +1596,7 @@ test "clear screen at a prompt above blank rows leaves no scrollback" {
 test "shared terminal dirty helper tracks visible terminal dirtiness" {
     const testing = std.testing;
 
-    var t = try terminalpkg.Terminal.init(testing.allocator, .{
+    var t = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 8,
         .rows = 4,
     });
@@ -1684,7 +1684,7 @@ test "issue149 explicit config colors reach derived config and terminal colors" 
     try testing.expectEqual(config.palette.value[5], derived.palette[5]);
     try testing.expectEqual(conditional_state, derived.conditional_state);
 
-    var terminal = try terminalpkg.Terminal.init(testing.allocator, .{
+    var terminal = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
         .colors = .{
@@ -1779,7 +1779,7 @@ test "issue149 config change writes exactly one color scheme report" {
     io.backend = .{ .exec = undefined };
     io.config = try DerivedConfig.init(alloc, &config, .{ .theme = .light });
     defer io.config.deinit();
-    io.terminal = try terminalpkg.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+    io.terminal = try terminalpkg.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 24 });
     defer io.terminal.deinit(alloc);
 
     var renderer_mutex: renderer.StateMutex = .{};

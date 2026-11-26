@@ -43,3 +43,13 @@ pub fn run(
         try callback(context, input[0..len]);
     }
 }
+
+/// The input of one `std.testing.fuzz` case as bytes, for a byte callback.
+/// Zig 0.17 hands a fuzz test a `Smith`; 0.15 handed it the input bytes.
+/// Outside fuzz mode the test runner sets `smith.in` to one corpus entry
+/// (then to "" for its smoke case), which is returned whole, as 0.15 passed
+/// it. In fuzz mode the fuzzer fills up to `buf.len` bytes.
+pub fn smithBytes(smith: *std.testing.Smith, buf: []u8) []const u8 {
+    if (smith.in) |in| return in;
+    return buf[0..smith.slice(buf)];
+}

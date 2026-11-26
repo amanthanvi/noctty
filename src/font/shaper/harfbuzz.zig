@@ -1590,7 +1590,7 @@ test "shape nerd font PUA glyphs without notdef" {
         text_len += try std.unicode.utf8Encode(cp, text[text_len..]);
     }
 
-    var t = try terminal.Terminal.init(alloc, .{
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{
         .cols = codepoints.len,
         .rows = 1,
     });
@@ -1628,7 +1628,7 @@ test "shape nerd font PUA boundary cases without notdef" {
             text_len += try std.unicode.utf8Encode(cp, text[text_len..]);
         }
 
-        var t = try terminal.Terminal.init(alloc, .{
+        var t = try terminal.Terminal.init(std.testing.io, alloc, .{
             .cols = codepoints.len,
             .rows = 1,
         });
@@ -1661,7 +1661,7 @@ test "shape nerd font PUA boundary cases without notdef" {
         var text: [8]u8 = undefined;
         const text_len = try std.unicode.utf8Encode(0xF023, &text);
 
-        var t = try terminal.Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+        var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 2, .rows = 1 });
         defer t.deinit(alloc);
 
         var stream = t.vtStream();
@@ -1706,7 +1706,7 @@ test "shape nerd font PUA boundary cases without notdef" {
         var pua: [4]u8 = undefined;
         const pua_len = try std.unicode.utf8Encode(0xF023, &pua);
 
-        var t = try terminal.Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+        var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 2, .rows = 1 });
         defer t.deinit(alloc);
 
         var stream = t.vtStream();

@@ -325,13 +325,14 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     // `endSearch`, `setSearchQuery("")` and `deinit` all end with.
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
     // The test thread is the app thread that owns the search (PLAN.md §2.7
     // RQ8); the search thread's threadMain enters .search itself.
     const role = thread_role.fixture(.ui);
     defer role.exit();
 
-    var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+    var t: terminal.Terminal = try .init(io, alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
         var stream = t.vtStream();
@@ -371,46 +372,52 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     // busy panes would. The search's first event (the total) takes it, and
     // the next, the viewport matches with their arena, waits for room; the
     // testing allocator then checks that dropping it freed the arena.
-    while (app.mailbox.push(.quit, .instant) > 0) {}
-    app.mailbox.pop().?.deinit(alloc);
-    defer while (app.mailbox.pop()) |message| message.deinit(alloc);
+    while (app.mailbox.push(io, .quit, .instant) > 0) {}
+    app.mailbox.pop(io).?.deinit(alloc);
+    defer while (app.mailbox.pop(io)) |message| message.deinit(alloc);
 
     // Start a search; its first results wait for room in the mailbox.
     try testing.expect(try surface.setSearchQuery("needle", .{}));
     var search_waited = false;
-    var waiting = try std.time.Timer.start();
-    while (waiting.read() < 10 * std.time.ns_per_s) {
-        app.mailbox.mutex.lock();
+    const waiting: std.Io.Timestamp = .now(io, .awake);
+    while (waiting.untilNow(io, .awake).toNanoseconds() < 10 * std.time.ns_per_s) {
+        app.mailbox.mutex.lockUncancelable(io);
         search_waited = app.mailbox.not_full_waiters > 0;
-        app.mailbox.mutex.unlock();
+        app.mailbox.mutex.unlock(io);
         if (search_waited) break;
-        std.Thread.sleep(std.time.ns_per_ms);
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     }
 
     // End the search on another thread, as the app thread would.
     const Ender = struct {
-        fn run(search: *Search, done: *std.Thread.ResetEvent) void {
+        fn run(search: *Search, done: *std.Io.Event) void {
             // As the app thread: the search's deinit stops its QuerySearch,
             // which locks (PLAN.md §2.7 RQ9, §19.5).
             const app_thread = thread_role.enter(.ui);
             defer app_thread.exit();
             search.deinit();
-            done.set();
+            done.set(std.testing.io);
         }
     };
-    var done: std.Thread.ResetEvent = .{};
+    var done: std.Io.Event = .unset;
     const ender = std.Thread.spawn(.{}, Ender.run, .{ &surface.search.?, &done }) catch |err| {
-        while (app.mailbox.pop()) |message| message.deinit(alloc);
+        while (app.mailbox.pop(io)) |message| message.deinit(alloc);
         surface.search.?.deinit();
         surface.search = null;
         return err;
     };
-    const ended = if (done.timedWait(10 * std.time.ns_per_s)) |_| true else |_| false;
+    const ended = if (done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    } })) |_| true else |_| false;
     if (!ended) {
         // Make room so the search thread, and with it the join, can finish.
         while (true) {
-            while (app.mailbox.pop()) |message| message.deinit(alloc);
-            done.timedWait(std.time.ns_per_ms) catch continue;
+            while (app.mailbox.pop(io)) |message| message.deinit(alloc);
+            done.waitTimeout(io, .{ .duration = .{
+                .raw = .fromMilliseconds(1),
+                .clock = .awake,
+            } }) catch continue;
             break;
         }
     }
@@ -452,7 +459,7 @@ const Mouse = struct {
     /// The left click time was the last time the left click was done. This
     /// is always set on the first left click.
     left_click_count: u8 = 0,
-    left_click_time: std.time.Instant = undefined,
+    left_click_time: std.Io.Timestamp = undefined,
 
     /// The last x/y sent for mouse reports.
     event_point: ?terminal.point.Coordinate = null,
@@ -495,7 +502,7 @@ const Mouse = struct {
 test "Surface: a left-click pin does not outlive its screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
-    var t: terminal.Terminal = try .init(alloc, .{ .cols = 10, .rows = 5 });
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{ .cols = 10, .rows = 5 });
     defer t.deinit(alloc);
 
     // Click on the alternate screen.
@@ -1502,15 +1509,15 @@ const RelockSurface = struct {
         const surface = try alloc.create(Surface);
         errdefer alloc.destroy(surface);
         @memset(std.mem.asBytes(surface), 0);
-        self.* = .{ .surface = surface, .term = try .init(alloc, .{ .cols = 10, .rows = 4 }) };
+        self.* = .{ .surface = surface, .term = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 4 }) };
         errdefer self.term.deinit(alloc);
         surface.renderer_state.mutex = &self.mutex;
         surface.renderer_state.terminal = &self.term;
         surface.io.renderer_state = &surface.renderer_state;
         surface.io.mailbox = try termio.Mailbox.initSPSC(alloc);
         const queue = surface.io.mailbox.spsc.queue;
-        _ = queue.push(.{ .focused = true }, .{ .instant = {} });
-        while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) > 0) {}
+        _ = queue.push(std.testing.io, .{ .focused = true }, .{ .instant = {} });
+        while (queue.push(std.testing.io, .{ .linefeed_mode = false }, .{ .instant = {} }) > 0) {}
     }
 
     fn deinit(self: *RelockSurface, alloc: Allocator) void {
@@ -1534,7 +1541,7 @@ const RelockSurface = struct {
             self.io_error = err;
             // Make room, so a waiting sender does not wait forever.
             const queue = self.surface.io.mailbox.spsc.queue;
-            while (queue.pop()) |message| message.deinit();
+            while (queue.pop(std.testing.io)) |message| message.deinit();
         };
     }
 };
@@ -1666,7 +1673,7 @@ test "isolated: a raw relock in place of send's leaves assertHeld() to panic wit
         try f.init(alloc);
         defer f.deinit(alloc);
         const queue = f.surface.io.mailbox.spsc.queue;
-        const raw: *std.Thread.Mutex = &f.mutex.inner;
+        const raw: *std.Io.Mutex = &f.mutex.inner;
         const IoThread = struct {
             fn main(relock: *RelockSurface) void {
                 const io_role = thread_role.enter(.termio);
@@ -1681,14 +1688,14 @@ test "isolated: a raw relock in place of send's leaves assertHeld() to panic wit
             return err;
         };
         const msg: termio.Message = .{ .linefeed_mode = false };
-        const full = queue.push(msg, .{ .instant = {} }) == 0;
+        const full = queue.push(std.testing.io, msg, .{ .instant = {} }) == 0;
         f.mutex.unlock();
-        if (full) _ = queue.push(msg, .{ .forever = {} });
-        raw.lock();
+        if (full) _ = queue.push(std.testing.io, msg, .{ .forever = {} });
+        raw.lockUncancelable(std.testing.io);
         f.mutex.assertHeld();
         // Not reached when assertHeld panics; otherwise the IO thread's
         // focusGained must get the mutex before the deinit's join.
-        raw.unlock();
+        raw.unlock(std.testing.io);
         if (!full) return error.MailboxNotFull;
         return;
     }
@@ -1933,7 +1940,7 @@ const RoleSiteSurface = struct {
         self.surface = try alloc.create(Surface);
         errdefer alloc.destroy(self.surface);
         @memset(std.mem.asBytes(self.surface), 0);
-        self.surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
+        self.surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 3 });
         self.surface.renderer_state.mutex = &self.mutex;
         self.surface.renderer_state.terminal = &self.surface.io.terminal;
     }
@@ -4020,7 +4027,7 @@ test "Surface: typing redraws only what it changed on screen" {
     surface.config.scroll_to_bottom = .{ .keystroke = true };
     surface.renderer_thread.wakeup = try @TypeOf(surface.renderer_thread.wakeup).init();
     defer surface.renderer_thread.wakeup.deinit();
-    surface.io.terminal = try .init(alloc, .{ .cols = 10, .rows = 3 });
+    surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 3 });
     defer surface.io.terminal.deinit(alloc);
     var mutex: rendererpkg.StateMutex = .{};
     surface.renderer_state.mutex = &mutex;
@@ -4166,8 +4173,8 @@ test "Surface: resizes inside a batch reach termio once, with the final size and
 
     // Outside a batch a resize goes straight to termio.
     try surface.resizeWithIoMode(.{ .width = 300, .height = 200 }, .queue);
-    try testing.expectEqual(@as(u32, 300), queue.pop().?.resize.screen.width);
-    try testing.expect(queue.pop() == null);
+    try testing.expectEqual(@as(u32, 300), queue.pop(testing.io).?.resize.screen.width);
+    try testing.expect(queue.pop(testing.io) == null);
 
     // A DPI change: the size in the old cells, the new cells, the new size.
     surface.beginResizeBatch();
@@ -4176,13 +4183,13 @@ test "Surface: resizes inside a batch reach termio once, with the final size and
     surface.size.cell = .{ .width = 14, .height = 31 };
     try surface.resizeWithIoMode(.{ .width = 500, .height = 310 }, .queue);
     surface.endResizeBatch();
-    try testing.expect(queue.pop() == null);
+    try testing.expect(queue.pop(testing.io) == null);
     surface.endResizeBatch();
-    const size = queue.pop().?.resize;
+    const size = queue.pop(testing.io).?.resize;
     try testing.expectEqual(@as(u32, 500), size.screen.width);
     try testing.expectEqual(@as(u32, 310), size.screen.height);
     try testing.expectEqual(@as(u32, 14), size.cell.width);
-    try testing.expect(queue.pop() == null);
+    try testing.expect(queue.pop(testing.io) == null);
 }
 
 /// Hold the terminal's resizes until `endResizeBatch`, which sends one with
@@ -5161,7 +5168,7 @@ fn copyModeStartPin(
 
 test "copy mode starts at a visible cursor or the viewport edge" {
     const testing = std.testing;
-    var screen = try terminal.Screen.init(testing.allocator, .{
+    var screen = try terminal.Screen.init(testing.io, testing.allocator, .{
         .cols = 8,
         .rows = 4,
         .max_scrollback = 0,
@@ -6275,20 +6282,13 @@ pub fn mouseButtonCallback(
 
             // If we are within the interval that the click would register
             // an increment then we do not extend the selection.
-            if (std.time.Instant.now()) |now| {
-                const since = now.since(self.mouse.left_click_time);
-                if (since <= self.config.mouse_interval) {
+            {
+                const since = self.mouse.left_click_time.untilNow(global.io(), .awake);
+                if (since.toNanoseconds() <= self.config.mouse_interval) {
                     // Click interval very short, we may be increasing
                     // click counts so we don't extend the selection.
                     break :extend_selection;
                 }
-            } else |err| {
-                // This is a weird behavior, I think either behavior is actually
-                // fine. This failure should be exceptionally rare anyways.
-                // My thinking here is that we can't be sure if we should extend
-                // the selection or not so we just don't.
-                log.warn("failed to get time, not extending selection err={}", .{err});
-                break :extend_selection;
             }
 
             const pos = try self.rt_surface.getCursorPos();
@@ -6482,12 +6482,13 @@ pub fn mouseButtonCallback(
         self.mouse.left_click_ypos = pos.y;
 
         // Setup our click counter and timer
-        if (std.time.Instant.now()) |now| {
+        {
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
             // If we have mouse clicks, then we check if the time elapsed
             // is less than and our interval and if so, increase the count.
             if (self.mouse.left_click_count > 0) {
-                const since = now.since(self.mouse.left_click_time);
-                if (since > self.config.mouse_interval) {
+                const since = self.mouse.left_click_time.durationTo(now);
+                if (since.toNanoseconds() > self.config.mouse_interval) {
                     self.mouse.left_click_count = 0;
                 }
             }
@@ -6497,9 +6498,6 @@ pub fn mouseButtonCallback(
 
             // We only support up to triple-clicks.
             if (self.mouse.left_click_count > 3) self.mouse.left_click_count = 1;
-        } else |err| {
-            self.mouse.left_click_count = 1;
-            log.err("error reading time, mouse multi-click won't work err={}", .{err});
         }
 
         // In all cases below we use `setSelection`, not
@@ -6850,7 +6848,7 @@ test "Surface: the release of a press reported to a program is not a prompt clic
     const role = thread_role.fixture(.ui);
     defer role.exit();
 
-    var t: terminal.Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+    var t: terminal.Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 4 });
     defer t.deinit(alloc);
     {
         var stream = t.vtStream();
@@ -6948,7 +6946,7 @@ const TestMouseSurface = struct {
             .cell = .{ .width = 10, .height = 20 },
             .padding = .{},
         };
-        surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 6 });
+        surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 40, .rows = 6 });
         errdefer surface.io.terminal.deinit(alloc);
         surface.renderer_state.terminal = &surface.io.terminal;
         var stream = surface.io.terminal.vtStream();
@@ -6987,18 +6985,21 @@ const TestMouseSurface = struct {
         _ = self.at(x, y);
         var job: Click = .{ .surface = self.surface };
         const thread = try std.Thread.spawn(.{}, Click.run, .{&job});
-        job.done.timedWait(5 * std.time.ns_per_s) catch @panic(name ++ ": deadlock");
+        job.done.waitTimeout(std.testing.io, .{ .duration = .{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        } }) catch @panic(name ++ ": deadlock");
         thread.join();
         return job.result;
     }
 
     const Click = struct {
         surface: *Surface,
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
         result: anyerror!bool = false,
 
         fn run(job: *Click) void {
-            defer job.done.set();
+            defer job.done.set(std.testing.io);
             // As the app thread: a click's callbacks take the renderer
             // state mutex, and the stand-in opener tries it (PLAN.md §2.7
             // RQ9, §19.5).
@@ -7130,7 +7131,7 @@ test "Surface: a left release over a refused link in a prompt is a prompt click 
     const testing = std.testing;
     const fixture = try TestMouseSurface.create(
         testing.allocator,
-        .false,
+        .none,
         "\x1b]133;A;cl=line\x07> \x1b]133;B\x07open https://example.com/x",
     );
     defer fixture.destroy();
@@ -7173,7 +7174,7 @@ test "Surface: a Ctrl+triple-click picks the output and a drag extends it by lin
 
     const fixture = try TestMouseSurface.create(
         testing.allocator,
-        .false,
+        .none,
         "\x1b]133;A\x07> \x1b]133;B\x07cmd1\r\n" ++
             "\x1b]133;C\x07out1a\r\nout1b\r\n" ++
             "\x1b]133;D;0\x07\x1b]133;A\x07> \x1b]133;B\x07cmd2\r\n" ++
@@ -7218,7 +7219,7 @@ test "Surface: triple-click drag extends selection through blank line" {
     const role = thread_role.fixture(.ui);
     defer role.exit();
 
-    const fixture = try TestMouseSurface.create(testing.allocator, .false, "alpha beta");
+    const fixture = try TestMouseSurface.create(testing.allocator, .none, "alpha beta");
     defer fixture.destroy();
     const surface = fixture.surface;
     surface.config.mouse_interval = 500 * std.time.ns_per_ms;
@@ -7303,7 +7304,7 @@ test "Surface: link-osc8 = false finds no OSC 8 link, only the text's own" {
         .cell = .{ .width = 10, .height = 10 },
         .padding = .{},
     };
-    surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 2 });
+    surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 40, .rows = 2 });
     defer surface.io.terminal.deinit(alloc);
     surface.renderer_state.terminal = &surface.io.terminal;
     {
@@ -7400,7 +7401,7 @@ test "Surface: a link does not run from a prompt into the command after it" {
     @memset(std.mem.asBytes(surface), 0);
     surface.alloc = alloc;
     surface.config.links = derived.links;
-    surface.io.terminal = try .init(alloc, .{ .cols = 40, .rows = 3 });
+    surface.io.terminal = try .init(std.testing.io, alloc, .{ .cols = 40, .rows = 3 });
     defer surface.io.terminal.deinit(alloc);
     surface.renderer_state.terminal = &surface.io.terminal;
     {
@@ -11191,7 +11192,7 @@ fn testMouseSelection(
         .padding = .{ .left = 5, .top = 5, .right = 5, .bottom = 5 },
         .screen = .{ .width = 110, .height = 110 },
     };
-    var screen = try terminal.Screen.init(std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    var screen = try terminal.Screen.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
     defer screen.deinit();
 
     // We hold both ctrl and alt for rectangular
@@ -11260,7 +11261,7 @@ fn testMouseSelectionIsNull(
         .padding = .{ .left = 5, .top = 5, .right = 5, .bottom = 5 },
         .screen = .{ .width = 110, .height = 110 },
     };
-    var screen = try terminal.Screen.init(std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    var screen = try terminal.Screen.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
     defer screen.deinit();
 
     // We hold both ctrl and alt for rectangular

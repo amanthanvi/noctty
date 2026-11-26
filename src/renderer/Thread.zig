@@ -1061,7 +1061,7 @@ const FrameReadTest = struct {
 
     fn init(self: *FrameReadTest) !void {
         self.* = .{ .term = undefined, .state = undefined, .t = undefined };
-        self.term = try terminalpkg.Terminal.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+        self.term = try terminalpkg.Terminal.init(std.testing.io, std.testing.allocator, .{ .cols = 4, .rows = 3 });
         self.state = .{ .mutex = &self.renderer_mutex, .terminal = &self.term };
         self.t.state = &self.state;
     }

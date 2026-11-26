@@ -82,7 +82,7 @@ pub const BenchmarkEndMarker = struct {
 
 test "benchmark end marker is inert without the environment variable" {
     var marker: BenchmarkEndMarker = .{};
-    var term = try terminalpkg.Terminal.init(std.testing.allocator, .{
+    var term = try terminalpkg.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 30,
         .rows = 3,
     });
@@ -91,7 +91,7 @@ test "benchmark end marker is inert without the environment variable" {
 }
 
 test "benchmark end marker waits for reconstructed visible terminal state" {
-    var term = try terminalpkg.Terminal.init(std.testing.allocator, .{
+    var term = try terminalpkg.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 30,
         .rows = 3,
     });

@@ -537,7 +537,7 @@ test {
 
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -642,7 +642,7 @@ test "search refresh timer requires active visible focused search" {
     defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -677,7 +677,7 @@ test "a clear sends the total first and the selection last" {
     defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var stream = t.vtStream();
@@ -710,7 +710,7 @@ test "a query that runs out of memory does not stop the mailbox drain" {
     defer role.exit();
     const alloc = testing.allocator;
     var mutex: StateMutex = .{};
-    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    var t: Terminal = try .init(std.testing.io, alloc, .{ .cols = 20, .rows = 2 });
     defer t.deinit(alloc);
 
     var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = std.math.maxInt(usize) });

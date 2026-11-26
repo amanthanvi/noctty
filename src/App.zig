@@ -116,7 +116,7 @@ pub fn init(
 
 pub fn deinit(self: *App) void {
     self.modal_mailbox.deinit(self.alloc);
-    while (self.mailbox.pop()) |message| message.deinit(self.alloc);
+    while (self.mailbox.pop(global.io())) |message| message.deinit(self.alloc);
 
     // Clean up all our surfaces
     for (self.surfaces.items) |surface| surface.deinit();
@@ -392,8 +392,14 @@ fn fuzzAutomationActionParser(_: void, data: []const u8) !void {
     }
 }
 
+fn fuzzAutomationActionParserSmith(_: void, smith: *std.testing.Smith) !void {
+    var buf: [4096]u8 = undefined;
+    const bounded_fuzz = @import("testing/bounded_fuzz.zig");
+    try fuzzAutomationActionParser({}, bounded_fuzz.smithBytes(smith, &buf));
+}
+
 test "fuzz automation action parser safety" {
-    try std.testing.fuzz({}, fuzzAutomationActionParser, .{ .corpus = &.{
+    try std.testing.fuzz({}, fuzzAutomationActionParserSmith, .{ .corpus = &.{
         "new_tab",
         "text:echo unsafe",
         "csi:0m",
@@ -541,8 +547,8 @@ const ModalMailbox = struct {
 
     fn needsModalWake(self: *const ModalMailbox, mailbox: *Mailbox.Queue) bool {
         if (self.modal_remaining != 0) return false;
-        mailbox.mutex.lock();
-        defer mailbox.mutex.unlock();
+        mailbox.mutex.lockUncancelable(global.io());
+        defer mailbox.mutex.unlock(global.io());
         return mailbox.len != 0;
     }
 
@@ -574,7 +580,7 @@ const ModalMailbox = struct {
                     self.overflow = null;
                     return message;
                 }
-                return mailbox.pop();
+                return mailbox.pop(global.io());
             },
             .modal => {
                 if (self.overflow) |message| {
@@ -582,7 +588,7 @@ const ModalMailbox = struct {
                     self.overflow = null;
                 }
                 while (self.modal_remaining != 0) {
-                    const message = mailbox.pop() orelse return null;
+                    const message = mailbox.pop(global.io()) orelse return null;
                     self.modal_remaining -= 1;
                     if (messageSafeDuringModal(message)) return message;
                     self.deferred.append(alloc, message) catch |err| {
@@ -651,20 +657,20 @@ test "modal mailbox drains past unsafe messages in a full producer queue" {
 
     for (0..63) |i| {
         const surface: *Surface = @ptrFromInt((i + 1) * @alignOf(Surface));
-        try std.testing.expect(queue.push(.{ .close = surface }, .instant) != 0);
+        try std.testing.expect(queue.push(std.testing.io, .{ .close = surface }, .instant) != 0);
     }
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
-    try std.testing.expect(queue.push(.{ .surface_message = .{
+    try std.testing.expect(queue.push(std.testing.io, .{ .surface_message = .{
         .surface = surface,
         .message = .ring_bell,
     } }, .instant) != 0);
-    try std.testing.expectEqual(@as(Mailbox.Queue.Size, 0), queue.push(.quit, .instant));
+    try std.testing.expectEqual(@as(Mailbox.Queue.Size, 0), queue.push(std.testing.io, .quit, .instant));
 
     const safe = (try pending.next(std.testing.allocator, &queue, .modal)).?;
     try std.testing.expect(safe.surface_message.message == .ring_bell);
     // Space is available before the native loop returns, even though the
     // first 63 messages all require the outer loop.
-    try std.testing.expect(queue.push(.quit, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .quit, .instant) != 0);
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
 
     for (0..63) |i| {
@@ -685,7 +691,7 @@ test "modal mailbox bounds continuously refilled safe messages and requests foll
         .surface = surface,
         .message = .ring_bell,
     } };
-    try std.testing.expect(queue.push(message, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, message, .instant) != 0);
 
     for (0..3) |_| {
         pending.beginModalBatch();
@@ -693,13 +699,13 @@ test "modal mailbox bounds continuously refilled safe messages and requests foll
             try std.testing.expect((try pending.next(std.testing.allocator, &queue, .modal)).?.surface_message.message == .ring_bell);
             // The producer replaces each consumed message before the next
             // pop. Empty-queue draining would never yield in this scenario.
-            try std.testing.expect(queue.push(message, .instant) != 0);
+            try std.testing.expect(queue.push(std.testing.io, message, .instant) != 0);
         }
         try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
         try std.testing.expect(pending.needsModalWake(&queue));
         try std.testing.expectEqual(@as(Mailbox.Queue.Size, 1), queue.len);
     }
-    _ = queue.pop();
+    _ = queue.pop(std.testing.io);
     try std.testing.expect(!pending.needsModalWake(&queue));
 }
 
@@ -708,7 +714,7 @@ test "modal mailbox budget counts deferred messages without replay wakes" {
     var pending: ModalMailbox = .{};
     defer pending.deinit(std.testing.allocator);
     for (0..ModalMailbox.modal_batch_limit) |_| {
-        try std.testing.expect(queue.push(.quit, .instant) != 0);
+        try std.testing.expect(queue.push(std.testing.io, .quit, .instant) != 0);
     }
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
     try std.testing.expectEqual(@as(usize, 0), pending.modal_remaining);
@@ -717,7 +723,7 @@ test "modal mailbox budget counts deferred messages without replay wakes" {
 
     // A newer producer message requires a follow-up, but draining it into
     // the deferred FIFO must end the wake chain until the outer loop runs.
-    try std.testing.expect(queue.push(.quit, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .quit, .instant) != 0);
     try std.testing.expect(pending.needsModalWake(&queue));
     pending.beginModalBatch();
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
@@ -736,7 +742,7 @@ test "modal mailbox retains unsafe FIFO order under an active outer handler" {
         @ptrFromInt(4 * @alignOf(Surface)),
     };
     for (surfaces[0..2]) |surface| {
-        try std.testing.expect(queue.push(.{ .close = surface }, .instant) != 0);
+        try std.testing.expect(queue.push(std.testing.io, .{ .close = surface }, .instant) != 0);
     }
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
     const active = (try pending.next(std.testing.allocator, &queue, .outer)).?;
@@ -745,12 +751,12 @@ test "modal mailbox retains unsafe FIFO order under an active outer handler" {
     // The first outer handler enters a native loop while the second
     // deferred message is still pending. Newly arriving unsafe work goes
     // after that second message, even if a safe message overtakes it.
-    try std.testing.expect(queue.push(.{ .close = surfaces[2] }, .instant) != 0);
-    try std.testing.expect(queue.push(.{ .surface_message = .{
+    try std.testing.expect(queue.push(std.testing.io, .{ .close = surfaces[2] }, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .{ .surface_message = .{
         .surface = surfaces[0],
         .message = .ring_bell,
     } }, .instant) != 0);
-    try std.testing.expect(queue.push(.{ .close = surfaces[3] }, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .{ .close = surfaces[3] }, .instant) != 0);
     pending.beginModalBatch();
     try std.testing.expect((try pending.next(std.testing.allocator, &queue, .modal)).?.surface_message.message == .ring_bell);
     try std.testing.expect(try pending.next(std.testing.allocator, &queue, .modal) == null);
@@ -771,9 +777,9 @@ test "modal mailbox retains owned automation on allocation failure" {
     var queue: Mailbox.Queue = .{};
     var pending: ModalMailbox = .{};
     defer pending.deinit(std.testing.allocator);
-    try std.testing.expect(queue.push(.{ .automation_window_list = request }, .instant) != 0);
+    try std.testing.expect(queue.push(std.testing.io, .{ .automation_window_list = request }, .instant) != 0);
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
-    try std.testing.expect(queue.push(.{ .surface_message = .{
+    try std.testing.expect(queue.push(std.testing.io, .{ .surface_message = .{
         .surface = surface,
         .message = .ring_bell,
     } }, .instant) != 0);
@@ -798,9 +804,9 @@ test "modal tick drains safely under an outer tick and rejects recursive modal d
     defer app.modal_mailbox.deinit(app.alloc);
     const rt_app: *apprt.App = @ptrFromInt(@alignOf(apprt.App));
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
-    try std.testing.expect(app.mailbox.push(.quit, .instant) != 0);
+    try std.testing.expect(app.mailbox.push(std.testing.io, .quit, .instant) != 0);
     const payload = try apprt.surface.Message.WriteReq.init(app.alloc, &@as([300]u8, @splat('x')));
-    try std.testing.expect(app.mailbox.push(.{ .surface_message = .{
+    try std.testing.expect(app.mailbox.push(std.testing.io, .{ .surface_message = .{
         .surface = surface,
         .message = .{ .pwd_change = payload },
     } }, .instant) != 0);

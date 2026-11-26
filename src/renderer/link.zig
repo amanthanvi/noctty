@@ -419,7 +419,7 @@ test "fromConfigWithUrl adds builtin URL matcher only when enabled" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(std.testing.io, alloc, .{
         .cols = 28,
         .rows = 1,
     });

@@ -2189,7 +2189,7 @@ test "semantic output capture follows real stream handler parser" {
     const role = thread_role.fixture(.reader);
     defer role.exit();
 
-    var term = try terminal.Terminal.init(std.testing.allocator, .{
+    var term = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
     });
@@ -2420,7 +2420,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
     const role = thread_role.fixture(.termio);
     defer role.exit();
 
-    var term = try terminal.Terminal.init(std.testing.allocator, .{
+    var term = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
         .colors = .{
@@ -2496,7 +2496,7 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
     const role = thread_role.fixture(.reader);
     defer role.exit();
 
-    var term = try terminal.Terminal.init(std.testing.allocator, .{
+    var term = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
         .colors = .{
@@ -2747,7 +2747,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     defer role.exit();
 
     const alloc = std.testing.allocator;
-    var term = try terminal.Terminal.init(alloc, .{
+    var term = try terminal.Terminal.init(std.testing.io, alloc, .{
         .cols = 80,
         .rows = 24,
     });
@@ -2856,7 +2856,7 @@ const TestStream = struct {
         // The fork's cursor defaults (block, blinking) used to be the
         // handler's fields; upstream c594031d5 moved them into Terminal,
         // whose `default_cursor_blink` defaults to false.
-        self.term = try terminal.Terminal.init(alloc, .{
+        self.term = try terminal.Terminal.init(std.testing.io, alloc, .{
             .cols = 80,
             .rows = 24,
             .default_cursor_blink = true,

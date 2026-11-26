@@ -20,13 +20,14 @@ const win32_sys = @import("../apprt/win32/sys.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
 const windows = std.os.windows;
 const windows_shell = @import("../config.zig").windows_shell;
 const os_path = @import("../os/path.zig");
 const os_windows = @import("../os/windows.zig");
 const windows_ext = @import("../os/windows_ext.zig");
 const Command = @import("../Command.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.wsl_env);
 
@@ -402,7 +403,7 @@ fn localPathState(path: []const u8) LocalPath {
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return .missing,
         else => return .unsafe,
     }
-    std.posix.close(handle);
+    windows.CloseHandle(handle);
     return .safe;
 }
 
@@ -497,8 +498,8 @@ const Answer = enum { pending, yes, no };
 const ProbeEntry = struct { answer: Answer, generation: u64 };
 var probe_cache: std.AutoHashMapUnmanaged(u64, ProbeEntry) = .empty;
 var probe_generation: u64 = 0;
-var probe_mutex: std.Thread.Mutex = .{};
-var probe_done: std.Thread.Condition = .{};
+var probe_mutex: std.Io.Mutex = .init;
+var probe_done: std.Io.Condition = .init;
 
 /// Whether the distribution that `argv` (a `wsl.exe` launch) starts has a
 /// terminfo entry for `term`, asked of the distribution itself with
@@ -518,7 +519,7 @@ fn distroHasTerminfo(
 
     const probe = (probeArgv(alloc, argv, term) catch return false) orelse return false;
     defer alloc.free(probe);
-    const inherited_cwd = if (launch_cwd == null) std.process.getCwdAlloc(alloc) catch return false else null;
+    const inherited_cwd = if (launch_cwd == null) std.process.currentPathAlloc(global.io(), alloc) catch return false else null;
     defer if (inherited_cwd) |cwd| alloc.free(cwd);
     const cwd = launch_cwd orelse inherited_cwd.?;
     const exe = (localExecutable(alloc, env, probe[0], cwd) catch return false) orelse return false;
@@ -563,12 +564,12 @@ fn cachedProbeWithHost(
     }
     const key = probeKey(alloc, env, pinned orelse probe, cwd, default_distro) catch return false;
 
-    probe_mutex.lock();
+    probe_mutex.lockUncancelable(global.io());
     var waited_generation: ?u64 = null;
     while (true) {
         const known = probe_cache.get(key) orelse {
             if (waited_generation != null) {
-                probe_mutex.unlock();
+                probe_mutex.unlock(global.io());
                 return false;
             }
             break;
@@ -577,13 +578,13 @@ fn cachedProbeWithHost(
         // Existing waiters share only their original attempt's outcome.
         if (waited_generation) |generation| {
             if (known.generation != generation) {
-                probe_mutex.unlock();
+                probe_mutex.unlock(global.io());
                 return false;
             }
         }
         switch (known.answer) {
             .yes, .no => {
-                probe_mutex.unlock();
+                probe_mutex.unlock(global.io());
                 if (!defaultStillMatches(alloc, default_distro, name, Host)) return false;
                 return known.answer == .yes;
             },
@@ -591,16 +592,16 @@ fn cachedProbeWithHost(
             .pending => {
                 if (waited_generation == null and @hasDecl(Host, "beforeWait")) Host.beforeWait();
                 waited_generation = known.generation;
-                probe_done.wait(&probe_mutex);
+                probe_done.waitUncancelable(global.io(), &probe_mutex);
             },
         }
     }
     probe_generation +%= 1;
     probe_cache.put(std.heap.page_allocator, key, .{ .answer = .pending, .generation = probe_generation }) catch {
-        probe_mutex.unlock();
+        probe_mutex.unlock(global.io());
         return false;
     };
-    probe_mutex.unlock();
+    probe_mutex.unlock(global.io());
 
     const answer = if (defaultStillMatches(alloc, default_distro, name, Host)) result: {
         const probed = Host.run(alloc, env, pinned orelse probe, cwd);
@@ -610,14 +611,14 @@ fn cachedProbeWithHost(
         break :result if (defaultStillMatches(alloc, default_distro, name, Host)) probed else null;
     } else null;
 
-    probe_mutex.lock();
-    defer probe_mutex.unlock();
+    probe_mutex.lockUncancelable(global.io());
+    defer probe_mutex.unlock(global.io());
     if (answer) |yes| {
         probe_cache.getPtr(key).?.answer = if (yes) .yes else .no;
     } else {
         _ = probe_cache.remove(key);
     }
-    probe_done.broadcast();
+    probe_done.broadcast(global.io());
     return answer orelse false;
 }
 
@@ -658,7 +659,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
         .creation = win32_types.OPEN_EXISTING,
         .sa = &sa,
     }) catch return null;
-    defer std.posix.close(nul);
+    defer windows.CloseHandle(nul);
     // Command uses an exact lpApplicationName for the absolute path. Unlike
     // std.Child, it never tries wsl.exe.cmd through the parent's PATHEXT.
     var child: Command = .{
@@ -681,7 +682,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
         return null;
     };
 
-    defer std.posix.close(child.pid.?);
+    defer windows.CloseHandle(child.pid.?);
     win32_sys.waitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
         log.warn("terminfo probe did not finish err={}", .{err});
         _ = win32_sys.TerminateProcess(child.pid.?, 1);
@@ -879,7 +880,7 @@ test "automatic TERM refuses unresolved direct executables" {
         "wsl.exe",                    ".\\wsl.exe",           "C:wsl.exe", "\\wsl.exe",
         "\\\\server\\share\\wsl.exe", "\\\\.\\pipe\\wsl.exe",
     }) |exe| try std.testing.expect(!canProbeDirect(exe));
-    const cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
     defer std.testing.allocator.free(cwd);
     const exe = try std.fs.path.join(std.testing.allocator, &.{ cwd, "wsl.exe" });
     defer std.testing.allocator.free(exe);
@@ -1170,7 +1171,7 @@ test "WSLCACHE registry query rejects errors and malformed default IDs" {
     Query.status = 0;
     try std.testing.expectEqual(Query.id[0..38].*, defaultDistributionWithQuery(Query.query));
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
-        Query.status = @backingInt(err);
+        Query.status = @intCast(@backingInt(err));
         try std.testing.expectEqual(null, defaultDistributionWithQuery(Query.query));
     }
     Query.status = 0;
@@ -1211,7 +1212,7 @@ test "WSLCACHE registry name query validates strings without starting WSL" {
     defer alloc.free(actual);
     try std.testing.expectEqualStrings("Ubuntu-24.04_amd64", actual);
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
-        Query.status = @backingInt(err);
+        Query.status = @intCast(@backingInt(err));
         try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
     }
     Query.status = 0;
@@ -1292,8 +1293,8 @@ test "WSLCACHE successive unanswered attempts on one key get different generatio
         fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
             // The caller owns the table's only entry and has left it pending.
             // Read the generation it was given, as a waiter would.
-            probe_mutex.lock();
-            defer probe_mutex.unlock();
+            probe_mutex.lockUncancelable(std.testing.io);
+            defer probe_mutex.unlock(std.testing.io);
             var entries = probe_cache.valueIterator();
             const entry = entries.next() orelse return null;
             if (entry.answer == .pending) pending_seen += 1;
@@ -1329,8 +1330,8 @@ test "WSLCACHE successive unanswered attempts on one key get different generatio
 
 test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces it" {
     const Host = struct {
-        var mutex: std.Thread.Mutex = .{};
-        var changed: std.Thread.Condition = .{};
+        var mutex: std.Io.Mutex = .init;
+        var changed: std.Io.Condition = .init;
         var entered = false;
         var release = false;
         var waiting: usize = 0;
@@ -1343,38 +1344,38 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
             return alloc.dupe(u8, "Ubuntu") catch null;
         }
         pub fn beforeWait() void {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             waiting += 1;
-            changed.broadcast();
+            changed.broadcast(std.testing.io);
         }
         fn waitFor(count: usize) !void {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             while (!(if (count == 0) entered else waiting >= count))
-                try changed.timedWait(&mutex, 30 * std.time.ns_per_s);
+                try changed.waitTimeout(std.testing.io, &mutex, .{ .duration = .{ .raw = .fromNanoseconds(30 * std.time.ns_per_s), .clock = .awake } });
         }
         fn waitForFinished(count: usize) !void {
-            mutex.lock();
-            defer mutex.unlock();
-            while (finished < count) try changed.timedWait(&mutex, 30 * std.time.ns_per_s);
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
+            while (finished < count) try changed.waitTimeout(std.testing.io, &mutex, .{ .duration = .{ .raw = .fromNanoseconds(30 * std.time.ns_per_s), .clock = .awake } });
         }
         fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             calls += 1;
             if (calls > 1) return true;
             entered = true;
-            changed.broadcast();
-            while (!release) changed.wait(&mutex);
+            changed.broadcast(std.testing.io);
+            while (!release) changed.waitUncancelable(std.testing.io, &mutex);
             return null; // Stubbed timeout; never starts WSL.
         }
         fn launch(alloc: Allocator, env: *const EnvMap, answer: *bool) void {
             answer.* = cachedProbeWithHost(alloc, env, &.{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" }, "C:\\waiters", @This());
-            mutex.lock();
-            defer mutex.unlock();
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
             finished += 1;
-            changed.broadcast();
+            changed.broadcast(std.testing.io);
         }
     };
     defer {
@@ -1407,10 +1408,10 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         var waiters: [4]std.Thread = undefined;
         var spawned: usize = 0;
         defer {
-            Host.mutex.lock();
+            Host.mutex.lockUncancelable(std.testing.io);
             Host.release = true;
-            Host.changed.broadcast();
-            Host.mutex.unlock();
+            Host.changed.broadcast(std.testing.io);
+            Host.mutex.unlock(std.testing.io);
             for (waiters[0..spawned]) |waiter| waiter.join();
         }
         try Host.waitFor(0);
@@ -1425,19 +1426,19 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
             // owner until all waiters finish so another pending generation alone
             // must release them; no scheduler timing or WSL process is involved.
             {
-                probe_mutex.lock();
-                defer probe_mutex.unlock();
+                probe_mutex.lockUncancelable(std.testing.io);
+                defer probe_mutex.unlock(std.testing.io);
                 var entries = probe_cache.valueIterator();
                 const entry = entries.next() orelse return error.TestUnexpectedResult;
                 entry.generation +%= 1;
-                probe_done.broadcast();
+                probe_done.broadcast(std.testing.io);
             }
             try Host.waitForFinished(waiters.len);
         }
-        Host.mutex.lock();
+        Host.mutex.lockUncancelable(std.testing.io);
         Host.release = true;
-        Host.changed.broadcast();
-        Host.mutex.unlock();
+        Host.changed.broadcast(std.testing.io);
+        Host.mutex.unlock(std.testing.io);
         for (waiters) |waiter| waiter.join();
         spawned = 0;
         owner.join();
@@ -1461,7 +1462,7 @@ test "WSLCACHE runProbe treats exit minus one as unanswered" {
     defer tmp.cleanup();
     const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
-    var env = try std.process.getEnvMap(alloc);
+    var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
     const root = env.get("SystemRoot") orelse return error.TestUnexpectedResult;
     const cmd = try std.fs.path.join(alloc, &.{ root, "System32", "cmd.exe" });
@@ -1734,9 +1735,9 @@ test "runProbe does not execute a PATHEXT sibling of a missing exe" {
     const exe = try std.fs.path.join(alloc, &.{ cwd, "wsl.exe" });
     defer alloc.free(exe);
     var script = try td.dir.createFile(std.testing.io, "wsl.exe.cmd", .{});
-    try script.writeAll("@echo off\r\necho executed>probe-executed.txt\r\nexit /b 0\r\n");
+    try script.writeStreamingAll(std.testing.io, "@echo off\r\necho executed>probe-executed.txt\r\nexit /b 0\r\n");
     script.close(std.testing.io);
-    var env = try std.process.getEnvMap(alloc);
+    var env = try std.testing.environ.createMap(alloc);
     defer env.deinit();
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
     try std.testing.expectEqual(null, runProbe(alloc, &env, &.{ exe, "--exec", "infocmp", "xterm-ghostty" }, cwd));

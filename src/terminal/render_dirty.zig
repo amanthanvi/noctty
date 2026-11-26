@@ -68,7 +68,7 @@ fn packedStructDirty(value: anytype) bool {
 test "needsRendererWake tracks visible terminal dirtiness" {
     const testing = @import("std").testing;
 
-    var term = try terminalpkg.Terminal.init(testing.allocator, .{
+    var term = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 4,
         .rows = 3,
     });
@@ -91,7 +91,7 @@ test "needsRendererWake tracks visible terminal dirtiness" {
 test "output that only moves the cursor or sets a color still needs a frame" {
     const testing = std.testing;
 
-    var term = try terminalpkg.Terminal.init(testing.allocator, .{
+    var term = try terminalpkg.Terminal.init(std.testing.io, testing.allocator, .{
         .cols = 10,
         .rows = 3,
     });
