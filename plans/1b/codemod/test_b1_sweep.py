@@ -45,6 +45,19 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(got.count("const windows_ext"), 1)
         self.assertEqual(len(hits), 4)
 
+    def test_added_binding_follows_the_matched_initializer(self):
+        # council F8: a comment that mentions internal_os does not make the added binding `internal_os.windows_ext`
+        # (an undefined name here); it is derived from the matched binding's own initializer.
+        for init, want in (("os.windows", "os.windows_ext"), ("internal_os.windows", "internal_os.windows_ext"),
+                           ('@import("../os/main.zig").windows', '@import("../os/main.zig").windows_ext')):
+            with self.subTest(init=init):
+                src = ('// internal_os is the module this file once imported\nconst os = @import("../os/main.zig");\n'
+                       f'const w = {init};\nfn f() void {{\n    _ = w.detectProcessArchitecture();\n}}\n')
+                got, hits = self.run_sweep(src, "src/apprt/x.zig", [("detectProcessArchitecture", "ext")])
+                self.assertIn(f"const w = {init};\nconst windows_ext = {want};\n", got)
+                self.assertIn("_ = windows_ext.detectProcessArchitecture();", got)
+                self.assertEqual(len(hits), 1)
+
     def test_other_receivers_left_alone(self):
         src = ('const w = @import("std").os.windows;\nconst os_windows = @import("../os/windows.zig");\n'
                'fn f() void {\n    _ = w.CloseHandle;\n    _ = self.os_windows.CloseHandle;\n}\n')
