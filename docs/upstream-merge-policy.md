@@ -551,11 +551,14 @@ the merge SHA, because `release.yml` releases only `main`'s head, and only
 with a successful Test run for that exact SHA.
 
 If that run fails, re-run each failed job once: the tree has already passed,
-so a first failure is not yet a regression. A failure that reproduces is fixed
-on `main`, which is still held. The maintainer disables the hold for the
-fix's pull request alone and re-enables it at once, as for the landing merge.
-The commit the fix lands as becomes the gated tip, and the whole pass repeats
-on it: every gate, not only the ones the fix's diff touches.
+so a first failure is not yet a regression. A job that never reached a verdict
+(a hosted outage, a cancellation) has not failed the tree: start it again when
+the runner is back, as often as that takes, and the prerelease waits for it.
+A failure that reproduces is fixed on `main`, which is still held. The
+maintainer disables the hold for the fix's pull request alone and re-enables
+it at once, as for the landing merge. The commit the fix lands as becomes the
+gated tip, and the whole pass repeats on it: every gate, not only the ones the
+fix's diff touches.
 
 The stepping stone landed this way as `f739b4c7b` (#748): its first parent is
 `358ce0f6a`, and its tree equals the gated tip `f0a5dc507`'s.
