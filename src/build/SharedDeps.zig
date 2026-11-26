@@ -256,14 +256,23 @@ pub fn add(
     // POSIX C imports that are used throughout Ghostty on a general basis.
     // (note: errno is C stdlib but we just include it here because that's
     // where it's generally included otherwise)
+    //
+    // Gated off Windows: the MSVC C runtime has no pwd.h, sys/types.h or
+    // unistd.h, so translating them fails the build, and only POSIX paths
+    // use them. A Windows module keeps the two headers the C runtime has, so
+    // a POSIX-only `@import("posix_c")` still names a module there.
+    const posix_c_files: []const translate_c.Options.IncludeFile = if (target.result.os.tag == .windows) &.{
+        .{ .path = "errno.h" },
+        .{ .path = "signal.h" },
+    } else &.{
+        .{ .path = "errno.h" },
+        .{ .path = "pwd.h" },
+        .{ .path = "signal.h" },
+        .{ .path = "sys/types.h" },
+        .{ .path = "unistd.h" },
+    };
     try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
-        .source = .{ .includes = .{ .files = &.{
-            .{ .path = "errno.h" },
-            .{ .path = "pwd.h" },
-            .{ .path = "signal.h" },
-            .{ .path = "sys/types.h" },
-            .{ .path = "unistd.h" },
-        } } },
+        .source = .{ .includes = .{ .files = posix_c_files } },
         .target = target,
         .optimize = optimize,
     });
