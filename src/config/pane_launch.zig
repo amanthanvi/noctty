@@ -27,6 +27,7 @@ const ProfileMap = @import("profile_map.zig");
 const windows_shell = @import("windows_shell.zig");
 const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
 
 const cli = struct {
@@ -276,8 +277,10 @@ fn useUserLaunch(pane: *Config, user: ?windows_shell.UserLaunch) !?windows_shell
 /// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
 fn homeDirectory(pane: *Config, profile: *const windows_shell.Profile) !Config.WorkingDirectory {
     if (windows_shell.isWslCommand(profile.command)) return .home;
+    var environ_map = try global.environMap();
+    defer environ_map.deinit();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (internal_os.home(&buf) catch null) orelse return .home;
+    const home = (internal_os.home(global.io(), &environ_map, &buf) catch null) orelse return .home;
     return .{ .path = try pane._arena.?.allocator().dupe(u8, home) };
 }
 
@@ -1866,7 +1869,7 @@ test "elevated profile env is taken from the command line, over env, and kept on
     const alloc = testing.allocator;
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         alloc,
         "--elevated-profile-env=PATH=p=1 --env=Path=global --env=KEEP=1 --elevated-profile-env=nothing --elevated-profile-env=KEEP=",
     );
@@ -2318,8 +2321,10 @@ test "prepare: a chosen profile starts in home unless it pins a directory or inh
     cfg.command = .{ .shell = "pwsh.exe" };
     const profiles = try testUserProfiles(alloc, &cfg);
     defer windows_shell.deinitProfiles(alloc, profiles);
+    var environ_map = try std.testing.environ.createMap(alloc);
+    defer environ_map.deinit();
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    const home = (try internal_os.home(std.testing.io, &environ_map, &home_buf)) orelse return error.SkipZigTest;
 
     // Home as a path: a bare `.home` on a pane's config would start in
     // noctty's own folder. A wsl.exe launch keeps `.home`, which gives
@@ -2510,8 +2515,10 @@ test "prepare: a split starts the source's profile as it is defined now" {
     defer cfg.deinit();
     const profiles = try testUserProfiles(alloc, &cfg);
     defer windows_shell.deinitProfiles(alloc, profiles);
+    var environ_map = try std.testing.environ.createMap(alloc);
+    defer environ_map.deinit();
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    const home = (try internal_os.home(std.testing.io, &environ_map, &home_buf)) orelse return error.SkipZigTest;
 
     // The split's own directory inheritance comes after `prepare`; before
     // it, a profile with no pinned directory keeps the ordinary rules' one
@@ -2577,8 +2584,10 @@ test "prepare: a restored pane runs its saved profile, and never connects over S
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
+    var environ_map = try std.testing.environ.createMap(alloc);
+    defer environ_map.deinit();
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = (try internal_os.home(&home_buf)) orelse return error.SkipZigTest;
+    const home = (try internal_os.home(std.testing.io, &environ_map, &home_buf)) orelse return error.SkipZigTest;
     var cfg = try fixtures.load(alloc, .{ .file = test_source_profiles, .argv = &.{ "-e", "vim.exe" } });
     defer cfg.deinit();
     var plain = try fixtures.load(alloc, .{ .file = "profile-command = vs18-cmd: cmd.exe /k VsDevCmd.bat\n" });

@@ -319,7 +319,7 @@ test "automation-new-window cli forwards class timeout and passthrough arguments
     };
     Hook.called = false;
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--class=lane9 --timeout=42 --working-directory=. --title=kept",
     );
@@ -352,7 +352,7 @@ test "automation-new-window cli rejects invalid timeout before ipc" {
 
     for ([_][]const u8{ "--timeout=10001", "--timeout=18446744073709551616" }) |command_line| {
         Hook.called = false;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, command_line);
         defer iter.deinit();
 
         var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
@@ -383,7 +383,7 @@ test "automation-new-window cli maps fallback and transport failures to five" {
 
     for ([_]bool{ false, true }) |fail_transport| {
         Hook.fail_transport = fail_transport;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, "--working-directory=.");
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, "--working-directory=.");
         defer iter.deinit();
 
         var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);

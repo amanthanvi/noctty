@@ -4,6 +4,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const paste_protection = @import("../apprt/win32_paste_protection.zig");
 const test_support = @import("automation_test_support.zig");
 
@@ -38,11 +39,11 @@ pub const Options = struct {
 
 /// Send printable UTF-8 to `--surface-id`; control input is refused and never prompts.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var buf: [1024]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buf);
+    var writer = std.Io.File.stderr().writer(global.io(), &buf);
     const result = runArgs(alloc, &iter, &writer.interface);
 
     try writer.interface.flush();

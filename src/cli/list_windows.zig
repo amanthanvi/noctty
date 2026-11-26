@@ -4,6 +4,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 
 const Format = enum { json };
 
@@ -52,15 +53,15 @@ pub const Options = struct {
 ///   * `--format=json`: Select the stable JSON output contract. JSON is the
 ///     default and only supported format.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(global.io(), &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     var stderr_buf: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &stderr_buf);
     const stderr = &stderr_writer.interface;
 
     const result = runArgs(alloc, &iter, stdout, stderr);
@@ -156,7 +157,7 @@ test "automation-window-list cli prints json payload" {
     };
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--class=lane9 --timeout=42 --format=json",
     );
@@ -195,7 +196,7 @@ test "automation-window-list cli reports ipc failure" {
         }
     };
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "",
     );
@@ -229,7 +230,7 @@ test "automation-window-list cli reports invalid ipc response" {
         }
     };
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "",
     );
@@ -265,7 +266,7 @@ test "automation-window-list cli reports missing instance" {
         }
     };
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "",
     );
@@ -312,7 +313,7 @@ test "automation-window-list cli rejects invalid arguments before ipc" {
         "unexpected",
     }) |command_line| {
         Hook.called = false;
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(testing.allocator, command_line);
         defer iter.deinit();
 
         var stdout_buf = std.Io.Writer.Allocating.init(testing.allocator);

@@ -52,7 +52,7 @@ fn printActionHelp(self: Action) !u8 {
         // All action help text is emitted through this shared path.
         if (self == @field(Action, field.name)) {
             var buffer: [1024]u8 = undefined;
-            var stdout_writer = std.fs.File.stdout().writer(&buffer);
+            var stdout_writer = std.Io.File.stdout().writer(global.io(), &buffer);
             const stdout = &stdout_writer.interface;
             const text = @field(help_strings.Action, field.name) ++ "\n";
             stdout.writeAll(text) catch return error.ActionHelpOutputUnavailable;
@@ -230,7 +230,7 @@ test "parse send-text action ignores literal action-like payloads" {
         "+send-text --surface-id=42 -- --version",
         "+send-text --surface-id=42 -- +focus",
     }) |args_text| {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, args_text);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(alloc, args_text);
         defer iter.deinit();
         try testing.expectEqual(Action.@"send-text", (try actionpkg.detectIter(Action, &iter)).?);
     }
@@ -272,7 +272,7 @@ test "vt-probe action is registered" {
     try testing.expect(@hasDecl(help_strings.Action, "vt-probe"));
 
     if (probe) |expected| {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "+vt-probe",
         );

@@ -1505,7 +1505,7 @@ test "ArgsIterator" {
 test "ArgsIterator preserves plus-prefixed values after literal delimiter" {
     const testing = std.testing;
 
-    const child = try std.process.ArgIteratorGeneral(.{}).init(
+    const child = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "+send-text --surface-id=42 -- +focus",
     );

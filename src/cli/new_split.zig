@@ -4,6 +4,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const test_support = @import("automation_test_support.zig");
 const working_directory = @import("automation_working_directory.zig");
 
@@ -58,11 +59,11 @@ pub const Options = struct {
 
 /// Split the focused/`--surface-id` pane by direction with only a safe working-directory override.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var buf: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buf);
+    var writer = std.Io.File.stderr().writer(global.io(), &buf);
     const result = runArgs(alloc, &iter, &writer.interface);
 
     try writer.interface.flush();

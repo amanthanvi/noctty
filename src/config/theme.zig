@@ -156,18 +156,19 @@ pub fn listFromDirectories(alloc: Allocator, dirs: []const Directory) ![]Entry {
         themes.deinit(alloc);
     }
 
+    const io = global.io();
     for (dirs) |loc| {
-        var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.cwd().openDir(io, loc.dir, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => {
                 std.log.warn("failed to open theme directory dir={f} err={}", .{ internal_os.redact.bytes(loc.dir), err });
                 continue;
             },
         };
-        defer dir.close();
+        defer dir.close(io);
 
         var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(io)) |entry| {
             switch (entry.kind) {
                 .file, .sym_link => {},
                 else => continue,
@@ -420,9 +421,9 @@ test "theme list keeps first duplicate by directory priority" {
     var user_buf: [std.fs.max_path_bytes]u8 = undefined;
     var legacy_user_buf: [std.fs.max_path_bytes]u8 = undefined;
     var resources_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const user_dir = try tmp.dir.realpath("user", &user_buf);
-    const legacy_user_dir = try tmp.dir.realpath("legacy-user", &legacy_user_buf);
-    const resources_dir = try tmp.dir.realpath("resources", &resources_buf);
+    const user_dir = user_buf[0..try tmp.dir.realPathFile(std.testing.io, "user", &user_buf)];
+    const legacy_user_dir = legacy_user_buf[0..try tmp.dir.realPathFile(std.testing.io, "legacy-user", &legacy_user_buf)];
+    const resources_dir = resources_buf[0..try tmp.dir.realPathFile(std.testing.io, "resources", &resources_buf)];
     const entries = try listFromDirectories(std.testing.allocator, &.{
         .{ .location = .user, .dir = user_dir },
         .{ .location = .legacy_user, .dir = legacy_user_dir },
@@ -527,8 +528,8 @@ test "a test build looks for user themes only under the config home its test nam
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = themes_dir ++ "/test-config-guard-theme", .data = "font-size = 31\n" });
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena.allocator());
     const saved: ?[:0]u8 = saved: {
-        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => break :saved null,
+        const value = std.testing.environ.getAlloc(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableMissing => break :saved null,
             else => return err,
         };
         defer alloc.free(value);
@@ -546,7 +547,7 @@ test "a test build looks for user themes only under the config home its test nam
     {
         var diags: cli_diags.DiagnosticList = .{};
         if (try open(arena.allocator(), "test-config-guard-theme", &diags)) |hit| {
-            hit.file.close();
+            hit.file.close(std.testing.io);
             std.debug.print("found the scratch home's theme without a named root\n", .{});
             return error.TestUserThemeFound;
         }
@@ -565,7 +566,7 @@ test "a test build looks for user themes only under the config home its test nam
     var diags: cli_diags.DiagnosticList = .{};
     const hit = (try open(arena.allocator(), "test-config-guard-theme", &diags)) orelse
         return error.TestExpectedTheme;
-    defer hit.file.close();
+    defer hit.file.close(std.testing.io);
     const expected = try std.fs.path.join(arena.allocator(), &.{ home, build_config.data_dir_name, "themes", "test-config-guard-theme" });
     try std.testing.expectEqualStrings(expected, hit.path);
 }

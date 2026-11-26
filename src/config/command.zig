@@ -76,7 +76,7 @@ pub const Command = union(enum) {
                 // quoting so direct commands can round-trip through config
                 // files and GUI edit controls without losing argv boundaries.
                 var builder: std.ArrayListUnmanaged([:0]const u8) = .empty;
-                var args = try std.process.ArgIteratorGeneral(.{}).init(
+                var args = try std.process.Args.IteratorGeneral(.{}).init(
                     alloc,
                     std.mem.trim(u8, str, " "),
                 );

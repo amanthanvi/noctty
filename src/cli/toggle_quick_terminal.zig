@@ -33,7 +33,7 @@ pub const Options = struct {
 ///
 /// Available since: 1.4.0
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var buf: [256]u8 = undefined;

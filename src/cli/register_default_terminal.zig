@@ -1,5 +1,6 @@
 const std = @import("std");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const actionpkg = @import("action.zig");
 const handoff = @import("../apprt/win32_terminal_handoff.zig");
 
@@ -19,12 +20,12 @@ pub const Options = struct {
 pub fn run(alloc: std.mem.Allocator) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
     try args.parse(Options, alloc, &opts, &iter);
 
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
     const stderr = &stderr_writer.interface;
     const exe_path = handoff.currentNocttyExePath(alloc) catch |err| {
         try stderr.print("Could not resolve the sibling noctty.exe path: {}\n", .{err});
@@ -58,7 +59,7 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
     };
 
     var stdout_buffer: [512]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(global.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     if (result.selection_changed) {
         try stdout.print("Registered and selected noctty as the current user's default terminal: {s}\n", .{exe_path});

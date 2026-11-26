@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const actionpkg = @import("action.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const shell_menu = @import("../apprt.zig").win32_shell_menu;
 
 const ERROR_ACCESS_DENIED: i32 = 5;
@@ -28,17 +29,17 @@ pub fn run(alloc: Allocator) !u8 {
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(Options, alloc, &opts, &iter);
     }
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(global.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &stderr_buffer);
     const stderr = &stderr_writer.interface;
 
     const result = runInner(alloc, stdout, stderr);
@@ -52,7 +53,7 @@ fn runInner(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !u8 {
-    const self_path = std.fs.selfExePathAlloc(alloc) catch |err| {
+    const self_path = std.process.executablePathAlloc(global.io(), alloc) catch |err| {
         try stderr.print(
             "Failed to register Explorer shell menu: executable path unavailable ({s}).\n",
             .{@errorName(err)},
@@ -70,7 +71,7 @@ fn runInner(
     };
     defer alloc.free(exe_path);
 
-    std.fs.accessAbsolute(exe_path, .{}) catch |err| {
+    std.Io.Dir.accessAbsolute(global.io(), exe_path, .{}) catch |err| {
         try stderr.print(
             "Failed to register Explorer shell menu: GUI executable not found at {s} ({s}).\n",
             .{ exe_path, @errorName(err) },

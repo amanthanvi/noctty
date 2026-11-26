@@ -984,8 +984,8 @@ test "origin: ofFiles counts only lines of files" {
 
 /// Load `path` (holding `text`), the command line `args`, and the files
 /// `config-file` names, and finalize, as the app does.
-fn loadWithArgs(alloc: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, text: []const u8, args: []const []const u8) !Config {
-    try dir.writeFile(.{ .sub_path = "config", .data = text });
+fn loadWithArgs(alloc: std.mem.Allocator, dir: std.Io.Dir, path: []const u8, text: []const u8, args: []const []const u8) !Config {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
     var cfg = try Config.default(alloc);
     errdefer cfg.deinit();
     try cfg.loadFile(alloc, path);
