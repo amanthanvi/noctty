@@ -203,3 +203,31 @@ test randomBasename {
     var small: [random_basename_len - 1]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, randomBasename(&small));
 }
+
+// Two Zig 0.17.1 std behaviours the port depends on, which differ from
+// 0.15.2's and which no compile error shows (council F3, the lead's QR-30).
+test "Zig 0.17 pin: Dir.openFile opens a directory unless allow_directory is false" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "folder", .default_dir);
+    // 0.17's default opens it; 0.15.2's Windows openFile refused it with
+    // error.IsDir (`std.os.windows.OpenFile`'s `filter = .file_only`).
+    const opened = try tmp.dir.openFile(io, "folder", .{});
+    opened.close(io);
+    try std.testing.expectError(error.IsDir, tmp.dir.openFile(io, "folder", .{ .allow_directory = false }));
+}
+
+test "Zig 0.17 pin: readFileAlloc's limit refuses a file of exactly that many bytes" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "eight", .data = "12345678" });
+    // 0.15.2's `readFileAlloc(alloc, path, 8)` read it; 0.17's `.limited(8)`
+    // refuses it, so 0.15's bound is `.limited(n + 1)`.
+    try std.testing.expectError(error.StreamTooLong, tmp.dir.readFileAlloc(io, "eight", alloc, .limited(8)));
+    const data = try tmp.dir.readFileAlloc(io, "eight", alloc, .limited(8 + 1));
+    defer alloc.free(data);
+    try std.testing.expectEqual(@as(usize, 8), data.len);
+}
