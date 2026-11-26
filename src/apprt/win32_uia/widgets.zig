@@ -1897,7 +1897,7 @@ pub const SettingsSectionGroupProvider = struct {
             .alloc = alloc,
             .hwnd = hwnd,
             .sections_mutex = .{},
-            .sections = [_]?*SettingsSectionProvider{null} ** settings_section_count,
+            .sections = @as([settings_section_count]?*SettingsSectionProvider, @splat(null)),
             .selected_index = .init(std.math.maxInt(u8)),
             .detached = std.atomic.Value(bool).init(false),
             .disconnected = std.atomic.Value(bool).init(false),
@@ -1920,7 +1920,7 @@ pub const SettingsSectionGroupProvider = struct {
         self.selected_index.store(std.math.maxInt(u8), .release);
         self.sections_mutex.lock();
         defer self.sections_mutex.unlock();
-        self.sections = [_]?*SettingsSectionProvider{null} ** settings_section_count;
+        self.sections = @as([settings_section_count]?*SettingsSectionProvider, @splat(null));
     }
 
     pub fn disconnect(self: *SettingsSectionGroupProvider) com.HRESULT {

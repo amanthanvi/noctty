@@ -627,7 +627,7 @@ fn publishSetting(update: SettingUpdate) void {
 }
 
 fn settingPayload(guid: GUID, value: DWORD) [@sizeOf(POWERBROADCAST_SETTING)]u8 {
-    var payload = [_]u8{0} ** @sizeOf(POWERBROADCAST_SETTING);
+    var payload = @as([@sizeOf(POWERBROADCAST_SETTING)]u8, @splat(0));
     @memcpy(
         payload[@offsetOf(POWERBROADCAST_SETTING, "PowerSetting")..][0..@sizeOf(GUID)],
         std.mem.asBytes(&guid),
