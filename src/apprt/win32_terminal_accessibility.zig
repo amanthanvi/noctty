@@ -6,6 +6,7 @@
 //! locks are therefore never held together.
 
 const std = @import("std");
+const win32_repeat = @import("win32_repeat.zig");
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
 const win32_uia = @import("win32_uia/mod.zig");
@@ -108,8 +109,8 @@ pub const TerminalAccessibilitySession = struct {
     origin_x: f64 = 0,
     origin_y: f64 = 0,
     pending_announcements: [max_pending_announcements][max_announcement_bytes]u8 = undefined,
-    pending_announcement_lengths: [max_pending_announcements]usize = [_]usize{0} ** max_pending_announcements,
-    pending_announcement_omitted: [max_pending_announcements]bool = [_]bool{false} ** max_pending_announcements,
+    pending_announcement_lengths: [max_pending_announcements]usize = @as([max_pending_announcements]usize, @splat(0)),
+    pending_announcement_omitted: [max_pending_announcements]bool = @as([max_pending_announcements]bool, @splat(false)),
     pending_announcement_head: usize = 0,
     pending_announcement_count: usize = 0,
     pending_output_omitted: bool = false,
@@ -1699,7 +1700,7 @@ test "terminal output queue chunks a multi-kilobyte burst without losing tail" {
     session.pending_announcement_head = 0;
     session.pending_announcement_count = 0;
     session.pending_output_omitted = false;
-    const burst = "a" ** 2_400 ++ " UNIQUE_TAIL";
+    const burst = comptime win32_repeat.repeat("a", 2_400) ++ " UNIQUE_TAIL";
     session.enqueuePendingAnnouncements(burst);
     try std.testing.expectEqual(@as(usize, 3), session.pending_announcement_count);
     const tail_index = (session.pending_announcement_head + 2) % max_pending_announcements;
@@ -1978,7 +1979,7 @@ test "terminal name cache replaces normal name with non-aliasing fallback" {
 }
 
 test "terminal name cache caps non-aliasing names to capacity" {
-    const long_name = "n" ** 300;
+    const long_name = comptime win32_repeat.repeat("n", 300);
     var ctx: MutableTestOps.Context = .{
         .focused = true,
         .text = "",
@@ -2075,7 +2076,7 @@ test "bounded terminal output queue emits explicit omission after retained chunk
     session.pending_announcement_head = 0;
     session.pending_announcement_count = 0;
     session.pending_output_omitted = false;
-    session.enqueuePendingAnnouncements("z" ** (max_announcement_bytes * (max_pending_announcements + 2)));
+    session.enqueuePendingAnnouncements(comptime win32_repeat.repeat("z", (max_announcement_bytes * (max_pending_announcements + 2))));
     try std.testing.expectEqual(max_pending_announcements, session.pending_announcement_count);
     try std.testing.expect(session.pending_output_omitted);
 
@@ -2097,7 +2098,7 @@ test "terminal output omission remains ordered before newer output" {
     session.pending_announcement_head = 0;
     session.pending_announcement_count = 0;
     session.pending_output_omitted = false;
-    session.pending_announcement_omitted = [_]bool{false} ** max_pending_announcements;
+    session.pending_announcement_omitted = @as([max_pending_announcements]bool, @splat(false));
 
     const old = [_][]const u8{ "old-0", "old-1", "old-2", "old-3", "old-4", "old-5", "old-6", "old-7" };
     for (old) |announcement| session.enqueuePendingAnnouncements(announcement);

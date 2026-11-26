@@ -19,6 +19,7 @@
 //! writes `profile-order` and `profile-hidden` whole into the draft
 //! (`moveProfile`, `setProfileHidden`), which a save writes to the file.
 const std = @import("std");
+const win32_repeat = @import("win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 
 const configpkg = @import("../config.zig");
@@ -999,7 +1000,7 @@ const changed_mark = " (changed here, not saved yet)";
 /// How a row shows a variable's value: masked, so a screenshot or someone
 /// looking on does not get it. The text field shows it while it is typed
 /// into.
-pub const masked_value = "\u{2022}" ** 6;
+pub const masked_value = win32_repeat.repeat("\u{2022}", 6);
 /// A variable row's UIA Value, in words.
 pub const value_hidden = "value hidden";
 
@@ -1710,7 +1711,7 @@ test "settings profiles: the checks refuse what the loader would, and never repe
     const cases = [_]Case{
         .{ .message = checkNewId(&config, ""), .refused = true },
         .{ .message = checkNewId(&config, "has space"), .refused = true },
-        .{ .message = checkNewId(&config, "x" ** 65), .refused = true },
+        .{ .message = checkNewId(&config, comptime win32_repeat.repeat("x", 65)), .refused = true },
         .{ .message = checkNewId(&config, "PWSH"), .refused = true },
         .{ .message = checkNewId(&config, "PY"), .refused = true },
         .{ .message = checkNewId(&config, "py2"), .refused = false },
@@ -1719,7 +1720,7 @@ test "settings profiles: the checks refuse what the loader would, and never repe
         .{ .message = checkCommand("py", "\"\" " ++ secret), .refused = true },
         .{ .message = checkCommand("c", "\\tools\\" ++ secret), .refused = true },
         .{ .message = checkCommand("py", secret ++ "\r\nx"), .refused = true },
-        .{ .message = checkCommand("py", "x" ** 4090), .refused = true },
+        .{ .message = checkCommand("py", comptime win32_repeat.repeat("x", 4090)), .refused = true },
         .{ .message = checkCommand("py", "cmd.exe /k " ++ secret), .refused = false },
         .{ .message = checkText(.name, "py", "\"" ++ secret ++ "\""), .refused = false },
         .{ .message = checkText(.text, "py", "~/" ++ secret), .refused = false },

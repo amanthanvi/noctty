@@ -1,6 +1,7 @@
 //! Win32 OpenGL startup diagnostics.
 
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const builtin = @import("builtin");
 
 const build_config = @import("../../build_config.zig");
@@ -827,8 +828,8 @@ test "win32-opengl-startup-message-says-direct3d11-failed-too-in-builds-that-hav
         .{ .step = .version_check, .zig_error_name = "OpenGLOutdated", .d3d11_error_name = "Direct3D11Unavailable", .detected = .{
             .major = 1,
             .minor = 1,
-            .renderer = .init("r" ** OpenGLStartupString.capacity),
-            .vendor = .init("v" ** OpenGLStartupString.capacity),
+            .renderer = .init(comptime win32_repeat.repeat("r", OpenGLStartupString.capacity)),
+            .vendor = .init(comptime win32_repeat.repeat("v", OpenGLStartupString.capacity)),
         } },
         .{ .step = .load_opengl32, .win32_error = c.ERROR_MOD_NOT_FOUND, .zig_error_name = "Unexpected", .d3d11_error_name = "Direct3D11Unavailable" },
         .{ .step = .version_check, .zig_error_name = "OpenGLOutdated", .d3d11_error_name = "Direct3D11Unavailable" },
@@ -892,7 +893,7 @@ test "win32-opengl-startup-records-the-direct3d11-error-on-the-opengl-failure" {
 }
 
 test "win32-opengl-startup-failure-bounds-driver-strings" {
-    const value = "x" ** (OpenGLStartupString.capacity + 1);
+    const value = comptime win32_repeat.repeat("x", (OpenGLStartupString.capacity + 1));
     const captured = OpenGLStartupString.init(value);
 
     try std.testing.expectEqual(OpenGLStartupString.capacity, captured.value().len);

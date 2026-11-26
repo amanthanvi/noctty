@@ -5,6 +5,7 @@
 //! a small `.dmp` next to any other local crash artifacts.
 
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 const windows = std.os.windows;
 const dir = @import("dir.zig");
 
@@ -249,7 +250,7 @@ test "writeMinidumpIn writes a dump that carries the exception" {
         .ExceptionRecord = null,
         .ExceptionAddress = @ptrFromInt(@returnAddress()),
         .NumberParameters = 2,
-        .ExceptionInformation = [_]usize{ 0, 0x10 } ++ [_]usize{0} ** 13,
+        .ExceptionInformation = [_]usize{ 0, 0x10 } ++ @as([13]usize, @splat(0)),
     };
     var context: windows.CONTEXT = undefined;
     windows.ntdll.RtlCaptureContext(&context);
@@ -263,7 +264,7 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     // Twelve components are 300 characters on their own, so the path passes
     // MAX_PATH however short the checkout is. The limit counts UTF-16 units.
-    const sub_path = "用户-Ü/" ++ "long-directory-component/" ** 12;
+    const sub_path = "用户-Ü/" ++ comptime win32_repeat.repeat("long-directory-component/", 12);
     try tmp.dir.makePath(sub_path);
     var dump_dir = try tmp.dir.openDir(sub_path, .{ .iterate = true });
     defer dump_dir.close();

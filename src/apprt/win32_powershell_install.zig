@@ -50,6 +50,7 @@
 //!   zig test src/_t.zig && rm src/_t.zig
 
 const std = @import("std");
+const win32_repeat = @import("win32_repeat.zig");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 const thread_role = @import("../sync/thread_role.zig");
@@ -607,7 +608,7 @@ test "integration_script is non-empty" {
 }
 
 test "integration_script_sha256 is not all zero" {
-    const zero: [32]u8 = .{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     try std.testing.expect(!std.mem.eql(u8, &integration_script_sha256, &zero));
 }
 
@@ -1759,7 +1760,7 @@ test "scriptRevision reads the declaration line only among the first lines" {
     try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# noctty-integration-revision: next\n"));
     try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# noctty-integration-revision: -1\n"));
     // A mention deep in the body is not a declaration.
-    const deep = "\n" ** 20 ++ "# noctty-integration-revision: 9\n";
+    const deep = comptime win32_repeat.repeat("\n", 20) ++ "# noctty-integration-revision: 9\n";
     try std.testing.expectEqual(@as(?u32, null), scriptRevision(deep));
 }
 
@@ -1833,7 +1834,7 @@ test "installIfStale: a copy that cannot be read is left for the next launch, on
     {
         const file = try big_fx.tmp.dir.createFile("integration.ps1", .{});
         defer file.close();
-        const chunk = [_]u8{'#'} ** 4096;
+        const chunk = @as([4096]u8, @splat('#'));
         for (0..257) |_| try file.writeAll(&chunk);
     }
     try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, big_fx.path));

@@ -19,6 +19,7 @@
 //! checked by `Config.finalize`, since a file may set a field before the line
 //! that defines the profile, or in another file.
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 
 const RepeatableStringMap = @import("RepeatableStringMap.zig");
@@ -651,7 +652,7 @@ test "profile map: lines the loader reports at once" {
         .{ .kind = .command, .value = "pwsh -File D:\\x.ps1", .err = error.InvalidProfileId },
         .{ .kind = .env, .value = "PYTHONHOME=C:\\Python312", .err = error.InvalidProfileId },
         .{ .kind = .command, .value = "caf\xc3\xa9: cmd.exe", .err = error.InvalidProfileId },
-        .{ .kind = .command, .value = ("x" ** 65) ++ ": cmd.exe", .err = error.InvalidProfileId },
+        .{ .kind = .command, .value = (comptime win32_repeat.repeat("x", 65)) ++ ": cmd.exe", .err = error.InvalidProfileId },
         .{ .kind = .command, .value = "CMD.EXE: x", .err = error.ReservedProfileId },
         .{ .kind = .command, .value = "pwsh: x", .err = error.ReservedProfileId },
         .{ .kind = .name, .value = "wsl:Ubuntu: X", .err = error.ReservedProfileId },
@@ -698,8 +699,8 @@ test "profile map: ids" {
     try testing.expect(!isValidId(""));
     try testing.expect(!isValidId("has space"));
     try testing.expect(!isValidId("a/b"));
-    try testing.expect(!isValidId("x" ** 65));
-    try testing.expect(isValidId("x" ** 64));
+    try testing.expect(!isValidId(comptime win32_repeat.repeat("x", 65)));
+    try testing.expect(isValidId(comptime win32_repeat.repeat("x", 64)));
     try testing.expect(isReservedId("CMD.EXE"));
     try testing.expect(isReservedId("wsl-default"));
     try testing.expect(isReservedId("Cmd"));
@@ -762,7 +763,7 @@ test "profile map: a line writeProfileLine writes reads back as its value" {
     try testing.expect(env.get("py") == null);
 
     // A value as long as the reader takes: the compact form.
-    const long = "x" ** (LineIterator.max_line_len - "profile-working-directory=py:".len);
+    const long = comptime win32_repeat.repeat("x", (LineIterator.max_line_len - "profile-working-directory=py:".len));
     out.clearRetainingCapacity();
     try writeProfileLine(&out.writer, .text, "profile-working-directory", "py", long);
     try testing.expectEqual(LineIterator.max_line_len + 1, out.written().len);

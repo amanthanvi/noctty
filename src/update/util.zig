@@ -1,4 +1,5 @@
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -57,14 +58,16 @@ pub fn sha256OpenFile(file: *std.fs.File) ![Sha256.digest_length]u8 {
 
 test "update util parses mixed-case SHA-256 hex and rejects invalid checksums" {
     const testing = std.testing;
-    const digest = try parseSha256Hex("01aB" ** 16);
-    try testing.expectEqualSlices(u8, &([_]u8{ 0x01, 0xab } ** 16), &digest);
+    const digest = try parseSha256Hex(comptime win32_repeat.repeat("01aB", 16));
+    var expected: [32]u8 = undefined;
+    for (&expected, 0..) |*byte, i| byte.* = if (i % 2 == 0) 0x01 else 0xab;
+    try testing.expectEqualSlices(u8, &expected, &digest);
     for ([_][]const u8{
         "",
-        "a" ** 63,
-        "a" ** 65,
-        "g" ++ "a" ** 63,
-        "a" ** 63 ++ "/",
+        comptime win32_repeat.repeat("a", 63),
+        comptime win32_repeat.repeat("a", 65),
+        "g" ++ comptime win32_repeat.repeat("a", 63),
+        comptime win32_repeat.repeat("a", 63) ++ "/",
     }) |invalid| {
         try testing.expectError(error.InvalidChecksum, parseSha256Hex(invalid));
     }

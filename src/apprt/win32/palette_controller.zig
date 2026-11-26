@@ -780,7 +780,7 @@ test "win32 palette MRU lines keep keys with line breaks and tabs, and read earl
     // action can hold a CR, an LF or a tab.
     const keys = [_][]const u8{ "text:make\r", "text:a\nb", "text:x\t", "text:\\x15", "text:\"hi\" \xf0\x9f\x91\xbb", "text:hello ", "goto_tab:1" };
     for (keys) |mru_key| try writePaletteMruLine(&file.writer, mru_key);
-    var read: [keys.len + 1]?[:0]const u8 = .{null} ** (keys.len + 1);
+    var read: [keys.len + 1]?[:0]const u8 = @splat(null);
     readPaletteMru(alloc, file.written(), &read);
     defer for (read) |key| if (key) |k| alloc.free(k);
     for (keys, read[0..keys.len]) |mru_key, key| {

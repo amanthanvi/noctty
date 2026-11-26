@@ -239,7 +239,7 @@ fn expectScriptManagedEntries(script: []const u8) !void {
     const list_end = std.mem.indexOf(u8, remainder, ")) {") orelse
         return error.InvalidManagedRootList;
 
-    var seen = [_]bool{false} ** managed_entries.len;
+    var seen = @as([managed_entries.len]bool, @splat(false));
     var lines = std.mem.splitScalar(u8, remainder[0..list_end], '\n');
     while (lines.next()) |raw_line| {
         var line = std.mem.trim(u8, raw_line, " \t\r");

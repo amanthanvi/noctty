@@ -195,7 +195,7 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
     const command_value = try commandValueAlloc(alloc, exe_path);
     defer alloc.free(command_value);
 
-    var created = [_]bool{false} ** register_key_paths.len;
+    var created = @as([register_key_paths.len]bool, @splat(false));
     errdefer rollbackCreatedKeys(alloc, &created);
     // Prove all six keys are writable before overwriting any existing values.
     // Newly created empty keys are tracked and rolled back if preflight or a
@@ -587,7 +587,7 @@ test "shell-menu key paths cover folders backgrounds and drives" {
         verb_key_paths[2],
     );
     try testing.expectEqual(@as(usize, 9), value_specs.len);
-    var values_per_key = [_]usize{0} ** register_key_paths.len;
+    var values_per_key = @as([register_key_paths.len]usize, @splat(0));
     for (value_specs) |spec| values_per_key[spec.key_index] += 1;
     try testing.expectEqualSlices(usize, &.{ 2, 1, 2, 1, 2, 1 }, &values_per_key);
 }

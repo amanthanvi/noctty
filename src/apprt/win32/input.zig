@@ -223,7 +223,7 @@ const KeyText = struct {
     /// UTF-8 for every code unit the layout produced for this key, not just
     /// the first one: an accent that cannot combine with the key that
     /// follows it yields both characters in one translation.
-    utf8: [text_capacity]u8 = [_]u8{0} ** text_capacity,
+    utf8: [text_capacity]u8 = @as([text_capacity]u8, @splat(0)),
     len: usize = 0,
     consumed_mods: input.Mods = .{},
     unshifted_codepoint: u21 = 0,
@@ -324,7 +324,7 @@ pub const Win32KeyMessage = struct {
     /// the instant it returns. The bytes are carried here instead and the
     /// slice is rebased by `bindText` once the value has landed in the frame
     /// that actually uses it.
-    text: [text_capacity]u8 = [_]u8{0} ** text_capacity,
+    text: [text_capacity]u8 = @as([text_capacity]u8, @splat(0)),
     text_len: usize = 0,
 
     /// Point `event.utf8` at this value's own storage. Must be called on the
@@ -543,7 +543,7 @@ fn isAltGr(mods: input.Mods) bool {
 /// cached state: it only runs while both keys are held, and the answer follows
 /// the layout automatically because it is measured from the layout itself.
 fn layoutHasAltGrMappings() bool {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     state[c.VK_CONTROL] = 0x80;
     state[c.VK_LCONTROL] = 0x80;
     state[c.VK_MENU] = 0x80;
@@ -581,7 +581,7 @@ fn probeAltGrShiftStates(
 }
 
 fn altGrProbeProducesTextForState(vk: UINT, state: *const [256]u8) bool {
-    var utf16: [4]u16 = [_]u16{0} ** 4;
+    var utf16: [4]u16 = @as([4]u16, @splat(0));
     const scan_code = sys.MapVirtualKeyW(vk, c.MAPVK_VK_TO_VSC);
     return translateKeyTextToUnicode(vk, scan_code, state, &utf16) != 0;
 }
@@ -592,7 +592,7 @@ fn testingShiftOnlyAltGrProbe(_: UINT, state: *const [256]u8) bool {
 }
 
 test "win32 AltGr layout probe checks shifted mappings" {
-    const state: [256]u8 = [_]u8{0} ** 256;
+    const state: [256]u8 = @as([256]u8, @splat(0));
     try std.testing.expect(probeAltGrShiftStates(
         c.VK_A,
         &state,
@@ -659,7 +659,7 @@ fn currentModsFromKeyboardState(state: ?*const [256]u8) input.Mods {
 }
 
 pub fn currentMods() input.Mods {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     return currentModsFromKeyboardState(currentKeyboardState(&state));
 }
 
@@ -673,7 +673,7 @@ fn quickSelectActionModsFromKeyboardState(state: *const [256]u8) input.Mods {
 }
 
 pub fn quickSelectActionMods() input.Mods {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     if (currentKeyboardState(&state)) |keyboard_state| {
         return quickSelectActionModsFromKeyboardState(keyboard_state);
     }
@@ -690,7 +690,7 @@ pub fn quickSelectActionMods() input.Mods {
 /// chord to produce printable label characters.
 pub fn quickSelectAsciiFromKey(wParam: WPARAM, lParam: LPARAM) ?u8 {
     const vk: UINT = @intCast(wParam & 0xFFFF);
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     const keyboard_state = currentKeyboardState(&state) orelse {
         const codepoint = unshiftedCodepointForVirtualKey(vk);
         return if (codepoint >= 0x20 and codepoint < 0x7F)
@@ -1193,7 +1193,7 @@ fn translatePrintableCodepoint(
     mask: KeyStateMask,
 ) ?u21 {
     const masked = maskedKeyboardState(state, mask);
-    var utf16: [4]u16 = [_]u16{0} ** 4;
+    var utf16: [4]u16 = @as([4]u16, @splat(0));
     const count = translateKeyTextToUnicode(vk, scan_code, &masked, &utf16);
     if (count <= 0) return null;
     return printableCodepoint(utf16[0..@min(@as(usize, @intCast(count)), utf16.len)]);
@@ -1277,7 +1277,7 @@ fn translateKeyText(
 
     // A key message TranslateMessage never saw. The layout has not latched
     // anything for it, so the probe reads the key as pressed.
-    var utf16: [4]u16 = [_]u16{0} ** 4;
+    var utf16: [4]u16 = @as([4]u16, @splat(0));
     const count = translateKeyTextToUnicode(vk, scan_code, state, &utf16);
     if (count < 0) {
         result.dead_key = true;
@@ -1368,7 +1368,7 @@ fn controlKeyStateFromState(state: *const [256]u8, lParam: LPARAM) u16 {
 /// `GetKeyState` when `GetKeyboardState` failed.
 fn controlKeyState(keyboard_state: ?*const [256]u8, lParam: LPARAM) u16 {
     if (keyboard_state) |state| return controlKeyStateFromState(state, lParam);
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     for (control_keys_pressed) |key| {
         if (keyPressed(key.vk)) state[key.vk] = 0x80;
     }
@@ -1442,7 +1442,7 @@ fn win32KeyRecord(
     };
 
     const state = keyboard_state orelse return record;
-    var utf16: [4]u16 = [_]u16{0} ** 4;
+    var utf16: [4]u16 = @as([4]u16, @splat(0));
     const count = translateKeyTextToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16);
     if (count <= 0) return record;
     var len: usize = @min(@as(usize, @intCast(count)), utf16.len);
@@ -1474,7 +1474,7 @@ fn keyMessage(
     if (vk == c.VK_PACKET) return packetKeyMessage(action);
 
     const key = keyFromVirtualKey(vk, lParam);
-    var keyboard_state_storage: [256]u8 = [_]u8{0} ** 256;
+    var keyboard_state_storage: [256]u8 = @as([256]u8, @splat(0));
     const keyboard_state = currentKeyboardState(&keyboard_state_storage);
     const raw_mods = currentModsFromKeyboardState(keyboard_state);
     const mods = normalizeAltGrMods(raw_mods);
@@ -1862,7 +1862,7 @@ fn testingUsLayout() bool {
 }
 
 fn testingKeyboardState(mods: input.Mods) [256]u8 {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     if (mods.shift) {
         state[c.VK_SHIFT] = 0x80;
         state[if (mods.sides.shift == .right) c.VK_RSHIFT else c.VK_LSHIFT] = 0x80;
@@ -2895,7 +2895,7 @@ pub const TestingKeyboard = struct {
     previous_pin: ?[256]u8,
 
     pub fn pin(state: *const [256]u8) TestingKeyboard {
-        var thread_state: [256]u8 = [_]u8{0} ** 256;
+        var thread_state: [256]u8 = @as([256]u8, @splat(0));
         _ = sys.GetKeyboardState(&thread_state);
         const keyboard: TestingKeyboard = .{
             .thread_state = thread_state,
@@ -2907,7 +2907,7 @@ pub const TestingKeyboard = struct {
 
     /// No key down and no toggle on.
     pub fn pinNone() TestingKeyboard {
-        return pin(&([_]u8{0} ** 256));
+        return pin(&(@as([256]u8, @splat(0))));
     }
 
     pub fn set(_: *const TestingKeyboard, state: *const [256]u8) void {
@@ -2977,7 +2977,7 @@ const TestingLayout = struct {
             .key_state = undefined,
             .lock = lock,
         };
-        if (sys.GetKeyboardState(&layout.key_state) == 0) layout.key_state = [_]u8{0} ** 256;
+        if (sys.GetKeyboardState(&layout.key_state) == 0) layout.key_state = @as([256]u8, @splat(0));
         if (sys.ActivateKeyboardLayout(hkl, 0) == 0 or sys.GetKeyboardLayout(0) != hkl) {
             layout.deinit();
             return null;
@@ -3077,7 +3077,7 @@ fn testingDeliverKeyMessage(
 /// A live keyboard that drifted from what a test pinned: Ctrl held and every
 /// lock on.
 fn testingDriftedKeyboardState() [256]u8 {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     state[c.VK_CONTROL] = 0x80;
     state[c.VK_LCONTROL] = 0x80;
     state[c.VK_NUMLOCK] = 1;
@@ -3113,7 +3113,7 @@ fn testingTypeKeys(
     defer_plain_text: bool,
 ) void {
     var chars: DeferredCharState = .{};
-    var held: [256]u8 = [_]u8{0} ** 256;
+    var held: [256]u8 = @as([256]u8, @splat(0));
     const keyboard = TestingKeyboard.pin(&held);
     defer keyboard.release();
     for (keys) |key| {
@@ -3154,7 +3154,7 @@ fn testingTypeKeys(
 }
 
 test "win32 control key state mirrors the console host's record bits" {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     try std.testing.expectEqual(@as(u16, 0), controlKeyStateFromState(&state, 0));
     try std.testing.expectEqual(ControlKeyState.enhanced_key, controlKeyStateFromState(&state, @bitCast(@as(usize, c.KF_EXTENDED))));
 
@@ -3165,7 +3165,7 @@ test "win32 control key state mirrors the console host's record bits" {
     state[c.VK_CONTROL] = 0x80;
     try std.testing.expectEqual(ControlKeyState.left_ctrl | ControlKeyState.right_alt, controlKeyStateFromState(&state, 0));
 
-    state = [_]u8{0} ** 256;
+    state = @as([256]u8, @splat(0));
     state[c.VK_SHIFT] = 0x80;
     state[c.VK_LMENU] = 0x80;
     state[c.VK_RCONTROL] = 0x80;
@@ -3180,7 +3180,7 @@ test "win32 control key state mirrors the console host's record bits" {
 }
 
 test "win32 key record takes the pump's characters and translates releases" {
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     state[c.VK_SHIFT] = 0x80;
     var typed: TypedChars = .{ .len = 2 };
     typed.units[0] = '\'';
@@ -3256,7 +3256,7 @@ test "win32 key messages report the keyboard state a test pinned, not the live k
     try std.testing.expect(!keyToggled(c.VK_NUMLOCK));
 
     // What the test asks for is what the readers report, toggles included.
-    var wanted: [256]u8 = [_]u8{0} ** 256;
+    var wanted: [256]u8 = @as([256]u8, @splat(0));
     wanted[c.VK_SHIFT] = 0x80;
     wanted[c.VK_LSHIFT] = 0x80;
     wanted[c.VK_NUMLOCK] = 1;
@@ -3567,7 +3567,7 @@ test "win32 XButton wParam decoding maps forward and back buttons" {
 test "win32 quick select treats synthetic AltGr as label text instead of an action" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var state: [256]u8 = [_]u8{0} ** 256;
+    var state: [256]u8 = @as([256]u8, @splat(0));
     state[c.VK_CONTROL] = 0x80;
     state[c.VK_LCONTROL] = 0x80;
     state[c.VK_MENU] = 0x80;

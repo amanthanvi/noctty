@@ -2652,7 +2652,7 @@ test "win32 a session a newer build wrote, or one too large to be ours, is left 
     {
         var file = try tmp.dir.createFile("session-state.json", .{});
         defer file.close();
-        const chunk = [_]u8{' '} ** 4096;
+        const chunk = @as([4096]u8, @splat(' '));
         var remaining: usize = win32_session_persistence.default_max_state_bytes + 1;
         while (remaining > 0) {
             const count = @min(remaining, chunk.len);

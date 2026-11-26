@@ -5443,7 +5443,7 @@ test "appExecLinkTarget reads the third string and rejects a cut, foreign or odd
     defer alloc.free(empty);
     try std.testing.expect(appExecLinkTarget(empty, &out) == null);
     // The unfilled tail of the zeroed buffer after a short call reads as empty strings.
-    var zeroed = [_]u8{0} ** 512;
+    var zeroed = @as([512]u8, @splat(0));
     @memcpy(zeroed[0..40], record[0..40]);
     try std.testing.expect(appExecLinkTarget(&zeroed, &out) == null);
 }
