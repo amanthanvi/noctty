@@ -2214,19 +2214,24 @@ test "semantic output capture follows real stream handler parser" {
         },
     };
 
-    var stream = StreamHandler.Stream.init(.{ .allocator = std.testing.allocator, .handler = .{
-        .alloc = std.testing.allocator,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .none,
-        .clipboard_write = .allow,
-    } });
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = std.testing.allocator,
+        .handler = .{
+            .alloc = std.testing.allocator,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
+    });
     defer stream.deinit();
 
     stream.handler.semantic_output.begin(false);
@@ -2451,19 +2456,24 @@ test "issue149 config change queues no color scheme report, even into a full mai
         },
     };
 
-    var stream = StreamHandler.Stream.init(.{ .allocator = std.testing.allocator, .handler = .{
-        .alloc = std.testing.allocator,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .@"16-bit",
-        .clipboard_write = .allow,
-    } });
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = std.testing.allocator,
+        .handler = .{
+            .alloc = std.testing.allocator,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
+    });
     defer stream.deinit();
     _ = countIssue149ColorSchemeReports(&termio_mailbox);
 
@@ -2527,19 +2537,24 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
         },
     };
 
-    var stream = StreamHandler.Stream.init(.{ .allocator = std.testing.allocator, .handler = .{
-        .alloc = std.testing.allocator,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .@"16-bit",
-        .clipboard_write = .allow,
-    } });
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = std.testing.allocator,
+        .handler = .{
+            .alloc = std.testing.allocator,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
+    });
     defer stream.deinit();
 
     stream.nextSlice("\x1b]10;?\x07");
@@ -2773,19 +2788,24 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
         },
     };
 
-    var stream = StreamHandler.Stream.init(.{ .allocator = alloc, .handler = .{
-        .alloc = alloc,
-        .size = undefined,
-        .terminal = &term,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = surface_mailbox,
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .none,
-        .clipboard_write = .allow,
-    } });
+    var stream = StreamHandler.Stream.init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .size = undefined,
+            .terminal = &term,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = surface_mailbox,
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
+        },
+    });
     defer stream.deinit();
     stream.handler.seen_title = true;
 
@@ -2874,23 +2894,28 @@ const TestStream = struct {
         self.app_queue = try AppMailbox.Queue.create(alloc);
         errdefer self.app_queue.destroy(alloc);
 
-        self.stream = StreamHandler.Stream.init(.{ .allocator = alloc, .handler = .{
-            .alloc = alloc,
-            .size = undefined,
-            .terminal = &self.term,
-            .termio_mailbox = &self.termio_mailbox,
-            .stopping = options.stopping,
-            .surface_mailbox = .{
-                .surface = undefined,
-                .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_queue },
+        self.stream = StreamHandler.Stream.init(.{
+            .allocator = alloc,
+            .handler = .{
+                .alloc = alloc,
+                .size = undefined,
+                .terminal = &self.term,
+                .termio_mailbox = &self.termio_mailbox,
+                .stopping = options.stopping,
+                .surface_mailbox = .{
+                    .surface = undefined,
+                    .app = .{ .rt_app = &self.rt_app, .mailbox = self.app_queue },
+                },
+                .renderer_state = &self.renderer_state,
+                .renderer_mailbox = undefined,
+                .renderer_wakeup = undefined,
+                .enquiry_response = options.enquiry_response,
+                .osc_color_report_format = options.osc_color_report_format,
+                .clipboard_write = .allow,
+                .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+                .xt_checksum_report = false, // vt-xt-checksum-report's default
             },
-            .renderer_state = &self.renderer_state,
-            .renderer_mailbox = undefined,
-            .renderer_wakeup = undefined,
-            .enquiry_response = options.enquiry_response,
-            .osc_color_report_format = options.osc_color_report_format,
-            .clipboard_write = .allow,
-        } });
+        });
         self.stream.handler.seen_title = options.seen_title;
         self.role = thread_role.fixture(.reader);
     }

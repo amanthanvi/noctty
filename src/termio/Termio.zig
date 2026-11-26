@@ -1805,22 +1805,27 @@ test "issue149 config change writes exactly one color scheme report" {
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);
     defer app_queue.destroy(alloc);
-    io.terminal_stream = StreamHandler.Stream.init(.{ .allocator = alloc, .handler = .{
-        .alloc = alloc,
-        .size = undefined,
-        .terminal = &io.terminal,
-        .termio_mailbox = &termio_mailbox,
-        .surface_mailbox = .{
-            .surface = undefined,
-            .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
+    io.terminal_stream = StreamHandler.Stream.init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .size = undefined,
+            .terminal = &io.terminal,
+            .termio_mailbox = &termio_mailbox,
+            .surface_mailbox = .{
+                .surface = undefined,
+                .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
+            },
+            .renderer_state = &renderer_state,
+            .renderer_mailbox = undefined,
+            .renderer_wakeup = undefined,
+            .enquiry_response = "",
+            .osc_color_report_format = .@"16-bit",
+            .clipboard_write = .allow,
+            .clipboard_write_limit = 64 * 1024 * 1024, // clipboard-write-limit-bytes' default
+            .xt_checksum_report = false, // vt-xt-checksum-report's default
         },
-        .renderer_state = &renderer_state,
-        .renderer_mailbox = undefined,
-        .renderer_wakeup = undefined,
-        .enquiry_response = "",
-        .osc_color_report_format = .@"16-bit",
-        .clipboard_write = .allow,
-    } });
+    });
     defer io.terminal_stream.deinit();
 
     // The loop never runs, so the write stream's handle is never used.
