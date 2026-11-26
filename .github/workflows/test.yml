@@ -628,7 +628,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.lib_vt == 'true'
     runs-on: windows-2025
-    timeout-minutes: 30
+    # Measured on windows-2025 with Zig 0.17.1: the test step alone took 26 min
+    # (633281171) and ran past 29.5 (c263997e1, cancelled); the same build and
+    # run take 12.5 min on a fast workstation. Then the configure sentinel and
+    # the ReleaseFast oracle build. 60 leaves about half as margin.
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
