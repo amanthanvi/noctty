@@ -3449,7 +3449,11 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
     defer mailbox.deinit(testing.allocator);
 
-    // As the pty reader, which runs the stream handler with the
+    // A fork-side fix to this inherited test (upstream 70f006575, 1B.5):
+    // upstream locks the renderer-state mutex with no thread role and leaves
+    // `handler.stopping` undefined, which the fork's role layer (a PN4
+    // panic) and its stopped-reader check (`messageWriter`) reject. So it
+    // runs as the pty reader, which runs the stream handler with the
     // renderer-state mutex held (PLAN.md 2.7 RQ9).
     const role = thread_role.fixture(.reader);
     defer role.exit();
