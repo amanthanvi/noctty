@@ -2106,7 +2106,7 @@ pub const Surface = struct {
         }
 
         if (sys.wglMakeCurrent(hdc, hglrc) == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             recordOpenGLStartupWin32Failure(.make_current, err);
             return windows.unexpectedError(err);
         }
@@ -2141,7 +2141,7 @@ pub const Surface = struct {
         if (sys.wglMakeCurrent(null, null) == 0) {
             log.warn(
                 "win32 wglMakeCurrent(null, null) failed during GL teardown err={}",
-                .{windows.kernel32.GetLastError()},
+                .{std.os.windows.GetLastError()},
             );
             return false;
         }
@@ -2153,7 +2153,7 @@ pub const Surface = struct {
         _ = self.hglrc orelse return error.NoOpenGLContext;
 
         if (sys.SwapBuffers(hdc) == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             return windows.unexpectedError(err);
         }
         self.noteSuccessfulPresent();
@@ -2990,7 +2990,7 @@ pub const Surface = struct {
         const parent = self.hwnd orelse return error.NoSurfaceWindow;
         var rect: RECT = undefined;
         if (sys.GetClientRect(parent, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
 
         self.quick_select_hwnd = sys.CreateWindowExW(
@@ -3006,7 +3006,7 @@ pub const Surface = struct {
             null,
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return windows.unexpectedError(std.os.windows.GetLastError());
         const hwnd = self.quick_select_hwnd.?;
         _ = sys.SetWindowLongPtrW(
             hwnd,
@@ -3022,7 +3022,7 @@ pub const Surface = struct {
             _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
             _ = sys.DestroyWindow(hwnd);
             self.quick_select_hwnd = null;
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
     }
 
@@ -5197,7 +5197,7 @@ pub const Surface = struct {
             if (!deleted) {
                 log.warn(
                     "win32 wglDeleteContext failed during surface teardown err={}",
-                    .{windows.kernel32.GetLastError()},
+                    .{std.os.windows.GetLastError()},
                 );
             }
             // Drop our reference either way. The Surface is freed moments
@@ -5215,7 +5215,7 @@ pub const Surface = struct {
             if (!released) {
                 log.warn(
                     "win32 ReleaseDC failed during surface teardown had_hwnd={} err={}",
-                    .{ self.hwnd != null, windows.kernel32.GetLastError() },
+                    .{ self.hwnd != null, std.os.windows.GetLastError() },
                 );
             }
             self.hdc = null;

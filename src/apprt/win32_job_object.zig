@@ -14,7 +14,7 @@ const sys = @import("win32/sys.zig");
 
 pub const HANDLE = windows.HANDLE;
 pub const DWORD = windows.DWORD;
-pub const BOOL = windows.BOOL;
+pub const BOOL = win32_types.BOOL;
 pub const SIZE_T = windows.SIZE_T;
 pub const SECURITY_ATTRIBUTES = windows.SECURITY_ATTRIBUTES;
 pub const LPCWSTR = win32_types.LPCWSTR;

@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("apprt/win32/sys.zig");
+const win32_types = @import("apprt/win32_types.zig");
 const builtin = @import("builtin");
 const internal_os = @import("os/main.zig");
 const windows = internal_os.windows;
@@ -222,7 +224,7 @@ pub fn runChildIfRequested() void {
                 var total: usize = 0;
                 while (total < graphics_payload.len) {
                     var written: windows.DWORD = 0;
-                    if (windows.kernel32.WriteFile(
+                    if (win32_sys.WriteFile(
                         stdout,
                         graphics_payload[total..].ptr,
                         @intCast(graphics_payload.len - total),
@@ -260,7 +262,7 @@ pub fn runChildIfRequested() void {
                 var offset: usize = 0;
                 while (offset < bytes.len) {
                     var written: windows.DWORD = 0;
-                    if (windows.kernel32.WriteFile(
+                    if (win32_sys.WriteFile(
                         handle,
                         bytes[offset..].ptr,
                         @intCast(bytes.len - offset),
@@ -302,7 +304,7 @@ pub fn runChildIfRequested() void {
                 while (true) {
                     var byte: [1]u8 = undefined;
                     var read: windows.DWORD = 0;
-                    if (windows.kernel32.ReadFile(
+                    if (win32_sys.ReadFile(
                         stdin,
                         &byte,
                         1,
@@ -366,7 +368,7 @@ pub fn runChildIfRequested() void {
             var offset: usize = 0;
             while (offset < bytes.len) {
                 var written: windows.DWORD = 0;
-                if (windows.kernel32.WriteFile(
+                if (win32_sys.WriteFile(
                     handle,
                     bytes[offset..].ptr,
                     @intCast(bytes.len - offset),
@@ -382,7 +384,7 @@ pub fn runChildIfRequested() void {
             while (true) {
                 var byte: [1]u8 = undefined;
                 var read: windows.DWORD = 0;
-                if (windows.kernel32.ReadFile(
+                if (win32_sys.ReadFile(
                     handle,
                     &byte,
                     1,
@@ -443,22 +445,22 @@ pub fn runChildIfRequested() void {
 
 fn cancelAndDrainWrite(
     pipe: windows.HANDLE,
-    overlapped: *std.os.windows.OVERLAPPED,
+    overlapped: *win32_types.OVERLAPPED,
 ) !void {
     var cancel_error: ?std.os.windows.Win32Error = null;
-    if (std.os.windows.kernel32.CancelIoEx(pipe, overlapped) == 0) {
-        const err = std.os.windows.kernel32.GetLastError();
+    if (win32_sys.CancelIoEx(pipe, overlapped) == 0) {
+        const err = std.os.windows.GetLastError();
         if (err != .NOT_FOUND) cancel_error = err;
     }
 
     var ignored: windows.DWORD = 0;
-    if (std.os.windows.kernel32.GetOverlappedResult(
+    if (win32_sys.GetOverlappedResult(
         pipe,
         overlapped,
         &ignored,
-        windows.TRUE,
+        win32_types.TRUE,
     ) == 0) {
-        const result_error = std.os.windows.kernel32.GetLastError();
+        const result_error = std.os.windows.GetLastError();
         if (result_error != .OPERATION_ABORTED) {
             return windows.unexpectedError(result_error);
         }
@@ -471,15 +473,15 @@ fn writeFragment(
     bytes: []const u8,
     timeout_ms: windows.DWORD,
 ) !void {
-    const event = try std.os.windows.CreateEventEx(
+    const event = try win32_sys.createEventEx(
         null,
         "",
         0,
-        std.os.windows.EVENT_ALL_ACCESS,
+        win32_types.EVENT_ALL_ACCESS,
     );
     defer _ = windows.CloseHandle(event);
 
-    var overlapped: std.os.windows.OVERLAPPED = .{
+    var overlapped: win32_types.OVERLAPPED = .{
         .Internal = 0,
         .InternalHigh = 0,
         .DUMMYUNIONNAME = .{ .DUMMYSTRUCTNAME = .{
@@ -488,7 +490,7 @@ fn writeFragment(
         } },
         .hEvent = event,
     };
-    const write_result = std.os.windows.kernel32.WriteFile(
+    const write_result = win32_sys.WriteFile(
         pipe,
         bytes.ptr,
         @intCast(bytes.len),
@@ -496,17 +498,17 @@ fn writeFragment(
         &overlapped,
     );
     if (write_result == 0) {
-        const write_error = std.os.windows.kernel32.GetLastError();
+        const write_error = std.os.windows.GetLastError();
         if (write_error != .IO_PENDING) return windows.unexpectedError(write_error);
 
-        switch (std.os.windows.kernel32.WaitForSingleObject(event, timeout_ms)) {
-            std.os.windows.WAIT_OBJECT_0 => {},
-            std.os.windows.WAIT_TIMEOUT => {
+        switch (win32_sys.WaitForSingleObject(event, timeout_ms)) {
+            win32_types.WAIT_OBJECT_0 => {},
+            win32_types.WAIT_TIMEOUT => {
                 try cancelAndDrainWrite(pipe, &overlapped);
                 return error.ConptyWriteTimeout;
             },
-            std.os.windows.WAIT_FAILED => {
-                const wait_error = std.os.windows.kernel32.GetLastError();
+            win32_types.WAIT_FAILED => {
+                const wait_error = std.os.windows.GetLastError();
                 try cancelAndDrainWrite(pipe, &overlapped);
                 return windows.unexpectedError(wait_error);
             },
@@ -516,7 +518,7 @@ fn writeFragment(
             },
         }
     }
-    const written = try std.os.windows.GetOverlappedResult(pipe, &overlapped, false);
+    const written = try win32_sys.getOverlappedResult(pipe, &overlapped, false);
     if (written != bytes.len) return error.ShortConptyWrite;
 }
 
@@ -551,35 +553,35 @@ pub fn runParentIfRequested() !void {
                     &available,
                     null,
                 ) == 0) {
-                    if (windows.kernel32.GetLastError() == .BROKEN_PIPE) {
+                    if (std.os.windows.GetLastError() == .BROKEN_PIPE) {
                         if (std.mem.indexOf(u8, output.items, marker) == null) {
                             return error.ConptyMissingMarker;
                         }
                         if (!require_exit or process_exited) return;
                     } else {
-                        return windows.unexpectedError(windows.kernel32.GetLastError());
+                        return windows.unexpectedError(std.os.windows.GetLastError());
                     }
                 } else if (available > 0) {
                     var buffer: [1024]u8 = undefined;
                     var read: windows.DWORD = 0;
-                    if (windows.kernel32.ReadFile(
+                    if (win32_sys.ReadFile(
                         pty.out_pipe,
                         &buffer,
                         @min(@as(windows.DWORD, buffer.len), available),
                         &read,
                         null,
-                    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+                    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
                     if (output.items.len + read > max_output_bytes) {
                         return error.ConptyOutputLimitExceeded;
                     }
                     try output.appendSlice(std.testing.allocator, buffer[0..read]);
                 }
 
-                switch (windows.kernel32.WaitForSingleObject(process, 0)) {
-                    std.os.windows.WAIT_OBJECT_0 => process_exited = true,
-                    std.os.windows.WAIT_TIMEOUT => {},
-                    std.os.windows.WAIT_FAILED => return windows.unexpectedError(
-                        windows.kernel32.GetLastError(),
+                switch (win32_sys.WaitForSingleObject(process, 0)) {
+                    win32_types.WAIT_OBJECT_0 => process_exited = true,
+                    win32_types.WAIT_TIMEOUT => {},
+                    win32_types.WAIT_FAILED => return windows.unexpectedError(
+                        std.os.windows.GetLastError(),
                     ),
                     else => return error.UnexpectedConptyProcessWait,
                 }
@@ -591,22 +593,22 @@ pub fn runParentIfRequested() !void {
         }
 
         fn terminateAndConfirm(process: windows.HANDLE) !void {
-            switch (windows.kernel32.WaitForSingleObject(process, 0)) {
-                std.os.windows.WAIT_OBJECT_0 => return,
-                std.os.windows.WAIT_TIMEOUT => {},
-                std.os.windows.WAIT_FAILED => return windows.unexpectedError(
-                    windows.kernel32.GetLastError(),
+            switch (win32_sys.WaitForSingleObject(process, 0)) {
+                win32_types.WAIT_OBJECT_0 => return,
+                win32_types.WAIT_TIMEOUT => {},
+                win32_types.WAIT_FAILED => return windows.unexpectedError(
+                    std.os.windows.GetLastError(),
                 ),
                 else => return error.UnexpectedConptyProcessWait,
             }
-            if (windows.kernel32.TerminateProcess(process, 0xEE) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            if (win32_sys.TerminateProcess(process, 0xEE) == 0) {
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
-            switch (windows.kernel32.WaitForSingleObject(process, 5000)) {
-                std.os.windows.WAIT_OBJECT_0 => {},
-                std.os.windows.WAIT_TIMEOUT => return error.ConptyChildCleanupTimeout,
-                std.os.windows.WAIT_FAILED => return windows.unexpectedError(
-                    windows.kernel32.GetLastError(),
+            switch (win32_sys.WaitForSingleObject(process, 5000)) {
+                win32_types.WAIT_OBJECT_0 => {},
+                win32_types.WAIT_TIMEOUT => return error.ConptyChildCleanupTimeout,
+                win32_types.WAIT_FAILED => return windows.unexpectedError(
+                    std.os.windows.GetLastError(),
                 ),
                 else => return error.UnexpectedConptyProcessWait,
             }
@@ -716,8 +718,8 @@ pub fn runParentIfRequested() !void {
             }
 
             var exit_code: windows.DWORD = undefined;
-            if (windows.kernel32.GetExitCodeProcess(process, &exit_code) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            if (win32_sys.GetExitCodeProcess(process, &exit_code) == 0) {
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
             try std.testing.expectEqual(@as(windows.DWORD, 0), exit_code);
             return expected_count;
@@ -786,13 +788,13 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
         }
 
         fn terminateAndConfirm(process: windows.HANDLE) !void {
-            const terminate_error = if (windows.kernel32.TerminateProcess(process, 1) == 0)
-                windows.kernel32.GetLastError()
+            const terminate_error = if (win32_sys.TerminateProcess(process, 1) == 0)
+                std.os.windows.GetLastError()
             else
                 null;
-            const final_wait = windows.kernel32.WaitForSingleObject(process, windows.INFINITE);
-            if (final_wait == windows.WAIT_FAILED) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            const final_wait = win32_sys.WaitForSingleObject(process, win32_types.INFINITE);
+            if (final_wait == win32_types.WAIT_FAILED) {
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
             if (final_wait != 0) return error.TransportProbeUnexpectedFinalWaitResult;
             if (terminate_error) |err| return windows.unexpectedError(err);
@@ -817,24 +819,24 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
                     null,
                     &available,
                     null,
-                ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+                ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
 
                 if (available > 0) {
                     if (total == buffer.len) return error.TransportProbeOutputTooLarge;
                     const read_len = @min(@as(usize, available), buffer.len - total);
                     var read: windows.DWORD = 0;
-                    if (windows.kernel32.ReadFile(
+                    if (win32_sys.ReadFile(
                         pty.out_pipe,
                         buffer[total..][0..read_len].ptr,
                         @intCast(read_len),
                         &read,
                         null,
-                    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+                    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
                     total += read;
                     if (process_signaled) quiet_since = std.time.nanoTimestamp();
                 }
 
-                const wait_result = windows.kernel32.WaitForSingleObject(process, 0);
+                const wait_result = win32_sys.WaitForSingleObject(process, 0);
                 if (wait_result == 0) {
                     if (!process_signaled) {
                         process_signaled = true;
@@ -845,8 +847,8 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
                     {
                         return buffer[0..total];
                     }
-                } else if (wait_result == windows.WAIT_FAILED) {
-                    return windows.unexpectedError(windows.kernel32.GetLastError());
+                } else if (wait_result == win32_types.WAIT_FAILED) {
+                    return windows.unexpectedError(std.os.windows.GetLastError());
                 } else if (wait_result != wait_timeout) {
                     return error.TransportProbeUnexpectedWaitResult;
                 }
@@ -899,8 +901,8 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
             };
 
             var exit_code: windows.DWORD = undefined;
-            if (windows.kernel32.GetExitCodeProcess(process, &exit_code) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            if (win32_sys.GetExitCodeProcess(process, &exit_code) == 0) {
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
             try std.testing.expectEqual(@as(windows.DWORD, 0), exit_code);
 
@@ -988,19 +990,19 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
                     &available,
                     null,
                 ) == 0) {
-                    if (windows.kernel32.GetLastError() == .BROKEN_PIPE) return;
-                    return windows.unexpectedError(windows.kernel32.GetLastError());
+                    if (std.os.windows.GetLastError() == .BROKEN_PIPE) return;
+                    return windows.unexpectedError(std.os.windows.GetLastError());
                 }
                 if (available == 0) return;
                 var buffer: [1024]u8 = undefined;
                 var read: windows.DWORD = 0;
-                if (windows.kernel32.ReadFile(
+                if (win32_sys.ReadFile(
                     pty.out_pipe,
                     &buffer,
                     @min(@as(windows.DWORD, buffer.len), available),
                     &read,
                     null,
-                ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+                ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
                 if (output.items.len + read > max_output_bytes) {
                     return error.KeyInputProbeOutputTooLarge;
                 }
@@ -1024,18 +1026,18 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
         }
 
         fn terminateAndConfirm(process: windows.HANDLE) !void {
-            switch (windows.kernel32.WaitForSingleObject(process, 0)) {
-                std.os.windows.WAIT_OBJECT_0 => return,
-                std.os.windows.WAIT_TIMEOUT => {},
-                std.os.windows.WAIT_FAILED => return windows.unexpectedError(
-                    windows.kernel32.GetLastError(),
+            switch (win32_sys.WaitForSingleObject(process, 0)) {
+                win32_types.WAIT_OBJECT_0 => return,
+                win32_types.WAIT_TIMEOUT => {},
+                win32_types.WAIT_FAILED => return windows.unexpectedError(
+                    std.os.windows.GetLastError(),
                 ),
                 else => return error.KeyInputProbeUnexpectedWait,
             }
-            if (windows.kernel32.TerminateProcess(process, 0xEE) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            if (win32_sys.TerminateProcess(process, 0xEE) == 0) {
+                return windows.unexpectedError(std.os.windows.GetLastError());
             }
-            if (windows.kernel32.WaitForSingleObject(process, 5000) != 0) {
+            if (win32_sys.WaitForSingleObject(process, 5000) != 0) {
                 return error.KeyInputProbeChildCleanupTimeout;
             }
         }
@@ -1095,8 +1097,8 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
             var timer = try std.time.Timer.start();
             errdefer {
                 var exit_code: windows.DWORD = 0;
-                const have_exit_code = windows.kernel32.GetExitCodeProcess(process, &exit_code) != 0;
-                const child_running = windows.kernel32.WaitForSingleObject(process, 0) == std.os.windows.WAIT_TIMEOUT;
+                const have_exit_code = win32_sys.GetExitCodeProcess(process, &exit_code) != 0;
+                const child_running = win32_sys.WaitForSingleObject(process, 0) == win32_types.WAIT_TIMEOUT;
                 std.debug.print("key-input-probe failure stage={t} case_index={d} elapsed_ns={d} output_bytes={d} child_running={} child_exit_available={} child_exit={d}\n", .{
                     stage, case_index, timer.read(), output.items.len, child_running, have_exit_code, exit_code,
                 });
@@ -1221,8 +1223,8 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
 
             stage = .exit;
             try readUntilMarker(&pty, &output, key_input_end_marker, std.time.ns_per_s);
-            switch (windows.kernel32.WaitForSingleObject(process, 5000)) {
-                std.os.windows.WAIT_OBJECT_0 => child_finished = true,
+            switch (win32_sys.WaitForSingleObject(process, 5000)) {
+                win32_types.WAIT_OBJECT_0 => child_finished = true,
                 else => {},
             }
         }

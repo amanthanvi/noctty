@@ -2,23 +2,24 @@
 //! clock.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const Pacer = @import("../renderer/Pacer.zig");
 const sys = @import("win32/sys.zig");
 
 const log = std.log.scoped(.win32_power);
 const windows = std.os.windows;
 
-const BOOL = windows.BOOL;
+const BOOL = win32_types.BOOL;
 const BYTE = windows.BYTE;
 const DWORD = windows.DWORD;
 const GUID = windows.GUID;
 const HANDLE = windows.HANDLE;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const HWND = windows.HWND;
 const LONG = windows.LONG;
 
 pub const WM_POWERBROADCAST: windows.UINT = 0x0218;
-pub const PBT_POWERSETTINGCHANGE: windows.WPARAM = 0x8013;
+pub const PBT_POWERSETTINGCHANGE: win32_types.WPARAM = 0x8013;
 
 const DEVICE_NOTIFY_WINDOW_HANDLE: DWORD = 0;
 const DWMWA_CLOAKED: DWORD = 14;
@@ -236,7 +237,7 @@ fn acquireCloakHook() void {
         // failing window creation.
         log.warn(
             "DWM cloak notifications unavailable err={}",
-            .{windows.kernel32.GetLastError()},
+            .{std.os.windows.GetLastError()},
         );
     }
 }
@@ -249,7 +250,7 @@ fn releaseCloakHook() void {
         if (UnhookWinEvent(hook) == 0) {
             log.warn(
                 "failed to unhook DWM cloak notifications err={}",
-                .{windows.kernel32.GetLastError()},
+                .{std.os.windows.GetLastError()},
             );
         }
         cloak_hook = null;
@@ -276,7 +277,7 @@ pub const Notifications = struct {
             DEVICE_NOTIFY_WINDOW_HANDLE,
         );
         if (acdc == null) {
-            log.warn("AC/DC power notifications unavailable err={}", .{windows.kernel32.GetLastError()});
+            log.warn("AC/DC power notifications unavailable err={}", .{std.os.windows.GetLastError()});
         }
 
         const saver = RegisterPowerSettingNotification(
@@ -285,7 +286,7 @@ pub const Notifications = struct {
             DEVICE_NOTIFY_WINDOW_HANDLE,
         );
         if (saver == null) {
-            log.warn("battery-saver notifications unavailable err={}", .{windows.kernel32.GetLastError()});
+            log.warn("battery-saver notifications unavailable err={}", .{std.os.windows.GetLastError()});
         }
 
         // Expected to fail on Windows builds without Energy Saver. Battery
@@ -296,7 +297,7 @@ pub const Notifications = struct {
             DEVICE_NOTIFY_WINDOW_HANDLE,
         );
         if (energy_saver == null) {
-            log.debug("energy-saver notifications unavailable err={}", .{windows.kernel32.GetLastError()});
+            log.debug("energy-saver notifications unavailable err={}", .{std.os.windows.GetLastError()});
         }
 
         return .{
@@ -311,17 +312,17 @@ pub const Notifications = struct {
         if (self.cloak_hook_held) releaseCloakHook();
         if (self.acdc) |handle| {
             if (UnregisterPowerSettingNotification(handle) == 0) {
-                log.warn("failed to unregister AC/DC power notification err={}", .{windows.kernel32.GetLastError()});
+                log.warn("failed to unregister AC/DC power notification err={}", .{std.os.windows.GetLastError()});
             }
         }
         if (self.saver) |handle| {
             if (UnregisterPowerSettingNotification(handle) == 0) {
-                log.warn("failed to unregister battery-saver notification err={}", .{windows.kernel32.GetLastError()});
+                log.warn("failed to unregister battery-saver notification err={}", .{std.os.windows.GetLastError()});
             }
         }
         if (self.energy_saver) |handle| {
             if (UnregisterPowerSettingNotification(handle) == 0) {
-                log.warn("failed to unregister energy-saver notification err={}", .{windows.kernel32.GetLastError()});
+                log.warn("failed to unregister energy-saver notification err={}", .{std.os.windows.GetLastError()});
             }
         }
         self.* = .{};

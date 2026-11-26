@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("apprt/win32/sys.zig");
+const win32_types = @import("apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 
@@ -15,7 +17,7 @@ const state = &@import("global.zig").state;
 /// https://github.com/microsoft/terminal/blob/3b8c5606ee1866e7bf5c4e84e962798492282097/src/cascadia/WindowsTerminal/main.cpp#L97-L102
 pub fn enableGuiChildCtrlC() !void {
     if (comptime builtin.os.tag != .windows) return;
-    try windows.SetConsoleCtrlHandler(null, false);
+    try win32_sys.setConsoleCtrlHandler(null, false);
 }
 
 test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
@@ -26,9 +28,9 @@ test "GUI child Ctrl+C reset clears inherited ignore and is idempotent" {
     // fails, so this test cannot affect a later console-control test.
     const flags = &windows.peb().ProcessParameters.ConsoleFlags;
     const before = flags.*;
-    defer windows.SetConsoleCtrlHandler(null, before & 1 != 0) catch unreachable;
+    defer win32_sys.setConsoleCtrlHandler(null, before & 1 != 0) catch unreachable;
 
-    try windows.SetConsoleCtrlHandler(null, true);
+    try win32_sys.setConsoleCtrlHandler(null, true);
     try std.testing.expect(flags.* & 1 != 0);
     try enableGuiChildCtrlC();
     try std.testing.expectEqual(before & ~@as(windows.ULONG, 1), flags.*);
@@ -97,9 +99,9 @@ fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
     _ = SetStdHandle(id, handle);
 }
 
-extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?windows.HANDLE;
-extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) u32;
 extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(.winapi) void;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;

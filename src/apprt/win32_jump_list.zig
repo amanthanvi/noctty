@@ -10,6 +10,7 @@
 //! misrepresenting where it points.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const windows = std.os.windows;
 const windows_shell = @import("../config/windows_shell.zig");
 const windows_ssh_hosts = @import("../config/windows_ssh_hosts.zig");
@@ -22,7 +23,7 @@ const consts = @import("win32/consts.zig");
 
 const Allocator = std.mem.Allocator;
 const DWORD = u32;
-const HRESULT = windows.HRESULT;
+const HRESULT = win32_types.HRESULT;
 const GUID = windows.GUID;
 const HWND = ?*anyopaque;
 const UINT = u32;

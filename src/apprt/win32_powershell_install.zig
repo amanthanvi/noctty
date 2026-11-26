@@ -51,6 +51,7 @@
 
 const std = @import("std");
 const win32_repeat = @import("win32_repeat.zig");
+const win32_sys = @import("win32/sys.zig");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 const thread_role = @import("../sync/thread_role.zig");
@@ -1266,9 +1267,9 @@ const TestProcessDeadline = struct {
     fn run(self: *@This()) void {
         const role_scope = thread_role.enter(.test_support);
         defer role_scope.exit();
-        std.os.windows.WaitForSingleObject(self.handle, self.milliseconds) catch {
+        win32_sys.waitForSingleObject(self.handle, self.milliseconds) catch {
             self.timed_out = true;
-            std.os.windows.TerminateProcess(self.handle, 124) catch {};
+            win32_sys.terminateProcess(self.handle, 124) catch {};
         };
     }
 };

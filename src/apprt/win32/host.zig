@@ -4000,7 +4000,7 @@ pub const Host = struct {
         if (sys.AdjustWindowRectExForDpi(&rect, window_start.hostStyle(framed, false), 0, ex_style, dpi) == 0) {
             // Not a (0,0) frame: this window's own, scaled to `dpi`, which is
             // what the grab used before #703.
-            log.warn("tear-off frame at dpi={} not known err={}; this window's own frame, scaled", .{ dpi, windows.kernel32.GetLastError() });
+            log.warn("tear-off frame at dpi={} not known err={}; this window's own frame, scaled", .{ dpi, std.os.windows.GetLastError() });
             var window_rect: RECT = undefined;
             var origin: POINT = .{ .x = 0, .y = 0 };
             if (sys.GetWindowRect(hwnd, &window_rect) == 0 or sys.ClientToScreen(hwnd, &origin) == 0) return .{ .x = 0, .y = 0 };
@@ -7531,8 +7531,8 @@ pub const Host = struct {
         host.refreshSurfaceVisibility();
 
         const name = std.unicode.utf8ToUtf16LeStringLiteral("NOCTTY_RENDERER_KEEP_NOTICES");
-        if (windows.kernel32.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
-        defer _ = windows.kernel32.SetEnvironmentVariableW(name, null);
+        if (sys.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
+        defer _ = sys.SetEnvironmentVariableW(name, null);
         try host.setBanner(.info, "OpenGL could not start.");
         bannerTestPaint(&host);
         if (build_config.renderer_test_tools) {

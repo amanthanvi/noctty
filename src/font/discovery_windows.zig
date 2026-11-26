@@ -526,7 +526,7 @@ pub const Windows = struct {
             for (paths.items) |path| alloc.free(path);
             paths.deinit(alloc);
         }
-        var seen: std.StringHashMapUnmanaged(void) = .{};
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer {
             var it = seen.keyIterator();
             while (it.next()) |key| alloc.free(key.*);
@@ -1839,7 +1839,7 @@ test "windowsFontPathDedupe" {
         for (paths.items) |path| alloc.free(path);
         paths.deinit(alloc);
     }
-    var seen: std.StringHashMapUnmanaged(void) = .{};
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.keyIterator();
         while (it.next()) |key| alloc.free(key.*);

@@ -3,6 +3,7 @@
 //! Cancellation waits for HANDLE_CLOSING before freeing any callback or buffer.
 const std = @import("std");
 const win32_repeat = @import("../apprt/win32_repeat.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
@@ -132,7 +133,7 @@ pub const Response = struct {
         // Preserve the old TLS floor. Older Windows builds may reject TLS 1.3.
         var protocols: u32 = secure_protocol_tls1_2 | secure_protocol_tls1_3;
         if (WinHttpSetOption(session, option_secure_protocols, &protocols, @sizeOf(u32)) == 0) {
-            if (@backingInt(windows.kernel32.GetLastError()) != error_invalid_parameter) return failure();
+            if (@backingInt(std.os.windows.GetLastError()) != error_invalid_parameter) return failure();
             protocols = secure_protocol_tls1_2;
             if (WinHttpSetOption(session, option_secure_protocols, &protocols, @sizeOf(u32)) == 0) return failure();
         }
@@ -203,7 +204,7 @@ pub const Response = struct {
         var buffer: [8192]u16 = undefined;
         var len: u32 = @sizeOf(@TypeOf(buffer));
         if (WinHttpQueryHeaders(self.request, query, null, &buffer, &len, index) == 0) {
-            if (@backingInt(windows.kernel32.GetLastError()) == error_winhttp_header_not_found) return null;
+            if (@backingInt(std.os.windows.GetLastError()) == error_winhttp_header_not_found) return null;
             return failure();
         }
         return try std.unicode.utf16LeToUtf8Alloc(alloc, buffer[0 .. len / 2]);
@@ -322,7 +323,7 @@ const BodyReader = struct {
 };
 
 fn failure() error{ UpdateHttpTimeout, UpdateHttpTransportFailed } {
-    return failureCode(@backingInt(windows.kernel32.GetLastError()));
+    return failureCode(@backingInt(std.os.windows.GetLastError()));
 }
 
 fn failureCode(code: u32) error{ UpdateHttpTimeout, UpdateHttpTransportFailed } {
@@ -333,17 +334,17 @@ fn failureCode(code: u32) error{ UpdateHttpTimeout, UpdateHttpTransportFailed } 
 }
 
 extern "winhttp" fn WinHttpOpen([*:0]const u16, u32, ?[*:0]const u16, ?[*:0]const u16, u32) callconv(WINAPI) ?Handle;
-extern "winhttp" fn WinHttpSetTimeouts(Handle, i32, i32, i32, i32) callconv(WINAPI) windows.BOOL;
+extern "winhttp" fn WinHttpSetTimeouts(Handle, i32, i32, i32, i32) callconv(WINAPI) win32_types.BOOL;
 extern "winhttp" fn WinHttpConnect(Handle, [*:0]const u16, u16, u32) callconv(WINAPI) ?Handle;
 extern "winhttp" fn WinHttpOpenRequest(Handle, [*:0]const u16, [*:0]const u16, ?[*:0]const u16, ?[*:0]const u16, ?[*:null]const ?[*:0]const u16, u32) callconv(WINAPI) ?Handle;
-extern "winhttp" fn WinHttpSetOption(Handle, u32, ?*anyopaque, u32) callconv(WINAPI) windows.BOOL;
+extern "winhttp" fn WinHttpSetOption(Handle, u32, ?*anyopaque, u32) callconv(WINAPI) win32_types.BOOL;
 extern "winhttp" fn WinHttpSetStatusCallback(Handle, *const fn (Handle, usize, u32, ?*anyopaque, u32) callconv(WINAPI) void, u32, usize) callconv(WINAPI) ?*anyopaque;
-extern "winhttp" fn WinHttpSendRequest(Handle, ?[*]const u16, u32, ?*anyopaque, u32, u32, usize) callconv(WINAPI) windows.BOOL;
-extern "winhttp" fn WinHttpReceiveResponse(Handle, ?*anyopaque) callconv(WINAPI) windows.BOOL;
-extern "winhttp" fn WinHttpQueryHeaders(Handle, u32, ?[*:0]const u16, ?*anyopaque, *u32, ?*u32) callconv(WINAPI) windows.BOOL;
-extern "winhttp" fn WinHttpReadData(Handle, [*]u8, u32, ?*u32) callconv(WINAPI) windows.BOOL;
-extern "winhttp" fn WinHttpQueryDataAvailable(Handle, ?*u32) callconv(WINAPI) windows.BOOL;
-extern "winhttp" fn WinHttpCloseHandle(Handle) callconv(WINAPI) windows.BOOL;
+extern "winhttp" fn WinHttpSendRequest(Handle, ?[*]const u16, u32, ?*anyopaque, u32, u32, usize) callconv(WINAPI) win32_types.BOOL;
+extern "winhttp" fn WinHttpReceiveResponse(Handle, ?*anyopaque) callconv(WINAPI) win32_types.BOOL;
+extern "winhttp" fn WinHttpQueryHeaders(Handle, u32, ?[*:0]const u16, ?*anyopaque, *u32, ?*u32) callconv(WINAPI) win32_types.BOOL;
+extern "winhttp" fn WinHttpReadData(Handle, [*]u8, u32, ?*u32) callconv(WINAPI) win32_types.BOOL;
+extern "winhttp" fn WinHttpQueryDataAvailable(Handle, ?*u32) callconv(WINAPI) win32_types.BOOL;
+extern "winhttp" fn WinHttpCloseHandle(Handle) callconv(WINAPI) win32_types.BOOL;
 
 const FakePeer = struct {
     server: std.net.Server,

@@ -212,6 +212,8 @@ const shouldUseIntegratedTitlebar = win32.shouldUseIntegratedTitlebar;
 const splitDirectionFromAction = win32.splitDirectionFromAction;
 const splitTreeEquivalent = win32.splitTreeEquivalent;
 const std = @import("std");
+const prefixed_path = @import("../win32_prefixed_path.zig");
+const win32_types = @import("../win32_types.zig");
 const suppressStartupLoaderErrorDialogs = win32.suppressStartupLoaderErrorDialogs;
 const surfaceActivationNeedsHostSync = win32.surfaceActivationNeedsHostSync;
 const surfaceFocusStateChanged = win32.surfaceFocusStateChanged;
@@ -2678,7 +2680,7 @@ pub const App = struct {
             .lpszClassName = name,
             .hIconSm = null,
         };
-        if (sys.RegisterClassExW(&wc) == 0 and windows.kernel32.GetLastError() != .CLASS_ALREADY_EXISTS)
+        if (sys.RegisterClassExW(&wc) == 0 and std.os.windows.GetLastError() != .CLASS_ALREADY_EXISTS)
             return lastError(); // ERROR_CLASS_ALREADY_EXISTS is expected in tests.
         const delivery = try AppDelivery.create();
         errdefer delivery.release();
@@ -2761,8 +2763,8 @@ pub const App = struct {
             .lpszClassName = lifecycle_class_name,
             .hIconSm = null,
         };
-        if (sys.RegisterClassExW(&wc) == 0 and windows.kernel32.GetLastError() != .CLASS_ALREADY_EXISTS) {
-            log.warn("failed to register the lifecycle window class err={}", .{windows.kernel32.GetLastError()});
+        if (sys.RegisterClassExW(&wc) == 0 and std.os.windows.GetLastError() != .CLASS_ALREADY_EXISTS) {
+            log.warn("failed to register the lifecycle window class err={}", .{std.os.windows.GetLastError()});
             return;
         }
         const hwnd = sys.CreateWindowExW(
@@ -2779,7 +2781,7 @@ pub const App = struct {
             self.hinstance,
             null,
         ) orelse {
-            log.warn("failed to create the lifecycle window err={}", .{windows.kernel32.GetLastError()});
+            log.warn("failed to create the lifecycle window err={}", .{std.os.windows.GetLastError()});
             return;
         };
         setWindowData(hwnd, self);
@@ -3097,7 +3099,7 @@ pub const App = struct {
             }
 
             if (sys.RegisterHotKey(null, next_id, spec.modifiers, spec.vk) == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = std.os.windows.GetLastError();
                 log.warn("failed to register win32 global hotkey trigger={f} id={} mods=0x{x} vk=0x{x} err={} reason={s}", .{
                     entry.key_ptr.*,
                     next_id,
@@ -3270,7 +3272,7 @@ pub const App = struct {
         if (self.update_recheck_timer_id != null) return;
         const timer_id = sys.SetTimer(null, 0, update_recheck_interval_ms, null);
         if (timer_id == 0) {
-            log.warn("failed to start win32 update recheck timer err={}", .{windows.kernel32.GetLastError()});
+            log.warn("failed to start win32 update recheck timer err={}", .{std.os.windows.GetLastError()});
             return;
         }
         self.update_recheck_timer_id = timer_id;
@@ -4039,7 +4041,7 @@ pub const App = struct {
         if (timer_id == 0) {
             log.err("failed to start win32 quit timer delay_ms={} err={}", .{
                 delay_ms,
-                windows.kernel32.GetLastError(),
+                std.os.windows.GetLastError(),
             });
             return;
         }
@@ -4054,7 +4056,7 @@ pub const App = struct {
         self.stopTerminalHandoffIdleTimer();
         const timer_id = sys.SetTimer(null, 0, 5000, null);
         if (timer_id == 0) {
-            log.err("failed to start terminal handoff idle timer err={}", .{windows.kernel32.GetLastError()});
+            log.err("failed to start terminal handoff idle timer err={}", .{std.os.windows.GetLastError()});
             return;
         }
         self.terminal_handoff_idle_timer_id = timer_id;
@@ -4115,7 +4117,7 @@ pub const App = struct {
         self.stopRecoveryRetryTimer();
         const timer_id = sys.SetTimer(null, 0, recovery_ready_retry_delay_ms, null);
         if (timer_id == 0) {
-            log.warn("failed to start win32 recovery retry timer err={}", .{windows.kernel32.GetLastError()});
+            log.warn("failed to start win32 recovery retry timer err={}", .{std.os.windows.GetLastError()});
             return false;
         }
         self.recovery_retry_timer_id = timer_id;
@@ -4198,7 +4200,7 @@ pub const App = struct {
         );
         if (timer_id == 0) {
             log.warn("failed to start win32 undo prune timer err={}", .{
-                windows.kernel32.GetLastError(),
+                std.os.windows.GetLastError(),
             });
             return;
         }
@@ -5648,7 +5650,7 @@ pub const App = struct {
 
         self.quick_select_class_atom = sys.RegisterClassExW(&wc);
         if (self.quick_select_class_atom == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
     }
 
@@ -6289,7 +6291,7 @@ pub const App = struct {
                 fn current() !windows.HANDLE {
                     var handle: windows.HANDLE = undefined;
                     const current_process = windows.GetCurrentProcess();
-                    if (windows.kernel32.DuplicateHandle(current_process, current_process, current_process, &handle, 0, windows.FALSE, windows.DUPLICATE_SAME_ACCESS) == 0) return lastError();
+                    if (sys.DuplicateHandle(current_process, current_process, current_process, &handle, 0, win32_types.FALSE, windows.DUPLICATE_SAME_ACCESS) == 0) return lastError();
                     return handle;
                 }
             };
@@ -8183,7 +8185,7 @@ pub const App = struct {
             // A full queue: the re-wake thread timer, whose `WM_TIMER` the
             // system makes when the queue has nothing else, wakes the pump
             // instead (CodeRabbit r4512044883).
-            log.warn("tab move wake could not be posted err={}; the re-wake timer wakes the pump", .{windows.kernel32.GetLastError()});
+            log.warn("tab move wake could not be posted err={}; the re-wake timer wakes the pump", .{std.os.windows.GetLastError()});
             if (!self.armTabMoveWakeTimer()) {
                 // No way to wake the pump at all: the request is refused, not
                 // left to wait for unrelated input, and the queue is as it was
@@ -8219,7 +8221,7 @@ pub const App = struct {
         if (self.tab_move_wake_timer != null) return true;
         const id = if (builtin.is_test and test_tab_move_wake_timer_fails) 0 else sys.SetTimer(null, 0, 50, null);
         if (id == 0) {
-            log.warn("tab move re-wake timer failed err={}", .{windows.kernel32.GetLastError()});
+            log.warn("tab move re-wake timer failed err={}", .{std.os.windows.GetLastError()});
             return false;
         }
         self.tab_move_wake_timer = id;
@@ -9120,7 +9122,7 @@ pub const App = struct {
         if (post_host) |host| if (host.hwnd) |hwnd| {
             if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_QUIT, @intFromBool(near != null), 0) == 0) {
                 log.warn("quit declined: could not post it to the message loop err={}", .{
-                    windows.kernel32.GetLastError(),
+                    std.os.windows.GetLastError(),
                 });
             }
             return;
@@ -9349,7 +9351,7 @@ pub const App = struct {
                         value.len,
                     ) == 1 and value[0] == '1') {
                         // Exercise the real Windows loader's missing-module path.
-                        break :loaded windows.kernel32.LoadLibraryExW(
+                        break :loaded sys.LoadLibraryExW(
                             std.unicode.utf8ToUtf16LeStringLiteral("noctty-opengl32-missing-test.dll"),
                             null,
                             0x00000800, // LOAD_LIBRARY_SEARCH_SYSTEM32
@@ -9362,7 +9364,7 @@ pub const App = struct {
         }
 
         const hdc = sys.GetDC(hwnd) orelse {
-            recordOpenGLStartupWin32Failure(.get_dc, windows.kernel32.GetLastError());
+            recordOpenGLStartupWin32Failure(.get_dc, std.os.windows.GetLastError());
             return error.GetDCFailed;
         };
         errdefer _ = sys.ReleaseDC(hwnd, hdc);
@@ -9425,7 +9427,7 @@ pub const App = struct {
     /// `error.Unexpected` with `windows.unexpectedError`, so a Debug build's
     /// stack dump still starts at the failing call.
     fn recordOpenGLStartupLastError(step: OpenGLStartupStep) windows.Win32Error {
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         recordOpenGLStartupWin32Failure(step, err);
         return err;
     }
@@ -9971,9 +9973,9 @@ pub const App = struct {
         const Fake = struct {
             var reply: []const u16 = &.{};
             var reply_len: u32 = 0;
-            var hr: windows.HRESULT = 0;
+            var hr: win32_types.HRESULT = 0;
 
-            fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) windows.HRESULT {
+            fn query(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) win32_types.HRESULT {
                 if (flags != (c.ASSOCF_NOTRUNCATE | c.ASSOCF_INIT_IGNOREUNKNOWN) or
                     str != c.ASSOCSTR_FRIENDLYAPPNAME or len.* != link_handler_name_cap or extra == null or
                     !std.mem.eql(u16, std.mem.span(assoc), std.unicode.utf8ToUtf16LeStringLiteral("ssh")) or
@@ -9985,7 +9987,7 @@ pub const App = struct {
         };
         const alloc = std.testing.allocator;
         const W = std.unicode.utf8ToUtf16LeStringLiteral;
-        for ([_]struct { []const u16, u32, windows.HRESULT, confirm_text.LinkHandler }{
+        for ([_]struct { []const u16, u32, win32_types.HRESULT, confirm_text.LinkHandler }{
             .{ W("PuTTY\x00"), 6, 0, .{ .app = "PuTTY" } },
             // No app is set (ERROR_NO_ASSOCIATION); S_FALSE names none.
             .{ W("PuTTY\x00"), 6, c.HRESULT_NO_ASSOCIATION, .none },
@@ -12966,8 +12968,8 @@ pub const App = struct {
             var held: ?std.os.windows.HANDLE = null;
             defer if (held) |handle| std.os.windows.CloseHandle(handle);
             if (case == .unopenable) {
-                const wide = try std.os.windows.sliceToPrefixedFileW(null, light);
-                const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+                const wide = try prefixed_path.sliceToPrefixedFileW(light);
+                const handle = sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
                 if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
                 held = handle;
             }
@@ -13809,7 +13811,7 @@ pub const App = struct {
         if (self.program_status_notify_timer_id != null) return;
         const timer_id = sys.SetTimer(null, 0, 1000, null);
         if (timer_id == 0) {
-            log.warn("failed to start program status notification timer err={}", .{windows.kernel32.GetLastError()});
+            log.warn("failed to start program status notification timer err={}", .{std.os.windows.GetLastError()});
             return;
         }
         self.program_status_notify_timer_id = timer_id;
@@ -14393,17 +14395,17 @@ const ComStart = enum {
 /// nothing and look at no update stage, so no test makes the test runner
 /// restartable or reads the user's profile.
 const RestartApi = struct {
-    register: *const fn (?LPCWSTR, DWORD) callconv(.winapi) windows.HRESULT =
+    register: *const fn (?LPCWSTR, DWORD) callconv(.winapi) win32_types.HRESULT =
         if (builtin.is_test) &inertRegisterRestart else &sys.RegisterApplicationRestart,
-    unregister: *const fn () callconv(.winapi) windows.HRESULT =
+    unregister: *const fn () callconv(.winapi) win32_types.HRESULT =
         if (builtin.is_test) &inertUnregisterRestart else &sys.UnregisterApplicationRestart,
     installer_apply_running: *const fn (Allocator) bool =
         if (builtin.is_test) &inertApplyRunning else &stagedInstallerRunning,
 
-    fn inertRegisterRestart(_: ?LPCWSTR, _: DWORD) callconv(.winapi) windows.HRESULT {
+    fn inertRegisterRestart(_: ?LPCWSTR, _: DWORD) callconv(.winapi) win32_types.HRESULT {
         return 0;
     }
-    fn inertUnregisterRestart() callconv(.winapi) windows.HRESULT {
+    fn inertUnregisterRestart() callconv(.winapi) win32_types.HRESULT {
         return 0;
     }
     fn inertApplyRunning(_: Allocator) bool {

@@ -1,6 +1,7 @@
 //! Single-instance IPC transport, authentication, forwarding and server dispatch.
 const std = @import("std");
 const win32_repeat = @import("../win32_repeat.zig");
+const win32_types = @import("../win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
@@ -19,16 +20,16 @@ const win32_toast_activation = @import("../win32_toast_activation.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
 const thread_role = @import("../../sync/thread_role.zig");
-const BOOL = windows.BOOL;
+const BOOL = win32_types.BOOL;
 const scanForwardedToastActivation = win32.scanForwardedToastActivation;
 
 /// Blocking (PIPE_WAIT) mode with overlapped instances: the server thread
 /// waits on an event for a client and for each request's bytes, so an idle
 /// server never runs.
-const ipc_server_pipe_mode = windows.PIPE_TYPE_BYTE |
+const ipc_server_pipe_mode = win32_types.PIPE_TYPE_BYTE |
     c.PIPE_READMODE_BYTE |
     c.PIPE_REJECT_REMOTE_CLIENTS;
-const ipc_server_instance_access = c.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVERLAPPED;
+const ipc_server_instance_access = c.PIPE_ACCESS_DUPLEX | win32_types.FILE_FLAG_OVERLAPPED;
 /// The server claims the pipe NAME once, at startup, and never releases it
 /// while it runs. `FILE_FLAG_FIRST_PIPE_INSTANCE` makes that claim fail if
 /// any other process already owns the name, and every replacement instance
@@ -114,7 +115,7 @@ const sid_buffer_align = @alignOf(u32);
 fn currentUserSidBytes(buf: *align(sid_buffer_align) SidBuffer) ![]u8 {
     var token: windows.HANDLE = undefined;
     if (sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) == 0) return error.TokenQueryFailed;
@@ -232,7 +233,7 @@ fn ipcPipeServerIsTrusted(pipe: windows.HANDLE) bool {
     // refused.
     var own_token: windows.HANDLE = undefined;
     if (sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &own_token,
     ) == 0) return false;
@@ -307,12 +308,12 @@ fn connectToIpcPipe(
 ) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
-        const handle = windows.kernel32.CreateFileW(
+        const handle = sys.CreateFileW(
             pipe_name.ptr,
-            windows.GENERIC_READ | windows.GENERIC_WRITE,
+            win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
             0,
             null,
-            windows.OPEN_EXISTING,
+            win32_types.OPEN_EXISTING,
             // Deny impersonation outright rather than relying on the server
             // never having read a message from us. See the constants.
             win32_ipc.client_pipe_open_flags,
@@ -355,7 +356,7 @@ fn connectToIpcPipe(
             return handle;
         }
 
-        const err = windows.kernel32.GetLastError();
+        const err = std.os.windows.GetLastError();
         switch (err) {
             .FILE_NOT_FOUND => return error.FileNotFound,
 
@@ -383,7 +384,7 @@ fn connectToIpcPipe(
 fn setIpcClientNonblocking(pipe: windows.HANDLE) !void {
     var mode: u32 = c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait;
     if (sys.SetNamedPipeHandleState(pipe, &mode, null, null) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
 }
 
@@ -1329,7 +1330,7 @@ fn allocIpcPipeIntegritySid(token: windows.HANDLE) ![*:0]u16 {
 fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     var token: windows.HANDLE = undefined;
     if (sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) == 0) return error.IpcSecurityDescriptorFailed;
@@ -1451,7 +1452,7 @@ fn ipcServerMain(
         );
         if (replacement == windows.INVALID_HANDLE_VALUE) {
             log.warn("failed to preserve win32 IPC pipe ownership err={}", .{
-                windows.kernel32.GetLastError(),
+                std.os.windows.GetLastError(),
             });
             return;
         }
@@ -1471,9 +1472,9 @@ fn connectIpcClient(
     io_event: windows.HANDLE,
     stop_event: windows.HANDLE,
 ) !bool {
-    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.hEvent = io_event;
-    if (sys.ConnectNamedPipe(pipe, &overlapped) == 0) switch (windows.kernel32.GetLastError()) {
+    if (sys.ConnectNamedPipe(pipe, &overlapped) == 0) switch (std.os.windows.GetLastError()) {
         .IO_PENDING => {},
         // A client opened the instance before this accept was issued.
         .PIPE_CONNECTED => return true,
@@ -1489,11 +1490,11 @@ fn connectIpcClient(
 }
 
 fn createIpcServerEvent() ?windows.HANDLE {
-    return windows.CreateEventExW(
+    return sys.createEventExW(
         null,
         null,
-        windows.CREATE_EVENT_MANUAL_RESET,
-        windows.EVENT_ALL_ACCESS,
+        win32_types.CREATE_EVENT_MANUAL_RESET,
+        win32_types.EVENT_ALL_ACCESS,
     ) catch |err| {
         log.warn("failed to create win32 IPC server event; continuing without an IPC server err={}", .{err});
         return null;
@@ -2000,7 +2001,7 @@ pub fn startIpcServer(self: *App) !bool {
         true,
     );
     if (first_pipe == windows.INVALID_HANDLE_VALUE) {
-        const create_error = windows.kernel32.GetLastError();
+        const create_error = std.os.windows.GetLastError();
         if (win32_ipc.isIpcPipeClaimConflict(create_error)) {
             log.warn("win32 IPC pipe ownership claim failed err={}; retrying startup forward once", .{create_error});
             const forwarded = tryForwardStartupToExistingInstance(self) catch |err| failed: {
@@ -2334,12 +2335,12 @@ fn testCreateSecuredPipe(name: [:0]const u16, descriptor: *anyopaque) windows.HA
     var security_attributes: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
         .lpSecurityDescriptor = descriptor,
-        .bInheritHandle = windows.FALSE,
+        .bInheritHandle = win32_types.FALSE,
     };
     return sys.CreateNamedPipeW(
         name.ptr,
         c.PIPE_ACCESS_DUPLEX,
-        windows.PIPE_TYPE_BYTE |
+        win32_types.PIPE_TYPE_BYTE |
             c.PIPE_READMODE_BYTE |
             win32_ipc.pipe_nowait |
             c.PIPE_REJECT_REMOTE_CLIENTS,
@@ -2413,7 +2414,7 @@ test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
     // independently from the token's own SID and require an exact match.
     var token: windows.HANDLE = undefined;
     try std.testing.expect(sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) != 0);
@@ -2506,13 +2507,13 @@ test "win32 IPC pipe DACL still admits a same-user client" {
 
     // The CLI verbs reach the server through this same CreateFileW path,
     // so the restrictive DACL must not lock the owning user out.
-    const client = windows.kernel32.CreateFileW(
+    const client = sys.CreateFileW(
         pipe_name.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
@@ -2863,7 +2864,7 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     // across integrity levels.
     var token: windows.HANDLE = undefined;
     try std.testing.expect(sys.OpenProcessToken(
-        windows.kernel32.GetCurrentProcess(),
+        sys.GetCurrentProcess(),
         c.TOKEN_QUERY,
         &token,
     ) != 0);
@@ -2941,7 +2942,7 @@ test "win32 IPC silent synchronous client read is bounded" {
     const server = sys.CreateNamedPipeW(
         pipe_name.ptr,
         c.PIPE_ACCESS_DUPLEX,
-        windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+        win32_types.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
         1,
         1024,
         1024,
@@ -2952,14 +2953,14 @@ test "win32 IPC silent synchronous client read is bounded" {
     defer _ = windows.CloseHandle(server);
 
     try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
-    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
+    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, std.os.windows.GetLastError());
 
-    const client = windows.kernel32.CreateFileW(
+    const client = sys.CreateFileW(
         pipe_name.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         win32_ipc.client_pipe_open_flags,
         null,
     );
@@ -2969,7 +2970,7 @@ test "win32 IPC silent synchronous client read is bounded" {
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
-        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
+        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, std.os.windows.GetLastError());
     }
 
     var byte: [1]u8 = undefined;
@@ -3053,7 +3054,7 @@ fn testThreadCycles(thread: windows.HANDLE) !u64 {
 
 fn testProcessHandleCount() !u32 {
     var count: u32 = 0;
-    if (GetProcessHandleCount(windows.kernel32.GetCurrentProcess(), &count) == 0) {
+    if (GetProcessHandleCount(sys.GetCurrentProcess(), &count) == 0) {
         return error.TestUnexpectedResult;
     }
     return count;
@@ -3105,12 +3106,12 @@ test "win32 IPC server replaces an instance whose client left before it was acce
     defer if (first_pipe_owned) {
         _ = windows.CloseHandle(first_pipe);
     };
-    const gone = windows.kernel32.CreateFileW(
+    const gone = sys.CreateFileW(
         app.ipc_pipe_name.?.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         win32_ipc.client_pipe_open_flags,
         null,
     );
@@ -3351,7 +3352,7 @@ fn testDescriptorSddlAlloc(
         information,
         &text,
         null,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
     defer _ = sys.LocalFree(@ptrCast(text.?));
 
     return std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(text.?));

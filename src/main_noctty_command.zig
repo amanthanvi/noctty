@@ -1,6 +1,8 @@
 //! Console entrypoint. Keep the application in noctty.exe; this binary only
 //! chooses whether to wait and forwards the original Windows command line.
 const std = @import("std");
+const win32_sys = @import("apprt/win32/sys.zig");
+const win32_types = @import("apprt/win32_types.zig");
 const w = std.os.windows;
 const k = w.kernel32;
 const cli_action = @import("cli/action.zig");
@@ -15,9 +17,9 @@ pub fn main() void {
         var writer = std.fs.File.stderr().writer(&buffer);
         writer.interface.print("noctty command launcher could not start or wait for noctty.exe: {s}\n", .{@errorName(err)}) catch {};
         writer.interface.flush() catch {};
-        k.ExitProcess(1);
+        win32_sys.ExitProcess(1);
     };
-    k.ExitProcess(code);
+    win32_sys.ExitProcess(code);
 }
 
 fn forward() !u32 {
@@ -51,9 +53,9 @@ fn forward() !u32 {
     startup.cb = @sizeOf(w.STARTUPINFOW);
     startup.lpDesktop = parent.lpDesktop;
     const handles = if (wait) [3]?w.HANDLE{
-        try inheritableStdHandle(w.STD_INPUT_HANDLE),
-        try inheritableStdHandle(w.STD_OUTPUT_HANDLE),
-        try inheritableStdHandle(w.STD_ERROR_HANDLE),
+        try inheritableStdHandle(win32_types.STD_INPUT_HANDLE),
+        try inheritableStdHandle(win32_types.STD_OUTPUT_HANDLE),
+        try inheritableStdHandle(win32_types.STD_ERROR_HANDLE),
     } else [3]?w.HANDLE{ null, null, null };
     defer for (handles) |handle| {
         if (handle) |h| if (h != w.INVALID_HANDLE_VALUE) w.CloseHandle(h);
@@ -65,7 +67,7 @@ fn forward() !u32 {
         startup.hStdError = handles[2];
         // A real handler is not inherited; the NULL-handler ignore attribute
         // is. Keep receiving the child's full exit status after Ctrl+C/Break.
-        if (k.SetConsoleCtrlHandler(ignoreControl, w.TRUE) == 0) return error.ConsoleHandlerFailed;
+        if (win32_sys.SetConsoleCtrlHandler(ignoreControl, win32_types.TRUE) == 0) return error.ConsoleHandlerFailed;
     }
     // Keep an action's lifetime tied to the wrapper, as with the old in-process
     // dispatch. Editors or GUI processes the action launches may outlive it.
@@ -73,7 +75,7 @@ fn forward() !u32 {
     defer if (job) |handle| w.CloseHandle(handle);
     var process: w.PROCESS_INFORMATION = undefined;
     if (k.CreateProcessW(image_z, raw, null, null, @intFromBool(wait), .{ .detached_process = !wait, .create_suspended = wait }, null, null, &startup, &process) == 0)
-        return switch (k.GetLastError()) {
+        return switch (std.os.windows.GetLastError()) {
             .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
             .ACCESS_DENIED => error.AccessDenied,
             .BAD_EXE_FORMAT => error.InvalidExecutable,
@@ -82,26 +84,26 @@ fn forward() !u32 {
     defer w.CloseHandle(process.hProcess);
     defer w.CloseHandle(process.hThread);
     errdefer {
-        _ = k.TerminateProcess(process.hProcess, 1);
-        _ = k.WaitForSingleObject(process.hProcess, w.INFINITE);
+        _ = win32_sys.TerminateProcess(process.hProcess, 1);
+        _ = win32_sys.WaitForSingleObject(process.hProcess, win32_types.INFINITE);
     }
     if (!wait) return 0;
     // Some caller-owned jobs cannot nest (notably with UI restrictions).
     // Preserve CLI availability there; lifetime cleanup is best effort.
     if (job) |handle| _ = jobs.AssignProcessToJobObject(handle, process.hProcess);
     if (ResumeThread(process.hThread) == 0xFFFFFFFF) return error.ResumeFailed;
-    if (k.WaitForSingleObject(process.hProcess, w.INFINITE) != w.WAIT_OBJECT_0) return error.WaitFailed;
+    if (win32_sys.WaitForSingleObject(process.hProcess, win32_types.INFINITE) != win32_types.WAIT_OBJECT_0) return error.WaitFailed;
     var code: u32 = undefined;
-    if (k.GetExitCodeProcess(process.hProcess, &code) == 0) return error.ExitCodeUnavailable;
+    if (win32_sys.GetExitCodeProcess(process.hProcess, &code) == 0) return error.ExitCodeUnavailable;
     return code;
 }
 
 fn inheritableStdHandle(id: w.DWORD) !?w.HANDLE {
-    const handle = k.GetStdHandle(id);
+    const handle = win32_sys.GetStdHandle(id);
     if (handle == null or handle == w.INVALID_HANDLE_VALUE) return handle;
     var copy: w.HANDLE = undefined;
-    if (k.DuplicateHandle(w.GetCurrentProcess(), handle.?, w.GetCurrentProcess(), &copy, 0, w.TRUE, w.DUPLICATE_SAME_ACCESS) == 0) {
-        if (k.GetLastError() == .INVALID_HANDLE) return null;
+    if (win32_sys.DuplicateHandle(w.GetCurrentProcess(), handle.?, w.GetCurrentProcess(), &copy, 0, win32_types.TRUE, w.DUPLICATE_SAME_ACCESS) == 0) {
+        if (std.os.windows.GetLastError() == .INVALID_HANDLE) return null;
         return error.StandardHandleUnavailable;
     }
     return copy;

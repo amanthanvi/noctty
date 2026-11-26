@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const wuffs = @import("wuffs");
 const build_config = @import("../build_config.zig");
@@ -1111,7 +1113,7 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     defer dir.close();
     const final_buf = alloc.alloc(u16, windows.PATH_MAX_WIDE) catch return false;
     defer alloc.free(final_buf);
-    const final = windows.GetFinalPathNameByHandle(dir.fd, .{}, final_buf) catch return false;
+    const final = win32_sys.getFinalPathNameByHandle(dir.fd, final_buf) catch return false;
 
     var pids: []u32 = alloc.alloc(u32, 1024) catch return false;
     defer alloc.free(pids);
@@ -1149,7 +1151,7 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
 fn isStagedImage(updates: []const u16, image: []const u16) bool {
     const sep: u16 = '\\';
     if (image.len <= updates.len + 1 or image[updates.len] != sep) return false;
-    if (!std.os.windows.eqlIgnoreCaseWTF16(image[0..updates.len], updates)) return false;
+    if (!win32_sys.eqlIgnoreCaseWtf16(image[0..updates.len], updates)) return false;
     const rest = image[updates.len + 1 ..];
     const split = std.mem.indexOfScalar(u16, rest, sep) orelse return false;
     if (split == 0) return false;
@@ -1157,7 +1159,7 @@ fn isStagedImage(updates: []const u16, image: []const u16) bool {
     if (std.mem.indexOfScalar(u16, name, sep) != null) return false;
     const exe = std.unicode.utf8ToUtf16LeStringLiteral(".exe");
     if (name.len <= exe.len) return false;
-    return std.os.windows.eqlIgnoreCaseWTF16(name[name.len - exe.len ..], exe);
+    return win32_sys.eqlIgnoreCaseWtf16(name[name.len - exe.len ..], exe);
 }
 
 const process_query_limited_information: u32 = 0x1000;
@@ -1674,7 +1676,7 @@ fn launchPortableHelper(
     try internal_os.windows.spawnChildHoldingInheritLock(&child);
     var child_open = true;
     errdefer if (child_open) {
-        std.os.windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id, 1) catch {};
         std.os.windows.CloseHandle(child.thread_handle);
         std.os.windows.CloseHandle(child.id);
     };
@@ -1809,7 +1811,7 @@ fn runPortableUpdateHelper(
                 _ = try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args);
                 return err;
             };
-            std.os.windows.WaitForSingleObject(child.id, 15_000) catch |err| switch (err) {
+            win32_sys.waitForSingleObject(child.id, 15_000) catch |err| switch (err) {
                 error.WaitTimeOut => {
                     std.os.windows.CloseHandle(child.thread_handle);
                     std.os.windows.CloseHandle(child.id);
@@ -2019,9 +2021,9 @@ fn buildInstalledNocttyArgv(
 }
 
 fn waitForProcessExit(pid: u32, timeout_ms: u32) !void {
-    const handle = OpenProcess(std.os.windows.SYNCHRONIZE, 0, pid) orelse return;
+    const handle = OpenProcess(win32_types.SYNCHRONIZE, 0, pid) orelse return;
     defer std.os.windows.CloseHandle(handle);
-    return std.os.windows.WaitForSingleObject(handle, timeout_ms);
+    return win32_sys.waitForSingleObject(handle, timeout_ms);
 }
 
 fn clearStagedPortableState(alloc: Allocator, state: *State) void {
@@ -2312,16 +2314,16 @@ fn requireStageChildHandle(
 fn handleIsReparsePoint(handle: std.os.windows.HANDLE) !bool {
     const windows = std.os.windows;
     var io: windows.IO_STATUS_BLOCK = undefined;
-    var info: windows.FILE_BASIC_INFORMATION = undefined;
+    var info: win32_types.FILE_BASIC_INFORMATION = undefined;
     const rc = windows.ntdll.NtQueryInformationFile(
         handle,
         &io,
         &info,
-        @sizeOf(windows.FILE_BASIC_INFORMATION),
+        @sizeOf(win32_types.FILE_BASIC_INFORMATION),
         .FileBasicInformation,
     );
     return switch (rc) {
-        .SUCCESS => info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        .SUCCESS => info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0,
         else => error.InvalidUpdateStagePath,
     };
 }
@@ -2434,7 +2436,7 @@ fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
     if (iterator.cd_record_count == 0) return error.InvalidPortableArchive;
     if (iterator.cd_record_count > max_portable_entries) return error.PortableArchiveTooLarge;
 
-    var names: std.StringHashMapUnmanaged(void) = .{};
+    var names: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var keys = names.keyIterator();
         while (keys.next()) |key| alloc.free(key.*);
@@ -2888,17 +2890,17 @@ fn openLockedInstaller(path: []const u8) !std.fs.File {
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
 
-    const handle = windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path_w.ptr,
-        windows.GENERIC_READ,
-        windows.FILE_SHARE_READ,
+        win32_types.GENERIC_READ,
+        win32_types.FILE_SHARE_READ,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     if (handle == windows.INVALID_HANDLE_VALUE) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     return .{ .handle = handle };
 }
@@ -2910,28 +2912,24 @@ fn openLockedStageDirectory(path: []const u8) !std.fs.File {
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
 
-    const handle = windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path_w.ptr,
-        windows.GENERIC_READ,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+        win32_types.GENERIC_READ,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_FLAG_BACKUP_SEMANTICS,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_FLAG_BACKUP_SEMANTICS,
         null,
     );
     if (handle == windows.INVALID_HANDLE_VALUE) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     return .{ .handle = handle };
 }
 
 fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
     var final_buf: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
-    const final_w = try std.os.windows.GetFinalPathNameByHandle(
-        handle,
-        .{ .volume_name = .Dos },
-        &final_buf,
-    );
+    const final_w = try win32_sys.getFinalPathNameByHandle(handle, &final_buf);
     const final_utf8 = try std.unicode.utf16LeToUtf8Alloc(alloc, final_w);
     defer alloc.free(final_utf8);
     const final_path = if (std.mem.startsWith(u8, final_utf8, "\\\\?\\")) final_utf8[4..] else final_utf8;
@@ -2996,21 +2994,20 @@ test "portable staging downgrade guard reads the built exe version" {
 fn readWindowsFileVersion(alloc: Allocator, path: []const u8) !WindowsFileVersion {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
-    const windows = std.os.windows;
     const GetFileVersionInfoSizeWFn = *const fn ([*:0]const u16, *u32) callconv(.winapi) u32;
-    const GetFileVersionInfoWFn = *const fn ([*:0]const u16, u32, u32, *anyopaque) callconv(.winapi) windows.BOOL;
-    const VerQueryValueWFn = *const fn (*const anyopaque, [*:0]const u16, *?*anyopaque, *u32) callconv(.winapi) windows.BOOL;
+    const GetFileVersionInfoWFn = *const fn ([*:0]const u16, u32, u32, *anyopaque) callconv(.winapi) win32_types.BOOL;
+    const VerQueryValueWFn = *const fn (*const anyopaque, [*:0]const u16, *?*anyopaque, *u32) callconv(.winapi) win32_types.BOOL;
 
-    const module = windows.LoadLibraryW(
+    const module = win32_sys.loadLibraryW(
         std.unicode.utf8ToUtf16LeStringLiteral("version.dll"),
     ) catch return error.InstallerVersionInfoUnavailable;
-    defer windows.FreeLibrary(module);
+    defer win32_sys.freeLibrary(module);
 
-    const size_proc = windows.kernel32.GetProcAddress(module, "GetFileVersionInfoSizeW") orelse
+    const size_proc = win32_sys.GetProcAddress(module, "GetFileVersionInfoSizeW") orelse
         return error.InstallerVersionInfoUnavailable;
-    const info_proc = windows.kernel32.GetProcAddress(module, "GetFileVersionInfoW") orelse
+    const info_proc = win32_sys.GetProcAddress(module, "GetFileVersionInfoW") orelse
         return error.InstallerVersionInfoUnavailable;
-    const query_proc = windows.kernel32.GetProcAddress(module, "VerQueryValueW") orelse
+    const query_proc = win32_sys.GetProcAddress(module, "VerQueryValueW") orelse
         return error.InstallerVersionInfoUnavailable;
     const getFileVersionInfoSize: GetFileVersionInfoSizeWFn = @ptrCast(@alignCast(size_proc));
     const getFileVersionInfo: GetFileVersionInfoWFn = @ptrCast(@alignCast(info_proc));
@@ -3083,16 +3080,16 @@ fn verifyAuthenticodeSignatureFor(
     const WTHelperGetProvSignerFromChainFn = *const fn (
         *CryptProviderData,
         u32,
-        windows.BOOL,
+        win32_types.BOOL,
         u32,
     ) callconv(.winapi) ?*CryptProviderSgnr;
-    const module = try windows.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("wintrust.dll"));
-    defer windows.FreeLibrary(module);
+    const module = try win32_sys.loadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("wintrust.dll"));
+    defer win32_sys.freeLibrary(module);
 
-    const proc = windows.kernel32.GetProcAddress(module, "WinVerifyTrust") orelse return error.SignatureVerifierUnavailable;
+    const proc = win32_sys.GetProcAddress(module, "WinVerifyTrust") orelse return error.SignatureVerifierUnavailable;
     const winVerifyTrust: WinVerifyTrustFn = @ptrCast(@alignCast(proc));
-    const prov_data_proc = windows.kernel32.GetProcAddress(module, "WTHelperProvDataFromStateData") orelse return error.SignatureVerifierUnavailable;
-    const signer_proc = windows.kernel32.GetProcAddress(module, "WTHelperGetProvSignerFromChain") orelse return error.SignatureVerifierUnavailable;
+    const prov_data_proc = win32_sys.GetProcAddress(module, "WTHelperProvDataFromStateData") orelse return error.SignatureVerifierUnavailable;
+    const signer_proc = win32_sys.GetProcAddress(module, "WTHelperGetProvSignerFromChain") orelse return error.SignatureVerifierUnavailable;
     const wtHelperProvDataFromStateData: WTHelperProvDataFromStateDataFn = @ptrCast(@alignCast(prov_data_proc));
     const wtHelperGetProvSignerFromChain: WTHelperGetProvSignerFromChainFn = @ptrCast(@alignCast(signer_proc));
 
@@ -3148,7 +3145,7 @@ fn verifyPinnedPublisherIdentityFromState(
     wtHelperGetProvSignerFromChain: *const fn (
         *CryptProviderData,
         u32,
-        std.os.windows.BOOL,
+        win32_types.BOOL,
         u32,
     ) callconv(.winapi) ?*CryptProviderSgnr,
 ) !void {
@@ -3778,13 +3775,13 @@ test "update state replaces a destination held open with delete sharing" {
     const windows = std.os.windows;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const handle = windows.kernel32.CreateFileW(
+    const handle = win32_sys.CreateFileW(
         path_w.ptr,
-        windows.GENERIC_READ,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_READ,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expect(handle != windows.INVALID_HANDLE_VALUE);
@@ -4168,8 +4165,8 @@ test "a staged installer reads as running only while a process runs from it" {
     {
         var file = try std.fs.openFileAbsolute(installer_path, .{ .mode = .read_write });
         defer file.close();
-        try file.setPermissions(.{ .inner = .{ .attributes = std.os.windows.FILE_ATTRIBUTE_READONLY } });
-        defer file.setPermissions(.{ .inner = .{ .attributes = std.os.windows.FILE_ATTRIBUTE_NORMAL } }) catch {};
+        try file.setPermissions(.{ .inner = .{ .attributes = win32_types.FILE_ATTRIBUTE_READONLY } });
+        defer file.setPermissions(.{ .inner = .{ .attributes = win32_types.FILE_ATTRIBUTE_NORMAL } }) catch {};
         try std.testing.expect(installerImageInUse(installer_path));
         try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
     }
@@ -4708,17 +4705,17 @@ test "portable recovery abandons stranded swapped transaction" {
     defer alloc.free(marker_path_w);
     // dwShareMode=0 denies subsequent opens per the Microsoft CreateFileW
     // contract, giving this test a deterministic transient access failure.
-    const held = std.os.windows.kernel32.CreateFileW(
+    const held = win32_sys.CreateFileW(
         marker_path_w.ptr,
-        std.os.windows.GENERIC_READ,
+        win32_types.GENERIC_READ,
         0,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     if (held == std.os.windows.INVALID_HANDLE_VALUE) {
-        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+        return std.os.windows.unexpectedError(std.os.windows.GetLastError());
     }
     defer std.os.windows.CloseHandle(held);
 
@@ -5614,17 +5611,17 @@ test "update staging refuses a new target when obsolete pruning is blocked" {
     defer alloc.free(locked_path);
     const locked_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, locked_path);
     defer alloc.free(locked_path_w);
-    const held = std.os.windows.kernel32.CreateFileW(
+    const held = win32_sys.CreateFileW(
         locked_path_w.ptr,
-        std.os.windows.GENERIC_READ,
+        win32_types.GENERIC_READ,
         0,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     if (held == std.os.windows.INVALID_HANDLE_VALUE) {
-        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+        return std.os.windows.unexpectedError(std.os.windows.GetLastError());
     }
     defer std.os.windows.CloseHandle(held);
 
@@ -6363,36 +6360,36 @@ test "locked staged installer rejects replacement until launch handoff" {
         std.fs.renameAbsolute(stage_dir, renamed_stage_dir),
     );
 
-    const replacement = std.os.windows.kernel32.CreateFileW(
+    const replacement = win32_sys.CreateFileW(
         path_w.ptr,
-        std.os.windows.GENERIC_WRITE,
-        std.os.windows.FILE_SHARE_READ |
-            std.os.windows.FILE_SHARE_WRITE |
-            std.os.windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_WRITE,
+        win32_types.FILE_SHARE_READ |
+            win32_types.FILE_SHARE_WRITE |
+            win32_types.FILE_SHARE_DELETE,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expectEqual(std.os.windows.INVALID_HANDLE_VALUE, replacement);
     try std.testing.expectEqual(
         std.os.windows.Win32Error.SHARING_VIOLATION,
-        std.os.windows.kernel32.GetLastError(),
+        std.os.windows.GetLastError(),
     );
 
     locked.close();
     locked_open = false;
     locked_stage_dir.close();
     locked_stage_dir_open = false;
-    const after_release = std.os.windows.kernel32.CreateFileW(
+    const after_release = win32_sys.CreateFileW(
         path_w.ptr,
-        std.os.windows.GENERIC_WRITE,
-        std.os.windows.FILE_SHARE_READ |
-            std.os.windows.FILE_SHARE_WRITE |
-            std.os.windows.FILE_SHARE_DELETE,
+        win32_types.GENERIC_WRITE,
+        win32_types.FILE_SHARE_READ |
+            win32_types.FILE_SHARE_WRITE |
+            win32_types.FILE_SHARE_DELETE,
         null,
-        std.os.windows.OPEN_EXISTING,
-        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     try std.testing.expect(after_release != std.os.windows.INVALID_HANDLE_VALUE);

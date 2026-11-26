@@ -2,6 +2,8 @@
 //! disposable host/client pair, not a product session protocol.
 
 const std = @import("std");
+const win32_sys = @import("apprt/win32/sys.zig");
+const win32_types = @import("apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Command = @import("Command.zig");
 const Pty = @import("pty.zig").Pty;
@@ -56,11 +58,11 @@ const TokenUser = extern struct {
 
 extern "kernel32" fn ConnectNamedPipe(
     pipe: windows.HANDLE,
-    overlapped: ?*windows.OVERLAPPED,
-) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn DisconnectNamedPipe(pipe: windows.HANDLE) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn ResetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
+    overlapped: ?*win32_types.OVERLAPPED,
+) callconv(.winapi) win32_types.BOOL;
+extern "kernel32" fn DisconnectNamedPipe(pipe: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
+extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
+extern "kernel32" fn ResetEvent(event: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn PeekNamedPipe(
     pipe: windows.HANDLE,
     buffer: ?*anyopaque,
@@ -68,38 +70,38 @@ extern "kernel32" fn PeekNamedPipe(
     bytes_read: ?*windows.DWORD,
     total_available: ?*windows.DWORD,
     bytes_left: ?*windows.DWORD,
-) callconv(.winapi) windows.BOOL;
-extern "kernel32" fn WaitNamedPipeW(name: [*:0]const u16, timeout_ms: windows.DWORD) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
+extern "kernel32" fn WaitNamedPipeW(name: [*:0]const u16, timeout_ms: windows.DWORD) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn LocalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaque;
 extern "advapi32" fn OpenProcessToken(
     process: windows.HANDLE,
     access: windows.DWORD,
     token: *?windows.HANDLE,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 extern "advapi32" fn GetTokenInformation(
     token: windows.HANDLE,
     information_class: windows.DWORD,
     information: ?*anyopaque,
     information_len: windows.DWORD,
     return_len: *windows.DWORD,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 extern "advapi32" fn ConvertSidToStringSidW(
     sid: *anyopaque,
     string_sid: *?[*:0]u16,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     sddl: [*:0]const u16,
     revision: windows.DWORD,
     descriptor: *?*anyopaque,
     descriptor_size: ?*windows.DWORD,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn GetNamedPipeServerProcessId(
     pipe: windows.HANDLE,
     process_id: *windows.DWORD,
-) callconv(.winapi) windows.BOOL;
+) callconv(.winapi) win32_types.BOOL;
 extern "kernel32" fn OpenProcess(
     access: windows.DWORD,
-    inherit_handle: windows.BOOL,
+    inherit_handle: win32_types.BOOL,
     process_id: windows.DWORD,
 ) callconv(.winapi) ?windows.HANDLE;
 
@@ -108,7 +110,7 @@ extern "kernel32" fn OpenProcess(
 fn tokenUserSidAlloc(alloc: Allocator, process: windows.HANDLE) ![]u8 {
     var token: ?windows.HANDLE = null;
     if (OpenProcessToken(process, token_query, &token) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     defer _ = windows.CloseHandle(token.?);
 
@@ -120,12 +122,12 @@ fn tokenUserSidAlloc(alloc: Allocator, process: windows.HANDLE) ![]u8 {
         &token_buffer,
         token_buffer.len,
         &token_len,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
 
     const token_user: *const TokenUser = @ptrCast(&token_buffer);
     var sid_w: ?[*:0]u16 = null;
     if (ConvertSidToStringSidW(token_user.user.sid, &sid_w) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     defer _ = LocalFree(sid_w);
     return std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(sid_w.?));
@@ -153,7 +155,7 @@ const PipeSecurity = struct {
             sddl_revision_1,
             &descriptor,
             null,
-        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) == 0) return windows.unexpectedError(std.os.windows.GetLastError());
 
         return .{ .descriptor = descriptor.? };
     }
@@ -167,7 +169,7 @@ const PipeSecurity = struct {
         return .{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
             .lpSecurityDescriptor = self.descriptor,
-            .bInheritHandle = windows.FALSE,
+            .bInheritHandle = win32_types.FALSE,
         };
     }
 };
@@ -274,7 +276,7 @@ fn drainConpty(context: *DrainContext) void {
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
         var read_len: windows.DWORD = 0;
-        if (windows.kernel32.ReadFile(
+        if (win32_sys.ReadFile(
             context.output,
             &buffer,
             buffer.len,
@@ -413,7 +415,7 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
 
     try command.start(alloc);
     const shell_pid = win32_job_object.GetProcessId(command.pid.?);
-    if (shell_pid == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (shell_pid == 0) return windows.unexpectedError(std.os.windows.GetLastError());
 
     var drain_context = DrainContext{ .output = pty.out_pipe, .ring = ring };
     drain_thread = try std.Thread.spawn(.{}, drainConpty, .{&drain_context});
@@ -547,7 +549,7 @@ const SyncPipe = struct {
 
     fn read(self: SyncPipe, dst: []u8) !usize {
         var read_len: windows.DWORD = 0;
-        if (windows.kernel32.ReadFile(
+        if (win32_sys.ReadFile(
             self.handle,
             dst.ptr,
             @intCast(dst.len),
@@ -559,7 +561,7 @@ const SyncPipe = struct {
 
     fn write(self: SyncPipe, src: []const u8) !usize {
         var write_len: windows.DWORD = 0;
-        if (windows.kernel32.WriteFile(
+        if (win32_sys.WriteFile(
             self.handle,
             src.ptr,
             @intCast(src.len),
@@ -581,7 +583,7 @@ const OverlappedPipe = struct {
 
     fn read(self: OverlappedPipe, dst: []u8) !usize {
         var request = try self.beginRequest();
-        return self.finish(windows.kernel32.ReadFile(
+        return self.finish(win32_sys.ReadFile(
             self.handle,
             dst.ptr,
             @intCast(dst.len),
@@ -592,7 +594,7 @@ const OverlappedPipe = struct {
 
     fn write(self: OverlappedPipe, src: []const u8) !usize {
         var request = try self.beginRequest();
-        return self.finish(windows.kernel32.WriteFile(
+        return self.finish(win32_sys.WriteFile(
             self.handle,
             src.ptr,
             @intCast(src.len),
@@ -601,30 +603,30 @@ const OverlappedPipe = struct {
         ), &request);
     }
 
-    fn beginRequest(self: OverlappedPipe) !windows.OVERLAPPED {
+    fn beginRequest(self: OverlappedPipe) !win32_types.OVERLAPPED {
         if (ResetEvent(self.event) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
-        var result: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
+        var result: win32_types.OVERLAPPED = std.mem.zeroes(win32_types.OVERLAPPED);
         result.hEvent = self.event;
         return result;
     }
 
     fn finish(
         self: OverlappedPipe,
-        issued: windows.BOOL,
-        overlapped: *windows.OVERLAPPED,
+        issued: win32_types.BOOL,
+        overlapped: *win32_types.OVERLAPPED,
     ) !usize {
         if (issued == 0) {
-            const err = windows.kernel32.GetLastError();
+            const err = std.os.windows.GetLastError();
             if (err != .IO_PENDING) return pipeErrorFrom(err);
         }
         var transferred: windows.DWORD = 0;
-        if (windows.kernel32.GetOverlappedResult(
+        if (win32_sys.GetOverlappedResult(
             self.handle,
             overlapped,
             &transferred,
-            windows.TRUE,
+            win32_types.TRUE,
         ) == 0) return pipeError();
         return transferred;
     }
@@ -640,10 +642,10 @@ fn createHostPipe(
     pipe_name_w: [*:0]const u16,
     security_attributes: ?*windows.SECURITY_ATTRIBUTES,
 ) !windows.HANDLE {
-    const pipe = windows.kernel32.CreateNamedPipeW(
+    const pipe = win32_sys.CreateNamedPipeW(
         pipe_name_w,
-        pipe_access_duplex | file_flag_first_pipe_instance | windows.FILE_FLAG_OVERLAPPED,
-        windows.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
+        pipe_access_duplex | file_flag_first_pipe_instance | win32_types.FILE_FLAG_OVERLAPPED,
+        win32_types.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
         1,
         max_frame_payload,
         max_frame_payload,
@@ -651,17 +653,17 @@ fn createHostPipe(
         security_attributes,
     );
     if (pipe == windows.INVALID_HANDLE_VALUE) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
     return pipe;
 }
 
 fn createManualResetEvent() !windows.HANDLE {
-    return windows.CreateEventExW(
+    return win32_sys.createEventExW(
         null,
         null,
-        windows.CREATE_EVENT_MANUAL_RESET,
-        windows.EVENT_ALL_ACCESS,
+        win32_types.CREATE_EVENT_MANUAL_RESET,
+        win32_types.EVENT_ALL_ACCESS,
     );
 }
 
@@ -676,13 +678,13 @@ fn acceptClientOrShellExit(
     shell: windows.HANDLE,
 ) !AcceptOutcome {
     if (ResetEvent(accept_event) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+        return windows.unexpectedError(std.os.windows.GetLastError());
     }
-    var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped: win32_types.OVERLAPPED = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.hEvent = accept_event;
 
     if (ConnectNamedPipe(pipe, &overlapped) != 0) return .client_connected;
-    switch (windows.kernel32.GetLastError()) {
+    switch (std.os.windows.GetLastError()) {
         .IO_PENDING => {},
         // A client opened the instance before this accept was issued.
         .PIPE_CONNECTED => return .client_connected,
@@ -690,10 +692,10 @@ fn acceptClientOrShellExit(
     }
 
     const handles = [_]windows.HANDLE{ accept_event, shell };
-    const signalled = try windows.WaitForMultipleObjectsEx(&handles, false, windows.INFINITE, false);
+    const signalled = try win32_sys.waitForMultipleObjectsEx(&handles, false, win32_types.INFINITE, false);
     if (signalled == 0) {
         var transferred: windows.DWORD = 0;
-        if (windows.kernel32.GetOverlappedResult(pipe, &overlapped, &transferred, windows.FALSE) == 0) {
+        if (win32_sys.GetOverlappedResult(pipe, &overlapped, &transferred, win32_types.FALSE) == 0) {
             return pipeError();
         }
         return .client_connected;
@@ -703,9 +705,9 @@ fn acceptClientOrShellExit(
     // to completion in the meantime; either way GetOverlappedResult returns
     // promptly once the request is no longer in flight. Its result is
     // irrelevant because the host is tearing down.
-    _ = windows.kernel32.CancelIoEx(pipe, &overlapped);
+    _ = win32_sys.CancelIoEx(pipe, &overlapped);
     var transferred: windows.DWORD = 0;
-    _ = windows.kernel32.GetOverlappedResult(pipe, &overlapped, &transferred, windows.TRUE);
+    _ = win32_sys.GetOverlappedResult(pipe, &overlapped, &transferred, win32_types.TRUE);
     return .shell_exited;
 }
 
@@ -750,25 +752,25 @@ fn writeAll(pipe: anytype, src: []const u8) !void {
 fn writePtyInput(handle: windows.HANDLE, src: []const u8) !void {
     var offset: usize = 0;
     while (offset < src.len) {
-        var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
-        const submitted = windows.kernel32.WriteFile(
+        var overlapped: win32_types.OVERLAPPED = std.mem.zeroes(win32_types.OVERLAPPED);
+        const submitted = win32_sys.WriteFile(
             handle,
             src[offset..].ptr,
             @intCast(src.len - offset),
             null,
             &overlapped,
         );
-        if (submitted == 0 and @intFromEnum(windows.kernel32.GetLastError()) != error_io_pending) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (submitted == 0 and @intFromEnum(std.os.windows.GetLastError()) != error_io_pending) {
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
-        const write_len = try windows.GetOverlappedResult(handle, &overlapped, true);
+        const write_len = try win32_sys.getOverlappedResult(handle, &overlapped, true);
         if (write_len == 0) return error.BrokenPipe;
         offset += write_len;
     }
 }
 
 fn pipeError() anyerror {
-    return pipeErrorFrom(windows.kernel32.GetLastError());
+    return pipeErrorFrom(std.os.windows.GetLastError());
 }
 
 fn pipeErrorFrom(last_error: windows.Win32Error) anyerror {
@@ -782,7 +784,7 @@ fn pipeErrorFrom(last_error: windows.Win32Error) anyerror {
 
 fn shellRunning(process: windows.HANDLE) bool {
     var exit_code: windows.DWORD = 0;
-    if (windows.kernel32.GetExitCodeProcess(process, &exit_code) == 0) return false;
+    if (win32_sys.GetExitCodeProcess(process, &exit_code) == 0) return false;
     return exit_code == still_active;
 }
 
@@ -870,7 +872,7 @@ fn verifyPipeServer(alloc: Allocator, pipe: windows.HANDLE) !void {
     }
     const server = OpenProcess(
         process_query_limited_information,
-        windows.FALSE,
+        win32_types.FALSE,
         server_pid,
     ) orelse return error.UntrustedPipeServer;
     defer _ = windows.CloseHandle(server);
@@ -901,13 +903,13 @@ fn connectClient(alloc: Allocator, pipe_name: [:0]const u16) !windows.HANDLE {
         // cannot act as us. This does NOT authenticate the server; the host keeps
         // its single pipe instance alive precisely so the name is never available
         // for an impostor to claim.
-        const pipe = windows.kernel32.CreateFileW(
+        const pipe = win32_sys.CreateFileW(
             pipe_name.ptr,
-            windows.GENERIC_READ | windows.GENERIC_WRITE,
+            win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
             0,
             null,
-            windows.OPEN_EXISTING,
-            windows.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
+            win32_types.OPEN_EXISTING,
+            win32_types.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
             null,
         );
         if (pipe != windows.INVALID_HANDLE_VALUE) {
@@ -916,7 +918,7 @@ fn connectClient(alloc: Allocator, pipe_name: [:0]const u16) !windows.HANDLE {
             return pipe;
         }
 
-        const last_error = windows.kernel32.GetLastError();
+        const last_error = std.os.windows.GetLastError();
         const last_error_int = @intFromEnum(last_error);
         if ((last_error_int != error_pipe_busy and last_error_int != error_file_not_found) or
             std.time.nanoTimestamp() >= deadline)
@@ -998,17 +1000,17 @@ const TestPipe = struct {
     }
 
     fn openClient(self: *TestPipe) !windows.HANDLE {
-        const client = windows.kernel32.CreateFileW(
+        const client = win32_sys.CreateFileW(
             self.name_w.ptr,
-            windows.GENERIC_READ | windows.GENERIC_WRITE,
+            win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
             0,
             null,
-            windows.OPEN_EXISTING,
-            windows.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
+            win32_types.OPEN_EXISTING,
+            win32_types.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
             null,
         );
         if (client == windows.INVALID_HANDLE_VALUE) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return windows.unexpectedError(std.os.windows.GetLastError());
         }
         return client;
     }

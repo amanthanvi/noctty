@@ -106,6 +106,62 @@ foreach ($control in $rendererLockControls) {
 }
 Write-Host "Renderer lock contract: $($rendererLockControls.Count)/$($rendererLockControls.Count) mutations rejected"
 
+# PLAN section 7.4: every extern struct a fork file declares in its ABI types
+# file carries a size pin and an offset pin per field. The floor reads the
+# struct's own field list, so a field added without its pin fails here.
+function Get-AbiPinProblems {
+    param([string]$Source, [string[]]$Structs)
+
+    $problems = [Collections.Generic.List[string]]::new()
+    foreach ($name in $Structs) {
+        $declaration = [regex]::Match($Source, "(?m)^pub const $name = extern struct \{")
+        if (-not $declaration.Success) { $problems.Add("$name is not declared"); continue }
+        $depth = 1
+        $body = $null
+        foreach ($brace in [regex]::new('[{}]').Matches($Source, $declaration.Index + $declaration.Length)) {
+            if ($brace.Value -eq '{') { $depth++ } else { $depth-- }
+            if ($depth -eq 0) {
+                $start = $declaration.Index + $declaration.Length
+                $body = $Source.Substring($start, $brace.Index - $start)
+                break
+            }
+        }
+        if ($null -eq $body) { $problems.Add("$name has no end"); continue }
+        # Top-level fields only: a nested extern union or struct is one field.
+        $flat = $body
+        while ($flat -match '\{[^{}]*\}') { $flat = [regex]::Replace($flat, '\{[^{}]*\}', '') }
+        $fields = @([regex]::Matches($flat, '(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:') | ForEach-Object { $_.Groups[1].Value })
+        if ($fields.Count -eq 0) { $problems.Add("$name has no fields"); continue }
+        if ($Source -cnotmatch "expectEqual\(@as\(usize, [^\n]*\), @sizeOf\($name\)\)") { $problems.Add("$name has no size pin") }
+        foreach ($field in $fields) {
+            if ($Source -cnotmatch "expectEqual\(@as\(usize, [^\n]*\), @offsetOf\($name, `"$field`"\)\)") {
+                $problems.Add("$name.$field has no offset pin")
+            }
+        }
+    }
+    return $problems
+}
+
+$abiPinStructs = @('FILETIME', 'OVERLAPPED', 'BY_HANDLE_FILE_INFORMATION', 'UNICODE_STRING', 'OBJECT_ATTRIBUTES', 'FILE_BASIC_INFORMATION', 'FILE_ATTRIBUTE_TAG_INFO')
+$abiPinSource = Get-Content -LiteralPath (Join-Path $repoRoot 'src/apprt/win32_types.zig') -Raw
+$abiPinProblems = @(Get-AbiPinProblems $abiPinSource $abiPinStructs)
+if ($abiPinProblems.Count -ne 0) {
+    throw "Win32 ABI pin floor: $($abiPinProblems -join '; ')."
+}
+$abiPinControls = @(
+    @{ Source = $abiPinSource.Replace('@sizeOf(OVERLAPPED)', '@sizeOf(FILETIME)'); Expect = 'OVERLAPPED has no size pin' }
+    @{ Source = $abiPinSource.Replace('@offsetOf(BY_HANDLE_FILE_INFORMATION, "nFileIndexLow")', '@offsetOf(FILETIME, "dwLowDateTime")'); Expect = 'BY_HANDLE_FILE_INFORMATION.nFileIndexLow has no offset pin' }
+    @{ Source = $abiPinSource.Replace('pub const FILETIME = extern struct {', 'pub const FILETIME_ = extern struct {'); Expect = 'FILETIME is not declared' }
+)
+foreach ($control in $abiPinControls) {
+    $problems = @(Get-AbiPinProblems $control.Source $abiPinStructs)
+    if ($problems -cnotcontains $control.Expect) {
+        throw "Win32 ABI pin floor did not reject: $($control.Expect)."
+    }
+}
+Write-Host "Win32 ABI pin floor: $($abiPinStructs.Count) structs pinned; $($abiPinControls.Count)/$($abiPinControls.Count) mutations rejected"
+
+
 $win32ModuleImports = @(
     'const c = @import("win32/consts.zig");'
     'const sys = @import("win32/sys.zig");'

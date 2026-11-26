@@ -1,4 +1,7 @@
 const std = @import("std");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
+const win32_sys = @import("../apprt/win32/sys.zig");
+const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
@@ -2320,7 +2323,7 @@ fn searchPath(
     accept: anytype,
 ) ?[]const u8 {
     const error_mode = struct {
-        extern "kernel32" fn SetThreadErrorMode(mode: u32, previous: ?*u32) callconv(.winapi) windows.BOOL;
+        extern "kernel32" fn SetThreadErrorMode(mode: u32, previous: ?*u32) callconv(.winapi) win32_types.BOOL;
     };
     var previous_mode: u32 = 0;
     const suppressed = error_mode.SetThreadErrorMode(0x0001 | 0x8000, &previous_mode) != 0;
@@ -2349,7 +2352,7 @@ fn searchPath(
             const candidate = std.fmt.bufPrint(buf, "{s}\\{s}{s}", .{ dir, exe, ext }) catch continue;
             if (discovery) {
                 const attributes = pathAttributes(candidate) orelse continue;
-                if (attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+                if (attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
             } else if (!windowsNonDirectoryPathExists(candidate)) continue;
             if (!isExeOrCom(if (extension.len > 0) extension else ext)) return null;
             if (!accept(candidate)) continue :dirs;
@@ -2391,10 +2394,10 @@ test "PKG48 only shell wrappers receive the inherited cwd search guard" {
 fn windowsNonDirectoryPathExists(path: []const u8) bool {
     // Explicit commands retain Windows link semantics, including Scoop's
     // current junction and paths with spaces. Only discovery refuses redirects.
-    const path_w = windows.sliceToPrefixedFileW(null, path) catch return false;
-    const attributes = windows.kernel32.GetFileAttributesW(path_w.span().ptr);
+    const path_w = prefixed_path.sliceToPrefixedFileW(path) catch return false;
+    const attributes = win32_sys.GetFileAttributesW(path_w.span().ptr);
     if (attributes == windows.INVALID_FILE_ATTRIBUTES) return false;
-    return attributes & windows.FILE_ATTRIBUTE_DIRECTORY == 0;
+    return attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY == 0;
 }
 
 /// Open only the final object, refusing every reparse ancestor in the kernel.
@@ -2408,8 +2411,8 @@ fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
     var handle: windows.HANDLE = undefined;
     const status = ntOpenDontReparse(
         path,
-        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE,
-        windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT,
+        win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE,
+        win32_types.FILE_OPEN_REPARSE_POINT | win32_types.FILE_SYNCHRONOUS_IO_NONALERT,
         &handle,
     ) orelse return null;
     return if (status == .SUCCESS) handle else null;
@@ -2440,8 +2443,8 @@ pub fn ntOpenDontReparse(
         .MaximumLength = @intCast(span.len * 2),
         .Buffer = @constCast(span.ptr),
     };
-    var attrs: windows.OBJECT_ATTRIBUTES = .{
-        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
+    var attrs: win32_types.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(win32_types.OBJECT_ATTRIBUTES),
         .RootDirectory = null,
         .ObjectName = &name,
         .Attributes = 0x1000, // OBJ_DONT_REPARSE
@@ -2449,15 +2452,15 @@ pub fn ntOpenDontReparse(
         .SecurityQualityOfService = null,
     };
     var io: windows.IO_STATUS_BLOCK = undefined;
-    return windows.ntdll.NtCreateFile(
+    return win32_sys.NtCreateFile(
         handle,
         access,
         &attrs,
         &io,
         null,
-        windows.FILE_ATTRIBUTE_NORMAL,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
-        windows.FILE_OPEN,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
+        win32_types.FILE_OPEN,
         options,
         null,
         0,
@@ -2465,10 +2468,10 @@ pub fn ntOpenDontReparse(
 }
 
 /// Attributes of the final object, with no ancestor or final link followed.
-fn pathInfo(path: []const u8) ?windows.FILE_ATTRIBUTE_TAG_INFO {
+fn pathInfo(path: []const u8) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
     const handle = openPathNoRedirect(path) orelse return null;
     defer windows.CloseHandle(handle);
-    var info: windows.FILE_ATTRIBUTE_TAG_INFO = undefined;
+    var info: win32_types.FILE_ATTRIBUTE_TAG_INFO = undefined;
     var io: windows.IO_STATUS_BLOCK = undefined;
     if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .FileAttributeTagInformation) != .SUCCESS) return null;
     return info;
@@ -2487,15 +2490,15 @@ fn pathAttributes(path: []const u8) ?windows.DWORD {
 fn isLaunchableFile(path: []const u8) bool {
     const info = pathInfo(path) orelse return false;
     if (isLocalExecutableInfo(info)) return true;
-    if (info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
+    if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
     return appExecLinkTargetExists(path);
 }
 
 /// WOF compression and deduplication keep file data on the local volume.
 /// Neither is a name redirect or a cloud placeholder that can fetch data.
-fn isLocalExecutableInfo(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
-    if (info.FileAttributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
-    return info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
+fn isLocalExecutableInfo(info: win32_types.FILE_ATTRIBUTE_TAG_INFO) bool {
+    if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
+    return info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
         info.ReparseTag == 0x80000017 or info.ReparseTag == 0x80000013;
 }
 
@@ -2505,7 +2508,7 @@ fn readReparseData(handle: windows.HANDLE, buf: []align(4) u8) ?[]const u8 {
     var returned: windows.DWORD = 0;
     if (internal_os.windows.DeviceIoControl(
         handle,
-        windows.FSCTL_GET_REPARSE_POINT,
+        win32_types.FSCTL_GET_REPARSE_POINT,
         null,
         0,
         buf.ptr,
@@ -2520,8 +2523,8 @@ fn readReparseData(handle: windows.HANDLE, buf: []align(4) u8) ?[]const u8 {
 /// by openPathNoRedirect; final folder links and cloud placeholders are skipped.
 fn isLocalSearchDirectory(dir: []const u8) bool {
     const attributes = pathAttributes(dir) orelse return false;
-    return attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0 and
-        attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0;
+    return attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0 and
+        attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0;
 }
 
 const IO_REPARSE_TAG_APPEXECLINK: u32 = 0x8000001b;
@@ -2633,9 +2636,9 @@ test "PKG08 round3 child lookup accepts a real App Execution Alias" {
     // launcher. Do not launch them: an unconfigured alias can open the Store.
     for ([_][]const u8{ "pwsh.exe", "python.exe", "python3.exe" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ dir, name });
-        const attributes = windows.GetFileAttributes(path) catch continue;
-        if (attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
-            attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+        const attributes = win32_sys.getFileAttributes(path) catch continue;
+        if (attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
+            attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
         const result = try lookupChildExecutable(alloc, name, &env);
         try std.testing.expect(result != null);
         try std.testing.expectEqualStrings(path, result.?);
@@ -3020,7 +3023,7 @@ const DefaultShellHost = struct {
     fn systemPath(alloc: Allocator, relative: []const u8) !?[]u8 {
         if (builtin.os.tag != .windows) return null;
         var buf: [windows.MAX_PATH:0]u16 = undefined;
-        const len = windows.kernel32.GetSystemDirectoryW(&buf, buf.len);
+        const len = win32_sys.GetSystemDirectoryW(&buf, buf.len);
         if (len == 0 or len >= buf.len) return null;
         const dir = std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..len]) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -4269,7 +4272,7 @@ fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
         _ = child.kill() catch {};
     }
 
-    windows.WaitForSingleObjectEx(child.id, wsl_probe_timeout_ms, false) catch |err| switch (err) {
+    win32_sys.waitForSingleObjectEx(child.id, wsl_probe_timeout_ms, false) catch |err| switch (err) {
         error.WaitTimeOut => {
             log.warn("skipping unresponsive wsl default shell exe={s} timeout_ms={}", .{
                 exe_path,
@@ -4468,11 +4471,11 @@ fn registryString(
 ) !?[]u8 {
     var buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-    const status = windows.advapi32.RegGetValueW(
+    const status = win32_sys.RegGetValueW(
         hive,
         subkey,
         name,
-        windows.advapi32.RRF.RT_REG_SZ | windows.advapi32.RRF.ZEROONFAILURE,
+        win32_types.RRF.RT_REG_SZ | win32_types.RRF.ZEROONFAILURE,
         null,
         @ptrCast(&buf),
         &bytes,
@@ -4593,9 +4596,9 @@ const WslOutputDrain = struct {
     err: ?anyerror = null,
 
     fn init(pipe: std.fs.File) !WslOutputDrain {
-        const io_event = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+        const io_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         errdefer windows.CloseHandle(io_event);
-        const stop_event = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+        const stop_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         return .{ .pipe = pipe, .io_event = io_event, .stop_event = stop_event };
     }
 
@@ -4636,18 +4639,18 @@ const WslOutputDrain = struct {
     /// `stop` cancels the read and waits for it to complete before this
     /// returns, so `buf` is never written after.
     fn readOnce(self: *WslOutputDrain, buf: []u8) !windows.DWORD {
-        var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+        var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
         overlapped.hEvent = self.io_event;
-        if (windows.kernel32.ReadFile(self.pipe.handle, buf.ptr, @intCast(buf.len), null, &overlapped) == 0) switch (windows.GetLastError()) {
+        if (win32_sys.ReadFile(self.pipe.handle, buf.ptr, @intCast(buf.len), null, &overlapped) == 0) switch (windows.GetLastError()) {
             .IO_PENDING => {},
             .BROKEN_PIPE, .HANDLE_EOF => return 0,
             else => |code| return windows.unexpectedError(code),
         };
         const events = [2]windows.HANDLE{ self.io_event, self.stop_event };
-        const waited = windows.kernel32.WaitForMultipleObjects(events.len, &events, windows.FALSE, windows.INFINITE);
-        if (waited != windows.WAIT_OBJECT_0) _ = windows.kernel32.CancelIoEx(self.pipe.handle, &overlapped);
+        const waited = win32_sys.WaitForMultipleObjects(events.len, &events, win32_types.FALSE, win32_types.INFINITE);
+        if (waited != win32_types.WAIT_OBJECT_0) _ = win32_sys.CancelIoEx(self.pipe.handle, &overlapped);
         var transferred: windows.DWORD = 0;
-        if (windows.kernel32.GetOverlappedResult(self.pipe.handle, &overlapped, &transferred, windows.TRUE) == 0) return switch (windows.GetLastError()) {
+        if (win32_sys.GetOverlappedResult(self.pipe.handle, &overlapped, &transferred, win32_types.TRUE) == 0) return switch (windows.GetLastError()) {
             .OPERATION_ABORTED => error.WslListCancelled,
             .BROKEN_PIPE, .HANDLE_EOF => 0,
             else => |code| windows.unexpectedError(code),
@@ -4668,7 +4671,7 @@ const WslOutputDrain = struct {
     }
 };
 
-extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) win32_types.BOOL;
 
 /// Tests only: called by a drain before each read, on its own thread
 /// (`WslOutputDrain.run`), so a test can hold it there.
@@ -4737,7 +4740,7 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // No thread reads the pipes yet: the errdefer may kill.
     const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
     const errors_thread = std.Thread.spawn(.{}, WslOutputDrain.run, .{&errors}) catch |err| {
-        windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id, 1) catch {};
         joinWslDrains(&.{&drain}, &.{drain_thread});
         _ = child.wait() catch {};
         child_running = false;
@@ -4746,12 +4749,12 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     const drains = [_]*WslOutputDrain{ &drain, &errors };
     const threads = [_]std.Thread{ drain_thread, errors_thread };
 
-    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
+    win32_sys.waitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
         if (err == error.WaitTimeOut) log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
             exe_path,
             wsl_list_timeout_ms,
         });
-        windows.TerminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id, 1) catch {};
         joinWslDrains(&drains, &threads);
         _ = child.wait() catch {};
         child_running = false;
@@ -4762,7 +4765,7 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // The whole exit code, before `child.wait()` keeps only its low byte: a
     // crash whose code ends in a zero byte is no success.
     var code: windows.DWORD = undefined;
-    const exit_code: ?u32 = if (windows.kernel32.GetExitCodeProcess(child.id, &code) != 0) code else null;
+    const exit_code: ?u32 = if (win32_sys.GetExitCodeProcess(child.id, &code) != 0) code else null;
     _ = try child.wait();
     child_running = false;
     // Stdout read whole to the pipe's end, or the list is not complete: a
@@ -4797,7 +4800,7 @@ const wsl_drain_grace_ms = 500;
 /// failed.
 fn joinWslDrains(drains: []const *WslOutputDrain, threads: []const std.Thread) void {
     for (drains, threads) |drain, thread| {
-        windows.WaitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
+        win32_sys.waitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
         thread.join();
     }
 }
@@ -4982,7 +4985,7 @@ const LxssRegistry = struct {
 
     fn open(self: *LxssRegistry) LxssRead(void) {
         const path = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss");
-        return switch (windows.advapi32.RegOpenKeyExW(windows.HKEY_CURRENT_USER, path, 0, windows.KEY_READ, &self.key)) {
+        return switch (win32_sys.RegOpenKeyExW(windows.HKEY_CURRENT_USER, path, 0, win32_types.KEY_READ, &self.key)) {
             0 => .{ .found = {} },
             error_file_not_found => .missing,
             else => .failed,
@@ -4990,7 +4993,7 @@ const LxssRegistry = struct {
     }
 
     fn close(self: *LxssRegistry) void {
-        _ = windows.advapi32.RegCloseKey(self.key);
+        _ = win32_sys.RegCloseKey(self.key);
     }
 
     fn subkey(self: *LxssRegistry, index: u32, buf: *[256:0]u16) LxssRead([:0]const u16) {
@@ -5010,11 +5013,11 @@ const LxssRegistry = struct {
     fn distributionName(self: *LxssRegistry, name: [:0]const u16, out: []u8) LxssRead([]const u8) {
         var buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
         var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-        switch (windows.advapi32.RegGetValueW(
+        switch (win32_sys.RegGetValueW(
             self.key,
             name,
             std.unicode.utf8ToUtf16LeStringLiteral("DistributionName"),
-            windows.advapi32.RRF.RT_REG_SZ,
+            win32_types.RRF.RT_REG_SZ,
             null,
             @ptrCast(&buf),
             &bytes,
@@ -5380,14 +5383,14 @@ fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) 
     (try dir.createFile(name, .{})).close();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try dir.realpath(name, &path_buf);
-    const path_w = try windows.sliceToPrefixedFileW(null, path);
-    const handle = windows.kernel32.CreateFileW(
+    const path_w = try prefixed_path.sliceToPrefixedFileW(path);
+    const handle = win32_sys.CreateFileW(
         path_w.span().ptr,
-        windows.GENERIC_WRITE,
+        win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_FLAG_OPEN_REPARSE_POINT,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_FLAG_OPEN_REPARSE_POINT,
         null,
     );
     if (handle == windows.INVALID_HANDLE_VALUE) return error.SkipZigTest;
@@ -5398,7 +5401,7 @@ fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) 
     defer alloc.free(record);
 
     const FSCTL_SET_REPARSE_POINT: windows.DWORD = 0x900a4;
-    windows.DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, record, null) catch return error.SkipZigTest;
+    win32_sys.deviceIoControl(handle, FSCTL_SET_REPARSE_POINT, record, null) catch return error.SkipZigTest;
 }
 
 test "appExecLinkTarget reads the third string and rejects a cut, foreign or odd record" {
@@ -5459,7 +5462,7 @@ test "ntOpenDontReparse refuses a path past PATH_MAX_WIDE before converting it" 
         @memset(path, 'a');
         @memcpy(path[0..3], "C:\\");
         var handle: windows.HANDLE = undefined;
-        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle));
+        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, win32_types.FILE_READ_ATTRIBUTES, 0, &handle));
     }
 }
 
@@ -5507,8 +5510,8 @@ fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !voi
     defer alloc.free(nt_target);
     const target_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, nt_target);
     defer alloc.free(target_w);
-    const link_w = try windows.sliceToPrefixedFileW(null, link);
-    const handle = windows.kernel32.CreateFileW(link_w.span().ptr, windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS, null);
+    const link_w = try prefixed_path.sliceToPrefixedFileW(link);
+    const handle = win32_sys.CreateFileW(link_w.span().ptr, win32_types.GENERIC_WRITE, 0, null, win32_types.OPEN_EXISTING, win32_types.FILE_FLAG_OPEN_REPARSE_POINT | win32_types.FILE_FLAG_BACKUP_SEMANTICS, null);
     if (handle == windows.INVALID_HANDLE_VALUE) return error.AccessDenied;
     defer windows.CloseHandle(handle);
     const bytes: u16 = @intCast(target_w.len * 2);
@@ -5522,7 +5525,7 @@ fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !voi
     try record.appendSlice(alloc, &.{ 0, 0 }); // empty print name
     try record.appendSlice(alloc, std.mem.sliceAsBytes(target_w));
     try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // terminators
-    try windows.DeviceIoControl(handle, 0x900a4, record.items, null);
+    try win32_sys.deviceIoControl(handle, 0x900a4, record.items, null);
 }
 
 test "explicit commands and child PATH keep junctions with spaces" {
@@ -5558,11 +5561,11 @@ test "explicit commands and child PATH keep junctions with spaces" {
 
 test "local executable data reparse tags exclude redirects and cloud files" {
     for ([_]u32{ 0x80000017, 0x80000013 }) |tag| {
-        try std.testing.expect(isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
-        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_DIRECTORY, .ReparseTag = tag }));
+        try std.testing.expect(isLocalExecutableInfo(.{ .FileAttributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
+        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT | win32_types.FILE_ATTRIBUTE_DIRECTORY, .ReparseTag = tag }));
     }
     for ([_]u32{ 0xa000000c, 0xa0000003, 0x9000001a, 0x8000001b }) |tag|
-        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
+        try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = win32_types.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
 }
 
 test "shell discovery uses the production DOS mapping before metadata opens" {
@@ -5882,7 +5885,7 @@ test "registryString reads a string value and nothing else" {
     var key: windows.HKEY = undefined;
     try testing.expectEqual(@as(i32, 0), Reg.RegCreateKeyExW(windows.HKEY_CURRENT_USER, subkey, 0, null, 0, key_write, null, &key, null));
     defer _ = Reg.RegDeleteKeyW(windows.HKEY_CURRENT_USER, subkey);
-    defer _ = windows.advapi32.RegCloseKey(key);
+    defer _ = win32_sys.RegCloseKey(key);
 
     // Present but not a string.
     const number: windows.DWORD = 7;
@@ -6265,10 +6268,10 @@ fn testWslPipe(read_end: *windows.HANDLE, write_end: *windows.HANDLE) !void {
     var wide: [96:0]u16 = undefined;
     const len = try std.unicode.utf8ToUtf16Le(&wide, name);
     wide[len] = 0;
-    const rd = windows.kernel32.CreateNamedPipeW(wide[0..len :0], windows.PIPE_ACCESS_INBOUND | windows.FILE_FLAG_OVERLAPPED, windows.PIPE_TYPE_BYTE, 1, 4096, 4096, 0, null);
+    const rd = win32_sys.CreateNamedPipeW(wide[0..len :0], win32_types.PIPE_ACCESS_INBOUND | win32_types.FILE_FLAG_OVERLAPPED, win32_types.PIPE_TYPE_BYTE, 1, 4096, 4096, 0, null);
     if (rd == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
     errdefer windows.CloseHandle(rd);
-    const wr = windows.kernel32.CreateFileW(wide[0..len :0], windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, null);
+    const wr = win32_sys.CreateFileW(wide[0..len :0], win32_types.GENERIC_WRITE, 0, null, win32_types.OPEN_EXISTING, win32_types.FILE_ATTRIBUTE_NORMAL, null);
     if (wr == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
     read_end.* = rd;
     write_end.* = wr;
@@ -6296,13 +6299,13 @@ fn testJoinWithin(drain: *WslOutputDrain, thread: std.Thread, write_end: windows
         thread.join();
         return err;
     };
-    const ended = if (windows.WaitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
+    const ended = if (win32_sys.waitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
     windows.CloseHandle(write_end);
     // Bounded too. With the write end closed, a read ends at the pipe's
     // end, and a reader held in a test hook is released by its test within
     // seconds. A join still running after this would leave the drain freed
     // under live threads if the test returned, so it ends the run instead.
-    windows.WaitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
+    win32_sys.waitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
         @panic("a WSL drain's join did not end after its pipe closed");
     joiner.join();
     if (!ended) return error.TestJoinHung;
@@ -6319,7 +6322,7 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         defer windows.CloseHandle(read_end);
         var drain: WslOutputDrain = try .init(.{ .handle = read_end });
         defer drain.deinit();
-        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         windows.CloseHandle(write_end);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
         joinWslDrains(&.{&drain}, &.{thread});
@@ -6338,7 +6341,7 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         defer if (write_open) |handle| windows.CloseHandle(handle);
         var drain: WslOutputDrain = try .init(.{ .handle = read_end });
         defer drain.deinit();
-        _ = try windows.WriteFile(write_end, "Ubuntu\r\n", null);
+        _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
         // The reader and the write end are `testJoinWithin`'s from here.
         write_open = null;
@@ -6362,7 +6365,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
             if (held) return;
             held = true;
             _ = SetEvent(at_hook.?);
-            windows.WaitForSingleObjectEx(release.?, windows.INFINITE, false) catch {};
+            win32_sys.waitForSingleObjectEx(release.?, win32_types.INFINITE, false) catch {};
         }
 
         /// Releases the reader once the join has stopped it (the drain's
@@ -6380,9 +6383,9 @@ test "a WSL drain held outside its read until long after it was stopped still en
             _ = SetEvent(release.?);
         }
     };
-    Hold.at_hook = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    Hold.at_hook = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
     defer windows.CloseHandle(Hold.at_hook.?);
-    Hold.release = try windows.CreateEventExW(null, null, windows.CREATE_EVENT_MANUAL_RESET, windows.EVENT_ALL_ACCESS);
+    Hold.release = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
     defer windows.CloseHandle(Hold.release.?);
     Hold.held = false;
     test_wsl_before_read = &Hold.before;
@@ -6410,7 +6413,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
         drain.stop();
         thread.join();
     };
-    try windows.WaitForSingleObjectEx(Hold.at_hook.?, 3000, false);
+    try win32_sys.waitForSingleObjectEx(Hold.at_hook.?, 3000, false);
     const releaser = try std.Thread.spawn(.{}, Hold.releaseAfterStop, .{});
     defer releaser.join();
     // The reader and the write end are `testJoinWithin`'s from here: it

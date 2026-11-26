@@ -26,6 +26,7 @@
 //! toast-activation channel; it reads no App state.
 
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const windows = std.os.windows;
 const com = @import("win32_uia/com.zig");
 
@@ -34,7 +35,7 @@ const Allocator = std.mem.Allocator;
 const HRESULT = com.HRESULT;
 const GUID = com.GUID;
 const DWORD = windows.DWORD;
-const BOOL = windows.BOOL;
+const BOOL = win32_types.BOOL;
 
 /// The activator's CLSID. `dist/windows/noctty.iss` registers the same value
 /// (the test "installer toast activator CLSID matches the runtime" holds the

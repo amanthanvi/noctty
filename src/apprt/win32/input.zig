@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("sys.zig");
+const win32_types = @import("../win32_types.zig");
 const builtin = @import("builtin");
 
 const apprt = @import("../../apprt.zig");
@@ -2947,9 +2949,9 @@ const TestingLayout = struct {
 
     fn activate(comptime klid: []const u8) error{TestingLayoutLock}!?TestingLayout {
         const lock = sys.CreateMutexW(null, 0, lock_name) orelse return error.TestingLayoutLock;
-        switch (windows.kernel32.WaitForSingleObject(lock, lock_timeout_ms)) {
+        switch (win32_sys.WaitForSingleObject(lock, lock_timeout_ms)) {
             // An abandoned lock is owned now; its holder exited mid-test.
-            windows.WAIT_OBJECT_0, windows.WAIT_ABANDONED => {},
+            win32_types.WAIT_OBJECT_0, win32_types.WAIT_ABANDONED => {},
             else => {
                 windows.CloseHandle(lock);
                 return error.TestingLayoutLock;
