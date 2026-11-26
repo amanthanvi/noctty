@@ -6196,7 +6196,7 @@ pub fn pasteFilePayload(surface: *Surface, payload: [:0]const u8) !void {
             // Non-modal confirm overlay; dupes payload so it survives
             // the caller's teardown. Paste completes asynchronously
             // on accept via `surfaceConfirmPasteAccept`.
-            try surface.requestPasteConfirm(.paste, payload);
+            try surface.requestPasteConfirm(.{ .paste = .standard }, payload);
             return;
         }
     }
@@ -6205,7 +6205,7 @@ pub fn pasteFilePayload(surface: *Surface, payload: [:0]const u8) !void {
         // Unsafe content (newlines, control sequences, etc.). Defer to
         // the non-modal confirm overlay; the Accept callback re-submits
         // with `confirmed = true`.
-        error.UnsafePaste, error.UnauthorizedPaste => try surface.requestPasteConfirm(.paste, payload),
+        error.UnsafePaste, error.UnauthorizedPaste => try surface.requestPasteConfirm(.{ .paste = .standard }, payload),
         else => return err,
     };
 }
@@ -15496,7 +15496,7 @@ test "win32 OSC 52 read displacement detach and owner teardown remain silent" {
     try fixture.expectSilent();
 
     try fixture.surface.requestPasteConfirm(.{ .osc_52_read = .standard }, "secret");
-    try fixture.surface.requestPasteConfirm(.paste, "user\npaste");
+    try fixture.surface.requestPasteConfirm(.{ .paste = .standard }, "user\npaste");
     try fixture.expectSilent();
     fixture.host.invokeConfirmCancel(); // Cancel the user's paste, never OSC 52.
     try fixture.expectSilent();

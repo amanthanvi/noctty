@@ -453,7 +453,11 @@ pub const Surface = struct {
     /// of this terminal (`Host.tabBackground`). Only this terminal's own
     /// config sets it (`setTabBackground`); background colors a program sets
     /// at run time (OSC 11) are not followed.
-    tab_background: u32 = colorRefFromConfig(std.meta.fieldInfo(configpkg.Config, .background).defaultValue().?),
+    tab_background: u32 = colorRefFromConfig(default_background: {
+        // 0.17's fieldInfo gives the attributes, whose defaultValue takes the type.
+        const info = std.meta.fieldInfo(configpkg.Config, .background);
+        break :default_background info.attrs.defaultValue(info.type).?;
+    }),
     scrollbar_config: configpkg.Config.Scrollbar = .system,
     secure_input: bool = false,
     secure_input_ever_engaged: bool = false,
@@ -2492,6 +2496,10 @@ pub const Surface = struct {
         const mode: HostOverlayMode = switch (kind) {
             .surface => .surface_title,
             .tab => .tab_title,
+            // Upstream 1.4's window-title prompt: Win32 has no window title
+            // override to prompt for, and `App.performAction` answers it
+            // false before it gets here.
+            .window => return,
         };
         if (host.overlay_mode == mode) {
             host.hideOverlay();
@@ -3252,12 +3260,12 @@ pub const Surface = struct {
                         @tagName(verdict.severity),
                         verdict.reason,
                     });
-                    try self.requestPasteConfirm(.paste, payload);
+                    try self.requestPasteConfirm(.{ .paste = .standard }, payload);
                     return;
                 }
             }
             self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
-                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.paste, payload),
+                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.{ .paste = .standard }, payload),
                 else => return err,
             };
             return;

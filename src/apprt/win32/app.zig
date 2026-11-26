@@ -451,7 +451,7 @@ const InstallKind = enum {
         if (isPortableModeActive(alloc)) return .portable;
         const install_dir = currentInstallDir(alloc) catch return .other;
         defer alloc.free(install_dir);
-        return classify(false, internal_os.windows_ext.isInstallerManagedInstallDir(install_dir));
+        return classify(false, internal_os.windows_ext.isInstallerManagedInstallDir(global.io(), install_dir));
     }
 
     test "only setup-managed and portable-marker copies stage an update" {
@@ -3870,7 +3870,7 @@ pub const App = struct {
             return;
         }
 
-        if (!internal_os.windows_ext.isInstallerManagedInstallDir(install_dir)) {
+        if (!internal_os.windows_ext.isInstallerManagedInstallDir(global.io(), install_dir)) {
             self.showUpdateApplyFailure(error.InvalidInstallPath);
             return error.InvalidInstallPath;
         }
@@ -3954,7 +3954,7 @@ pub const App = struct {
         }
         const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
         defer self.core_app.alloc.free(install_dir);
-        return internal_os.windows_ext.isInstallerManagedInstallDir(install_dir) and
+        return internal_os.windows_ext.isInstallerManagedInstallDir(global.io(), install_dir) and
             updatepkg.hasStagedWindowsInstall(self.core_app.alloc, state_path, .installer);
     }
 
@@ -4866,6 +4866,9 @@ pub const App = struct {
             },
 
             .prompt_title => {
+                // Upstream 1.4's window-title prompt is not performed (see
+                // the not-performed arm below).
+                if (value == .window) return false;
                 if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.promptTitle(value);
                     return true;
@@ -5150,6 +5153,15 @@ pub const App = struct {
             // renderer state mutex held: an arm here must neither take that
             // mutex nor pump messages.
             .selection_changed => return false,
+
+            // Upstream 1.4's actions the Win32 runtime does not perform, so
+            // they answer false (not performed): resize_window, which CSI 8 t
+            // sends (Win32 does nothing with it: lead ruling S5, carry-over
+            // L1); set_window_title, a window title override the Win32
+            // window has no counterpart of yet; and export_terminal_io, the
+            // inspector's Terminal IO export, which the Win32 inspector does
+            // not offer.
+            .resize_window, .set_window_title, .export_terminal_io => return false,
         }
     }
 
