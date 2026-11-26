@@ -197,14 +197,35 @@ has one declaration:
 - Re-read the struct at every merge: a name it newly declares leaves the fork
   file, so each symbol on the path keeps one declaration.
 
-On this path `std.Io` is for locks taken with
-`lockUncancelable`, timestamps, thread names, passing the handle on, and
-regular files that are not pty handles (the working-directory check before a
-spawn, the `input` files, the bundled ConPTY loader). The reader's
-`yieldToDemand` keeps upstream's timed wait between chunks. `Io.File` on a pty
-handle or pipe, `Io.async`, `Io.concurrent`, the cancel APIs and `Io.sleep`
-stay out of it; upstream's POSIX `killPid` and `getpgid` keep their
-`Io.sleep`, which no Windows build reaches.
+On this path `std.Io` does five things and no others:
+
+- locks, always taken with `lockUncancelable`;
+- timestamps;
+- thread names;
+- passing the handle on: to `Terminal.init`, to the renderer mailbox's
+  `push`, and to the Kitty image delete in `clearScreen`;
+- regular files, at five call sites: the working-directory check in
+  `Subprocess.start`, the executable's path in `Subprocess.init`, the `input`
+  files that `prepareInput` opens and `threadEnter` reads, the output trace's
+  file in `writeSnapshot`, and the bundled ConPTY loader (`loadBundledFrom`
+  and `openConsoleMatchesArchitecture`).
+
+The reader's `yieldToDemand` also keeps upstream's timed wait between chunks,
+the one wait there that is cancelable by signature.
+
+The invariant behind the list: no `Io` call on this path takes a pty handle
+or a pipe, starts a task, or can be cancelled. The handles are the pty's
+input and output pipes and their console-side ends, the quit pipe, an adopted
+session's signal pipe, and the pseudo console. So `Io.File` on any of them,
+`Io.async`, `Io.concurrent` and the cancel APIs stay out. So does
+`std.Io.sleep`: the Windows functions wait on a handle with a bound, and only
+upstream's POSIX `killPid` and `getpgid`, which no Windows build reaches, keep
+theirs.
+
+The loader opens one file, to read `OpenConsole.exe`'s header. That is an
+ordinary `std.Io` open, and on Zig 0.17 those wait out a sharing violation
+before they fail. So the merge decides what a held `OpenConsole.exe` does to
+the first pane, and a held-file test pins the choice.
 
 Upstream's own Windows lines in these files are not taken where they would
 undo a fork fix. They:
@@ -244,16 +265,16 @@ in `plans/stone-1a/generate_stone_ledgers.py` assigns the class. It tests
 class 1 first, so a fork-owned seam stays class 1 where another pattern would
 also match.
 
-| Class | Paths                                                                                                                                                                                                             | Default side                                                                                                                                                                                     |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1     | `src/apprt/**`, and the fork-owned seams listed above wherever they live                                                                                                                                          | The fork wins on Windows behaviour and fork-owned features; upstream wins on VT and protocol correctness and memory safety, adapted around the fork                                              |
-| 2     | Windows platform and process: `src/os/**`, `src/pty.zig`, `src/termio/**`, `src/crash/**`, `src/global.zig`, `src/main_ghostty.zig`, `src/App.zig`                                                                | Fork, except the `exp` struct of `src/os/windows.zig` (`exp.kernel32` and `exp.ntdll`), which stays upstream's as written (the ConPTY paragraphs above)                                          |
-| 3     | Terminal core: the rest of `src/terminal/**`                                                                                                                                                                      | Upstream, re-applying the fork-owned delta (the written override below)                                                                                                                          |
-| 4     | The libghostty-vt C API: `src/terminal/c/**`, `include/ghostty/**`, `src/lib_vt.zig`                                                                                                                              | Upstream                                                                                                                                                                                         |
-| 5     | Other shared core: everything no other class names                                                                                                                                                                | Per file, which means no default: each hunk is decided and recorded with its rule and its reason                                                                                                 |
-| 6     | Shell integration: `src/shell-integration/**`                                                                                                                                                                     | Fork, taking upstream's security fixes                                                                                                                                                           |
-| 7     | Build, CI, packaging, repository files and tests, as `owner()` matches them: `build.zig*`, `src/build/**`, `pkg/**`, `.github/**`, `nix*`, `flake*`, `CODEOWNERS`, `typos*`, `valgrind*`, `.gitignore`, `test/**` | Fork for CI, packaging and repository files; upstream's build port, adapted; a test hunk takes the side the code it tests took, and the fork's own harnesses (`test/windows/**`) stay the fork's |
-| 8     | Docs: top-level Markdown and Markdown under `src/`                                                                                                                                                                | Fork                                                                                                                                                                                             |
+| Class | Paths                                                                                                                                                                                                             | Default side                                                                                                                                                                                                                                                                                                                                                                    |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | `src/apprt/**`, and the fork-owned seams listed above wherever they live                                                                                                                                          | The fork wins on Windows behaviour and fork-owned features; upstream wins on VT and protocol correctness and memory safety, adapted around the fork                                                                                                                                                                                                                             |
+| 2     | Windows platform and process: `src/os/**`, `src/pty.zig`, `src/termio/**`, `src/crash/**`, `src/global.zig`, `src/main_ghostty.zig`, `src/App.zig`                                                                | Fork, except the `exp` struct of `src/os/windows.zig` (`exp.kernel32` and `exp.ntdll`), which stays upstream's as written (the ConPTY paragraphs above)                                                                                                                                                                                                                         |
+| 3     | Terminal core: the rest of `src/terminal/**`                                                                                                                                                                      | Upstream, re-applying the fork-owned delta (the written override below)                                                                                                                                                                                                                                                                                                         |
+| 4     | The libghostty-vt C API: `src/terminal/c/**`, `include/ghostty/**`, `src/lib_vt.zig`                                                                                                                              | Upstream                                                                                                                                                                                                                                                                                                                                                                        |
+| 5     | Other shared core: everything no other class names                                                                                                                                                                | Per file, which means no default: each hunk is decided and recorded with its rule and its reason                                                                                                                                                                                                                                                                                |
+| 6     | Shell integration: `src/shell-integration/**`                                                                                                                                                                     | Fork, taking upstream's security fixes                                                                                                                                                                                                                                                                                                                                          |
+| 7     | Build, CI, packaging, repository files and tests, as `owner()` matches them: `build.zig*`, `src/build/**`, `pkg/**`, `.github/**`, `nix*`, `flake*`, `CODEOWNERS`, `typos*`, `valgrind*`, `.gitignore`, `test/**` | Fork for CI, packaging and repository files; upstream's build port, adapted; the fork's own harnesses (`test/windows/**`) stay the fork's. By default a test hunk takes the side the code it tests took; where that code was merged by hand, both sides' tests are kept; an upstream test that is not taken is ledgered as an absence, as in `plans/stone-1a/test-absences.tsv` |
+| 8     | Docs: top-level Markdown and Markdown under `src/`                                                                                                                                                                | Fork                                                                                                                                                                                                                                                                                                                                                                            |
 
 A class chooses a default side and nothing else. Three things say when the
 default does not hold: the seam paragraphs under Fork-owned files (the
