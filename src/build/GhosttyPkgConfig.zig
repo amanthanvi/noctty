@@ -65,9 +65,14 @@ pub fn getSharedFile(self: *const GhosttyPkgConfig) LazyPath {
 
 pub fn getStaticFile(self: *const GhosttyPkgConfig) LazyPath {
     const run = self.owner.addRunArtifact(self.generator);
-    run.setEnvironmentVariable("IS_STATIC", "1");
     run.addDirectoryArg2(self.owner.graph.path(.install_prefix, ""), .{
         .make_absolute = true,
     });
+    // noctty: an argument, not upstream's `IS_STATIC` environment variable.
+    // `setEnvironmentVariable` clones the configurer's whole environment into
+    // the Run step, and Zig 0.17 writes the step, that copy included, into the
+    // build configuration under `.zig-cache` (measured with a sentinel
+    // variable, 1B.4).
+    run.addArg("--static");
     return run.captureStdOut(.{});
 }

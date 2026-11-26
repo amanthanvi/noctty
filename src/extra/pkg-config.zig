@@ -13,7 +13,13 @@ pub fn main(init: std.process.Init) !void {
     std.debug.assert(args.skip());
     const prefix = args.next() orelse return error.NoPrefix;
 
-    const is_static = init.environ_map.contains("IS_STATIC");
+    // noctty: `--static` after the prefix (GhosttyPkgConfig.getStaticFile),
+    // where upstream reads an `IS_STATIC` environment variable.
+    const is_static = if (args.next()) |arg| static: {
+        if (!std.mem.eql(u8, arg, "--static")) return error.UnknownArgument;
+        break :static true;
+    } else false;
+    if (args.next() != null) return error.UnknownArgument;
 
     const stdout = std.Io.File.stdout();
     var stdout_writer = stdout.writer(io, &.{});
