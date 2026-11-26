@@ -15,6 +15,16 @@ the build with each set of options given (`zig build <options> --print-configura
 configures and builds nothing), and searches every file under the local cache for the sentinel's
 bytes. It prints the names of the files that hold it, never their contents, and exits 1 when any does.
 
+By default it configures two of the three option sets CI's windows-lib-vt job builds with: the
+default build and lib-vt (`-Demit-lib-vt=true`). Not covered (council F9): the differential
+oracle's set (`oracle -Dvt-api=v140 -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline
+-Dcustom-shaders=true`, the job's oracle step). The oracle's argument guard
+(`test/differential-oracle/build_args.py`) refuses any option outside its allowlist, so a
+configure-only `--print-configuration-path` run of that set fails before it writes anything (measured
+at 1B.5). A configure only reaches the build-script code its options select, so the oracle's
+configure-time code (`src/differential_oracle_build.zig`, which Contracts.21 reads) is checked by
+source only.
+
 Run it on a checkout whose local cache holds no configuration from a run without the sentinel (CI's
 fresh checkout), or give -CacheDir a fresh directory: a configure the cache already holds is not run
 again.
