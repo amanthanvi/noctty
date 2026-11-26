@@ -4,6 +4,7 @@
 const Windows = @This();
 const std = @import("std");
 const global = @import("../global.zig");
+const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const apprt = @import("../apprt.zig");
 const font = @import("../font/main.zig");
@@ -58,7 +59,7 @@ fn initGL(alloc: std.mem.Allocator, options: renderer.Options) !*GL {
         return err;
     }
     if (comptime build_config.renderer_test_tools) {
-        if (std.process.hasEnvVarConstant("NOCTTY_RENDERER_FAIL_OPENGL")) return error.OpenGLTestFailure;
+        if (internal_os.hasEnvVarConstant("NOCTTY_RENDERER_FAIL_OPENGL")) return error.OpenGLTestFailure;
     }
     // The default surface was prepared in surfaceInit, before font allocation.
     if (!options.rt_surface.renderer_gl_prepared) {
@@ -195,7 +196,7 @@ fn showNotice(self: *Windows) void {
     if (self.notice_len == 0) return;
     if (comptime build_config.renderer_test_tools) {
         // Target-pixel parity fixes geometry independently of host banners.
-        if (std.process.hasEnvVarConstant("NOCTTY_RENDERER_HIDE_NOTICES")) {
+        if (internal_os.hasEnvVarConstant("NOCTTY_RENDERER_HIDE_NOTICES")) {
             self.notice_len = 0;
             return;
         }
@@ -379,10 +380,10 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
     if (!build_config.renderer_test_tools) return error.TestToolsDisabled;
     self.mutex.lockUncancelable(global.io());
     defer self.mutex.unlock(global.io());
-    const status_path = try std.process.getEnvVarOwned(self.alloc, "NOCTTY_RENDERER_STATUS_PATH");
+    const status_path = try internal_os.getEnvVarOwned(self.alloc, "NOCTTY_RENDERER_STATUS_PATH");
     defer self.alloc.free(status_path);
-    const file = try std.fs.cwd().createFile(status_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().createFile(global.io(), status_path, .{});
+    defer file.close(global.io());
     const json = switch (self.active) {
         .opengl => |v| try std.json.Stringify.valueAlloc(self.alloc, .{ .backend = "opengl", .split_dimmed = v.split_dimmed, .preedit_caret_clean_rebuilds = v.preedit_caret_clean_rebuilds }, .{}),
         .d3d11 => |v| report: {

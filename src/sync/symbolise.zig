@@ -237,12 +237,12 @@ fn loadApi() error{NoDbgHelp}!*const Api {
     const lib = LoadLibraryExW(std.unicode.utf8ToUtf16LeStringLiteral("dbghelp.dll"), null, LOAD_LIBRARY_SEARCH_SYSTEM32) orelse
         return error.NoDbgHelp;
     var fns: Api = undefined;
-    inline for (@typeInfo(Api).@"struct".fields) |field| {
-        const proc = GetProcAddress(lib, field.name) orelse return error.NoDbgHelp;
+    inline for (@typeInfo(Api).@"struct".field_names) |field_name| {
+        const proc = GetProcAddress(lib, field_name) orelse return error.NoDbgHelp;
         // A function pointer is aligned 4 on aarch64 and 1 on x86_64, so only an
         // aarch64 build rejects the cast without the assertion (tabs-panes.md,
         // 2026-11-08 TEAROFF-01, review round 2).
-        @field(fns, field.name) = @ptrCast(@alignCast(proc));
+        @field(fns, field_name) = @ptrCast(@alignCast(proc));
     }
     api = fns;
     return &api.?;

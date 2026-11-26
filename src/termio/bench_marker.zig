@@ -17,6 +17,7 @@
 //! before touching terminal state.
 
 const std = @import("std");
+const internal_os = @import("../os/main.zig");
 const Allocator = std.mem.Allocator;
 
 const terminalpkg = @import("../terminal/main.zig");
@@ -27,7 +28,7 @@ pub const BenchmarkEndMarker = struct {
     seen: bool = false,
 
     pub fn init(alloc: Allocator) BenchmarkEndMarker {
-        const raw = std.process.getEnvVarOwned(
+        const raw = internal_os.getEnvVarOwned(
             alloc,
             "NOCTTY_BENCH_END_MARKER",
         ) catch return .{};

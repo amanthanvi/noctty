@@ -2580,7 +2580,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         /// locks below for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
         renderer_mutex: *renderer.StateMutex,
         input: []const u8,
-        done: std.Thread.ResetEvent = .{},
+        done: std.Io.Event = .unset,
 
         fn run(self: *@This()) void {
             // As the pty reader, on a helper thread or nested in the test
@@ -2590,7 +2590,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
             self.renderer_mutex.lock();
             defer self.renderer_mutex.unlock();
             self.stream.nextSlice(self.input);
-            self.done.set();
+            self.done.set(std.testing.io);
         }
 
         /// Feed on another thread until it waits on the full `queue`, stop
@@ -2598,18 +2598,19 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
         fn stoppedWhileWaiting(self: *@This(), queue: anytype, flag: *std.atomic.Value(bool)) !void {
             flag.store(false, .release);
             const thread = try std.Thread.spawn(.{}, run, .{self});
-            var timer = try std.time.Timer.start();
-            const waited = while (timer.read() < 5 * std.time.ns_per_s and !self.done.isSet()) {
-                queue.mutex.lock();
+            const io = std.testing.io;
+            const started: std.Io.Timestamp = .now(io, .awake);
+            const waited = while (started.untilNow(io, .awake).toNanoseconds() < 5 * std.time.ns_per_s and !self.done.isSet()) {
+                queue.mutex.lockUncancelable(io);
                 const waiting = queue.not_full_waiters;
-                queue.mutex.unlock();
+                queue.mutex.unlock(io);
                 if (waiting == 1) break true;
                 std.Thread.yield() catch {};
             } else false;
             flag.store(true, .release);
-            self.done.timedWait(5 * std.time.ns_per_s) catch {
+            self.done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {
                 // Make room so the waiting feed can finish, then fail.
-                _ = queue.pop();
+                _ = queue.pop(io);
                 thread.join();
                 return error.StoppedReaderKeptWaiting;
             };
@@ -2700,7 +2701,7 @@ test "PKG16 integrated cmd prompt clears stale keyboard modes" {
     // default cmd prompt codes into the bytes ConPTY forwards to this handler.
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    var env = std.process.EnvMap.init(arena.allocator());
+    var env = std.process.Environ.Map.init(arena.allocator());
     const integration = try @import("shell_integration.zig").setup(
         arena.allocator(),
         "C:\\unused",

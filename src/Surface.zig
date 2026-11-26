@@ -3562,7 +3562,7 @@ fn resolvePathForOpening(
 
     const base = terminal_pwd orelse return null;
     const resolved = try std.fs.path.resolve(self.alloc, &.{ base, path });
-    std.fs.accessAbsolute(resolved, .{}) catch {
+    std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
         self.alloc.free(resolved);
         return null;
     };

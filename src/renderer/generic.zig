@@ -9,6 +9,7 @@ const font = @import("../font/main.zig");
 const inputpkg = @import("../input.zig");
 const os = @import("../os/main.zig");
 const global = @import("../global.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const terminal = @import("../terminal/main.zig");
 const renderer = @import("../renderer.zig");
 const math = @import("../math.zig");
@@ -654,7 +655,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             frame_index: std.math.IntFittingRange(0, buf_count) = 0,
             /// Semaphore that we wait on to make sure we have an available
             /// frame state struct so we can start working on a new frame.
-            frame_sema: std.Thread.Semaphore = .{ .permits = buf_count },
+            frame_sema: std.Io.Semaphore = .{ .permits = buf_count },
 
             /// Set to true when deinited, if you try to deinit a defunct
             /// swap chain it will just be ignored, to prevent double-free.
@@ -681,7 +682,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Wait for all of our inflight draws to complete
                 // so that we can cleanly deinit our GPU state.
-                for (0..buf_count) |_| self.frame_sema.wait();
+                for (0..buf_count) |_| self.frame_sema.waitUncancelable(global.io());
                 for (&self.frames) |*frame| frame.deinit();
             }
 
@@ -691,15 +692,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             pub fn nextFrame(self: *SwapChain) error{Defunct}!*FrameState {
                 if (self.defunct) return error.Defunct;
 
-                self.frame_sema.wait();
-                errdefer self.frame_sema.post();
+                self.frame_sema.waitUncancelable(global.io());
+                errdefer self.frame_sema.post(global.io());
                 self.frame_index = (self.frame_index + 1) % buf_count;
                 return &self.frames[self.frame_index];
             }
 
             /// This should be called when the frame has completed drawing.
             pub fn releaseFrame(self: *SwapChain) void {
-                self.frame_sema.post();
+                self.frame_sema.post(global.io());
             }
         };
 
@@ -2353,17 +2354,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
 
                 // Open the file
-                var file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+                var file = std.Io.Dir.openFileAbsolute(
+                    global.io(),
+                    path,
+                    .{},
+                ) catch |err| {
                     log.warn(
                         "error opening background image file \"{s}\": {}",
                         .{ path, err },
                     );
                     break :load_background;
                 };
-                defer file.close();
+                defer file.close(global.io());
 
                 // Read it
-                const contents = file.readToEndAlloc(
+                const contents = compat_file.readToEndAlloc(
+                    file,
                     self.alloc,
                     std.math.maxInt(u32), // Max size of 4 GiB, for now.
                 ) catch |err| {

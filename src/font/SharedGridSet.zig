@@ -109,8 +109,8 @@ pub fn startDiscoveryPrefetch(self: *SharedGridSet) void {
     if (self.discovery_prefetch_thread != null) return;
 
     const disco = disco: {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(global.io());
+        defer self.lock.unlock(global.io());
         break :disco (self.discover() catch return) orelse return;
     };
 
@@ -217,8 +217,8 @@ pub fn ref(
 /// matched. Other configured or built-in families provide fallbacks. Names are
 /// borrowed from the set and stay valid while `key` is referenced.
 pub fn missingFamilies(self: *SharedGridSet, key: Key) []const [:0]const u8 {
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
     const entry = self.map.get(key) orelse return &.{};
     return entry.missing.reportable();
 }
@@ -231,8 +231,8 @@ pub fn configuredMissingFamilies(
     alloc: Allocator,
     config: *const Config,
 ) !MissingFamilies {
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.lock.lockUncancelable(global.io());
+    defer self.lock.unlock(global.io());
 
     var missing: MissingFamilies = .{};
     errdefer missing.deinit(alloc);

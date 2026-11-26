@@ -666,7 +666,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
         .path = args[0],
         .args = args,
         .env = env,
-        .cwd = cwd,
+        .cwd = temp.dupeSentinel(u8, cwd, 0) catch return null,
         .stdin = .{ .handle = nul },
         .stdout = .{ .handle = nul },
         .stderr = .{ .handle = nul },

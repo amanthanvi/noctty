@@ -169,7 +169,7 @@ const PipeSecurity = struct {
         return .{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
             .lpSecurityDescriptor = self.descriptor,
-            .bInheritHandle = win32_types.FALSE,
+            .bInheritHandle = .FALSE,
         };
     }
 };

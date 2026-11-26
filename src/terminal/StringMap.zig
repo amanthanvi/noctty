@@ -252,8 +252,7 @@ test "StringMap searchIterator Windows path with click position" {
     for ([_]u16{ 4, 5, 14, 31 }) |x| {
         const click_pin = s.pages.pin(.{ .active = .{ .x = x, .y = 0 } }).?;
         const line = s.selectLine(.{ .pin = click_pin }).?;
-        var map: StringMap = undefined;
-        alloc.free(try s.selectionString(alloc, .{ .sel = line, .trim = false, .map = &map }));
+        const map = try s.selectionStringMap(alloc, .{ .sel = line, .trim = false });
         defer map.deinit(alloc);
 
         var it = map.searchIterator(re);

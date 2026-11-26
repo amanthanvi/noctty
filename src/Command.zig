@@ -1066,8 +1066,7 @@ test "Command: windows-cmd-shell-command-line executes quoted command" {
     const exit = try cmd.wait(true);
     try testing.expectEqual(@as(u32, 0), exit.Exited);
 
-    try stdout.seekTo(0);
-    const contents = try stdout.readToEndAlloc(testing.allocator, 1024);
+    const contents = try readTestOutput(stdout, testing.allocator, 1024);
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("QUOTED_A \r\nQUOTED_B\r\n", contents);
 }
@@ -1111,8 +1110,7 @@ test "Command windows_command_line reaches cmd.exe exactly as written" {
         };
         try cmd.testingStart();
         _ = try cmd.wait(true);
-        try stdout.seekTo(0);
-        const output = try stdout.readToEndAlloc(alloc, 4096);
+        const output = try readTestOutput(stdout, alloc, 4096);
         try testing.expectEqualStrings(case.stdout, output);
     }
 }
@@ -1194,8 +1192,7 @@ test "a Developer Command Prompt line runs its batch file through cmd whatever t
         };
         try cmd.testingStart();
         _ = try cmd.wait(true);
-        try stdout.seekTo(0);
-        const output = try stdout.readToEndAlloc(alloc, 4096);
+        const output = try readTestOutput(stdout, alloc, 4096);
         testing.expect(std.mem.startsWith(u8, output, "BAT RAN -startdir=none -arch=x64 -host_arch=x64\r\n")) catch |err| {
             std.debug.print("install {s}: cmd wrote {s}\n", .{ name, output });
             return err;
@@ -1264,8 +1261,7 @@ test "PKG48 shell wrapper ignores implicit cwd programs and retains native synta
         const status = try cmd.wait(true);
         if (status.Exited != 0) std.debug.print("PKG48 failed fixture: {s}\n", .{case[0]});
         try testing.expectEqual(@as(u32, 0), status.Exited);
-        try stdout.seekTo(0);
-        const output = try stdout.readToEndAlloc(alloc, 4096);
+        const output = try readTestOutput(stdout, alloc, 4096);
         try testing.expectEqualStrings(case[1], output);
     }
 }
@@ -1324,8 +1320,7 @@ test "PKG48 shell wrapper supports literal expansion characters in PATH" {
                 };
                 try cmd.testingStart();
                 try testing.expectEqual(@as(u32, 0), (try cmd.wait(true)).Exited);
-                try stdout.seekTo(0);
-                try testing.expectEqualStrings(case[1], try stdout.readToEndAlloc(alloc, 4096));
+                try testing.expectEqualStrings(case[1], try readTestOutput(stdout, alloc, 4096));
             }
         }
     }
@@ -1531,6 +1526,17 @@ test "Command: rt post fork 1" {
     };
 
     try testing.expectError(error.PostForkError, cmd.testingStart());
+}
+
+/// A test's stdout file from its start, refused past `max_bytes` as 0.15's
+/// `File.readToEndAlloc` refused it (`error.FileTooBig`).
+fn readTestOutput(file: File, alloc: Allocator, max_bytes: usize) ![]u8 {
+    const size = (try file.stat(testing.io)).size;
+    if (size > max_bytes) return error.FileTooBig;
+    const data = try alloc.alloc(u8, @intCast(size));
+    errdefer alloc.free(data);
+    if (try file.readPositionalAll(testing.io, data, 0) != data.len) return error.EndOfStream;
+    return data;
 }
 
 fn createTestStdout(io: std.Io, dir: std.Io.Dir) !File {
@@ -1844,7 +1850,7 @@ test "Command: windows job object kill-on-close terminates local child" {
         if (process_id == root_process_id) continue;
         descendant_handle = apprt.win32_job_object.OpenProcess(
             windows.SYNCHRONIZE,
-            windows.FALSE,
+            windows_ext.FALSE,
             @intCast(process_id),
         );
         if (descendant_handle != null) break;

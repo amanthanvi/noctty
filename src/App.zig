@@ -323,7 +323,7 @@ test "automation-action safety rejects end_key_sequence parsed from IPC text" {
 fn testAutomationApp() App {
     return .{
         .alloc = std.testing.allocator,
-        .surfaces = .{},
+        .surfaces = .empty,
         .mailbox = .{},
         .font_grid_set = undefined,
         .config_conditional_state = .{},
