@@ -1455,6 +1455,69 @@ pub fn getFinalPathNameByHandle(handle: HANDLE, out_buffer: []u16) GetFinalPathN
     return path;
 }
 
+pub extern "kernel32" fn SetEnvironmentVariableW(lpName: LPCWSTR, lpValue: ?LPCWSTR) callconv(.winapi) BOOL;
+
+/// `SetLastError` taking std's `Win32Error`, which every caller names its
+/// codes with; the extern itself takes the SDK's `DWORD`.
+pub fn setLastError(err: windows.Win32Error) void {
+    SetLastError(@intFromEnum(err));
+}
+
+pub const LockFileError = error{ SystemResources, WouldBlock, Unexpected };
+
+/// `NtLockFile` with std's former status mapping.
+pub fn lockFile(
+    file_handle: HANDLE,
+    event: ?HANDLE,
+    apc_routine: ?*windows.IO_APC_ROUTINE,
+    apc_context: ?*anyopaque,
+    io_status_block: *windows.IO_STATUS_BLOCK,
+    byte_offset: *const windows.LARGE_INTEGER,
+    length: *const windows.LARGE_INTEGER,
+    key: ?*ULONG,
+    fail_immediately: u8,
+    exclusive_lock: u8,
+) LockFileError!void {
+    const rc = windows.ntdll.NtLockFile(
+        file_handle,
+        event,
+        apc_routine,
+        apc_context,
+        io_status_block,
+        byte_offset,
+        length,
+        key,
+        fail_immediately,
+        exclusive_lock,
+    );
+    switch (rc) {
+        .SUCCESS => return,
+        .INSUFFICIENT_RESOURCES => return error.SystemResources,
+        .LOCK_NOT_GRANTED => return error.WouldBlock,
+        .ACCESS_VIOLATION => unreachable, // bad io_status_block pointer
+        else => return windows.unexpectedStatus(rc),
+    }
+}
+
+pub const UnlockFileError = error{ RangeNotLocked, Unexpected };
+
+/// `NtUnlockFile` with std's former status mapping.
+pub fn unlockFile(
+    file_handle: HANDLE,
+    io_status_block: *windows.IO_STATUS_BLOCK,
+    byte_offset: *const windows.LARGE_INTEGER,
+    length: *const windows.LARGE_INTEGER,
+    key: ?*ULONG,
+) UnlockFileError!void {
+    const rc = windows.ntdll.NtUnlockFile(file_handle, io_status_block, byte_offset, length, key);
+    switch (rc) {
+        .SUCCESS => return,
+        .RANGE_NOT_LOCKED => return error.RangeNotLocked,
+        .ACCESS_VIOLATION => unreachable, // bad io_status_block pointer
+        else => return windows.unexpectedStatus(rc),
+    }
+}
+
 pub const GetOverlappedResultError = error{ WouldBlock, Unexpected };
 
 /// `GetOverlappedResult` with std's former error mapping: `WouldBlock` when the
@@ -1626,4 +1689,30 @@ test "the final path name keeps std's DOS form" {
     try std.testing.expectError(error.NameTooLong, getFinalPathNameByHandle(file.handle, &small));
     var any: [windows.PATH_MAX_WIDE]u16 = undefined;
     try std.testing.expectError(error.FileNotFound, getFinalPathNameByHandle(windows.INVALID_HANDLE_VALUE, &any));
+}
+
+test "lockFile and unlockFile keep std's status mapping" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first = try tmp.dir.createFile("locked.bin", .{ .read = true });
+    defer first.close();
+    const second = try tmp.dir.openFile("locked.bin", .{});
+    defer second.close();
+
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    const offset: windows.LARGE_INTEGER = 0;
+    const length: windows.LARGE_INTEGER = 1;
+    try lockFile(first.handle, null, null, null, &io, &offset, &length, null, win32_types.TRUE, win32_types.TRUE);
+    // The same range, from another handle, without waiting.
+    try std.testing.expectError(error.WouldBlock, lockFile(second.handle, null, null, null, &io, &offset, &length, null, win32_types.TRUE, win32_types.TRUE));
+    try unlockFile(first.handle, &io, &offset, &length, null);
+    try std.testing.expectError(error.RangeNotLocked, unlockFile(first.handle, &io, &offset, &length, null));
+    try lockFile(second.handle, null, null, null, &io, &offset, &length, null, win32_types.TRUE, win32_types.TRUE);
+}
+
+test "setLastError writes the thread's last error" {
+    setLastError(.ACCESS_DENIED);
+    try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, windows.GetLastError());
+    setLastError(.SUCCESS);
+    try std.testing.expectEqual(windows.Win32Error.SUCCESS, windows.GetLastError());
 }
