@@ -8,8 +8,12 @@ Modelled on upstream Ghostty's `build-examples-cmake-windows` job, which builds
 each CMake example with Visual Studio's generator. This one also builds every
 Zig example, which upstream builds only on Linux:
 
-- every `example/<name>/build.zig.zon`: `zig build` in that folder (a path
-  dependency on this tree);
+- every `example/<name>/build.zig.zon`: `zig build -Dtarget=native-native-msvc`
+  in that folder (a path dependency on this tree). The fork builds for MSVC,
+  and Zig 0.17.1's default `native` target on Windows is windows-gnu, where
+  the pure Zig examples' C++ dependencies fail to compile (`<cstring>` not
+  found, MinGW header errors); upstream v1.4.0's own zig-vt example fails
+  the same way there (measured);
 - every `example/<name>/CMakeLists.txt` but `c-vt-cmake-cross`: `cmake -B
   build -DFETCHCONTENT_SOURCE_DIR_NOCTTY=<this tree>` and `cmake --build
   build`. The cross example needs a single-config generator (Makefiles or
@@ -77,7 +81,7 @@ function Invoke-ExampleCommand {
 foreach ($example in $zigExamples) {
     Write-Host "::group::$($example.Name) (zig build)"
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    $ok = Invoke-ExampleCommand -Example $example.Name -Directory $example.FullName -Command 'zig' -Arguments @('build', '--summary', 'none')
+    $ok = Invoke-ExampleCommand -Example $example.Name -Directory $example.FullName -Command 'zig' -Arguments @('build', '-Dtarget=native-native-msvc', '--summary', 'none')
     Write-Host "$($example.Name): $(if ($ok) { 'built' } else { 'FAILED' }) in $([int]$timer.Elapsed.TotalSeconds)s"
     Write-Host '::endgroup::'
     if (-not $ok) { $failures.Add("$($example.Name) (zig build)") }
