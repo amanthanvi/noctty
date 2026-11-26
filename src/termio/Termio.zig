@@ -892,8 +892,8 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     // The remainder of this function is modifying terminal state or
     // the read thread data, all of which requires holding the renderer
     // state lock.
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     // Deinit our old config. We do this in the lock because the
     // stream handler may be referencing the old config (i.e. enquiry resp)
@@ -977,8 +977,8 @@ pub fn resize(
 
     // Enter the critical area that we want to keep small
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // Resizing the pty can immediately wake the shell with SIGWINCH.
         // Hold the same lock used by processOutput before notifying it, so
@@ -1074,8 +1074,8 @@ pub fn resizeBeforeThreadStart(
 
 /// Make a size report.
 pub fn sizeReport(self: *Termio, td: *ThreadData, style: termio.Message.SizeReport) !void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     try self.sizeReportLocked(td, style);
 }
 
@@ -1104,8 +1104,8 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
 /// Reset the synchronized output mode. This is usually called by timer
 /// expiration from the termio thread.
 pub fn resetSynchronizedOutput(self: *Termio) void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     self.terminal.modes.set(.synchronized_output, false);
     self.renderer_wakeup.notify() catch {};
 }
@@ -1193,16 +1193,16 @@ pub fn scrollViewport(
     self: *Termio,
     scroll: terminalpkg.Terminal.ScrollViewport,
 ) void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     self.terminal.scrollViewport(scroll);
 }
 
 /// Jump the viewport to the prompt.
 pub fn jumpToPrompt(self: *Termio, delta: isize) !void {
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         self.terminal.screens.active.scroll(.{ .delta_prompt = delta });
     }
 
@@ -1237,9 +1237,9 @@ pub fn ptyClear(self: *Termio, keep_cursor_row: bool) void {
 
 /// Called when focus is gained or lost (when focus events are enabled)
 pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
+    self.renderer_state.mutex.lockUncancelable();
     const focus_event = self.renderer_state.terminal.modes.get(.focus_event);
-    self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.unlock();
 
     // If we have focus events enabled, we send the focus event.
     if (focus_event) {
@@ -1465,16 +1465,16 @@ pub fn kittyClipboardGrant(
     pw: []const u8,
     dir: terminalpkg.kitty.clipboard.Grants.Direction,
 ) error{OutOfMemory}!void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     try self.terminal_stream.handler.kittyClipboardGrant(pw, dir);
 }
 
 /// Sends a DSR response for the current color scheme to the pty.
 pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     try self.colorSchemeReportLocked(td, force);
 }
@@ -1505,8 +1505,8 @@ pub fn visibilityReport(
     visible: bool,
     force: bool,
 ) !void {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     if (!force and !self.renderer_state.terminal.modes.get(.report_visibility)) {
         return;

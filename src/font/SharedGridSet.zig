@@ -119,7 +119,7 @@ pub fn startDiscoveryPrefetch(self: *SharedGridSet) void {
         discoveryPrefetchMain,
         .{disco},
     ) catch return;
-    thread.setName("font-prefetch") catch {};
+    thread.setName(global.io(), "font-prefetch") catch {};
     self.discovery_prefetch_thread = thread;
 }
 
@@ -1124,8 +1124,8 @@ fn testRenderTinySample(alloc: Allocator, grid: *SharedGrid) !void {
         for (presentations) |p| {
             const idx = try grid.getIndex(alloc, cp, .regular, p) orelse continue;
             const glyph_index = if (idx.special() != null) cp else glyph_index: {
-                grid.lock.lockShared();
-                defer grid.lock.unlockShared();
+                grid.lock.lockSharedUncancelable(std.testing.io);
+                defer grid.lock.unlockShared(std.testing.io);
                 const face = try grid.resolver.collection.getFace(idx);
                 break :glyph_index face.glyphIndex(cp) orelse continue;
             };

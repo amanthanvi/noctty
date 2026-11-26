@@ -1844,8 +1844,8 @@ pub fn activateInspector(self: *Surface) !void {
 
     // Put the inspector onto the render state
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         assert(self.renderer_state.inspector == null);
         self.renderer_state.inspector = self.inspector;
     }
@@ -1874,8 +1874,8 @@ pub fn deactivateInspector(self: *Surface) void {
 
     // Remove the inspector from the render state
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         assert(self.renderer_state.inspector != null);
         self.renderer_state.inspector = null;
     }
@@ -2406,8 +2406,8 @@ fn selectionScrollTick(self: *Surface) !void {
     const delta: isize = if (pos.y < 0) -1 else 1;
 
     // We need our locked state for the remainder
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const t: *terminal.Terminal = self.renderer_state.terminal;
 
     // If our left-click pin no longer belongs to the active screen, we stop
@@ -2517,8 +2517,8 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 
         // If the native GUI can't be shown, display a text message in the
         // terminal.
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         t.carriageReturn();
         t.linefeed() catch break :terminal;
@@ -2563,8 +2563,8 @@ fn childExitedAbnormally(
     });
     const runtime_str = try alloc.print("{d} ms", .{info.runtime_ms});
 
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const t: *terminal.Terminal = self.renderer_state.terminal;
 
     // No matter what move the cursor back to the column 0.
@@ -2626,8 +2626,8 @@ fn childExitedAbnormally(
 /// Called when the terminal detects there is a password input prompt.
 fn passwordInput(self: *Surface, v: bool) !void {
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // If our password input state is unchanged then we don't
         // waste time doing anything more.
@@ -3365,8 +3365,8 @@ pub fn dumpText(
     alloc: Allocator,
     sel: terminal.Selection,
 ) !Text {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return try self.dumpTextLocked(alloc, sel);
 }
 
@@ -3498,15 +3498,15 @@ pub fn missingFontFamilies(self: *const Surface) []const [:0]const u8 {
 
 /// Returns true if the terminal has a selection.
 pub fn hasSelection(self: *const Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return self.io.terminal.screens.active.selection != null;
 }
 
 /// Returns the selected text. This is allocated.
 pub fn selectionString(self: *Surface, alloc: Allocator) !?[:0]const u8 {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const sel = self.io.terminal.screens.active.selection orelse return null;
     return try self.io.terminal.screens.active.selectionString(alloc, .{
         .sel = sel,
@@ -3521,8 +3521,8 @@ pub fn pwd(
     self: *const Surface,
     alloc: Allocator,
 ) Allocator.Error!?[]const u8 {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     const terminal_pwd = self.io.terminal.getPwd() orelse return null;
     return try alloc.dupe(u8, terminal_pwd);
 }
@@ -5824,9 +5824,9 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
 
     // Update the focus state and notify the terminal
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
+        self.renderer_state.mutex.lockUncancelable();
         self.io.terminal.flags.focused = focused;
-        self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.unlock();
         self.queueIo(.{ .focused = focused }, .unlocked);
     }
 }
@@ -5988,8 +5988,8 @@ pub fn scrollCallback(
     // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
 
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // If we have an active mouse reporting mode, clear the selection.
         // The selection can occur if the user uses the shift mod key to
@@ -6123,8 +6123,8 @@ fn isMouseReporting(self: *const Surface) bool {
 }
 
 pub fn mouseReportingActive(self: *Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return self.isMouseReporting();
 }
 
@@ -6203,8 +6203,8 @@ fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
         .false, .true => {},
     }
 
-    if (lock) self.renderer_state.mutex.lockUncancelable(global.io());
-    defer if (lock) self.renderer_state.mutex.unlock(global.io());
+    if (lock) self.renderer_state.mutex.lockUncancelable();
+    defer if (lock) self.renderer_state.mutex.unlock();
 
     // If the terminal explicitly requests it then we always allow it
     // since we processed never/always at this point.
@@ -6225,8 +6225,8 @@ fn mouseShiftCapture(self: *const Surface, lock: bool) bool {
 /// Returns true if the mouse is currently captured by the terminal
 /// (i.e. reporting events).
 pub fn mouseCaptured(self: *Surface) bool {
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
     return self.io.terminal.flags.mouse_event != .none;
 }
 
@@ -6377,8 +6377,8 @@ pub fn mouseButtonCallback(
 
     // Report mouse events if enabled
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         if (self.isMouseReporting()) report: {
             // If we have shift-pressed and we aren't allowed to capture it,
             // then we do not do a mouse report.
@@ -6431,8 +6431,8 @@ pub fn mouseButtonCallback(
     // For left button clicks we always record some information for
     // selection/highlighting purposes.
     if (button == .left and action == .press) click: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
 
@@ -6596,8 +6596,8 @@ pub fn mouseButtonCallback(
     // want to be careful in the future we can add a function to apprts
     // that let's us know.
     if (button == .right and action == .press) sel: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // Get our viewport pin
         const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
@@ -6673,8 +6673,8 @@ pub fn mouseButtonCallback(
             } else {
                 // Pasting can trigger a lock grab in complete clipboard
                 // request so we need to unlock.
-                self.renderer_state.mutex.unlock(global.io());
-                defer self.renderer_state.mutex.lockUncancelable(global.io());
+                self.renderer_state.mutex.unlock();
+                defer self.renderer_state.mutex.lockUncancelable();
                 _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
 
                 // We don't need to clear selection because we didn't have
@@ -6688,8 +6688,8 @@ pub fn mouseButtonCallback(
 
                 // Pasting can trigger a lock grab in complete clipboard
                 // request so we need to unlock.
-                self.renderer_state.mutex.unlock(global.io());
-                defer self.renderer_state.mutex.lockUncancelable(global.io());
+                self.renderer_state.mutex.unlock();
+                defer self.renderer_state.mutex.lockUncancelable();
                 _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
             },
         }
@@ -7569,8 +7569,8 @@ pub fn mousePressureCallback(
     if (self.mouse.click_state[left_idx] == .press and
         stage == .deep)
     select: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // This should always be set in this state but we don't want
         // to handle state inconsistency here.
@@ -7628,8 +7628,8 @@ pub fn cursorPosCallback(
             try self.queueRender();
         }
 
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // No mouse point so we don't highlight links
         self.renderer_state.mouse.point = null;
@@ -7655,8 +7655,8 @@ pub fn cursorPosCallback(
     self.mouse.over_link = false;
 
     // We are reading/writing state for the remainder
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     // Stop selection scrolling when inside the viewport within a 1px buffer
     // for fullscreen windows, but only when selection scrolling is active.
@@ -8170,8 +8170,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             // CSI/ESC triggers a scroll.
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 self.scrollToBottom() catch |err| {
                     log.warn("error scrolling to bottom err={}", .{err});
                 };
@@ -8198,8 +8198,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             // Text triggers a scroll.
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 self.scrollToBottom() catch |err| {
                     log.warn("error scrolling to bottom err={}", .{err});
                 };
@@ -8211,8 +8211,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // in cursor keys mode. We're in "normal" mode if cursor
             // keys mode is NOT set.
             const normal = normal: {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
 
                 // With the lock held, we must scroll to the bottom.
                 // We always scroll to the bottom for these inputs.
@@ -8452,8 +8452,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             if (!self.mouse.over_link) return false;
             const pos = try self.rt_surface.getCursorPos();
 
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.lockUncancelable();
+            defer self.renderer_state.mutex.unlock();
             if (try self.linkAtPos(pos)) |link_info| {
                 const url_text = switch (link_info.action) {
                     .open => url_text: {
@@ -8614,8 +8614,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // alternate screen then clear screen does nothing so we want to
             // return false so the keybind can be unconsumed.
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 if (self.io.terminal.screens.active_key == .alternate) return false;
             }
 
@@ -8646,8 +8646,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .scroll_to_row => |n| {
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 const t: *terminal.Terminal = self.renderer_state.terminal;
                 t.screens.active.scroll(.{ .row = n });
             }
@@ -8657,8 +8657,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .scroll_to_selection => {
             {
-                self.renderer_state.mutex.lockUncancelable(global.io());
-                defer self.renderer_state.mutex.unlock(global.io());
+                self.renderer_state.mutex.lockUncancelable();
+                defer self.renderer_state.mutex.unlock();
                 const sel = self.io.terminal.screens.active.selection orelse return false;
                 const tl = sel.topLeft(self.io.terminal.screens.active);
                 self.io.terminal.screens.active.scroll(.{ .pin = tl });
@@ -8920,8 +8920,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         ),
 
         .select_all => {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.lockUncancelable();
+            defer self.renderer_state.mutex.unlock();
 
             const sel = self.io.terminal.screens.active.selectAll();
             if (sel) |s| {
@@ -9075,8 +9075,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .adjust_selection => |direction| {
-            self.renderer_state.mutex.lockUncancelable(global.io());
-            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.lockUncancelable();
+            defer self.renderer_state.mutex.unlock();
 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
             if (self.copy_mode_active and
@@ -10248,8 +10248,8 @@ fn writeScreenFile(
 
     // Write the scrollback contents. This requires a lock.
     {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
 
         // We only dump history if we have history. We still keep
         // the file and write the empty file to the pty so that this
@@ -10615,9 +10615,9 @@ fn startClipboardRequest(
             // Snapshot the mode before asking the apprt for clipboard data.
             // Event pastes request only a MIME listing, while ordinary
             // pastes request the text representation as before.
-            self.renderer_state.mutex.lockUncancelable(global.io());
+            self.renderer_state.mutex.lockUncancelable();
             const event = self.io.terminal.modes.get(.kitty_paste_events);
-            self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mutex.unlock();
 
             break :effective if (event)
                 .{ .list = clipboard }
@@ -10658,8 +10658,8 @@ fn completeClipboardPaste(
     if (data.len == 0) return;
 
     const encode_opts: input.paste.Options = encode_opts: {
-        self.renderer_state.mutex.lockUncancelable(global.io());
-        defer self.renderer_state.mutex.unlock(global.io());
+        self.renderer_state.mutex.lockUncancelable();
+        defer self.renderer_state.mutex.unlock();
         const opts: input.paste.Options = .fromTerminal(&self.io.terminal);
 
         // If we have paste protection enabled, we detect unsafe pastes and return
@@ -10855,8 +10855,8 @@ fn completeClipboardPasteEvent(
     var aw: std.Io.Writer.Allocating = .init(self.alloc);
     defer aw.deinit();
 
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    self.renderer_state.mutex.lockUncancelable();
+    defer self.renderer_state.mutex.unlock();
 
     const pasted = try terminal.paste.paste(.{
         .terminal = &self.io.terminal,

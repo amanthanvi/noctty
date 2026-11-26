@@ -326,6 +326,7 @@ fn testAutomationApp() App {
         .surfaces = .empty,
         .mailbox = .{},
         .font_grid_set = undefined,
+        .device = null,
         .config_conditional_state = .{},
     };
 }

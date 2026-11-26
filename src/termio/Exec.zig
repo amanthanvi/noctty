@@ -607,8 +607,8 @@ fn termiosTimer(
         // If our password input state changed on the terminal then
         // we notify the surface.
         {
-            td.renderer_state.mutex.lockUncancelable(global.io());
-            defer td.renderer_state.mutex.unlock(global.io());
+            td.renderer_state.mutex.lockUncancelable();
+            defer td.renderer_state.mutex.unlock();
             const t = td.renderer_state.terminal;
             if (t.flags.password_input == password_input) {
                 break :mode_change;

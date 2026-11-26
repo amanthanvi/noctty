@@ -127,7 +127,7 @@ pub fn runChildIfRequested() void {
         running_child = true;
         test_fn.func() catch |err| {
             std.debug.print("isolated child: the test failed: error.{s}\n", .{@errorName(err)});
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             std.process.exit(exit_failed);
         };
         if (std.testing.allocator_instance.deinit() == .leak) std.process.exit(exit_leaked);
@@ -543,7 +543,7 @@ pub fn compareChild(child: *Child) !Compared {
     var it = dir.tmp.dir.iterate();
     while (try it.next(std.testing.io)) |entry| try names.append(aa, try aa.dupe(u8, entry.name));
     for (names.items) |name| {
-        const raw = try dir.tmp.dir.readFileAlloc(aa, name, 16 << 20);
+        const raw = try dir.tmp.dir.readFileAlloc(std.testing.io, name, aa, .limited(16 << 20));
         if (!std.mem.endsWith(u8, name, dump.extension)) continue;
         var s = try symbolise.Session.openSelf(aa);
         defer s.close();
