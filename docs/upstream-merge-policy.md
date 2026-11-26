@@ -567,14 +567,14 @@ line in the drift report. Every re-run or restart here is a new Test run on
 `main` (`gh workflow run test.yml --repo amanthanvi/noctty --ref main`, the
 recovery `release.yml` names), never GitHub's "Re-run failed jobs": the
 portable smoke's evidence artifact is named by run ID
-(`flagship-portable-x64-<run id>`), so a second attempt in the same run fails
-its upload, and `release.yml` accepts only a successful run that holds that
-artifact. A failure that reproduces in the tree's own build, tests or gates is
-fixed on `main`, which is still held. The
-maintainer disables the hold for the fix's pull request alone and re-enables
-it at once, as for the landing merge. The commit the fix lands as becomes the
-gated tip, and the whole pass repeats on it: every gate, not only the ones the
-fix's diff touches.
+(`flagship-portable-x64-<run id>`), so a second attempt in the same run adds a
+second artifact of that name, and `release.yml` accepts a run only when it
+holds exactly one. A failure that reproduces in the tree's own build, tests
+or gates is fixed on `main`, which is still held. The maintainer disables the
+hold for the fix's pull request alone and re-enables it at once, as for the
+landing merge. The commit the fix lands as becomes the gated tip, and the
+whole pass repeats on it: every gate, not only the ones the fix's diff
+touches.
 
 The stepping stone landed this way as `f739b4c7b` (#748): its first parent is
 `358ce0f6a`, and its tree equals the gated tip `f0a5dc507`'s.
