@@ -2,6 +2,7 @@
 //! bound DNS/TCP/TLS, response-head and body waits without a second update worker.
 //! Cancellation waits for HANDLE_CLOSING before freeing any callback or buffer.
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
@@ -613,7 +614,7 @@ test "update HTTP transport bounds aggregate headers and leaves redirects to HTT
             .server = try FakePeer.listenLoopback(),
             .mode = .capture,
             .response = if (oversized)
-                "HTTP/1.1 200 OK\r\nX-Padding: " ++ "x" ** 9000 ++ "\r\nContent-Length: 0\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nX-Padding: " ++ comptime win32_repeat.repeat("x", 9000) ++ "\r\nContent-Length: 0\r\n\r\n"
             else
                 "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/no-plaintext-redirect\r\nContent-Length: 0\r\n\r\n",
         };

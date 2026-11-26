@@ -411,7 +411,7 @@ test "toast activator Activate hands the launch string to the bound sink only" {
     const launch = std.unicode.utf8ToUtf16LeStringLiteral("wgh://activate?surface=7&pid=12&action=focus");
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, launch, null, 0));
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, null, null, 0));
-    const long = [_:0]u16{'w'} ** (max_launch_bytes + 1);
+    const long = @as([max_launch_bytes + 1:0]u16, @splat('w'));
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, &long, null, 0));
     const unpaired = [_:0]u16{ 'w', 0xD800 };
     try std.testing.expectEqual(com.S_OK, cb.vtbl.Activate(cb, aumid, &unpaired, null, 0));

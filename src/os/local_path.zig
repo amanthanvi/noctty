@@ -2059,7 +2059,7 @@ fn sweepRegexMatchesOni(alphabet: []const u8, max_len: usize, dirs: []const ?[]c
     // A match is a string over the alphabet too: one bit per such string,
     // at its number in bijective base `alphabet.len`, runs each match once
     // however many strings hold it.
-    var digit = [_]usize{0} ** 256;
+    var digit = @as([256]usize, @splat(0));
     for (alphabet, 1..) |c, d| digit[c] = d;
     var total: usize = 1;
     for (0..max_len) |_| total = try std.math.add(usize, try std.math.mul(usize, total, alphabet.len), 1);

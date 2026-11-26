@@ -15,6 +15,7 @@
 //! the user's own entries, flags and order stay as they are, and no Windows
 //! path is exported (`TERMINFO` never is).
 const std = @import("std");
+const win32_repeat = @import("../apprt/win32_repeat.zig");
 const win32_sys = @import("../apprt/win32/sys.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
@@ -1263,7 +1264,7 @@ test "WSLCACHE invalid names use the unpinned uncached probe" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
     const probe = &[_][]const u8{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" };
-    for ([_][]const u8{ "", "Ubuntu Space", "Ubuntu-é", "a/b", "a\\b", "a\"b", "a" ** 257 }) |name| {
+    for ([_][]const u8{ "", "Ubuntu Space", "Ubuntu-é", "a/b", "a\\b", "a\"b", comptime win32_repeat.repeat("a", 257) }) |name| {
         Host.name = name;
         const before = Host.calls;
         try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\invalid", Host));
@@ -1272,7 +1273,7 @@ test "WSLCACHE invalid names use the unpinned uncached probe" {
         try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
     }
     try std.testing.expect(!Host.bad_argv);
-    try std.testing.expect(validDistributionName("a" ** 256));
+    try std.testing.expect(validDistributionName(comptime win32_repeat.repeat("a", 256)));
     try std.testing.expect(validDistributionName("A0._-z"));
 }
 

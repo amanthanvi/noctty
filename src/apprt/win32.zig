@@ -9,6 +9,7 @@ const search_controls = @import("win32/search_controls.zig");
 const window_state = @import("win32/window_state.zig");
 const surface_presentation = @import("win32/surface_presentation.zig");
 const std = @import("std");
+const win32_repeat = @import("win32_repeat.zig");
 const prefixed_path = @import("win32_prefixed_path.zig");
 const builtin = @import("builtin");
 pub const Allocator = std.mem.Allocator;
@@ -645,7 +646,7 @@ pub fn probeWindowsBuild() u32 {
         .dwMinorVersion = 0,
         .dwBuildNumber = 0,
         .dwPlatformId = 0,
-        .szCSDVersion = .{0} ** 128,
+        .szCSDVersion = @splat(0),
     };
     const rc = sys.RtlGetVersion(&info);
     if (rc < 0) return 0;
@@ -5555,7 +5556,7 @@ test "settings the All settings page reads the config file by its whole path, ho
     defer tmp.cleanup();
     // A folder name of 205 UTF-8 bytes ("é" is two), so the whole path is
     // over the 240 bytes the Advanced page's line shows.
-    const folder = "long-" ++ "\u{e9}" ** 100;
+    const folder = "long-" ++ comptime win32_repeat.repeat("\u{e9}", 100);
     try tmp.dir.makePath(folder);
     try tmp.dir.writeFile(.{ .sub_path = folder ++ "\\config.ghostty", .data = "font-size = 15\n" });
     const path = try tmp.dir.realpathAlloc(alloc, folder ++ "\\config.ghostty");
@@ -7908,7 +7909,7 @@ test "win32 settings save of a profile edit beside a setting keeps a profile lin
     const Edit = @import("win32/settings_patch.zig").Edit;
     // A CRLF file whose last line is a 4,094-byte label and a CR, no LF:
     // 4,095 bytes as the reader holds it, which it takes.
-    const label = "x" ** 4075;
+    const label = comptime win32_repeat.repeat("x", 4075);
     const name_line = "profile-name = py: " ++ label;
     try std.testing.expectEqual(@as(usize, 4094), name_line.len);
     const raw = "profile-command = py: python.exe\r\n" ++ name_line ++ "\r";
@@ -8078,7 +8079,7 @@ test "win32 settings save of ordinary settings alone keeps a file's missing fina
     const alloc = std.testing.allocator;
     // The reader holds a 4,094-byte line ending in a CR, which it takes; a
     // CRLF after that CR would make it 4,096 bytes, which it skips.
-    const long = "font-family = " ++ "x" ** (4094 - "font-family = ".len);
+    const long = "font-family = " ++ comptime win32_repeat.repeat("x", (4094 - "font-family = ".len));
     for ([_][2][]const u8{
         .{ "font-size = 12", "font-size = 12\ncopy-on-select = true" },
         .{ "# keep\r\nfont-size = 12", "# keep\r\nfont-size = 12\r\ncopy-on-select = true" },
@@ -8421,7 +8422,7 @@ test "win32 settings save writes no file larger than the next save could read" {
         defer file.close();
         var buf: [4096]u8 = undefined;
         var writer = file.writer(&buf);
-        const line = "#" ++ "x" ** 4094 ++ "\n";
+        const line = "#" ++ comptime win32_repeat.repeat("x", 4094) ++ "\n";
         var left: usize = save_target.max_bytes - 8;
         while (left >= line.len) : (left -= line.len) try writer.interface.writeAll(line);
         try writer.interface.splatByteAll('#', left - 1);
@@ -13947,7 +13948,7 @@ test "win32 unsupported tab structural action invalidates affected tab redo and 
 test "win32 local undo push failure preserves host structural redo" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var arena: [64]u8 = .{0} ** 64;
+    var arena: [64]u8 = @splat(0);
     var fixed: std.heap.FixedBufferAllocator = .init(&arena);
     var core_app: CoreApp = undefined;
     var app: App = undefined;
@@ -24357,7 +24358,7 @@ test "win32 recovery startup keeps a newer build's history and counts one with a
         const file = try tmp.dir.createFile("startup-attempts.json", .{});
         defer file.close();
         try file.writeAll("{\"schema_version\":3,\"pad\":\"");
-        const chunk = [_]u8{'x'} ** 4096;
+        const chunk = @as([4096]u8, @splat('x'));
         for (0..17) |_| try file.writeAll(&chunk);
         try file.writeAll("\"}");
     }
@@ -24682,7 +24683,7 @@ test "win32 recovery concurrent startups never lose each other's attempt" {
 
     // Every worker got in (nobody timed out), and every worker's snapshot
     // was one larger than the previous one's — the serialised order.
-    var seen = [_]bool{false} ** worker_count;
+    var seen = @as([worker_count]bool, @splat(false));
     for (workers) |worker| {
         try std.testing.expect(worker.count >= 1 and worker.count <= worker_count);
         try std.testing.expect(!seen[worker.count - 1]);

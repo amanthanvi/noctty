@@ -2289,7 +2289,7 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
         var file = try tmp.dir.createFile("oversized.json", .{});
         defer file.close();
         var remaining = max_state_bytes + 1;
-        const chunk = [_]u8{'x'} ** 1024;
+        const chunk = @as([1024]u8, @splat('x'));
         while (remaining > 0) {
             const count = @min(remaining, chunk.len);
             try file.writeAll(chunk[0..count]);

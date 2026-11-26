@@ -675,7 +675,7 @@ pub fn generateLabels(alloc: Allocator, alphabet: []const u8, count: usize) !Lab
             return false;
         }
     };
-    var order: LabelOrder = .{ .rank = [_]u8{0} ** 128 };
+    var order: LabelOrder = .{ .rank = @as([128]u8, @splat(0)) };
     for (alphabet, 0..) |char, index| order.rank[char] = @intCast(index);
     std.mem.sortUnstable([]u8, leaves.items, order, LabelOrder.lessThan);
 
