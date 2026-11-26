@@ -5,6 +5,7 @@
 //! a small `.dmp` next to any other local crash artifacts.
 
 const std = @import("std");
+const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
 const win32_sys = @import("../apprt/win32/sys.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const windows = std.os.windows;
@@ -60,7 +61,7 @@ var previous_filter: ExceptionFilter = null;
 var writing = std.atomic.Value(bool).init(false);
 var crash_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 var crash_dir: []const u8 = "";
-var crash_dir_w: windows.PathSpace = undefined;
+var crash_dir_w: prefixed_path.PathSpace = undefined;
 // Static rather than on the stack: the filter runs on the faulting thread,
 // which may be a driver thread with a small stack. `writing` serializes use.
 var dump_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -141,9 +142,9 @@ fn writeMinidump(info: *windows.EXCEPTION_POINTERS) !void {
     try writeMinidumpIn(crash_dir, crash_dir_w.span(), info);
 }
 
-fn dumpDirectoryW(path: []const u8) !windows.PathSpace {
+fn dumpDirectoryW(path: []const u8) !prefixed_path.PathSpace {
     if (!std.fs.path.isAbsolute(path)) return error.InvalidDirectory;
-    var result = try windows.sliceToPrefixedFileW(null, path);
+    var result = try prefixed_path.sliceToPrefixedFileW(path);
     // Zig normalizes absolute paths to the NT namespace (\??\). Change it
     // to the equivalent Win32 extended prefix (\\?\) for CreateFileW,
     // retaining normalized separators, UNC paths and long-path support.

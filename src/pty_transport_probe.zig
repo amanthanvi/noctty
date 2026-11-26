@@ -473,7 +473,7 @@ fn writeFragment(
     bytes: []const u8,
     timeout_ms: windows.DWORD,
 ) !void {
-    const event = try std.os.windows.CreateEventEx(
+    const event = try win32_sys.createEventEx(
         null,
         "",
         0,

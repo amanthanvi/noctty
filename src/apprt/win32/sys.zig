@@ -3,6 +3,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const win32_types = @import("../win32_types.zig");
+const prefixed_path = @import("../win32_prefixed_path.zig");
 const c = @import("consts.zig");
 const ole = @import("../win32_ole.zig");
 
@@ -1066,6 +1067,166 @@ pub fn waitForMultipleObjectsEx(handles: []const HANDLE, wait_all: bool, millise
     }
 }
 
+pub const TerminateProcessError = error{ AccessDenied, Unexpected };
+
+/// `TerminateProcess` with std's former error mapping.
+pub fn terminateProcess(process: HANDLE, exit_code: UINT) TerminateProcessError!void {
+    if (TerminateProcess(process, exit_code) == 0) {
+        switch (windows.GetLastError()) {
+            .ACCESS_DENIED => return error.AccessDenied,
+            else => |err| return windows.unexpectedError(err),
+        }
+    }
+}
+
+/// `WaitForSingleObject` with std's former result mapping.
+pub fn waitForSingleObject(handle: HANDLE, milliseconds: DWORD) WaitForSingleObjectError!void {
+    return waitForSingleObjectEx(handle, milliseconds, false);
+}
+
+/// `SetConsoleCtrlHandler` with std's former error mapping.
+pub fn setConsoleCtrlHandler(handler: ?HANDLER_ROUTINE, add: bool) error{Unexpected}!void {
+    if (SetConsoleCtrlHandler(handler, if (add) win32_types.TRUE else win32_types.FALSE) == win32_types.FALSE) {
+        return windows.unexpectedError(windows.GetLastError());
+    }
+}
+
+pub const WriteFileError = error{
+    SystemResources,
+    OperationAborted,
+    BrokenPipe,
+    NotOpenForWriting,
+    /// Another process has locked a portion of the file.
+    LockViolation,
+    /// The specified network name is no longer available.
+    ConnectionResetByPeer,
+    AccessDenied,
+    Unexpected,
+};
+
+/// `WriteFile` with std's former error mapping. A non-null `offset` writes at
+/// that file position through an `OVERLAPPED`.
+pub fn writeFile(handle: HANDLE, bytes: []const u8, offset: ?u64) WriteFileError!usize {
+    var bytes_written: DWORD = undefined;
+    var overlapped_data: OVERLAPPED = undefined;
+    const overlapped: ?*OVERLAPPED = if (offset) |off| blk: {
+        overlapped_data = .{
+            .Internal = 0,
+            .InternalHigh = 0,
+            .DUMMYUNIONNAME = .{ .DUMMYSTRUCTNAME = .{
+                .Offset = @truncate(off),
+                .OffsetHigh = @truncate(off >> 32),
+            } },
+            .hEvent = null,
+        };
+        break :blk &overlapped_data;
+    } else null;
+    const adjusted_len = std.math.cast(u32, bytes.len) orelse std.math.maxInt(u32);
+    if (WriteFile(handle, bytes.ptr, adjusted_len, &bytes_written, overlapped) == 0) {
+        switch (windows.GetLastError()) {
+            .INVALID_USER_BUFFER => return error.SystemResources,
+            .NOT_ENOUGH_MEMORY => return error.SystemResources,
+            .OPERATION_ABORTED => return error.OperationAborted,
+            .NOT_ENOUGH_QUOTA => return error.SystemResources,
+            .IO_PENDING => unreachable,
+            .NO_DATA => return error.BrokenPipe,
+            .INVALID_HANDLE => return error.NotOpenForWriting,
+            .LOCK_VIOLATION => return error.LockViolation,
+            .NETNAME_DELETED => return error.ConnectionResetByPeer,
+            .ACCESS_DENIED => return error.AccessDenied,
+            .WORKING_SET_QUOTA => return error.SystemResources,
+            else => |err| return windows.unexpectedError(err),
+        }
+    }
+    return bytes_written;
+}
+
+pub const LoadLibraryError = error{ FileNotFound, Unexpected };
+
+/// `LoadLibraryW` with std's former error mapping; the module is never NULL.
+pub fn loadLibraryW(name: [*:0]const u16) LoadLibraryError!*anyopaque {
+    return LoadLibraryW(name) orelse {
+        switch (windows.GetLastError()) {
+            .FILE_NOT_FOUND => return error.FileNotFound,
+            .PATH_NOT_FOUND => return error.FileNotFound,
+            .MOD_NOT_FOUND => return error.FileNotFound,
+            else => |err| return windows.unexpectedError(err),
+        }
+    };
+}
+
+/// `FreeLibrary` of a module `loadLibraryW` returned. Failure is a bug.
+pub fn freeLibrary(module: *anyopaque) void {
+    std.debug.assert(FreeLibrary(module) != 0);
+}
+
+/// `GetModuleFileNameW` with std's former error mapping: the path written, as
+/// a slice of the buffer.
+pub fn getModuleFileNameW(module: HMODULE, buf_ptr: [*]u16, buf_len: DWORD) error{Unexpected}![:0]u16 {
+    const rc = GetModuleFileNameW(module, buf_ptr, buf_len);
+    if (rc == 0) return windows.unexpectedError(windows.GetLastError());
+    return buf_ptr[0..rc :0];
+}
+
+pub const GetFileAttributesError = error{ FileNotFound, AccessDenied, Unexpected };
+
+/// `GetFileAttributesW` with std's former error mapping.
+pub fn getFileAttributesW(name: LPCWSTR) GetFileAttributesError!DWORD {
+    const rc = GetFileAttributesW(name);
+    if (rc == windows.INVALID_FILE_ATTRIBUTES) {
+        switch (windows.GetLastError()) {
+            .FILE_NOT_FOUND => return error.FileNotFound,
+            .PATH_NOT_FOUND => return error.FileNotFound,
+            .ACCESS_DENIED => return error.AccessDenied,
+            else => |err| return windows.unexpectedError(err),
+        }
+    }
+    return rc;
+}
+
+/// `GetFileAttributesW` of a WTF-8 path, as std's `GetFileAttributes` did.
+pub fn getFileAttributes(filename: []const u8) (GetFileAttributesError || prefixed_path.Error)!DWORD {
+    const filename_w = try prefixed_path.sliceToPrefixedFileW(filename);
+    return getFileAttributesW(filename_w.span().ptr);
+}
+
+/// `CreateEventExW` of a WTF-8 name, as std's `CreateEventEx` did.
+pub fn createEventEx(attributes: ?*SECURITY_ATTRIBUTES, name: []const u8, flags: DWORD, desired_access: DWORD) (error{Unexpected} || prefixed_path.Error)!HANDLE {
+    const name_w = try prefixed_path.sliceToPrefixedFileW(name);
+    return createEventExW(attributes, name_w.span().ptr, flags, desired_access);
+}
+
+pub extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *i64) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *i64) callconv(.winapi) BOOL;
+
+/// The counter's value. "On systems that run Windows XP or later, the function
+/// will always succeed."
+pub fn queryPerformanceCounter() u64 {
+    var result: i64 = undefined;
+    std.debug.assert(QueryPerformanceCounter(&result) != 0);
+    // The kernel treats this integer as unsigned.
+    return @bitCast(result);
+}
+
+pub fn queryPerformanceFrequency() u64 {
+    var result: i64 = undefined;
+    std.debug.assert(QueryPerformanceFrequency(&result) != 0);
+    return @bitCast(result);
+}
+
+pub extern "ntdll" fn RtlEqualUnicodeString(String1: *const win32_types.UNICODE_STRING, String2: *const win32_types.UNICODE_STRING, CaseInSensitive: u8) callconv(.winapi) u8;
+
+/// Whether two WTF-16 strings are equal ignoring case, by the system's
+/// uppercase table, as std's `eqlIgnoreCaseWTF16` compared them on Windows.
+pub fn eqlIgnoreCaseWtf16(a: []const u16, b: []const u16) bool {
+    const a_bytes: u16 = @intCast(a.len * 2);
+    const a_string: win32_types.UNICODE_STRING = .{ .Length = a_bytes, .MaximumLength = a_bytes, .Buffer = @constCast(a.ptr) };
+    const b_bytes: u16 = @intCast(b.len * 2);
+    const b_string: win32_types.UNICODE_STRING = .{ .Length = b_bytes, .MaximumLength = b_bytes, .Buffer = @constCast(b.ptr) };
+    return RtlEqualUnicodeString(&a_string, &b_string, 1) != 0;
+}
+
 pub const GetOverlappedResultError = error{ WouldBlock, Unexpected };
 
 /// `GetOverlappedResult` with std's former error mapping: `WouldBlock` when the
@@ -1100,4 +1261,64 @@ test "event and wait helpers keep std's result mapping" {
 
     const handles = [_]HANDLE{ event, event };
     try std.testing.expectEqual(@as(u32, 0), try waitForMultipleObjectsEx(&handles, false, 0, false));
+}
+
+test "the re-homed process and module helpers keep std's error mapping" {
+    // A handle to this process that grants only SYNCHRONIZE: terminating it is
+    // refused, and the refusal maps to the error std gave.
+    var limited: HANDLE = undefined;
+    try std.testing.expect(DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &limited, win32_types.SYNCHRONIZE, win32_types.FALSE, 0) != 0);
+    defer windows.CloseHandle(limited);
+    try std.testing.expectError(error.AccessDenied, terminateProcess(limited, 1));
+    // The process is still running: waiting on it times out.
+    try std.testing.expectError(error.WaitTimeOut, waitForSingleObject(limited, 0));
+
+    const kernel = try loadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll"));
+    defer freeLibrary(kernel);
+    var path: [windows.PATH_MAX_WIDE + 1]u16 = undefined;
+    const name = try getModuleFileNameW(kernel, &path, path.len);
+    try std.testing.expect(name.len > 0 and name.len < path.len);
+    try std.testing.expectError(error.FileNotFound, loadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("noctty-no-such-module.dll")));
+}
+
+test "the re-homed file helpers keep std's error mapping" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "present.txt", .data = "x" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try tmp.dir.realpath(".", &buf);
+    var present_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const present = try std.fmt.bufPrint(&present_buf, "{s}\\present.txt", .{dir});
+    var missing_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buf, "{s}\\absent.txt", .{dir});
+
+    const attributes = try getFileAttributes(present);
+    try std.testing.expect(attributes & win32_types.FILE_ATTRIBUTE_DIRECTORY == 0);
+    try std.testing.expect((try getFileAttributes(dir)) & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0);
+    try std.testing.expectError(error.FileNotFound, getFileAttributes(missing));
+
+    // `writeFile` writes at a given position through an OVERLAPPED.
+    const file = try tmp.dir.createFile("positioned.bin", .{ .read = true });
+    defer file.close();
+    try std.testing.expectEqual(@as(usize, 3), try writeFile(file.handle, "abc", null));
+    try std.testing.expectEqual(@as(usize, 2), try writeFile(file.handle, "XY", 1));
+    var back: [3]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try file.preadAll(&back, 0));
+    try std.testing.expectEqualStrings("aXY", &back);
+}
+
+test "case-insensitive WTF-16 comparison follows the system table" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(eqlIgnoreCaseWtf16(w("Noctty.EXE"), w("noctty.exe")));
+    try std.testing.expect(eqlIgnoreCaseWtf16(w("\u{00e9}cole"), w("\u{00c9}COLE")));
+    try std.testing.expect(!eqlIgnoreCaseWtf16(w("noctty"), w("noctty.exe")));
+    try std.testing.expect(!eqlIgnoreCaseWtf16(w("a"), w("b")));
+    try std.testing.expect(eqlIgnoreCaseWtf16(w(""), w("")));
+}
+
+test "the performance counter ticks at a fixed rate" {
+    const first = queryPerformanceCounter();
+    const second = queryPerformanceCounter();
+    try std.testing.expect(second >= first);
+    try std.testing.expect(queryPerformanceFrequency() > 0);
 }

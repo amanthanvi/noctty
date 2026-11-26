@@ -651,7 +651,7 @@ pub fn launchElevated(
     cwd: ?[]const u8,
 ) !LaunchResult {
     var exe_buffer: [windows.PATH_MAX_WIDE + 1]u16 = undefined;
-    const exe = try windows.GetModuleFileNameW(
+    const exe = try win32_sys.getModuleFileNameW(
         null,
         &exe_buffer,
         @intCast(exe_buffer.len),

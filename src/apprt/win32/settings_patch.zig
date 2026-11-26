@@ -19,6 +19,7 @@
 //! lines for the key go, and `key =` (which clears what any earlier layer
 //! gave) then one line per value take the place of the first of them.
 const std = @import("std");
+const prefixed_path = @import("../win32_prefixed_path.zig");
 const win32_sys = @import("sys.zig");
 const win32_types = @import("../win32_types.zig");
 const Allocator = std.mem.Allocator;
@@ -2438,7 +2439,7 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // Another program holds the dark theme with no sharing as the switch to
     // dark reads it, after the save's probe: it does not open.
     {
-        const wide = try std.os.windows.sliceToPrefixedFileW(null, dark);
+        const wide = try prefixed_path.sliceToPrefixedFileW(dark);
         const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
@@ -2500,7 +2501,7 @@ test "settings patch: a theme the light/dark switch could not open is named, a m
     // Found by name and held with no sharing: named, by the path it was
     // found at.
     try check(alloc, tmp.dir, none, light, "Mine", null);
-    const wide = try std.os.windows.sliceToPrefixedFileW(null, mine);
+    const wide = try prefixed_path.sliceToPrefixedFileW(mine);
     const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
     defer std.os.windows.CloseHandle(handle);
@@ -2847,7 +2848,7 @@ test "settings patch: a config-file the load could not open or read whole, or a 
         try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
         const path = try tmp.dir.realpathAlloc(alloc, "config");
         defer alloc.free(path);
-        const wide = try std.os.windows.sliceToPrefixedFileW(null, held);
+        const wide = try prefixed_path.sliceToPrefixedFileW(held);
         const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);

@@ -1,6 +1,7 @@
 //! Windows session-state file I/O and recovery policy.
 
 const std = @import("std");
+const prefixed_path = @import("win32_prefixed_path.zig");
 const win32_sys = @import("win32/sys.zig");
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
@@ -117,8 +118,8 @@ pub fn quarantineFileAlloc(
 
 /// `std.fs.renameAbsolute` replaces an existing target on Windows.
 fn renameNoReplace(old_path: []const u8, new_path: []const u8) !void {
-    const old_w = try std.os.windows.sliceToPrefixedFileW(null, old_path);
-    const new_w = try std.os.windows.sliceToPrefixedFileW(null, new_path);
+    const old_w = try prefixed_path.sliceToPrefixedFileW(old_path);
+    const new_w = try prefixed_path.sliceToPrefixedFileW(new_path);
     try std.posix.renameatW(std.fs.cwd().fd, old_w.span(), std.fs.cwd().fd, new_w.span(), win32_types.FALSE);
 }
 
