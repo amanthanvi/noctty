@@ -17,7 +17,9 @@ pub fn Entry(comptime run: anytype) type {
 }
 
 pub fn readRequest(ctx: Context) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(ctx.io, "request.bin", alloc, .limited(512 * 1024 * 1024));
+    // readFileAlloc refuses a file that reaches its limit; + 1 accepts exactly
+    // 512 MiB, as the 0.15 legacy adapter did.
+    return std.Io.Dir.cwd().readFileAlloc(ctx.io, "request.bin", alloc, .limited(512 * 1024 * 1024 + 1));
 }
 
 pub fn writeResponse(ctx: Context, bytes: []const u8) !void {
