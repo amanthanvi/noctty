@@ -133,32 +133,37 @@ pub fn randomTmpPath(
     );
 }
 
+/// The SDK's `SetEnvironmentVariableW` (Zig 0.17's std declares it no more), for the allocTmpDir tests.
+extern "kernel32" fn SetEnvironmentVariableW(
+    lpName: [*:0]const u16,
+    lpValue: ?[*:0]const u16,
+) callconv(.winapi) c_int;
+
 test "allocTmpDir without TMP follows GetTempPathW to TEMP" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    const kernel32 = std.os.windows.kernel32;
     const tmp_name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
     const temp_name = std.unicode.utf8ToUtf16LeStringLiteral("TEMP");
 
-    // getenvW points into the environment block, which a change can move.
-    const saved_tmp = if (std.process.getenvW(tmp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    // getWindows points into the environment block, which a change can move.
+    const saved_tmp = if (testing.environ.getWindows(tmp_name)) |v| try alloc.dupeSentinel(u16, v, 0) else null;
     defer if (saved_tmp) |v| alloc.free(v);
-    const saved_temp = if (std.process.getenvW(temp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    const saved_temp = if (testing.environ.getWindows(temp_name)) |v| try alloc.dupeSentinel(u16, v, 0) else null;
     defer if (saved_temp) |v| alloc.free(v);
-    defer _ = kernel32.SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
-    defer _ = kernel32.SetEnvironmentVariableW(temp_name, if (saved_temp) |v| v.ptr else null);
+    defer _ = SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
+    defer _ = SetEnvironmentVariableW(temp_name, if (saved_temp) |v| v.ptr else null);
 
     // GetTempPathW does not check that the directory exists, and its
     // result always ends in a separator.
-    try testing.expect(kernel32.SetEnvironmentVariableW(tmp_name, null) != 0);
-    try testing.expect(kernel32.SetEnvironmentVariableW(
+    try testing.expect(SetEnvironmentVariableW(tmp_name, null) != 0);
+    try testing.expect(SetEnvironmentVariableW(
         temp_name,
         std.unicode.utf8ToUtf16LeStringLiteral("C:\\noctty-test-temp\\"),
     ) != 0);
 
-    const dir = try allocTmpDir(alloc);
+    const dir = try allocTmpDir(alloc, testing.environ);
     defer freeTmpDir(alloc, dir);
     try testing.expectEqualStrings("C:\\noctty-test-temp", dir);
 }
@@ -168,19 +173,18 @@ test "allocTmpDir keeps the separator of a drive root" {
 
     const testing = std.testing;
     const alloc = testing.allocator;
-    const kernel32 = std.os.windows.kernel32;
     const tmp_name = std.unicode.utf8ToUtf16LeStringLiteral("TMP");
 
-    const saved_tmp = if (std.process.getenvW(tmp_name)) |v| try alloc.dupeZ(u16, v) else null;
+    const saved_tmp = if (testing.environ.getWindows(tmp_name)) |v| try alloc.dupeSentinel(u16, v, 0) else null;
     defer if (saved_tmp) |v| alloc.free(v);
-    defer _ = kernel32.SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
+    defer _ = SetEnvironmentVariableW(tmp_name, if (saved_tmp) |v| v.ptr else null);
 
-    try testing.expect(kernel32.SetEnvironmentVariableW(
+    try testing.expect(SetEnvironmentVariableW(
         tmp_name,
         std.unicode.utf8ToUtf16LeStringLiteral("C:\\"),
     ) != 0);
 
-    const dir = try allocTmpDir(alloc);
+    const dir = try allocTmpDir(alloc, testing.environ);
     defer freeTmpDir(alloc, dir);
     try testing.expectEqualStrings("C:\\", dir);
 }

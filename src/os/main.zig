@@ -220,9 +220,9 @@ test "Windows surface thread stack carries local_path.open through a junction cy
     // build tree's cache a 31-link chain would run out of names first.
     var tmp = try TempDir.init();
     defer tmp.deinit();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\image.data", .data = "image" });
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(std.testing.io, "real", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real\\image.data", .data = "image" });
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(base);
     var components = std.mem.tokenizeScalar(u8, base[3..], '\\');
     var depth: usize = 0;
@@ -236,13 +236,13 @@ test "Windows surface thread stack carries local_path.open through a junction cy
     var made: usize = 0;
     defer {
         // Links go first, removed as links (never followed).
-        tmp.dir.deleteDir("loop") catch {};
+        tmp.dir.deleteDir(std.testing.io, "loop") catch {};
         for (0..made) |i| {
             var name_buf: [16]u8 = undefined;
-            tmp.dir.deleteDir(std.fmt.bufPrint(&name_buf, "link-{d}", .{i}) catch unreachable) catch {};
+            tmp.dir.deleteDir(std.testing.io, std.fmt.bufPrint(&name_buf, "link-{d}", .{i}) catch unreachable) catch {};
         }
     }
-    try tmp.dir.makeDir("loop");
+    try tmp.dir.createDir(std.testing.io, "loop", .default_dir);
     {
         const loop = try std.fs.path.join(alloc, &.{ base, "loop" });
         defer alloc.free(loop);
@@ -253,7 +253,7 @@ test "Windows surface thread stack carries local_path.open through a junction cy
     while (made < chain_len) : (made += 1) {
         var name_buf: [16]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "link-{d}", .{made});
-        try tmp.dir.makeDir(name);
+        try tmp.dir.createDir(std.testing.io, name, .default_dir);
         const link = try std.fs.path.join(alloc, &.{ base, name });
         defer alloc.free(link);
         const target = if (made + 1 == chain_len)

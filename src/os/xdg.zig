@@ -16,9 +16,9 @@ pub const portable_marker_names = [_][]const u8{
 
 const PortableMarker = enum { explicit, legacy_config };
 
-fn portableMarkerInDir(directory: std.fs.Dir) ?PortableMarker {
+fn portableMarkerInDir(io: std.Io, directory: std.Io.Dir) ?PortableMarker {
     for (portable_marker_names) |name| {
-        const stat = directory.statFile(name) catch continue;
+        const stat = directory.statFile(io, name, .{}) catch continue;
         if (stat.kind != .file) continue;
         return if (std.mem.eql(u8, name, "config.ghostty")) .legacy_config else .explicit;
     }
@@ -27,18 +27,19 @@ fn portableMarkerInDir(directory: std.fs.Dir) ?PortableMarker {
 
 /// Detect portable mode from a real executable directory. Markers must be
 /// regular files so an unrelated directory cannot relocate application data.
-pub fn detectPortableRoot(alloc: Allocator, exe_dir: []const u8) !?[]u8 {
-    return detectPortableRootWithInstallerManaged(alloc, exe_dir, null);
+pub fn detectPortableRoot(io: std.Io, alloc: Allocator, exe_dir: []const u8) !?[]u8 {
+    return detectPortableRootWithInstallerManaged(io, alloc, exe_dir, null);
 }
 
 fn detectPortableRootWithInstallerManaged(
+    io: std.Io,
     alloc: Allocator,
     exe_dir: []const u8,
     installer_managed_override: ?bool,
 ) !?[]u8 {
-    var directory = try std.fs.openDirAbsolute(exe_dir, .{});
-    defer directory.close();
-    const marker = portableMarkerInDir(directory) orelse return null;
+    var directory = try std.Io.Dir.openDirAbsolute(io, exe_dir, .{});
+    defer directory.close(io);
+    const marker = portableMarkerInDir(io, directory) orelse return null;
     if (marker == .legacy_config) {
         const installer_managed = installer_managed_override orelse
             (builtin.os.tag == .windows and windows_ext.innoUninstallRegistryMatchesInstallDir(exe_dir));
@@ -54,14 +55,18 @@ const PortableRootCache = struct {
 };
 
 var portable_root_cache: PortableRootCache = .{};
-var portable_root_once = std.once(initPortableRootCache);
+var portable_root_once = @import("once.zig").once(initPortableRootCache);
 
 fn initPortableRootCache() void {
     if (builtin.os.tag != .windows) return;
 
+    // The first caller may run before the global state (and its Io) exists,
+    // so the one-time lookup takes std's single-threaded Io: a blocking call
+    // on the calling thread, as 0.15.2's std.fs was.
+    const io = std.Io.Threaded.global_single_threaded.io();
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_dir = std.fs.selfExeDirPath(&exe_dir_buf) catch return;
-    const root = detectPortableRoot(std.heap.page_allocator, exe_dir) catch return;
+    const exe_dir = exe_dir_buf[0 .. std.process.executableDirPath(io, &exe_dir_buf) catch return];
+    const root = detectPortableRoot(io, std.heap.page_allocator, exe_dir) catch return;
     defer if (root) |value| std.heap.page_allocator.free(value);
     const value = root orelse return;
     if (value.len > portable_root_cache.path.len) return;
@@ -246,27 +251,27 @@ test "portable marker detection requires a regular file" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const exe_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const exe_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(exe_dir);
 
-    try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
+    try testing.expect((try detectPortableRoot(testing.io, alloc, exe_dir)) == null);
 
     for (portable_marker_names) |marker| {
-        try tmp.dir.makeDir(marker);
-        try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
-        try tmp.dir.deleteDir(marker);
+        try tmp.dir.createDir(std.testing.io, marker, .default_dir);
+        try testing.expect((try detectPortableRoot(testing.io, alloc, exe_dir)) == null);
+        try tmp.dir.deleteDir(std.testing.io, marker);
 
-        const file = try tmp.dir.createFile(marker, .{});
-        file.close();
-        const root = (try detectPortableRoot(alloc, exe_dir)).?;
+        const file = try tmp.dir.createFile(std.testing.io, marker, .{});
+        file.close(std.testing.io);
+        const root = (try detectPortableRoot(testing.io, alloc, exe_dir)).?;
         defer alloc.free(root);
         try testing.expectEqualStrings(exe_dir, root);
-        try tmp.dir.deleteFile(marker);
+        try tmp.dir.deleteFile(std.testing.io, marker);
     }
 
-    const ignored = try tmp.dir.createFile("config", .{});
-    ignored.close();
-    try testing.expect((try detectPortableRoot(alloc, exe_dir)) == null);
+    const ignored = try tmp.dir.createFile(std.testing.io, "config", .{});
+    ignored.close(std.testing.io);
+    try testing.expect((try detectPortableRoot(testing.io, alloc, exe_dir)) == null);
 
     const path_root = if (builtin.os.tag == .windows) "D:\\apps\\noctty" else "/apps/noctty";
 
@@ -300,21 +305,21 @@ test "ambiguous portable config marker does not override an installer-managed di
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const exe_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const exe_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(exe_dir);
 
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "user configuration" });
-    try testing.expect((try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)) == null);
-    const legacy_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, false)).?;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "user configuration" });
+    try testing.expect((try detectPortableRootWithInstallerManaged(testing.io, alloc, exe_dir, true)) == null);
+    const legacy_root = (try detectPortableRootWithInstallerManaged(testing.io, alloc, exe_dir, false)).?;
     defer alloc.free(legacy_root);
     try testing.expectEqualStrings(exe_dir, legacy_root);
 
     for ([_][]const u8{ "noctty.portable", "portable.txt" }) |explicit_marker| {
-        try tmp.dir.writeFile(.{ .sub_path = explicit_marker, .data = explicit_marker });
-        const explicit_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)).?;
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = explicit_marker, .data = explicit_marker });
+        const explicit_root = (try detectPortableRootWithInstallerManaged(testing.io, alloc, exe_dir, true)).?;
         defer alloc.free(explicit_root);
         try testing.expectEqualStrings(exe_dir, explicit_root);
-        try tmp.dir.deleteFile(explicit_marker);
+        try tmp.dir.deleteFile(std.testing.io, explicit_marker);
     }
 }
 
