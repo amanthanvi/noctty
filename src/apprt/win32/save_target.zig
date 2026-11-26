@@ -395,7 +395,7 @@ pub const Scratch = struct {
         const target_w = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, target);
         defer testing.allocator.free(target_w);
         // ALLOW_UNPRIVILEGED_CREATE: works with Developer Mode, no elevation.
-        if (CreateSymbolicLinkW(link_w, target_w, 0x2) == 0) {
+        if (CreateSymbolicLinkW(link_w, target_w, 0x2) == .FALSE) {
             if (windows.GetLastError() == .PRIVILEGE_NOT_HELD) return error.SkipZigTest;
             return error.SymlinkFailed;
         }

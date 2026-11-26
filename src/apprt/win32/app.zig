@@ -11697,7 +11697,7 @@ pub const App = struct {
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, app.settings_failure_detail.text orelse return error.TestExpectedDetail));
         // The check stopped before its load, which would have let go.
-        if (SaveTest.brief_lock) |file| file.close();
+        if (SaveTest.brief_lock) |file| file.close(std.testing.io);
         SaveTest.brief_lock = null;
         const after = try SaveTest.read(path);
         defer alloc.free(after);
@@ -11990,7 +11990,7 @@ pub const App = struct {
             SaveTest.lock_path = path;
             save_target.test_before_compare = SaveTest.hook;
             try host.commitPaletteTheme(picked);
-            if (SaveTest.lock) |file| file.close();
+            if (SaveTest.lock) |file| file.close(std.testing.io);
             SaveTest.lock = null;
             SaveTest.lock_path = "";
             // Rolled back: the config from before the pick (and its preview)
@@ -12110,7 +12110,7 @@ pub const App = struct {
                 },
             }
             const result = settingsSaveAndReloadThunk(&app, &pending, &original, &.of(&original));
-            if (SaveTest.lock) |file| file.close();
+            if (SaveTest.lock) |file| file.close(std.testing.io);
             SaveTest.lock = null;
             SaveTest.lock_path = "";
             try std.testing.expect(!fail_next.armed);
@@ -14988,10 +14988,10 @@ test "security regression win32 link opener allows local junctions without PATHE
     defer alloc.free(system_root);
     const cmd_exe = try std.fs.path.join(alloc, &.{ system_root, "System32", "cmd.exe" });
     defer alloc.free(cmd_exe);
-    const result = try std.process.Child.run(.{ .allocator = alloc, .argv = &.{ cmd_exe, "/d", "/c", "mklink", "/J", junction, target } });
+    const result = try std.process.run(alloc, std.testing.io, .{ .argv = &.{ cmd_exe, "/d", "/c", "mklink", "/J", junction, target } });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
-    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, result.term);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     // Remove just our junction before tmpDir cleanup, never its target contents.
     defer tmp.dir.deleteDir(std.testing.io, "junction") catch {};
     var writer = try tmp.dir.createFile(std.testing.io, "target/active.log", .{ .read = true });

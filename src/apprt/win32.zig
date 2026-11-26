@@ -1447,7 +1447,7 @@ pub const RecoveryLedgerLock = struct {
             &io_status_block,
             &lock_range_off,
             &lock_range_len,
-            null,
+            0, // `key`, a ULONG in the fork's binding (0.15's took a null pointer)
         ) catch |err| {
             // Closing the handle drops the lock regardless.
             log.warn("win32 recovery: ledger unlock failed err={}", .{err});
@@ -4376,7 +4376,7 @@ test "win32 terminal undo aligns content after replay prunes history" {
     // Replay can retain fewer history rows due to page packing at the cap.
     // A smaller cap makes that pruning deterministic without relying on a
     // particular page's style/grapheme allocation layout.
-    t.screens.active.pages.explicit_max_size = 0;
+    t.screens.active.pages.limits.set(.bytes, 0);
     t.fullReset();
     _ = restoreTerminalUndoState(&t, snapshot, true);
     try std.testing.expect(t.screens.active.pages.total_rows < captured_rows);

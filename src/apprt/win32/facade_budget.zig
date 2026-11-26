@@ -236,7 +236,7 @@ fn ratchet(what: []const u8, measured: usize, row: usize, over: anyerror, fix: [
 }
 
 fn aliasCount(gpa: std.mem.Allocator, source: [:0]const u8) !usize {
-    var tree = try std.zig.Ast.parse(gpa, source, .zig);
+    var tree = try std.zig.Ast.parse(gpa, source, .{ .mode = .zig });
     defer tree.deinit(gpa);
     var count: usize = 0;
     for (tree.rootDecls()) |node| {
@@ -250,7 +250,7 @@ fn aliasCount(gpa: std.mem.Allocator, source: [:0]const u8) !usize {
 /// `@typeInfo` lists only pub declarations, so a private bag (one a
 /// generic such as Fixtures takes as an argument) is found in the source.
 fn rejectPrivateBags(gpa: std.mem.Allocator, source: [:0]const u8) !void {
-    var tree = try std.zig.Ast.parse(gpa, source, .zig);
+    var tree = try std.zig.Ast.parse(gpa, source, .{ .mode = .zig });
     defer tree.deinit(gpa);
     for (tree.rootDecls()) |node| {
         const decl = tree.fullVarDecl(node) orelse continue;

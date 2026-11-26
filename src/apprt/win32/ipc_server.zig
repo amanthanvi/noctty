@@ -1122,7 +1122,9 @@ fn normalizeForwardedStartupArg(
 
         const cwd = std.Io.Dir.cwd();
         var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const expanded = homedir.expandHome(trimmed, &home_buf) catch trimmed;
+        var environ_map = try global.environ().createMap(alloc);
+        defer environ_map.deinit();
+        const expanded = homedir.expandHome(global.io(), &environ_map, trimmed, &home_buf) catch trimmed;
         var realpath_buf: [std.fs.max_path_bytes]u8 = undefined;
         const normalized = if (cwd.realPathFile(global.io(), expanded, &realpath_buf)) |len| realpath_buf[0..len] else |_| expanded;
 

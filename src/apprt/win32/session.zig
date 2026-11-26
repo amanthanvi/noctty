@@ -334,7 +334,7 @@ pub fn scheduleSessionCheckpoint(self: *App) void {
     if (!self.sessionStateEnabled()) return;
     const timer_id = sys.SetTimer(null, self.session_checkpoint_timer_id orelse 0, session_checkpoint_delay_ms, null);
     if (timer_id == 0) {
-        log.warn("failed to start session checkpoint timer err={}", .{windows.kernel32.GetLastError()});
+        log.warn("failed to start session checkpoint timer err={}", .{windows.GetLastError()});
         return;
     }
     self.session_checkpoint_timer_id = timer_id;
@@ -1214,7 +1214,7 @@ pub fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
     host.clearStructuralHistory(.normal);
     if (host.hwnd) |hwnd| {
         if (sys.DestroyWindow(hwnd) == 0) {
-            const destroy_err = windows.kernel32.GetLastError();
+            const destroy_err = windows.GetLastError();
             if (sys.IsWindow(hwnd) != 0) {
                 log.err("failed to destroy partially restored host; retaining ownership err={}", .{
                     destroy_err,

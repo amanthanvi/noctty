@@ -2108,7 +2108,9 @@ test "settings patch: the lists are another layer's when the command line, a lat
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "# light\n" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "profile-hidden = pwsh.exe\n" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "both", .data = "profile-hidden = pwsh.exe\n" });
-    var names: [5][]u8 = undefined;
+    // Sentinel-terminated, as 0.17's realPathFileAlloc allocates them, so
+    // each is freed at the length it was allocated.
+    var names: [5][:0]u8 = undefined;
     for ([_][]const u8{ "earlier", "later.conf", "light", "dark", "both" }, &names) |name, *full| full.* = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
     defer for (names) |full| alloc.free(full);
     const later_line = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{names[1]});
@@ -2366,8 +2368,9 @@ test "settings patch: FileEnd hands the patchers a complete, marked last line, a
 
 /// A config file `theme = light:<light>,dark:<dark>` that defines `py`, in
 /// `tmp` as `config`, where only the dark theme defines `py` too. Returns its
-/// path, the caller's to free.
-fn testThemedProfile(tmp: *std.testing.TmpDir) ![]u8 {
+/// path, the caller's to free (sentinel-terminated, as 0.17's
+/// realPathFileAlloc allocates it).
+fn testThemedProfile(tmp: *std.testing.TmpDir) ![:0]u8 {
     const alloc = testing.allocator;
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "none.conf", .data = "\n" });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "light", .data = "\n" });
