@@ -10834,7 +10834,19 @@ test "PageList scroll to row far from both ends of a long scrollback" {
     // here, and used to snap the viewport to the active area instead.
     var s = try init(alloc, .{ .cols = 10, .rows = 24 });
     defer s.deinit();
-    try s.growRows(150_000);
+    // Grown with the list's and each page's integrity walks paused: under
+    // slow_runtime_safety every grow walks the whole last page and the whole
+    // list, which made this setup take 75 s in Debug (over the 120 s test
+    // timeout on CI's runner). The list is checked once after.
+    s.pauseIntegrityChecks(true);
+    for (0..150_000) |_| {
+        const last = s.pages.last.?.page();
+        last.pauseIntegrityChecks(true);
+        _ = try s.grow();
+        last.pauseIntegrityChecks(false);
+    }
+    s.pauseIntegrityChecks(false);
+    s.assertIntegrity();
 
     // 70_000 and 66_000 are past 65535 from the top (the forward walk),
     // 80_000 and the midpoint are past it from the bottom (the backward
