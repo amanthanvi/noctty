@@ -1182,7 +1182,7 @@ pub fn shouldResetNewTabWorkingDirectory(
 }
 
 pub fn detectExplicitStartupWorkingDirectory(alloc: Allocator) bool {
-    var iter = cli_args.argsIterator(alloc) catch return false;
+    var iter = cli_args.argsIterator(alloc, global.args()) catch return false;
     defer iter.deinit();
     while (iter.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--working-directory=")) return true;
@@ -6869,7 +6869,7 @@ test "win32 settings save names the edited keys a later config layer overrides" 
     var everything = try configpkg.Config.default(alloc);
     defer everything.deinit();
     try settingsTestLoadText(&everything,
-        \\scrollback-limit = 123456
+        \\scrollback-limit-bytes = 123456
         \\font-size = 13.25
         \\background-opacity = 0.875
         \\window-padding-x = 5,7
@@ -6897,7 +6897,7 @@ test "win32 settings save names the edited keys a later config layer overrides" 
     defer defaults.deinit();
     const crowded = settingsMaskedKeyNames(&names_buf, all, &everything, &defaults);
     try std.testing.expect(std.mem.count(u8, crowded, ", ") >= 15);
-    try std.testing.expect(std.mem.startsWith(u8, crowded, "scrollback-limit, font-size, "));
+    try std.testing.expect(std.mem.startsWith(u8, crowded, "scrollback-limit-bytes, font-size, "));
 }
 
 test "win32 config problems leave out the arguments that start the process" {
@@ -7830,9 +7830,9 @@ test "win32 settings save follows a symbolic link and keeps it" {
     try persistSettings(alloc, link, &draft.pending, draft.edited, &.{}, null, null);
     // The edit landed in the file the link points at, the link is still a
     // link, and it reads the new bytes.
-    try scratch.expectContent("dotfiles/config.ghostty", "# kept\ncopy-on-select = true\n");
+    try scratch.expectContent("dotfiles/config.ghostty", "# kept\ncopy-on-select = clipboard\n");
     try std.testing.expect(try scratch.isLink("config.ghostty"));
-    try scratch.expectContent("config.ghostty", "# kept\ncopy-on-select = true\n");
+    try scratch.expectContent("config.ghostty", "# kept\ncopy-on-select = clipboard\n");
 }
 
 test "win32 settings save refuses a dangling link and leaves it alone" {
@@ -7862,8 +7862,8 @@ test "win32 settings save keeps hard links together" {
     defer draft.pending.deinit();
 
     try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null);
-    try scratch.expectContent("config.ghostty", "copy-on-select = true\n");
-    try scratch.expectContent("dotfile", "copy-on-select = true\n");
+    try scratch.expectContent("config.ghostty", "copy-on-select = clipboard\n");
+    try scratch.expectContent("dotfile", "copy-on-select = clipboard\n");
     try scratch.expectNames(&.{ "config.ghostty", "dotfile" });
 }
 
@@ -7876,12 +7876,12 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
     // `copy-on-select` has no line in any of these files, so the ordinary
     // patcher appends it; the profile edit is patched after it.
     const cases = [_]Case{
-        .{ .raw = "profile-command = py: python.exe", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = true" },
-        .{ .raw = "# keep\r\nprofile-command = py: python.exe", .edits = label, .expected = "# keep\r\nprofile-command = py: python.exe\r\nprofile-name = py: Python\r\ncopy-on-select = true" },
-        .{ .raw = "\xef\xbb\xbf# keep\r\nprofile-command = py: python.exe", .edits = label, .expected = "\xef\xbb\xbf# keep\r\nprofile-command = py: python.exe\r\nprofile-name = py: Python\r\ncopy-on-select = true" },
-        .{ .raw = "font-size = 12", .edits = new_profile, .expected = "font-size = 12\ncopy-on-select = true\n\nprofile-command = dev: cmd.exe" },
-        .{ .raw = "# keep\r\nfont-size = 12", .edits = new_profile, .expected = "# keep\r\nfont-size = 12\r\ncopy-on-select = true\r\n\r\nprofile-command = dev: cmd.exe" },
-        .{ .raw = "\xef\xbb\xbffont-size = 12", .edits = new_profile, .expected = "\xef\xbb\xbffont-size = 12\ncopy-on-select = true\n\nprofile-command = dev: cmd.exe" },
+        .{ .raw = "profile-command = py: python.exe", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = clipboard" },
+        .{ .raw = "# keep\r\nprofile-command = py: python.exe", .edits = label, .expected = "# keep\r\nprofile-command = py: python.exe\r\nprofile-name = py: Python\r\ncopy-on-select = clipboard" },
+        .{ .raw = "\xef\xbb\xbf# keep\r\nprofile-command = py: python.exe", .edits = label, .expected = "\xef\xbb\xbf# keep\r\nprofile-command = py: python.exe\r\nprofile-name = py: Python\r\ncopy-on-select = clipboard" },
+        .{ .raw = "font-size = 12", .edits = new_profile, .expected = "font-size = 12\ncopy-on-select = clipboard\n\nprofile-command = dev: cmd.exe" },
+        .{ .raw = "# keep\r\nfont-size = 12", .edits = new_profile, .expected = "# keep\r\nfont-size = 12\r\ncopy-on-select = clipboard\r\n\r\nprofile-command = dev: cmd.exe" },
+        .{ .raw = "\xef\xbb\xbffont-size = 12", .edits = new_profile, .expected = "\xef\xbb\xbffont-size = 12\ncopy-on-select = clipboard\n\nprofile-command = dev: cmd.exe" },
     };
     for (cases, 0..) |case, index| {
         errdefer std.debug.print("case {d}\n", .{index});
@@ -7910,8 +7910,8 @@ test "win32 settings save of a profile edit and a newly appended setting keeps a
     // A file that ends in a newline keeps it, and so does a save with no
     // profile edit keep a file's missing one (it used to add it).
     for ([_]struct { raw: []const u8, edits: []const Edit, expected: []const u8 }{
-        .{ .raw = "profile-command = py: python.exe\n", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = true\n" },
-        .{ .raw = "font-size = 12", .edits = &.{}, .expected = "font-size = 12\ncopy-on-select = true" },
+        .{ .raw = "profile-command = py: python.exe\n", .edits = label, .expected = "profile-command = py: python.exe\nprofile-name = py: Python\ncopy-on-select = clipboard\n" },
+        .{ .raw = "font-size = 12", .edits = &.{}, .expected = "font-size = 12\ncopy-on-select = clipboard" },
     }) |case| {
         var scratch = try save_target.Scratch.init();
         defer scratch.deinit();
@@ -7967,7 +7967,7 @@ test "win32 settings save of a profile edit beside a setting keeps a profile lin
         raw,
         true,
         &.{.{ .field = .folder, .id = "py", .op = .{ .set = "C:\\src" } }},
-        "profile-command = py: python.exe\r\n" ++ name_line ++ "\r\nprofile-working-directory = py: C:\\src\r\ncopy-on-select = true\r",
+        "profile-command = py: python.exe\r\n" ++ name_line ++ "\r\nprofile-working-directory = py: C:\\src\r\ncopy-on-select = clipboard\r",
     );
     defer loaded.deinit();
     // The label still loads, and so do the new lines.
@@ -7999,7 +7999,7 @@ test "win32 settings save that removes a file's only line beside a new setting e
     const Edit = @import("win32/settings_patch.zig").Edit;
     const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
     // The bare CR was the deleted line's; the new line ends as new lines do.
-    var loaded = try settingsTestProfileSave(alloc, "profile-command = py: cmd\r", true, removal, "copy-on-select = true\r\n");
+    var loaded = try settingsTestProfileSave(alloc, "profile-command = py: cmd\r", true, removal, "copy-on-select = clipboard\r\n");
     defer loaded.deinit();
     try std.testing.expect(loaded.@"profile-command".get("py") == null);
     try std.testing.expect(loaded.@"copy-on-select" == .clipboard);
@@ -8013,11 +8013,11 @@ test "win32 settings save beside a setting that deletes the final profile line l
     const Edit = @import("win32/settings_patch.zig").Edit;
     const removal: []const Edit = &.{.{ .field = .command, .id = "py", .op = .delete }};
     for ([_][2][]const u8{
-        .{ "font-size = 12\nprofile-command = py: cmd", "font-size = 12\ncopy-on-select = true\n" },
-        .{ "font-size = 12\r\nprofile-command = py: cmd", "font-size = 12\r\ncopy-on-select = true\r\n" },
-        .{ "\xef\xbb\xbffont-size = 12\r\nprofile-command = py: cmd", "\xef\xbb\xbffont-size = 12\r\ncopy-on-select = true\r\n" },
-        .{ "font-size = 12\r\nprofile-command = py: cmd\r", "font-size = 12\r\ncopy-on-select = true\r\n" },
-        .{ "font-size = 12\r\nprofile-command = py: cmd\r\n", "font-size = 12\r\ncopy-on-select = true\r\n" },
+        .{ "font-size = 12\nprofile-command = py: cmd", "font-size = 12\ncopy-on-select = clipboard\n" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd", "font-size = 12\r\ncopy-on-select = clipboard\r\n" },
+        .{ "\xef\xbb\xbffont-size = 12\r\nprofile-command = py: cmd", "\xef\xbb\xbffont-size = 12\r\ncopy-on-select = clipboard\r\n" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd\r", "font-size = 12\r\ncopy-on-select = clipboard\r\n" },
+        .{ "font-size = 12\r\nprofile-command = py: cmd\r\n", "font-size = 12\r\ncopy-on-select = clipboard\r\n" },
     }) |case| {
         var loaded = try settingsTestProfileSave(alloc, case[0], true, removal, case[1]);
         defer loaded.deinit();
@@ -8037,7 +8037,7 @@ test "win32 settings save that keeps a file's unterminated last line, changed in
         .{ .raw = "font-size = 12\nprofile-command = py: cmd", .ordinary = false, .edits = command, .expected = "font-size = 12\nprofile-command = py: cmd2" },
         .{ .raw = "font-size = 12\r\nprofile-command = py: cmd\r", .ordinary = false, .edits = command, .expected = "font-size = 12\r\nprofile-command = py: cmd2\r" },
         // Changed in place, a setting after it.
-        .{ .raw = "font-size = 12\nprofile-command = py: cmd", .ordinary = true, .edits = command, .expected = "font-size = 12\nprofile-command = py: cmd2\ncopy-on-select = true" },
+        .{ .raw = "font-size = 12\nprofile-command = py: cmd", .ordinary = true, .edits = command, .expected = "font-size = 12\nprofile-command = py: cmd2\ncopy-on-select = clipboard" },
         // Kept, a profile after it.
         .{ .raw = "font-size = 12\r\nfont-family = x", .ordinary = false, .edits = new_profile, .expected = "font-size = 12\r\nfont-family = x\r\n\r\nprofile-command = dev: cmd.exe" },
         .{ .raw = "profile-command = py: cmd\r", .ordinary = false, .edits = new_profile, .expected = "profile-command = py: cmd\r\n\r\nprofile-command = dev: cmd.exe\r" },
@@ -8130,14 +8130,14 @@ test "win32 settings save of ordinary settings alone keeps a file's missing fina
     // CRLF after that CR would make it 4,096 bytes, which it skips.
     const long = "font-family = " ++ comptime win32_repeat.repeat("x", (4094 - "font-family = ".len));
     for ([_][2][]const u8{
-        .{ "font-size = 12", "font-size = 12\ncopy-on-select = true" },
-        .{ "# keep\r\nfont-size = 12", "# keep\r\nfont-size = 12\r\ncopy-on-select = true" },
-        .{ "\xef\xbb\xbffont-size = 12", "\xef\xbb\xbffont-size = 12\ncopy-on-select = true" },
-        .{ "font-size = 12\r\n" ++ long ++ "\r", "font-size = 12\r\n" ++ long ++ "\r\ncopy-on-select = true\r" },
+        .{ "font-size = 12", "font-size = 12\ncopy-on-select = clipboard" },
+        .{ "# keep\r\nfont-size = 12", "# keep\r\nfont-size = 12\r\ncopy-on-select = clipboard" },
+        .{ "\xef\xbb\xbffont-size = 12", "\xef\xbb\xbffont-size = 12\ncopy-on-select = clipboard" },
+        .{ "font-size = 12\r\n" ++ long ++ "\r", "font-size = 12\r\n" ++ long ++ "\r\ncopy-on-select = clipboard\r" },
         // Changed in place, it stays the last line with no line ending.
-        .{ "font-size = 12\ncopy-on-select = false", "font-size = 12\ncopy-on-select = true" },
+        .{ "font-size = 12\ncopy-on-select = false", "font-size = 12\ncopy-on-select = clipboard" },
         // A file that ends in one keeps it.
-        .{ "font-size = 12\n", "font-size = 12\ncopy-on-select = true\n" },
+        .{ "font-size = 12\n", "font-size = 12\ncopy-on-select = clipboard\n" },
     }) |case| {
         var loaded = try settingsTestProfileSave(alloc, case[0], true, &.{}, case[1]);
         defer loaded.deinit();
@@ -8506,7 +8506,7 @@ test "win32 settings save writes a config only the extended path form reaches" {
     try persistSettings(alloc, dotted, &draft.pending, draft.edited, &.{}, null, null);
     const written = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, dotted, alloc, .limited(1024));
     defer alloc.free(written);
-    try std.testing.expectEqualStrings("# kept\ncopy-on-select = true\n", written);
+    try std.testing.expectEqualStrings("# kept\ncopy-on-select = clipboard\n", written);
     try scratch.expectContent("config", "sibling\n");
     try scratch.expectNames(&.{ "config", "config." });
 }
@@ -8521,7 +8521,7 @@ test "win32 settings first save creates the file and its folder" {
     defer draft.pending.deinit();
 
     try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null);
-    try scratch.expectContent("new-dir/custom.conf", "copy-on-select = true\n");
+    try scratch.expectContent("new-dir/custom.conf", "copy-on-select = clipboard\n");
 }
 
 test "win32 settings save refuses UTF-16 text and leaves the file as it was" {
@@ -8565,7 +8565,7 @@ test "win32 settings save refuses UTF-16 text and leaves the file as it was" {
     // survive the save.
     try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "\xef\xbb\xbf# caf\xe9\ncopy-on-select = false\n" });
     try persistSettings(alloc, path, &draft.pending, draft.edited, &.{}, null, null);
-    try scratch.expectContent("config.ghostty", "\xef\xbb\xbf# caf\xe9\ncopy-on-select = true\n");
+    try scratch.expectContent("config.ghostty", "\xef\xbb\xbf# caf\xe9\ncopy-on-select = clipboard\n");
 }
 
 test "win32 settings text is patchable unless a UTF-16 or UTF-32 marker or NUL says it is not" {
@@ -8603,7 +8603,7 @@ test "win32 settings clone does not edit include or shader paths" {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
-    try std.testing.expectEqualStrings("config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = true\n", out.items);
+    try std.testing.expectEqualStrings("config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = clipboard\n", out.items);
 }
 
 test "win32 settings every editable key round trips through a file" {
@@ -8758,7 +8758,7 @@ test "win32 settings fields found by a search and edited save themselves and lea
             // opened with.
             const text = "# noctty config\r\nwindow-save-state = never\r\n" ++
                 "config-file = ?missing-include.ghostty\n" ++
-                "scrollback-limit = 10000000\n" ++
+                "scrollback-limit-bytes = 10000000\n" ++
                 "\n  # indented comment\nkeybind = ctrl+shift+a=new_tab\n" ++
                 "cursor-style = block\n";
 
@@ -8805,7 +8805,7 @@ test "win32 settings fields found by a search and edited save themselves and lea
             const original = &settings.original.?;
             const pending = &settings.pending.?;
             const edited = settingsUserEditedKeys(original, pending);
-            const keys = [_]SettingsConfigKey{ .@"scrollback-limit", .@"cursor-style", .@"clipboard-trim-trailing-spaces", .@"font-family" };
+            const keys = [_]SettingsConfigKey{ .@"scrollback-limit-bytes", .@"cursor-style", .@"clipboard-trim-trailing-spaces", .@"font-family" };
             try std.testing.expectEqual(keys.len, edited.count());
             for (keys) |key| try std.testing.expect(edited.isSet(@backingInt(key)));
 
@@ -8843,7 +8843,7 @@ test "win32 settings fields found by a search and edited save themselves and lea
             inline for (win32_settings.editable_keys) |key| {
                 try std.testing.expect(!pending.changed(&reloaded, key));
             }
-            try std.testing.expectEqual(@as(usize, 5000), reloaded.@"scrollback-limit");
+            try std.testing.expectEqual(@as(usize, 5000), reloaded.@"scrollback-limit-bytes".value);
             try std.testing.expect(reloaded.@"cursor-style" == .bar);
             try std.testing.expect(reloaded.@"clipboard-trim-trailing-spaces" != original.@"clipboard-trim-trailing-spaces");
         }

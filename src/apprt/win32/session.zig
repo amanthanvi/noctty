@@ -2179,7 +2179,7 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
         .lines = &lines,
     };
 
-    // `scrollback-limit = 0`: `scrollClear` has nowhere to move the snapshot,
+    // `scrollback-limit-bytes = 0`: `scrollClear` has nowhere to move the snapshot,
     // so a "successful" restore would leave the user with nothing.
     {
         var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{

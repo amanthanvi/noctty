@@ -1177,7 +1177,7 @@ pub fn forwardsLauncherDirectory(config: *const configpkg.Config) bool {
 }
 
 fn collectStartupForwardArguments(alloc: Allocator, forward_cwd: bool) !?[]const [:0]const u8 {
-    var iter = try cli_args.argsIterator(alloc);
+    var iter = try cli_args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var argv: std.ArrayList([:0]const u8) = .empty;
