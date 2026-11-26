@@ -3449,19 +3449,29 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
     defer mailbox.deinit(testing.allocator);
 
-    // The fork's renderer-state mutex is its StateMutex (PLAN.md 2.7).
-    var mutex: renderer.StateMutex = .{};
-    mutex.lock();
-    defer mutex.unlock();
+    // As the pty reader, which runs the stream handler with the
+    // renderer-state mutex held (PLAN.md 2.7 RQ9).
+    const role = thread_role.fixture(.reader);
+    defer role.exit();
+
+    // The fork's renderer-state mutex is its StateMutex (PLAN.md 2.7). Not
+    // `mutex`: the lock inventory would take the queues' `.mutex` locks in
+    // this file for this one (test-harnesses.md INVENTORY-NAME-MATCH-01).
+    var renderer_mutex: renderer.StateMutex = .{};
+    renderer_mutex.lock();
+    defer renderer_mutex.unlock();
 
     var renderer_state: renderer.State = .{
-        .mutex = &mutex,
+        .mutex = &renderer_mutex,
         .terminal = undefined,
     };
     var handler: StreamHandler = undefined;
     handler.alloc = testing.allocator;
     handler.termio_mailbox = &mailbox;
     handler.renderer_state = &renderer_state;
+    // The fork's stopped-reader check (messageWriter) reads it; an
+    // undefined handler has no default.
+    handler.stopping = &never_stopped;
     handler.clipboard_write = .allow;
     handler.clipboard_write_limit = 4;
     handler.kitty_clipboard_write = null;
