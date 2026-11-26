@@ -23,6 +23,7 @@
 //! waits forever, as 0.15.2's release builds did. 1B.6 re-checks this with the
 //! other sync primitives (PLAN decision 19's roles).
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn once(comptime f: fn () void) Once(f) {
     return .{};
@@ -34,6 +35,11 @@ pub fn Once(comptime f: fn () void) type {
         /// The thread running `f`, in builds with runtime safety.
         runner: if (std.debug.runtime_safety) std.atomic.Value(std.Thread.Id) else void =
             if (std.debug.runtime_safety) .init(0) else {},
+        /// Test builds only: how many times a waiter went round its wait
+        /// loop. A parked waiter goes round once per wake; a busy-yielding
+        /// one would go round thousands of times while `f` runs (council F7).
+        wait_loops: if (builtin.is_test) std.atomic.Value(u32) else void =
+            if (builtin.is_test) .init(0) else {},
 
         const Self = @This();
         const idle: u32 = 0;
@@ -58,6 +64,7 @@ pub fn Once(comptime f: fn () void) type {
             while (true) {
                 const now = self.state.load(.acquire);
                 if (now == done) return;
+                if (builtin.is_test) _ = self.wait_loops.fetchAdd(1, .monotonic);
                 waitIo().futexWaitUncancelable(u32, &self.state.raw, now);
             }
         }
@@ -166,30 +173,38 @@ test "once: waiters sleep on the state until the first call wakes them" {
     while (!Slow.entered.load(.acquire)) std.Thread.yield() catch {};
     var waiters: [4]std.Thread = undefined;
     for (&waiters) |*t| t.* = try std.Thread.spawn(.{}, Slow.worker, .{});
-    // While `f` runs, no caller returns.
+    // While `f` runs, no caller returns, and the waiters sleep: in 50 ms a
+    // parked waiter goes round its loop about once (each enters it, and a
+    // spurious wake may add a turn), where a waiter that yielded or spun
+    // would go round thousands of times (council F7).
     std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
     try std.testing.expectEqual(@as(u32, 0), Slow.returned.load(.monotonic));
     try std.testing.expectEqual(Slow.flag.state.load(.acquire), 1);
+    const loops = Slow.flag.wait_loops.load(.monotonic);
+    try std.testing.expect(loops <= waiters.len * 8);
     Slow.release.store(1, .release);
     first.join();
     for (waiters) |t| t.join();
     try std.testing.expectEqual(@as(u32, waiters.len + 1), Slow.returned.load(.monotonic));
 }
 
-test "once: a call from inside its own function is detected in safe builds" {
+test "once: a function that calls its own once panics in safe builds" {
     if (!std.debug.runtime_safety) return error.SkipZigTest;
-    const Inner = struct {
-        var seen: bool = false;
-        var flag = once(init);
+    // In an isolated child of the test exe (`sync/isolated.zig`), since a test
+    // exe cannot survive its own panic: the re-entering `call` panics there,
+    // and without the check it would wait for itself until the parent's
+    // deadline, which fails this test too (council F7).
+    const isolated = @import("../sync/isolated.zig");
+    if (isolated.inChild()) {
+        const Inner = struct {
+            var flag = once(init);
 
-        fn init() void {
-            // What `callSlow` asks before it would wait on itself: here it is
-            // the runner, so a call would panic "Deadlock detected".
-            seen = flag.reentered();
-        }
-    };
-    Inner.flag.call();
-    try std.testing.expect(Inner.seen);
-    // Another thread asking while nothing runs is no re-entry.
-    try std.testing.expect(!Inner.flag.reentered());
+            fn init() void {
+                flag.call();
+            }
+        };
+        Inner.flag.call();
+        return;
+    }
+    try isolated.expectPanic(@src(), "Deadlock detected: a once's function called its own once");
 }
