@@ -58,7 +58,6 @@ pub const HMODULE = windows.HMODULE;
 pub const FOLDERID_Profile = windows.GUID.parse("{5E6C858F-0E22-4760-9AFE-EA3317B67173}");
 pub const FOLDERID_LocalAppData = windows.FOLDERID_LocalAppData;
 
-
 pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
 pub extern "kernel32" fn GetOEMCP() callconv(.winapi) windows.UINT;
 /// The one declaration: the text editor opener and the Win32 runtime's
@@ -125,7 +124,7 @@ fn isDirectVolumeDeviceName(name: []const u16) bool {
 
 /// Replace the DOS drive alias in a prefixed path before OBJ_DONT_REPARSE.
 /// Callers must screen the drive's media type before resolving this mapping.
-pub fn directVolumePath(path: *windows.PathSpace) bool {
+pub fn directVolumePath(path: *std.Io.Threaded.WindowsPathSpace) bool {
     if (builtin.is_test) {
         if (TestHooks.direct_volume_mapping) |mapping|
             return directVolumePathWithMapping(path, mapping);
@@ -143,8 +142,8 @@ pub const DeleteOpenedFileError = error{ AccessDenied, Unexpected };
 pub fn deleteOpenedFile(handle: windows.HANDLE) DeleteOpenedFileError!void {
     const delete_handle = ReOpenFile(
         handle,
-        windows.DELETE,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         0,
     );
     if (delete_handle == windows.INVALID_HANDLE_VALUE) return switch (windows.GetLastError()) {
@@ -153,27 +152,27 @@ pub fn deleteOpenedFile(handle: windows.HANDLE) DeleteOpenedFileError!void {
     };
     defer windows.CloseHandle(delete_handle);
 
-    var io: windows.IO_STATUS_BLOCK = undefined;
-    var info_ex: windows.FILE_DISPOSITION_INFORMATION_EX = .{
-        .Flags = FILE_DISPOSITION_DELETE |
-            FILE_DISPOSITION_POSIX_SEMANTICS |
-            FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
-    };
+    var io_status: windows.IO_STATUS_BLOCK = undefined;
+    var info_ex: windows.FILE.DISPOSITION.INFORMATION.EX = .{ .Flags = .{
+        .DELETE = true,
+        .POSIX_SEMANTICS = true,
+        .IGNORE_READONLY_ATTRIBUTE = true,
+    } };
     var rc = windows.ntdll.NtSetInformationFile(
         delete_handle,
-        &io,
+        &io_status,
         &info_ex,
-        @sizeOf(windows.FILE_DISPOSITION_INFORMATION_EX),
-        .FileDispositionInformationEx,
+        @sizeOf(windows.FILE.DISPOSITION.INFORMATION.EX),
+        .DispositionEx,
     );
     if (rc == .INVALID_PARAMETER) {
-        var info: windows.FILE_DISPOSITION_INFORMATION = .{ .DeleteFile = windows.TRUE };
+        var info: windows.FILE.DISPOSITION.INFORMATION = .{ .DeleteFile = .TRUE };
         rc = windows.ntdll.NtSetInformationFile(
             delete_handle,
-            &io,
+            &io_status,
             &info,
-            @sizeOf(windows.FILE_DISPOSITION_INFORMATION),
-            .FileDispositionInformation,
+            @sizeOf(windows.FILE.DISPOSITION.INFORMATION),
+            .Disposition,
         );
     }
     return switch (rc) {
@@ -183,10 +182,11 @@ pub fn deleteOpenedFile(handle: windows.HANDLE) DeleteOpenedFileError!void {
     };
 }
 
-// FILE_DISPOSITION_INFORMATION_EX flags (ntifs.h); std keeps its copies private.
-const FILE_DISPOSITION_DELETE: windows.ULONG = 0x00000001;
-const FILE_DISPOSITION_POSIX_SEMANTICS: windows.ULONG = 0x00000002;
-const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: windows.ULONG = 0x00000010;
+// The access and share masks `ReOpenFile` takes (winnt.h), as DWORDs.
+pub const DELETE: windows.DWORD = 0x00010000;
+pub const FILE_SHARE_READ: windows.DWORD = 0x00000001;
+pub const FILE_SHARE_WRITE: windows.DWORD = 0x00000002;
+pub const FILE_SHARE_DELETE: windows.DWORD = 0x00000004;
 
 /// Inject at the OS boundary so tests enter through the real production callers.
 /// The override and its dispatch are absent from non-test builds. Thread-local
@@ -201,7 +201,7 @@ pub const TestHooks = if (builtin.is_test) struct {
     }
 } else struct {};
 
-fn directVolumePathWithMapping(path: *windows.PathSpace, mapping: anytype) bool {
+fn directVolumePathWithMapping(path: *std.Io.Threaded.WindowsPathSpace, mapping: anytype) bool {
     const prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\??\\");
     if (path.len < 7 or !std.mem.startsWith(u16, path.span(), prefix) or
         !((path.data[4] >= 'A' and path.data[4] <= 'Z') or (path.data[4] >= 'a' and path.data[4] <= 'z')) or
@@ -229,7 +229,7 @@ test "direct volume path maps DOS letter before guarded opens" {
         }
     };
     inline for (.{ "C:\\", "C:\\folder\\café.txt", "C:/folder/café.txt" }) |input| {
-        var path = try windows.sliceToPrefixedFileW(null, input);
+        var path = try std.Io.Threaded.sliceToPrefixedFileW(null, input, .{});
         try std.testing.expect(directVolumePathWithMapping(&path, Mapping.map));
         const expected = if (std.mem.eql(u8, input, "C:\\"))
             w("\\Device\\HarddiskVolume3\\")
@@ -251,7 +251,7 @@ test "direct volume path fails closed on missing mappings and oversized names" {
             return buf[0..device.len];
         }
     };
-    var path = try windows.sliceToPrefixedFileW(null, "C:\\safe.txt");
+    var path = try std.Io.Threaded.sliceToPrefixedFileW(null, "C:\\safe.txt", .{});
     try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.missing));
     try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\\??\\C:\\safe.txt"), path.span());
     @memset(path.data[7 .. path.data.len - 1], 'x');
@@ -274,7 +274,7 @@ test "direct volume path refuses other native roots before mapping" {
         }
     };
     inline for (.{ "", "\\??\\C:", "\\??\\C:x", "\\??\\1:\\x", "\\??\\UNC\\server\\share", "\\Device\\HarddiskVolume3\\x" }) |input| {
-        var path: windows.PathSpace = undefined;
+        var path: std.Io.Threaded.WindowsPathSpace = undefined;
         const wide = std.unicode.utf8ToUtf16LeStringLiteral(input);
         @memcpy(path.data[0..wide.len], wide);
         path.len = wide.len;
@@ -394,10 +394,10 @@ const IsWow64Process2Fn = *const fn (
 pub fn detectProcessArchitecture() ?ProcessArchitecture {
     if (comptime builtin.os.tag != .windows) return null;
 
-    const module = windows.kernel32.GetModuleHandleW(
+    const module = GetModuleHandleW(
         std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll"),
     ) orelse return null;
-    const entry = windows.kernel32.GetProcAddress(
+    const entry = GetProcAddress(
         module,
         "IsWow64Process2",
     ) orelse return null;
@@ -537,15 +537,15 @@ pub fn knownFolderPathUtf8(
     return buf[0..len];
 }
 
-pub fn isInstallerManagedInstallDir(install_dir: []const u8) bool {
+pub fn isInstallerManagedInstallDir(io: std.Io, install_dir: []const u8) bool {
     if (builtin.os.tag != .windows) return false;
-    var dir = std.fs.openDirAbsolute(install_dir, .{ .iterate = true }) catch return false;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, install_dir, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
 
     var has_uninstaller_exe = false;
     var has_uninstaller_dat = false;
     var iter = dir.iterate();
-    while (iter.next() catch return false) |entry| {
+    while (iter.next(io) catch return false) |entry| {
         if (entry.kind != .file) continue;
         has_uninstaller_exe = has_uninstaller_exe or isInnoUninstallerFileName(entry.name, ".exe");
         has_uninstaller_dat = has_uninstaller_dat or isInnoUninstallerFileName(entry.name, ".dat");
@@ -582,7 +582,7 @@ pub fn innoUninstallRegistryMatchesInstallDir(install_dir: []const u8) bool {
         @ptrCast(&registered_buf),
         &registered_bytes,
     );
-    if (status != @intFromEnum(windows.Win32Error.SUCCESS)) return false;
+    if (status != @backingInt(windows.Win32Error.SUCCESS)) return false;
     if (registered_bytes < @sizeOf(u16) or
         registered_bytes > @sizeOf(@TypeOf(registered_buf)) or
         registered_bytes % @sizeOf(u16) != 0)
@@ -640,14 +640,15 @@ test "Windows installer management recognizes Inno uninstaller markers" {
     try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
     try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
 
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const install_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const install_dir = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
     defer std.testing.allocator.free(install_dir);
-    try tmp.dir.writeFile(.{ .sub_path = "unins000.exe", .data = "uninstaller executable" });
-    try std.testing.expect(!isInstallerManagedInstallDir(install_dir));
-    try tmp.dir.writeFile(.{ .sub_path = "unins000.dat", .data = "uninstaller data" });
-    try std.testing.expect(isInstallerManagedInstallDir(install_dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "unins000.exe", .data = "uninstaller executable" });
+    try std.testing.expect(!isInstallerManagedInstallDir(io, install_dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "unins000.dat", .data = "uninstaller data" });
+    try std.testing.expect(isInstallerManagedInstallDir(io, install_dir));
 }
 
 test "Windows installer registry paths compare case-insensitively with trailing separators" {
@@ -714,6 +715,10 @@ pub extern "kernel32" fn GetComputerNameExW(
     lpBuffer: ?windows.LPWSTR,
     nSize: *windows.DWORD,
 ) callconv(.winapi) BOOL;
+/// https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlew
+pub extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const u16) callconv(.winapi) ?windows.HMODULE;
+/// https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getprocaddress
+pub extern "kernel32" fn GetProcAddress(hModule: windows.HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 /// https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile
 /// Fails with INVALID_HANDLE_VALUE, not NULL.
 pub extern "kernel32" fn ReOpenFile(
