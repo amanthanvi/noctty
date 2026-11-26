@@ -10,13 +10,17 @@ Usage:
 
 Without --check it rewrites the files in place (LF kept; a file with CR bytes is refused) and prints one line per rule
 with its hit count; with --check it rewrites nothing and exits 1 when a rule would. Directories are walked for *.zig,
-skipping `.zig-cache`, `zig-out` and `zig-pkg`. --report writes `<file>\t<rule>\t<line>` per hit.
+skipping `.zig-cache`, `zig-out` and `zig-pkg`. --report writes `<file>\t<rule>\t<line>\t<what>` per hit
+(`rewritten`) and per hand edit (`hand edit: <why>`).
 
-Every file is rewritten in memory first; nothing is written unless every file rewrote cleanly (a failure, such as an
-unreadable baseline, writes nothing). A rule's hit is one group of edits, kept or dropped whole: with --fork-lines a
-group is kept only when every edit in it lies on a line that differs from REV, and two groups that overlap (a call
-nested in another's arguments) are applied in turns until the rule finds nothing more. No rule adds or removes a
-line, so the line ownership the filter reads stays true.
+A hand edit is a 0.15 shape a rule recognises but cannot prove equivalent: the run leaves it as it is, prints it
+(`hand edit\t<file>\t<rule>\t<line>\t<why>`, and the count), and goes on; it never stops the run. Every file is
+rewritten in memory first; nothing is written unless every file rewrote cleanly (a failure, such as an unreadable
+baseline, writes nothing). A rule's hit is one group of edits, kept or dropped whole: with --fork-lines a group is
+kept only when every line it touches (from each edit's first line to its last) differs from REV, and one that also
+touches an inherited line is a hand edit. A group that would add, drop or move a line break is a hand edit too, so
+the line ownership the filter reads stays true. Two groups that overlap (a call nested in another's arguments) are
+applied in turns until the rule finds nothing more.
 """
 import argparse
 import os
@@ -55,6 +59,26 @@ class Hit:
     @property
     def end(self):
         return max(e.end for e in self.edits)
+
+
+class Bail:
+    """A shape a rule leaves for a hand edit: the 1-based line it is reported at, why, and the lines it concerns
+    (with --fork-lines it is reported only when one of them is the fork's)."""
+    __slots__ = ("line", "reason", "lines")
+
+    def __init__(self, line, reason, lines=None):
+        self.line, self.reason = line, reason
+        self.lines = set(lines) if lines is not None else {line}
+
+
+class HandEdit(Exception):
+    """Raised while a rule builds a hit for a shape it cannot prove equivalent; the rule reports it as a Bail."""
+
+
+# Why the engine leaves a hit for a hand edit.
+INHERITED = "the rewrite would also edit an inherited line"
+LINE_COUNT = "the rewrite would change the number of lines"
+ACROSS_LINES = "the rewrite would move text across a line break"
 
 
 def code_tokens(text):
@@ -250,7 +274,7 @@ def _open_options(texts):
         return ".{}"
     if opts.startswith(".{") and opts.endswith("}"):
         return ".{ .open_options = " + texts[1] + " }"
-    return None
+    raise HandEdit("makeOpenPath's options are no literal the rule can read")
 
 
 DIR_METHODS = {
@@ -278,7 +302,8 @@ def _span(run):
 
 
 def _dir_call_edits(text, toks, i, args):
-    """The edits that turn the 0.15 Dir call whose method name is toks[i] into the 0.17 call, or None."""
+    """The edits that turn the 0.15 Dir call whose method name is toks[i] into the 0.17 call; HandEdit when the
+    call is a shape the rule cannot prove equivalent."""
     t = toks[i]
     new_name, arity, shape = DIR_METHODS[t.text]
     spans = [_span(a) for a in args]
@@ -290,14 +315,15 @@ def _dir_call_edits(text, toks, i, args):
         elif isinstance(item, str):
             new_args.append(item)
         else:
-            value = item(texts)
-            if value is None:
-                return None
-            new_args.append(value)
-    moved = any(isinstance(item, int) and item != k for k, item in enumerate(shape[:len(spans)]))
-    if moved and any("//" in text[spans[k][1]:spans[k + 1][0]] for k in range(len(spans) - 1)):
-        # A comment between arguments that change places would end up beside the wrong one: a hand edit.
-        return None
+            new_args.append(item(texts))
+    moved = [k for k, item in enumerate(shape[:len(spans)]) if isinstance(item, int) and item != k]
+    if moved:
+        # Arguments that change places must lie on one line, or text would move across a line break.
+        involved = set(moved) | {shape[k] for k in moved}
+        if len({_line_of(text, p) for k in involved for p in (spans[k][0], spans[k][1] - 1)}) > 1:
+            raise HandEdit(ACROSS_LINES)
+        if any("//" in text[spans[k][1]:spans[k + 1][0]] for k in range(len(spans) - 1)):
+            raise HandEdit("a comment between its arguments would end up beside another one")
     edits = [Edit(spans[0][0], spans[0][0], IO + ", ")]
     for k, (s, e) in enumerate(spans):
         if new_args[k] != texts[k]:
@@ -372,13 +398,16 @@ def rule_test_dir_io(text, toks):
             recv = _receiver(toks, i, tmp_names)
             if recv is None:
                 continue
-            if t.text == "readFileAlloc" and names_file_too_big:
-                continue
-            args, _ = zigtok.split_args(toks, i + 1)
+            args, close = zigtok.split_args(toks, i + 1)
             if len(args) != DIR_METHODS[t.text][1] or "".join(x.text for x in args[0]) in IO_ARG_NAMES:
                 continue
-            edits = _dir_call_edits(text, toks, i, args)
-            if edits is None:
+            call_lines = range(t.line + 1, toks[close].line + 2)
+            try:
+                if t.text == "readFileAlloc" and names_file_too_big:
+                    raise HandEdit("the test names FileTooBig, which 0.17's readFileAlloc never returns")
+                edits = _dir_call_edits(text, toks, i, args)
+            except HandEdit as e:
+                hits.append(Bail(t.line + 1, str(e), call_lines))
                 continue
             if recv == "cwd":
                 fs = toks[i - 6]   # std.fs.cwd() -> std.Io.Dir.cwd()
@@ -464,9 +493,28 @@ def _line_of(text, offset):
     return text.count("\n", 0, offset) + 1
 
 
+def _touched(text, hit):
+    """Every 1-based line an edit of the hit replaces text on or inserts at, the lines between its ends included."""
+    out = set()
+    for e in hit.edits:
+        out.update(range(_line_of(text, e.start), _line_of(text, max(e.start, e.end - 1)) + 1))
+    return out
+
+
 def _on_lines(text, hit, lines):
-    return all(_line_of(text, e.start) in lines and _line_of(text, max(e.start, e.end - 1)) in lines
-               for e in hit.edits)
+    return _touched(text, hit) <= lines
+
+
+def _line_break_problem(text, hit):
+    """Why applying the hit would add, drop or move a line break (a hand edit), or None. An edit may replace text
+    that spans a line break only by keeping that text whole, wrapped in text without one."""
+    for e in hit.edits:
+        old = text[e.start:e.end]
+        if old.count("\n") != e.text.count("\n"):
+            return LINE_COUNT
+        if "\n" in old and old not in e.text:
+            return ACROSS_LINES
+    return None
 
 
 def _conflict(a, b):
@@ -489,28 +537,52 @@ def _disjoint(hits):
     return kept
 
 
-def rewrite(text, rule_ids=None, lines=None):
+def rewrite(text, rule_ids=None, lines=None, rows=None):
     """(new text, [(rule id, line)]) for one file's text: each selected rule in order, over the previous rule's
     output, repeated while it finds more (a call nested in another's arguments is rewritten in a later pass). With
-    `lines` (a set of 1-based line numbers), a hit is kept only when every edit of it lies on those lines."""
+    `lines` (a set of 1-based line numbers), a hit is kept only when every line it touches is one of them; one that
+    touches some of them is a hand edit, one that touches none is upstream's and left unreported. A hit that would
+    add, drop or move a line break is a hand edit too. `rows`, when given, collects (rule id, line, what) for each
+    hit (`rewritten`) and each hand edit (`hand edit: <why>`), these as the rule's last pass finds them."""
     hits_out = []
     for rule_id, _, fn in RULES:
         if rule_ids is not None and rule_id not in rule_ids:
             continue
         for _ in range(MAX_PASSES):
-            hits = fn(text, code_tokens(text))
-            if lines is not None:
-                hits = [h for h in hits if _on_lines(text, h, lines)]
+            bails, hits = [], []
+            for found in fn(text, code_tokens(text)):
+                if isinstance(found, Bail):
+                    bails.append(found)
+                    continue
+                touched = _touched(text, found)
+                if lines is not None and not touched <= lines:
+                    if touched & lines:
+                        bails.append(Bail(found.line, INHERITED, touched))
+                    continue
+                why = _line_break_problem(text, found)
+                if why is not None:
+                    bails.append(Bail(found.line, why, touched))
+                    continue
+                hits.append(found)
             hits = _disjoint(hits)
             if not hits:
                 break
             new = apply_edits(text, [e for h in hits for e in h.edits])
             if new.count("\n") != text.count("\n"):
+                # Each applied edit keeps its line breaks (_line_break_problem), so this is the engine's own bug.
                 raise ValueError(f"rule {rule_id} changed the number of lines")
             text = new
             hits_out.extend((rule_id, h.line) for h in hits)
+            if rows is not None:
+                rows.extend((rule_id, h.line, "rewritten") for h in hits)
         else:
             raise ValueError(f"rule {rule_id} did not settle in {MAX_PASSES} passes")
+        if rows is not None:
+            seen = set()
+            for b in bails:
+                if (lines is None or b.lines & lines) and (b.line, b.reason) not in seen:
+                    seen.add((b.line, b.reason))
+                    rows.append((rule_id, b.line, "hand edit: " + b.reason))
     return text, hits_out
 
 
@@ -606,7 +678,7 @@ def main(argv=None):
         if unknown:
             ap.error(f"unknown rules: {', '.join(sorted(unknown))}")
     counts = {r[0]: 0 for r in RULES if rule_ids is None or r[0] in rule_ids}
-    report, pending = [], []
+    report, hand, pending = [], [], []
     try:
         if args.fork_lines:
             check_rev(args.fork_lines)
@@ -618,13 +690,17 @@ def main(argv=None):
             lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
             if lines is not None and not lines:
                 continue
+            rows = []
             try:
-                new, hits = rewrite(text, rule_ids, lines)
+                new, hits = rewrite(text, rule_ids, lines, rows)
             except ValueError as e:
                 raise ValueError(f"{path}: {e}") from e
             for rule_id, line in hits:
                 counts[rule_id] += 1
-                report.append(f"{path.as_posix()}\t{rule_id}\t{line}")
+            for rule_id, line, what in sorted(rows, key=lambda r: r[1]):
+                report.append(f"{path.as_posix()}\t{rule_id}\t{line}\t{what}")
+                if what.startswith("hand edit: "):
+                    hand.append(f"hand edit\t{path.as_posix()}\t{rule_id}\t{line}\t{what[len('hand edit: '):]}")
             if new != text:
                 pending.append((path, new))
     except ValueError as e:
@@ -633,8 +709,11 @@ def main(argv=None):
     if not args.check:
         for path, new in pending:
             path.write_bytes(new.encode("utf-8"))
+    for row in hand:
+        print(row)
     for rule_id, n in counts.items():
         print(f"{rule_id}\t{n}")
+    print(f"hand edits\t{len(hand)}")
     print(f"files {'to change' if args.check else 'changed'}\t{len(pending)}")
     if args.report:
         Path(args.report).write_text("".join(r + "\n" for r in report), encoding="utf-8", newline="\n")

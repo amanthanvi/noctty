@@ -149,18 +149,26 @@ class RuleTests(unittest.TestCase):
         self.assertIn('tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "x" })', got)
         self.assertIn('tmp.dir.readFileAlloc(alloc, "a", 0)', got)
 
-    def test_reorder_keeps_line_breaks_and_leaves_commented_arguments(self):
-        # Each argument's span takes the 0.17 argument at its place; the line breaks stay.
+    def test_arguments_that_change_places_stay_on_one_line(self):
+        # council F5: arguments that change places across a line break would move text from one line to another:
+        # a hand edit, reported. On one line they are rewritten, and the other arguments keep their line breaks.
         src = ('test "r" {\n    var tmp = std.testing.tmpDir(.{});\n    const d = try tmp.dir.readFileAlloc(\n'
-               '        alloc,\n        "a.txt",\n        1 << 20,\n    );\n}\n')
-        got, hits = codemod.rewrite(src)
-        self.assertEqual(got.count("\n"), src.count("\n"))
-        self.assertIn('readFileAlloc(\n        std.testing.io, "a.txt",\n        alloc,\n'
-                      '        .limited(1 << 20),\n    );', got)
+               '        alloc,\n        "a.txt",\n        64,\n    );\n}\n')
+        rows = []
+        got, hits = codemod.rewrite(src, None, None, rows)
+        self.assertEqual((got, hits), (src, []))
+        self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.ACROSS_LINES)])
+        same_line = src.replace("(\n        alloc,\n        \"a.txt\",\n", "(alloc, \"a.txt\",\n")
+        got, hits = codemod.rewrite(same_line)
+        self.assertIn('readFileAlloc(std.testing.io, "a.txt", alloc,\n        .limited(64),\n    );', got)
         self.assertEqual(len(hits), 1)
-        # A comment between arguments that change places would sit beside the wrong one: left for a hand edit.
-        commented = src.replace("        alloc,\n", "        alloc, // the allocator\n")
-        self.assertEqual(codemod.rewrite(commented)[0], commented)
+        # A comment between the arguments would end up beside another one: a hand edit, reported.
+        for commented in (src.replace("        alloc,\n", "        alloc, // the allocator\n"),
+                          same_line.replace('"a.txt",\n', '"a.txt", // the file\n')):
+            rows = []
+            self.assertEqual(codemod.rewrite(commented, None, None, rows)[0], commented)
+            self.assertEqual([r[:2] for r in rows], [("test-dir-io", 3)])
+            self.assertTrue(rows[0][2].startswith("hand edit: "))
 
     def test_open_and_close_are_one_hit(self):
         src = ('test "oc" {\n    var tmp = std.testing.tmpDir(.{});\n'
@@ -187,12 +195,70 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(len(hits), 2)
         self.assertEqual(codemod.rewrite(got)[0], got)
 
-    def test_multi_line_reorder_in_fork_line_mode(self):
+    def test_a_hand_edit_is_reported_on_fork_lines_only(self):
         src = ('test "f" {\n    var tmp = std.testing.tmpDir(.{});\n    const d = try tmp.dir.readFileAlloc(\n'
-               '        alloc,\n        "a.txt",\n        1 << 20,\n    );\n}\n')
-        got, hits = codemod.rewrite(src, None, set(range(1, 9)))
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(got.count("\n"), src.count("\n"))
+               '        alloc,\n        "a.txt",\n        64,\n    );\n}\n')
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, set(range(1, 9)), rows), (src, []))
+        self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.ACROSS_LINES)])
+        # The call's lines are upstream's: nothing to report.
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, {1, 2, 8}, rows), (src, []))
+        self.assertEqual(rows, [])
+
+    # --- the council's round-2 findings ------------------------------------------------------------------------
+
+    def test_an_edit_is_checked_on_every_line_it_spans(self):
+        # council F5: an edit from line 1 to line 3 touches line 2 too.
+        hit = codemod.Hit(1, [codemod.Edit(0, 5, "a\nB\nc")])
+        self.assertFalse(codemod._on_lines("a\nb\nc\n", hit, {1, 3}))
+        self.assertTrue(codemod._on_lines("a\nb\nc\n", hit, {1, 2, 3}))
+
+    def test_a_three_line_argument_reorder_around_an_inherited_line(self):
+        # council F5: the second argument spans lines 3-5 and line 4 is upstream's. Swapping it with the first would
+        # rewrite line 4 (and move it), whichever lines are the fork's: a hand edit, reported, never an abort.
+        src = ('test "r" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    const p = try tmp.dir.realpathAlloc(alloc, try std.fmt.allocPrint(\n'
+               '        alloc, "{s}", .{name},\n    ));\n}\n')
+        for lines in ({1, 2, 3, 5, 6}, {5}, None):
+            with self.subTest(lines=lines):
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, lines, rows), (src, []))
+                self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.ACROSS_LINES)])
+        # A hit the engine finds reaching an inherited line is reported with that reason.
+        src = 'test "o" {\n    var tmp = std.testing.tmpDir(.{});\n    const f = try tmp.dir.openFile("a", .{});\n' \
+              '    defer f.close();\n}\n'
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, {1, 2, 4, 5}, rows), (src, []))
+        self.assertEqual(rows, [("test-dir-io", 3, "hand edit: " + codemod.INHERITED)])
+
+    def test_a_multi_line_empty_array_list_is_a_hand_edit(self):
+        # council F5: `.empty` would drop the line break (and the comment): reported, never an abort.
+        for src in ("var xs: std.ArrayList(u8) = .{\n};\n", "var xs: std.ArrayList(u8) = .{ // none yet\n};\n"):
+            with self.subTest(src=src):
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                self.assertEqual(rows, [("arraylist-empty", 1, "hand edit: " + codemod.LINE_COUNT)])
+
+    def test_a_hand_edit_never_aborts_the_run(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p, report = Path(d) / "a.zig", Path(d) / "report.tsv"
+            p.write_text("var xs: std.ArrayList(u8) = .{\n};\nconst t = std.mem.trimLeft(u8, s, \" \");\n",
+                         encoding="utf-8", newline="\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = codemod.main(["--report", str(report), str(p)])
+            self.assertEqual(code, 0)
+            self.assertEqual(p.read_text(encoding="utf-8"),
+                             "var xs: std.ArrayList(u8) = .{\n};\nconst t = std.mem.trimStart(u8, s, \" \");\n")
+            self.assertIn(f"hand edit\t{p.as_posix()}\tarraylist-empty\t1\t{codemod.LINE_COUNT}\n", out.getvalue())
+            self.assertIn("hand edits\t1\n", out.getvalue())
+            self.assertEqual(report.read_text(encoding="utf-8"),
+                             f"{p.as_posix()}\tarraylist-empty\t1\thand edit: {codemod.LINE_COUNT}\n"
+                             f"{p.as_posix()}\tmem-trim\t3\trewritten\n")
 
     def test_parse_changed_lines(self):
         diff = ("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,0 +2,3 @@ fn a\n+a\n+b\n+c\n"
