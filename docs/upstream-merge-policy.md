@@ -402,13 +402,12 @@ gate is `git ls-files` finding nothing for each. Upstream carries them:
 `test/windows/flagship/contracts/Contracts.15-PathKinds.ps1` runs that gate
 with a negative control, for the pathspecs it lists and no others. A bullet
 below that has no pathspec there is a rule the contract does not check, and
-the merge's own delete list has to carry it. At `63a4c3969` the contract lists
+the merge's own delete list has to carry it. At `9860e6f08` the contract lists
 nothing for:
 
 - the i18n, Xcode and Metal build steps `v1.4.0` has under `src/build/`:
   `GhosttyI18n.zig`, `GhosttyXcodebuild.zig`, `MetallibStep.zig` and
   `xcframework.zig`;
-- the three Apple steps named below;
 - three of upstream's workflows: `clean-artifacts.yml`, `milestone.yml` and
   `publish-tag.yml`.
 
@@ -424,7 +423,7 @@ The paths of this kind:
   the three Apple steps its `GhosttyLibVt.zig` referenced (`LipoStep.zig`,
   `LibtoolStep.zig`, `XCFrameworkStep.zig`; row Qg11-1 of
   `plans/stone-1a/drift-decisions.tsv`), so they are in this kind from then
-  on;
+  on, and the contract lists them;
 - `LibsystemOverride*`;
 - `nix/package.nix`, `nix/tests.nix`, `nix/vm/**`,
   `nix/patches/zig-0.17-ios-process-replace.patch`;
