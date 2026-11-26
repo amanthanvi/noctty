@@ -252,7 +252,7 @@ pub fn threadEnter(
         switch (@as(StartError, @errorCast(err))) {
             // We're in the child. Nothing more we can do but abnormal exit.
             // The Command will output some additional information.
-            error.ExecFailedInChild => posix.exit(1),
+            error.ExecFailedInChild => std.process.exit(1),
 
             // Keep the tailored pty exhaustion message in Thread.
             error.OpenptyFailed => return error.OpenptyFailed,
@@ -304,8 +304,11 @@ pub fn threadEnter(
     // Create our pipe that we'll use to kill our read thread.
     // pipe[0] is the read end, pipe[1] is the write end.
     const pipe = try internal_os.pipe();
-    errdefer _ = posix.system.close(pipe[0]);
-    errdefer _ = posix.system.close(pipe[1]);
+    // Win32 handles: 0.15.2's posix.close was CloseHandle; 0.17's
+    // posix.system.close is the C runtime's, which takes no HANDLE
+    // (conpty-io-boundary 4.3).
+    errdefer _ = windows.exp.kernel32.CloseHandle(pipe[0]);
+    errdefer _ = windows.exp.kernel32.CloseHandle(pipe[1]);
 
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
@@ -803,7 +806,7 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.Mode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        _ = posix.system.close(self.read_thread_pipe);
+        _ = windows.exp.kernel32.CloseHandle(self.read_thread_pipe);
 
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just

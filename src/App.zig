@@ -1575,6 +1575,22 @@ test "named layout automation save requires the focused target" {
     );
 }
 
+/// Redraw a surface on runtimes that draw on the UI thread (the fork's
+/// handler; the 1.4 merge dropped it with upstream's GTK GL-area removal).
+fn redrawSurface(
+    self: *App,
+    rt_app: *apprt.App,
+    surface: *apprt.Surface,
+) !void {
+    if (!self.hasRtSurface(surface)) return;
+
+    _ = try rt_app.performAction(
+        .{ .surface = surface.core() },
+        .render,
+        {},
+    );
+}
+
 /// Handle a window message
 fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !void {
     // We want to ensure our window is still active. Window messages

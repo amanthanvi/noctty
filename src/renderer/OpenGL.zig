@@ -38,7 +38,8 @@ pub const custom_shader_y_is_down = false;
 pub const swap_chain_count = 1;
 
 const log = std.log.scoped(.opengl);
-const WglSwapIntervalExt = *const fn (interval: c_int) callconv(.winapi) windows.BOOL;
+/// Returns the SDK's BOOL, a c_int (std's BOOL is an enum in Zig 0.17).
+const WglSwapIntervalExt = *const fn (interval: c_int) callconv(.winapi) c_int;
 const wgl_swap_interval_ext_name: [*:0]const u8 = "wglSwapIntervalEXT";
 const enable_gl_debug_output = false;
 /// Bound on the driver strings read for the startup diagnostic. The Win32
@@ -729,7 +730,7 @@ fn drawComposed(self: *const OpenGL, pipeline: Pipeline, texture: gl.Texture, di
     try pipeline.program.setUniform("dst_size", @Vector(2, f32){ @floatFromInt(width), @floatFromInt(height) });
     try pipeline.program.setUniform("dim", composedDimUniform(dim));
     try gl.Texture.active(0);
-    const texbind = try texture.bind(.@"2D");
+    const texbind = try texture.bind(.@"2d");
     defer texbind.unbind();
     const vaobind = try pipeline.vao.bind();
     defer vaobind.unbind();
@@ -800,7 +801,7 @@ pub inline fn textureOptions(self: OpenGL) Texture.Options {
     return .{
         .format = .rgba,
         .internal_format = .srgba,
-        .target = .@"2D",
+        .target = .@"2d",
         .min_filter = .linear,
         .mag_filter = .linear,
         .wrap_s = .clamp_to_edge,
@@ -847,7 +848,7 @@ pub inline fn imageTextureOptions(
     return .{
         .format = format.toPixelFormat(),
         .internal_format = if (srgb) .srgba else .rgba,
-        .target = .@"2D",
+        .target = .@"2d",
         // TODO: Generate mipmaps for image textures and use
         //       linear_mipmap_linear filtering so that they
         //       look good even when scaled way down.
@@ -878,7 +879,7 @@ pub fn initAtlasTexture(
         .{
             .format = format,
             .internal_format = internal_format,
-            .target = .Rectangle,
+            .target = .rectangle,
             .min_filter = .nearest,
             .mag_filter = .nearest,
             .wrap_s = .clamp_to_edge,

@@ -974,8 +974,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 metrics: font.Metrics,
             } = font_critical: {
                 const grid: *font.SharedGrid = options.font_grid;
-                grid.lock.lockShared();
-                defer grid.lock.unlockShared();
+                grid.lock.lockSharedUncancelable(global.io());
+                defer grid.lock.unlockShared(global.io());
                 break :font_critical .{
                     .metrics = grid.metrics,
                 };
@@ -2097,8 +2097,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             texture: {
                 const modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
                 if (modified <= frame.grayscale_modified) break :texture;
-                self.font_grid.lock.lockShared();
-                defer self.font_grid.lock.unlockShared();
+                self.font_grid.lock.lockSharedUncancelable(global.io());
+                defer self.font_grid.lock.unlockShared(global.io());
                 const uploaded = self.font_grid.atlas_grayscale.modified.load(.monotonic);
                 try self.syncAtlasTexture(&self.font_grid.atlas_grayscale, &frame.grayscale);
                 frame.grayscale_modified = uploaded;
@@ -2107,8 +2107,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             texture: {
                 const modified = self.font_grid.atlas_color.modified.load(.monotonic);
                 if (modified <= frame.color_modified) break :texture;
-                self.font_grid.lock.lockShared();
-                defer self.font_grid.lock.unlockShared();
+                self.font_grid.lock.lockSharedUncancelable(global.io());
+                defer self.font_grid.lock.unlockShared(global.io());
                 const uploaded = self.font_grid.atlas_color.modified.load(.monotonic);
                 try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
                 frame.color_modified = uploaded;
@@ -2562,15 +2562,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // These fields own API-specific resources, shared ownership, or
             // fresh-renderer synchronization state. A backport must classify
             // every new field explicitly instead of silently dropping state.
-            const recreated = .{ "alloc", "draw_mutex", "config", "surface_mailbox", "custom_shader_focused_changed", "cells_rebuilt", "font_grid", "images", "bg_image", "bg_image_changed", "bg_image_buffer", "bg_image_buffer_modified", "api", "display_link", "health", "swap_chain", "target_config_modified", "reinitialize_shaders", "has_custom_shaders", "shaders" };
+            const recreated = .{ "alloc", "draw_mutex", "config", "surface_mailbox", "custom_shader_focused_changed", "cells_rebuilt", "images_rebuilt", "font_grid", "images", "bg_image", "bg_image_changed", "bg_image_buffer", "bg_image_buffer_modified", "api", "display_link", "health", "swap_chain", "target_config_modified", "reinitialize_shaders", "has_custom_shaders", "shaders" };
             comptime {
                 @setEvalBranchQuota(100_000);
-                for (std.meta.fields(Self)) |field| {
+                for (@typeInfo(Self).@"struct".field_names) |field_name| {
                     var covered = false;
                     for (transferred ++ recreated) |name| {
-                        if (std.mem.eql(u8, name, field.name)) covered = true;
+                        if (std.mem.eql(u8, name, field_name)) covered = true;
                     }
-                    if (!covered) @compileError("classify new renderer field for backend transfer: " ++ field.name);
+                    if (!covered) @compileError("classify new renderer field for backend transfer: " ++ field_name);
                 }
             }
             inline for (transferred) |field| {

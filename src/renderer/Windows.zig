@@ -22,6 +22,8 @@ pub const FrameUpdate = generic.CommonFrameUpdate;
 
 alloc: std.mem.Allocator,
 rt_surface: *apprt.Surface,
+/// The device `init` was given, for the renderer a fallback starts.
+device: *renderer.Device,
 surface_mailbox: apprt.surface.Mailbox,
 mutex: std.Io.Mutex = .init,
 /// Published once, after full GL construction/state transfer. GL never changes
@@ -96,7 +98,7 @@ pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
     const safe_mode = options.rt_surface.app.safe_mode;
     const recovery_preference = if (safe_mode) .@"d3d11-warp" else requested;
     const feature = selection.unsupported(options.config.custom_shaders.value.items.len != 0, options.config.bg_image != null, false);
-    var result: Windows = .{ .alloc = alloc, .rt_surface = options.rt_surface, .surface_mailbox = options.surface_mailbox, .active = undefined, .thread = options.thread };
+    var result: Windows = .{ .alloc = alloc, .rt_surface = options.rt_surface, .device = options.device, .surface_mailbox = options.surface_mailbox, .active = undefined, .thread = options.thread };
     const skip_opengl = apprt.win32.openGLUnavailable();
     var opengl_error: ?anyerror = null;
     var opengl_unavailable = false;
@@ -213,7 +215,7 @@ fn fallBack(self: *Windows) !void {
         .d3d11 => |v| v,
     };
     try old.api.suspendPresentation();
-    const replacement = initGL(self.alloc, .{ .config = old.config, .font_grid = old.font_grid, .size = old.size, .surface_mailbox = old.surface_mailbox, .rt_surface = self.rt_surface, .thread = self.thread }) catch |err| {
+    const replacement = initGL(self.alloc, .{ .device = self.device, .config = old.config, .font_grid = old.font_grid, .size = old.size, .surface_mailbox = old.surface_mailbox, .rt_surface = self.rt_surface, .thread = self.thread }) catch |err| {
         // Where OpenGL could not start, later surfaces in this process start
         // without it. Nothing of the attempt is bound for later frames.
         if (openGLCouldNotStart(self.rt_surface)) apprt.win32.markOpenGLUnavailable();

@@ -2629,7 +2629,7 @@ pub const SettingsWindow = struct {
     fields: FieldWindows = std.mem.zeroes(FieldWindows),
     /// The sections whose rows exist. `open` makes the selected section's; the
     /// others are made the first time they are shown (`materializeSection`).
-    materialized: std.EnumSet(Section) = .initEmpty(),
+    materialized: std.EnumSet(Section) = .empty,
     active_section: Section = .appearance,
     dpi: u32 = 96,
     /// Class atoms lazily registered the first time `open` runs.
@@ -4627,7 +4627,7 @@ pub const SettingsWindow = struct {
         self.held_control_count = 0;
         self.held_viewport = false;
         self.fields = .{};
-        self.materialized = .initEmpty();
+        self.materialized = .empty;
         self.viewport = null;
         self.framed_invalid_field = null;
         self.help_shown = false;
@@ -4727,10 +4727,10 @@ pub const SettingsWindow = struct {
         self.search_total = 0;
         if (!self.search_query.active()) return;
         const KeySet = std.StaticBitSet(settings_reference.key_count);
-        var form_keys: KeySet = .initEmpty();
+        var form_keys: KeySet = .empty;
         var not_keys: usize = 0;
         for (std.enums.values(Section)) |section| {
-            var page_keys: KeySet = .initEmpty();
+            var page_keys: KeySet = .empty;
             for (formItemsForSection(section)) |item| {
                 const found = self.searchFinds(item.control_index);
                 self.search_found[item.control_index] = found;
@@ -6053,7 +6053,7 @@ pub const SettingsWindow = struct {
         const edit = self.rawScalarEdit(field) orelse return;
         const p = self.pending orelse return;
         var buf: [32]u8 = undefined;
-        const text = std.fmt.bufPrintZ(&buf, "{d}", .{fieldValue(&p, field.setting())}) catch return;
+        const text = std.fmt.bufPrintSentinel(&buf, "{d}", .{fieldValue(&p, field.setting())}, 0) catch return;
         setEditText(edit, text, &self.suppress_edit_events);
         self.syncCompanion(field);
     }

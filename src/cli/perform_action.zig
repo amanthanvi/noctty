@@ -163,7 +163,6 @@ fn runArgsWithPerform(
             try stderr.print("Invalid action for +perform-action: {s}\n", .{action});
             return 1;
         },
-        else => return err,
     };
 
     if (opts.@"surface-id" != null and parsed_action.scope() == .app) {

@@ -103,7 +103,7 @@ fn collectConfigKeyNames(alloc: Allocator) ![][]const u8 {
     defer alloc.free(legacy);
     const current = try config_file.defaultXdgPath(alloc);
     defer alloc.free(current);
-    var keys = ConfigKeys.initEmpty();
+    var keys = ConfigKeys.empty;
     const legacy_exists = try scanConfigFile(alloc, legacy, &keys);
     const current_exists = try scanConfigFile(alloc, current, &keys);
     if (!legacy_exists and !current_exists) {
@@ -318,7 +318,7 @@ test "diagnostic system metadata identifies the OS and embedded integration" {
 
 test "diagnostic config scan emits recognized sorted names only" {
     const alloc = std.testing.allocator;
-    var keys = ConfigKeys.initEmpty();
+    var keys = ConfigKeys.empty;
     try scanConfigBytes(alloc, "\xef\xbb\xbf# command = comment-secret\n" ++
         " font-size = 19\r\n" ++
         "env = TOKEN=secret-token\n" ++
@@ -370,13 +370,13 @@ test "diagnostic config scan supports UTF16 byte orders and missing files" {
         "\xff\xfef\x00o\x00n\x00t\x00-\x00s\x00i\x00z\x00e\x00=\x002\x000\x00\n\x00",
         "\xfe\xff\x00f\x00o\x00n\x00t\x00-\x00s\x00i\x00z\x00e\x00=\x002\x000\x00\n",
     }) |bytes| {
-        var keys = ConfigKeys.initEmpty();
+        var keys = ConfigKeys.empty;
         try scanConfigBytes(alloc, bytes, &keys);
         try std.testing.expect(keys.contains(.@"font-size"));
         try std.testing.expectEqual(@as(usize, 1), keys.count());
     }
     for ([_][]const u8{ "\xff\xfef", "\xfe\xff\x00" }) |bytes| {
-        var invalid_keys = ConfigKeys.initEmpty();
+        var invalid_keys = ConfigKeys.empty;
         try std.testing.expectError(error.InvalidEncoding, scanConfigBytes(alloc, bytes, &invalid_keys));
         try std.testing.expectEqual(@as(usize, 0), invalid_keys.count());
     }
@@ -387,7 +387,7 @@ test "diagnostic config scan supports UTF16 byte orders and missing files" {
     defer alloc.free(root);
     const path = try std.fs.path.join(alloc, &.{ root, "config.ghostty" });
     defer alloc.free(path);
-    var keys = ConfigKeys.initEmpty();
+    var keys = ConfigKeys.empty;
     try std.testing.expect(!try scanConfigFile(alloc, path, &keys));
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "" });
     // An empty default file still exists, so the caller must not load the

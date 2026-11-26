@@ -5206,6 +5206,10 @@ pub const App = struct {
                 defer alloc.free(pipe_name);
                 return ipc_server.sendToggleQuickTerminalIpc(alloc, pipe_name, elevated, response_timeout_ms);
             },
+            // 1.4's IPC new_tab is GTK's D-Bus `+new-tab`. The fork's
+            // `+new-tab` is an automation verb over its own pipe
+            // (`cli/new_tab.zig`), so nothing on Windows sends this one.
+            .new_tab => return false,
         }
     }
 

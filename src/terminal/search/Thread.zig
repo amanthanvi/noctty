@@ -604,9 +604,9 @@ test {
                 worker.exited.load(.acquire),
             });
             const seen = ud.events_seen.load(.acquire);
-            inline for (std.meta.fields(Event)) |field| {
-                if (seen & (@as(u32, 1) << @backingInt(@field(std.meta.Tag(Event), field.name))) != 0) {
-                    std.debug.print(" {s}", .{field.name});
+            inline for (@typeInfo(Event).@"union".field_names) |field_name| {
+                if (seen & (@as(u32, 1) << @backingInt(@field(std.meta.Tag(Event), field_name))) != 0) {
+                    std.debug.print(" {s}", .{field_name});
                 }
             }
             std.debug.print("\n", .{});

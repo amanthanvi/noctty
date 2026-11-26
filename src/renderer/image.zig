@@ -246,7 +246,8 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 pipeline: GraphicsAPI.Pipeline,
                 pass: *GraphicsAPI.RenderPass,
                 placement_type: DrawPlacements,
-            ) void {
+            ) !void {
+                if (comptime @hasDecl(GraphicsAPI, "supports_images") and !GraphicsAPI.supports_images) return;
                 const placements: []const Placement = switch (placement_type) {
                     .kitty_below_bg => self.kitty_placements.items[0..self.kitty_bg_end],
                     .kitty_below_text => self.kitty_placements.items[self.kitty_bg_end..self.kitty_text_end],
@@ -305,7 +306,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                     };
                     defer buf.deinit();
 
-                    pass.step(.{
+                    try pass.step(.{
                         .pipeline = pipeline,
                         .buffers = &.{buf.buffer},
                         .textures = &.{texture},
