@@ -693,7 +693,10 @@ that govern each symbol you change, or that none does.
   what a build script reads at configure time; the host-tool steps
   `src/build/ConptyRedist.zig` and `src/build/ThreadRoleTextCheck.zig`;
   module modes, `SharedDeps.assertModuleOptimizeMode` and
-  `SharedDeps.uucodeModule`), the
+  `SharedDeps.uucodeModule`; what a `Run` step hands its child, as
+  `src/build/GhosttyPkgConfig.zig` does its generator
+  `src/extra/pkg-config.zig`; which files `test-lib-vt` parses and
+  compiles), the
   Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
   `scripts/dev-windows.cmd` keeps when set and otherwise sets to
   `%LOCALAPPDATA%\zig`), the Windows target floor (`src/build/Config.zig`,
