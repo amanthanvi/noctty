@@ -214,16 +214,16 @@ in `plans/stone-1a/generate_stone_ledgers.py` assigns the class. It tests
 class 1 first, so a fork-owned seam stays class 1 where another pattern would
 also match.
 
-| Class | Paths                                                                                                                                              | Default side                                                                                                                                        |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | The fork-owned seams listed above                                                                                                                  | The fork wins on Windows behaviour and fork-owned features; upstream wins on VT and protocol correctness and memory safety, adapted around the fork |
-| 2     | Windows platform and process: `src/os/**`, `src/pty.zig`, `src/termio/**`, `src/crash/**`, `src/global.zig`, `src/main_ghostty.zig`, `src/App.zig` | Fork                                                                                                                                                |
-| 3     | Terminal core: the rest of `src/terminal/**`                                                                                                       | Upstream, re-applying the fork-owned delta (the written override below)                                                                             |
-| 4     | The libghostty-vt C API: `src/terminal/c/**`, `include/ghostty/**`, `src/lib_vt.zig`                                                               | Upstream                                                                                                                                            |
-| 5     | Other shared core: everything no other class names                                                                                                 | Per file                                                                                                                                            |
-| 6     | Shell integration: `src/shell-integration/**`                                                                                                      | Fork, taking upstream's security fixes                                                                                                              |
-| 7     | Build, CI, packaging and tests: `build.zig`, `src/build/**`, `pkg/**`, `.github/**`, the Nix files, `test/**`                                      | Fork for CI and packaging; upstream's build port, adapted                                                                                           |
-| 8     | Docs: top-level Markdown and Markdown under `src/`                                                                                                 | Fork                                                                                                                                                |
+| Class | Paths                                                                                                                                                                                                             | Default side                                                                                                                                                                                     |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | `src/apprt/**`, and the fork-owned seams listed above wherever they live                                                                                                                                          | The fork wins on Windows behaviour and fork-owned features; upstream wins on VT and protocol correctness and memory safety, adapted around the fork                                              |
+| 2     | Windows platform and process: `src/os/**`, `src/pty.zig`, `src/termio/**`, `src/crash/**`, `src/global.zig`, `src/main_ghostty.zig`, `src/App.zig`                                                                | Fork                                                                                                                                                                                             |
+| 3     | Terminal core: the rest of `src/terminal/**`                                                                                                                                                                      | Upstream, re-applying the fork-owned delta (the written override below)                                                                                                                          |
+| 4     | The libghostty-vt C API: `src/terminal/c/**`, `include/ghostty/**`, `src/lib_vt.zig`                                                                                                                              | Upstream                                                                                                                                                                                         |
+| 5     | Other shared core: everything no other class names                                                                                                                                                                | Per file                                                                                                                                                                                         |
+| 6     | Shell integration: `src/shell-integration/**`                                                                                                                                                                     | Fork, taking upstream's security fixes                                                                                                                                                           |
+| 7     | Build, CI, packaging, repository files and tests, as `owner()` matches them: `build.zig*`, `src/build/**`, `pkg/**`, `.github/**`, `nix*`, `flake*`, `CODEOWNERS`, `typos*`, `valgrind*`, `.gitignore`, `test/**` | Fork for CI, packaging and repository files; upstream's build port, adapted; a test hunk takes the side the code it tests took, and the fork's own harnesses (`test/windows/**`) stay the fork's |
+| 8     | Docs: top-level Markdown and Markdown under `src/`                                                                                                                                                                | Fork                                                                                                                                                                                             |
 
 A class chooses a default side and nothing else. The two rules below say when
 the default does not hold.
@@ -306,8 +306,10 @@ same change from both sides.
 
 ## What the tree may hold after a merge
 
-Every path a merge touches is one of three kinds, and each kind has its gate.
-The "never merged" list under Merge scope falls into the first two.
+Three kinds of path have a tree gate of their own, below. The "never merged"
+list under Merge scope falls into the first two. Every other path a merge
+touches is resolved by its class (Default sides, above) and checked by the
+build, the test suite and the resolution ledger, not by a tree comparison.
 
 **Must be empty.** No tracked file under these paths, after any merge. The
 gate is `git ls-files` finding nothing for each;
@@ -401,16 +403,21 @@ first-parent history `main`'s own.
 
 The landing:
 
-1. Confirm `main` has not moved since the last forward merge:
-   `git merge-base --is-ancestor origin/main <gated tip>`. The tip then
-   contains `main`, so the merge commit's tree will equal the tip's.
-2. Merge the pull request as a merge commit pinned to the gated tip:
-   `gh pr merge <PR> --repo amanthanvi/noctty --merge --match-head-commit <gated tip>`,
-   never with
-   `--admin`. Squash and rebase merging stay enabled for ordinary pull
-   requests; the explicit method and the pin are what rule a squash out here.
-3. Verify all three, and stop if one fails, because the merge is then not the
-   gated candidate:
+1. Fetch (`git fetch origin main`), then confirm `main` has not moved since
+   the last forward merge: `git merge-base --is-ancestor origin/main <gated tip>`.
+   The tip then contains `main`, so the merge commit's tree will equal the
+   tip's.
+2. Disable the hold, merge, and re-enable the hold at once, with nothing else
+   merged while it is down (the stepping stone's was down for six seconds).
+   Merge the pull request as a merge commit pinned to the gated tip, never with
+   `--admin`:
+   `gh pr merge <PR> --repo amanthanvi/noctty --merge --match-head-commit <gated tip>`.
+   Squash and rebase merging stay enabled for ordinary pull requests; the
+   explicit method and the pin are what rule a squash out here. The pin fixes
+   the head, not the base, so step 3 is what proves the base did not move.
+3. Fetch again, then verify all three. If one fails, the merge is not the
+   gated candidate: keep the hold on, stop, and take it to the maintainer,
+   with no revert (see Rollback):
    - `git merge-base --is-ancestor <merged upstream revision> origin/main`;
    - `git rev-parse <merge>^{tree}` equals `git rev-parse <gated tip>^{tree}`;
    - the merge's first parent is the previous `main`.
