@@ -1348,7 +1348,7 @@ fn consumeEchoPrefix(
     queue_len.* = 0;
     matched_len.* = 0;
     complete.* = true;
-    return .{ .output = std.mem.trimLeft(u8, output[pending.len..], " \t\r\n") };
+    return .{ .output = std.mem.trimStart(u8, output[pending.len..], " \t\r\n") };
 }
 
 test "terminal accessibility refresh and query policies" {

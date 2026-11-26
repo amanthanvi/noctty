@@ -1341,7 +1341,7 @@ test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces
         fn distributionName(alloc: Allocator, _: DefaultDistribution) ?[]u8 {
             return alloc.dupe(u8, "Ubuntu") catch null;
         }
-        fn beforeWait() void {
+        pub fn beforeWait() void {
             mutex.lock();
             defer mutex.unlock();
             waiting += 1;

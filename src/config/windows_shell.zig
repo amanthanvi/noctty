@@ -621,7 +621,7 @@ fn userWorkingDirectory(
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (internal_os.home(&buf) catch null) |home| {
             return .{ .path = try std.fmt.allocPrintSentinel(alloc, "{s}\\{s}", .{
-                std.mem.trimRight(u8, home, "\\/"),
+                std.mem.trimEnd(u8, home, "\\/"),
                 value[2..],
             }, 0) };
         }
@@ -885,7 +885,7 @@ test "user profile working directories take the working-directory values" {
         if (try internal_os.home(&buf)) |home| {
             const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{});
             defer alloc.free(dir.path);
-            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimRight(u8, home, "\\/")));
+            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimEnd(u8, home, "\\/")));
             try testing.expect(std.mem.endsWith(u8, dir.path, "\\src"));
         }
     }
@@ -1369,7 +1369,7 @@ fn appendVisualStudioInstance(
     if (!visual_studio.isPlainInstanceId(instance.id)) return;
     if (!isOnLocalDrive(instance.path)) return;
     if (!host.installDirectory(instance.path)) return;
-    const root = std.mem.trimRight(u8, instance.path, "\\/");
+    const root = std.mem.trimEnd(u8, instance.path, "\\/");
     const dev_args = visual_studio.devCmdArguments(arch, instance.version);
 
     const bat = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, visual_studio.dev_cmd_relative });
@@ -4563,7 +4563,7 @@ fn isWslBashLauncher(path: []const u8, system_root: []const u8) bool {
 /// Whether `path` is `dir` or below it, ignoring case and the kind of
 /// separator, as Windows does.
 fn pathIsUnder(path: []const u8, dir: []const u8) bool {
-    const root = std.mem.trimRight(u8, dir, "/\\");
+    const root = std.mem.trimEnd(u8, dir, "/\\");
     if (root.len == 0 or path.len <= root.len) return false;
     for (root, path[0..root.len]) |a, b| {
         if (isSeparator(a) and isSeparator(b)) continue;
@@ -5205,7 +5205,7 @@ fn isSeparator(c: u8) bool {
 }
 
 fn trimLeadingSeparators(path: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, path, "/\\");
+    return std.mem.trimStart(u8, path, "/\\");
 }
 
 const normalizeWslPath = internal_os.path.normalizeWslPath;

@@ -89,7 +89,7 @@ pub fn parseQuery(raw: []const u8) ParsedQuery {
     if (text.len == 0) return .{ .filter = null, .text = text };
     for (prefixes) |prefix| {
         if (text[0] == prefix.value) {
-            text = std.mem.trimLeft(u8, text[1..], " \t");
+            text = std.mem.trimStart(u8, text[1..], " \t");
             return .{ .filter = prefix.kind, .text = text };
         }
     }

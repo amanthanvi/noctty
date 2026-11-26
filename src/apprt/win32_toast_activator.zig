@@ -335,7 +335,7 @@ test "installer toast activator CLSID matches the runtime" {
     var server_line = false;
     var shortcuts: usize = 0;
     while (lines.next()) |raw| {
-        const line = std.mem.trimRight(u8, raw, "\r");
+        const line = std.mem.trimEnd(u8, raw, "\r");
         if (std.mem.indexOf(u8, line, class_key) != null) {
             try std.testing.expect(std.mem.startsWith(u8, line, "Root: HKA;"));
             try std.testing.expect(std.mem.indexOf(u8, line, "Flags: uninsdeletekey") != null);

@@ -521,12 +521,12 @@ pub const Windows = struct {
     fn scanAll(self: *Windows) error{ OutOfMemory, ScanStopped }![]Record {
         const alloc = self.alloc;
 
-        var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
+        var paths: std.ArrayListUnmanaged([:0]const u8) = .empty;
         defer {
             for (paths.items) |path| alloc.free(path);
             paths.deinit(alloc);
         }
-        var seen: std.StringHashMapUnmanaged(void) = .{};
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer {
             var it = seen.keyIterator();
             while (it.next()) |key| alloc.free(key.*);
@@ -549,7 +549,7 @@ pub const Windows = struct {
         };
         defer lib.deinit();
 
-        var records: std.ArrayListUnmanaged(Record) = .{};
+        var records: std.ArrayListUnmanaged(Record) = .empty;
         errdefer {
             for (records.items) |*record| record.deinit(alloc);
             records.deinit(alloc);
@@ -951,7 +951,7 @@ pub const Windows = struct {
         alloc: Allocator,
         desc: Descriptor,
     ) Allocator.Error![]u32 {
-        var result: std.ArrayListUnmanaged(u32) = .{};
+        var result: std.ArrayListUnmanaged(u32) = .empty;
         errdefer result.deinit(alloc);
         for (self.records, 0..) |record, index| {
             if (!matchesDescriptor(record, desc)) continue;
@@ -1056,7 +1056,7 @@ pub const Windows = struct {
             return try alloc.alloc(CodepointRange, 0);
         }
 
-        var ranges: std.ArrayListUnmanaged(CodepointRange) = .{};
+        var ranges: std.ArrayListUnmanaged(CodepointRange) = .empty;
         errdefer ranges.deinit(alloc);
 
         // FT_Get_Next_Char returns codepoints in ascending order.
@@ -1559,7 +1559,7 @@ test "windows system fallback puts DirectWrite's face first end to end" {
         const Face = struct { path: [:0]const u8, face_index: i32 };
         const collect = struct {
             fn all(it: *Windows.DiscoverIterator) ![]Face {
-                var faces: std.ArrayListUnmanaged(Face) = .{};
+                var faces: std.ArrayListUnmanaged(Face) = .empty;
                 errdefer {
                     for (faces.items) |face| testing.allocator.free(face.path);
                     faces.deinit(testing.allocator);
@@ -1595,7 +1595,7 @@ test "windows system fallback puts DirectWrite's face first end to end" {
         const named: ?usize = for (plain, 0..) |face, i| {
             if (face.face_index == preferred.face_index and dwrite.samePath(face.path, preferred.path)) break i;
         } else null;
-        var expected: std.ArrayListUnmanaged(Face) = .{};
+        var expected: std.ArrayListUnmanaged(Face) = .empty;
         defer expected.deinit(alloc);
         if (named) |i| try expected.append(alloc, plain[i]);
         for (plain, 0..) |face, i| {
@@ -1834,12 +1834,12 @@ test "windowsRegistryFontPathResolve" {
 test "windowsFontPathDedupe" {
     const alloc = testing.allocator;
 
-    var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
+    var paths: std.ArrayListUnmanaged([:0]const u8) = .empty;
     defer {
         for (paths.items) |path| alloc.free(path);
         paths.deinit(alloc);
     }
-    var seen: std.StringHashMapUnmanaged(void) = .{};
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.keyIterator();
         while (it.next()) |key| alloc.free(key.*);
@@ -2018,7 +2018,7 @@ fn fixtureDiscovery(dir: std.fs.Dir, fixtures: []const Fixture) !Windows {
     var lib = try freetype.Library.init();
     defer lib.deinit();
 
-    var records: std.ArrayListUnmanaged(Windows.Record) = .{};
+    var records: std.ArrayListUnmanaged(Windows.Record) = .empty;
     errdefer {
         for (records.items) |*record| record.deinit(disco.alloc);
         records.deinit(disco.alloc);

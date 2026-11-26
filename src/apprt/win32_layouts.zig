@@ -50,7 +50,7 @@ pub fn validateName(name: []const u8) NameError!void {
     };
 
     const extension_index = std.mem.indexOfScalar(u8, name, '.') orelse name.len;
-    const device_stem = std.mem.trimRight(u8, name[0..extension_index], " .");
+    const device_stem = std.mem.trimEnd(u8, name[0..extension_index], " .");
     if (isReservedDeviceName(device_stem)) return error.ReservedDeviceName;
 }
 

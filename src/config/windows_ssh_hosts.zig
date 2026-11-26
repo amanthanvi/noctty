@@ -279,7 +279,7 @@ fn parseDirective(raw_line: []const u8) ?Directive {
     var line = std.mem.trim(u8, raw_line, " \t\r");
     if (line.len == 0 or line[0] == '#') return null;
     if (sshCommentStart(line)) |comment_start| {
-        line = std.mem.trimRight(u8, line[0..comment_start], " \t\r");
+        line = std.mem.trimEnd(u8, line[0..comment_start], " \t\r");
     }
     if (line.len == 0) return null;
 
@@ -302,7 +302,7 @@ fn parseDirective(raw_line: []const u8) ?Directive {
 
     return .{
         .keyword = line[0..keyword_end],
-        .value = std.mem.trimRight(u8, line[value_start..], " \t\r"),
+        .value = std.mem.trimEnd(u8, line[value_start..], " \t\r"),
     };
 }
 

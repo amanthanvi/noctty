@@ -388,7 +388,7 @@ fn windowsPathIsRepresentable(path: []const u8) bool {
     // of nothing else (`b:.`, `b: `) is empty by the time NT sees it, and NT
     // answers STATUS_OBJECT_NAME_INVALID. `b:x.` and `b: x` are fine
     // (measured: not found).
-    if (std.mem.trimRight(u8, stream, ". ").len == 0) return false;
+    if (std.mem.trimEnd(u8, stream, ". ").len == 0) return false;
     // A NUL would truncate in a wide-string API, so a check could run against
     // a shorter path than the one we hand back to be opened.
     if (std.mem.indexOfScalar(u8, stream, 0) != null) return false;
@@ -407,7 +407,7 @@ fn windowsPathIsRepresentable(path: []const u8) bool {
 /// Windows maps them. They are refused too: this is the one place that has to
 /// hold on every build, and the only check here that `open` does not repeat.
 fn windowsNameIsDevice(name: []const u8) bool {
-    const stem = std.mem.trimRight(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
+    const stem = std.mem.trimEnd(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
     for ([_][]const u8{ "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" }) |device| {
         if (std.ascii.eqlIgnoreCase(stem, device)) return true;
     }

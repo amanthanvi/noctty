@@ -545,11 +545,11 @@ test "a 256-slot recorder, eight threads: one shared pair and 16 each make 129 p
     try testing.expectEqual(@as(usize, 129), n);
 
     var buf: [dump.pair_line_max]u8 = undefined;
-    try testing.expect(seen.contains(std.mem.trimRight(u8, dump.formatPair(&buf, s[0], s[1], .lock), "\n")));
+    try testing.expect(seen.contains(std.mem.trimEnd(u8, dump.formatPair(&buf, s[0], s[1], .lock), "\n")));
     for (0..Concurrent.threads) |t| {
         for (0..Concurrent.own) |i| {
             const p = Concurrent.pair(t, i);
-            try testing.expect(seen.contains(std.mem.trimRight(u8, dump.formatPair(&buf, p[0], p[1], .lock), "\n")));
+            try testing.expect(seen.contains(std.mem.trimEnd(u8, dump.formatPair(&buf, p[0], p[1], .lock), "\n")));
         }
     }
 }

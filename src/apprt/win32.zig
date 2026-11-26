@@ -1932,7 +1932,7 @@ fn settingsThemeOpenable(
         if (!std.mem.eql(u8, name, std.fs.path.basename(name))) continue;
         var arena: std.heap.ArenaAllocator = .init(alloc);
         defer arena.deinit();
-        var dirs: std.ArrayListUnmanaged([]const u8) = .{};
+        var dirs: std.ArrayListUnmanaged([]const u8) = .empty;
         var it: themepkg.LocationIterator = .{ .arena_alloc = arena.allocator() };
         while (it.next() catch return error.OutOfMemory) |location| {
             dirs.append(arena.allocator(), location.dir) catch return error.OutOfMemory;
@@ -6491,10 +6491,10 @@ fn leadingIndentLen(line: []const u8) usize {
 
 /// Return an assignment's key without treating literal value text as comments.
 fn settingsAssignmentKey(line: []const u8) ?SettingsConfigKey {
-    const stripped = std.mem.trimLeft(u8, line, " \t");
+    const stripped = std.mem.trimStart(u8, line, " \t");
     if (stripped.len == 0 or stripped[0] == '#' or stripped[0] == ';') return null;
     const eq = std.mem.indexOfScalar(u8, stripped, '=') orelse return null;
-    return std.meta.stringToEnum(SettingsConfigKey, std.mem.trimRight(u8, stripped[0..eq], " \t"));
+    return std.meta.stringToEnum(SettingsConfigKey, std.mem.trimEnd(u8, stripped[0..eq], " \t"));
 }
 
 fn appendSettingsPayload(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), payload: []const u8, ending: []const u8) !void {
@@ -6578,14 +6578,14 @@ pub fn persistSettings(
         return problem;
     }
 
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(alloc);
     // Profile definitions, by identity: `patchOrAppendEdits` never sees
     // their keys.
     const settings_patch = @import("win32/settings_patch.zig");
-    var terminated: std.ArrayListUnmanaged(u8) = .{};
+    var terminated: std.ArrayListUnmanaged(u8) = .empty;
     defer terminated.deinit(alloc);
-    var profiles_patched: std.ArrayListUnmanaged(u8) = .{};
+    var profiles_patched: std.ArrayListUnmanaged(u8) = .empty;
     defer profiles_patched.deinit(alloc);
     // The end of the file is handled once, for every save: the patchers get
     // the text ending in a complete line ending, the file's own kind, so
@@ -6660,7 +6660,7 @@ pub fn patchOrAppendEdits(
     @setEvalBranchQuota(10_000);
     const keys_total = comptime std.enums.values(SettingsConfigKey).len;
     var last_line: [keys_total]usize = @splat(std.math.maxInt(usize));
-    var lines: std.ArrayListUnmanaged([]const u8) = .{};
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
     defer lines.deinit(alloc);
     var crlf_count: usize = 0;
     var lf_count: usize = 0;
@@ -7719,7 +7719,7 @@ test "win32 settings patch replaces the whole font list and resets lower layers"
     try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "C");
     var edited: SettingsEditedKeySet = .initEmpty();
     edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try patchOrAppendEdits(alloc, "# keep\nfont-family = A\ncopy-on-select = false\n  font-family = B\n", &pending, edited, &out);
     try std.testing.expectEqualStrings("# keep\ncopy-on-select = false\n  font-family = \nfont-family = C\n", out.items);
@@ -8548,7 +8548,7 @@ test "win32 settings clone does not edit include or shader paths" {
     pending.@"copy-on-select" = .true;
     const edited = settingsUserEditedKeys(&original, &pending);
     try std.testing.expectEqual(@as(usize, 1), edited.count());
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
     try std.testing.expectEqualStrings("config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = true\n", out.items);
@@ -8573,7 +8573,7 @@ test "win32 settings every editable key round trips through a file" {
         const duplicates = try std.fmt.allocPrint(alloc, "# preserve this comment\n{s}# between duplicates\r\n{s}", .{ old.written(), old.written() });
         defer alloc.free(duplicates);
         for ([_][]const u8{ "# preserve this comment\n", old.written(), duplicates }) |raw| {
-            var out: std.ArrayListUnmanaged(u8) = .{};
+            var out: std.ArrayListUnmanaged(u8) = .empty;
             defer out.deinit(alloc);
             try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
             var loaded = try configpkg.Config.default(alloc);
@@ -8590,13 +8590,13 @@ test "win32 settings every editable key round trips through a file" {
 
 /// The lines of `text` that do not assign `key`, each with its line ending.
 fn settingsTestOtherLines(alloc: Allocator, text: []const u8, key: SettingsConfigKey) !std.ArrayListUnmanaged([]const u8) {
-    var lines: std.ArrayListUnmanaged([]const u8) = .{};
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer lines.deinit(alloc);
     var start: usize = 0;
     while (start < text.len) {
         const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |newline| newline + 1 else text.len;
         const line = text[start..end];
-        if (settingsAssignmentKey(std.mem.trimRight(u8, line, "\r\n")) != key) try lines.append(alloc, line);
+        if (settingsAssignmentKey(std.mem.trimEnd(u8, line, "\r\n")) != key) try lines.append(alloc, line);
         start = end;
     }
     return lines;
@@ -8605,7 +8605,7 @@ fn settingsTestOtherLines(alloc: Allocator, text: []const u8, key: SettingsConfi
 fn settingsTestKeyLines(text: []const u8, key: SettingsConfigKey) usize {
     var count: usize = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| count += @intFromBool(settingsAssignmentKey(std.mem.trimRight(u8, line, "\r")) == key);
+    while (lines.next()) |line| count += @intFromBool(settingsAssignmentKey(std.mem.trimEnd(u8, line, "\r")) == key);
     return count;
 }
 
@@ -8761,9 +8761,9 @@ test "win32 settings fields found by a search and edited save themselves and lea
             defer alloc.free(saved);
             // Every line that assigns none of those keys is byte-identical,
             // in order.
-            var before: std.ArrayListUnmanaged([]const u8) = .{};
+            var before: std.ArrayListUnmanaged([]const u8) = .empty;
             defer before.deinit(alloc);
-            var after: std.ArrayListUnmanaged([]const u8) = .{};
+            var after: std.ArrayListUnmanaged([]const u8) = .empty;
             defer after.deinit(alloc);
             for ([_]struct { source: []const u8, lines: *std.ArrayListUnmanaged([]const u8) }{
                 .{ .source = text, .lines = &before },
@@ -8773,7 +8773,7 @@ test "win32 settings fields found by a search and edited save themselves and lea
                 while (start < side.source.len) {
                     const end = if (std.mem.indexOfScalarPos(u8, side.source, start, '\n')) |newline| newline + 1 else side.source.len;
                     const line = side.source[start..end];
-                    const key = settingsAssignmentKey(std.mem.trimRight(u8, line, "\r\n"));
+                    const key = settingsAssignmentKey(std.mem.trimEnd(u8, line, "\r\n"));
                     if (key == null or std.mem.indexOfScalar(SettingsConfigKey, &keys, key.?) == null) try side.lines.append(alloc, line);
                     start = end;
                 }
@@ -8813,7 +8813,7 @@ test "win32 settings patch persists optional command edits" {
     const edited = settingsUserEditedKeys(&original, &pending);
     try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.command)));
 
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);
     try patchOrAppendEdits(
         testing.allocator,
@@ -8982,7 +8982,7 @@ test "win32 settings patch persists optional update channel edits" {
     const edited = settingsUserEditedKeys(&original, &pending);
     try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"auto-update-channel")));
 
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);
     try patchOrAppendEdits(testing.allocator, "", &pending, edited, &patched);
     try testing.expectEqualStrings("auto-update-channel = tip\n", patched.items);
@@ -9047,7 +9047,7 @@ test "win32 settings patch persists optional auto update edits" {
     const edited = settingsUserEditedKeys(&original, &pending);
     try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"auto-update")));
 
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);
     try patchOrAppendEdits(testing.allocator, "", &pending, edited, &patched);
     try testing.expectEqualStrings("auto-update = download\n", patched.items);
@@ -9071,7 +9071,7 @@ test "win32 settings patch persists optional auto update edits" {
 /// supplies `text/html`. Plain consumers get readable text; entity
 /// references are preserved verbatim.
 pub fn stripHtmlTags(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     try buf.ensureTotalCapacity(alloc, html.len);
     var i: usize = 0;
