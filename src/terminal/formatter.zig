@@ -6844,11 +6844,15 @@ test "Terminal vt cursor stays absolute in origin mode without the region" {
     s.nextSlice("\x1b[3;8r\x1b[?6h\x1b[2;5H");
 
     // The replaying terminal keeps full-screen margins, so row 4 is absolute.
+    // The cursor is written before the other screen extras (v1.4.0), so the
+    // output holds its CUP rather than ending with it.
     var formatter: TerminalFormatter = .init(&t, .vt);
     formatter.extra = .all;
     formatter.extra.scrolling_region = false;
     try formatter.format(&builder.writer);
-    try testing.expect(std.mem.endsWith(u8, builder.writer.buffered(), "\x1b[4;5H"));
+    const out = builder.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;5H") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2;5H") == null);
 }
 
 test "Terminal vt with keyboard modes" {

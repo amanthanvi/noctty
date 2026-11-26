@@ -804,7 +804,6 @@ pub const Handler = struct {
                 // degrades it without corrupting terminal state, so we log.
                 log.warn("error handling kitty dnd err={}", .{err});
             },
-            .program_status => self.programStatus(value),
 
             .dcs_hook => try self.dcsHook(value),
             .dcs_put => try self.dcsPut(value),
@@ -8042,18 +8041,25 @@ test "paste: bracketed paste frames the text" {
     handler.effects.write_pty = &S.writePty;
     t.modes.set(.bracketed_paste, true);
 
-    // Line terminators are safe inside the frame and are preserved.
+    // Line terminators are safe inside the frame and are preserved (noctty:
+    // as CR on Windows, whose console readers need it; PKG16 in paste.zig).
     try testing.expect(try handler.paste(.{
         .contents = .{ .memory = &.{.{ .mime = "text/plain", .data = "hello\nworld" }} },
     }));
-    try testing.expectEqualStrings("\x1b[200~hello\nworld\x1b[201~", S.written.items);
+    try testing.expectEqualStrings(
+        if (@import("builtin").os.tag == .windows) "\x1b[200~hello\rworld\x1b[201~" else "\x1b[200~hello\nworld\x1b[201~",
+        S.written.items,
+    );
     try testing.expectEqual(@as(usize, 1), S.write_count);
 
     S.reset();
     try testing.expect(try handler.paste(.{
         .contents = .{ .memory = &.{.{ .mime = "text/plain", .data = "hello\r\nworld" }} },
     }));
-    try testing.expectEqualStrings("\x1b[200~hello\r\nworld\x1b[201~", S.written.items);
+    try testing.expectEqualStrings(
+        if (@import("builtin").os.tag == .windows) "\x1b[200~hello\r\rworld\x1b[201~" else "\x1b[200~hello\r\nworld\x1b[201~",
+        S.written.items,
+    );
 
     // The frame terminator is not.
     S.reset();

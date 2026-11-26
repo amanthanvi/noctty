@@ -240,7 +240,11 @@ test "encodeWriter bracketed" {
     var buf: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try encodeWriter(&writer, "hel\x1blo\nworld", .{ .bracketed = true });
-    try testing.expectEqualStrings("\x1b[200~hel lo\nworld\x1b[201~", writer.buffered());
+    // noctty: Windows console readers get CR inside the frame too (PKG16).
+    try testing.expectEqualStrings(
+        if (builtin.os.tag == .windows) "\x1b[200~hel lo\rworld\x1b[201~" else "\x1b[200~hel lo\nworld\x1b[201~",
+        writer.buffered(),
+    );
 }
 
 test "encodeWriter unbracketed" {
@@ -302,8 +306,12 @@ test "encodeWriter chunks through a small writer buffer" {
     const data = "line one\nline\x1btwo\nline three\n";
     try encodeWriter(&sink.writer, data, .{ .bracketed = true });
     try sink.writer.flush();
+    // noctty: Windows console readers get CR inside the frame too (PKG16).
     try testing.expectEqualStrings(
-        "\x1b[200~line one\nline two\nline three\n\x1b[201~",
+        if (builtin.os.tag == .windows)
+            "\x1b[200~line one\rline two\rline three\r\x1b[201~"
+        else
+            "\x1b[200~line one\nline two\nline three\n\x1b[201~",
         sink.list.items,
     );
 }
@@ -351,8 +359,15 @@ fn fuzzPasteEncoding(_: void, input: []const u8) !void {
     }
 }
 
+/// `fuzzPasteEncoding` behind Zig 0.17's fuzz interface, which hands a test
+/// a `std.testing.Smith` rather than the input bytes.
+fn fuzzPasteEncodingSmith(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    try fuzzPasteEncoding({}, buf[0..smith.slice(&buf)]);
+}
+
 test "fuzz paste sanitizer" {
-    try std.testing.fuzz({}, fuzzPasteEncoding, .{ .corpus = &.{
+    try std.testing.fuzz({}, fuzzPasteEncodingSmith, .{ .corpus = &.{
         "plain text",
         "line one\nline two",
         "submit\r",
