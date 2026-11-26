@@ -20,6 +20,7 @@ line, so the line ownership the filter reads stays true.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -513,44 +514,67 @@ def rewrite(text, rule_ids=None, lines=None):
     return text, hits_out
 
 
+HUNK = re.compile(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
 def parse_changed_lines(diff_text):
-    """The 1-based new-side lines a `git diff -U0` output's hunks cover."""
+    """The 1-based new-side lines a `git diff` output adds: its `+` records, numbered from their hunk's header. A
+    context line inside a hunk (which `-U0 --inter-hunk-context=0` should not produce, but a config could) is
+    upstream's line, not the fork's. A hunk ends when its header's counts are used up, so an added line that starts
+    `++` is a record, not a file header."""
     lines = set()
-    for line in diff_text.splitlines():
-        if not line.startswith("@@ "):
+    old_left = new_left = new_line = 0
+    for line in diff_text.split("\n"):
+        if old_left <= 0 and new_left <= 0:
+            m = HUNK.match(line)
+            if m:
+                old_left = int(m.group(1)) if m.group(1) is not None else 1
+                new_line = int(m.group(2))
+                new_left = int(m.group(3)) if m.group(3) is not None else 1
             continue
-        plus = line.split(" +", 1)[1].split(" ", 1)[0]
-        start, _, count = plus.partition(",")
-        start, count = int(start), int(count) if count else 1
-        lines.update(range(start, start + count))
+        if line.startswith("+"):
+            lines.add(new_line)
+            new_line, new_left = new_line + 1, new_left - 1
+        elif line.startswith("-"):
+            old_left -= 1
+        elif line.startswith("\\"):
+            pass   # "\ No newline at end of file"
+        else:      # a context line (" ", or "" under diff.suppressBlankEmpty)
+            new_line, new_left, old_left = new_line + 1, new_left - 1, old_left - 1
     return lines
+
+
+def _git(*args):
+    """A git command in the repository, its output as bytes (no newline translation: a carriage return on the ref
+    side of a diff is part of its record)."""
+    return subprocess.run(["git", "-C", str(ROOT), "--no-optional-locks", *args], capture_output=True)
+
+
+def _text(data):
+    return data.decode("utf-8", "surrogateescape")
 
 
 def check_rev(rev):
     """Stop unless `rev` names a commit."""
-    r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
+    if _git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").returncode != 0:
         raise ValueError(f"--fork-lines: {rev!r} is no commit")
 
 
 def changed_lines(path, rev):
     """The 1-based lines of `path` (as it is in the work tree) that differ from `rev`, or None when `rev` lacks
     the file (fork-only: every line). An empty set means the file is upstream's as it stands. A git failure other
-    than a path `rev` lacks stops the run."""
+    than a path `rev` lacks stops the run. `ls-tree -z` names the path unquoted, so a non-ASCII name is found."""
     rel = Path(path).resolve().relative_to(ROOT).as_posix()
-    listed = subprocess.run(["git", "-C", str(ROOT), "--no-optional-locks", "ls-tree", "--name-only", rev, "--", rel],
-                            capture_output=True, text=True, encoding="utf-8")
+    listed = _git("ls-tree", "-z", "--name-only", rev, "--", rel)
     if listed.returncode != 0:
-        raise ValueError(f"git ls-tree {rev} {rel} failed: {listed.stderr.strip()[:200]}")
-    if listed.stdout.strip() != rel:
+        raise ValueError(f"git ls-tree {rev} {rel} failed: {_text(listed.stderr).strip()[:200]}")
+    if listed.stdout != (rel + "\0").encode("utf-8"):
         return None
-    out = subprocess.run(["git", "-C", str(ROOT), "--no-optional-locks", "diff", "--no-color", "--no-ext-diff",
-                          "--no-textconv", "-U0", rev, "--", rel],
-                         capture_output=True, text=True, encoding="utf-8")
+    out = _git("diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--inter-hunk-context=0", rev, "--",
+               rel)
     if out.returncode != 0:
-        raise ValueError(f"git diff {rev} {rel} failed: {out.stderr.strip()[:200]}")
-    return parse_changed_lines(out.stdout)
+        raise ValueError(f"git diff {rev} {rel} failed: {_text(out.stderr).strip()[:200]}")
+    return parse_changed_lines(_text(out.stdout))
 
 
 def zig_files(paths):

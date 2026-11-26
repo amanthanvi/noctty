@@ -198,14 +198,27 @@ class RuleTests(unittest.TestCase):
         diff = ("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,0 +2,3 @@ fn a\n+a\n+b\n+c\n"
                 "@@ -5 +7 @@\n-x\n+y\n@@ -9,2 +11,0 @@\n-p\n-q\n")
         self.assertEqual(codemod.parse_changed_lines(diff), {2, 3, 4, 7})
+        # council F6: only a `+` record is a fork line; a context line inside a hunk (an inter-hunk context the
+        # config set) is upstream's, and an added line that starts `++` is still a record.
+        diff = ("--- a/x\n+++ b/x\n@@ -20,6 +20,6 @@\n-r\n+s\n c\n c\n c\n c\n-t\n+u\n"
+                "@@ -30 +30 @@\n-v\n\\ No newline at end of file\n+w\n\\ No newline at end of file\n"
+                "@@ -40,0 +41 @@\n+++x\n")
+        self.assertEqual(codemod.parse_changed_lines(diff), {20, 25, 30, 41})
 
     def test_bad_baseline_writes_nothing(self):
+        # council F6: the file lies inside the repository root, so the run reaches the ref check and not a path
+        # outside the root, and the diagnostic is the ref's.
+        import contextlib
+        import io
         import tempfile
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(dir=Path(codemod.__file__).resolve().parent) as d:
             p = Path(d) / "a.zig"
             p.write_text("const t = std.mem.trimLeft(u8, s, \" \");\n", encoding="utf-8", newline="\n")
-            code = codemod.main(["--fork-lines", "no-such-ref-1b5", str(p)])
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = codemod.main(["--fork-lines", "no-such-ref-1b5", str(p)])
             self.assertEqual(code, 2)
+            self.assertEqual(err.getvalue(), "codemod: --fork-lines: 'no-such-ref-1b5' is no commit; nothing written\n")
             self.assertIn("trimLeft", p.read_text(encoding="utf-8"))
 
     def test_a_failing_file_writes_nothing(self):
@@ -233,6 +246,56 @@ class RuleTests(unittest.TestCase):
             for source, expected in cases:
                 with self.subTest(rule=rule_id, source=source):
                     self.assertEqual(codemod.rewrite(source)[0], expected if expected is not None else source)
+
+
+class ForkLineTests(unittest.TestCase):
+    """council F6: `changed_lines` against a scratch repository whose config sets what a user's could."""
+
+    def make_repo(self, files, config=()):
+        import tempfile
+        d = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(d.cleanup)
+        repo = Path(d.name).resolve()
+        self.git(repo, "init", "-q")
+        for key, value in (("core.autocrlf", "false"), ("core.quotePath", "true")) + tuple(config):
+            self.git(repo, "config", key, value)
+        for name, data in files.items():
+            (repo / name).write_bytes(data)
+        self.git(repo, "add", "--", *files)
+        self.git(repo, "-c", "user.name=codemod-test", "-c", "user.email=codemod-test@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "base")
+        return repo, self.git(repo, "rev-parse", "HEAD").strip()
+
+    @staticmethod
+    def git(repo, *args):
+        import subprocess
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+    def changed(self, repo, name, rev):
+        from unittest import mock
+        with mock.patch.object(codemod, "ROOT", repo):
+            return codemod.changed_lines(repo / name, rev)
+
+    BASE = "".join(f"line {k}\n" for k in range(1, 13)).encode()
+
+    def test_inter_hunk_context_marks_no_unchanged_line(self):
+        # Changes at lines 3 and 8 with diff.interHunkContext = 4 make one hunk over 3..8 unless the run sets 0.
+        repo, rev = self.make_repo({"a.zig": self.BASE}, [("diff.interHunkContext", "4")])
+        (repo / "a.zig").write_bytes(self.BASE.replace(b"line 3\n", b"line three\n").replace(b"line 8\n", b"line 8!\n"))
+        self.assertEqual(self.changed(repo, "a.zig", rev), {3, 8})
+
+    def test_non_ascii_path_is_found_in_the_ref(self):
+        # Without -z, ls-tree quotes the name, which then reads as missing from the ref: every line eligible.
+        name = "café.zig"
+        repo, rev = self.make_repo({name: self.BASE})
+        (repo / name).write_bytes(self.BASE.replace(b"line 2\n", b"line two\n"))
+        self.assertEqual(self.changed(repo, name, rev), {2})
+
+    def test_a_carriage_return_on_the_ref_side_is_no_line_break(self):
+        # The ref's line `one<CR>two` is one diff record; read with universal newlines it would be two.
+        repo, rev = self.make_repo({"a.zig": b"one\rtwo\nthree\nfour\n"})
+        (repo / "a.zig").write_bytes(b"one\nthree\nFOUR\n")
+        self.assertEqual(self.changed(repo, "a.zig", rev), {1, 3})
 
 
 if __name__ == "__main__":
