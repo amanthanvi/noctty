@@ -566,8 +566,11 @@ so a first failure is not yet a regression. A job that never reached a verdict
 the runner is back, as often as that takes, and the prerelease waits for it.
 The same holds for a job that failed only in a step that does not run the
 tree's code (checkout, toolchain setup, an artifact download or upload, a lost
-runner), once its log shows that step as the first failure. Record the log
-line in the drift report. Every re-run or restart here is a new Test run on
+runner), once its log shows that step as the first failure and the cause is
+outside the repository (an outage, a mirror or registry that is down). Record
+the log line in the drift report. A setup failure that reproduces because of
+the repository's own configuration (a pinned tool version, a workflow input,
+a cache key) is a failure of the tree, and takes the fix route below. Every re-run or restart here is a new Test run on
 `main` (`gh workflow run test.yml --repo amanthanvi/noctty --ref main`, the
 recovery `release.yml` names), never GitHub's "Re-run failed jobs": the
 portable smoke's evidence artifact is named by run ID
