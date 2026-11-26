@@ -64,7 +64,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
         /// No thread holds it. No Windows thread has ID 0.
         const no_owner: ThreadId = 0;
 
-        inner: std.Thread.Mutex = .{},
+        inner: std.Io.Mutex = .init,
 
         /// The holding thread's ID, or `no_owner`. Only the holder stores its
         /// own ID, and only while it holds the inner mutex, so a thread that
@@ -73,16 +73,16 @@ pub fn StateMutexOf(comptime form: Layer) type {
         owner: Owner = if (on) .init(no_owner) else {},
 
         pub inline fn lock(self: *Self) void {
-            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock }) else self.inner.lock();
+            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock }) else self.inner.lockUncancelable(innerIo());
         }
 
         pub inline fn lockUncancelable(self: *Self) void {
-            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock_uncancelable }) else self.inner.lock();
+            if (on) @call(.never_tail, acquire, .{ self, Acquire.lock_uncancelable }) else self.inner.lockUncancelable(innerIo());
         }
 
         /// The demand acquire: the renderer's way in (PN3 exempts it).
         pub inline fn demand(self: *Self) void {
-            if (on) @call(.never_tail, acquire, .{ self, Acquire.demand }) else self.inner.lock();
+            if (on) @call(.never_tail, acquire, .{ self, Acquire.demand }) else self.inner.lockUncancelable(innerIo());
         }
 
         /// False when another thread holds it, or when the caller does; the
@@ -100,7 +100,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
                 }
                 self.owner.store(no_owner, .monotonic);
             }
-            self.inner.unlock();
+            self.inner.unlock(innerIo());
         }
 
         /// PN2: for a function documented "requires the mutex held". A no-op
@@ -119,7 +119,7 @@ pub fn StateMutexOf(comptime form: Layer) type {
             if (self.owner.load(.monotonic) == me) panicReentry(kind, role);
             if (role == .none) panicNoRole(kind);
             if (role == .renderer and kind != .demand) panicRendererPlain(kind);
-            self.inner.lock();
+            self.inner.lockUncancelable(innerIo());
             self.owner.store(me, .monotonic);
         }
 
@@ -135,6 +135,16 @@ pub fn StateMutexOf(comptime form: Layer) type {
             return true;
         }
     };
+}
+
+/// The `Io` of the inner mutex's waits and wakes. Zig 0.17's `std.Io.Mutex`
+/// takes one for its futex; `lockUncancelable` and `unlock` reach only
+/// `futexWaitUncancelable` and `futexWake`, which `std.Io.Threaded` runs on the
+/// OS futex whatever the instance (`lib/std/Io/Threaded.zig`), so the wrapper
+/// keeps its `Io`-free API, with no cancelation point, as on 0.15. Which `Io`
+/// the renderer-state mutex takes for good is 1B.6's lock work.
+inline fn innerIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 /// The recorder's seam: each acquisition's site (the address its acquiring
@@ -296,7 +306,7 @@ test "another thread's tryLock fails while the holder holds it" {
 
 test "the off form is the plain mutex with the same API" {
     const Plain = StateMutexOf(.off);
-    try testing.expectEqual(@sizeOf(std.Thread.Mutex), @sizeOf(Plain));
+    try testing.expectEqual(@sizeOf(std.Io.Mutex), @sizeOf(Plain));
     try testing.expectEqual(void, @FieldType(Plain, "owner"));
 
     var m: Plain = .{};

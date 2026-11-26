@@ -47,6 +47,8 @@
 //! place that names the tree's scope.
 
 const std = @import("std");
+const win32_types = @import("../apprt/win32_types.zig");
+const win32_sys = @import("../apprt/win32/sys.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const thread_role = @import("thread_role.zig");
@@ -119,7 +121,7 @@ pub fn runChildIfRequested() void {
         // just-in-time debugger. The child exits 3 itself instead, after the
         // panic has printed, and asks Windows for no fault dialog.
         _ = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-        _ = windows.kernel32.AddVectoredExceptionHandler(1, exitOnBreakpoint);
+        _ = win32_sys.AddVectoredExceptionHandler(1, exitOnBreakpoint);
         // Before the first pair, so the dump's header says what it is.
         recorder.setProcessKind(.child) catch std.process.exit(exit_kind_decided);
         running_child = true;
@@ -147,7 +149,7 @@ extern "kernel32" fn SetErrorMode(mode: u32) callconv(.winapi) u32;
 /// next handler.
 fn exitOnBreakpoint(info: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     if (info.ExceptionRecord.ExceptionCode != STATUS_BREAKPOINT) return windows.EXCEPTION_CONTINUE_SEARCH;
-    _ = windows.kernel32.TerminateProcess(windows.GetCurrentProcess(), exit_panicked);
+    _ = win32_sys.TerminateProcess(windows.GetCurrentProcess(), exit_panicked);
     return windows.EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -220,9 +222,9 @@ const Deadline = struct {
     fn run(self: *Deadline) void {
         const role_scope = thread_role.enter(.test_support);
         defer role_scope.exit();
-        windows.WaitForSingleObject(self.handle, child_deadline_ms) catch {
+        win32_sys.waitForSingleObject(self.handle, child_deadline_ms) catch {
             self.timed_out = true;
-            windows.TerminateProcess(self.handle, 124) catch {};
+            win32_sys.terminateProcess(self.handle, 124) catch {};
         };
     }
 };
@@ -266,7 +268,7 @@ pub fn run(src: std.builtin.SourceLocation, dumps: Dumps) !Child {
     watcher.join();
     // Read before `wait`, which keeps only the low byte and closes the handle.
     var exit_code: windows.DWORD = 0;
-    if (windows.kernel32.GetExitCodeProcess(child.id, &exit_code) == 0) exit_code = 0xffff_ffff;
+    if (win32_sys.GetExitCodeProcess(child.id, &exit_code) == 0) exit_code = 0xffff_ffff;
     const term = try child.wait();
     waited = true;
     try collected;
@@ -609,7 +611,7 @@ test "the table variable must name a drive-absolute path" {
 }
 
 extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buffer: [*]u16, size: u32) callconv(.winapi) u32;
-extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetEnvironmentVariableW(name: [*:0]const u16, value: ?[*:0]const u16) callconv(.winapi) win32_types.BOOL;
 
 test "the dispatch check reads the runner's header for test 0 and then the marker" {
     try testing.expect(dispatchedFirst("1/6800 main.test_0..." ++ dispatch_marker ++ "a.test.b\nthread 1 panic: x", "a.test.b"));
