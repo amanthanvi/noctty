@@ -156,23 +156,6 @@ fn initVt(
         }
     }
 
-    // The stepping stone turns Kitty graphics on for lib-vt (upstream
-    // 29e3de737), and the fork's graphics_image.zig decompresses zlib with
-    // WUFFS (#609), so the vt module needs wuffs whenever Kitty graphics is
-    // compiled: the condition is build_options' `kitty_graphics`. Its C
-    // code is compiled whenever the module is in the build graph, so it is
-    // wired in only then (v1.4.0 does the same).
-    if (!(cfg.target.result.cpu.arch == .wasm32 and
-        cfg.target.result.os.tag == .freestanding))
-    {
-        if (b.lazyDependency("wuffs", .{
-            .target = cfg.target,
-            .optimize = cfg.optimize,
-        })) |dep| {
-            vt.addImport("wuffs", dep.module("wuffs"));
-        }
-    }
-
     // If SIMD is enabled, add all our SIMD dependencies.
     if (cfg.simd) {
         try SharedDeps.addSimd(b, vt, simd_libs);
