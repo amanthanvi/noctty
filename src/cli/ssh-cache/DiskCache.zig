@@ -286,7 +286,7 @@ pub fn contains(
     const file = std.Io.Dir.openFileAbsolute(
         global.io(),
         self.path,
-        .{},
+        .{ .allow_directory = false },
     ) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
@@ -358,7 +358,7 @@ pub fn list(
     const file = std.Io.Dir.openFileAbsolute(
         global.io(),
         self.path,
-        .{},
+        .{ .allow_directory = false },
     ) catch |err| switch (err) {
         error.FileNotFound => return .init(alloc),
         else => return err,

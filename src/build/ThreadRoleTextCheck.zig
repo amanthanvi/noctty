@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     }
     const path = args[1];
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false }) catch |err| {
         std.log.err("unable to open '{s}': {t}", .{ path, err });
         std.process.exit(1);
     };

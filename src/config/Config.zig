@@ -5496,7 +5496,9 @@ pub fn loadRecursiveFiles(self: *Config, alloc_gpa: Allocator) !void {
             continue;
         }
 
-        var file = std.Io.Dir.openFileAbsolute(global.io(), path, .{}) catch |err| {
+        // A directory fails the open with `error.IsDir`, as Zig 0.15's open
+        // did on Windows; the file type check below takes the other kinds.
+        var file = std.Io.Dir.openFileAbsolute(global.io(), path, .{ .allow_directory = false }) catch |err| {
             if (err != error.FileNotFound or !optional) {
                 const diag: cli.Diagnostic = .{
                     .message = try arena_alloc.printSentinel(

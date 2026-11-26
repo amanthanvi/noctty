@@ -1802,7 +1802,7 @@ fn setupBashWithLaunchForm(
         "{s}/shell-integration/bash/ghostty.bash",
         .{resource_dir},
     );
-    if (std.Io.Dir.openFileAbsolute(global.io(), script_path, .{})) |file| {
+    if (std.Io.Dir.openFileAbsolute(global.io(), script_path, .{ .allow_directory = false })) |file| {
         file.close(global.io());
         try env.put("ENV", script_path);
     } else |err| {
@@ -2292,7 +2292,7 @@ fn setupNushell(
         const path = try std.fs.path.join(alloc, &.{
             resource_dir, "shell-integration", "nushell", "vendor", "autoload", "ghostty.nu",
         });
-        const file = std.Io.Dir.openFileAbsolute(global.io(), path, .{}) catch return null;
+        const file = std.Io.Dir.openFileAbsolute(global.io(), path, .{ .allow_directory = false }) catch return null;
         file.close(global.io());
         break :module path;
     } else null;

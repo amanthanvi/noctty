@@ -2357,7 +2357,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 var file = std.Io.Dir.openFileAbsolute(
                     global.io(),
                     path,
-                    .{},
+                    .{ .allow_directory = false },
                 ) catch |err| {
                     log.warn(
                         "error opening background image file \"{s}\": {}",
