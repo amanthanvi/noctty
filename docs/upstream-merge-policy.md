@@ -192,13 +192,14 @@ has one declaration:
   struct upstream's inside a class 2 file.
 - What upstream lacks goes in one fork-added file, `src/os/windows_ext.zig`,
   with `BOOL = c_int`. The three externs `main` has inside the struct
-  (`ResumeThread`, `GetComputerNameExW`, `ReOpenFile`) move there on the
-  merge branch, at step 1B.1 of the Ghostty 1.4.0 catch-up. Nothing under
+  (`ResumeThread`, `GetComputerNameExW`, `ReOpenFile`), and the fork's other
+  declarations there (the bundled-DLL function-pointer types, its constants,
+  `COMPUTER_NAME_FORMAT`), move there on the merge branch, at step 1B.1 of the Ghostty 1.4.0 catch-up. Nothing under
   `src/` changes on `main` for it.
 - Re-read the struct at every merge: a name it newly declares leaves the fork
   file, so each symbol on the path keeps one declaration.
 
-On this path `std.Io` does six things and no others. The list is closed, and
+On this path `std.Io` does eight things and no others. The list is closed, and
 it goes by call site:
 
 - locks, always taken with `lockUncancelable`;
@@ -212,14 +213,16 @@ it goes by call site:
 - regular files, at five call sites: the working-directory check in
   `Subprocess.start`, the executable's path in `Subprocess.init`, the `input`
   files that `prepareInput` opens and `threadEnter` reads, the output trace's
-  file in `writeSnapshot`, and the bundled ConPTY loader (`loadBundledFrom`
-  and `openConsoleMatchesArchitecture`);
+  file in `writeSnapshot`, and the bundled ConPTY loader (`loadBundled`,
+  `loadBundledFrom` and `openConsoleMatchesArchitecture`);
 - `std.Io.sleep`, at upstream's two POSIX sites, `killPid` and `getpgid`,
   which no Windows build reaches. Nothing on the Windows path sleeps through
-  `Io`: its waits are on a handle, with a bound.
-
-The reader's `yieldToDemand` also keeps upstream's timed wait between chunks,
-the one wait there that is cancelable by signature.
+  `Io`: its waits are on a handle, with a bound;
+- the reader's `yieldToDemand` keeps upstream's timed wait between chunks
+  (`io.futexWaitTimeout`), the one wait there that is cancelable by
+  signature;
+- pure types, used as types and constants only, such as `std.Io.Writer` and
+  `std.Io.Dir.max_path_bytes`.
 
 The invariant behind the list: nothing in `Io` touches a pty handle, and
 those three threads use no `Io.async`, no `Io.concurrent` and no
@@ -282,10 +285,11 @@ also match.
 | 7     | Build, CI, packaging, repository files and tests, as `owner()` matches them: `build.zig*`, `src/build/**`, `pkg/**`, `.github/**`, `nix*`, `flake*`, `CODEOWNERS`, `typos*`, `valgrind*`, `.gitignore`, `test/**` | Fork for CI, packaging and repository files; upstream's build port, adapted; the fork's own harnesses (`test/windows/**`) stay the fork's. By default a test hunk takes the side the code it tests took. Where that code was hand-merged from both sides, both sides' tests are kept. Each upstream test that is not taken is ledgered as an absence, as in `plans/stone-1a/test-absences.tsv`, so the ran-test floor counts it |
 | 8     | Docs: top-level Markdown and Markdown under `src/`                                                                                                                                                                | Fork                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
-A class chooses a default side and nothing else. Three things say when the
+A class chooses a default side and nothing else. Four things say when the
 default does not hold: the seam paragraphs under Fork-owned files (the
-`PageList.Node` model, renderer scheduling, the ConPTY path), and the two
-rules below.
+`PageList.Node` model, renderer scheduling, the ConPTY path), the two rules
+below, and the modify/delete rule under "What the tree may hold after a
+merge".
 
 Every conflict hunk is decided on its own and recorded, whatever its class.
 Class 5 shows why: the stepping stone's 48 class 5 hunks went 17 to the fork,
@@ -299,7 +303,8 @@ the model:
 - **The dropped-delta ledger** (`dropped-delta.tsv`): what the result dropped
   from either side, each with a disposition. A hunk resolved to the fork's
   side owes one for the upstream lines it leaves out: kept, mapped onto the
-  fork's equivalent by name, or refused with a reason.
+  fork's equivalent by name, refused with a reason, or deferred, naming the
+  step that re-applies it (see Deferral).
 - **The residual ledger** (`residual-ledger.tsv`): every difference that
   remains between the merged tree and the upstream revision on shared paths,
   each with why it stays.
@@ -459,7 +464,7 @@ compares equal.
 | `pkg/libxml2`, `pkg/libintl`, `pkg/macos`, `pkg/android-ndk` | 5, 5, 59 and 2 files, equal                                                                                                                | The same counts, with upstream's content                                                                                                                                            |
 | `pkg/breakpad`                                               | Equal but for two fork changes in `build.zig`: no `linkLibCpp` under the MSVC ABI, and #718's `-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` | Keeps the first, rewritten for `v1.4.0`'s file, which sets `.link_libcpp = true` on the module where the stone's called `linkLibCpp()`; the toolchain cutover removes #718's define |
 
-Two rules ride on these kinds.
+Three rules ride on these kinds.
 
 - **Platform dependencies are not copied.** `v1.4.0`'s `build.zig.zon`
   declares `apple_sdk` and `android_ndk` as plain path dependencies. The
