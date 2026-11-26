@@ -303,7 +303,7 @@ pub fn adoptPipeSecurityDescriptor(descriptor: *anyopaque) IpcPipeSecurity {
         .attributes = .{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
             .lpSecurityDescriptor = descriptor,
-            .bInheritHandle = win32_types.FALSE,
+            .bInheritHandle = .FALSE,
         },
     };
 }

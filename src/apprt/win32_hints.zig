@@ -67,7 +67,7 @@ const non_openable_schemes = [_][]const u8{"file:"};
 
 /// Compiled once: the scheme set is a compile-time constant and this runs on
 /// the UI thread for every fired label.
-var scheme_regex_once = std.once(initSchemeRegex);
+var scheme_regex_once = @import("../os/once.zig").once(initSchemeRegex);
 var scheme_regex: ?oni.Regex = null;
 var scheme_regex_err: ?anyerror = null;
 
@@ -832,7 +832,7 @@ pub fn labelPlacement(cells: CellRect, label_len: usize, metrics: PlacementMetri
 }
 
 fn renderFixture(alloc: Allocator, cols: u16, rows: u16, text: []const u8) !terminal.RenderState {
-    var term: terminal.Terminal = try .init(alloc, .{ .cols = cols, .rows = rows });
+    var term: terminal.Terminal = try .init(std.testing.io, alloc, .{ .cols = cols, .rows = rows });
     defer term.deinit(alloc);
     var stream = term.vtStream();
     defer stream.deinit();

@@ -101,7 +101,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
     const name = std.unicode.utf8ToUtf16LeStringLiteral(aumid_utf8);
     const elevated = win32_elevation.isProcessElevated() catch true;
     const installer_managed = if (std.fs.path.dirname(exe_path)) |dir|
-        windows_ext.isInstallerManagedInstallDir(dir)
+        windows_ext.isInstallerManagedInstallDir(global.io(), dir)
     else
         false;
     // A test that starts a real App reaches this; it must never name an
