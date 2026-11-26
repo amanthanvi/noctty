@@ -85,16 +85,23 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $buildConfig82
         Content = { $buildConfigText82 }
-        Pattern = '(?s)config\.omit_frame_pointer = switch \(optimize\) \{\s*\.Debug, \.ReleaseSafe => false,\s*\.ReleaseFast, \.ReleaseSmall => true,'
+        Pattern = '(?s)config\.omit_frame_pointer = switch \(optimize\) \{\s*\.debug, \.safe => false,\s*\.fast, \.small => true,'
         Kind = 'Text'
         Description = 'frame-pointer omission follows the optimize mode, not -Dstrip, so the shipped PDB describes release codegen'
     }
     @{
         File = $buildZig82
         Content = { $buildZigText82 }
-        Pattern = '(?s)if \(config\.release_symbols\) \{\s*const inherited = b\.graph\.env_map\.get\("_LINK_"\).*?b\.graph\.env_map\.put\("_LINK_", b\.fmt\("\{s\} -OPT:REF", \.\{inherited\}\)\)'
+        Pattern = '(?s)if \(config\.release_symbols\) \{\s*const link_env = b\.graph\.environ_map\.get\("_LINK_"\) orelse "";\s*if \(std\.mem\.indexOf\(u8, link_env, "-OPT:REF"\) == null\) \{\s*b\.getInstallStep\(\)\.dependOn\(&b\.addFail\('
         Kind = 'Text'
-        Description = 'a Windows release build that keeps its PDB links with /OPT:REF, which lld-link drops once /DEBUG is on'
+        Description = 'a Windows release build that keeps its PDB fails its install unless _LINK_ carries /OPT:REF, which lld-link drops once /DEBUG is on (Zig 0.17: build.zig cannot set the links'' environment)'
+    }
+    @{
+        File = $windowsPackager82
+        Content = { $windowsPackagerText82 }
+        Pattern = '(?s)\$previousLinkEnv = \$env:_LINK_\s*\$env:_LINK_ = \(@\(\$previousLinkEnv, ''-OPT:REF''\) \| Where-Object \{ \$_ \}\) -join '' ''\s*try \{\s*& zig build [^\r\n]*-Doptimize=ReleaseFast -Dstrip=false [^\r\n]*\s*\} finally \{\s*\$env:_LINK_ = \$previousLinkEnv'
+        Kind = 'Text'
+        Description = 'the packager links its symbols build with /OPT:REF through _LINK_, for that build only'
     }
     @{
         File = $buildConfig82

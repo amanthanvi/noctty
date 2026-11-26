@@ -168,7 +168,7 @@ fn initOptions(self: *SharedDeps, b: *std.Build, thread_roles: bool) !void {
 /// thread-role layer when these deps give it and the mode has it.
 fn buildOptions(
     self: *const SharedDeps,
-    mode: std.builtin.OptimizeMode,
+    mode: std.lang.Optimize,
 ) *std.Build.Step.Options {
     if (self.thread_role_options) |options| {
         if (Config.threadRoles(mode)) return options;
@@ -658,7 +658,7 @@ pub fn add(
 fn harmonizeModuleOptimizeMode(
     b: *std.Build,
     root: *std.Build.Module,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
     var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     defer visited.deinit(b.allocator);
@@ -673,7 +673,7 @@ fn harmonizeModuleOptimizeMode(
 fn harmonizeModuleOptimizeModeRecursive(
     b: *std.Build,
     module: *std.Build.Module,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
 ) !void {
     const entry = try visited.getOrPut(b.allocator, module);
@@ -692,7 +692,7 @@ fn harmonizeModuleOptimizeModeRecursive(
 fn assertModuleOptimizeMode(
     b: *std.Build,
     root: *std.Build.Module,
-    expected: std.builtin.OptimizeMode,
+    expected: std.lang.Optimize,
 ) !void {
     var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     defer visited.deinit(b.allocator);
@@ -708,14 +708,14 @@ fn assertModuleOptimizeMode(
 fn assertModuleOptimizeModeRecursive(
     b: *std.Build,
     module: *std.Build.Module,
-    expected: std.builtin.OptimizeMode,
+    expected: std.lang.Optimize,
     import_name: []const u8,
     visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
 ) !void {
     const entry = try visited.getOrPut(b.allocator, module);
     if (entry.found_existing) return;
 
-    const actual = module.optimize orelse .Debug;
+    const actual = module.optimize orelse .debug;
     if (actual != expected) {
         std.log.err(
             "product module optimize mismatch import={s} expected={s} actual={s}",

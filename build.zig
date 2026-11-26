@@ -56,9 +56,20 @@ pub fn build(b: *std.Build) !void {
     // Zig's cache key does not see the environment, so Config feeds the same
     // condition into the build options: that is what keeps a link cached
     // without the flag from being reused.
+    //
+    // From Zig 0.17 this script runs in its own configure process, and the
+    // links run in the make process, which reads its own environment: a
+    // value put into `b.graph.environ_map` here never reaches lld. So the
+    // caller sets `_LINK_` (scripts/package-windows.ps1 does), and a release
+    // build that keeps its symbols without it fails at install rather than
+    // linking 2 MB of dead code.
     if (config.release_symbols) {
-        const inherited = b.graph.env_map.get("_LINK_") orelse "";
-        try b.graph.env_map.put("_LINK_", b.fmt("{s} -OPT:REF", .{inherited}));
+        const link_env = b.graph.environ_map.get("_LINK_") orelse "";
+        if (std.mem.indexOf(u8, link_env, "-OPT:REF") == null) {
+            b.getInstallStep().dependOn(&b.addFail(
+                "a Windows release build with -Dstrip=false links with /OPT:REF: set _LINK_ to include -OPT:REF (scripts/package-windows.ps1 does)",
+            ).step);
+        }
     }
 
     const test_filters = b.option(
@@ -150,8 +161,8 @@ pub fn build(b: *std.Build) !void {
             }),
             .use_llvm = true,
         });
-        conpty_host.subsystem = .Console;
-        conpty_host.linkSystemLibrary("advapi32");
+        conpty_host.subsystem = .console;
+        conpty_host.root_module.linkSystemLibrary("advapi32", .{});
         // It shares the app's deps, but never the runtime thread-role layer.
         const conpty_host_deps = deps.withoutThreadRoles();
         _ = try conpty_host_deps.add(conpty_host);
@@ -328,7 +339,7 @@ pub fn build(b: *std.Build) !void {
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/build/version_fixture_main.zig"),
                     .target = config.target,
-                    .optimize = .Debug,
+                    .optimize = .debug,
                 }),
             });
             try GhosttyExe.addWindowsResource(b, &config, fixture_exe);
@@ -348,7 +359,7 @@ pub fn build(b: *std.Build) !void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/test_shard.zig"),
                 .target = config.baselineTarget(),
-                .optimize = .Debug,
+                .optimize = .debug,
             }),
         });
         test_step.dependOn(&b.addRunArtifact(shard_test).step);
@@ -387,7 +398,7 @@ pub fn build(b: *std.Build) !void {
         // bench:*` cannot measure Debug integrity checks hidden inside an
         // otherwise release binary.
         var bench_config = config;
-        bench_config.optimize = .ReleaseFast;
+        bench_config.optimize = .fast;
         // Never with the runtime thread-role layer, whatever the mode.
         const bench_deps = (try SharedDeps.init(b, &bench_config)).withoutThreadRoles();
         inline for (benches) |bench| {
@@ -440,11 +451,11 @@ fn addBenchStep(
         .root_module = b.createModule(.{
             .root_source_file = b.path(src),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     _ = try deps.add(exe);
-    addBenchCoreImport(b, exe, target, .ReleaseFast);
+    addBenchCoreImport(b, exe, target, .fast);
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     const step = b.step(
@@ -458,7 +469,7 @@ fn addBenchCoreImport(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
     const bench_core = b.createModule(.{
         .root_source_file = b.path("src/main_bench.zig"),

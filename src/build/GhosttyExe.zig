@@ -56,7 +56,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     // OS-specific
     switch (cfg.target.result.os.tag) {
         .windows => {
-            exe.subsystem = .Windows;
+            exe.subsystem = .windows;
             try addWindowsResource(b, cfg, exe);
 
             const command = b.addExecutable(.{
@@ -71,7 +71,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
                 }),
                 .use_llvm = true,
             });
-            command.subsystem = .Console;
+            command.subsystem = .console;
             command_exe = command;
             command_install_step = b.addInstallBinFile(command.getEmittedBin(), "noctty.com");
             // The compiled name is noctty-command, so noctty.com's CodeView
@@ -119,7 +119,7 @@ pub fn addWindowsResource(
     if (cfg.version.major > std.math.maxInt(u16) or
         cfg.version.minor > std.math.maxInt(u16) or
         cfg.version.patch > std.math.maxInt(u16)) return error.WindowsVersionComponentOutOfRange;
-    compile.addWin32ResourceFile(.{
+    compile.root_module.addWin32ResourceFile(.{
         .file = b.path("dist/windows/noctty.rc"),
         .flags = &.{
             try win32IconResourceStamp(b),
@@ -132,10 +132,14 @@ pub fn addWindowsResource(
 }
 
 fn win32IconResourceStamp(b: *std.Build) ![]const u8 {
-    const icon_bytes = try std.fs.cwd().readFileAlloc(
-        b.allocator,
+    // Zig 0.17 caches the configure step itself: register the icon, or a
+    // changed icon would reuse the old stamp.
+    b.dependOnFileContents(b.path("dist/windows/noctty.ico"));
+    const icon_bytes = try b.root.root_dir.handle.readFileAlloc(
+        b.graph.io,
         "dist/windows/noctty.ico",
-        1024 * 1024,
+        b.allocator,
+        .limited(1024 * 1024),
     );
     defer b.allocator.free(icon_bytes);
 

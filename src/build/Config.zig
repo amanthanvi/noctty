@@ -67,7 +67,7 @@ emit_termcap: bool = false,
 emit_test_exe: bool = false,
 /// The test executable's optimize mode (-Dtest-optimize). Debug unless
 /// asked: -Doptimize leaves it alone.
-test_optimize: std.builtin.OptimizeMode = .Debug,
+test_optimize: std.lang.Optimize = .debug,
 emit_themes: bool = false,
 emit_webdata: bool = false,
 emit_unicode_table_gen: bool = false,
@@ -336,8 +336,8 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     // still generate release code, or the PDB would describe a different
     // binary from the one users run.
     config.omit_frame_pointer = switch (optimize) {
-        .Debug, .ReleaseSafe => false,
-        .ReleaseFast, .ReleaseSmall => true,
+        .debug, .safe => false,
+        .fast, .small => true,
     };
 
     // A Windows release image that keeps its PDB. build.zig links it with
@@ -390,10 +390,10 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     ) orelse false;
 
     config.test_optimize = b.option(
-        std.builtin.OptimizeMode,
+        std.lang.Optimize,
         "test-optimize",
         "Optimize mode of the Zig test executable ghostty-test (default Debug; -Doptimize does not change it)",
-    ) orelse .Debug;
+    ) orelse .debug;
 
     config.emit_unicode_table_gen = b.option(
         bool,
@@ -534,7 +534,7 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "thread_roles", self.thread_roles);
     step.addOption(bool, "d3d11", self.d3d11);
     step.addOption(bool, "renderer_test_tools", self.renderer_test_tools);
-    step.addOption(std.builtin.OptimizeMode, "test_optimize", self.test_optimize);
+    step.addOption(std.lang.Optimize, "test_optimize", self.test_optimize);
     step.addOption(ApprtRuntime, "app_runtime", self.app_runtime);
     step.addOption(FontBackend, "font_backend", self.font_backend);
     step.addOption(RendererBackend, "renderer", self.renderer);
@@ -590,10 +590,10 @@ pub fn testModule(
 /// thread-role layer (PLAN.md §2.7's build scope): in Debug and ReleaseSafe,
 /// never in ReleaseFast or ReleaseSmall. Every other artifact gets it in no
 /// mode.
-pub fn threadRoles(mode: std.builtin.OptimizeMode) bool {
+pub fn threadRoles(mode: std.lang.Optimize) bool {
     return switch (mode) {
-        .Debug, .ReleaseSafe => true,
-        .ReleaseFast, .ReleaseSmall => false,
+        .debug, .safe => true,
+        .fast, .small => false,
     };
 }
 

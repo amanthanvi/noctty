@@ -54,7 +54,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !Proxy {
         .linkage = .dynamic,
         .use_llvm = true,
     });
-    library.linkLibC();
+    library.root_module.link_libc = true;
     const install_step = b.addInstallBinFile(
         library.getEmittedBin(),
         name ++ ".dll",

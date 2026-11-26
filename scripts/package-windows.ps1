@@ -587,7 +587,18 @@ try {
         try {
             Remove-Item -LiteralPath $buildCapabilitiesPath -Force -ErrorAction SilentlyContinue
             # -Dstrip=false keeps the debug info the symbols zip is made from.
-            & zig build -Demit-exe=true -Doptimize=ReleaseFast -Dstrip=false "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
+            # lld-link keeps every unreferenced function once it writes a PDB,
+            # so the link needs /OPT:REF. On Zig 0.17 build.zig cannot put it
+            # into the links' environment (it runs in its own configure
+            # process), so it is set here, for this build only, and build.zig
+            # fails the install without it.
+            $previousLinkEnv = $env:_LINK_
+            $env:_LINK_ = (@($previousLinkEnv, '-OPT:REF') | Where-Object { $_ }) -join ' '
+            try {
+                & zig build -Demit-exe=true -Doptimize=ReleaseFast -Dstrip=false "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
+            } finally {
+                $env:_LINK_ = $previousLinkEnv
+            }
             if ($LASTEXITCODE -ne 0) {
                 throw "Zig build failed with exit code $LASTEXITCODE."
             }
