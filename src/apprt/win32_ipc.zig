@@ -1,4 +1,6 @@
 const std = @import("std");
+const win32_sys = @import("win32/sys.zig");
+const win32_types = @import("win32_types.zig");
 const builtin = @import("builtin");
 const apprt = @import("../apprt.zig");
 const sys = @import("win32/sys.zig");
@@ -8,7 +10,7 @@ const win32_layouts = @import("win32_layouts.zig");
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 
-const BOOL = std.os.windows.BOOL;
+const BOOL = win32_types.BOOL;
 const PIPE_READMODE_BYTE = consts.PIPE_READMODE_BYTE;
 const security_sqos_present: windows.DWORD = 0x00100000;
 const security_identification: windows.DWORD = 0x00010000;
@@ -16,7 +18,7 @@ pub const pipe_nowait = 0x00000001;
 /// A named-pipe server impersonates at SecurityImpersonation by default.
 /// Identification-level SQOS lets it query the client's identity, but not
 /// open objects on the client's behalf. Keep both flags on every client open.
-pub const client_pipe_open_flags: windows.DWORD = windows.FILE_ATTRIBUTE_NORMAL |
+pub const client_pipe_open_flags: windows.DWORD = win32_types.FILE_ATTRIBUTE_NORMAL |
     security_sqos_present |
     security_identification;
 pub const io_timeout_ms: u64 = 2_000;
@@ -725,7 +727,7 @@ fn readExactUntil(
         if (expired_buffered_budget == null and sys.GetTickCount64() >= deadline_ms) {
             var available: u32 = 0;
             if (sys.PeekNamedPipe(pipe.handle, null, 0, null, &available, null) == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = std.os.windows.GetLastError();
                 if (err == .BROKEN_PIPE) return error.EndOfStream;
                 if (pipeIoPending(err)) return error.IpcTimeout;
                 return windows.unexpectedError(err);
@@ -742,14 +744,14 @@ fn readExactUntil(
             try readOverlapped(pipe, event, dst[offset..][0..read_cap], deadline_ms)
         else read: {
             var read_len: u32 = 0;
-            if (windows.kernel32.ReadFile(
+            if (win32_sys.ReadFile(
                 pipe.handle,
                 dst[offset..].ptr,
                 @intCast(read_cap),
                 &read_len,
                 null,
             ) == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = std.os.windows.GetLastError();
                 if (err == .BROKEN_PIPE) return error.EndOfStream;
                 if (pipeIoPending(err)) {
                     if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
@@ -778,14 +780,14 @@ pub fn writeAll(pipe: Pipe, src: []const u8) !void {
             try writeOverlapped(pipe, event, src[offset..], started_at +| io_timeout_ms)
         else write: {
             var write_len: u32 = 0;
-            if (windows.kernel32.WriteFile(
+            if (win32_sys.WriteFile(
                 pipe.handle,
                 src[offset..].ptr,
                 @intCast(src.len - offset),
                 &write_len,
                 null,
             ) == 0) {
-                const err = windows.kernel32.GetLastError();
+                const err = std.os.windows.GetLastError();
                 if (pipeIoPending(err)) {
                     if (sys.GetTickCount64() -| started_at >= io_timeout_ms) {
                         return error.IpcTimeout;
@@ -803,26 +805,26 @@ pub fn writeAll(pipe: Pipe, src: []const u8) !void {
 }
 
 fn readOverlapped(pipe: Pipe, event: windows.HANDLE, dst: []u8, deadline_ms: u64) !u32 {
-    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.hEvent = event;
-    const started = windows.kernel32.ReadFile(pipe.handle, dst.ptr, @intCast(dst.len), null, &overlapped);
+    const started = win32_sys.ReadFile(pipe.handle, dst.ptr, @intCast(dst.len), null, &overlapped);
     return finishOverlapped(pipe, &overlapped, started, deadline_ms);
 }
 
 fn writeOverlapped(pipe: Pipe, event: windows.HANDLE, src: []const u8, deadline_ms: u64) !u32 {
-    var overlapped = std.mem.zeroes(windows.OVERLAPPED);
+    var overlapped = std.mem.zeroes(win32_types.OVERLAPPED);
     overlapped.hEvent = event;
-    const started = windows.kernel32.WriteFile(pipe.handle, src.ptr, @intCast(src.len), null, &overlapped);
+    const started = win32_sys.WriteFile(pipe.handle, src.ptr, @intCast(src.len), null, &overlapped);
     return finishOverlapped(pipe, &overlapped, started, deadline_ms);
 }
 
 fn finishOverlapped(
     pipe: Pipe,
-    overlapped: *windows.OVERLAPPED,
+    overlapped: *win32_types.OVERLAPPED,
     started: BOOL,
     deadline_ms: u64,
 ) !u32 {
-    if (started == 0) switch (windows.kernel32.GetLastError()) {
+    if (started == 0) switch (std.os.windows.GetLastError()) {
         .IO_PENDING => {},
         .BROKEN_PIPE, .NO_DATA, .PIPE_NOT_CONNECTED => return error.EndOfStream,
         else => |err| return windows.unexpectedError(err),
@@ -837,7 +839,7 @@ fn finishOverlapped(
 /// transferred.
 pub fn awaitOverlapped(
     handle: windows.HANDLE,
-    overlapped: *windows.OVERLAPPED,
+    overlapped: *win32_types.OVERLAPPED,
     stop_event: ?windows.HANDLE,
     deadline_ms: u64,
 ) !u32 {
@@ -848,20 +850,20 @@ pub fn awaitOverlapped(
         count = 2;
     }
     const timeout_ms: u32 = if (deadline_ms == std.math.maxInt(u64))
-        windows.INFINITE
+        win32_types.INFINITE
     else
-        @intCast(@min(deadline_ms -| sys.GetTickCount64(), windows.INFINITE - 1));
-    const waited = windows.kernel32.WaitForMultipleObjects(count, &events, windows.FALSE, timeout_ms);
-    if (waited != windows.WAIT_OBJECT_0) _ = windows.kernel32.CancelIoEx(handle, overlapped);
+        @intCast(@min(deadline_ms -| sys.GetTickCount64(), win32_types.INFINITE - 1));
+    const waited = win32_sys.WaitForMultipleObjects(count, &events, win32_types.FALSE, timeout_ms);
+    if (waited != win32_types.WAIT_OBJECT_0) _ = win32_sys.CancelIoEx(handle, overlapped);
 
     var transferred: u32 = 0;
-    if (windows.kernel32.GetOverlappedResult(handle, overlapped, &transferred, windows.TRUE) != 0) {
+    if (win32_sys.GetOverlappedResult(handle, overlapped, &transferred, win32_types.TRUE) != 0) {
         return transferred;
     }
-    return switch (windows.kernel32.GetLastError()) {
+    return switch (std.os.windows.GetLastError()) {
         .OPERATION_ABORTED => switch (waited) {
-            windows.WAIT_OBJECT_0 + 1 => error.IpcStopped,
-            windows.WAIT_TIMEOUT => error.IpcTimeout,
+            win32_types.WAIT_OBJECT_0 + 1 => error.IpcStopped,
+            win32_types.WAIT_TIMEOUT => error.IpcTimeout,
             else => error.Unexpected,
         },
         .BROKEN_PIPE, .NO_DATA, .PIPE_NOT_CONNECTED => error.EndOfStream,
@@ -1137,10 +1139,10 @@ test "win32 IPC silent client read is bounded" {
     );
     defer std.testing.allocator.free(pipe_name);
 
-    const server = windows.kernel32.CreateNamedPipeW(
+    const server = win32_sys.CreateNamedPipeW(
         pipe_name.ptr,
         0x00000003,
-        windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | pipe_nowait,
+        win32_types.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | pipe_nowait,
         1,
         1024,
         1024,
@@ -1154,14 +1156,14 @@ test "win32 IPC silent client read is bounded" {
     }
 
     try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
-    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
+    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, std.os.windows.GetLastError());
 
-    const client = windows.kernel32.CreateFileW(
+    const client = win32_sys.CreateFileW(
         pipe_name.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         client_pipe_open_flags,
         null,
     );
@@ -1170,7 +1172,7 @@ test "win32 IPC silent client read is bounded" {
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
-        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
+        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, std.os.windows.GetLastError());
     }
 
     var byte: [1]u8 = undefined;
