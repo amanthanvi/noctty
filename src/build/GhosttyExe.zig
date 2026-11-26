@@ -139,7 +139,8 @@ fn win32IconResourceStamp(b: *std.Build) ![]const u8 {
         b.graph.io,
         "dist/windows/noctty.ico",
         b.allocator,
-        .limited(1024 * 1024),
+        // readFileAlloc refuses a file that reaches its limit; + 1 accepts exactly 1 MiB, as 0.15 did.
+        .limited(1024 * 1024 + 1),
     );
     defer b.allocator.free(icon_bytes);
 

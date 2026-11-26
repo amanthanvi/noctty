@@ -99,7 +99,8 @@ pub fn main(init: std.process.Init) !void {
     const cache_root = try std.Io.Dir.path.join(arena, &.{ args[5], "noctty-conpty" });
     const system_package_mode = std.mem.eql(u8, args[6], "system");
 
-    const pin_text = std.Io.Dir.cwd().readFileAlloc(io, pin_file, arena, .limited(64 * 1024)) catch |err|
+    // readFileAlloc refuses a file that reaches its limit; + 1 accepts exactly 64 KiB, as 0.15 did.
+    const pin_text = std.Io.Dir.cwd().readFileAlloc(io, pin_file, arena, .limited(64 * 1024 + 1)) catch |err|
         fail("unable to read {s}: {t}", .{ pin_path, err });
     const pin = std.json.parseFromSliceLeaky(Pin, arena, pin_text, .{
         .ignore_unknown_fields = true,
@@ -214,7 +215,8 @@ const Staged = struct {
 /// Install-ConPtyRedist checked when it staged the file.
 fn installedMatches(io: std.Io, arena: std.mem.Allocator, bin: std.Io.Dir, staged: []const Staged) bool {
     for (staged) |file| {
-        const bytes = bin.readFileAlloc(io, file.name, arena, .limited(max_file_bytes)) catch return false;
+        // + 1: a file of exactly max_file_bytes is read, as 0.15 did.
+        const bytes = bin.readFileAlloc(io, file.name, arena, .limited(max_file_bytes + 1)) catch return false;
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(bytes, &digest, .{});
         if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), file.sha256)) return false;
