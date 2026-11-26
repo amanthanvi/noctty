@@ -1437,14 +1437,15 @@ pub const GetFinalPathNameByHandleError = error{
 /// compares the two exactly; council T6). Both callers compare without case,
 /// with Windows' rules.
 ///
-/// **Where it differs from std.** For a volume with a drive letter or a UNC
-/// share it gives std's answer, the opened spelling. A volume mounted only at a
-/// folder has no DOS volume name: `VOLUME_NAME_DOS` then fails with
-/// ERROR_PATH_NOT_FOUND (it gives no `\\?\Volume{GUID}\` path), which is
+/// **Where it may differ from std.** For a volume with a drive letter or a UNC
+/// share it gives std's answer (measured for a drive letter: the test below).
+/// A volume mounted only at a folder is **not measured** (council T7): std
+/// asked the mount manager and returned the mount folder's path; with
+/// `VOLUME_NAME_DOS` the call either gives that path too (`dosPathFromFinal`
+/// handles the forms it returns) or fails with ERROR_PATH_NOT_FOUND, which is
 /// `error.FileNotFound`, the error std itself returned when it found no DOS
-/// name at all, while std asked the mount manager again and returned the mount
-/// folder's path. The two differ in result there (a path against an error),
-/// never in a wrong path.
+/// name at all. Either way it gives no wrong path; measuring it needs a volume
+/// (a VHD) mounted at a folder.
 pub fn getFinalPathNameByHandle(handle: HANDLE, out_buffer: []u16) GetFinalPathNameByHandleError![]u16 {
     const file_name_opened = 0x8;
     const volume_name_dos = 0x0;
