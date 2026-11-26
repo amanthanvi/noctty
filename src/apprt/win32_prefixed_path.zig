@@ -1,14 +1,14 @@
 //! The fork's own `PathSpace` and the WTF-8 to NT-prefixed WTF-16 conversion
 //! its file code needs.
 //!
-//! Zig 0.17 removed std's `sliceToPrefixedFileW` and `PathSpace` from `os.windows`
-//! (the conversion lives on in `std.Io.Threaded`, with another error set).
-//! Until the 1B cutover this bridges to std's form on 0.15.2, whose behaviour
-//! every caller was written against (PLAN section 5, "sliceToPrefixedFileW").
-//! The std function is reached by name through `@field`, on purpose: it is the
-//! one sanctioned use, so the Win32-identifier lint (which resolves spellings,
-//! not strings) does not count it, and 1B replaces the body of `convert` and
-//! nothing else. Do not copy the pattern.
+//! Zig 0.17 removed `sliceToPrefixedFileW` and `PathSpace` from
+//! `std.os.windows` (the conversion lives on in `std.Io.Threaded`, with another
+//! error set). Until the 1B cutover `convert` is the PLAN section 5 wrapper
+//! "calling std's `os.windows` form on 0.15.2": it names
+//! `std.os.windows.sliceToPrefixedFileW` in plain text, and it is the one place
+//! in the fork that may. The Win32-identifier lint reports that one line, and
+//! its allowance (a change under `ci/`, which waits for review seats) is where
+//! the exception is recorded. 1B replaces the body of `convert` and nothing else.
 
 const std = @import("std");
 
@@ -42,8 +42,7 @@ pub fn sliceToPrefixedFileW(path: []const u8) Error!PathSpace {
 }
 
 fn convert(path: []const u8) Error!PathSpace {
-    const std_convert = @field(std.os.windows, "sliceToPrefixedFileW");
-    const std_space = try std_convert(null, path);
+    const std_space = try std.os.windows.sliceToPrefixedFileW(null, path);
     comptime std.debug.assert(@sizeOf(@TypeOf(std_space)) == @sizeOf(PathSpace));
     var out: PathSpace = undefined;
     out.len = std_space.len;
@@ -51,50 +50,45 @@ fn convert(path: []const u8) Error!PathSpace {
     return out;
 }
 
-test "the prefixed path keeps std's conversion" {
-    const testing = std.testing;
-
-    // A relative path stays relative and null-terminated.
-    const relative = try sliceToPrefixedFileW("a\\b.txt");
-    try testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("a\\b.txt"), relative.span());
-    try testing.expectEqual(@as(u16, 0), relative.data[relative.len]);
-
-    // A drive-absolute path takes the NT prefix.
-    const absolute = try sliceToPrefixedFileW("C:\\Windows\\notepad.exe");
-    try testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\\??\\C:\\Windows\\notepad.exe"), absolute.span());
-
-    // A verbatim path keeps its text under the NT prefix.
-    const verbatim = try sliceToPrefixedFileW("\\\\?\\C:\\x");
-    try testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\\??\\C:\\x"), verbatim.span());
-
-    // A UNC path becomes `\??\UNC\server\share`.
-    const unc = try sliceToPrefixedFileW("\\\\server\\share\\f");
-    try testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\\??\\UNC\\server\\share\\f"), unc.span());
-
-    // Bytes that are not WTF-8 fail with the error std gave.
-    try testing.expectError(error.InvalidWtf8, sliceToPrefixedFileW("\xff"));
+fn expectConverts(path: []const u8, expected: []const u8) !void {
+    const space = try sliceToPrefixedFileW(path);
+    try std.testing.expectEqual(@as(u16, 0), space.data[space.len]);
+    var buf: [256]u8 = undefined;
+    const n = try std.unicode.utf16LeToUtf8(&buf, space.span());
+    try std.testing.expectEqualStrings(expected, buf[0..n]);
 }
 
-test "the prefixed path agrees with std on a corpus" {
-    const std_convert = @field(std.os.windows, "sliceToPrefixedFileW");
-    const corpus = [_][]const u8{
-        "",
-        ".",
-        "..\\x",
-        "a\\..\\..\\b",
-        "dir\\.\\file",
-        "C:file",
-        "\\rooted",
-        "C:\\a\\..\\b",
-        "\\\\.\\COM1",
-        "\\\\.\\pipe\\name",
-        "\\\\?\\UNC\\s\\h",
-        "\\??\\C:\\y",
-        "C:\\\u{00e9}\u{4e2d}",
-    };
-    for (corpus) |path| {
-        const mine = try sliceToPrefixedFileW(path);
-        const theirs = try std_convert(null, path);
-        try std.testing.expectEqualSlices(u16, theirs.span(), mine.span());
-    }
+// Each expected value is what std 0.15.2's own `sliceToPrefixedFileW` returned
+// for the input on 2026-11-26 (read from a run of the std function itself), so
+// these tests pin the conversion against a drift on either side of the 1B
+// cutover. Cases that depend on the working directory are left out.
+test "the prefixed path keeps std's conversion" {
+    // Relative paths stay relative and are normalized.
+    try expectConverts("a\\b.txt", "a\\b.txt");
+    try expectConverts("", "");
+    try expectConverts(".", "");
+    try expectConverts("dir\\.\\file", "dir\\file");
+    try expectConverts("a\\..\\b", "b");
+    // Drive-absolute and rooted forms take the NT prefix and are normalized.
+    try expectConverts("C:\\Windows\\notepad.exe", "\\??\\C:\\Windows\\notepad.exe");
+    try expectConverts("C:\\a\\..\\b", "\\??\\C:\\b");
+    try expectConverts("C:\\a\\.\\b\\", "\\??\\C:\\a\\b\\");
+    try expectConverts("C:/a/b", "\\??\\C:\\a\\b");
+    try expectConverts("C:\\\u{e9}\u{4e2d}", "\\??\\C:\\\u{e9}\u{4e2d}");
+    // UNC paths become `\??\UNC\server\share`.
+    try expectConverts("\\\\server\\share\\f", "\\??\\UNC\\server\\share\\f");
+    try expectConverts("\\\\server\\share\\a\\..\\b", "\\??\\UNC\\server\\share\\b");
+    // Local-device and verbatim forms keep their text under the NT prefix; a
+    // verbatim path is not normalized.
+    try expectConverts("\\\\.\\COM1", "\\??\\COM1");
+    try expectConverts("\\\\.\\pipe\\name", "\\??\\pipe\\name");
+    try expectConverts("\\\\?\\C:\\x", "\\??\\C:\\x");
+    try expectConverts("\\\\?\\UNC\\s\\h", "\\??\\UNC\\s\\h");
+    try expectConverts("\\\\?\\C:\\a\\..\\b", "\\??\\C:\\a\\..\\b");
+    try expectConverts("//?/C:/x", "\\??\\C:\\x");
+    try expectConverts("\\??\\C:\\y", "\\??\\C:\\y");
+}
+
+test "bytes that are not WTF-8 fail with the error std gave" {
+    try std.testing.expectError(error.InvalidWtf8, sliceToPrefixedFileW("\xff"));
 }
