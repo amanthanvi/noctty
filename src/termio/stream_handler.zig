@@ -455,7 +455,6 @@ pub const StreamHandler = struct {
             .title_pop,
             .kitty_dnd,
             .osc_unknown,
-            .program_status,
             => {},
         }
     }
@@ -2390,7 +2389,7 @@ test "semantic output capture asks the consumer to forget typed input on a scree
 
 fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {
     const message = switch (mailbox.*) {
-        .spsc => |*value| value.queue.pop() orelse return error.TestExpectedEqual,
+        .spsc => |*value| value.queue.pop(std.testing.io) orelse return error.TestExpectedEqual,
     };
     switch (message) {
         .write_small => |value| try std.testing.expectEqualStrings(
@@ -2408,7 +2407,7 @@ fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {
 fn countIssue149ColorSchemeReports(mailbox: *termio.Mailbox) usize {
     var count: usize = 0;
     switch (mailbox.*) {
-        .spsc => |*value| while (value.queue.pop()) |message| {
+        .spsc => |*value| while (value.queue.pop(std.testing.io)) |message| {
             if (message == .color_scheme_report) count += 1;
         },
     }
@@ -2491,7 +2490,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
     // A burst of query replies from the reader can fill the mailbox before a
     // reload reaches the IO thread.
     const queue = termio_mailbox.spsc.queue;
-    while (queue.push(.{ .inspector = false }, .{ .instant = {} }) > 0) {}
+    while (queue.push(std.testing.io, .{ .inspector = false }, .{ .instant = {} }) > 0) {}
     var light = try termio.DerivedConfig.init(std.testing.allocator, &config, .{ .theme = .light });
     defer light.deinit();
     stream.handler.changeConfig(&light);
@@ -2580,9 +2579,9 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     });
     defer h.deinit(std.testing.allocator);
 
-    while (h.app_queue.push(.{ .quit = {} }, .{ .instant = {} }) != 0) {}
+    while (h.app_queue.push(std.testing.io, .{ .quit = {} }, .{ .instant = {} }) != 0) {}
     const termio_queue = h.termio_mailbox.spsc.queue;
-    while (termio_queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+    while (termio_queue.push(std.testing.io, .{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
 
     // An OSC 52 write longer than a small surface message, so it owns its
     // bytes too; the testing allocator reports a dropped message not freed.
@@ -2665,8 +2664,8 @@ test "a reader's answerback into a full termio mailbox lets the IO thread take t
     defer h.deinit(std.testing.allocator);
 
     const queue = h.termio_mailbox.spsc.queue;
-    try std.testing.expect(queue.push(.{ .focused = true }, .{ .instant = {} }) > 0);
-    while (queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+    try std.testing.expect(queue.push(std.testing.io, .{ .focused = true }, .{ .instant = {} }) > 0);
+    while (queue.push(std.testing.io, .{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
 
     const Io = struct {
         mailbox: *termio.Mailbox,
@@ -2681,7 +2680,7 @@ test "a reader's answerback into a full termio mailbox lets the IO thread take t
             termio.Thread.drainForTest(self.mailbox, self.state, &self.hook) catch |err| {
                 self.err = err;
                 // Make room, so the waiting reader does not wait forever.
-                while (self.mailbox.spsc.queue.pop()) |message| message.deinit();
+                while (self.mailbox.spsc.queue.pop(std.testing.io)) |message| message.deinit();
             };
         }
     };
@@ -2812,9 +2811,9 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     stream.nextSlice("\x1b]9;9;kitty-shell-cwd://localhost/C:\\Users\\test\\project\x1b\\");
     try std.testing.expectEqualStrings("C:\\Users\\test\\project", term.getPwd().?);
 
-    var message = app_queue.pop().?;
+    var message = app_queue.pop(std.testing.io).?;
     message.deinit(alloc);
-    try std.testing.expect(app_queue.pop() == null);
+    try std.testing.expect(app_queue.pop(std.testing.io) == null);
 
     // A network or device cwd is refused whole: the previous pwd stays and
     // the surface is not told about a change.
@@ -2822,7 +2821,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     stream.nextSlice("\x1b]7;file://localhost/%5C%5Cserver%5Cshare\x1b\\");
     stream.nextSlice("\x1b]7;file://localhost//server/share\x1b\\");
     try std.testing.expectEqualStrings("C:\\Users\\test\\project", term.getPwd().?);
-    try std.testing.expect(app_queue.pop() == null);
+    try std.testing.expect(app_queue.pop(std.testing.io) == null);
 }
 
 test "OSC 7 pwd refuses network and device paths" {
@@ -2922,7 +2921,7 @@ const TestStream = struct {
 
     fn deinit(self: *TestStream, alloc: Allocator) void {
         self.stream.deinit();
-        while (self.app_queue.pop()) |value| {
+        while (self.app_queue.pop(std.testing.io)) |value| {
             var message = value;
             message.deinit(alloc);
         }
@@ -2935,7 +2934,7 @@ const TestStream = struct {
     /// The next surface message, or null when none is left. Skips the mouse
     /// shape a full reset sends.
     fn nextSurfaceMessage(self: *TestStream) ?apprt.surface.Message {
-        while (self.app_queue.pop()) |message| {
+        while (self.app_queue.pop(std.testing.io)) |message| {
             const payload = message.surface_message.message;
             if (payload == .set_mouse_shape) continue;
             return payload;
@@ -3044,7 +3043,7 @@ test "OSC 9;9 pwd keeps the network and device screening" {
     for ([_][]const u8{ "\\\\server\\share", "C:\\a\x7fb" }) |value| {
         var seq: std.ArrayList(u8) = .empty;
         defer seq.deinit(alloc);
-        try seq.writer(alloc).print("\x1b]9;9;{s}\x1b\\", .{value});
+        try seq.print(alloc, "\x1b]9;9;{s}\x1b\\", .{value});
         h.stream.nextSlice(seq.items);
         h.expectPwd("C:\\Users\\test") catch |err| {
             std.debug.print("accepted: {s}\n", .{value});
@@ -3103,7 +3102,7 @@ test "OSC 7 accepts this machine's name in any letter case" {
     for ([_][]const u8{ ours, lower, upper, absolute, "LocalHost" }) |host| {
         var seq: std.ArrayList(u8) = .empty;
         defer seq.deinit(alloc);
-        try seq.writer(alloc).print("\x1b]7;file://{s}/C:/Users/test\x1b\\", .{host});
+        try seq.print(alloc, "\x1b]7;file://{s}/C:/Users/test\x1b\\", .{host});
         h.stream.nextSlice(seq.items);
         h.expectPwd("C:\\Users\\test") catch |err| {
             std.debug.print("rejected host: {s}\n", .{host});
@@ -3180,7 +3179,7 @@ test "desktop notifications are cut on a code point boundary" {
 fn popProgramStatusTestWrite(mailbox: *termio.Mailbox) ?[]const u8 {
     while (true) {
         const message = switch (mailbox.*) {
-            .spsc => |*value| value.queue.pop() orelse return null,
+            .spsc => |*value| value.queue.pop(std.testing.io) orelse return null,
         };
         switch (message) {
             .write_stable => |value| return value,
@@ -3268,7 +3267,7 @@ test "OSC 22 with an empty shape gives the pointer back" {
 
     const S = struct {
         fn nextShape(queue: anytype) ?terminal.MouseShape {
-            while (queue.pop()) |message| switch (message.surface_message.message) {
+            while (queue.pop(std.testing.io)) |message| switch (message.surface_message.message) {
                 .set_mouse_shape => |shape| return shape,
                 else => {},
             };
@@ -3387,7 +3386,7 @@ test "CSI 19 t asks for the size in characters" {
 
     h.stream.nextSlice("\x1b[19t");
     const message = switch (h.termio_mailbox) {
-        .spsc => |*value| value.queue.pop() orelse return error.NoTermioMessage,
+        .spsc => |*value| value.queue.pop(std.testing.io) orelse return error.NoTermioMessage,
     };
     try std.testing.expectEqual(termio.Message.SizeReport.csi_19_t, message.size_report);
 }
@@ -3419,7 +3418,7 @@ test "glyph APC gets no reply from the app stream handler" {
 
     // A well-formed glyph query would elicit a reply if dispatched.
     h.stream.nextSlice("\x1b_25a1;q;cp=E0A0\x1b\\");
-    try std.testing.expect(h.termio_mailbox.spsc.queue.pop() == null);
+    try std.testing.expect(h.termio_mailbox.spsc.queue.pop(std.testing.io) == null);
 
     // A supported request still reaches the same reply queue.
     h.stream.nextSlice("\x1b[?6n");
