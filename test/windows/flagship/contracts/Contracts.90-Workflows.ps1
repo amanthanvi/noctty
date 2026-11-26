@@ -260,6 +260,12 @@ $libVtStep = Get-YamlStepBlock -Content $libVtJob -Name 'Run libghostty-vt and C
 if ($libVtStep -notmatch 'run: zig build test-lib-vt -Demit-lib-vt=true --summary all') {
     throw 'CI must run the separate libghostty-vt graph and report its test count.'
 }
+# ZIG017-RUN-ENV-01: CI configures with a sentinel variable and fails if the
+# build cache holds it (the end-to-end half of Contracts.21).
+$sentinelStep = Get-YamlStepBlock -Content $libVtJob -Name 'The build configuration holds no environment copy' -Source $testWorkflow
+if ($sentinelStep -notmatch '(?m)^        run: \./scripts/check-configure-environment\.ps1\s*$') {
+    throw 'CI must check that a configure writes no environment copy into the build cache.'
+}
 # PLAN decision 15: the kept examples build on Windows (upstream's
 # build-examples-cmake-windows, with the Zig examples).
 $examplesJob = Get-YamlJobText -Content $testWorkflowText -Name 'windows-examples' -Source $testWorkflow
@@ -363,7 +369,7 @@ $filteredJobs = @(
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'build'; Flag = 'build'; Steps = @('Build executable', 'Verify default source-build shader mode', 'Verify source build stages the pinned ConPTY', 'Build without D3D11 beta') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'renderer-smoke'; Flag = 'renderer_smoke'; Steps = @('Build D3D11 lifecycle smoke tools', 'Hidden-desktop x64 WARP lifecycle smoke') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'cross-arm64'; Flag = 'cross_arm64'; Steps = @('Build ARM64 executable', 'Verify ARM64 source build stages the pinned ConPTY') }
-    @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-lib-vt'; Flag = 'lib_vt'; Steps = @('Run libghostty-vt and C API tests') }
+    @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-lib-vt'; Flag = 'lib_vt'; Steps = @('The build configuration holds no environment copy', 'Run libghostty-vt and C API tests') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-examples'; Flag = 'lib_vt'; Steps = @('Build the libghostty-vt examples') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-portable-smoke'; Flag = 'portable_smoke'; Steps = @('Run portable package CLI smoke') }
     @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Job = 'arm64-tests'; Flag = 'arm64_tests'; Steps = @('Verify native ARM64 runner', 'Run ARM64 Zig tests') }

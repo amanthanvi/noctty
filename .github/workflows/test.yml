@@ -650,6 +650,13 @@ jobs:
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
           key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+      # ZIG017-RUN-ENV-01: a configure that copies the environment into a
+      # Run step writes it into the build cache. Configures the app and
+      # lib-vt with a sentinel variable set and fails if any cache file
+      # holds it (names only), the dependencies' build scripts included.
+      - name: The build configuration holds no environment copy
+        shell: pwsh
+        run: ./scripts/check-configure-environment.ps1
       # Not sharded: its two test executables already run side by side, and
       # two shards each (four processes) left the step's time unchanged
       # (TEST-SHARDS-01 in docs/agents/log/test-harnesses.md).
