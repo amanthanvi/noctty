@@ -1429,10 +1429,13 @@ pub const GetFinalPathNameByHandleError = error{
 /// compares the result with the path it opened (`lockedHandleMatchesPath` in
 /// update/github_releases.zig) would read the same file as another, and on an
 /// SMB share normalization can fail with ACCESS_DENIED where the open worked.
-/// Case is not kept: with these flags the file system gives its own case for
-/// the name (measured on NTFS, 2026-11-26: `PRESENT FILE.TXT` opened,
-/// `present file.txt` returned), where std's object name kept the caller's.
-/// Both callers compare without case, so neither sees the difference.
+/// Case is not kept: the file system gives its own case for the name
+/// (measured on NTFS, 2026-11-26: `PRESENT FILE.TXT` opened, `present
+/// file.txt` returned), and so does std's object name: 0.17's `realPath`,
+/// which reads it (`QueryObjectName`, the call 0.15.2's form used), gives
+/// the same text for a case variant and for an 8.3 alias (the test below
+/// compares the two exactly; council T6). Both callers compare without case,
+/// with Windows' rules.
 ///
 /// **Where it differs from std.** For a volume with a drive letter or a UNC
 /// share it gives std's answer, the opened spelling. A volume mounted only at a
@@ -1865,10 +1868,13 @@ fn expectFinalPathAsOpened(path: []const u8) !void {
     const got_text = got_utf8[0..std.unicode.wtf16LeToWtf8(&got_utf8, got)];
     var real: [std.fs.max_path_bytes]u8 = undefined;
     const real_text = real[0..try file.realPath(io, &real)];
-    if (!std.ascii.eqlIgnoreCase(path, got_text) or !std.ascii.eqlIgnoreCase(path, real_text)) {
-        std.debug.print("opened {s}\nfinal  {s}\nreal   {s}\n", .{ path, got_text, real_text });
-        return error.TestExpectedEqual;
-    }
+    errdefer std.debug.print("opened {s}\nfinal  {s}\nreal   {s}\n", .{ path, got_text, real_text });
+    // std's form exactly: 0.17's `realPath` still reads the handle's object
+    // name (`QueryObjectName`), as 0.15.2's `GetFinalPathNameByHandle(.{})`
+    // did (council T6).
+    try std.testing.expectEqualStrings(real_text, got_text);
+    // The opened path, without case.
+    if (!std.ascii.eqlIgnoreCase(path, got_text)) return error.TestExpectedEqual;
 }
 
 test "lockFile and unlockFile keep std's status mapping" {
