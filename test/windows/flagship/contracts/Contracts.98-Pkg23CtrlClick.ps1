@@ -236,7 +236,7 @@ else {
     $pkg23SeamMutations = @(
         @{ Name = 'this checkout'; File = $null; Old = $null; New = $null }
         @{ Name = 'the opener goes on to the shell after the trace'; File = 'app'; Old = 'try recordOpenUrlForTest(self.core_app.alloc, target)) return;'; New = 'try recordOpenUrlForTest(self.core_app.alloc, target)) {}' }
-        @{ Name = 'the trace is not Debug-only but never runs'; File = 'app'; Old = 'if (builtin.mode == .Debug and'; New = 'if (builtin.mode == .ReleaseFast and' }
+        @{ Name = 'the trace is not Debug-only but never runs'; File = 'app'; Old = 'if (builtin.mode == .debug and'; New = 'if (builtin.mode == .fast and' }
         @{ Name = 'a queued target goes straight to the shell'; File = 'app'; Old = 'target, dispatchOpenTarget),'; New = 'target, shellExecuteOpenTarget),' }
         @{ Name = 'a second caller reaches the shell'; File = 'app'; Old = 'try self.deferShellRequest(.{ .target = owned });'; New = 'try self.deferShellRequest(.{ .target = owned }); if (false) try shellExecuteOpenTarget(self, owned);' }
         @{ Name = 'a link open is not queued'; File = 'app'; Old = 'orelse return self.app.deferOpenTarget(checked);'; New = 'orelse return self.app.dispatchOpenTarget(checked);' }
