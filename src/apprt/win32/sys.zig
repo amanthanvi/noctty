@@ -1610,6 +1610,40 @@ test "event and wait helpers keep std's result mapping" {
     try std.testing.expectEqual(@as(u32, 1), try waitForMultipleObjectsEx(&handles, false, 0, false));
 }
 
+test "getOverlappedResult is WouldBlock while an overlapped operation is pending" {
+    // An overlapped pipe server's connect stays pending with no client.
+    var name_buf: [96]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\noctty-sys-overlapped-{d}-{d}", .{ GetCurrentProcessId(), GetTickCount64() });
+    const name_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
+    defer std.testing.allocator.free(name_w);
+    const pipe = CreateNamedPipeW(
+        name_w.ptr,
+        c.PIPE_ACCESS_DUPLEX | win32_types.FILE_FLAG_OVERLAPPED | c.FILE_FLAG_FIRST_PIPE_INSTANCE,
+        win32_types.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        0,
+        0,
+        0,
+        null,
+    );
+    try std.testing.expect(pipe != windows.INVALID_HANDLE_VALUE);
+    defer windows.CloseHandle(pipe);
+    const event = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(event);
+    var overlapped = std.mem.zeroes(OVERLAPPED);
+    overlapped.hEvent = event;
+    try std.testing.expect(ConnectNamedPipe(pipe, &overlapped) == 0);
+    try std.testing.expectEqual(windows.Win32Error.IO_PENDING, windows.GetLastError());
+
+    try std.testing.expectError(error.WouldBlock, getOverlappedResult(pipe, &overlapped, false));
+
+    // Cancel it and let it finish before `overlapped` goes out of scope.
+    try std.testing.expect(CancelIoEx(pipe, &overlapped) != 0);
+    var bytes: DWORD = undefined;
+    try std.testing.expect(GetOverlappedResult(pipe, &overlapped, &bytes, 1) == 0);
+    try std.testing.expectEqual(windows.Win32Error.OPERATION_ABORTED, windows.GetLastError());
+}
+
 test "the re-homed process and module helpers keep std's error mapping" {
     // A handle to this process that grants only SYNCHRONIZE: terminating it is
     // refused, and the refusal maps to the error std gave.
