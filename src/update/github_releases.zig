@@ -2952,13 +2952,45 @@ fn openLockedStageDirectory(path: []const u8) !std.Io.File {
     return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
+/// Whether `handle` is the object `path` names, by its final path. The file
+/// system gives its own case back (`getFinalPathNameByHandle`), so the two are
+/// compared with Windows' own case-insensitive rules, non-ASCII letters
+/// included (`RtlEqualUnicodeString`; council T2: an ASCII-only compare read a
+/// state folder made as "\u{c9}tat" and given as "\u{e9}tat" as another).
 fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
     var final_buf: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
     const final_w = try win32_sys.getFinalPathNameByHandle(handle, &final_buf);
-    const final_utf8 = try std.unicode.utf16LeToUtf8Alloc(alloc, final_w);
-    defer alloc.free(final_utf8);
-    const final_path = if (std.mem.startsWith(u8, final_utf8, "\\\\?\\")) final_utf8[4..] else final_utf8;
-    return std.ascii.eqlIgnoreCase(final_path, path);
+    const verbatim = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    const final_path = if (std.mem.startsWith(u16, final_w, verbatim)) final_w[verbatim.len..] else final_w;
+    const path_w = try std.unicode.wtf8ToWtf16LeAlloc(alloc, path);
+    defer alloc.free(path_w);
+    // RtlEqualUnicodeString's lengths are 16-bit byte counts.
+    const max_units = std.math.maxInt(u16) / 2;
+    if (final_path.len > max_units or path_w.len > max_units) return false;
+    return win32_sys.eqlIgnoreCaseWtf16(final_path, path_w);
+}
+
+test "the staging lock matches a state folder spelled in another non-ASCII case (council T2)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Made as "\u{c9}tat" (capital E acute), given as "\u{e9}tat" (small).
+    try tmp.dir.createDirPath(io, "\u{c9}tat");
+    const made = try tmp.dir.realPathFileAlloc(io, "\u{c9}tat", alloc);
+    defer alloc.free(made);
+    const given = try std.mem.concat(alloc, u8, &.{ made[0 .. made.len - "\u{c9}tat".len], "\u{e9}tat" });
+    defer alloc.free(given);
+    var dir = try openLockedStageDirectory(given);
+    defer dir.close(io);
+    try std.testing.expect(try lockedHandleMatchesPath(alloc, given, dir.handle));
+    try std.testing.expect(try lockedHandleMatchesPath(alloc, made, dir.handle));
+    // Another folder still does not match.
+    try tmp.dir.createDirPath(io, "other");
+    const other = try tmp.dir.realPathFileAlloc(io, "other", alloc);
+    defer alloc.free(other);
+    try std.testing.expect(!try lockedHandleMatchesPath(alloc, other, dir.handle));
 }
 
 const WindowsFileVersion = struct {
