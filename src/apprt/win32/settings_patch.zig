@@ -19,6 +19,7 @@
 //! lines for the key go, and `key =` (which clears what any earlier layer
 //! gave) then one line per value take the place of the first of them.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const prefixed_path = @import("../win32_prefixed_path.zig");
 const win32_sys = @import("sys.zig");
 const win32_types = @import("../win32_types.zig");
@@ -2263,7 +2264,7 @@ test "settings patch: lines are read as the loader reads them" {
     );
     // A line longer than the reader takes is skipped by the loader: never
     // matched, never changed.
-    const long = "profile-name = py: " ++ "x" ** 4080;
+    const long = "profile-name = py: " ++ comptime win32_repeat.repeat("x", 4080);
     try testPatch(
         long ++ "\n",
         &.{.{ .field = .name, .id = "py", .op = .{ .set = "B" } }},
@@ -2271,7 +2272,7 @@ test "settings patch: lines are read as the loader reads them" {
     );
     // A line replaced in place keeps its indentation unless that would make
     // it longer than the reader takes.
-    const value = "y" ** 4073;
+    const value = comptime win32_repeat.repeat("y", 4073);
     try testPatch(
         "    profile-name = py: A\n",
         &.{.{ .field = .name, .id = "py", .op = .{ .set = value } }},
@@ -2285,7 +2286,7 @@ test "settings patch: a line the loader skips for its two CRs is never matched o
     const alloc = arena.allocator();
     // 4,096 bytes before the LF: one more than the reader holds, so the
     // loader skips the line, though less one CR it would be 4,095.
-    const refused = "profile-name = py: " ++ "x" ** 4075 ++ "\r\r";
+    const refused = "profile-name = py: " ++ comptime win32_repeat.repeat("x", 4075) ++ "\r\r";
     try testing.expectEqual(@as(usize, LineIterator.max_line_len + 2), refused.len);
     const raw = "profile-command = py: python.exe\r\n" ++ refused ++ "\n";
     var reader: std.Io.Reader = .fixed(raw);
