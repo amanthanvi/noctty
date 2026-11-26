@@ -1680,9 +1680,11 @@ pub const StreamHandler = struct {
         // its own, so upstream's below stays where upstream has it.
         if (comptime builtin.os.tag == .windows) if (conemu) plain: {
             var arena_alloc: std.heap.ArenaAllocator = .init(self.alloc);
-            var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
+            // 0.15's `stackFallback(1024, ...)`: 0.17's BufferFirstAllocator.
+            var stack_alloc_buf: [1024]u8 = undefined;
+            var stack_alloc: std.heap.BufferFirstAllocator = .init(&stack_alloc_buf, arena_alloc.allocator());
             defer arena_alloc.deinit();
-            const path = internal_os.local_path.pwd(stack_alloc.get(), .{ .conemu = url }) catch |err| switch (err) {
+            const path = internal_os.local_path.pwd(stack_alloc.allocator(), .{ .conemu = url }) catch |err| switch (err) {
                 // Not a plain path: a URL, read below (noctty's cmd
                 // integration sends `kitty-shell-cwd://localhost/%P`).
                 error.NotPlainPath => break :plain,
