@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 
 const cli = @import("cli.zig");
-const state = &@import("global.zig").state;
+const global = @import("global.zig");
 
 /// Enable Ctrl+C in children of the Windows GUI before any are started.
 ///
@@ -118,7 +118,8 @@ extern "kernel32" fn CreateFileW(
 pub fn reportStateInitError(err: anyerror) !void {
     attachParentConsole();
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    // The global state failed to initialize, so its Io may not exist.
+    var stderr_writer = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &buffer);
     const stderr = &stderr_writer.interface;
 
     const ErrSet = @TypeOf(err) || error{Unknown};
@@ -181,7 +182,7 @@ fn formatCliActionFailureMessage(
 
 fn writePlainStderr(message: []const u8) bool {
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
     const stderr = &stderr_writer.interface;
     stderr.writeAll(message) catch return false;
     stderr.flush() catch return false;
@@ -231,14 +232,18 @@ fn logFn(
 ) void {
     stderr: {
         if (comptime builtin.mode != .debug and level == .debug) break :stderr;
-        if (!state.logging.stderr) break :stderr;
+        // A line logged before `global.init` (process-origin capture, the
+        // portable update helper) has no state to read: Zig 0.15's zeroed
+        // `state` read false there, so it skips stderr as it did.
+        const logging = global.loggingIfInitialized() orelse break :stderr;
+        if (!logging.stderr) break :stderr;
 
         var buf: [64]u8 = undefined;
-        const stderr = std.debug.lockStderrWriter(&buf);
-        defer std.debug.unlockStderrWriter();
+        const stderr = std.debug.lockStderr(&buf);
+        defer std.debug.unlockStderr();
 
-        nosuspend stderr.print(comptime logPrefix(level, scope) ++ format ++ "\n", args) catch break :stderr;
-        nosuspend stderr.flush() catch break :stderr;
+        nosuspend stderr.file_writer.interface.print(comptime logPrefix(level, scope) ++ format ++ "\n", args) catch break :stderr;
+        nosuspend stderr.file_writer.interface.flush() catch break :stderr;
     }
 }
 
@@ -280,10 +285,12 @@ pub const panic = switch (builtin.mode) {
 
 fn releasePanic(msg: []const u8, _: ?usize) noreturn {
     @branchHint(.cold);
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll("panic: ") catch {};
-    stderr.writeAll(msg) catch {};
-    stderr.writeAll("\n") catch {};
+    // A panic can come from any thread, before or after the global state.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const stderr = std.Io.File.stderr();
+    stderr.writeStreamingAll(io, "panic: ") catch {};
+    stderr.writeStreamingAll(io, msg) catch {};
+    stderr.writeStreamingAll(io, "\n") catch {};
     @trap();
 }
 

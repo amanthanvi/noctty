@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const internal_os = @import("os/main.zig");
 const windows = internal_os.windows;
 const windows_ext = internal_os.windows_ext;
+const global = @import("global.zig");
+const once = @import("os/once.zig").once;
 const posix = std.posix;
 const assert = @import("quirks.zig").inlineAssert;
 
@@ -501,7 +503,7 @@ const WindowsConPty = struct {
     var fallback_functions: Functions = inbox_functions;
     const demoted_functions: Functions = .inboxBecause(error.CreateFailed);
     var selected = std.atomic.Value(*const Functions).init(&inbox_functions);
-    var resolver_once = std.once(initialize);
+    var resolver_once = once(initialize);
     /// Number of bundled pseudo consoles currently open in this process.
     /// Incremented under `backend_lock` when a bundled creation succeeds and
     /// decremented by `WindowsPty.deinit` after the handle is closed, so a
@@ -523,7 +525,7 @@ const WindowsConPty = struct {
     /// `conPtyInfo` and the fallback banner both misreport. Opens happen once
     /// per surface and already spawn OpenConsole.exe, so the contention cost
     /// is irrelevant.
-    var backend_lock: std.Thread.Mutex = .{};
+    var backend_lock: std.Io.Mutex = .init;
 
     /// Pick the backend that will own a new pseudo console.
     ///
@@ -540,8 +542,8 @@ const WindowsConPty = struct {
     /// `error.BundledConptyInconsistent` instead. Once the last bundled
     /// handle closes the count returns to zero and demotion is allowed again.
     fn selectBackend(context: anytype) SelectError!*const Functions {
-        backend_lock.lock();
-        defer backend_lock.unlock();
+        backend_lock.lockUncancelable(global.io());
+        defer backend_lock.unlock(global.io());
 
         const initial = functions();
         if (context.attempt(initial)) {
@@ -609,7 +611,9 @@ const WindowsConPty = struct {
     }
 
     fn forceInbox() bool {
-        const value = std.process.getEnvVarOwned(
+        // A live read of the process environment, once per process (the
+        // resolver runs once), as 0.15's `getEnvVarOwned` was.
+        const value = global.environ().getAlloc(
             std.heap.page_allocator,
             "NOCTTY_CONPTY",
         ) catch return false;
@@ -619,10 +623,10 @@ const WindowsConPty = struct {
     }
 
     fn loadBundled() BundledLoadError!Functions {
-        var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const exe_dir = std.fs.selfExeDirPath(&exe_dir_buf) catch
+        var exe_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const exe_dir_len = std.process.executableDirPath(global.io(), &exe_dir_buf) catch
             return error.PathUnavailable;
-        return loadBundledFrom(exe_dir);
+        return loadBundledFrom(exe_dir_buf[0..exe_dir_len]);
     }
 
     fn loadBundledFrom(exe_dir: []const u8) BundledLoadError!Functions {
@@ -664,7 +668,7 @@ const WindowsConPty = struct {
             flags,
         ) orelse return switch (windows_ext.kernel32.GetLastError()) {
             // MOD_NOT_FOUND also means a DLL that conpty.dll needs is missing.
-            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => if (std.fs.accessAbsolute(path, .{}))
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => if (std.Io.Dir.accessAbsolute(global.io(), path, .{}))
                 error.LoadFailed
             else |_|
                 error.NotFound,
@@ -711,17 +715,17 @@ const WindowsConPty = struct {
     }
 
     fn openConsoleMatchesArchitecture(path: []const u8) !bool {
-        var file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
+        const io = global.io();
+        var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+        defer file.close(io);
 
         var dos_header: [64]u8 = undefined;
-        if (try file.readAll(&dos_header) != dos_header.len) return false;
+        if (try file.readPositionalAll(io, &dos_header, 0) != dos_header.len) return false;
         if (!std.mem.eql(u8, dos_header[0..2], "MZ")) return false;
 
         const pe_offset = std.mem.readInt(u32, dos_header[0x3c..0x40], .little);
-        try file.seekTo(@as(u64, pe_offset));
         var pe_header: [6]u8 = undefined;
-        if (try file.readAll(&pe_header) != pe_header.len) return false;
+        if (try file.readPositionalAll(io, &pe_header, @as(u64, pe_offset)) != pe_header.len) return false;
         if (!std.mem.eql(u8, pe_header[0..4], "PE\x00\x00")) return false;
 
         const expected: u16 = switch (builtin.cpu.arch) {
@@ -749,7 +753,7 @@ const WindowsConPty = struct {
         if (bundled_functions.bundled_path) |path| std.heap.page_allocator.free(path);
         bundled_functions = inbox_functions;
         fallback_functions = inbox_functions;
-        resolver_once = std.once(initialize);
+        resolver_once = once(initialize);
         live_bundled_hpcons.store(0, .release);
         fallback_banner_pending.store(false, .release);
     }
@@ -793,13 +797,13 @@ const WindowsPty = struct {
         signal: ?windows.HANDLE,
         server_process: windows.HANDLE,
         reference: windows.HANDLE,
-        signal_write_mutex: std.Thread.Mutex = .{},
+        signal_write_mutex: std.Io.Mutex = .init,
 
         /// Write one whole packet to the signal pipe under the write lock.
         /// False when the pipe is closed or the write fails or falls short.
         fn writeSignal(self: *HandoffControl, packet: []const u8) bool {
-            self.signal_write_mutex.lock();
-            defer self.signal_write_mutex.unlock();
+            self.signal_write_mutex.lockUncancelable(global.io());
+            defer self.signal_write_mutex.unlock(global.io());
             const signal = self.signal orelse return false;
             var written: windows.DWORD = 0;
             return windows_ext.kernel32.WriteFile(signal, packet.ptr, @intCast(packet.len), &written, null) != 0 and
@@ -1050,8 +1054,8 @@ const WindowsPty = struct {
         switch (self.control) {
             .pseudo_console => {},
             .handoff => |*handoff| {
-                handoff.signal_write_mutex.lock();
-                defer handoff.signal_write_mutex.unlock();
+                handoff.signal_write_mutex.lockUncancelable(global.io());
+                defer handoff.signal_write_mutex.unlock(global.io());
                 if (handoff.signal) |handle| {
                     _ = windows_ext.CloseHandle(handle);
                     handoff.signal = null;
@@ -1247,7 +1251,7 @@ test "handoff release drops the marshaled pipe ends without closing them" {
     const process = std.os.windows.GetCurrentProcess();
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     defer _ = windows_ext.CloseHandle(signal_read);
 
     // `openAdopted` takes ownership of all three control handles, and `deinit`
@@ -1261,7 +1265,7 @@ test "handoff release drops the marshaled pipe ends without closing them" {
             process,
             slot,
             0,
-            windows.FALSE,
+            windows_ext.FALSE,
             std.os.windows.DUPLICATE_SAME_ACCESS,
         ) != 0);
     }
@@ -1308,7 +1312,7 @@ test "handoff resize writes one exact signal packet" {
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     defer _ = windows_ext.CloseHandle(signal_read);
     defer _ = windows_ext.CloseHandle(signal_write);
 
@@ -1317,7 +1321,7 @@ test "handoff resize writes one exact signal packet" {
 
     var packet: [6]u8 = undefined;
     var read: windows.DWORD = 0;
-    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
+    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != windows.FALSE);
     try std.testing.expectEqual(@as(windows.DWORD, packet.len), read);
     try std.testing.expectEqualSlices(u8, &.{ 0x08, 0x00, 0x50, 0x00, 0x18, 0x00 }, &packet);
 }
@@ -1327,7 +1331,7 @@ test "handoff visibility writes exact boolean packets and fails after signal clo
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     defer _ = windows_ext.CloseHandle(signal_read);
 
     var pty = handoffPtyForTest(signal_write);
@@ -1337,7 +1341,7 @@ test "handoff visibility writes exact boolean packets and fails after signal clo
     try pty.setAdoptedVisibility(false);
     var packet: [8]u8 = undefined;
     var read: windows.DWORD = 0;
-    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
+    try std.testing.expect(windows_ext.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != windows.FALSE);
     try std.testing.expectEqual(@as(windows.DWORD, packet.len), read);
     try std.testing.expectEqualSlices(u8, &.{ 1, 0, 1, 0, 1, 0, 0, 0 }, &packet);
 
@@ -1356,7 +1360,7 @@ test "handoff visibility reports a broken signal receiver" {
 
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     _ = windows_ext.CloseHandle(signal_read);
     defer _ = windows_ext.CloseHandle(signal_write);
 
@@ -1371,12 +1375,12 @@ test "handoff visibility resize and close share the signal lock" {
     const Worker = struct {
         pty: *WindowsPty,
         operation: Operation,
-        entered: std.Thread.ResetEvent = .{},
-        done: std.Thread.ResetEvent = .{},
+        entered: std.Io.Event = .unset,
+        done: std.Io.Event = .unset,
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.entered.set();
+            self.entered.set(std.testing.io);
             switch (self.operation) {
                 .visibility => self.pty.setAdoptedVisibility(true) catch |err| {
                     self.failure = err;
@@ -1386,14 +1390,14 @@ test "handoff visibility resize and close share the signal lock" {
                 },
                 .close => self.pty.closeAdoptedSignal(),
             }
-            self.done.set();
+            self.done.set(std.testing.io);
         }
     };
 
     inline for (.{ Operation.visibility, Operation.resize, Operation.close }) |operation| {
         var signal_read: windows.HANDLE = undefined;
         var signal_write: windows.HANDLE = undefined;
-        try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+        try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
         defer _ = windows_ext.CloseHandle(signal_read);
         var pty = handoffPtyForTest(signal_write);
         defer pty.closeAdoptedSignal();
@@ -1401,13 +1405,13 @@ test "handoff visibility resize and close share the signal lock" {
         var thread: ?std.Thread = null;
         defer if (thread) |value| value.join();
         {
-            pty.control.handoff.signal_write_mutex.lock();
-            defer pty.control.handoff.signal_write_mutex.unlock();
+            pty.control.handoff.signal_write_mutex.lockUncancelable(std.testing.io);
+            defer pty.control.handoff.signal_write_mutex.unlock(std.testing.io);
             thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
-            try worker.entered.timedWait(5 * std.time.ns_per_s);
-            try std.testing.expectError(error.Timeout, worker.done.timedWait(20 * std.time.ns_per_ms));
+            try worker.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+            try std.testing.expectError(error.Timeout, worker.done.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }));
             var available: windows.DWORD = 0;
-            try std.testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != 0);
+            try std.testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != windows.FALSE);
             try std.testing.expectEqual(@as(windows.DWORD, 0), available);
         }
         thread.?.join();
@@ -1419,7 +1423,7 @@ test "handoff visibility resize and close share the signal lock" {
 
 /// The caller's `NOCTTY_CONPTY`, if set, for `restoreConPtyEnvForTest`.
 fn saveConPtyEnvForTest(alloc: std.mem.Allocator) !?[:0]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_CONPTY") catch return null;
+    const raw = std.testing.environ.getAlloc(alloc, "NOCTTY_CONPTY") catch return null;
     defer alloc.free(raw);
     return try alloc.dupeSentinel(u8, raw, 0);
 }
@@ -1678,7 +1682,7 @@ test "Windows ConPTY live bundled count follows real pseudo console open and clo
     // An adopted session owns no HPCON and must not touch the count.
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     defer _ = windows_ext.CloseHandle(signal_read);
     const duplicate = struct {
         fn handle(source: windows.HANDLE) !windows.HANDLE {
@@ -1690,7 +1694,7 @@ test "Windows ConPTY live bundled count follows real pseudo console open and clo
                 current,
                 &result,
                 0,
-                std.os.windows.FALSE,
+                windows_ext.FALSE,
                 std.os.windows.DUPLICATE_SAME_ACCESS,
             ) == 0) return windows.unexpectedError(windows_ext.kernel32.GetLastError());
             return result;
@@ -1860,7 +1864,7 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
     // know a signal ends the session, so nothing reaches its signal pipe.
     var signal_read: windows.HANDLE = undefined;
     var signal_write: windows.HANDLE = undefined;
-    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != windows.FALSE);
     defer _ = windows_ext.CloseHandle(signal_read);
     var adopted = handoffPtyForTest(signal_write);
     defer adopted.closeAdoptedSignal();
@@ -1869,7 +1873,7 @@ test "Windows ConPTY optional exports reach the creating backend and are skipped
     try adopted.showPseudoConsole(true);
     try adopted.reparentPseudoConsole(owner);
     var available: windows.DWORD = 0;
-    try testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != 0);
+    try testing.expect(windows.exp.kernel32.PeekNamedPipe(signal_read, null, 0, null, &available, null) != windows.FALSE);
     try testing.expectEqual(@as(windows.DWORD, 0), available);
 }
 
@@ -1893,12 +1897,12 @@ test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     const open_console_path = try std.fs.path.join(testing.allocator, &.{ dir, "OpenConsole.exe" });
     defer testing.allocator.free(open_console_path);
 
-    const system_root = try std.process.getEnvVarOwned(testing.allocator, "SystemRoot");
+    const system_root = try testing.environ.getAlloc(testing.allocator, "SystemRoot");
     defer testing.allocator.free(system_root);
     const known_bad = try std.fs.path.join(testing.allocator, &.{ system_root, "System32", "version.dll" });
     defer testing.allocator.free(known_bad);
-    try std.fs.copyFileAbsolute(known_bad, conpty_path, .{});
-    try std.fs.copyFileAbsolute(known_bad, open_console_path, .{});
+    try std.Io.Dir.copyFileAbsolute(known_bad, conpty_path, testing.io, .{});
+    try std.Io.Dir.copyFileAbsolute(known_bad, open_console_path, testing.io, .{});
 
     try testing.expectError(error.CreateSymbolMissing, WindowsConPty.loadBundledFrom(dir));
 }

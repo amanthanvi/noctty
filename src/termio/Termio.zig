@@ -41,7 +41,7 @@ var output_trace_file_claimed = std.atomic.Value(bool).init(false);
 
 const OutputTrace = struct {
     path: ?[]const u8 = null,
-    start_time: ?std.time.Instant = null,
+    start_time: ?std.Io.Timestamp = null,
     process_output_count: u64 = 0,
     process_output_bytes: u64 = 0,
     renderer_wake_count: u64 = 0,
@@ -92,7 +92,7 @@ const OutputTrace = struct {
             return .{};
         return .{
             .path = trace_path,
-            .start_time = std.time.Instant.now() catch null,
+            .start_time = .now(global.io(), .awake),
         };
     }
 
@@ -112,8 +112,7 @@ const OutputTrace = struct {
 
     fn elapsedMs(self: *const OutputTrace) u64 {
         const start_time = self.start_time orelse return 0;
-        const now = std.time.Instant.now() catch return 0;
-        return @intCast(@divFloor(now.since(start_time), std.time.ns_per_ms));
+        return @intCast(@max(0, start_time.untilNow(global.io(), .awake).toMilliseconds()));
     }
 
     fn noteProcessOutput(
@@ -189,14 +188,15 @@ const OutputTrace = struct {
 
     fn writeSnapshot(self: *const OutputTrace) void {
         const trace_path = self.path orelse return;
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+        const io = global.io();
+        const file = std.Io.Dir.createFileAbsolute(io, trace_path, .{ .truncate = true }) catch |err| {
             log.warn("termio output trace create failed path={s} err={}", .{ trace_path, err });
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
         var buffer: [1024]u8 = undefined;
-        var writer = file.writer(&buffer);
+        var writer = file.writer(io, &buffer);
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = self.elapsedMs(),
@@ -294,7 +294,7 @@ fn fileHeldOpen(alloc: Allocator, path: []const u8) !bool {
     const k32 = windows_ext.kernel32;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
-    const h = k32.CreateFileW(
+    const h = windows.exp.kernel32.CreateFileW(
         path_w.ptr,
         windows.GENERIC_READ,
         0,
@@ -335,8 +335,8 @@ test "termio input files are closed after prepareInput fails part way" {
 
     // Positive control: the probe sees a handle that is open.
     {
-        const held = try std.fs.openFileAbsolute(first, .{});
-        defer held.close();
+        const held = try std.Io.Dir.openFileAbsolute(std.testing.io, first, .{});
+        defer held.close(std.testing.io);
         try testing.expect(try fileHeldOpen(alloc, first));
     }
 
@@ -1262,13 +1262,13 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 pub fn processOutput(self: *Termio, buf: []const u8) void {
     const semantic_output_epoch = self.terminal_output_transport.captureEpoch();
     const trace_lock = self.output_trace.enabled();
-    const lock_started = if (trace_lock) std.time.Instant.now() catch null else null;
-    var lock_acquired: ?std.time.Instant = null;
+    const lock_started: ?std.Io.Timestamp = if (trace_lock) .now(global.io(), .awake) else null;
+    var lock_acquired: ?std.Io.Timestamp = null;
     const decision = render: {
         // We are modifying terminal state from here on out and we need
         // the lock to grab our read data.
         self.renderer_state.mutex.lock();
-        if (trace_lock) lock_acquired = std.time.Instant.now() catch null;
+        if (trace_lock) lock_acquired = .now(global.io(), .awake);
         defer self.renderer_state.mutex.unlock();
         // Typing at a prompt often echoes only a cursor move (Left is a BS
         // or CUB), which marks nothing dirty but must still be drawn.
@@ -1313,13 +1313,13 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         };
     };
     if (trace_lock) {
-        const lock_released = std.time.Instant.now() catch null;
-        const wait_ns = if (lock_started != null and lock_acquired != null)
-            lock_acquired.?.since(lock_started.?)
+        const lock_released: std.Io.Timestamp = .now(global.io(), .awake);
+        const wait_ns: u64 = if (lock_started != null and lock_acquired != null)
+            @intCast(@max(0, lock_started.?.durationTo(lock_acquired.?).toNanoseconds()))
         else
             0;
-        const hold_ns = if (lock_acquired != null and lock_released != null)
-            lock_released.?.since(lock_acquired.?)
+        const hold_ns: u64 = if (lock_acquired) |acquired|
+            @intCast(@max(0, acquired.durationTo(lock_released).toNanoseconds()))
         else
             0;
         self.output_trace.noteProcessOutputLock(wait_ns, hold_ns);
@@ -1614,8 +1614,12 @@ test "shared terminal dirty helper tracks visible terminal dirtiness" {
     try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 
     t.flags.dirty = .{};
-    t.screens.active.kitty_images.dirty = true;
-    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
+    // The Kitty image storage's counter is never cleared, so a change
+    // shows against the snapshot of the last frame update (`needsFrame`).
+    const drawn: terminal_render_dirty.Undirtied = .init(&t);
+    try testing.expect(!terminal_render_dirty.needsFrame(&t, drawn));
+    t.screens.active.kitty_images.markDirty();
+    try testing.expect(terminal_render_dirty.needsFrame(&t, drawn));
 }
 
 test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pending render work" {
@@ -1691,10 +1695,13 @@ test "issue149 explicit config colors reach derived config and terminal colors" 
             .background = .init(derived.background.toTerminalRGB()),
             .foreground = .init(derived.foreground.toTerminalRGB()),
             .cursor = .unset,
-            .palette = .init(derived.palette),
+            .palette = .default,
         },
     });
     defer terminal.deinit(testing.allocator);
+    // As `Termio.init` sets it: the default palette may be an
+    // allocator-owned copy, so it is set once the terminal owns its memory.
+    try terminal.colors.palette.changeDefault(testing.allocator, derived.palette);
     try testing.expectEqual(config.background.toTerminalRGB(), terminal.colors.background.get().?);
     try testing.expectEqual(config.foreground.toTerminalRGB(), terminal.colors.foreground.get().?);
     try testing.expectEqual(config.palette.value[5], terminal.colors.palette.current[5]);

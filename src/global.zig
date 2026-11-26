@@ -373,6 +373,14 @@ pub fn logging() GlobalState.Logging {
     return state.?.logging;
 }
 
+/// The logging configuration once `init` has set the state, else null. The
+/// log function runs for lines logged before `init` too (the Windows entry's
+/// process-origin capture and portable update helper), which `logging` would
+/// assert on.
+pub fn loggingIfInitialized() ?GlobalState.Logging {
+    return if (state) |s| s.logging else null;
+}
+
 /// Returns the global state action.
 ///
 /// Asserts that the global state is initialized.

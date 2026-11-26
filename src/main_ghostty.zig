@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = std.posix;
 const build_config = @import("build_config.zig");
 const apprt = @import("apprt.zig");
 const process_shared = @import("process_shared.zig");
@@ -42,13 +41,13 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
         // exit to.
         apprt.win32.captureProcessOrigin();
         if (try apprt.win32.maybeRunPortableUpdateHelper(std.heap.page_allocator)) |exit_code| {
-            posix.exit(exit_code);
+            std.process.exit(exit_code);
         }
     }
 
     // We first start by initializing our global process state.
     global.init(.{ .main = minimal }) catch |err| {
-        defer posix.exit(1);
+        defer std.process.exit(1);
         try process_shared.reportStateInitError(err);
     };
     defer global.deinit();
@@ -70,7 +69,7 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // Execute our action if we have one
     if (global.action()) |action| {
         std.log.info("executing noctty CLI action={}", .{action});
-        posix.exit(process_shared.runCliAction(action, alloc));
+        std.process.exit(process_shared.runCliAction(action, alloc));
     }
 
     // Pure CLI actions above must never be swallowed by a pending portable

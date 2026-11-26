@@ -12,7 +12,9 @@ pub const completions = comptimeGenerateCompletions();
 
 fn comptimeGenerateCompletions() []const u8 {
     comptime {
-        @setEvalBranchQuota(50000);
+        // The fork has more config keys than upstream, and 0.17's comptime
+        // Writer spends more branches per write.
+        @setEvalBranchQuota(500_000);
         var counter: std.Io.Writer.Discarding = .init(&.{});
         try writeCompletions(&counter.writer);
 

@@ -629,6 +629,12 @@ fn messageSafeDuringModal(message: Message) bool {
             .search_viewport_matches,
             .search_selected_match,
             .search_clear,
+            // Upstream 1.4.0's: a window resize the program asks for, and
+            // the Kitty clipboard protocol's reads and writes, as the
+            // clipboard messages above.
+            .resize_window,
+            .kitty_clipboard_read,
+            .kitty_clipboard_write,
             => false,
             .set_title,
             .set_mouse_shape,
@@ -645,6 +651,8 @@ fn messageSafeDuringModal(message: Message) bool {
             .search_total,
             .search_selected,
             .search_match_rows,
+            // Upstream 1.4.0's frame-present redraw, as `.redraw_surface`.
+            .redraw,
             => true,
         },
     };

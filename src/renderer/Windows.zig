@@ -227,7 +227,10 @@ fn fallBack(self: *Windows) !void {
     if (self.state) |state| {
         if (comptime terminal_options.kitty_graphics) {
             state.mutex.lock();
-            state.terminal.screens.active.kitty_images.dirty = true;
+            // The counter, never cleared since upstream 1.4.0: moving it
+            // makes the next frame place the images again, as setting the
+            // old flag did.
+            state.terminal.screens.active.kitty_images.markDirty();
             state.mutex.unlock();
         }
         _ = replacement.updateFrame(state, self.cursor_blink_visible) catch |err| {

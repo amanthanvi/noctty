@@ -471,14 +471,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     {
-        windows_ext.inheritable_spawn_lock.lock();
-        defer windows_ext.inheritable_spawn_lock.unlock();
-        try std.os.windows.CreateProcessW(
+        windows_ext.inheritable_spawn_lock.lockUncancelable(global.io());
+        defer windows_ext.inheritable_spawn_lock.unlock(global.io());
+        try windows_ext.createProcessW(
             application_name_w,
             if (command_line_w) |w| w.ptr else null,
             null,
             null,
-            windows.TRUE,
+            windows_ext.TRUE,
             flags,
             if (env_w) |w| w.ptr else null,
             if (cwd_w) |w| w.ptr else null,
@@ -980,7 +980,7 @@ test "PKG08 Windows command line round trips argv including empty arguments" {
     defer allocator.free(line);
     const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, line);
     defer allocator.free(wide);
-    var iter = try std.process.ArgIteratorWindows.init(allocator, wide);
+    var iter = try std.process.Args.Iterator.Windows.init(allocator, wide);
     defer iter.deinit();
     for (args) |arg| try testing.expectEqualStrings(arg, iter.next() orelse return error.MissingArgument);
     try testing.expect(iter.next() == null);
@@ -1032,7 +1032,7 @@ test "Command: windows-command-line rejects empty executable argument" {
 test "Command: windows-cmd-shell-command-line executes quoted command" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const windir = try std.process.getEnvVarOwned(testing.allocator, "WINDIR");
+    const windir = try testing.environ.getAlloc(testing.allocator, "WINDIR");
     defer testing.allocator.free(windir);
     const cmd_path = try std.fs.path.joinZ(testing.allocator, &.{
         windir,
@@ -1043,8 +1043,8 @@ test "Command: windows-cmd-shell-command-line executes quoted command" {
 
     var td = try TempDir.init();
     defer td.deinit();
-    var stdout = try createTestStdout(td.dir);
-    defer stdout.close();
+    var stdout = try createTestStdout(testing.io, td.dir);
+    defer stdout.close(testing.io);
 
     var cmd: Command = .{
         .path = cmd_path,
@@ -1077,7 +1077,7 @@ test "Command windows_command_line reaches cmd.exe exactly as written" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const windir = try std.process.getEnvVarOwned(alloc, "WINDIR");
+    const windir = try testing.environ.getAlloc(alloc, "WINDIR");
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ windir, "System32", "cmd.exe" });
     var td = try TempDir.init();
     defer td.deinit();
@@ -1092,10 +1092,10 @@ test "Command windows_command_line reaches cmd.exe exactly as written" {
         .{ .line = null, .stdout = "a\r\n" },
     };
     for (cases) |case| {
-        var stdout = try createTestStdout(td.dir);
-        defer stdout.close();
-        var stderr = try createTestStderr(td.dir);
-        defer stderr.close();
+        var stdout = try createTestStdout(testing.io, td.dir);
+        defer stdout.close(testing.io);
+        var stderr = try createTestStderr(testing.io, td.dir);
+        defer stderr.close(testing.io);
         var cmd: Command = .{
             .path = cmd_path,
             .args = &args,
@@ -1124,7 +1124,7 @@ test "a Developer Command Prompt line runs its batch file through cmd whatever t
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const windir = try std.process.getEnvVarOwned(alloc, "WINDIR");
+    const windir = try testing.environ.getAlloc(alloc, "WINDIR");
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ windir, "System32", "cmd.exe" });
     var td = try TempDir.init();
     defer td.deinit();
@@ -1175,10 +1175,10 @@ test "a Developer Command Prompt line runs its batch file through cmd whatever t
         // text after `/k` is the same.
         const run_line = try std.mem.replaceOwned(u8, alloc, line, " /k ", " /d /k ");
 
-        var stdout = try createTestStdout(td.dir);
-        defer stdout.close();
-        var stderr = try createTestStderr(td.dir);
-        defer stderr.close();
+        var stdout = try createTestStdout(testing.io, td.dir);
+        defer stdout.close(testing.io);
+        var stderr = try createTestStderr(testing.io, td.dir);
+        defer stderr.close(testing.io);
         var cmd: Command = .{
             .path = cmd_path,
             .args = profile.command.direct,
@@ -1216,17 +1216,17 @@ test "PKG48 shell wrapper ignores implicit cwd programs and retains native synta
     try td.dir.writeFile(std.testing.io, .{ .sub_path = "trusted tools/my.tool.cmd", .data = "@echo DOTTED\r\n" });
     const trusted = try td.dir.realPathFileAlloc(std.testing.io, "trusted tools", alloc);
     const cwd = try td.dir.realPathFileAlloc(std.testing.io, "untrusted", alloc);
-    var env = try std.process.getEnvMap(alloc);
+    var env = try testing.environ.createMap(alloc);
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ env.get("WINDIR").?, "System32", "cmd.exe" });
     const probe = try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" });
-    try std.fs.copyFileAbsolute(cmd_path, probe, .{});
+    try std.Io.Dir.copyFileAbsolute(cmd_path, probe, testing.io, .{});
     try env.put("PATH", trusted);
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-    env.remove("NoDefaultCurrentDirectoryInExePath");
+    _ = env.orderedRemove("NoDefaultCurrentDirectoryInExePath");
     try configpkg.windows_shell.configureShellSearch(&env, true);
     try td.dir.writeFile(std.testing.io, .{ .sub_path = "untrusted/echo.cmd", .data = "@echo PLANTED\r\n" });
     const dotted_probe = try std.fs.path.join(alloc, &.{ cwd, "echo.message" });
-    try std.fs.copyFileAbsolute(cmd_path, dotted_probe, .{});
+    try std.Io.Dir.copyFileAbsolute(cmd_path, dotted_probe, testing.io, .{});
     const cases = .{
         .{ "pkg48probe /d /c \"echo TRUSTED&&if defined NoDefaultCurrentDirectoryInExePath echo GUARD\"", "TRUSTED\r\nGUARD\r\n" },
         .{ "pkg48missing || echo FALLBACK", "FALLBACK\r\n" },
@@ -1241,10 +1241,10 @@ test "PKG48 shell wrapper ignores implicit cwd programs and retains native synta
         .{ ".\\pkg48probe.cmd", "PLANTED\r\n" },
     };
     inline for (cases) |case| {
-        var stdout = try createTestStdout(td.dir);
-        defer stdout.close();
-        var stderr = try createTestStderr(td.dir);
-        defer stderr.close();
+        var stdout = try createTestStdout(testing.io, td.dir);
+        defer stdout.close(testing.io);
+        var stderr = try createTestStderr(testing.io, td.dir);
+        defer stderr.close(testing.io);
         var cmd: Command = .{
             .path = cmd_path,
             .args = &.{ cmd_path, "/D", "/C", case[0] },
@@ -1281,7 +1281,7 @@ test "PKG48 shell wrapper supports literal expansion characters in PATH" {
     inline for (.{ "untrusted/pkg48probe.cmd", "untrusted/bin/pkg48probe.cmd", "untrusted/my.tool.cmd" }) |path|
         try td.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "@echo PLANTED\r\n" });
     const cwd = try td.dir.realPathFileAlloc(std.testing.io, "untrusted", alloc);
-    var env = try std.process.getEnvMap(alloc);
+    var env = try testing.environ.createMap(alloc);
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ env.get("WINDIR").?, "System32", "cmd.exe" });
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
     try env.put("PKG48_PATH", "WRONG");
@@ -1290,7 +1290,7 @@ test "PKG48 shell wrapper supports literal expansion characters in PATH" {
     inline for (.{ "trusted %PKG48_PATH%", "trusted !PKG48_PATH!", "trusted %PKG48_PATH% !PKG48_PATH! ^caret!" }) |directory| {
         try td.dir.createDir(std.testing.io, directory, .default_dir);
         const trusted = try td.dir.realPathFileAlloc(std.testing.io, directory, alloc);
-        try std.fs.copyFileAbsolute(cmd_path, try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" }), .{});
+        try std.Io.Dir.copyFileAbsolute(cmd_path, try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" }), testing.io, .{});
         try td.dir.writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(alloc, &.{ directory, "my.tool.cmd" }), .data = "@echo SCRIPT\r\n" });
         inline for (.{ false, true }) |delayed| {
             inline for (.{
@@ -1301,12 +1301,12 @@ test "PKG48 shell wrapper supports literal expansion characters in PATH" {
             }) |case| {
                 try env.put("PATH", trusted);
                 // An empty existing guard is effective too; do not overwrite it.
-                if (delayed) try env.put("NoDefaultCurrentDirectoryInExePath", "") else env.remove("NoDefaultCurrentDirectoryInExePath");
+                if (delayed) try env.put("NoDefaultCurrentDirectoryInExePath", "") else _ = env.orderedRemove("NoDefaultCurrentDirectoryInExePath");
                 try configpkg.windows_shell.configureShellSearch(&env, true);
-                var stdout = try createTestStdout(td.dir);
-                defer stdout.close();
-                var stderr = try createTestStderr(td.dir);
-                defer stderr.close();
+                var stdout = try createTestStdout(testing.io, td.dir);
+                defer stdout.close(testing.io);
+                var stderr = try createTestStderr(testing.io, td.dir);
+                defer stderr.close(testing.io);
                 var cmd: Command = .{
                     .path = cmd_path,
                     .args = &.{ cmd_path, "/D", if (delayed) "/V:ON" else "/V:OFF", "/C", case[0] },
@@ -1824,7 +1824,7 @@ test "Command: windows job object kill-on-close terminates local child" {
     const root_process_id = apprt.win32_job_object.GetProcessId(cmd.pid.?);
     try testing.expect(root_process_id != 0);
     var process_ids: ProcessIdList = .{};
-    const query_deadline = std.time.nanoTimestamp() + (5 * std.time.ns_per_s);
+    const query_deadline = std.Io.Timestamp.now(testing.io, .real).addDuration(.fromSeconds(5));
     while (true) {
         var returned_length: windows.DWORD = 0;
         if (apprt.win32_job_object.QueryInformationJobObject(
@@ -1835,8 +1835,8 @@ test "Command: windows job object kill-on-close terminates local child" {
             &returned_length,
         ) == 0) return windows.unexpectedError(windows_ext.kernel32.GetLastError());
         if (process_ids.listed_count >= 2) break;
-        if (std.time.nanoTimestamp() >= query_deadline) return error.WindowsJobObjectDescendantDidNotStart;
-        std.Thread.sleep(20 * std.time.ns_per_ms);
+        if (std.Io.Timestamp.now(testing.io, .real).compare(.gte, query_deadline)) return error.WindowsJobObjectDescendantDidNotStart;
+        try std.Io.sleep(testing.io, .fromMilliseconds(20), .awake);
     }
 
     var descendant_handle: ?windows.HANDLE = null;
@@ -1854,7 +1854,7 @@ test "Command: windows job object kill-on-close terminates local child" {
 
     cmd.closeWindowsJobObject();
 
-    try std.os.windows.WaitForSingleObject(child, 5000);
+    try @import("apprt/win32/sys.zig").waitForSingleObject(child, 5000);
     const exit = try cmd.wait(true);
     try testing.expect(exit == .Exited);
 }
