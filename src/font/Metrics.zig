@@ -57,19 +57,21 @@ face_y: f64,
 
 /// Minimum acceptable values for some fields to prevent modifiers
 /// from being able to, for example, cause 0-thickness underlines.
+/// The decls are `pub` because `clamp` finds them with `@hasDecl`, which
+/// Zig 0.17 answers only for public declarations, even in this file.
 const Minimums = struct {
-    const cell_width = 1;
-    const cell_height = 1;
-    const underline_thickness = 1;
-    const strikethrough_thickness = 1;
-    const overline_thickness = 1;
-    const box_thickness = 1;
-    const cursor_thickness = 1;
-    const cursor_height = 1;
-    const icon_height = 1.0;
-    const icon_height_single = 1.0;
-    const face_height = 1.0;
-    const face_width = 1.0;
+    pub const cell_width = 1;
+    pub const cell_height = 1;
+    pub const underline_thickness = 1;
+    pub const strikethrough_thickness = 1;
+    pub const overline_thickness = 1;
+    pub const box_thickness = 1;
+    pub const cursor_thickness = 1;
+    pub const cursor_height = 1;
+    pub const icon_height = 1.0;
+    pub const icon_height_single = 1.0;
+    pub const face_height = 1.0;
+    pub const face_width = 1.0;
 };
 
 /// Metrics extracted from a font face, based on

@@ -13,7 +13,6 @@ pub const Packed = packedpkg.Packed;
 pub const PackedTaggedUnion = packedpkg.PackedTaggedUnion;
 pub const parseInt = @import("parse_int.zig").parseInt;
 pub const checkGhosttyHEnum = enumpkg.checkGhosttyHEnum;
-pub const parseInt = @import("parse_int.zig").parseInt;
 pub const String = types.String;
 pub const Struct = structpkg.Struct;
 pub const structSizedFieldFits = structpkg.sizedFieldFits;

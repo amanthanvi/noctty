@@ -475,8 +475,13 @@ pub const Message = union(enum) {
     /// Force-clear search state for the current search generation.
     search_clear: SearchClear,
 
+    /// Renderer pushed a new frame, redraw this surface.
+    redraw,
+
     pub fn deinit(self: *Message) void {
         switch (self.*) {
+            .kitty_clipboard_read => |req| req.destroy(),
+            .kitty_clipboard_write => |req| req.destroy(),
             .clipboard_write => |v| v.req.deinit(),
             .pwd_change => |v| v.deinit(),
             .search_viewport_matches => |*v| v.deinit(),
@@ -506,9 +511,6 @@ pub const Message = union(enum) {
         /// A full reset (RIS).
         reset,
     };
-
-    /// Renderer pushed a new frame, redraw this surface.
-    redraw,
 
     pub const ReportTitleStyle = enum {
         csi_21_t,
