@@ -947,7 +947,7 @@ pub const Ledger = struct {
     /// been read, so an `env` line in an included file cannot replace them,
     /// as it would replace an `--env` argument. Not a field: a config file
     /// line that names it is reported as an unknown field and ignored.
-    elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
+    elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .empty,
 
     /// Where each `profile-*` (key, id) was last written, for the problems
     /// `finalize` reports (`profilePlace`). Recorded by `note`, so a config

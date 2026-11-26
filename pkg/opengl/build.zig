@@ -19,5 +19,13 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .include_paths = &.{b.path("../../vendor/glad/include")},
+        // noctty: on Windows, EGL's platform header includes windows.h for
+        // its native types, which Zig 0.17's translate-c (Aro) cannot parse
+        // for the MSVC target. The fork draws through WGL and uses no EGL
+        // native type, so those take Khronos's platform-neutral spelling.
+        .extra_args = if (target.result.os.tag == .windows)
+            &.{"-DEGL_NO_PLATFORM_SPECIFIC_TYPES"}
+        else
+            &.{},
     });
 }

@@ -3752,7 +3752,7 @@ keybind: Keybinds = .{},
 /// Retained compatibility setting from the removed GTK runtime.
 ///
 /// This has no effect in the Windows-only fork.
-@"gtk-opengl-debug": bool = builtin.mode == .Debug,
+@"gtk-opengl-debug": bool = builtin.mode == .debug,
 
 /// Deprecated compatibility alias for `single-instance`.
 ///
@@ -4523,7 +4523,7 @@ test "handle bom in config files" {
 fn testUtf16Bytes(alloc: Allocator, text: []const u8, order: std.builtin.Endian) ![]u8 {
     const units = try std.unicode.utf8ToUtf16LeAlloc(alloc, text);
     defer alloc.free(units);
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
     try out.appendSlice(alloc, if (order == .little) "\xff\xfe" else "\xfe\xff");
     for (units) |unit| {
@@ -8383,7 +8383,7 @@ pub const RepeatableFontVariation = struct {
     const Self = @This();
 
     // Allocator for the list is the arena for the parent config.
-    list: std.ArrayListUnmanaged(FontVariation) = .{},
+    list: std.ArrayListUnmanaged(FontVariation) = .empty,
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
         const input = input_ orelse return error.ValueRequired;
@@ -11268,7 +11268,7 @@ fn parseOptionalRegexEntry(alloc: Allocator, input_: ?[]const u8) !?[]const u8 {
 pub const QuickSelectPatterns = struct {
     const Self = @This();
 
-    list: std.ArrayListUnmanaged([]const u8) = .{},
+    list: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
         const regex = try parseOptionalRegexEntry(alloc, input_) orelse {
