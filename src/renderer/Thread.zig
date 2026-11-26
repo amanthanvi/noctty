@@ -939,7 +939,7 @@ test "a timer reset in the pass it falls due loses the run its callback arms nex
     defer probe.b.deinit();
     probe.a.run(&loop, &probe.a_c, 1, Probe, &probe, Probe.onA);
     probe.b.run(&loop, &probe.b_c, 2, Probe, &probe, Probe.onB);
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
     try loop.run(.until_done);
     try std.testing.expectEqualStrings("RCR", probe.seen[0..probe.len]);
 }

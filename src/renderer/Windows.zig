@@ -3,6 +3,7 @@
 //! from renderer-thread updates during replacement. OpenGL is the default.
 const Windows = @This();
 const std = @import("std");
+const global = @import("../global.zig");
 const renderer = @import("../renderer.zig");
 const apprt = @import("../apprt.zig");
 const font = @import("../font/main.zig");
@@ -21,7 +22,7 @@ pub const FrameUpdate = generic.CommonFrameUpdate;
 alloc: std.mem.Allocator,
 rt_surface: *apprt.Surface,
 surface_mailbox: apprt.surface.Mailbox,
-mutex: std.Thread.Mutex = .{},
+mutex: std.Io.Mutex = .init,
 /// Published once, after full GL construction/state transfer. GL never changes
 /// again, so default surfaces forward with the original GenericRenderer locks.
 opengl: std.atomic.Value(?*GL) = .init(null),
@@ -246,7 +247,7 @@ fn fallBack(self: *Windows) !void {
 
 fn tryFallback(self: *Windows) bool {
     const old = self.active.d3d11;
-    const now = std.time.milliTimestamp();
+    const now = std.Io.Timestamp.now(global.io(), .real).toMilliseconds();
     if (now < self.fallback_retry_ms) return false;
     if (comptime build_config.renderer_test_tools) self.fallback_attempts +|= 1;
     self.fallBack() catch |err| {
@@ -269,8 +270,8 @@ pub fn drawFrame(self: *Windows, sync: bool) !void {
         self.showNotice();
         return v.drawFrame(sync);
     }
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     self.showNotice();
     if (self.active == .opengl) return self.active.opengl.drawFrame(sync);
     const v = self.active.d3d11;
@@ -320,8 +321,8 @@ pub fn drawFrame(self: *Windows, sync: bool) !void {
 
 pub fn updateFrame(self: *Windows, state: *renderer.State, cursor_blink_visible: bool) std.mem.Allocator.Error!FrameUpdate {
     if (self.opengl.load(.acquire)) |v| return v.updateFrame(state, cursor_blink_visible);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     self.state = state;
     self.cursor_blink_visible = cursor_blink_visible;
     switch (self.active) {
@@ -340,8 +341,8 @@ pub fn updateFrame(self: *Windows, state: *renderer.State, cursor_blink_visible:
 
 pub fn changeConfig(self: *Windows, config: *DerivedConfig) !void {
     if (self.opengl.load(.acquire)) |v| return v.changeConfig(config);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     if (self.active == .d3d11) {
         if (selection.unsupported(config.custom_shaders.value.items.len != 0, config.bg_image != null, self.active.d3d11.images.hasLiveImages())) |feature| {
             log.warn("D3D11 does not support {s}; trying OpenGL on next draw", .{@tagName(feature)});
@@ -357,8 +358,8 @@ pub fn changeConfig(self: *Windows, config: *DerivedConfig) !void {
 
 pub fn setBackgroundOpacity(self: *Windows, opacity: ?f64) void {
     if (self.opengl.load(.acquire)) |v| return v.setBackgroundOpacity(opacity);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setBackgroundOpacity(opacity),
     }
@@ -376,8 +377,8 @@ pub fn deinit(self: *Windows) void {
 
 pub fn capture(self: *Windows, hdc: *anyopaque) !void {
     if (!build_config.renderer_test_tools) return error.TestToolsDisabled;
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     const status_path = try std.process.getEnvVarOwned(self.alloc, "NOCTTY_RENDERER_STATUS_PATH");
     defer self.alloc.free(status_path);
     const file = try std.fs.cwd().createFile(status_path, .{});
@@ -433,8 +434,8 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
     // The harness still requires successful capture for pixel assertions.
     switch (self.active) {
         inline else => |v| {
-            v.draw_mutex.lock();
-            defer v.draw_mutex.unlock();
+            v.draw_mutex.lockUncancelable(global.io());
+            defer v.draw_mutex.unlock(global.io());
             if (self.active == .opengl) try self.rt_surface.makeGLContextCurrent();
             try v.api.capture(hdc);
         },
@@ -443,8 +444,8 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
 
 pub fn requestDeviceLoss(self: *Windows) bool {
     if (!build_config.renderer_test_tools) return false;
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     if (self.active != .d3d11) return false;
     self.active.d3d11.api.requestDeviceLoss() catch return false;
     return true;
@@ -456,8 +457,8 @@ test {
 
 pub fn finalizeSurfaceInit(self: *Windows, surface: *apprt.Surface) !void {
     if (self.opengl.load(.acquire)) |v| return v.finalizeSurfaceInit(surface);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| try v.finalizeSurfaceInit(surface),
     }
@@ -465,8 +466,8 @@ pub fn finalizeSurfaceInit(self: *Windows, surface: *apprt.Surface) !void {
 
 pub fn threadEnter(self: *Windows, surface: *apprt.Surface) !void {
     if (self.opengl.load(.acquire)) |v| return v.threadEnter(surface);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| try v.threadEnter(surface),
     }
@@ -474,8 +475,8 @@ pub fn threadEnter(self: *Windows, surface: *apprt.Surface) !void {
 
 pub fn prepareSurfaceDeinit(self: *Windows, surface: *apprt.Surface) !void {
     if (self.opengl.load(.acquire)) |v| return v.prepareSurfaceDeinit(surface);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| try v.prepareSurfaceDeinit(surface),
     }
@@ -483,8 +484,8 @@ pub fn prepareSurfaceDeinit(self: *Windows, surface: *apprt.Surface) !void {
 
 pub fn threadExit(self: *Windows) void {
     if (self.opengl.load(.acquire)) |v| return v.threadExit();
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.threadExit(),
     }
@@ -492,8 +493,8 @@ pub fn threadExit(self: *Windows) void {
 
 pub fn loopEnter(self: *Windows, thr: *renderer.Thread) !void {
     if (self.opengl.load(.acquire)) |v| return v.loopEnter(thr);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| try v.loopEnter(thr),
     }
@@ -501,8 +502,8 @@ pub fn loopEnter(self: *Windows, thr: *renderer.Thread) !void {
 
 pub fn loopExit(self: *Windows) void {
     if (self.opengl.load(.acquire)) |v| return v.loopExit();
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.loopExit(),
     }
@@ -510,8 +511,8 @@ pub fn loopExit(self: *Windows) void {
 
 pub fn hasAnimations(self: *Windows) bool {
     if (self.opengl.load(.acquire)) |v| return v.hasAnimations();
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| return v.hasAnimations(),
     }
@@ -519,8 +520,8 @@ pub fn hasAnimations(self: *Windows) bool {
 
 pub fn hasVsync(self: *Windows) bool {
     if (self.opengl.load(.acquire)) |v| return v.hasVsync();
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| return v.hasVsync(),
     }
@@ -528,8 +529,8 @@ pub fn hasVsync(self: *Windows) bool {
 
 pub fn setFocus(self: *Windows, focus: bool) !void {
     if (self.opengl.load(.acquire)) |v| return v.setFocus(focus);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| try v.setFocus(focus),
     }
@@ -537,8 +538,8 @@ pub fn setFocus(self: *Windows, focus: bool) !void {
 
 pub fn setSplitDimmed(self: *Windows, dimmed: bool) void {
     if (self.opengl.load(.acquire)) |v| return v.setSplitDimmed(dimmed);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setSplitDimmed(dimmed),
     }
@@ -546,8 +547,8 @@ pub fn setSplitDimmed(self: *Windows, dimmed: bool) void {
 
 pub fn setVisible(self: *Windows, visible: bool) void {
     if (self.opengl.load(.acquire)) |v| return v.setVisible(visible);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setVisible(visible),
     }
@@ -555,8 +556,8 @@ pub fn setVisible(self: *Windows, visible: bool) void {
 
 pub fn setFontGrid(self: *Windows, grid: *font.SharedGrid) void {
     if (self.opengl.load(.acquire)) |v| return v.setFontGrid(grid);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setFontGrid(grid),
     }
@@ -564,8 +565,8 @@ pub fn setFontGrid(self: *Windows, grid: *font.SharedGrid) void {
 
 pub fn setScreenSize(self: *Windows, size: renderer.Size) void {
     if (self.opengl.load(.acquire)) |v| return v.setScreenSize(size);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setScreenSize(size),
     }
@@ -573,8 +574,8 @@ pub fn setScreenSize(self: *Windows, size: renderer.Size) void {
 
 pub fn setSearchMatches(self: *Windows, value: ?renderer.Message.SearchMatches) void {
     if (self.opengl.load(.acquire)) |v| return v.setSearchMatches(value);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setSearchMatches(value),
     }
@@ -582,8 +583,8 @@ pub fn setSearchMatches(self: *Windows, value: ?renderer.Message.SearchMatches) 
 
 pub fn setSearchSelectedMatch(self: *Windows, value: ?renderer.Message.SearchMatch) void {
     if (self.opengl.load(.acquire)) |v| return v.setSearchSelectedMatch(value);
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     switch (self.active) {
         inline else => |v| v.setSearchSelectedMatch(value),
     }
@@ -591,8 +592,8 @@ pub fn setSearchSelectedMatch(self: *Windows, value: ?renderer.Message.SearchMat
 
 pub fn setTestFailures(self: *Windows, hardware: bool, device: bool) bool {
     if (!build_config.renderer_test_tools) return false;
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     if (self.active != .d3d11) return false;
     self.active.d3d11.api.setTestFailures(hardware, device) catch return false;
     return true;
@@ -600,8 +601,8 @@ pub fn setTestFailures(self: *Windows, hardware: bool, device: bool) bool {
 
 pub fn failNextPresent(self: *Windows) bool {
     if (!build_config.renderer_test_tools) return false;
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(global.io());
+    defer self.mutex.unlock(global.io());
     if (self.active != .d3d11) return false;
     self.active.d3d11.api.failNextPresent() catch return false;
     return true;
@@ -626,10 +627,10 @@ test "OpenGL scheduling queries bypass the dispatcher lock" {
     var gl: GL = undefined;
     gl.has_custom_shaders = true;
     var value: Windows = undefined;
-    value.mutex = .{};
+    value.mutex = .init;
     value.opengl = .init(&gl);
-    value.mutex.lock();
-    defer value.mutex.unlock();
+    value.mutex.lockUncancelable(std.testing.io);
+    defer value.mutex.unlock(std.testing.io);
     try std.testing.expect(value.hasAnimations());
     try std.testing.expect(!value.hasVsync());
 }

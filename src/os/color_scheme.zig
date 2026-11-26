@@ -46,7 +46,7 @@ fn readAppsUseLightTheme() ?u32 {
     var data_size: windows.DWORD = @sizeOf(u32);
     var reg_type: windows.DWORD = 0;
     if (win32_sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != 0) return null;
-    if (reg_type != windows.REG.DWORD or data_size != @sizeOf(u32)) return null;
+    if (reg_type != @backingInt(windows.REG.ValueType.DWORD) or data_size != @sizeOf(u32)) return null;
     return data;
 }
 

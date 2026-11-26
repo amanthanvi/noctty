@@ -349,7 +349,7 @@ pub fn threadEnter(
         .read_thread_fd = pty_fds.read,
         .stopping = &io.stopping,
         .termios_timer = termios_timer,
-        .write_pool = .init(alloc),
+        .write_pool = .empty,
     } };
 
     // Start our process watcher. If we have an xev.Process use it.
@@ -646,9 +646,6 @@ pub fn queueWrite(
     linefeed: bool,
 ) !void {
     _ = self;
-    // The write pool owns its allocator; the parameter is kept for the
-    // backend interface.
-    _ = alloc;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
@@ -661,7 +658,7 @@ pub fn queueWrite(
     // still queued (see `ThreadData.Write`).
     var i: usize = 0;
     while (i < data.len) {
-        const w = try exec.write_pool.create();
+        const w = try exec.write_pool.create(alloc);
         w.td = exec;
         const buf = &w.buf;
         const slice = slice: {
@@ -811,8 +808,7 @@ pub const ThreadData = struct {
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
         // drop this.
-        _ = alloc;
-        self.write_pool.deinit();
+        self.write_pool.deinit(alloc);
 
         // Stop our process watcher
         if (self.process) |*p| p.deinit();
@@ -3660,7 +3656,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     name_w_buf[name_w_len] = 0;
     const name_w = name_w_buf[0..name_w_len :0];
 
-    const server = k32.CreateNamedPipeW(
+    const server = windows.exp.kernel32.CreateNamedPipeW(
         name_w.ptr,
         windows.PIPE_ACCESS_OUTBOUND |
             windows.FILE_FLAG_FIRST_PIPE_INSTANCE |
@@ -3677,7 +3673,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
     }
     defer _ = windows_ext.CloseHandle(server);
 
-    const client = k32.CreateFileW(
+    const client = windows.exp.kernel32.CreateFileW(
         name_w.ptr,
         windows.GENERIC_READ,
         0,
@@ -3709,11 +3705,11 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
 
     // Two large writes of distinct bytes, each far more chunks than the
     // old 32-slot preallocation.

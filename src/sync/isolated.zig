@@ -100,16 +100,16 @@ pub fn inChild() bool {
 /// mode, symbolises and ends the process; otherwise returns at once.
 pub fn runChildIfRequested() void {
     if (comptime builtin.os.tag != .windows) return;
-    if (std.process.hasEnvVarConstant(symbolise.raw_env)) symbolise.runFromEnvironment();
+    if (std.testing.environ.containsConstant(symbolise.raw_env)) symbolise.runFromEnvironment();
     var name_buf: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&name_buf);
-    const name = std.process.getEnvVarOwned(fba.allocator(), child_env) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return,
+    // One variable from the live block, as 0.15's `getEnvVarOwned` read it
+    // (a whole-environment map would not fit the fixed buffer).
+    const name_w = std.testing.environ.getWindows(std.unicode.utf8ToUtf16LeStringLiteral(child_env)) orelse return;
+    const name = std.unicode.wtf16LeToWtf8Alloc(fba.allocator(), name_w) catch |err| {
         // A child must never fall through to the rest of the suite.
-        else => {
-            std.debug.print("isolated child: its test's name cannot be read: {s}\n", .{@errorName(err)});
-            std.process.exit(exit_no_test);
-        },
+        std.debug.print("isolated child: its test's name cannot be read: {s}\n", .{@errorName(err)});
+        std.process.exit(exit_no_test);
     };
     for (builtin.test_functions) |test_fn| {
         if (!std.mem.eql(u8, test_fn.name, name)) continue;
@@ -202,12 +202,12 @@ pub const Child = struct {
 /// The child's environment: this process's, without the build runner's
 /// progress pipe, the symbolise mode or the run's dump directory, with the
 /// test's name, and with `dump_dir` as its dump directory if one is given.
-pub fn childEnvironment(a: Allocator, qualified: []const u8, dump_dir: ?[]const u8) !std.process.EnvMap {
-    var env = try std.process.getEnvMap(a);
+pub fn childEnvironment(a: Allocator, qualified: []const u8, dump_dir: ?[]const u8) !std.process.Environ.Map {
+    var env = try std.testing.environ.createMap(a);
     errdefer env.deinit();
-    env.remove("ZIG_PROGRESS");
-    env.remove(symbolise.raw_env);
-    env.remove(dump.env_var);
+    _ = env.orderedRemove("ZIG_PROGRESS");
+    _ = env.orderedRemove(symbolise.raw_env);
+    _ = env.orderedRemove(dump.env_var);
     try env.put(child_env, qualified);
     if (dump_dir) |dir| try env.put(dump.env_var, dir);
     return env;
@@ -233,7 +233,7 @@ const Deadline = struct {
 /// it. `src` is the test block's `@src()`.
 pub fn run(src: std.builtin.SourceLocation, dumps: Dumps) !Child {
     const a = std.testing.allocator;
-    if (running_child or std.process.hasEnvVarConstant(child_env)) return error.IsolatedChildStartsNoChild;
+    if (running_child or std.testing.environ.containsConstant(child_env)) return error.IsolatedChildStartsNoChild;
     var name_buf: [1024]u8 = undefined;
     const qualified = try qualifiedName(&name_buf, src);
 
@@ -244,41 +244,59 @@ pub fn run(src: std.builtin.SourceLocation, dumps: Dumps) !Child {
 
     var env = try childEnvironment(a, qualified, dir_utf8);
     defer env.deinit();
-    const exe = try std.fs.selfExePathAlloc(a);
+    const io = std.testing.io;
+    const exe = try std.process.executablePathAlloc(io, a);
     defer a.free(exe);
 
-    var child = std.process.Child.init(&.{exe}, a);
-    child.env_map = &env;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.create_no_window = true;
-    try child.spawn();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{exe},
+        .environ_map = &env,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .create_no_window = true,
+    });
     var waited = false;
-    errdefer if (!waited) {
-        _ = child.kill() catch {};
-    };
-    var deadline: Deadline = .{ .handle = child.id };
+    errdefer if (!waited) child.kill(io);
+    var deadline: Deadline = .{ .handle = child.id.? };
     const watcher = try std.Thread.spawn(.{}, Deadline.run, .{&deadline});
-    var stdout: std.ArrayList(u8) = .empty;
-    defer stdout.deinit(a);
-    var stderr: std.ArrayList(u8) = .empty;
-    defer stderr.deinit(a);
-    const collected = child.collectOutput(a, &stdout, &stderr, 4 << 20);
+    // Both pipes until they end, as 0.15's `collectOutput` with a 4 MiB
+    // limit on each.
+    const collected = collectOutput(io, a, &child, 4 << 20);
+    errdefer if (collected) |s| a.free(s) else |_| {};
     watcher.join();
     // Read before `wait`, which keeps only the low byte and closes the handle.
     var exit_code: windows.DWORD = 0;
-    if (win32_sys.GetExitCodeProcess(child.id, &exit_code) == 0) exit_code = 0xffff_ffff;
-    const term = try child.wait();
+    if (win32_sys.GetExitCodeProcess(child.id.?, &exit_code) == 0) exit_code = 0xffff_ffff;
+    const term = try child.wait(io);
     waited = true;
-    try collected;
+    const stderr = try collected;
     return .{
         .term = term,
         .exit_code = exit_code,
-        .stderr = try stderr.toOwnedSlice(a),
+        .stderr = stderr,
         .timed_out = deadline.timed_out,
         .dir = dir,
     };
+}
+
+/// Reads the child's stdout and stderr pipes to their ends and returns its
+/// stderr (stdout is read and dropped), failing as 0.15's
+/// `std.process.Child.collectOutput` did when either passes `max_bytes`.
+fn collectOutput(io: std.Io, a: Allocator, child: *std.process.Child, max_bytes: usize) ![]u8 {
+    var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(a, io, buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+    while (multi_reader.fill(64, .none)) |_| {
+        if (multi_reader.reader(0).buffered().len > max_bytes) return error.StdoutStreamTooLong;
+        if (multi_reader.reader(1).buffered().len > max_bytes) return error.StderrStreamTooLong;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try multi_reader.checkAnyError();
+    return multi_reader.toOwnedSlice(1);
 }
 
 /// Whether the dispatch ran the child's test as its first: the runner's
@@ -512,7 +530,7 @@ pub fn compareChild(child: *Child) !Compared {
         defer session.close();
         const root = try session.sourceRoot(aa);
         const path = try tablePathAlloc(aa, &session);
-        const table = std.fs.cwd().readFileAlloc(aa, path, 16 << 20) catch |err| {
+        const table = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, aa, .limited(16 << 20)) catch |err| {
             std.debug.print("isolated parent: the reviewed table cannot be read ({s}); set " ++ table_env ++
                 " or run from a build whose checkout holds " ++ table_path ++ "\n", .{@errorName(err)});
             return err;

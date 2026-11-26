@@ -221,7 +221,7 @@ extern "kernel32" fn FreeLibrary(module: windows.HMODULE) callconv(.winapi) win3
 
 /// DbgHelp is single-threaded: one session at a time, held from `open` to
 /// `close`.
-var session_lock: std.Thread.Mutex = .{};
+var session_lock: std.Io.Mutex = .init;
 /// Loaded at the first session, kept for the process (under the lock).
 var api: ?Api = null;
 /// Its address names this file's DbgHelp sessions: `SymInitializeW` takes
@@ -293,8 +293,8 @@ pub const Session = struct {
         const dir_z = try a.dupeSentinel(u16, image[0..dir_len], 0);
         defer a.free(dir_z);
 
-        session_lock.lock();
-        errdefer session_lock.unlock();
+        session_lock.lockUncancelable(std.testing.io);
+        errdefer session_lock.unlock(std.testing.io);
         const fns = try loadApi();
         _ = fns.SymSetOptions(sym_options);
         if (fns.SymInitializeW(sessionHandle(), dir_z.ptr, win32_types.FALSE) == 0) return error.SymInitializeFailed;
@@ -316,7 +316,7 @@ pub const Session = struct {
 
     pub fn close(self: *Session) void {
         _ = self.api.SymCleanup(sessionHandle());
-        session_lock.unlock();
+        session_lock.unlock(std.testing.io);
     }
 
     /// What DbgHelp loaded for the image.
@@ -551,8 +551,8 @@ pub fn runFromEnvironment() noreturn {
 /// environment is drive-absolute or refused (error.NotDriveAbsolute), as
 /// the dump directory is (`dump.isDriveAbsolute`).
 pub fn envPath(a: Allocator, name: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(a, name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
+    const value = std.testing.environ.getAlloc(a, name) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return null,
         else => return err,
     };
     errdefer a.free(value);
@@ -575,7 +575,7 @@ fn runDirectories(a: Allocator) !u8 {
     const raw_path = (try envPath(a, raw_env)) orelse return error.NoRawDirectory;
     const out_path = (try envPath(a, out_env)) orelse return error.NoOutputDirectory;
     const images_path = (try envPath(a, images_env)) orelse images: {
-        const self_exe = try std.fs.selfExePathAlloc(a);
+        const self_exe = try std.process.executablePathAlloc(std.testing.io, a);
         break :images try a.dupe(u8, std.fs.path.dirname(self_exe) orelse return error.NoImagesDirectory);
     };
     const root = (try envPath(a, root_env)) orelse root: {
@@ -584,14 +584,15 @@ fn runDirectories(a: Allocator) !u8 {
         break :root try own.sourceRoot(a);
     };
 
-    var raw_dir = try std.fs.openDirAbsolute(raw_path, .{ .iterate = true });
-    defer raw_dir.close();
-    var out_dir = try std.fs.openDirAbsolute(out_path, .{});
-    defer out_dir.close();
+    const io = std.testing.io;
+    var raw_dir = try std.Io.Dir.openDirAbsolute(io, raw_path, .{ .iterate = true });
+    defer raw_dir.close(io);
+    var out_dir = try std.Io.Dir.openDirAbsolute(io, out_path, .{});
+    defer out_dir.close(io);
 
     var names: std.ArrayListUnmanaged([]u8) = .empty;
     var it = raw_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, dump.extension)) continue;
         try names.append(a, try a.dupe(u8, entry.name));
     }
@@ -603,13 +604,13 @@ fn runDirectories(a: Allocator) !u8 {
 
     var totals: struct { dumps: usize = 0, pairs: usize = 0, unresolved: usize = 0, problems: usize = 0 } = .{};
     for (names.items) |name| {
-        const raw = try raw_dir.readFileAlloc(a, name, 16 << 20);
+        const raw = try raw_dir.readFileAlloc(io, name, a, .limited(16 << 20));
         defer a.free(raw);
         const result = try symboliseFile(a, raw, images_path, root);
         defer result.deinit(a);
-        const file = try out_dir.createFile(name, .{ .exclusive = true });
-        defer file.close();
-        try file.writeAll(result.text);
+        const file = try out_dir.createFile(io, name, .{ .exclusive = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, result.text);
         totals.dumps += 1;
         totals.pairs += result.pairs;
         totals.unresolved += result.unresolved;

@@ -509,7 +509,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             job_handle = null;
 
             var exit_code: windows.DWORD = undefined;
-            if (windows_ext.kernel32.GetExitCodeProcess(process_information.hProcess, &exit_code) == 0) {
+            if (windows_ext.kernel32.GetExitCodeProcess(process_information.hProcess, &exit_code) == windows.FALSE) {
                 return windows.unexpectedError(windows_ext.kernel32.GetLastError());
             }
             if (exit_code != windows_ext.STILL_ACTIVE) {

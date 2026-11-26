@@ -959,7 +959,7 @@ const TestPipe = struct {
 
     fn init(alloc: Allocator) !TestPipe {
         var random: [8]u8 = undefined;
-        std.crypto.random.bytes(&random);
+        std.testing.io.random(&random);
         const name = try std.fmt.allocPrint(alloc, "test-{x}", .{&random});
         defer alloc.free(name);
         const pipe_name = try makePipeName(alloc, name);
@@ -1016,7 +1016,7 @@ const TestPipe = struct {
     }
 
     fn openClientAfterDelay(self: *TestPipe, client: *windows.HANDLE) void {
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
         client.* = self.openClient() catch windows.INVALID_HANDLE_VALUE;
     }
 };
@@ -1075,7 +1075,7 @@ test "conpty-host accept: shell exit wins while the accept is pending" {
     // accept must return shell_exited rather than wait for a client forever.
     const Signaller = struct {
         fn run(event: windows.HANDLE) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
             _ = SetEvent(event);
         }
     };

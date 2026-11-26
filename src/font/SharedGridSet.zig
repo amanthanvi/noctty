@@ -1204,7 +1204,7 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
         defer testing.allocator.free(dir);
 
         const Hold = struct {
-            entered: std.Thread.ResetEvent = .{},
+            entered: std.Io.Event = .unset,
             calls: std.atomic.Value(usize) = .init(0),
 
             // A slow first open: it lasts until the scan is stopped, or
@@ -1214,10 +1214,12 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
             fn call(ctx: *anyopaque, disco: *Discover, _: [:0]const u8) void {
                 const self: *@This() = @ptrCast(@alignCast(ctx));
                 if (self.calls.fetchAdd(1, .monotonic) != 0) return;
-                self.entered.set();
-                var timer = std.time.Timer.start() catch return;
-                while (!disco.scanStopped() and timer.read() < 5 * std.time.ns_per_s) {
-                    std.Thread.sleep(std.time.ns_per_ms);
+                self.entered.set(std.testing.io);
+                const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+                while (!disco.scanStopped() and
+                    started.untilNow(std.testing.io, .awake).toNanoseconds() < 5 * std.time.ns_per_s)
+                {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return;
                 }
             }
         };
@@ -1235,7 +1237,7 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
 
         set.startDiscoveryPrefetch();
         try testing.expect(set.discoveryPrefetchStarted());
-        try hold.entered.timedWait(5 * std.time.ns_per_s);
+        try hold.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
 
         set_live = false;
         set.deinit();

@@ -384,11 +384,11 @@ test "termio input files are closed and read buffers freed once queued" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
     var io: Termio = undefined;
     io.alloc = alloc;
     io.backend = .{ .exec = undefined };
@@ -1837,11 +1837,11 @@ test "issue149 config change writes exactly one color scheme report" {
             .read_thread_fd = undefined,
             .stopping = undefined,
             .termios_timer = undefined,
-            .write_pool = .init(alloc),
+            .write_pool = .empty,
         } },
         .mailbox = undefined,
     };
-    defer td.backend.exec.write_pool.deinit();
+    defer td.backend.exec.write_pool.deinit(alloc);
 
     var written: std.ArrayList(u8) = .empty;
     defer written.deinit(alloc);

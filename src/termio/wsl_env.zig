@@ -193,7 +193,7 @@ fn listed(wslenv: []const u8, name: []const u8) bool {
 /// Add each of `names` that `env` holds and `WSLENV` does not list yet to
 /// `WSLENV` as `NAME/u`, after the entries already there.
 pub fn forward(env: *EnvMap, names: []const []const u8) !void {
-    const alloc = env.hash_map.allocator;
+    const alloc = env.allocator;
     const existing = env.get("WSLENV") orelse "";
 
     var merged: std.ArrayList(u8) = .empty;
@@ -650,7 +650,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
     for (probe, args) |arg, *dest| dest.* = temp.dupeSentinel(u8, arg, 0) catch return null;
     var sa: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
-        .bInheritHandle = win32_types.TRUE,
+        .bInheritHandle = .TRUE,
         .lpSecurityDescriptor = null,
     };
     const nul = win32_sys.openFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
