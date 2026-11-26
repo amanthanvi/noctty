@@ -42,7 +42,18 @@ pub fn sliceToPrefixedFileW(path: []const u8) Error!PathSpace {
     return convert(path);
 }
 
+/// Its frame holds two path spaces (the WTF-16 form and std's result, about
+/// 128 KiB) and it returns a third. No caller runs on a termio or renderer
+/// thread; measure it against that thread's stack (`stackUse` in
+/// `os/main.zig`) before one does.
 fn convert(path: []const u8) Error!PathSpace {
+    // The conversion writes into a fixed buffer, so a path longer than the NT
+    // forms allow is refused before anything converts it (PATH-BOUND, the
+    // 2026-10-30 entry in launch-and-paths.md: 40,000 bytes ended the Debug
+    // test binary with "index out of bounds" in 0.15.2's conversion;
+    // ReleaseFast would write past the buffer, inferred).
+    if ((std.unicode.calcWtf16LeLen(path) catch return error.InvalidWtf8) > path_max_wide)
+        return error.NameTooLong;
     var wide: std.Io.Threaded.WindowsPathSpace = undefined;
     wide.len = try std.unicode.wtf8ToWtf16Le(&wide.data, path);
     wide.data[wide.len] = 0;
@@ -95,6 +106,23 @@ test "the prefixed path keeps std's conversion" {
     try expectConverts("\\\\?\\C:\\a\\..\\b", "\\??\\C:\\a\\..\\b");
     try expectConverts("//?/C:/x", "\\??\\C:\\x");
     try expectConverts("\\??\\C:\\y", "\\??\\C:\\y");
+}
+
+test "a path longer than the NT forms allow is refused before it converts" {
+    // 40,000 bytes, as PATH-BOUND measured: refused, not converted.
+    const long: [40000]u8 = @splat('a');
+    try std.testing.expectError(error.NameTooLong, sliceToPrefixedFileW(&long));
+    // Exactly `path_max_wide` units of a relative name still converts.
+    const at_limit: [path_max_wide]u8 = @splat('b');
+    const space = try sliceToPrefixedFileW(&at_limit);
+    try std.testing.expectEqual(@as(usize, path_max_wide), space.len);
+    // One unit over is refused.
+    const over: [path_max_wide + 1]u8 = @splat('b');
+    try std.testing.expectError(error.NameTooLong, sliceToPrefixedFileW(&over));
+    // A two-byte UTF-8 sequence is one unit, so the bound counts units, not bytes.
+    var two_byte: [path_max_wide * 2]u8 = undefined;
+    for (0..path_max_wide) |i| two_byte[i * 2 ..][0..2].* = "\xc3\xa9".*;
+    _ = try sliceToPrefixedFileW(&two_byte);
 }
 
 test "bytes that are not WTF-8 fail with the error std gave" {
