@@ -254,27 +254,41 @@ test "shared Win32 type layouts" {
     try testing.expectEqual(@alignOf(?*anyopaque), @alignOf(PAINTSTRUCT));
     try testing.expectEqual(@as(usize, 72), @sizeOf(PAINTSTRUCT));
     try testing.expectEqual(@as(usize, 0), @offsetOf(PAINTSTRUCT, "hdc"));
+    try testing.expectEqual(@as(usize, 8), @offsetOf(PAINTSTRUCT, "fErase"));
     try testing.expectEqual(@as(usize, 12), @offsetOf(PAINTSTRUCT, "rcPaint"));
+    try testing.expectEqual(@as(usize, 28), @offsetOf(PAINTSTRUCT, "fRestore"));
+    try testing.expectEqual(@as(usize, 32), @offsetOf(PAINTSTRUCT, "fIncUpdate"));
     try testing.expectEqual(@as(usize, 36), @offsetOf(PAINTSTRUCT, "rgbReserved"));
 
     try testing.expectEqual(@alignOf(?*anyopaque), @alignOf(CREATESTRUCTW));
     try testing.expectEqual(@as(usize, 80), @sizeOf(CREATESTRUCTW));
     try testing.expectEqual(@as(usize, 0), @offsetOf(CREATESTRUCTW, "lpCreateParams"));
     try testing.expectEqual(@as(usize, 8), @offsetOf(CREATESTRUCTW, "hInstance"));
+    try testing.expectEqual(@as(usize, 16), @offsetOf(CREATESTRUCTW, "hMenu"));
+    try testing.expectEqual(@as(usize, 24), @offsetOf(CREATESTRUCTW, "hwndParent"));
+    try testing.expectEqual(@as(usize, 32), @offsetOf(CREATESTRUCTW, "cy"));
+    try testing.expectEqual(@as(usize, 36), @offsetOf(CREATESTRUCTW, "cx"));
+    try testing.expectEqual(@as(usize, 40), @offsetOf(CREATESTRUCTW, "y"));
+    try testing.expectEqual(@as(usize, 44), @offsetOf(CREATESTRUCTW, "x"));
+    try testing.expectEqual(@as(usize, 48), @offsetOf(CREATESTRUCTW, "style"));
     try testing.expectEqual(@as(usize, 56), @offsetOf(CREATESTRUCTW, "lpszName"));
     try testing.expectEqual(@as(usize, 64), @offsetOf(CREATESTRUCTW, "lpszClass"));
+    try testing.expectEqual(@as(usize, 72), @offsetOf(CREATESTRUCTW, "dwExStyle"));
 
     try testing.expectEqual(@alignOf(?*anyopaque), @alignOf(WNDCLASSEXW));
     try testing.expectEqual(@as(usize, 80), @sizeOf(WNDCLASSEXW));
     try testing.expectEqual(@as(usize, 0), @offsetOf(WNDCLASSEXW, "cbSize"));
     try testing.expectEqual(@as(usize, 4), @offsetOf(WNDCLASSEXW, "style"));
     try testing.expectEqual(@as(usize, 8), @offsetOf(WNDCLASSEXW, "lpfnWndProc"));
+    try testing.expectEqual(@as(usize, 16), @offsetOf(WNDCLASSEXW, "cbClsExtra"));
+    try testing.expectEqual(@as(usize, 20), @offsetOf(WNDCLASSEXW, "cbWndExtra"));
     try testing.expectEqual(@as(usize, 24), @offsetOf(WNDCLASSEXW, "hInstance"));
     try testing.expectEqual(@as(usize, 32), @offsetOf(WNDCLASSEXW, "hIcon"));
     try testing.expectEqual(@as(usize, 40), @offsetOf(WNDCLASSEXW, "hCursor"));
     try testing.expectEqual(@as(usize, 48), @offsetOf(WNDCLASSEXW, "hbrBackground"));
     try testing.expectEqual(@as(usize, 56), @offsetOf(WNDCLASSEXW, "lpszMenuName"));
     try testing.expectEqual(@as(usize, 64), @offsetOf(WNDCLASSEXW, "lpszClassName"));
+    try testing.expectEqual(@as(usize, 72), @offsetOf(WNDCLASSEXW, "hIconSm"));
 
     // winuser.h declares both outside its pshpack2 block: natural packing.
     try testing.expectEqual(@as(usize, 44), @sizeOf(WINDOWPLACEMENT));
@@ -307,6 +321,17 @@ test "shared Win32 type layouts" {
     try testing.expectEqual(@as(usize, @sizeOf(usize)), @offsetOf(OVERLAPPED, "InternalHigh"));
     try testing.expectEqual(@as(usize, @sizeOf(usize) * 2), @offsetOf(OVERLAPPED, "DUMMYUNIONNAME"));
     try testing.expectEqual(@as(usize, @sizeOf(usize) * 3), @offsetOf(OVERLAPPED, "hEvent"));
+    // OVERLAPPED's nested union and the offset pair inside it (council S3/P4):
+    // a swap of Offset and OffsetHigh fails here. An extern union's members
+    // all start at 0 (Zig has no @offsetOf for a union), so its members'
+    // sizes are pinned instead.
+    const OverlappedUnion = @FieldType(OVERLAPPED, "DUMMYUNIONNAME");
+    const OverlappedOffsets = @FieldType(OverlappedUnion, "DUMMYSTRUCTNAME");
+    try testing.expectEqual(@as(usize, 8), @sizeOf(OverlappedUnion));
+    try testing.expectEqual(@as(usize, @sizeOf(usize)), @sizeOf(@FieldType(OverlappedUnion, "Pointer")));
+    try testing.expectEqual(@as(usize, 8), @sizeOf(OverlappedOffsets));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(OverlappedOffsets, "Offset"));
+    try testing.expectEqual(@as(usize, 4), @offsetOf(OverlappedOffsets, "OffsetHigh"));
     try testing.expectEqual(@as(usize, 52), @sizeOf(BY_HANDLE_FILE_INFORMATION));
     try testing.expectEqual(@as(usize, 0), @offsetOf(BY_HANDLE_FILE_INFORMATION, "dwFileAttributes"));
     try testing.expectEqual(@as(usize, 4), @offsetOf(BY_HANDLE_FILE_INFORMATION, "ftCreationTime"));
