@@ -757,7 +757,10 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .size = opts.size,
         .backend = backend,
         .mailbox = opts.mailbox,
-        .terminal_stream = .initAlloc(alloc, handler),
+        .terminal_stream = .init(.{
+            .allocator = alloc,
+            .handler = handler,
+        }),
         .output_trace = OutputTrace.init(alloc),
         .benchmark_end_marker = BenchmarkEndMarker.init(alloc),
         .thread_enter_state = thread_enter_state,
@@ -1802,7 +1805,7 @@ test "issue149 config change writes exactly one color scheme report" {
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);
     defer app_queue.destroy(alloc);
-    io.terminal_stream = StreamHandler.Stream.initAlloc(alloc, .{
+    io.terminal_stream = StreamHandler.Stream.init(.{ .allocator = alloc, .handler = .{
         .alloc = alloc,
         .size = undefined,
         .terminal = &io.terminal,
@@ -1817,7 +1820,7 @@ test "issue149 config change writes exactly one color scheme report" {
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
-    });
+    } });
     defer io.terminal_stream.deinit();
 
     // The loop never runs, so the write stream's handle is never used.

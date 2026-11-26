@@ -1432,7 +1432,6 @@ fn performAutomationAction(
 ) !void {
     const action = input.Binding.Action.parse(action_text) catch |err| switch (err) {
         error.InvalidAction, error.InvalidFormat => return error.InvalidAutomationAction,
-        else => return err,
     };
     if (!isSafeAutomationAction(action)) return error.UnsafeAutomationAction;
     if (automationActionTargetError(target, action)) |err| return err;

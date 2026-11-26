@@ -9240,7 +9240,7 @@ pub fn setSearchQuery(
             terminal.search.Thread.threadMain,
             .{&state.state},
         );
-        state.thread.setName("search") catch {};
+        state.thread.setName(global.io(), "search") catch {};
 
         break :init state;
     };

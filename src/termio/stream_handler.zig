@@ -2214,7 +2214,7 @@ test "semantic output capture follows real stream handler parser" {
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+    var stream = StreamHandler.Stream.init(.{ .allocator = std.testing.allocator, .handler = .{
         .alloc = std.testing.allocator,
         .size = undefined,
         .terminal = &term,
@@ -2226,7 +2226,7 @@ test "semantic output capture follows real stream handler parser" {
         .enquiry_response = "",
         .osc_color_report_format = .none,
         .clipboard_write = .allow,
-    });
+    } });
     defer stream.deinit();
 
     stream.handler.semantic_output.begin(false);
@@ -2451,7 +2451,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+    var stream = StreamHandler.Stream.init(.{ .allocator = std.testing.allocator, .handler = .{
         .alloc = std.testing.allocator,
         .size = undefined,
         .terminal = &term,
@@ -2463,7 +2463,7 @@ test "issue149 config change queues no color scheme report, even into a full mai
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
-    });
+    } });
     defer stream.deinit();
     _ = countIssue149ColorSchemeReports(&termio_mailbox);
 
@@ -2527,7 +2527,7 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+    var stream = StreamHandler.Stream.init(.{ .allocator = std.testing.allocator, .handler = .{
         .alloc = std.testing.allocator,
         .size = undefined,
         .terminal = &term,
@@ -2539,7 +2539,7 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
         .enquiry_response = "",
         .osc_color_report_format = .@"16-bit",
         .clipboard_write = .allow,
-    });
+    } });
     defer stream.deinit();
 
     stream.nextSlice("\x1b]10;?\x07");
@@ -2773,7 +2773,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
         },
     };
 
-    var stream = StreamHandler.Stream.initAlloc(alloc, .{
+    var stream = StreamHandler.Stream.init(.{ .allocator = alloc, .handler = .{
         .alloc = alloc,
         .size = undefined,
         .terminal = &term,
@@ -2785,7 +2785,7 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
         .enquiry_response = "",
         .osc_color_report_format = .none,
         .clipboard_write = .allow,
-    });
+    } });
     defer stream.deinit();
     stream.handler.seen_title = true;
 
@@ -2874,7 +2874,7 @@ const TestStream = struct {
         self.app_queue = try AppMailbox.Queue.create(alloc);
         errdefer self.app_queue.destroy(alloc);
 
-        self.stream = StreamHandler.Stream.initAlloc(alloc, .{
+        self.stream = StreamHandler.Stream.init(.{ .allocator = alloc, .handler = .{
             .alloc = alloc,
             .size = undefined,
             .terminal = &self.term,
@@ -2890,7 +2890,7 @@ const TestStream = struct {
             .enquiry_response = options.enquiry_response,
             .osc_color_report_format = options.osc_color_report_format,
             .clipboard_write = .allow,
-        });
+        } });
         self.stream.handler.seen_title = options.seen_title;
         self.role = thread_role.fixture(.reader);
     }
