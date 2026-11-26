@@ -689,7 +689,11 @@ that govern each symbol you change, or that none does.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   (including the `bench:*` steps' `addBenchCoreImport`, and the test
   executable's mode, `-Dtest-optimize` through `Config.testModule`) and
-  resources, the
+  resources, Zig 0.17's build graph (the configure process, its cache and
+  what a build script reads at configure time; the host-tool steps
+  `src/build/ConptyRedist.zig` and `src/build/ThreadRoleTextCheck.zig`;
+  module modes, `SharedDeps.assertModuleOptimizeMode` and
+  `SharedDeps.uucodeModule`), the
   Zig global cache a build uses (`ZIG_GLOBAL_CACHE_DIR`, which
   `scripts/dev-windows.cmd` keeps when set and otherwise sets to
   `%LOCALAPPDATA%\zig`), the Windows target floor (`src/build/Config.zig`,
@@ -851,7 +855,8 @@ that govern each symbol you change, or that none does.
   dropping `pub` from a declaration another file probes by name
   (`@hasDecl(apprt.Surface, ...)` in `src/Surface.zig` and
   `src/renderer/Thread.zig`, the runtime hooks such as
-  `noteRendererFollowupCallback`),
+  `noteRendererFollowupCallback`) or its own file probes (on Zig 0.17,
+  `Minimums` in `src/font/Metrics.zig`),
   adding a name to `src/apprt/win32.zig` or to one of its `*_runtime` bags
   (the budget in `win32/facade_budget.zig`, and the facade importer list in
   `Contracts.20-Zig.ps1`), `union(enum)` tests, PowerShell language traps
