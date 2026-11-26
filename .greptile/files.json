@@ -26,7 +26,8 @@
         "test/windows/interactive-win11-conpty-sync.ps1",
         "test/windows/hidden-win11-conpty-reply-path.ps1",
         "test/windows/console-reply-reader.c",
-        "src/os/local_path.zig"
+        "src/os/local_path.zig",
+        "src/apprt/win32_prefixed_path.zig"
       ]
     },
     {

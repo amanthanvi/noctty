@@ -258,7 +258,8 @@ that govern each symbol you change, or that none does.
 
 - [conpty.md](docs/agents/log/conpty.md): `src/pty.zig`, the pty reader (and
   its stack size, `os.surfaceThreadSpawnConfig`, and how much of it code
-  uses, `stackUse` in `os/main.zig`, including the reparse walk the kitty
+  uses, `stackUse` in `os/main.zig`, `win32_prefixed_path.convert`'s frame
+  among it, including the reparse walk the kitty
   file open runs there: `os/local_path.zig` `walk`, `openRoot`,
   `readLinkTarget`) and write pool in
   `termio/Exec.zig`, `ResizePseudoConsole` and the renderer lock
