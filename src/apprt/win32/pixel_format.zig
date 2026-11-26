@@ -1774,10 +1774,10 @@ test "win32 WGL bootstrap keeps exact sRGB API families and valid procs" {
 }
 
 test "win32 WGL sRGB family order covers every pairing exactly once" {
-    const fields = @typeInfo(WglSrgbApiFamily).@"enum".fields;
-    try std.testing.expectEqual(fields.len, wgl_srgb_api_family_order.len);
-    inline for (fields) |field| {
-        const family: WglSrgbApiFamily = @fromBackingInt(@intCast(field.value));
+    const values = @typeInfo(WglSrgbApiFamily).@"enum".field_values;
+    try std.testing.expectEqual(values.len, wgl_srgb_api_family_order.len);
+    inline for (values) |value| {
+        const family: WglSrgbApiFamily = @fromBackingInt(@intCast(value));
         var seen: usize = 0;
         for (wgl_srgb_api_family_order) |candidate| {
             if (candidate == family) seen += 1;

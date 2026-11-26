@@ -44,15 +44,19 @@ fn Loader(comptime Backend: type) type {
 
         backend: Backend = .{},
         initialized: std.atomic.Value(bool) = .init(false),
-        mutex: std.Thread.Mutex = .{},
+        mutex: std.Io.Mutex = .init,
         module: types.HMODULE = null,
         api: ?Api = null,
         load_error: std.atomic.Value(u32) = .init(0),
 
         fn getApi(self: *Self) ?*const Api {
             if (self.initialized.load(.acquire)) return &self.api.?;
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            // `std.Io.Mutex` takes an Io for its futex: the OS futex
+            // whatever the `std.Io.Threaded` instance (`sync/state_mutex.zig`'s
+            // `innerIo`), and the loader can run before the global state.
+            const io = std.Io.Threaded.global_single_threaded.io();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
             if (self.initialized.load(.monotonic)) return &self.api.?;
 
             // Keep this reference for the process lifetime, as the original
@@ -63,13 +67,13 @@ fn Loader(comptime Backend: type) type {
                 0x00000800, // LOAD_LIBRARY_SEARCH_SYSTEM32
             ) orelse return self.loadFailed(self.backend.getLastError());
             var api: Api = undefined;
-            inline for (@typeInfo(Api).@"struct".fields) |field| {
-                const ptr = self.backend.getProcAddress(module, field.name) orelse {
+            inline for (@typeInfo(Api).@"struct".field_names) |field_name| {
+                const ptr = self.backend.getProcAddress(module, field_name) orelse {
                     const err = self.backend.getLastError();
                     self.backend.freeLibrary(module);
                     return self.loadFailed(err);
                 };
-                @field(api, field.name) = @ptrCast(@alignCast(ptr));
+                @field(api, field_name) = @ptrCast(@alignCast(ptr));
             }
             self.module = module;
             self.api = api;
@@ -189,7 +193,7 @@ const FakeBackend = struct {
 
     fn loadLibraryExW(self: *@This(), name: [*:0]const u16, reserved: ?windows.HANDLE, flags: u32) types.HMODULE {
         self.loads += 1;
-        if (self.slow_load) std.Thread.sleep(20 * std.time.ns_per_ms);
+        if (self.slow_load) std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
         self.flags = flags;
         self.filename_ok = std.mem.eql(u16, std.mem.span(name), std.unicode.utf8ToUtf16LeStringLiteral("opengl32.dll"));
         self.reserved_ok = reserved == null;
@@ -209,9 +213,9 @@ const FakeBackend = struct {
                 return null;
             }
         }
-        inline for (@typeInfo(Api).@"struct".fields) |field| {
-            if (std.mem.eql(u8, std.mem.span(name), field.name))
-                return @ptrCast(&@field(@This(), field.name));
+        inline for (@typeInfo(Api).@"struct".field_names) |field_name| {
+            if (std.mem.eql(u8, std.mem.span(name), field_name))
+                return @ptrCast(&@field(@This(), field_name));
         }
         if (std.mem.eql(u8, std.mem.span(name), "glGetString")) return @ptrCast(&coreProc);
         self.last_error = 127;
@@ -334,8 +338,8 @@ test "WGL missing DLL retries and every wrapper restores the load error" {
 }
 
 test "WGL missing export never publishes a partial API and retries after recovery" {
-    inline for (@typeInfo(Api).@"struct".fields, 0..) |field, index| {
-        var fixture: Loader(FakeBackend) = .{ .backend = .{ .missing_export = field.name } };
+    inline for (@typeInfo(Api).@"struct".field_names, 0..) |field_name, index| {
+        var fixture: Loader(FakeBackend) = .{ .backend = .{ .missing_export = field_name } };
         try expectUnavailable(&fixture, 127);
         try std.testing.expectEqual(@as(usize, 7), fixture.backend.loads);
         try std.testing.expectEqual(7 * (index + 1), fixture.backend.resolutions);

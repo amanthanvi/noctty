@@ -368,7 +368,7 @@ test "config problems: the list keeps whole entries and counts the rest" {
     defer problems.deinit(alloc);
     for (0..40) |i| {
         var key_buf: [16:0]u8 = undefined;
-        const key = std.fmt.bufPrintZ(&key_buf, "key-{d}", .{i}) catch unreachable;
+        const key = std.mem.printSentinel(&key_buf, "key-{d}", .{i}, 0) catch unreachable;
         try problems.addDiagnostics(alloc, &.{testDiagnostic(key, "unknown field", i + 1)});
     }
 

@@ -124,6 +124,7 @@ const host_titlebar_action_button_size = win32.host_titlebar_action_button_size;
 const infoBannersExpire = win32.infoBannersExpire;
 const input = @import("../../input.zig");
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const isHighContrastActive = win32.isHighContrastActive;
 const keyEventFromWin32Message = win32.keyEventFromWin32Message;
 const keyPressed = win32.keyPressed;
@@ -2611,15 +2612,16 @@ pub const Host = struct {
 
     fn loadPaletteThemeConfig(self: *Host, name: []const u8) !configpkg.Config {
         const alloc = self.app.core_app.alloc;
-        const cwd_before = try std.process.getCwdAlloc(alloc);
+        const io = global.io();
+        const cwd_before = try std.process.currentPathAlloc(io, alloc);
         defer alloc.free(cwd_before);
 
         var changed_cwd = false;
         if (self.app.startup_cwd) |cwd| {
-            try std.process.changeCurDir(cwd);
+            try std.process.setCurrentPath(io, cwd);
             changed_cwd = true;
         }
-        defer if (changed_cwd) std.process.changeCurDir(cwd_before) catch |err| {
+        defer if (changed_cwd) std.process.setCurrentPath(io, cwd_before) catch |err| {
             log.warn("palette theme cwd restore failed path={f} err={}", .{ internal_os.redact.bytes(cwd_before), err });
         };
 
@@ -5223,7 +5225,7 @@ pub const Host = struct {
 
         fn take() usize {
             var count: usize = 0;
-            while (watched.?.core_surface.io.mailbox.spsc.queue.pop()) |message| {
+            while (watched.?.core_surface.io.mailbox.spsc.queue.pop(std.testing.io)) |message| {
                 message.deinit();
                 count += 1;
             }
@@ -5274,10 +5276,10 @@ pub const Host = struct {
         var client: RECT = undefined;
         _ = sys.GetClientRect(surface.hwnd.?, &client);
         const queue = surface.core_surface.io.mailbox.spsc.queue;
-        const resize = (queue.pop() orelse return error.TestExpectedResize).resize;
+        const resize = (queue.pop(std.testing.io) orelse return error.TestExpectedResize).resize;
         try std.testing.expectEqual(@as(u32, @intCast(client.right)), resize.screen.width);
         try std.testing.expectEqual(@as(u32, @intCast(client.bottom)), resize.screen.height);
-        try std.testing.expect(queue.pop() == null);
+        try std.testing.expect(queue.pop(std.testing.io) == null);
         try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
     }
 
@@ -5416,7 +5418,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.shows);
         try std.testing.expect(!surface_b.window_visible);
         try std.testing.expect(sys.IsWindowVisible(surface_b.hwnd.?) == 0);
-        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop() == null);
+        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
         try std.testing.expectEqual(@as(u8, 0), surface_b.core_surface.resize_batch.depth);
         try expectOneLaidOutResize(&surface_a);
     }
@@ -7048,7 +7050,7 @@ pub const Host = struct {
         };
         pub const raw = struct {
             extern "gdi32" fn CreateDIBSection(hdc: HDC, info: *const BITMAPINFOHEADER, usage: u32, bits: *?[*]u32, section: ?*anyopaque, offset: u32) callconv(.winapi) HGDIOBJ;
-            pub extern "gdi32" fn GdiFlush() callconv(.winapi) i32;
+            pub const GdiFlush = sys.GdiFlush;
         };
 
         dc: HDC,
@@ -7322,9 +7324,9 @@ pub const Host = struct {
     /// no window yet).
     pub fn runOnPrivateDesktop(comptime body: anytype) !void {
         const Desktop = struct {
-            extern "user32" fn CreateDesktopW(name: [*:0]const u16, device: ?*anyopaque, mode: ?*anyopaque, flags: u32, access: u32, attributes: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-            extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
-            extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+            const CreateDesktopW = sys.CreateDesktopW;
+            const SetThreadDesktop = sys.SetThreadDesktop;
+            const CloseDesktop = sys.CloseDesktop;
             fn run(desktop: *anyopaque, result: *anyerror!void) void {
                 // This desktop's UI thread from its first statement (test 9 wants an
                 // entry's role scope first): the body's windows are made and
@@ -11590,8 +11592,10 @@ pub const Host = struct {
     /// (client coordinates), with the panes laid out in `content`.
     pub fn paneDividerAt(self: *Host, content: RECT, point: POINT) ?PaneDividers.Divider {
         const tab = self.paneDividerTab() orelse return null;
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         return PaneDividers.hitTest(
@@ -11853,8 +11857,10 @@ pub const Host = struct {
         const along = paneDividerAlong(drag.layout, point);
         const same_content = paneDividerSameRect(content, drag.anchor_content);
         const ratio = if (same_content and along == drag.press_along and drag.anchor_along == drag.press_along) drag.start_ratio else ratio: {
-            var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-            const alloc = fallback.get();
+            // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+            var fallback_buf: [2048]u8 = undefined;
+            var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+            const alloc = fallback.allocator();
             var spatial = tab.tree.spatial(alloc) catch return;
             defer spatial.deinit(alloc);
             const area = paneDividerArea(content);
@@ -11896,8 +11902,10 @@ pub const Host = struct {
         const now = tab.tree.nodes[handle.idx()].split.ratio;
         defer tab.tree.resizeInPlace(handle, now);
         tab.tree.resizeInPlace(handle, ratio);
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         const area = paneDividerArea(content);
@@ -11938,8 +11946,10 @@ pub const Host = struct {
     /// Where the divider at `handle` sits in `content`, along its axis.
     fn paneDividerPosition(self: *Host, tab: *Tab, handle: SplitTreeSurface.Node.Handle, content: RECT) ?i32 {
         if (builtin.is_test and self.test_pane_divider_lookup_fails) return null;
-        var fallback = std.heap.stackFallback(2048, self.app.core_app.alloc);
-        const alloc = fallback.get();
+        // 0.15's `stackFallback(2048, ...)`: 0.17's BufferFirstAllocator.
+        var fallback_buf: [2048]u8 = undefined;
+        var fallback: std.heap.BufferFirstAllocator = .init(&fallback_buf, self.app.core_app.alloc);
+        const alloc = fallback.allocator();
         var spatial = tab.tree.spatial(alloc) catch return null;
         defer spatial.deinit(alloc);
         const found = PaneDividers.divider(&tab.tree, spatial, paneDividerArea(content), handle, 0) orelse return null;
@@ -12450,7 +12460,7 @@ test "win32 settings patch persists a palette theme selection" {
     defer pending.deinit();
     try Host.setConfigTheme(&pending, "0x96f");
 
-    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
+    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .empty;
     edited.set(@backingInt(ConfigKey.theme));
     var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);

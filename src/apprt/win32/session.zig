@@ -1,6 +1,7 @@
 //! Session persistence, restore, placement and scrollback snapshots.
 const win32 = @import("../win32.zig");
 const runtime = win32.session_runtime;
+const global = @import("../../global.zig");
 const killThreadTimer = runtime.killThreadTimer;
 const Allocator = runtime.Allocator;
 const App = runtime.App;
@@ -241,14 +242,14 @@ const session_checkpoint_delay_ms: u32 = 1000;
 /// An exclusive byte-range lock on the `.lock` sibling, so the kernel drops
 /// it when the owner exits or crashes and the next launch can take over.
 pub const SessionOwnerLock = struct {
-    file: std.fs.File,
+    file: std.Io.File,
 
     /// Null when another live process holds it.
     pub fn acquire(alloc: Allocator, state_path: []const u8) !?SessionOwnerLock {
         try makeParentDirAbsolute(state_path);
         const lock_path = try std.fmt.allocPrint(alloc, "{s}.lock", .{state_path});
         defer alloc.free(lock_path);
-        const file = std.fs.createFileAbsolute(lock_path, .{
+        const file = std.Io.Dir.createFileAbsolute(global.io(), lock_path, .{
             .read = true,
             .truncate = false,
             .lock = .exclusive,
@@ -261,7 +262,7 @@ pub const SessionOwnerLock = struct {
     }
 
     pub fn release(self: SessionOwnerLock) void {
-        self.file.close();
+        self.file.close(global.io());
     }
 };
 
@@ -333,7 +334,7 @@ pub fn scheduleSessionCheckpoint(self: *App) void {
     if (!self.sessionStateEnabled()) return;
     const timer_id = sys.SetTimer(null, self.session_checkpoint_timer_id orelse 0, session_checkpoint_delay_ms, null);
     if (timer_id == 0) {
-        log.warn("failed to start session checkpoint timer err={}", .{windows.kernel32.GetLastError()});
+        log.warn("failed to start session checkpoint timer err={}", .{windows.GetLastError()});
         return;
     }
     self.session_checkpoint_timer_id = timer_id;
@@ -419,7 +420,7 @@ pub fn restoreSessionState(self: *App) !bool {
     // Debug-only fault for the restore crash-loop harness: the process
     // ends mid-restore, as a release abort does (ExitProcess(3)), without
     // the breakpoint a Debug panic raises.
-    if (builtin.mode == .debug and std.process.hasEnvVarConstant("NOCTTY_DEBUG_CRASH_SESSION_RESTORE")) {
+    if (builtin.mode == .debug and global.environ().containsConstant("NOCTTY_DEBUG_CRASH_SESSION_RESTORE")) {
         std.process.exit(3);
     }
 
@@ -1213,7 +1214,7 @@ pub fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
     host.clearStructuralHistory(.normal);
     if (host.hwnd) |hwnd| {
         if (sys.DestroyWindow(hwnd) == 0) {
-            const destroy_err = windows.kernel32.GetLastError();
+            const destroy_err = windows.GetLastError();
             if (sys.IsWindow(hwnd) != 0) {
                 log.err("failed to destroy partially restored host; retaining ownership err={}", .{
                     destroy_err,
@@ -1732,10 +1733,10 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     const role_scope = thread_role.fixture(.ui);
     defer role_scope.exit();
 
-    var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+    var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 16,
         .rows = 3,
-        .max_scrollback = 1024,
+        .max_scrollback_bytes = 1024,
     });
     defer terminal_state.deinit(std.testing.allocator);
     var stream = terminal_state.vtStream();
@@ -1812,30 +1813,30 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     try std.testing.expect(persisted_budget_nodes[1].pane.scrollback != null);
     try std.testing.expect(persisted_budget_nodes[2].pane.scrollback == null);
 
-    var overflow_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var overflow_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 4,
         .rows = 1,
-        .max_scrollback = 16,
+        .max_scrollback_bytes = 16,
     });
     defer overflow_terminal.deinit(std.testing.allocator);
     var overflow_stream = overflow_terminal.vtStream();
     defer overflow_stream.deinit();
     overflow_stream.nextSlice("ééé");
 
-    var expensive_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var expensive_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 4,
         .rows = 1,
-        .max_scrollback = 16,
+        .max_scrollback_bytes = 16,
     });
     defer expensive_terminal.deinit(std.testing.allocator);
     var expensive_stream = expensive_terminal.vtStream();
     defer expensive_stream.deinit();
     expensive_stream.nextSlice("\\\\\\\\");
 
-    var following_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var following_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 4,
         .rows = 1,
-        .max_scrollback = 16,
+        .max_scrollback_bytes = 16,
     });
     defer following_terminal.deinit(std.testing.allocator);
     var following_stream = following_terminal.vtStream();
@@ -1895,10 +1896,10 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     )) == null);
     try std.testing.expectEqual(@as(usize, 0), exhausted_budget);
 
-    var newest_suffix_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var newest_suffix_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 10,
         .rows = 2,
-        .max_scrollback = 16,
+        .max_scrollback_bytes = 16,
     });
     defer newest_suffix_terminal.deinit(std.testing.allocator);
     var newest_suffix_stream = newest_suffix_terminal.vtStream();
@@ -1917,10 +1918,10 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     try std.testing.expectEqual(@as(usize, 1), newest_suffix_snapshot.lines.len);
     try std.testing.expectEqualStrings("ok", newest_suffix_snapshot.lines[0]);
 
-    var multibyte_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var multibyte_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 10,
         .rows = 3,
-        .max_scrollback = 32,
+        .max_scrollback_bytes = 32,
     });
     defer multibyte_terminal.deinit(std.testing.allocator);
     var multibyte_stream = multibyte_terminal.vtStream();
@@ -2034,10 +2035,10 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
         fallback_marker,
     );
 
-    var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+    var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 65,
         .rows = 8,
-        .max_scrollback = 1024,
+        .max_scrollback_bytes = 1024,
     });
     defer terminal_state.deinit(std.testing.allocator);
     try terminal_state.setTitle("original title");
@@ -2075,10 +2076,10 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
     ) != null);
     try std.testing.expectEqualStrings("original title", terminal_state.getTitle().?);
 
-    var rejected_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var rejected_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 100,
         .rows = 4,
-        .max_scrollback = 1024,
+        .max_scrollback_bytes = 1024,
     });
     defer rejected_terminal.deinit(std.testing.allocator);
     const rejected_lines = [_][]const u8{
@@ -2096,10 +2097,10 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
     defer std.testing.allocator.free(rejected_plain);
     try std.testing.expect(std.mem.indexOf(u8, rejected_plain, "SNAPSHOT END") == null);
 
-    var disabled_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var disabled_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 100,
         .rows = 4,
-        .max_scrollback = 1024,
+        .max_scrollback_bytes = 1024,
     });
     defer disabled_terminal.deinit(std.testing.allocator);
     const stale_lines = [_][]const u8{"stale snapshot must stay on disk only"};
@@ -2113,10 +2114,10 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
     try std.testing.expect(std.mem.indexOf(u8, disabled_plain, "stale snapshot") == null);
     try std.testing.expect(std.mem.indexOf(u8, disabled_plain, "SNAPSHOT END") == null);
 
-    var lowered_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+    var lowered_terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 100,
         .rows = 6,
-        .max_scrollback = 1024,
+        .max_scrollback_bytes = 1024,
     });
     defer lowered_terminal.deinit(std.testing.allocator);
     const lowered_lines = [_][]const u8{ "oldest", "middle", "newest" };
@@ -2139,10 +2140,10 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
 test "win32 session scrollback restore survives pwsh ConPTY startup repaint" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+    var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 8,
-        .max_scrollback = 1024,
+        .max_scrollback_bytes = 1024,
     });
     defer terminal_state.deinit(std.testing.allocator);
 
@@ -2178,13 +2179,13 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
         .lines = &lines,
     };
 
-    // `scrollback-limit = 0`: `scrollClear` has nowhere to move the snapshot,
+    // `scrollback-limit-bytes = 0`: `scrollClear` has nowhere to move the snapshot,
     // so a "successful" restore would leave the user with nothing.
     {
-        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
             .cols = 80,
             .rows = 8,
-            .max_scrollback = 0,
+            .max_scrollback_bytes = 0,
         });
         defer terminal_state.deinit(std.testing.allocator);
         try std.testing.expect(terminal_state.screens.active.no_scrollback);
@@ -2197,10 +2198,10 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
     // The child painted before restore ran. Restoring here would scroll the
     // shell's own prompt into history and desync it from the pane.
     {
-        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
             .cols = 80,
             .rows = 8,
-            .max_scrollback = 1024,
+            .max_scrollback_bytes = 1024,
         });
         defer terminal_state.deinit(std.testing.allocator);
 
@@ -2227,10 +2228,10 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
     // The child only moved the cursor. Nothing is painted, but restoring would
     // scroll the cursor out from under a shell that thinks it is at (2,2).
     {
-        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
             .cols = 80,
             .rows = 8,
-            .max_scrollback = 1024,
+            .max_scrollback_bytes = 1024,
         });
         defer terminal_state.deinit(std.testing.allocator);
 
@@ -2248,10 +2249,10 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
     // the origin, but printing into it would scroll within the region instead
     // of building history, so the snapshot would eat its own oldest lines.
     {
-        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
             .cols = 80,
             .rows = 8,
-            .max_scrollback = 1024,
+            .max_scrollback_bytes = 1024,
         });
         defer terminal_state.deinit(std.testing.allocator);
 
@@ -2291,10 +2292,10 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
             // would emit blank linefeeds and report success.
             .{ .status_line = true, .want = error.SnapshotNeedsMainDisplay },
         }) |case| {
-            var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
                 .cols = 80,
                 .rows = 8,
-                .max_scrollback = 1024,
+                .max_scrollback_bytes = 1024,
             });
             defer terminal_state.deinit(std.testing.allocator);
 
@@ -2314,10 +2315,10 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
     // The child painted and then homed the cursor. Cursor position alone would
     // call this pane pristine, so the predicate must look at the cells.
     {
-        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
             .cols = 80,
             .rows = 8,
-            .max_scrollback = 1024,
+            .max_scrollback_bytes = 1024,
         });
         defer terminal_state.deinit(std.testing.allocator);
 
@@ -2336,10 +2337,10 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
     // A pane that pwsh has cleared but not yet prompted into is still eligible:
     // its startup `ESC[2J ESC[H` leaves no painted cells.
     {
-        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        var terminal_state = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
             .cols = 80,
             .rows = 8,
-            .max_scrollback = 1024,
+            .max_scrollback_bytes = 1024,
         });
         defer terminal_state.deinit(std.testing.allocator);
 
@@ -2656,7 +2657,7 @@ test "win32 a session a newer build wrote, or one too large to be ours, is left 
         var remaining: usize = win32_session_persistence.default_max_state_bytes + 1;
         while (remaining > 0) {
             const count = @min(remaining, chunk.len);
-            try file.writeAll(chunk[0..count]);
+            try file.writeStreamingAll(std.testing.io, chunk[0..count]);
             remaining -= count;
         }
     }

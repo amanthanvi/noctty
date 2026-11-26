@@ -171,9 +171,9 @@ pub fn Fixtures(comptime runtime: anytype) type {
         /// own thread cannot do it (AGENTS.md 2026-10-06).
         pub fn runOnHiddenDesktop(comptime body: anytype) !void {
             const Desktop = struct {
-                extern "user32" fn CreateDesktopW(name: [*:0]const u16, device: ?*anyopaque, mode: ?*anyopaque, flags: u32, access: u32, attributes: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-                extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
-                extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+                const CreateDesktopW = sys.CreateDesktopW;
+                const SetThreadDesktop = sys.SetThreadDesktop;
+                const CloseDesktop = sys.CloseDesktop;
 
                 fn run(desktop: *anyopaque, result: *anyerror!void) void {
                     // This desktop's UI thread from its first statement (test 9 wants an
@@ -194,7 +194,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     body() catch |err| {
                         // The test fails at `return result` on the runner's thread;
                         // this trace shows which check failed.
-                        if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+                        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
                         result.* = err;
                     };
                 }

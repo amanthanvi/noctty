@@ -1,6 +1,7 @@
 //! Command palette orchestration. Host and Surface retain coordination.
 const win32 = @import("../win32.zig");
 const runtime = win32.palette_controller_runtime;
+const global = @import("../../global.zig");
 const App = runtime.App;
 const HDC = runtime.HDC;
 const HGDIOBJ = runtime.HGDIOBJ;
@@ -816,12 +817,14 @@ pub const AppControls = struct {
         const path = self.paletteMruPath() orelse return;
         defer self.core_app.alloc.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch return;
-        defer file.close();
+        const io = global.io();
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch return;
+        defer file.close(io);
 
         // Cap read size at 64 KB — way more than the 5 × ~200-char
         // actions we expect, but bounded so a corrupted file can't OOM.
-        const raw = file.readToEndAlloc(self.core_app.alloc, 64 * 1024) catch return;
+        var reader = file.readerStreaming(io, &.{});
+        const raw = reader.interface.allocRemaining(self.core_app.alloc, .limited(64 * 1024)) catch return;
         defer self.core_app.alloc.free(raw);
 
         readPaletteMru(self.core_app.alloc, raw, &self.palette_mru);
@@ -837,8 +840,9 @@ pub const AppControls = struct {
         const path = self.paletteMruPath() orelse return;
         defer self.core_app.alloc.free(path);
 
+        const io = global.io();
         if (std.fs.path.dirname(path)) |dir| {
-            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => {
                     std.log.warn("palette MRU: mkdir failed path={f} err={}", .{ redact.bytes(dir), err });
@@ -847,14 +851,14 @@ pub const AppControls = struct {
             };
         }
 
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
+        const file = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }) catch |err| {
             std.log.warn("palette MRU: create failed path={f} err={}", .{ redact.bytes(path), err });
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
         var fbuf: [1024]u8 = undefined;
-        var fw = file.writer(&fbuf);
+        var fw = file.writer(io, &fbuf);
         for (self.palette_mru) |slot| {
             if (slot) |owned| {
                 writePaletteMruLine(&fw.interface, owned) catch return;

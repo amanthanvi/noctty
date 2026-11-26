@@ -213,7 +213,7 @@ const Visible = struct { edit: bool, preview: bool, accept: bool, cancel: bool }
 pub fn nextFocus(mode: Mode, from: Slot, reverse: bool, visible: Visible) ?Slot {
     var candidate = from;
     // One iteration per slot: a full lap proves nothing else is visible.
-    for (0..@typeInfo(Slot).@"enum".fields.len) |_| {
+    for (0..@typeInfo(Slot).@"enum".field_names.len) |_| {
         candidate = ringStep(mode, candidate, reverse);
         const shown = switch (candidate) {
             .edit => visible.edit,
@@ -670,7 +670,7 @@ test "win32 overlay shape: which controls each mode shows and what an empty quer
         // callback.
         .{ .mode = .confirm, .accept = true, .edit = false, .dismisses = false, .follows = false },
     };
-    try std.testing.expectEqual(@typeInfo(Mode).@"enum".fields.len, rows.len);
+    try std.testing.expectEqual(@typeInfo(Mode).@"enum".field_names.len, rows.len);
     for (rows) |row| {
         errdefer std.debug.print("mode {s}\n", .{@tagName(row.mode)});
         const got = shape(row.mode);

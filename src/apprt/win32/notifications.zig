@@ -15,6 +15,7 @@ const std = @import("std");
 const win32_repeat = @import("../win32_repeat.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const global = @import("../../global.zig");
 const Target = @import("../action.zig").Target;
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
@@ -349,7 +350,7 @@ pub const Notifications = struct {
                 // The popup's handler and the COM activator can both report
                 // one popup click, and a cold start forwards one this
                 // process may have had already.
-                if (!self.click_filter.admit(target, std.time.milliTimestamp())) return .done;
+                if (!self.click_filter.admit(target, std.Io.Timestamp.now(global.io(), .real).toMilliseconds())) return .done;
                 if (self.bringForward(target)) return .done;
                 self.kept = target;
                 return .needs_window;
@@ -1527,7 +1528,7 @@ const ColdToastWaitTest = struct {
         body() catch |err| {
             // The test fails on the runner's thread; this trace shows which
             // check failed.
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             result.* = err;
         };
     }

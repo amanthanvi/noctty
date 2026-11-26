@@ -1418,22 +1418,32 @@ pub const GetFinalPathNameByHandleError = error{
     Unexpected,
 };
 
-/// The canonical path of `handle` with a DOS volume name and no `\\?\` prefix
-/// (`C:\dir\file`, `\\server\share\file`), written into `out_buffer`: the form
-/// std 0.15.2's `GetFinalPathNameByHandle(.{})` returned.
+/// The path of `handle` as it was opened, with a DOS volume name and no `\\?\`
+/// prefix (`C:\dir\file`, `\\server\share\file`), written into `out_buffer`:
+/// the form std 0.15.2's `GetFinalPathNameByHandle(.{})` returned.
 ///
-/// **Where it differs from std.** Std read the NT name and asked the mount
-/// manager for a DOS name. For a volume with a drive letter or a UNC share it
-/// gets the same answer as the Win32 call used here. For a volume mounted only
-/// at a folder (a `\\?\Volume{GUID}\` path from Win32) std asked the mount
-/// manager again and returned the mount folder's path; this function has no
-/// such step and fails with `error.FileNotFound`, which is the error std
-/// itself returned when it found no DOS name at all. The two differ in result
-/// there (a path against an error), never in a wrong path.
+/// **The flags.** `FILE_NAME_OPENED | VOLUME_NAME_DOS` (0x8). Std read the name
+/// the handle was opened by (`NtQueryObject`'s object name) and only mapped its
+/// volume to a drive letter, so an 8.3 short name and the case the caller
+/// spelled stay as opened. Flags 0 would be `FILE_NAME_NORMALIZED`, which
+/// expands short names and takes the on-disk case: a caller that compares the
+/// result with the path it opened (`lockedHandleMatchesPath` in
+/// update/github_releases.zig) would read the same file as another, and on an
+/// SMB share normalization can fail with ACCESS_DENIED where the open worked.
+///
+/// **Where it differs from std.** For a volume with a drive letter or a UNC
+/// share it gives std's answer, the opened spelling. A volume mounted only at a
+/// folder has no DOS volume name: `VOLUME_NAME_DOS` then fails with
+/// ERROR_PATH_NOT_FOUND (it gives no `\\?\Volume{GUID}\` path), which is
+/// `error.FileNotFound`, the error std itself returned when it found no DOS
+/// name at all, while std asked the mount manager again and returned the mount
+/// folder's path. The two differ in result there (a path against an error),
+/// never in a wrong path.
 pub fn getFinalPathNameByHandle(handle: HANDLE, out_buffer: []u16) GetFinalPathNameByHandleError![]u16 {
+    const file_name_opened = 0x8;
     const volume_name_dos = 0x0;
     const capacity: DWORD = @intCast(@min(out_buffer.len, std.math.maxInt(DWORD)));
-    const written = GetFinalPathNameByHandleW(handle, out_buffer.ptr, capacity, volume_name_dos);
+    const written = GetFinalPathNameByHandleW(handle, out_buffer.ptr, capacity, file_name_opened | volume_name_dos);
     if (written == 0) {
         return switch (windows.GetLastError()) {
             .INVALID_HANDLE, .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
@@ -1489,6 +1499,16 @@ fn startsWithDrive(path: []const u16) bool {
 }
 
 pub extern "kernel32" fn SetEnvironmentVariableW(lpName: LPCWSTR, lpValue: ?LPCWSTR) callconv(.winapi) BOOL;
+
+/// The fork's one declaration (the link opener's alias tests use it too).
+pub extern "kernel32" fn GetShortPathNameW(lpszLongPath: LPCWSTR, lpszShortPath: [*]u16, cchBuffer: DWORD) callconv(.winapi) DWORD;
+
+// The private-desktop test runners' entry points: one declaration each for
+// the runtime's files (they were declared in three).
+pub extern "user32" fn CreateDesktopW(lpszDesktop: LPCWSTR, lpszDevice: ?*anyopaque, pDevmode: ?*anyopaque, dwFlags: u32, dwDesiredAccess: u32, lpsa: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn SetThreadDesktop(hDesktop: *anyopaque) callconv(.winapi) BOOL;
+pub extern "user32" fn CloseDesktop(hDesktop: *anyopaque) callconv(.winapi) BOOL;
+pub extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
 
 /// `SetLastError` taking std's `Win32Error`, which every caller names its
 /// codes with; the extern itself takes the SDK's `DWORD`.
@@ -1584,8 +1604,51 @@ test "event and wait helpers keep std's result mapping" {
     try std.testing.expect(SetEvent(event) != 0);
     try waitForSingleObjectEx(event, 0, false);
 
-    const handles = [_]HANDLE{ event, event };
-    try std.testing.expectEqual(@as(u32, 0), try waitForMultipleObjectsEx(&handles, false, 0, false));
+    // Two distinct events (the call refuses a handle given twice), only the
+    // second signaled: the index names it, which a wrapper answering 0
+    // whatever was signaled would get wrong.
+    const first = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(first);
+    const second = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(second);
+    const handles = [_]HANDLE{ first, second };
+    try std.testing.expectError(error.WaitTimeOut, waitForMultipleObjectsEx(&handles, false, 0, false));
+    try std.testing.expect(SetEvent(second) != 0);
+    try std.testing.expectEqual(@as(u32, 1), try waitForMultipleObjectsEx(&handles, false, 0, false));
+}
+
+test "getOverlappedResult is WouldBlock while an overlapped operation is pending" {
+    // An overlapped pipe server's connect stays pending with no client.
+    var name_buf: [96]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\noctty-sys-overlapped-{d}-{d}", .{ GetCurrentProcessId(), GetTickCount64() });
+    const name_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
+    defer std.testing.allocator.free(name_w);
+    const pipe = CreateNamedPipeW(
+        name_w.ptr,
+        c.PIPE_ACCESS_DUPLEX | win32_types.FILE_FLAG_OVERLAPPED | c.FILE_FLAG_FIRST_PIPE_INSTANCE,
+        win32_types.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        0,
+        0,
+        0,
+        null,
+    );
+    try std.testing.expect(pipe != windows.INVALID_HANDLE_VALUE);
+    defer windows.CloseHandle(pipe);
+    const event = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(event);
+    var overlapped = std.mem.zeroes(OVERLAPPED);
+    overlapped.hEvent = event;
+    try std.testing.expect(ConnectNamedPipe(pipe, &overlapped) == 0);
+    try std.testing.expectEqual(windows.Win32Error.IO_PENDING, windows.GetLastError());
+
+    try std.testing.expectError(error.WouldBlock, getOverlappedResult(pipe, &overlapped, false));
+
+    // Cancel it and let it finish before `overlapped` goes out of scope.
+    try std.testing.expect(CancelIoEx(pipe, &overlapped) != 0);
+    var bytes: DWORD = undefined;
+    try std.testing.expect(GetOverlappedResult(pipe, &overlapped, &bytes, 1) == 0);
+    try std.testing.expectEqual(windows.Win32Error.OPERATION_ABORTED, windows.GetLastError());
 }
 
 test "the re-homed process and module helpers keep std's error mapping" {
@@ -1736,6 +1799,59 @@ test "the final path name is std's DOS form" {
     try std.testing.expectError(error.NameTooLong, getFinalPathNameByHandle(file.handle, &small));
     var any: [windows.PATH_MAX_WIDE]u16 = undefined;
     try std.testing.expectError(error.FileNotFound, getFinalPathNameByHandle(windows.INVALID_HANDLE_VALUE, &any));
+}
+
+test "the final path name is the spelling the handle was opened by: a case variant and an 8.3 alias" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    // In the temp folder, through `GetShortPathNameW`: the checkout's drive may
+    // make no 8.3 names (a ReFS Dev Drive, a CI work volume), and a hand-made
+    // alias may name nothing (NTFS hashes some short bases).
+    var tmp = try @import("../../os/TempDir.zig").init();
+    defer tmp.deinit();
+    const folder = "noctty final path folder";
+    const leaf = "present file.txt";
+    try tmp.dir.createDir(io, folder, .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = folder ++ "\\" ++ leaf, .data = "x" });
+    const long = try tmp.dir.realPathFileAlloc(io, folder ++ "\\" ++ leaf, alloc);
+    defer alloc.free(long);
+
+    // The file's name in other case: normalization would give the on-disk case.
+    const variant = try alloc.dupe(u8, long);
+    defer alloc.free(variant);
+    for (variant[variant.len - leaf.len ..]) |*ch| ch.* = std.ascii.toUpper(ch.*);
+    try std.testing.expect(!std.mem.eql(u8, variant, long));
+    try expectFinalPathAsOpened(variant);
+
+    // The 8.3 alias, which normalization would expand.
+    const long_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, long);
+    defer alloc.free(long_w);
+    var short_w: [windows.PATH_MAX_WIDE]u16 = undefined;
+    const short_len = GetShortPathNameW(long_w.ptr, &short_w, short_w.len);
+    try std.testing.expect(short_len != 0 and short_len < short_w.len);
+    const short = try std.unicode.wtf16LeToWtf8Alloc(alloc, short_w[0..short_len]);
+    defer alloc.free(short);
+    if (std.mem.eql(u8, short, long)) {
+        std.log.warn("no 8.3 alias for the fixture; 8.3 names are off on this volume", .{});
+        return error.SkipZigTest;
+    }
+    try expectFinalPathAsOpened(short);
+}
+
+/// Opens `path` and checks `getFinalPathNameByHandle` gives that spelling back,
+/// as std's own `realPath` of the handle does (std 0.17 still reads the object
+/// name, as 0.15.2's did).
+fn expectFinalPathAsOpened(path: []const u8) !void {
+    const io = std.testing.io;
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    var buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+    const got = try getFinalPathNameByHandle(file.handle, &buf);
+    var got_utf8: [std.fs.max_path_bytes]u8 = undefined;
+    errdefer std.debug.print("opened {s}\n", .{path});
+    try std.testing.expectEqualStrings(path, got_utf8[0..std.unicode.wtf16LeToWtf8(&got_utf8, got)]);
+    var real: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(path, real[0..try file.realPath(io, &real)]);
 }
 
 test "lockFile and unlockFile keep std's status mapping" {

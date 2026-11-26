@@ -69,6 +69,7 @@ const imeWindowForms = win32.imeWindowForms;
 const input = @import("../../input.zig");
 const inspectorChromeVisible = win32.inspectorChromeVisible;
 const internal_os = @import("../../os/main.zig");
+const global = @import("../../global.zig");
 const isAutomaticSshCommandTitle = win32.isAutomaticSshCommandTitle;
 const isHighContrastActive = win32.isHighContrastActive;
 const lParamBits = win32.lParamBits;
@@ -452,7 +453,11 @@ pub const Surface = struct {
     /// of this terminal (`Host.tabBackground`). Only this terminal's own
     /// config sets it (`setTabBackground`); background colors a program sets
     /// at run time (OSC 11) are not followed.
-    tab_background: u32 = colorRefFromConfig(std.meta.fieldInfo(configpkg.Config, .background).defaultValue().?),
+    tab_background: u32 = colorRefFromConfig(default_background: {
+        // 0.17's fieldInfo gives the attributes, whose defaultValue takes the type.
+        const info = std.meta.fieldInfo(configpkg.Config, .background);
+        break :default_background info.attrs.defaultValue(info.type).?;
+    }),
     scrollbar_config: configpkg.Config.Scrollbar = .system,
     secure_input: bool = false,
     secure_input_ever_engaged: bool = false,
@@ -1757,12 +1762,29 @@ pub const Surface = struct {
         return clipboard_type == .standard;
     }
 
+    /// Core's clipboard read (`Surface.startClipboardRequest`). Started means
+    /// it was served, here before this returns; a request it does not serve
+    /// was not started.
     pub fn clipboardRequest(
         self: *Surface,
         clipboard_type: apprt.Clipboard,
         state: apprt.ClipboardRequest,
-    ) !bool {
-        if (clipboard_type != .standard) return false;
+    ) !apprt.ClipboardReadResult {
+        // Windows has no selection or primary clipboard.
+        if (clipboard_type != .standard) return .unsupported;
+        switch (state) {
+            .paste, .osc_52_read => {},
+            // Upstream 1.4's Kitty clipboard protocol (OSC 5522): its reads,
+            // writes and paste-event listing are not served by the Win32
+            // runtime yet. OSC 52 writes never come here (setClipboard).
+            .kitty_read, .kitty_write, .list, .osc_52_write => return .unsupported,
+        }
+        return if (try self.clipboardRequestStarted(state)) .started else .unavailable;
+    }
+
+    /// The Win32 clipboard read behind `clipboardRequest`, true when the
+    /// request was served.
+    fn clipboardRequestStarted(self: *Surface, state: apprt.ClipboardRequest) !bool {
         // A paste, from any key, menu or palette; a program's own read is not.
         if (state == .paste) self.noteProgramInput();
         // A program's read that would only be declined does not read the
@@ -1818,6 +1840,8 @@ pub const Surface = struct {
             .paste => return try self.core_surface.completeClipboardPasteWithoutText(),
             .osc_52_read => try self.app.core_app.alloc.dupeSentinel(u8, "", 0),
             .osc_52_write => unreachable,
+            // Never started (`clipboardRequest`).
+            .kitty_read, .kitty_write, .list => return false,
         };
         defer self.app.core_app.alloc.free(str);
 
@@ -1826,11 +1850,9 @@ pub const Surface = struct {
             return try self.core_surface.completeClipboardPasteWithoutText();
         }
 
-        self.core_surface.completeClipboardRequest(
-            state,
-            str,
-            false,
-        ) catch |err| switch (err) {
+        self.core_surface.completeClipboardRequest(state, .{
+            .contents = &.{.{ .mime = "text/plain", .data = str }},
+        }) catch |err| switch (err) {
             error.UnsafePaste,
             error.UnauthorizedPaste,
             => {
@@ -1896,8 +1918,10 @@ pub const Surface = struct {
         }
     }
 
-    pub fn defaultTermioEnv(self: *const Surface) !std.process.EnvMap {
-        var env = try internal_os.getEnvMap(self.app.core_app.alloc);
+    pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
+        // The process environment, as 0.15's `internal_os.getEnvMap` read it
+        // on Windows (its Flatpak arm is Linux's).
+        var env = try global.environ().createMap(self.app.core_app.alloc);
         errdefer env.deinit();
 
         if (env.get("USERPROFILE") == null) {
@@ -1921,6 +1945,14 @@ pub const Surface = struct {
         }
 
         return env;
+    }
+
+    /// The app-wide render device's options, which core `Surface.init` asks
+    /// for: nothing on Windows, where each pane's renderer makes its own GPU
+    /// context (`renderer.Device`).
+    pub fn renderDeviceOptions(self: *const Surface) !rendererpkg.Device.Options {
+        _ = self;
+        return .{};
     }
 
     pub fn redrawInspector(self: *Surface) void {
@@ -2260,12 +2292,12 @@ pub const Surface = struct {
                 owner.refreshSurfaceVisibility();
                 for (surfaces) |surface| {
                     const queue = surface.core_surface.io.mailbox.spsc.queue;
-                    const message = queue.pop() orelse return error.MissingVisibilitySignal;
+                    const message = queue.pop(std.testing.io) orelse return error.MissingVisibilitySignal;
                     try std.testing.expectEqual(expected, message.pty_visibility);
-                    try std.testing.expect(queue.pop() == null);
+                    try std.testing.expect(queue.pop(std.testing.io) == null);
                 }
                 owner.refreshSurfaceVisibility();
-                for (surfaces) |surface| try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop() == null);
+                for (surfaces) |surface| try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
             }
             fn request(surface: *Surface, visible: bool) !void {
                 try surface.core_surface.handleMessage(.{ .window_visibility = visible });
@@ -2349,10 +2381,10 @@ pub const Surface = struct {
         }
         const Queue = struct {
             fn expectNext(surface: *Surface) !termio.Message {
-                return surface.core_surface.io.mailbox.spsc.queue.pop() orelse error.MissingPtyMessage;
+                return surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) orelse error.MissingPtyMessage;
             }
             fn expectEmpty(surface: *Surface) !void {
-                try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop() == null);
+                try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
             }
         };
 
@@ -2489,6 +2521,10 @@ pub const Surface = struct {
         const mode: HostOverlayMode = switch (kind) {
             .surface => .surface_title,
             .tab => .tab_title,
+            // Upstream 1.4's window-title prompt: Win32 has no window title
+            // override to prompt for, and `App.performAction` answers it
+            // false before it gets here.
+            .window => return,
         };
         if (host.overlay_mode == mode) {
             host.hideOverlay();
@@ -3249,12 +3285,14 @@ pub const Surface = struct {
                         @tagName(verdict.severity),
                         verdict.reason,
                     });
-                    try self.requestPasteConfirm(.paste, payload);
+                    try self.requestPasteConfirm(.{ .paste = .standard }, payload);
                     return;
                 }
             }
-            self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
-                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.paste, payload),
+            self.core_surface.completeClipboardRequest(.{ .paste = .standard }, .{
+                .contents = &.{.{ .mime = "text/plain", .data = payload }},
+            }) catch |err| switch (err) {
+                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.{ .paste = .standard }, payload),
                 else => return err,
             };
             return;
@@ -4350,7 +4388,7 @@ pub const Surface = struct {
         defer role_scope.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
-        surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 10 });
+        surface.core_surface.io.terminal = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{ .cols = 10, .rows = 10 });
         defer surface.core_surface.io.terminal.deinit(std.testing.allocator);
         surface.core_surface.mouse = .{ .link_point = .{ .x = 4, .y = 4 } };
         surface.core_surface.renderer_state = .{
@@ -5814,7 +5852,7 @@ test "isolated: Win32 surface key demand records the key-message options read fr
         defer role.exit();
         var mutex: rendererpkg.StateMutex = .{};
         var surface: Surface = .{ .app = undefined, .core_initialized = true };
-        var term = try terminal.Terminal.init(testing.allocator, .{ .cols = 10, .rows = 3 });
+        var term = try terminal.Terminal.init(std.testing.io, testing.allocator, .{ .cols = 10, .rows = 3 });
         defer term.deinit(testing.allocator);
         surface.core_surface.renderer_state = .{ .mutex = &mutex, .terminal = &term };
 
