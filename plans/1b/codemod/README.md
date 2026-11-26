@@ -33,4 +33,9 @@ The engine, for every rule:
 test-dir-io (also):
 - arguments that change places must lie on one line, with no comment between the call's arguments;
 - makeOpenPath with options that are not a `.{ ... }` literal;
-- readFileAlloc in a test that names `FileTooBig`.
+- readFileAlloc's bound `n` becomes `.limited(n + 1)`: 0.15 read a file of exactly `n` bytes and 0.17's `Io.Limit`
+  refuses a file that reaches it (measured on both toolchains). Only a literal or a simple name takes the `+ 1`;
+  any other bound is a hand edit (`1 << 20 + 1` is `1 << 21`; `maxInt(usize) + 1` overflows). A name whose value
+  is `maxInt(usize)` would overflow too, which a comptime value turns into a compile error;
+- every readFileAlloc in a file that names `FileTooBig` anywhere (code, string or comment): 0.17's oversize error
+  is `StreamTooLong`, and a helper outside the test may consume the old name.

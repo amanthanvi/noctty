@@ -277,6 +277,19 @@ def _open_options(texts):
     raise HandEdit("makeOpenPath's options are no literal the rule can read")
 
 
+FILE_TOO_BIG = "the file names FileTooBig, which 0.17's readFileAlloc never returns (its oversize error is StreamTooLong)"
+LIMIT_SHAPE = "readFileAlloc's limit is no literal or simple name, so `+ 1` (0.15's inclusive bound) could change it"
+
+
+def _inclusive_limit(texts):
+    """readFileAlloc's 0.15 `max_bytes` accepted a file of exactly that size; 0.17's `Io.Limit` refuses a file that
+    reaches it. `.limited(n + 1)` keeps the bound, for a literal or a simple name only: `1 << 20 + 1` is `1 << 21`."""
+    toks = code_tokens(texts[2])
+    if len(toks) == 1 and toks[0].kind in ("number", "identifier"):
+        return ".limited(" + texts[2] + " + 1)"
+    raise HandEdit(LIMIT_SHAPE)
+
+
 DIR_METHODS = {
     "writeFile": ("writeFile", 1, [0]),
     "access": ("access", 2, [0, 1]),
@@ -292,7 +305,7 @@ DIR_METHODS = {
     "makePath": ("createDirPath", 1, [0]),
     "makeOpenPath": ("createDirPathOpen", 2, [0, _open_options]),
     "realpathAlloc": ("realPathFileAlloc", 2, [1, 0]),
-    "readFileAlloc": ("readFileAlloc", 3, [1, 0, lambda texts: ".limited(" + texts[2] + ")"]),
+    "readFileAlloc": ("readFileAlloc", 3, [1, 0, _inclusive_limit]),
 }
 OPENING = ("createFile", "openFile", "openDir", "makeOpenPath")
 
@@ -378,16 +391,18 @@ def _tmp_bindings(toks, lo, hi):
 def rule_test_dir_io(text, toks):
     """In a test block, a 0.15 `std.fs.Dir` call on a `std.testing.tmpDir` or fork TempDir directory
     (`<tmp>.dir.<method>(`) or on `std.fs.cwd()` becomes the 0.17 `std.Io.Dir` call with `std.testing.io`, renamed
-    where 0.17 renamed it (makeDir, makePath, makeOpenPath, realpathAlloc). readFileAlloc's byte bound becomes an
-    `Io.Limit`, which refuses a file of exactly that size where 0.15 accepted it, and its oversize error is
-    `StreamTooLong` where 0.15's was `FileTooBig`: a test block that names `FileTooBig` keeps its readFileAlloc calls
-    for a hand edit. A file or directory such a call opened (`const f = try tmp.dir.createFile(...)`) closes with the
+    where 0.17 renamed it (makeDir, makePath, makeOpenPath, realpathAlloc). readFileAlloc's byte bound `n` becomes
+    the `Io.Limit` `.limited(n + 1)`, since 0.15 accepted a file of exactly `n` bytes and 0.17's limit refuses a file
+    that reaches it; a bound that is not a literal or a simple name is a hand edit. Its oversize error is
+    `StreamTooLong` where 0.15's was `FileTooBig`: in a file that names `FileTooBig` anywhere (a helper outside the
+    test may consume it), every readFileAlloc is a hand edit. A file or directory such a call opened
+    (`const f = try tmp.dir.createFile(...)`) closes with the
     Io, in the same hit as its open, so the two are rewritten together or not at all; one whose open is already
     0.17's closes with the Io alone. Only the 0.15 arity is rewritten, so a ported call is left alone."""
     hits = []
+    names_file_too_big = "FileTooBig" in text   # code, a string or a comment: when in doubt, a hand edit
     for lo, hi in test_blocks(toks):
         tmp_names = _tmp_bindings(toks, lo, hi)
-        names_file_too_big = any(toks[k].text == "FileTooBig" for k in range(lo, hi))
         call_hits = {}   # method-name token index -> Hit
         for i in range(lo, hi):
             t = toks[i]
@@ -404,7 +419,7 @@ def rule_test_dir_io(text, toks):
             call_lines = range(t.line + 1, toks[close].line + 2)
             try:
                 if t.text == "readFileAlloc" and names_file_too_big:
-                    raise HandEdit("the test names FileTooBig, which 0.17's readFileAlloc never returns")
+                    raise HandEdit(FILE_TOO_BIG)
                 edits = _dir_call_edits(text, toks, i, args)
             except HandEdit as e:
                 hits.append(Bail(t.line + 1, str(e), call_lines))
