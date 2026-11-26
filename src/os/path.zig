@@ -188,7 +188,7 @@ pub fn isSafeWindowsPath(path: []const u8) bool {
 }
 
 fn trimLeadingSeparators(path: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, path, "/\\");
+    return std.mem.trimStart(u8, path, "/\\");
 }
 
 fn appendWindowsPath(
