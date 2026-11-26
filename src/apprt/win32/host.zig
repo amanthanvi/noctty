@@ -5225,7 +5225,7 @@ pub const Host = struct {
 
         fn take() usize {
             var count: usize = 0;
-            while (watched.?.core_surface.io.mailbox.spsc.queue.pop()) |message| {
+            while (watched.?.core_surface.io.mailbox.spsc.queue.pop(std.testing.io)) |message| {
                 message.deinit();
                 count += 1;
             }
@@ -5276,10 +5276,10 @@ pub const Host = struct {
         var client: RECT = undefined;
         _ = sys.GetClientRect(surface.hwnd.?, &client);
         const queue = surface.core_surface.io.mailbox.spsc.queue;
-        const resize = (queue.pop() orelse return error.TestExpectedResize).resize;
+        const resize = (queue.pop(std.testing.io) orelse return error.TestExpectedResize).resize;
         try std.testing.expectEqual(@as(u32, @intCast(client.right)), resize.screen.width);
         try std.testing.expectEqual(@as(u32, @intCast(client.bottom)), resize.screen.height);
-        try std.testing.expect(queue.pop() == null);
+        try std.testing.expect(queue.pop(std.testing.io) == null);
         try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
     }
 
@@ -5418,7 +5418,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.shows);
         try std.testing.expect(!surface_b.window_visible);
         try std.testing.expect(sys.IsWindowVisible(surface_b.hwnd.?) == 0);
-        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop() == null);
+        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
         try std.testing.expectEqual(@as(u8, 0), surface_b.core_surface.resize_batch.depth);
         try expectOneLaidOutResize(&surface_a);
     }

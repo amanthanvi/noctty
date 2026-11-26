@@ -1831,11 +1831,9 @@ pub const Surface = struct {
             return try self.core_surface.completeClipboardPasteWithoutText();
         }
 
-        self.core_surface.completeClipboardRequest(
-            state,
-            str,
-            false,
-        ) catch |err| switch (err) {
+        self.core_surface.completeClipboardRequest(state, .{
+            .contents = &.{.{ .mime = "text/plain", .data = str }},
+        }) catch |err| switch (err) {
             error.UnsafePaste,
             error.UnauthorizedPaste,
             => {
@@ -2267,12 +2265,12 @@ pub const Surface = struct {
                 owner.refreshSurfaceVisibility();
                 for (surfaces) |surface| {
                     const queue = surface.core_surface.io.mailbox.spsc.queue;
-                    const message = queue.pop() orelse return error.MissingVisibilitySignal;
+                    const message = queue.pop(std.testing.io) orelse return error.MissingVisibilitySignal;
                     try std.testing.expectEqual(expected, message.pty_visibility);
-                    try std.testing.expect(queue.pop() == null);
+                    try std.testing.expect(queue.pop(std.testing.io) == null);
                 }
                 owner.refreshSurfaceVisibility();
-                for (surfaces) |surface| try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop() == null);
+                for (surfaces) |surface| try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
             }
             fn request(surface: *Surface, visible: bool) !void {
                 try surface.core_surface.handleMessage(.{ .window_visibility = visible });
@@ -2356,10 +2354,10 @@ pub const Surface = struct {
         }
         const Queue = struct {
             fn expectNext(surface: *Surface) !termio.Message {
-                return surface.core_surface.io.mailbox.spsc.queue.pop() orelse error.MissingPtyMessage;
+                return surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) orelse error.MissingPtyMessage;
             }
             fn expectEmpty(surface: *Surface) !void {
-                try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop() == null);
+                try std.testing.expect(surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) == null);
             }
         };
 
@@ -3264,7 +3262,9 @@ pub const Surface = struct {
                     return;
                 }
             }
-            self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
+            self.core_surface.completeClipboardRequest(.{ .paste = .standard }, .{
+                .contents = &.{.{ .mime = "text/plain", .data = payload }},
+            }) catch |err| switch (err) {
                 error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.{ .paste = .standard }, payload),
                 else => return err,
             };

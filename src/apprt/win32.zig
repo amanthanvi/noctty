@@ -6036,11 +6036,10 @@ pub fn surfaceConfirmPasteAccept(userdata: ?*anyopaque) void {
     const alloc = surface.app.core_app.alloc;
     surface.pending_clipboard_op = null;
     defer alloc.free(pending.data);
-    surface.core_surface.completeClipboardRequest(
-        pending.request,
-        pending.data,
-        true, // confirmed
-    ) catch |err| {
+    surface.core_surface.completeClipboardRequest(pending.request, .{
+        .contents = &.{.{ .mime = "text/plain", .data = pending.data }},
+        .confirmed = true,
+    }) catch |err| {
         std.log.warn("pending clipboard paste accept failed err={}", .{err});
     };
 }
@@ -6058,7 +6057,10 @@ pub fn surfaceConfirmPasteCancel(userdata: ?*anyopaque, reason: ConfirmCancelRea
 
     // Finish this read without revealing clipboard contents. Reuse the
     // OSC 52 serializer so the reply echoes the requested selection.
-    surface.core_surface.completeClipboardRequest(op.paste.request, "", true) catch |err| {
+    surface.core_surface.completeClipboardRequest(op.paste.request, .{
+        .contents = &.{.{ .mime = "text/plain", .data = "" }},
+        .confirmed = true,
+    }) catch |err| {
         log.warn("pending clipboard read cancel reply failed err={}", .{err});
     };
 }
@@ -6201,7 +6203,9 @@ pub fn pasteFilePayload(surface: *Surface, payload: [:0]const u8) !void {
         }
     }
 
-    surface.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
+    surface.core_surface.completeClipboardRequest(.{ .paste = .standard }, .{
+        .contents = &.{.{ .mime = "text/plain", .data = payload }},
+    }) catch |err| switch (err) {
         // Unsafe content (newlines, control sequences, etc.). Defer to
         // the non-modal confirm overlay; the Accept callback re-submits
         // with `confirmed = true`.
@@ -9927,11 +9931,11 @@ const Pkg19NativeDeliveryTest = struct {
 
         // Unsafe work precedes safe work, so failing to defer it would close
         // the child / quit before the observable title reaches the fixture.
-        try std.testing.expect(core_app.mailbox.push(.{ .close = &closing_surface.core_surface }, .instant) != 0);
-        try std.testing.expect(core_app.mailbox.push(.quit, .instant) != 0);
+        try std.testing.expect(core_app.mailbox.push(std.testing.io, .{ .close = &closing_surface.core_surface }, .instant) != 0);
+        try std.testing.expect(core_app.mailbox.push(std.testing.io, .quit, .instant) != 0);
         var title: [256]u8 = @splat(0);
         @memcpy(title[0.."modal-delivered".len], "modal-delivered");
-        try std.testing.expect(core_app.mailbox.push(.{ .surface_message = .{ .surface = &title_surface.core_surface, .message = .{ .set_title = title } } }, .instant) != 0);
+        try std.testing.expect(core_app.mailbox.push(std.testing.io, .{ .surface_message = .{ .surface = &title_surface.core_surface, .message = .{ .set_title = title } } }, .instant) != 0);
         try std.testing.expect(app.delivery.?.wake(c.WM_WINHOSTTY_WAKE));
         try std.testing.expect(title_surface.title == null);
         try std.testing.expectEqual(@as(usize, 0), fake.disconnects);
@@ -15424,13 +15428,13 @@ const ClipboardReplyFixture = struct {
     }
 
     fn expectSilent(self: *ClipboardReplyFixture) !void {
-        const message = self.surface.core_surface.io.mailbox.spsc.queue.pop();
+        const message = self.surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io);
         if (message) |value| value.deinit();
         try std.testing.expect(message == null);
     }
 
     fn expectReply(self: *ClipboardReplyFixture, expected: []const u8) !void {
-        const message = self.surface.core_surface.io.mailbox.spsc.queue.pop() orelse return error.MissingClipboardReply;
+        const message = self.surface.core_surface.io.mailbox.spsc.queue.pop(std.testing.io) orelse return error.MissingClipboardReply;
         defer message.deinit();
         switch (message) {
             .write_small => |v| try std.testing.expectEqualStrings(expected, v.data[0..v.len]),
@@ -15661,7 +15665,7 @@ fn expectUserPasteWithoutText(held: ?[]const u8, brackets: bool, readonly: bool)
     fixture.surface.core_surface.readonly = readonly;
     EmptyPasteClipboard.install(&fixture, held);
 
-    const pasted = try fixture.surface.clipboardRequest(.standard, .{ .paste = {} });
+    const pasted = try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard });
     if (brackets and !readonly) {
         try std.testing.expect(pasted);
         try fixture.expectReply(empty_bracketed_pair);
@@ -15723,12 +15727,12 @@ test "win32 empty-bracketed-paste: text still pastes between the fences and unsa
     fixture.setBracketedPaste(true);
 
     EmptyPasteClipboard.install(&fixture, "ab");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     const queue = fixture.surface.core_surface.io.mailbox.spsc.queue;
     var collected: [3][]const u8 = undefined;
     var storage: [3][16]u8 = undefined;
     for (&collected, &storage) |*piece, *buf| {
-        const message = queue.pop() orelse return error.MissingClipboardReply;
+        const message = queue.pop(std.testing.io) orelse return error.MissingClipboardReply;
         defer message.deinit();
         switch (message) {
             .write_small => |v| {
@@ -15751,7 +15755,7 @@ test "win32 empty-bracketed-paste: text still pastes between the fences and unsa
     fixture.setBracketedPaste(false);
     fixture.surface.core_surface.config.clipboard_paste_protection = true;
     EmptyPasteClipboard.install(&fixture, "a\nb");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqual(HostOverlayMode.confirm, fixture.host.overlay_mode);
     try fixture.expectSilent();
 }
@@ -15768,9 +15772,9 @@ test "win32 empty-bracketed-paste: input that is not a user paste of a clipboard
     // this completion; an empty text there is still nothing to send.
     try core.textCallback("");
     try fixture.expectSilent();
-    try core.completeClipboardRequest(.paste, "", false);
+    try core.completeClipboardRequest(.{ .paste = .standard }, .{ .contents = &.{.{ .mime = "text/plain", .data = "" }} });
     try fixture.expectSilent();
-    try core.completeClipboardRequest(.paste, "", true);
+    try core.completeClipboardRequest(.{ .paste = .standard }, .{ .contents = &.{.{ .mime = "text/plain", .data = "" }}, .confirmed = true });
     try fixture.expectSilent();
 }
 
@@ -15797,7 +15801,7 @@ test "win32 empty-bracketed-paste: the paste action reports whether it pasted" {
 fn takePastedBytes(fixture: *ClipboardReplyFixture, buf: []u8) ![]const u8 {
     const queue = fixture.surface.core_surface.io.mailbox.spsc.queue;
     var len: usize = 0;
-    while (queue.pop()) |message| {
+    while (queue.pop(std.testing.io)) |message| {
         defer message.deinit();
         const piece: []const u8 = switch (message) {
             .write_small => |v| v.data[0..v.len],
@@ -15824,7 +15828,7 @@ test "win32 copied-files-paste: a clipboard of only copied files pastes their qu
 
     // Bracketed, as Windows Terminal sends a path; ours takes every file.
     fixture.setBracketedPaste(true);
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings("\x1b[200~" ++ payload ++ "\x1b[201~", try takePastedBytes(&fixture, &buf));
     try std.testing.expect(EmptyPasteClipboard.hdrop_read);
 
@@ -15847,7 +15851,7 @@ test "win32 copied-files-paste: a path that could run a command asks first" {
 
     // Nothing reaches the program until the user allows it.
     fixture.app.config.@"clipboard-paste-protection" = true;
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqual(HostOverlayMode.confirm, fixture.host.overlay_mode);
     try std.testing.expectEqualStrings(payload, fixture.surface.pending_clipboard_op.?.paste.data);
     try fixture.expectSilent();
@@ -15856,13 +15860,13 @@ test "win32 copied-files-paste: a path that could run a command asks first" {
     try fixture.expectSilent();
 
     // Allow pastes the same bytes, between the fences.
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     fixture.host.invokeConfirmAccept();
     try std.testing.expectEqualStrings("\x1b[200~" ++ payload ++ "\x1b[201~", try takePastedBytes(&fixture, &buf));
 
     // With the protection off, as for a drop, it pastes at once.
     fixture.app.config.@"clipboard-paste-protection" = false;
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqual(HostOverlayMode.none, fixture.host.overlay_mode);
     try std.testing.expectEqualStrings("\x1b[200~" ++ payload ++ "\x1b[201~", try takePastedBytes(&fixture, &buf));
 }
@@ -15881,25 +15885,25 @@ test "win32 copied-files-paste: the reader takes text over files, an empty text 
     // the files.
     EmptyPasteClipboard.installFiles(&fixture, &.{"C:\\f.txt"});
     EmptyPasteClipboard.text = "ab";
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings("\x1b[200~ab\x1b[201~", try takePastedBytes(&fixture, &buf));
     try std.testing.expect(!EmptyPasteClipboard.hdrop_read);
 
     // An empty text beside files is no text: the files paste.
     EmptyPasteClipboard.text = "";
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings("\x1b[200~C:\\f.txt\x1b[201~", try takePastedBytes(&fixture, &buf));
     try std.testing.expect(EmptyPasteClipboard.hdrop_read);
 
     // An empty text and no files: the empty paste of a clipboard with no text.
     EmptyPasteClipboard.install(&fixture, "");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings(empty_bracketed_pair, try takePastedBytes(&fixture, &buf));
     try std.testing.expect(EmptyPasteClipboard.hdrop_read);
 
     // Neither text nor files: the same.
     EmptyPasteClipboard.install(&fixture, null);
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = {} }));
+    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings(empty_bracketed_pair, try takePastedBytes(&fixture, &buf));
 
     // A program's OSC 52 read of a clipboard holding only files, or an empty

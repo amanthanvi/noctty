@@ -2895,7 +2895,7 @@ pub const App = struct {
         // window can be created for either. Before the fix the first error
         // left `App.run`, and every existing window closed with it.
         for (0..2) |_| {
-            try std.testing.expect(core_app.mailbox.push(.{ .new_window = .{} }, .instant) != 0);
+            try std.testing.expect(core_app.mailbox.push(std.testing.io, .{ .new_window = .{} }, .instant) != 0);
         }
         try core_app.tick(&app);
         try std.testing.expectEqual(@as(usize, 2), Hook.calls);
@@ -2907,7 +2907,7 @@ pub const App = struct {
         try host.setBanner(.none, null);
         var detached = host.tabs.orderedRemove(0);
         detached.deinit();
-        try std.testing.expect(core_app.mailbox.push(.{ .new_window = .{} }, .instant) != 0);
+        try std.testing.expect(core_app.mailbox.push(std.testing.io, .{ .new_window = .{} }, .instant) != 0);
         try core_app.tick(&app);
         try std.testing.expectEqual(@as(usize, 3), Hook.calls);
         try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
@@ -5372,12 +5372,14 @@ pub const App = struct {
                 const text_z = try self.core_app.alloc.dupeSentinel(u8, value.text, 0);
                 defer self.core_app.alloc.free(text_z);
                 if (self.test_automation_paste) |paste| {
-                    paste(surface, .paste, text_z, false) catch |err| switch (err) {
+                    paste(surface, .{ .paste = .standard }, text_z, false) catch |err| switch (err) {
                         error.UnsafePaste => return error.AutomationPolicyRefused,
                         else => return err,
                     };
                 } else {
-                    surface.core().completeClipboardRequest(.paste, text_z, false) catch |err| switch (err) {
+                    surface.core().completeClipboardRequest(.{ .paste = .standard }, .{
+                        .contents = &.{.{ .mime = "text/plain", .data = text_z }},
+                    }) catch |err| switch (err) {
                         error.UnsafePaste => return error.AutomationPolicyRefused,
                         else => return err,
                     };
@@ -6318,7 +6320,7 @@ pub const App = struct {
             // Real pipes and owned handles, but no process, COM or registry.
             var signal_read: windows.HANDLE = undefined;
             var signal_write: windows.HANDLE = undefined;
-            try std.testing.expect(internal_os.windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+            try std.testing.expect(internal_os.windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0).toBool());
             defer _ = windows.CloseHandle(signal_read);
             const Dup = struct {
                 fn current() !windows.HANDLE {
@@ -7567,7 +7569,7 @@ pub const App = struct {
         // Before the startup windows exist the first of them takes it, and a
         // terminal handoff server's windows come only from handoffs.
         if (!self.startup_windows_opened or self.embedding_mode) return;
-        if (self.core_app.mailbox.push(.{ .new_window = .{} }, .instant) == 0)
+        if (self.core_app.mailbox.push(global.io(), .{ .new_window = .{} }, .instant) == 0)
             log.warn("toast activation: could not request a window", .{});
     }
 
@@ -10138,7 +10140,7 @@ pub const App = struct {
         app.recovery_ready_resolved = true;
 
         // Nothing queued: no tick, so the mailbox message waits.
-        try std.testing.expect(core_app.mailbox.push(.{ .new_window = .{} }, .instant) != 0);
+        try std.testing.expect(core_app.mailbox.push(std.testing.io, .{ .new_window = .{} }, .instant) != 0);
         try std.testing.expect(!try app.drainDeferredOpens());
         try std.testing.expectEqual(@as(usize, 0), Hook.new_windows);
 
