@@ -1503,6 +1503,13 @@ pub extern "kernel32" fn SetEnvironmentVariableW(lpName: LPCWSTR, lpValue: ?LPCW
 /// The fork's one declaration (the link opener's alias tests use it too).
 pub extern "kernel32" fn GetShortPathNameW(lpszLongPath: LPCWSTR, lpszShortPath: [*]u16, cchBuffer: DWORD) callconv(.winapi) DWORD;
 
+// The private-desktop test runners' entry points: one declaration each for
+// the runtime's files (they were declared in three).
+pub extern "user32" fn CreateDesktopW(lpszDesktop: LPCWSTR, lpszDevice: ?*anyopaque, pDevmode: ?*anyopaque, dwFlags: u32, dwDesiredAccess: u32, lpsa: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+pub extern "user32" fn SetThreadDesktop(hDesktop: *anyopaque) callconv(.winapi) BOOL;
+pub extern "user32" fn CloseDesktop(hDesktop: *anyopaque) callconv(.winapi) BOOL;
+pub extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
+
 /// `SetLastError` taking std's `Win32Error`, which every caller names its
 /// codes with; the extern itself takes the SDK's `DWORD`.
 pub fn setLastError(err: windows.Win32Error) void {

@@ -23,10 +23,11 @@ const BOOL = win32_types.BOOL;
 const GetTickCount64 = sys.GetTickCount64;
 const WglPixelFormatProvenance = pixel_format.WglPixelFormatProvenance;
 
+// The counter's one declaration is sys.zig's.
+const QueryPerformanceCounter = sys.QueryPerformanceCounter;
+const QueryPerformanceFrequency = sys.QueryPerformanceFrequency;
 // Benchmark-only Win32 entry points; deliberately not in sys.zig, which
 // carries the product surface.
-extern "kernel32" fn QueryPerformanceCounter(value: *i64) callconv(.winapi) BOOL;
-extern "kernel32" fn QueryPerformanceFrequency(value: *i64) callconv(.winapi) BOOL;
 extern "kernel32" fn K32GetProcessMemoryInfo(
     process: windows.HANDLE,
     counters: *PROCESS_MEMORY_COUNTERS_EX,

@@ -15240,7 +15240,7 @@ test "security regression win32 link opener rejects dangerous handler files" {
 /// For tests: `long` as GetShortPathNameW spells it, every component that has
 /// an 8.3 alias shortened (the parent folders too).
 const test_short_path = struct {
-    extern "kernel32" fn GetShortPathNameW(long: [*:0]const u16, short: [*]u16, len: u32) callconv(.winapi) u32;
+    const GetShortPathNameW = sys.GetShortPathNameW;
 
     fn of(alloc: Allocator, long: []const u8) ![]u8 {
         const long_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, long);
@@ -15469,9 +15469,9 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
     if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
 
     const Probe = struct {
-        extern "user32" fn CreateDesktopW(name: [*:0]const u16, device: ?*anyopaque, mode: ?*anyopaque, flags: u32, access: u32, attributes: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-        extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
-        extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+        const CreateDesktopW = sys.CreateDesktopW;
+        const SetThreadDesktop = sys.SetThreadDesktop;
+        const CloseDesktop = sys.CloseDesktop;
 
         calls: usize = 0,
         fn dispatch(self: *@This(), target: []const u8) !void {

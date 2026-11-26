@@ -7050,7 +7050,7 @@ pub const Host = struct {
         };
         pub const raw = struct {
             extern "gdi32" fn CreateDIBSection(hdc: HDC, info: *const BITMAPINFOHEADER, usage: u32, bits: *?[*]u32, section: ?*anyopaque, offset: u32) callconv(.winapi) HGDIOBJ;
-            pub extern "gdi32" fn GdiFlush() callconv(.winapi) i32;
+            pub const GdiFlush = sys.GdiFlush;
         };
 
         dc: HDC,
@@ -7324,9 +7324,9 @@ pub const Host = struct {
     /// no window yet).
     pub fn runOnPrivateDesktop(comptime body: anytype) !void {
         const Desktop = struct {
-            extern "user32" fn CreateDesktopW(name: [*:0]const u16, device: ?*anyopaque, mode: ?*anyopaque, flags: u32, access: u32, attributes: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-            extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
-            extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+            const CreateDesktopW = sys.CreateDesktopW;
+            const SetThreadDesktop = sys.SetThreadDesktop;
+            const CloseDesktop = sys.CloseDesktop;
             fn run(desktop: *anyopaque, result: *anyerror!void) void {
                 // This desktop's UI thread from its first statement (test 9 wants an
                 // entry's role scope first): the body's windows are made and

@@ -19815,9 +19815,7 @@ test "win32 windowDestroyed detaches the removed tab UIA provider" {
             return std.fmt.bufPrint(buf, "removed tab", .{}) catch "";
         }
     };
-    const GetDesktopWindow = struct {
-        extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
-    }.GetDesktopWindow;
+    const GetDesktopWindow = sys.GetDesktopWindow;
 
     var core_app: CoreApp = undefined;
     var app: App = undefined;
@@ -25187,7 +25185,7 @@ test "win32 the lifecycle window is a top-level window that never shows and answ
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     // On a desktop of its own: if the window did show, nobody would see it.
     try runOnHiddenDesktop(struct {
-        extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
+        const GetDesktopWindow = sys.GetDesktopWindow;
         const ga_parent: u32 = 1;
 
         fn body() !void {
