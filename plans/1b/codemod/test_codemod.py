@@ -284,6 +284,54 @@ class RuleTests(unittest.TestCase):
                       '    g.close(std.testing.io);', got)
         self.assertEqual(len(hits), 2)
 
+    def test_a_name_bound_twice_leaves_its_opens_and_closes_to_hand_edits(self):
+        # council F4: two sibling blocks each bind `f` to an open. Pairing a close with an open by name alone would
+        # give both closes to the second open; neither pair is rewritten, and each open and close is reported.
+        src = ('test "s" {\n    var tmp = std.testing.tmpDir(.{});\n'
+               '    {\n        const f = try tmp.dir.openFile("a", .{});\n        defer f.close();\n    }\n'
+               '    {\n        const f = try tmp.dir.openFile("b", .{});\n        defer f.close();\n    }\n}\n')
+        why = "hand edit: " + codemod.REUSED_NAME.format("f")
+        for lines in (None, set(range(1, 7)), set(range(1, 12))):
+            with self.subTest(lines=lines):
+                rows = []
+                self.assertEqual(codemod.rewrite(src, None, lines, rows), (src, []))
+                want = [4, 5] if lines == set(range(1, 7)) else [4, 5, 8, 9]
+                self.assertEqual(rows, [("test-dir-io", n, why) for n in want])
+        # A capture, a parameter or a ported open binds the name too.
+        for second in ('    for (files) |f| f.close();\n', '    const S = struct {\n        fn g(f: File) void {\n'
+                       '            f.close();\n        }\n    };\n', '    {\n        const f = other;\n        f.close();\n    }\n'):
+            for first in ('const f = try tmp.dir.openFile("a", .{});', 'const f = try tmp.dir.openFile(std.testing.io, "a", .{});'):
+                with self.subTest(first=first, second=second):
+                    src = (f'test "c" {{\n    var tmp = std.testing.tmpDir(.{{}});\n    {{\n        {first}\n'
+                           f'        defer f.close();\n    }}\n{second}}}\n')
+                    rows = []
+                    self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+                    self.assertTrue(rows and all(r[2] == why for r in rows))
+                    self.assertEqual("std.testing.io, \"a\"" not in first, 4 in [r[1] for r in rows])
+
+    def test_a_name_in_another_test_block_is_another_binding(self):
+        # The pairing reads one test block at a time: the same name in two tests pairs within each.
+        one = 'test "{}" {{\n    var tmp = std.testing.tmpDir(.{{}});\n    const f = try tmp.dir.openFile("a", .{{}});\n' \
+              '    defer f.close();\n}}\n'
+        src = one.format("a") + one.format("b")
+        got, hits = codemod.rewrite(src, None, {1, 2, 3, 4, 5})
+        self.assertEqual(got, one.format("a").replace('openFile("a"', 'openFile(std.testing.io, "a"')
+                         .replace("f.close()", "f.close(std.testing.io)") + one.format("b"))
+        self.assertEqual(len(hits), 1)
+
+    def test_a_receiver_bound_twice_is_a_hand_edit(self):
+        # The same scope question for `tmp`: bound once to a temporary directory and once to something else, its
+        # calls are hand edits; bound twice to temporary directories, they are rewritten.
+        src = ('test "t" {\n    {\n        var tmp = std.testing.tmpDir(.{});\n        try tmp.dir.makeDir("a");\n    }\n'
+               '    {\n        var tmp = other;\n        try tmp.dir.makeDir("b");\n    }\n}\n')
+        rows = []
+        self.assertEqual(codemod.rewrite(src, None, None, rows), (src, []))
+        self.assertEqual(rows, [("test-dir-io", n, "hand edit: " + codemod.REUSED_RECEIVER.format("tmp")) for n in (4, 8)])
+        both = src.replace("var tmp = other;", "var tmp = std.testing.tmpDir(.{});")
+        got, hits = codemod.rewrite(both)
+        self.assertEqual(got.count('makeDir(std.testing.io, "'), 0)
+        self.assertEqual(got.count('createDir(std.testing.io, "'), 2)
+
     def test_nested_calls_are_rewritten_in_turns(self):
         src = ('test "n" {\n    var tmp = std.testing.tmpDir(.{});\n'
                '    try tmp.dir.writeFile(.{ .sub_path = "a", .data = try tmp.dir.readFileAlloc(alloc, "b", 10) });\n}\n')

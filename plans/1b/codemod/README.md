@@ -31,6 +31,10 @@ The engine, for every rule:
   initializer (`= .{` and `}` on two lines), or arguments that change places from one line to another.
 
 test-dir-io (also):
+- an open and the closes of what it opened, when the open's name is bound more than once in the test (sibling
+  blocks, a capture `|f|`, a parameter `f: T`, a ported open): a close paired by name alone could take the wrong
+  open. The pairing reads one test block at a time, so the same name in another test is another binding and pairs
+  within that test. Likewise a `tmp` receiver bound to a temporary directory and also to something else;
 - arguments that change places must lie on one line, with no comment between the call's arguments;
 - makeOpenPath with any options but the two exact translations: `.{}` stays, `.{ .no_follow = true }` becomes
   `.{ .open_options = .{ .follow_symlinks = false } }` (0.17 renamed the field and inverted it);

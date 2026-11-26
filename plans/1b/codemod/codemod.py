@@ -381,8 +381,53 @@ def _receiver(toks, i, tmp_names):
     return None
 
 
+REUSED_NAME = ("the name `{}` is bound more than once in this test, so which open a close belongs to needs a "
+               "reader: its 0.15 opens and its closes are hand edits")
+REUSED_RECEIVER = ("the name `{}` is bound more than once in this test, not always to a temporary directory: its "
+                   "calls are hand edits")
+
+
+def _binding_counts(toks, lo, hi):
+    """How many times each name is bound in toks[lo:hi]: by `var` or `const`, in a capture (`|x|`, `|*x, i|`), or as
+    a parameter (`(x: T`, `, x: T`, `comptime x: T`). A struct field or a bitwise `|` can count as one too, which
+    errs toward a hand edit."""
+    counts = {}
+
+    def add(name):
+        counts[name] = counts.get(name, 0) + 1
+
+    k = lo
+    while k < hi:
+        t = toks[k]
+        if t.kind == "keyword" and t.text in ("var", "const") and is_tok(at(toks, k + 1), "identifier"):
+            add(toks[k + 1].text)
+        elif is_tok(t, "op", "|"):
+            j, names = k + 1, []
+            while True:
+                if is_tok(at(toks, j), "op", "*"):
+                    j += 1
+                if not is_tok(at(toks, j), "identifier"):
+                    break
+                names.append(toks[j].text)
+                j += 1
+                if not is_tok(at(toks, j), "op", ","):
+                    break
+                j += 1
+            if names and is_tok(at(toks, j), "op", "|"):
+                for name in names:
+                    add(name)
+                k = j
+        elif (t.kind == "identifier" and is_tok(at(toks, k + 1), "op", ":") and at(toks, k - 1) is not None
+              and (toks[k - 1].kind, toks[k - 1].text) in (("op", "("), ("op", ","), ("keyword", "comptime"),
+                                                           ("keyword", "noalias"))):
+            add(t.text)
+        k += 1
+    return counts
+
+
 def _tmp_bindings(toks, lo, hi):
-    names = set()
+    """The names bound in toks[lo:hi] to a temporary directory, each with how many such bindings it has."""
+    names = {}
     for i in range(lo, hi):
         if not (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
                 and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
@@ -395,7 +440,7 @@ def _tmp_bindings(toks, lo, hi):
             j += 2
         if (is_tok(at(toks, j), "identifier", "testing") and is_tok(at(toks, j + 1), "op", ".")
                 and is_tok(at(toks, j + 2), "identifier", "tmpDir")):
-            names.add(toks[i + 1].text)
+            names[toks[i + 1].text] = names.get(toks[i + 1].text, 0) + 1
             continue
         # var tmp = try TempDir.init(); (the fork's os/TempDir.zig, whose `dir` is a std.Io.Dir), qualified or not.
         while is_tok(at(toks, k), "identifier") and is_tok(at(toks, k + 1), "op", ".") and toks[k].text != "TempDir":
@@ -403,7 +448,7 @@ def _tmp_bindings(toks, lo, hi):
         if (is_tok(at(toks, k), "identifier", "TempDir") and is_tok(at(toks, k + 1), "op", ".")
                 and is_tok(at(toks, k + 2), "identifier", "init") and is_tok(at(toks, k + 3), "op", "(")
                 and is_tok(at(toks, k + 4), "op", ")")):
-            names.add(toks[i + 1].text)
+            names[toks[i + 1].text] = names.get(toks[i + 1].text, 0) + 1
     return names
 
 
@@ -439,7 +484,11 @@ def rule_test_dir_io(text, toks):
         if len(args) == 2:
             hits.append(Bail(t.line + 1, PRODUCT_OPEN_FILE, range(t.line + 1, toks[close].line + 2)))
     for lo, hi in blocks:
-        tmp_names = _tmp_bindings(toks, lo, hi)
+        bound = _binding_counts(toks, lo, hi)
+        tmp_counts = _tmp_bindings(toks, lo, hi)
+        # A name bound to a temporary directory and also to something else (sibling scopes) is no known receiver.
+        tmp_names = {n for n, c in tmp_counts.items() if c == bound.get(n, 0)}
+        tmp_any = set(tmp_counts)
         call_hits = {}   # method-name token index -> Hit
         for i in range(lo, hi):
             t = toks[i]
@@ -447,7 +496,7 @@ def rule_test_dir_io(text, toks):
                 continue
             if not is_tok(at(toks, i + 1), "op", "("):
                 continue
-            recv = _receiver(toks, i, tmp_names)
+            recv = _receiver(toks, i, tmp_any)
             if recv is None:
                 continue
             args, close = zigtok.split_args(toks, i + 1)
@@ -455,6 +504,8 @@ def rule_test_dir_io(text, toks):
                 continue
             call_lines = range(t.line + 1, toks[close].line + 2)
             try:
+                if recv == "tmp" and toks[i - 4].text not in tmp_names:
+                    raise HandEdit(REUSED_RECEIVER.format(toks[i - 4].text))
                 if t.text == "readFileAlloc" and names_file_too_big:
                     raise HandEdit(FILE_TOO_BIG)
                 if t.text == "realpathAlloc" and not _untyped_const_init(toks, i - (4 if recv == "tmp" else 8), close):
@@ -469,8 +520,10 @@ def rule_test_dir_io(text, toks):
             hit = Hit(t.line + 1, edits, OPEN_FILE_NOTE if t.text == "openFile" else None)
             hits.append(hit)
             call_hits[i] = hit
-        # What such a call opened closes with the Io.
+        # What such a call opened closes with the Io. A name bound more than once in the block (sibling scopes, a
+        # capture, a parameter) could pair a close with the wrong open: its opens and closes are hand edits.
         opened = {}   # name -> the open's Hit, or "ported" when the open is already 0.17's
+        open_hits = {}   # name -> the Hits of its 0.15 opens
         for i in range(lo, hi):
             if not (toks[i].kind == "keyword" and toks[i].text in ("var", "const")
                     and is_tok(at(toks, i + 1), "identifier") and is_tok(at(toks, i + 2), "op", "=")):
@@ -500,14 +553,23 @@ def rule_test_dir_io(text, toks):
             name, method = toks[i + 1].text, toks[m].text
             if m in call_hits and method in OPENING:
                 opened[name] = call_hits[m]
+                open_hits.setdefault(name, []).append(call_hits[m])
             elif method in ("createFile", "openFile", "openDir", "createDirPathOpen"):
                 args, _ = zigtok.split_args(toks, m + 1)
                 if args and "".join(x.text for x in args[0]) in IO_ARG_NAMES:
                     opened[name] = "ported"
+        reused = {n for n in opened if bound.get(n, 0) > 1}
+        for name in sorted(reused):
+            for owner in open_hits.get(name, ()):
+                hits.remove(owner)
+                hits.append(Bail(owner.line, REUSED_NAME.format(name)))
         for i in range(lo, hi):
             if (is_tok(at(toks, i), "identifier") and toks[i].text in opened and is_tok(at(toks, i + 1), "op", ".")
                     and is_tok(at(toks, i + 2), "identifier", "close") and is_tok(at(toks, i + 3), "op", "(")
                     and is_tok(at(toks, i + 4), "op", ")") and not is_tok(at(toks, i - 1), "op", ".")):
+                if toks[i].text in reused:
+                    hits.append(Bail(toks[i].line + 1, REUSED_NAME.format(toks[i].text)))
+                    continue
                 edit = Edit(toks[i + 4].start, toks[i + 4].start, IO)
                 owner = opened[toks[i].text]
                 if owner == "ported":
@@ -633,7 +695,7 @@ def rewrite(text, rule_ids=None, lines=None, rows=None):
             raise ValueError(f"rule {rule_id} did not settle in {MAX_PASSES} passes")
         if rows is not None:
             seen = set()
-            for b in bails:
+            for b in sorted(bails, key=lambda b: b.line):
                 if (lines is None or b.lines & lines) and (b.line, b.reason) not in seen:
                     seen.add((b.line, b.reason))
                     rows.append((rule_id, b.line, "hand edit: " + b.reason))
