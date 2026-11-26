@@ -9,6 +9,7 @@ const search_controls = @import("win32/search_controls.zig");
 const window_state = @import("win32/window_state.zig");
 const surface_presentation = @import("win32/surface_presentation.zig");
 const std = @import("std");
+const prefixed_path = @import("win32_prefixed_path.zig");
 const builtin = @import("builtin");
 pub const Allocator = std.mem.Allocator;
 
@@ -825,7 +826,7 @@ fn openClipboardWithClock(open: *const fn (?HWND) callconv(.winapi) BOOL, hwnd: 
             while (true) {
                 const elapsed = timer.read();
                 if (elapsed >= clipboard_open_budget_ns) {
-                    windows.kernel32.SetLastError(open_error);
+                    sys.setLastError(open_error);
                     return false;
                 }
                 if (elapsed >= next_attempt) break;
@@ -835,12 +836,12 @@ fn openClipboardWithClock(open: *const fn (?HWND) callconv(.winapi) BOOL, hwnd: 
             }
         }
         if (open(hwnd) != 0) return true;
-        open_error = windows.kernel32.GetLastError();
+        open_error = std.os.windows.GetLastError();
         const elapsed = timer.read();
         if (elapsed >= clipboard_open_budget_ns) break;
         next_attempt = elapsed + clipboard_open_interval_ns;
     }
-    windows.kernel32.SetLastError(open_error);
+    sys.setLastError(open_error);
     return false;
 }
 
@@ -885,7 +886,7 @@ test "win32 clipboard contention stops retrying at its UI budget" {
         fn read(self: *@This()) u64 {
             // A wait (or a preemption) can overrun the whole budget.
             // Clock and yield calls must not replace the open error.
-            windows.kernel32.SetLastError(.INVALID_HANDLE);
+            sys.setLastError(.INVALID_HANDLE);
             defer self.elapsed += self.step;
             return self.elapsed;
         }
@@ -893,7 +894,7 @@ test "win32 clipboard contention stops retrying at its UI budget" {
         fn open(hwnd: ?HWND) callconv(.winapi) BOOL {
             calls += 1;
             owner = hwnd;
-            windows.kernel32.SetLastError(.ACCESS_DENIED);
+            sys.setLastError(.ACCESS_DENIED);
             return 0;
         }
     };
@@ -905,7 +906,7 @@ test "win32 clipboard contention stops retrying at its UI budget" {
         try std.testing.expect(!openClipboardWithClock(Fake.open, owner, &clock));
         try std.testing.expectEqual(@as(usize, 1), Fake.calls);
         try std.testing.expectEqual(owner, Fake.owner.?);
-        try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, windows.kernel32.GetLastError());
+        try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, std.os.windows.GetLastError());
     }
 }
 
@@ -926,7 +927,7 @@ test "win32 clipboard retry stops when a yield crosses its UI budget" {
 
         fn open(_: ?HWND) callconv(.winapi) BOOL {
             calls += 1;
-            windows.kernel32.SetLastError(.ACCESS_DENIED);
+            sys.setLastError(.ACCESS_DENIED);
             return 0;
         }
     };
@@ -935,7 +936,7 @@ test "win32 clipboard retry stops when a yield crosses its UI budget" {
     var clock: Fake = .{};
     try std.testing.expect(!openClipboardWithClock(Fake.open, null, &clock));
     try std.testing.expectEqual(@as(usize, 1), Fake.calls);
-    try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, windows.kernel32.GetLastError());
+    try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, std.os.windows.GetLastError());
 }
 
 test "win32 clipboard retry uses QPC without opening the real clipboard" {
@@ -944,7 +945,7 @@ test "win32 clipboard retry uses QPC without opening the real clipboard" {
         var busy: bool = false;
         fn open(_: ?HWND) callconv(.winapi) BOOL {
             calls += 1;
-            windows.kernel32.SetLastError(.ACCESS_DENIED);
+            sys.setLastError(.ACCESS_DENIED);
             return if (busy) 0 else 1;
         }
     };
@@ -958,7 +959,7 @@ test "win32 clipboard retry uses QPC without opening the real clipboard" {
     Fake.busy = true;
     try std.testing.expect(!openClipboardWith(Fake.open, null));
     try std.testing.expect(Fake.calls >= 1 and Fake.calls <= clipboard_open_attempts);
-    try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, windows.kernel32.GetLastError());
+    try std.testing.expectEqual(windows.Win32Error.ACCESS_DENIED, std.os.windows.GetLastError());
 }
 
 pub fn surfaceWindowStyle() u32 {
@@ -1429,7 +1430,7 @@ pub const RecoveryLedgerLock = struct {
 
     pub fn release(self: *RecoveryLedgerLock) void {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
-        windows.UnlockFile(
+        sys.unlockFile(
             self.file.handle,
             &io_status_block,
             &lock_range_off,
@@ -1451,7 +1452,7 @@ pub const RecoveryLedgerLock = struct {
     /// made directly with the same one-byte range `std` uses.
     fn tryLockExclusive(file: std.fs.File) !bool {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
-        windows.LockFile(
+        sys.lockFile(
             file.handle,
             null,
             null,
@@ -1460,8 +1461,8 @@ pub const RecoveryLedgerLock = struct {
             &lock_range_off,
             &lock_range_len,
             null,
-            windows.TRUE, // fail immediately
-            windows.TRUE, // exclusive
+            win32_types.TRUE, // fail immediately
+            win32_types.TRUE, // exclusive
         ) catch |err| switch (err) {
             error.WouldBlock => return false,
             else => return err,
@@ -7421,13 +7422,13 @@ test "win32 settings disk check stops at a config file it cannot open, not at a 
     // Another program holds it with no sharing (std's `.lock` is a byte-range
     // lock on Windows and does not stop an open): the load would call it
     // absent, so the check refuses instead.
-    const wide = try std.os.windows.sliceToPrefixedFileW(null, missing_path);
-    const held = std.os.windows.kernel32.CreateFileW(
+    const wide = try prefixed_path.sliceToPrefixedFileW(missing_path);
+    const held = sys.CreateFileW(
         wide.span().ptr,
-        std.os.windows.GENERIC_READ,
+        win32_types.GENERIC_READ,
         0,
         null,
-        std.os.windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         0,
         null,
     );
@@ -7526,8 +7527,8 @@ test "win32 settings disk check looks only at the theme copy the loader would us
 
     // Hold the bundled copy with no sharing. The user copy wins the search, so
     // the load never opens it: no refusal.
-    const wide = try std.os.windows.sliceToPrefixedFileW(null, bundled_copy);
-    const held = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    const wide = try prefixed_path.sliceToPrefixedFileW(bundled_copy);
+    const held = sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
     if (held == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
     defer std.os.windows.CloseHandle(held);
     try settingsThemeNameOpenable(alloc, null, "Mine", &.{ user, bundled });
@@ -8262,8 +8263,8 @@ test "win32 settings disk check does not stop a save on a theme only the other l
         // The light theme decodes, and another program holds it with no
         // sharing: it does not open, for the load or the probe.
         try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
-        const wide = try std.os.windows.sliceToPrefixedFileW(null, light);
-        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        const wide = try prefixed_path.sliceToPrefixedFileW(light);
+        const handle = sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
         var disk = try configpkg.Config.default(alloc);
@@ -8294,8 +8295,8 @@ test "win32 settings disk check stops a save on a default config file that will 
     defer detail.clear(alloc);
     {
         // Held with no sharing: it does not open.
-        const wide = try std.os.windows.sliceToPrefixedFileW(null, path);
-        const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+        const wide = try prefixed_path.sliceToPrefixedFileW(path);
+        const handle = sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
         if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
         defer std.os.windows.CloseHandle(handle);
         var disk = try configpkg.Config.default(alloc);
@@ -9859,7 +9860,7 @@ const Pkg19NativeDeliveryTest = struct {
             .lpszClassName = popup_class_name,
             .hIconSm = null,
         };
-        if (sys.RegisterClassExW(&wc) == 0 and windows.kernel32.GetLastError() != .CLASS_ALREADY_EXISTS) return lastError();
+        if (sys.RegisterClassExW(&wc) == 0 and std.os.windows.GetLastError() != .CLASS_ALREADY_EXISTS) return lastError();
         const owner = sys.CreateWindowExW(0, popup_class_name, popup_class_name, WS_OVERLAPPEDWINDOW, 100, 100, 300, 200, null, null, app.hinstance, null) orelse return lastError();
         defer _ = sys.DestroyWindow(owner);
         setWindowData(owner, &popup);
@@ -10536,11 +10537,11 @@ fn infoBannersExpireIn(comptime test_tools: bool) bool {
 test "infoBannersExpire reads NOCTTY_RENDERER_KEEP_NOTICES only with test tools" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const name = std.unicode.utf8ToUtf16LeStringLiteral("NOCTTY_RENDERER_KEEP_NOTICES");
-    defer _ = windows.kernel32.SetEnvironmentVariableW(name, null);
-    _ = windows.kernel32.SetEnvironmentVariableW(name, null);
+    defer _ = sys.SetEnvironmentVariableW(name, null);
+    _ = sys.SetEnvironmentVariableW(name, null);
     try std.testing.expect(infoBannersExpireIn(true));
     try std.testing.expect(infoBannersExpireIn(false));
-    if (windows.kernel32.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
+    if (sys.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
     try std.testing.expect(!infoBannersExpireIn(true));
     try std.testing.expect(infoBannersExpireIn(false));
     try std.testing.expectEqual(infoBannersExpireIn(build_config.renderer_test_tools), infoBannersExpire());
@@ -21691,7 +21692,7 @@ test "win32 elevation authenticates a same-process pipe server token" {
     const server = sys.CreateNamedPipeW(
         pipe_name.ptr,
         c.PIPE_ACCESS_DUPLEX,
-        windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+        win32_types.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
         1,
         1024,
         1024,
@@ -21702,14 +21703,14 @@ test "win32 elevation authenticates a same-process pipe server token" {
     defer _ = windows.CloseHandle(server);
 
     try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
-    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
+    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, std.os.windows.GetLastError());
 
-    const client = windows.kernel32.CreateFileW(
+    const client = sys.CreateFileW(
         pipe_name.ptr,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
         0,
         null,
-        windows.OPEN_EXISTING,
+        win32_types.OPEN_EXISTING,
         win32_ipc.client_pipe_open_flags,
         null,
     );
@@ -21718,7 +21719,7 @@ test "win32 elevation authenticates a same-process pipe server token" {
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
-        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
+        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, std.os.windows.GetLastError());
     }
 
     const identity = try win32_elevation.inspectPipeServerIdentity(
@@ -24717,13 +24718,13 @@ test "win32 recovery fallback failure is consumed by next startup" {
 
     const target_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, target);
     defer std.testing.allocator.free(target_w);
-    const held = windows.kernel32.CreateFileW(
+    const held = sys.CreateFileW(
         target_w.ptr,
-        windows.GENERIC_READ,
-        windows.FILE_SHARE_READ,
+        win32_types.GENERIC_READ,
+        win32_types.FILE_SHARE_READ,
         null,
-        windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_ATTRIBUTE_NORMAL,
         null,
     );
     if (held == windows.INVALID_HANDLE_VALUE) return error.TestUnexpectedResult;
@@ -25328,7 +25329,7 @@ test "win32 agreeing to a Restart Manager close registers the session owner for 
         var null_line: bool = false;
         var line: [128]u16 = undefined;
         var line_len: usize = 0;
-        fn register(cmdline: ?LPCWSTR, dwFlags: DWORD) callconv(.winapi) windows.HRESULT {
+        fn register(cmdline: ?LPCWSTR, dwFlags: DWORD) callconv(.winapi) win32_types.HRESULT {
             registers += 1;
             flags = dwFlags;
             null_line = cmdline == null;
@@ -25340,7 +25341,7 @@ test "win32 agreeing to a Restart Manager close registers the session owner for 
             }
             return 0;
         }
-        fn unregister() callconv(.winapi) windows.HRESULT {
+        fn unregister() callconv(.winapi) win32_types.HRESULT {
             unregisters += 1;
             return 0;
         }
