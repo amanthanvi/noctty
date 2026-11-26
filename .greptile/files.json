@@ -379,6 +379,7 @@
         "dist/**",
         "test/windows/release-promote.ps1",
         "test/windows/release-fixture-cleanup.ps1",
+        "test/windows/flagship/contracts/Contracts.21-BuildEnvironment.ps1",
         "test/windows/flagship/contracts/Contracts.93-ConPty.ps1",
         ".github/**"
       ]
