@@ -48,7 +48,7 @@ function Get-UnreviewedRendererLocks {
     }
     $updateFrame = $scopes['generic.zig updateFrame']
     $reviewedSites = @(
-        'if\s*\(self\.images\.kittyRequiresUpdate\(state\.terminal\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.images\.kittyUpdate\('
+        'if\s*\(self\.images\.kittyRequiresUpdate\(\s*state\.terminal,\s*&self\.terminal_state,\s*\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.images\.kittyUpdate\('
         'var output_progress:\s*\?renderer\.State\.OutputProgress\s*=\s*critical\.output_progress;\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.rebuildCells\('
     )
     foreach ($site in $reviewedSites) {

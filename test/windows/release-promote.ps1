@@ -47,7 +47,9 @@ $other = Join-Path $WorkDirectory 'checkout-b'
 foreach ($name in @('common.ps1', 'windows-architecture.ps1', 'release-manifest.ps1', 'release-evidence.ps1', 'release-promote.ps1', 'release-publication-state.ps1', 'release-package-manager-preflight.ps1', 'release-run-generator.ps1', 'package-package-managers.ps1')) {
     Copy-Item -LiteralPath (Join-Path $sourceRoot "scripts/$name") -Destination (Join-Path $primary "scripts/$name")
 }
-Copy-Item -LiteralPath (Join-Path $sourceRoot 'dist/windows/release-metadata.json') -Destination (Join-Path $primary 'dist/windows/release-metadata.json')
+# The metadata v1.3.136 was released under, not the tree's own, which names the
+# upstream line of the next releases (1.4.0 once the 1B merge lands).
+[IO.File]::WriteAllText((Join-Path $primary 'dist/windows/release-metadata.json'), "{`n  `"upstreamBaseVersion`": `"1.3.2`",`n  `"firstForkPatch`": 100`n}`n")
 [IO.File]::WriteAllText((Join-Path $primary 'scripts/check-release-copy.ps1'), @'
 param([string] $ExpectedVersion, [switch] $CheckRemoteLatest)
 Test-PromoteFixtureCopy -Version $ExpectedVersion -Remote ([bool]$CheckRemoteLatest)
