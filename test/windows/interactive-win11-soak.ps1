@@ -66,8 +66,8 @@ handle, and whether the copy's stderr log, noctty.log, carries the layer's marke
 <run>\role-manifest.tsv and <run>\role-supervisor\. It fails closed: a supervisor call that fails fails the
 driver; a copy that has not ended (no exit receipt), no dump, or any dump but the copy's own fails the harness
 (the driver exits 5 and harness.json lists RoleErrors). Symbolise the dump with the build's images and PDBs and
-compare it with `ci/role_compare3.py --run soak-releasesafe`: on 0.15.2 its pair checks are advisory and its
-launch, dump and seal checks gate.
+compare it with `ci/role_compare3.py --run soak-releasesafe --compiler 0.17`: on 0.17.1 its two pairs are
+required, and its launch, dump and seal checks gate.
 
 Safety (AGENTS.md "Running noctty"). Every process starts on the private desktop, named in lpDesktop, inside
 the job; input is posted, never SendInput, and nothing takes the foreground. The copy is portable with

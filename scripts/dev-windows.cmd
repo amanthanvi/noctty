@@ -22,9 +22,9 @@ if "%_TEMP_DIR%"=="" set "_TEMP_DIR=%_LOCALAPPDATA%\Temp"
 set "_TMP_DIR=%TMP%"
 if "%_TMP_DIR%"=="" set "_TMP_DIR=%_TEMP_DIR%"
 
-if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-0.15.2\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-0.15.2"
-if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-aarch64-windows-0.15.2\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-aarch64-windows-0.15.2"
-if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-x86_64-windows-0.15.2\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-x86_64-windows-0.15.2"
+if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-0.17.1\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-0.17.1"
+if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-aarch64-windows-0.17.1\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-aarch64-windows-0.17.1"
+if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-x86_64-windows-0.17.1\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-x86_64-windows-0.17.1"
 if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig"
 if "%ZIG_HOME%"=="" if exist "%_PROGRAM_FILES%\Zig" set "ZIG_HOME=%_PROGRAM_FILES%\Zig"
 for %%I in (zig.exe) do if "%ZIG_HOME%"=="" if not "%%~$PATH:I"=="" set "ZIG_HOME=%%~dp$PATH:I"
@@ -70,7 +70,7 @@ if not exist "%GIT_USR_BIN%\sh.exe" (
 )
 
 if "%ZIG_HOME%"=="" (
-  echo Zig 0.15.2+ not found. Set ZIG_HOME or install Zig to "%_USER_HOME%\tools\zig" or "%_PROGRAM_FILES%\Zig".
+  echo Zig 0.17.1+ not found. Set ZIG_HOME or install Zig to "%_USER_HOME%\tools\zig" or "%_PROGRAM_FILES%\Zig".
   exit /b 1
 )
 
@@ -107,8 +107,8 @@ git --version || exit /b 1
 zig version || exit /b 1
 cl 2>&1 | findstr /c:"Version" || exit /b 1
 for /f %%v in ('zig version') do set "ZIG_VERSION=%%v"
-echo %ZIG_VERSION% | findstr /b /c:"0.15." >nul || (
-  echo noctty currently requires Zig 0.15.x. Resolved: %ZIG_VERSION%
+echo %ZIG_VERSION% | findstr /b /c:"0.17." >nul || (
+  echo noctty currently requires Zig 0.17.x. Resolved: %ZIG_VERSION%
   exit /b 1
 )
 

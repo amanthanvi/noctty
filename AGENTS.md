@@ -9,10 +9,12 @@ reading step under [Self-Correction Log](#self-correction-log).
 - **Build:** `zig build` (also stages the pinned `conpty.dll` and
   `OpenConsole.exe` beside the exe; staging traps: the 2026-10-10 bundled
   ConPTY entry in `docs/agents/log/conpty.md`)
-- **Test (Zig):** `zig build test -Demit-test-exe=true --summary all`
+- **Test (Zig):** `zig build test -Demit-test-exe=true --summary all --test-timeout 120s`
   (full suite, ~6.8k tests, several minutes). This is the only invocation that
   is trustworthy on its own, and `--summary all` is part of it: the count is
-  the evidence.
+  the evidence. `--test-timeout 120s` has Zig 0.17.1's build runner report a
+  test still running after two minutes as timed out instead of waiting on it
+  (CI passes it on every `zig build test` step).
   - `-Dtest-shards=4` runs it as four concurrent processes with the same
     count, about a third of the time (test-harnesses.md: 2026-11-11
     TEST-SHARDS-01).
@@ -36,7 +38,7 @@ reading step under [Self-Correction Log](#self-correction-log).
 - **Formatting (Zig):** `zig fmt .`
 - **Formatting (other):** `prettier -w .`
 - Run `zig build*` through `scripts/dev-windows.cmd` (or an equivalent
-  VS-dev + Zig 0.15.2 shell); the ambient shell can miss the native toolchain
+  VS-dev + Zig 0.17.1 shell); the ambient shell can miss the native toolchain
   and fail with misleading dependency errors. A build root on another drive
   than the effective Zig global cache (a review clone under `H:\scratch`
   with the default `%LOCALAPPDATA%\zig`) asserts in the build runner: set
@@ -122,7 +124,12 @@ reading step under [Self-Correction Log](#self-correction-log).
   the original `LOCALAPPDATA`), or, for a build root on another drive than
   that cache, to a cache on the build root's drive: a build root and its
   effective cache must share a drive (build-release-ci.md: 2026-11-13
-  BUILD-CROSS-DRIVE-CACHE). A test that
+  BUILD-CROSS-DRIVE-CACHE). Zig 0.17.1 also unpacks a build's packages into
+  `zig-pkg/` in the build root (`ZIG_LOCAL_PKG_DIR` moves it), which the
+  redirect does not move: leave `ZIG_LOCAL_PKG_DIR` unset or on the build
+  root's drive, since the packages' own build steps then run from it, as they
+  ran from the global cache before (inferred from 0.17.1's
+  `lib/compiler/Maker/Fetch.zig`, not yet measured). A test that
   reached the real `%LOCALAPPDATA%\noctty` once put the user's launches into
   safe mode. (window-frame.md: 2026-09-23 "Item (b) of the #262 entry";
   test-harnesses.md: 2026-09-23 #261 trap 2.) Give each PowerShell you type
@@ -689,8 +696,8 @@ that govern each symbol you change, or that none does.
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
   `CloseApplications` closes, and what it installs and deletes; the
-  placeholder staging contract and its controls,
-  `Get-PlaceholderStagingProblems` and `Assert-PlaceholderControlFails` in
+  runtime staging contract and its controls,
+  `Get-RuntimeStagingProblems` and `Assert-StagingControlFails` in
   `Contracts.93-ConPty.ps1`), signing,
   the updater (including `RegisterApplicationRestart` while an installer
   closes noctty, with `stagedInstallerRunning`; `pkg/wuffs/src/deflate.zig`,
@@ -698,15 +705,12 @@ that govern each symbol you change, or that none does.
   must hold and the ones it may drop: `managed_entries`, `retired_entries`,
   `legacy_updater_required_entries`, `portable_zip_carries_legacy_entries`,
   `requirePayloadEntries`, `swapPayload`, `rollback`, `fileMatches`,
-  `verifyBackupManifest`, `checkSetupRetiresLibVt`, `retired_placeholders`
-  and `checkPackagingStagesPlaceholders` in
+  `verifyBackupManifest`, `checkSetupRetiresLibVt` and
+  `checkPackagingStagesPlaceholders` in
   `src/update/portable_apply.zig`, `verifyPortablePayload` and
   `verifyInstalledPortablePayloadAgainstManifest` in
   `src/update/github_releases.zig`, and the packaging scripts'
-  `$runtimeFiles`; the portable ZIP's `ghostty-vt.dll` placeholder:
-  `src/build/GhosttyVtStub.zig`, `src/ghostty_vt_stub/`,
-  `scripts/ghostty-vt-stub.ps1` `Assert-GhosttyVtStub`, and its packaged
-  smoke `test/windows/test_dll_init.c`), release workflows and package managers
+  `$runtimeFiles`), release workflows and package managers
   (WinGet, Scoop, Chocolatey): `scripts/release-publication-state.ps1`
   (`Get-ReleaseByTag`, `Assert-RemoteReleaseTag`, `Get-CreatedReleaseDraft`,
   `Confirm-ReleasePublication`), `scripts/release-evidence.ps1`

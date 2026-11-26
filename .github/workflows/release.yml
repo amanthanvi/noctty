@@ -226,7 +226,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       - name: Install Inno Setup
@@ -235,7 +235,7 @@ jobs:
 
       - name: Run full test suite
         shell: pwsh
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 120s
 
       - name: Run native Win32 compositor tests
         shell: pwsh

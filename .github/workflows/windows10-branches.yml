@@ -55,7 +55,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -68,7 +68,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Zig version
         run: zig version
@@ -76,7 +76,7 @@ jobs:
       - name: Full Zig test suite
         shell: pwsh
         run: |
-          zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all 2>&1 | Tee-Object -FilePath zig-test.log
+          zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 120s 2>&1 | Tee-Object -FilePath zig-test.log
           $code = $LASTEXITCODE
           $summary = Select-String -Path zig-test.log -Pattern 'tests passed' | Select-Object -Last 1
           "Zig suite on build ${env:windows_build}: $($summary.Line)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

@@ -603,11 +603,15 @@ report.
 Public tags remain plain semantic versions. `major.minor` tracks the upstream
 Ghostty line, while `patch` is fork-owned beginning at `100`: `1.3.100`,
 `1.3.101`, and so on. The exact upstream base does not appear in the public
-tag. The current base is the stepping stone `74d0c72fd` from 2026-07-20,
-landed on `main` by the merge commit `f739b4c7b` (#748); its dated drift report
-is `plans/stone-1a/drift-report.md`. The stone is still post-`v1.3.1` upstream
-main, represented as `1.3.2-dev`, not a released upstream tag, so
-`upstreamBaseVersion` stays `1.3.2`. The previous base was `ba398dfff` from
+tag. The current base is upstream's `v1.4.0` release (`83fb95624`, tagged
+2026-10-27), a released upstream tag, so `upstreamBaseVersion` is `1.4.0`
+and the fork's releases on it are `1.4.100` and later. Its landing merge
+commit and dated drift report are recorded here when the merge lands. The
+previous base was the stepping stone `74d0c72fd` from 2026-07-20, landed on
+`main` by the merge commit `f739b4c7b` (#748), with its dated drift report
+`plans/stone-1a/drift-report.md`; the stone was post-`v1.3.1` upstream main,
+represented as `1.3.2-dev`, not a released upstream tag, so
+`upstreamBaseVersion` stayed `1.3.2`. Before it the base was `ba398dfff` from
 2026-04-05, on the same `1.3.2-dev` line.
 
 ## Validation gates
@@ -623,7 +627,7 @@ pwsh -NoProfile -File scripts/check-source-format.ps1
 
 Use `scripts/check-zig-format.ps1` rather than a bare `zig fmt --check src`.
 The tracked generated table `src/build/uucode_tables.zig` is not `zig fmt`
-clean under the pinned Zig 0.15.2, so the bare command fails on an unmodified
+clean under the pinned Zig 0.17.1, so the bare command fails on an unmodified
 checkout and cannot serve as a merge-window gate. The script formats every
 other tracked Zig source under `src/` and `pkg/` plus `build.zig`.
 

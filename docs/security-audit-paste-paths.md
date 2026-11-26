@@ -11,6 +11,13 @@ The two rows marked "current tree" (live OSC 7 pwd, OSC 8 / regex link open) wer
 
 `src/apprt/win32.zig` has since been split (#580-#590) and is now a facade. App, Host and Surface live in `src/apprt/win32/app.zig`, `host.zig` and `terminal_window.zig`, session code in `session.zig`, and the named-pipe server (an earlier extraction) in `ipc_server.zig`. A `src/apprt/win32.zig:<line>` reference before the Findings is a line of that file at the revision its row names (`git show d031dc474:src/apprt/win32.zig`, or `e6dae0919` for the two "current tree" rows), not a line of today's file. The Findings name the file and function where the code lives now.
 
+Toolchain note (added at the Zig 0.17.1 cutover): where this audit names a
+Zig release, it is the one the fork pinned at the revisions above, and the
+statement holds for that release. The cutover did not re-run the audit; a
+fix that does not depend on the release (an explicit `.allocate` option, say)
+still stands, while a statement about the standard library's or the fuzzer's
+behaviour has not been checked on 0.17.1.
+
 ## Result
 
 Both Win32 drag-and-drop paths now use the same core paste encoder and unsafe-paste confirmation route as ordinary clipboard paste. For non-bracketed paste, or when `clipboard-paste-bracketed-safe=false`, the shared paste gate classifies both carriage return and line feed as unsafe. Trusted bracketed paste intentionally preserves CR and LF inside the fenceposts without confirmation because the framing prevents them from submitting input; a pasted closing fence remains unsafe. Live OSC 7 working directories reject all C0 and DEL bytes before reaching terminal pwd/title state and again before `PWD` or `CreateProcessW`. Win32 link opening permits the repository's built-in URL schemes and safe local files while rejecting arbitrary protocol handlers, UNC files, and executable/script files. Session JSON owns decoded strings and rejects control- or newline-bearing pane metadata on load; session snapshots drop only an offending live field so one hostile title cannot deny persistence for every window. The named-pipe server rejects remote clients, installs a protected current-user-only DACL with an explicit mandatory-integrity label, claims the pipe name with `FILE_FLAG_FIRST_PIPE_INSTANCE`, and never releases that name while it runs; clients refuse any server whose owner SID differs or whose integrity level is below their own. Forwarded new-window arguments are constrained by a deny-by-default key allowlist, so `--command`, `-e`, and `--input` no longer forward at all.

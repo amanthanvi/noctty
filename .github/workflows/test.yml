@@ -128,6 +128,32 @@ jobs:
         # A separate PR just before Phase 0b changes report to enforce here.
         run: python -I ci/run_lints.py --win32-mode enforce
 
+      # The residue gate (ci/residue_gate17.py, PLAN.md section 7.8) runs
+      # report-only from the 1B toolchain cutover and at each forward merge,
+      # and enforces on the frozen tree; its allowance is ci/residue-allow.tsv.
+      # It reads Zig only through ci/astdump.zig built with the tree's pinned
+      # compiler, and it reads a fresh worktree of the commit, so files the
+      # steps above leave in the checkout (ci/__pycache__) are not read.
+      # Report-only exits 0 on findings; a setup or input error still fails.
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+          use-cache: false
+
+      - name: Residue gate (report only)
+        shell: pwsh
+        run: |
+          zig build-exe ci/astdump.zig -lc -O ReleaseSafe "-femit-bin=$env:RUNNER_TEMP/astdump.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tree = Join-Path $env:RUNNER_TEMP 'residue-tree'
+          git worktree add --detach $tree HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $out = @(python -I ci/residue_gate17.py $tree (Join-Path $tree 'ci/residue-allow.tsv') --astdump "$env:RUNNER_TEMP/astdump.exe" --report-only)
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          @($out | Where-Object { $_ -cmatch '^(?:COMMIT|RESULT) ' }) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          exit $code
 
       - name: Armed renderer-state thread gate
         shell: pwsh
@@ -275,7 +301,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           # Failed and cancelled jobs can save incomplete generated files.
           use-cache: false
 
@@ -284,11 +310,16 @@ jobs:
         shell: pwsh
         run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       # Reuse only verified dependency packages, never compiler/build outputs.
+      # Zig 0.17 keeps each fetched package in the global cache's p/ as a tarball
+      # named by its hash, and unpacks it into the checkout's zig-pkg/, whose
+      # copies a later build uses without hashing them again. A job that unpacks
+      # a cached tarball hashes the result against the hash its build.zig.zon
+      # declares, so p/ is all any job caches: zig-pkg/ is rebuilt by each job.
       - name: Cache Zig dependency packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Zig version
         run: zig version
@@ -314,7 +345,7 @@ jobs:
         # four cores, most of it in a few long tests. Four shards of the one
         # executable (src/test_runner.zig) run side by side, each test once,
         # and the Build Summary adds their counts up as before.
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-shards=4 --summary all --test-timeout 120s
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
@@ -379,7 +410,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -391,7 +422,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Zig version
         run: zig version
@@ -441,7 +472,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -453,7 +484,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Zig version
         run: zig version
@@ -504,7 +535,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -516,7 +547,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Zig version
         run: zig version
@@ -558,7 +589,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -570,7 +601,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Zig version
         run: zig version
@@ -601,7 +632,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -613,12 +644,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
       # Not sharded: its two test executables already run side by side, and
       # two shards each (four processes) left the step's time unchanged
       # (TEST-SHARDS-01 in docs/agents/log/test-harnesses.md).
       - name: Run libghostty-vt and C API tests
-        run: zig build test-lib-vt -Demit-lib-vt=true --summary all
+        run: zig build test-lib-vt -Demit-lib-vt=true --summary all --test-timeout 120s
 
       - name: Build app-profile differential oracle (no capture)
         run: zig build oracle -Dvt-api=stone_flag -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
@@ -638,7 +669,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -650,7 +681,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
       - name: Run opt-in ConPTY transport and key input probes
         timeout-minutes: 15
         # prettier-ignore
@@ -658,7 +689,7 @@ jobs:
           NOCTTY_RUN_CONPTY_TRANSPORT_TEST: "1"
           NOCTTY_CONPTY_TRANSPORT_PROBE: "1"
           NOCTTY_CONPTY_KEY_INPUT_PROBE: "1"
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-filter=ConPTY --summary all
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true -Dtest-filter=ConPTY --summary all --test-timeout 120s
 
   windows-portable-smoke:
     name: Windows x64 Portable Package Smoke
@@ -676,7 +707,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -688,7 +719,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Run portable package CLI smoke
         shell: pwsh
@@ -728,7 +759,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # setup-zig exports its own global cache even with use-cache disabled.
@@ -740,7 +771,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}\.zig-global-cache/p
-          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
 
       - name: Measure and compare with the previous nightly
         shell: pwsh
@@ -816,7 +847,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           # Ephemeral retries must start clean. setup-zig saves failed local
           # caches and otherwise restores the broken build runner on retry.
           use-cache: false

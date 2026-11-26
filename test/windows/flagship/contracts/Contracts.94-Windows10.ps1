@@ -99,7 +99,7 @@ $win10WorkflowSteps = [ordered]@{
         '(?m)^if \(\$build -ge 22000\) \{\s*throw '
     )
     'Full Zig test suite' = @(
-        '(?m)^zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all 2>&1 \| Tee-Object -FilePath zig-test\.log\s*\r?\n\$code = \$LASTEXITCODE\s*$'
+        '(?m)^zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all --test-timeout 120s 2>&1 \| Tee-Object -FilePath zig-test\.log\s*\r?\n\$code = \$LASTEXITCODE\s*$'
         '(?m)^if \(\$code -ne 0\) \{ exit \$code \}\s*$'
     )
     'noctty +version smoke' = @(
@@ -204,7 +204,7 @@ $win10Contracts = @(
     @{
         File = $win10WorkflowPath
         Content = { $win10Workflow }
-        Pattern = '(?ms)- name: Setup Zig.*?with:\s+version: 0\.15\.2\s+use-cache: false'
+        Pattern = '(?ms)- name: Setup Zig.*?with:\s+version: 0\.17\.1\s+use-cache: false'
         Kind = 'Text'
         Description = 'the Windows 10 workflow cannot restore failed Zig build caches'
     }

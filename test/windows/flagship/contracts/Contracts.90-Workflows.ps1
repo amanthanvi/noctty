@@ -40,7 +40,7 @@ Invoke-ContractTable -Contracts @(
                     -Name 'Setup Zig' `
                     -Source "$releaseWorkflow :: windows-release")
         }
-        Pattern = '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false'
+        Pattern = '(?ms)with:\s+version: 0\.17\.1\s+.*?use-cache: false'
         Kind = 'Text'
         Description = 'release builds cannot restore failed Zig build caches'
     }
@@ -52,7 +52,7 @@ Invoke-ContractTable -Contracts @(
                     -Name 'Setup Zig' `
                     -Source "$testWorkflow :: windows-interactive")
         }
-        Pattern = '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false'
+        Pattern = '(?ms)with:\s+version: 0\.17\.1\s+.*?use-cache: false'
         Kind = 'Text'
         Description = 'ephemeral interactive retries cannot restore failed Zig build caches'
     }
@@ -396,7 +396,7 @@ foreach ($zigJob in @(
     foreach ($jobName in $zigJob.Jobs) {
         $jobText = Get-YamlJobText -Content $zigJob.Text -Name $jobName -Source $zigJob.Workflow
         $setup = Get-YamlStepBlock -Content $jobText -Name 'Setup Zig' -Source "$($zigJob.Workflow) :: $jobName"
-        if ($setup -notmatch '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false') {
+        if ($setup -notmatch '(?ms)with:\s+version: 0\.17\.1\s+.*?use-cache: false') {
             throw "$($zigJob.Workflow) job '$jobName': Zig builds must not restore failed Zig build caches."
         }
         $cache = Get-YamlStepBlock -Content $jobText -Name 'Cache Zig dependency packages' -Source "$($zigJob.Workflow) :: $jobName"
@@ -2947,9 +2947,9 @@ if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
 # job change, needs no re-pin (Opus on #740: the whole-file pin failed every such edit), and neither does another
 # manual input beside it (Sol on #740: the pin covered the whole `workflow_dispatch` block).
 $frozenSetSha256 = [ordered]@{
-    '.github/workflows/test.yml#windows-interactive' = '44c05e4dac25e44cefaffa5922d191a8674dc4c349af08c18151bb3979adef70'
+    '.github/workflows/test.yml#windows-interactive' = '58e386fb04f90d48ea19665efda93d22812e977c8c78903555bafb67fe705c37'
     '.github/workflows/test.yml#run_interactive_win11' = '8110a2478d5a88e5efbb6abeb16b4da1a44255ff7489b1f18c2e99ef8820750f'
-    '.github/workflows/release.yml' = '0d204a0cde96d60e5a38eb2294d1030c6b2cc67b8b3baeee66706a99216871d2'
+    '.github/workflows/release.yml' = 'decce3c03743bc63867c85a5a83a3011d3cc16cc21793dda8796d3b5ca194388'
     'test/windows/interactive-win11-job.ps1' = '8cf5b41cba40803748b193c09a9e19d42b47e5ece2e0262cd2c9f497a2cb0253'
     'test/windows/interactive-win11-validate.ps1' = 'cf24651acd8cf091201fc2f81ad1286f389543502c76124c8d2d08d97d0d4d66'
     'test/windows/flagship/Invoke-InteractiveWin11.ps1' = '189560bc3bc0f67fd26937fd31084176dafe60352703505e26eea5f39459e7ff'

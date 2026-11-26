@@ -105,8 +105,9 @@ using System.Text;
 public static class StaleModesNative {
     [DllImport("ntdll.dll")] static extern IntPtr RtlGetCurrentPeb();
     public static uint IgnoreFlag() {
-        // Read-only test oracle: the same PEB/process-parameter prefix used
-        // by Zig 0.15.2 on x64/ARM64 (and the natural 32-bit pointer layout).
+        // Read-only test oracle: the same PEB/process-parameter prefix as
+        // Zig 0.17.1's std.os.windows PEB and RTL_USER_PROCESS_PARAMETERS on
+        // x64/ARM64 (and the natural 32-bit pointer layout).
         IntPtr parameters=Marshal.ReadIntPtr(RtlGetCurrentPeb(),4*IntPtr.Size);
         return unchecked((uint)Marshal.ReadInt32(parameters,16+IntPtr.Size))&1;
     }

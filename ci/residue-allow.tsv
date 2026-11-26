@@ -14,9 +14,11 @@
 # it builds with both pinned compilers by design. `setup-zig-step` (r41; r42: bound) names the one workflow step per
 # self-test job whose setup-zig version is no literal: the job, the step, the step that produces the version and the
 # sha256 of that producer's text as ciyaml.py gives it (the 1A compiler's version, read at run time from the fixture's
-# build.zig.zon). Active toolchain pins and production shims have no other allowance. The history docs are named here
-# at 1B.3.
+# build.zig.zon). Active toolchain pins and production shims have no other allowance. The history docs
+# are named here from 1B.3: the rows whose reason begins "the history docs".
 prefix	docs/agents/log/	the self-correction log
+prefix	plans/stone-1a/	the history docs (1B.3, §7.8): the stepping stone's ledgers and drift report, which record the 1A tree's code and toolchain as they were
+prefix	plans/1b/	the history docs (1B.3, §7.8): the 1B merge's ledgers, which record each side's code as merged, the 1A toolchain's lines among them
 zig-version-use	src/build/zig.zig	requireZig: the build's check that the running compiler meets the minimum
 zig-version-string-use	src/cli/version.zig	the version printer: the compiler's version string, read once to print it (round 35's Opus M2)
 zig-version-string-use	ci/astdump.zig	the gate's own dump tool: its format line names the compiler that built it, which the residue gate and the binding check compare with the tree's pin; it builds with both pinned compilers by design, since after the cutover the self-test still builds the 1A astdump with 0.15.2 (the user's decision, round 42)
@@ -47,6 +49,10 @@ count	ci/zigtok.py	6	the two compilers whose tokenizers it ports and was checked
 count	ci/zigast.py	1	the 1A compiler's dialect name, which its token cross-check passes to zigtok.py
 count	ci/fixture/lock-inventory-threads.tsv	2	the frozen fixture, approved at 31796f5d0: row reasons written then
 count	ci/fixture/role-runs.tsv	3	the frozen fixture, approved at 31796f5d0: the soak's advisory run and its comments, which controls 83, 88 and 89 read
+count	plans/upstream-drift-2026-08.md	1	the history docs (1B.3, §7.8): a dated upstream drift report, frozen when written
+count	plans/upstream-drift-2026-09.md	3	the history docs (1B.3, §7.8): a dated upstream drift report, frozen when written
+count	plans/upstream-drift-2026-10.md	5	the history docs (1B.3, §7.8): a dated upstream drift report, frozen when written
+count	docs/security-audit-paste-paths.md	2	the history docs (1B.3, §7.8): a dated security audit of the code and toolchain at its base revision, annotated as such
 count	ci/fixture/build.zig.zon	1	the frozen fixture's build.zig.zon, the fixture revision's pin, which the self-test jobs read at run time to install the 1A compiler (§7.8's named exception, round 40's Opus M3 (b))
 unresolved-origin	src/Surface.zig	2	a feature test or nonliteral @field whose origin the default-deny gate cannot positively resolve, by exact count: nonliteral @field names on a method-call receiver, an address (r39: the key event's modifiers, released field by field)
 unresolved-origin	src/apprt/action.zig	2	a feature test or nonliteral @field whose origin the default-deny gate cannot positively resolve, by exact count: @TypeOf(@field(action, field)) over the union's field names (a non-literal @field name), and a nonliteral @field on a member of a value the gate cannot name

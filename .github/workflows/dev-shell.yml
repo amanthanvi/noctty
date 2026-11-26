@@ -48,7 +48,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.17.1
           use-cache: false
 
       # Each script must name the VsDevCmd.bat it found. Through vswhere that is
@@ -91,7 +91,7 @@ jobs:
             if ($r.Exit -ne 0) { throw "$label exited $($r.Exit)." }
             if ($r.VsDevCmd -notmatch $installed -or -not (Test-Path -LiteralPath $r.VsDevCmd)) { throw "$label named '$($r.VsDevCmd)', not the image's Visual Studio $env:EXPECTED_VS." }
             if (-not ($r.Output -match 'C/C\+\+ Optimizing Compiler Version')) { throw "$label did not reach cl." }
-            if ($label -like '*.cmd*' -and $r.Output[-1] -notmatch '^0\.15\.') { throw "$label did not run zig version in the dev shell: '$($r.Output[-1])'." }
+            if ($label -like '*.cmd*' -and $r.Output[-1] -notmatch '^0\.17\.') { throw "$label did not run zig version in the dev shell: '$($r.Output[-1])'." }
             "${label}: $($r.VsDevCmd)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
 

@@ -145,7 +145,7 @@ $guiHiddenProblems = & {
             $symboliser -match '(?m)^        (?:if|continue-on-error):' -or $compare -match '(?m)^        (?:if|continue-on-error):' -or
             $compare -notmatch '(?m)^          \$env:NOCTTY_THREAD_ROLE_IMAGES = Split-Path -Parent \$measure\.Exe\s*$' -or
             -not $compare.Contains('$env:NOCTTY_THREAD_ROLE_SOURCE_ROOT = $measure.Source + ''\''') -or
-            $compare -notmatch 'python -I ci/role_compare3\.py --runs ci/role-runs\.tsv --run composite --compiler 0\.15 \$manifest ci/lock-inventory-threads\.tsv \$symbolised --table-scope 1a 2>&1\)' -or
+            $compare -notmatch 'python -I ci/role_compare3\.py --runs ci/role-runs\.tsv --run composite --compiler 0\.17 \$manifest ci/lock-inventory-threads\.tsv \$symbolised --table-scope 1a 2>&1\)' -or
             $compare -notmatch "(?m)^            NoKey = 'gui-hidden-role-no-key'\s*$" -or
             $compare -notmatch "(?m)^            NoLaunch = 'gui-hidden-role-no-launch'\s*$" -or
             $compare -notmatch '-Leaves role-pairs -RoleControl \$case') {

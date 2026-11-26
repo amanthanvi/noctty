@@ -86,8 +86,7 @@ pub fn build(b: *std.Build) !void {
     // so on CI's four-core runners one process left three cores idle.
     // Not with --fuzz: the build runner would rebuild the one test compile
     // concurrently for each sharded run step, and a build script cannot see
-    // --fuzz to refuse it (Zig 0.15.2's libfuzzer does not build for Windows
-    // anyway).
+    // --fuzz to refuse it.
     const test_shards = b.option(
         u32,
         "test-shards",
