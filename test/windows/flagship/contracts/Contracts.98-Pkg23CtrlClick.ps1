@@ -241,8 +241,8 @@ else {
         @{ Name = 'a second caller reaches the shell'; File = 'app'; Old = 'try self.deferShellRequest(.{ .target = owned });'; New = 'try self.deferShellRequest(.{ .target = owned }); if (false) try shellExecuteOpenTarget(self, owned);' }
         @{ Name = 'a link open is not queued'; File = 'app'; Old = 'orelse return self.app.deferOpenTarget(checked);'; New = 'orelse return self.app.dispatchOpenTarget(checked);' }
         @{ Name = 'the trace variable is renamed'; File = 'win32'; Old = '"NOCTTY_WIN32_OPEN_URL_TRACE_FILE",'; New = '"NOCTTY_OPEN_URL_TRACE",' }
-        @{ Name = 'the trace appends'; File = 'win32'; Old = 'createFileAbsolute(path, .{ .truncate = true })'; New = 'createFileAbsolute(path, .{ .truncate = false })' }
-        @{ Name = 'the trace reports no record'; File = 'win32'; Old = "try writeOpenUrlTrace(file, url);`n    return true;"; New = "try writeOpenUrlTrace(file, url);`n    return false;" }
+        @{ Name = 'the trace appends'; File = 'win32'; Old = 'createFileAbsolute(io, path, .{ .truncate = true })'; New = 'createFileAbsolute(io, path, .{ .truncate = false })' }
+        @{ Name = 'the trace reports no record'; File = 'win32'; Old = "try writeOpenUrlTrace(io, file, url);`n    return true;"; New = "try writeOpenUrlTrace(io, file, url);`n    return false;" }
         @{ Name = 'a record has no line end'; File = 'win32'; Old = 'print("{s}\r\n", .{url})'; New = 'print("{s}", .{url})' }
     )
     foreach ($mutation in $pkg23SeamMutations) {

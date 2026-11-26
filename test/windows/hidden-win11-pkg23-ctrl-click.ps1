@@ -164,7 +164,7 @@ function Get-Pkg23SeamProblems([string] $AppText, [string] $Win32Text) {
     foreach ($rule in $appRules) { if ($AppText -cnotmatch $rule.Pattern) { $problems.Add($rule.Name) } }
     if ([regex]::Matches($AppText, 'shellExecuteOpenTarget\(').Count -ne 2) { $problems.Add('shellExecuteOpenTarget has its definition and one caller, dispatchOpenTarget') }
     $win32Rules = @(
-        @{ Name = 'the trace reads NOCTTY_WIN32_OPEN_URL_TRACE_FILE at each open, truncates the file, and then returns true'; Pattern = '(?s)pub fn recordOpenUrlForTest\(alloc: Allocator, url: \[\]const u8\) !bool \{.*?"NOCTTY_WIN32_OPEN_URL_TRACE_FILE",.*?const file = try std\.fs\.createFileAbsolute\(path, \.\{ \.truncate = true \}\);\s+defer file\.close\(\);\s+try writeOpenUrlTrace\(file, url\);\s+return true;' }
+        @{ Name = 'the trace reads NOCTTY_WIN32_OPEN_URL_TRACE_FILE at each open, truncates the file, and then returns true'; Pattern = '(?s)pub fn recordOpenUrlForTest\(alloc: Allocator, url: \[\]const u8\) !bool \{.*?"NOCTTY_WIN32_OPEN_URL_TRACE_FILE",.*?const file = try std\.Io\.Dir\.createFileAbsolute\(io, path, \.\{ \.truncate = true \}\);\s+defer file\.close\(io\);\s+try writeOpenUrlTrace\(io, file, url\);\s+return true;' }
         @{ Name = 'a trace record is the URL and one CRLF'; Pattern = 'try writer\.interface\.print\("\{s\}\\r\\n", \.\{url\}\);' }
     )
     foreach ($rule in $win32Rules) { if ($Win32Text -cnotmatch $rule.Pattern) { $problems.Add($rule.Name) } }

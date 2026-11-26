@@ -43,13 +43,14 @@ function Get-UnreviewedRendererLocks {
 
     # The two reviewed draw-mutex sites protect renderer-owned state. Pin
     # their surrounding statements so unrelated calls cannot use this allowance.
-    if ([regex]::Matches($genericCode, '\bdraw_mutex:\s*std\.Thread\.Mutex\s*=\s*\.\{\s*\}\s*,').Count -ne 1) {
+    # Zig 0.17: a std.Io.Mutex, taken with the global Io (QR-32's spellings).
+    if ([regex]::Matches($genericCode, '\bdraw_mutex:\s*std\.Io\.Mutex\s*=\s*\.init\s*,').Count -ne 1) {
         throw 'Renderer lock contract cannot confirm the draw mutex declaration.'
     }
     $updateFrame = $scopes['generic.zig updateFrame']
     $reviewedSites = @(
-        'if\s*\(self\.images\.kittyRequiresUpdate\(\s*state\.terminal,\s*&self\.terminal_state,\s*\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.images\.kittyUpdate\('
-        'var output_progress:\s*\?renderer\.State\.OutputProgress\s*=\s*critical\.output_progress;\s*\{\s*(?<lock>self\.draw_mutex\.lock\(\);)\s*defer self\.draw_mutex\.unlock\(\);\s*self\.rebuildCells\('
+        'if\s*\(self\.images\.kittyRequiresUpdate\(\s*state\.terminal,\s*&self\.terminal_state,\s*\)\)\s*\{\s*(?<lock>self\.draw_mutex\.lockUncancelable\(global\.io\(\)\);)\s*defer self\.draw_mutex\.unlock\(global\.io\(\)\);\s*self\.images\.kittyUpdate\('
+        'var output_progress:\s*\?renderer\.State\.OutputProgress\s*=\s*critical\.output_progress;\s*\{\s*(?<lock>self\.draw_mutex\.lockUncancelable\(global\.io\(\)\);)\s*defer self\.draw_mutex\.unlock\(global\.io\(\)\);\s*self\.rebuildCells\('
     )
     foreach ($site in $reviewedSites) {
         $siteMatches = [regex]::Matches($updateFrame, $site)

@@ -449,7 +449,7 @@ try {
     # line; and each runner matcher starts with the prefix the logPrefix test names for its level and scope.
     $guiRendererSources = [ordered]@{
         'src\process_shared.zig' = @('const level_txt = comptime level.asText();', 'const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";',
-            'return level_txt ++ prefix;', 'nosuspend stderr.print(comptime logPrefix(level, scope) ++ format ++ "\n", args)')
+            'return level_txt ++ prefix;', 'nosuspend stderr.file_writer.interface.print(comptime logPrefix(level, scope) ++ format ++ "\n", args)')
         'src\renderer\Windows.zig' = @('const log = std.log.scoped(.renderer_windows);', 'const start_log = std.log.scoped(.renderer_start);',
             'start_log.info("renderer started backend={s}", .{backend});', 'logStarted("opengl");',
             'logStarted(if (result.last_warp) "d3d11-warp" else "d3d11");', 'log.warn("OpenGL startup failed err={} could_not_start={}; trying the Direct3D 11 beta"',
