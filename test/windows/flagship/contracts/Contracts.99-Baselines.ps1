@@ -9,13 +9,16 @@ $reviewedArtifactDigests = @{
     # of rejecting it, and for FULLSCREEN-SESSION-01, which adds fullscreen
     # with an optional fullscreen_maximized return flag within schema v1,
     # and for the Zig 0.17.1 parse pass (1B.4), which rewrites one test's
-    # removed `**` as a typed @splat and leaves the schema unchanged.
+    # removed `**` as a typed @splat and leaves the schema unchanged, and
+    # for the Zig 0.17.1 compile pass (1B.5), which wraps the parser's fuzz
+    # test in 0.17's Smith interface (the same bytes outside fuzz mode) and
+    # leaves the parser and the schema unchanged.
     # PR branch commits are intentionally squashed and
     # deleted, so pin this digest independently of the manifest's durable base
     # commit rather than disabling verification when an intermediate source
     # commit becomes unreachable.
     'src/apprt/win32_session_state.zig' =
-        'aea991b40b09f55d65310afbc26bce0816547528e0ba60ef2858bdabf75d37f2'
+        '2599d4fe5a5b7c892dc4806bfeedf406612a45a0ad78a54a452916765d17f33a'
 
     # Reviewed in full after the Noctty rebrand and for PKG-35's packaged DLL
     # load/allocator smoke, retaining the staged portable CLI siblings, and
