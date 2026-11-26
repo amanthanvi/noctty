@@ -112,7 +112,7 @@ test "deinit frees the messages it never delivered" {
     var mailbox = try Mailbox.initSPSC(alloc);
 
     // The write outgrows the inline buffer, so the message owns an allocation.
-    const msg = try Message.writeReq(alloc, "x" ** 64);
+    const msg = try Message.writeReq(alloc, &@as([64]u8, @splat('x')));
     try std.testing.expect(msg == .write_alloc);
     mailbox.send(msg, null, null);
     mailbox.deinit(alloc);

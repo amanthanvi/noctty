@@ -81,30 +81,27 @@ pub const window_save_state_scrollback_max_lines: u32 = @intCast(win32_session_s
 /// when paired with diff to determine what fields have changed in a config,
 /// amongst other things.
 pub const Key = key: {
-    const field_infos = std.meta.fields(Config);
-    var enumFields: [field_infos.len]std.builtin.Type.EnumField = undefined;
+    const field_infos = @typeInfo(Config).@"struct".field_names;
+    var names: [field_infos.len][]const u8 = undefined;
+    var raw_values: [field_infos.len]comptime_int = undefined;
     var i: usize = 0;
-    for (field_infos) |field| {
+    for (field_infos, &names, &raw_values) |field, *name, *raw| {
         // Ignore fields starting with "_" since they're internal and
         // not copied ever.
-        if (field.name[0] == '_') continue;
+        if (field[0] == '_') continue;
 
-        enumFields[i] = .{
-            .name = field.name,
-            .value = i,
-        };
+        name.* = field;
+        raw.* = i;
         i += 1;
     }
 
-    var decls = [_]std.builtin.Type.Declaration{};
-    break :key @Type(.{
-        .@"enum" = .{
-            .tag_type = std.math.IntFittingRange(0, field_infos.len - 1),
-            .fields = enumFields[0..i],
-            .decls = &decls,
-            .is_exhaustive = true,
-        },
-    });
+    const TagInt = std.math.IntFittingRange(0, field_infos.len - 1);
+    var values: [i]TagInt = undefined;
+    for (raw_values[0..i], &values) |raw, *val| {
+        val.* = raw;
+    }
+
+    break :key @Enum(TagInt, .exhaustive, names[0..i], &values);
 };
 
 /// Returns the value type for a key.
@@ -6063,7 +6060,7 @@ const test_profile_text =
 test "profile keys keep every value exactly as written and format back to the same lines" {
     const testing = std.testing;
     const alloc = testing.allocator;
-    const long_arg = "x" ** 320;
+    const long_arg = &@as([320]u8, @splat('x'));
     const long_line = "profile-command = long: tool.exe " ++ long_arg ++ "\n";
     const text = test_profile_text ++ long_line;
 
@@ -6112,7 +6109,7 @@ test "profile keys: a line of the longest length the reader takes formats to a l
     const max = cli.args.LineIterator.max_line_len;
     const fill = struct {
         fn line(comptime head: []const u8, comptime byte: u8, comptime tail: []const u8) []const u8 {
-            return head ++ [_]u8{byte} ** (max - head.len - tail.len) ++ tail;
+            return head ++ &@as([max - head.len - tail.len]u8, @splat(byte)) ++ tail;
         }
     }.line;
     // Each line is exactly `max` bytes as written, without the optional
@@ -6412,7 +6409,7 @@ test "a config line longer than the reader takes is reported once and the next l
     // The line ends past the first 2048-byte read buffer and past the
     // second; a three-byte character crosses the limit.
     const prefix = "env = LONG=";
-    const long_env = prefix ++ "x" ** (max - prefix.len - 2) ++ "\xe2\x82\xac";
+    const long_env = prefix ++ &@as([max - prefix.len - 2]u8, @splat('x')) ++ "\xe2\x82\xac";
     // Theme files that exist: `finalize` then swaps in a config rebuilt by
     // replay (`loadTheme`), which `changeConditionalState` replays again.
     try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
@@ -6465,7 +6462,7 @@ test "a config line longer than the reader takes is reported once and the next l
     }
 
     // 4094 bytes is still read.
-    const fits = prefix ++ "x" ** (max - prefix.len);
+    const fits = prefix ++ &@as([max - prefix.len]u8, @splat('x'));
     var reader: std.Io.Reader = .fixed(fits ++ "\n");
     var ok = try Config.default(alloc);
     defer ok.deinit();
@@ -6484,7 +6481,7 @@ test "a theme file's problems are its own and are reported once, however the con
     // Three problems of the light theme: an over-long line (a problem that
     // is only a replay step), an unknown key and a refused profile line
     // (both parse problems of a line that is replayed).
-    const long = "background = #" ++ "1" ** (cli.args.LineIterator.max_line_len - "background = #".len + 1);
+    const long = "background = #" ++ &@as([cli.args.LineIterator.max_line_len - "background = #".len + 1]u8, @splat('1'));
     try tmp.dir.writeFile(.{ .sub_path = "light", .data = long ++ "\nforeground = #111111\n" ++
         "foo-bogus = 1\nprofile-command = C:\\Tools\\x.exe\n" });
     try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "foreground = #eeeeee\n" });
@@ -11357,7 +11354,7 @@ pub const QuickSelectAlphabet = struct {
     pub fn validate(alphabet: []const u8) Error!void {
         if (alphabet.len == 0) return error.EmptyAlphabet;
         if (alphabet.len == 1) return error.AlphabetTooShort;
-        var seen = [_]bool{false} ** 128;
+        var seen: [128]bool = @splat(false);
         for (alphabet) |char| {
             if (char < 0x20 or char >= 0x7f) return error.NonAsciiCharacter;
             if (seen[char]) return error.DuplicateCharacter;

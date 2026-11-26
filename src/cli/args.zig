@@ -1852,9 +1852,9 @@ test "LineIterator skips a line longer than its buffer and reads on" {
     // 4094 bytes fits, also with a CRLF line ending; 4095 does not, with
     // either ending; neither does a line whose last character, a three-byte
     // one, crosses the limit.
-    const fits = "a=" ++ "x" ** (max - 2);
-    const over = "b=" ++ "y" ** (max - 1);
-    const utf8 = "c=" ++ "z" ** (max - 3) ++ "\xe2\x82\xac";
+    const fits = "a=" ++ &@as([max - 2]u8, @splat('x'));
+    const over = "b=" ++ &@as([max - 1]u8, @splat('y'));
+    const utf8 = "c=" ++ &@as([max - 3]u8, @splat('z')) ++ "\xe2\x82\xac";
     const text = fits ++ "\n" ++ over ++ "\n" ++ "d=1\n" ++ utf8 ++ "\n" ++ "e=2\n" ++
         fits ++ "\r\n" ++ over ++ "\r\n" ++ "f=3\r\n" ++ over;
     // Through a small read buffer, as a config file is read.
@@ -1888,13 +1888,13 @@ test "LineIterator reads a line at 4095 bytes only when it ends in a CR, skips o
     // Each line as the reader holds it: its bytes before the LF, every CR
     // included.
     const cases = [_]Case{
-        .{ .line = "a=" ++ "x" ** (max - 2), .read = true },
-        .{ .line = "a=" ++ "x" ** (max - 1), .read = false },
-        .{ .line = "a=" ++ "x" ** (max - 2) ++ "\r", .read = true },
-        .{ .line = "a=" ++ "x" ** (max - 3) ++ "\r\r", .read = true },
-        .{ .line = "a=" ++ "x" ** (max - 2) ++ "\r\r", .read = false },
-        .{ .line = "a=" ++ "x" ** (max - 1) ++ "\r", .read = false },
-        .{ .line = "a=" ++ "x" ** max ++ "\r\r", .read = false },
+        .{ .line = "a=" ++ &@as([max - 2]u8, @splat('x')), .read = true },
+        .{ .line = "a=" ++ &@as([max - 1]u8, @splat('x')), .read = false },
+        .{ .line = "a=" ++ &@as([max - 2]u8, @splat('x')) ++ "\r", .read = true },
+        .{ .line = "a=" ++ &@as([max - 3]u8, @splat('x')) ++ "\r\r", .read = true },
+        .{ .line = "a=" ++ &@as([max - 2]u8, @splat('x')) ++ "\r\r", .read = false },
+        .{ .line = "a=" ++ &@as([max - 1]u8, @splat('x')) ++ "\r", .read = false },
+        .{ .line = "a=" ++ &@as([max]u8, @splat('x')) ++ "\r\r", .read = false },
     };
     for (cases) |case| {
         try testing.expectEqual(case.read, LineIterator.takes(case.line));
@@ -1970,7 +1970,7 @@ test "parse reports a skipped line with its place and keeps the rest" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    const text = "a=1\nb=" ++ "x" ** LineIterator.max_line_len ++ "\nb=2\n";
+    const text = "a=1\nb=" ++ &@as([LineIterator.max_line_len]u8, @splat('x')) ++ "\nb=2\n";
     var f: std.Io.Reader = .fixed(text);
     var iter: LineIterator = .{ .r = &f, .filepath = "C:\\cfg" };
     try parse(@TypeOf(data), testing.allocator, &data, &iter);

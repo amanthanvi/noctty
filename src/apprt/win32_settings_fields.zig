@@ -87,20 +87,16 @@ pub const SettingField = enum {
 /// descriptor's Config key, with explicit bool projections for notifications.
 pub const SettingValue = value: {
     @setEvalBranchQuota(10000);
-    const tags = std.meta.fields(SettingField);
-    var fields: [tags.len]std.builtin.Type.UnionField = undefined;
-    for (tags, 0..) |tag, i| {
-        const field: SettingField = @enumFromInt(tag.value);
+    const tags = @typeInfo(SettingField).@"enum";
+    var names: [tags.field_names.len][]const u8 = undefined;
+    var types: [tags.field_names.len]type = undefined;
+    for (tags.field_names, tags.field_values, &names, &types) |tag_name, tag_value, *name, *T| {
+        const field: SettingField = @enumFromInt(tag_value);
         const spec = descriptor(field);
-        const T = if (projection(field)) |part| @FieldType(spec.Value(), part.member) else spec.Value();
-        fields[i] = .{ .name = tag.name, .type = T, .alignment = @alignOf(T) };
+        T.* = if (projection(field)) |part| @FieldType(spec.Value(), part.member) else spec.Value();
+        name.* = tag_name;
     }
-    break :value @Type(.{ .@"union" = .{
-        .layout = .auto,
-        .tag_type = SettingField,
-        .fields = &fields,
-        .decls = &.{},
-    } });
+    break :value @Union(.auto, SettingField, &names, &types, &@splat(.{}));
 };
 
 /// These are the current form and UIA names, which intentionally differ from

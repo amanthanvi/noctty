@@ -650,7 +650,7 @@ test "win32 session state round-trips pane scrollback snapshot" {
 }
 
 test "win32 session state enforces scrollback line and byte caps" {
-    const too_many_lines = [_][]const u8{"x"} ** (max_scrollback_lines + 1);
+    const too_many_lines: [max_scrollback_lines + 1][]const u8 = @splat("x");
     try std.testing.expectError(
         error.TooManyScrollbackLines,
         encodeTestPane(.{ .scrollback = .{

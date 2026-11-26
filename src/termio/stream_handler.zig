@@ -2559,7 +2559,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
     try h.init(std.testing.allocator, .{
         .stopping = &stop,
         // Longer than a small write, so the reply owns its bytes.
-        .enquiry_response = "x" ** 60,
+        .enquiry_response = &@as([60]u8, @splat('x')),
         .osc_color_report_format = .@"16-bit",
         .seen_title = false,
     });
@@ -2571,7 +2571,7 @@ test "a stopped reader gives up waiting on a full mailbox and sends nothing afte
 
     // An OSC 52 write longer than a small surface message, so it owns its
     // bytes too; the testing allocator reports a dropped message not freed.
-    const clipboard = "\x1b]52;c;" ++ "QUJD" ** 75 ++ "\x07";
+    const clipboard = "\x1b]52;c;" ++ &@as(["QUJD".len * 75]u8, std.simd.repeat("QUJD".len * 75, "QUJD".*)) ++ "\x07";
 
     // Feeds output with the renderer mutex held, as the reader does.
     const Feed = struct {
@@ -3113,7 +3113,7 @@ test "utf8Prefix never cuts a UTF-8 sequence" {
     }
 
     // The case from the report: 40 two-byte letters against a 63-byte title.
-    const title = "é" ** 40;
+    const title = &@as(["é".len * 40]u8, std.simd.repeat("é".len * 40, "é".*));
     try std.testing.expectEqual(@as(usize, 62), StreamHandler.utf8Prefix(title, 63).len);
     // Text that fits, ASCII or not, is returned whole.
     try std.testing.expectEqualStrings(title, StreamHandler.utf8Prefix(title, 80));
@@ -3134,9 +3134,9 @@ test "desktop notifications are cut on a code point boundary" {
     var seq: std.ArrayList(u8) = .empty;
     defer seq.deinit(alloc);
     try seq.appendSlice(alloc, "\x1b]777;notify;");
-    try seq.appendSlice(alloc, "é" ** 40);
+    try seq.appendSlice(alloc, &@as(["é".len * 40]u8, std.simd.repeat("é".len * 40, "é".*)));
     try seq.append(alloc, ';');
-    try seq.appendSlice(alloc, "é" ** 200);
+    try seq.appendSlice(alloc, &@as(["é".len * 200]u8, std.simd.repeat("é".len * 200, "é".*)));
     try seq.appendSlice(alloc, "\x1b\\");
     h.stream.nextSlice(seq.items);
 
@@ -3196,7 +3196,7 @@ test "OSC 7501 answers the query once and forwards reports, prompts and resets" 
 
     // A report reaches the surface with its body. One longer than a small
     // message is allocated and freed with the message.
-    const long_msg = "QUFB" ** 80;
+    const long_msg = &@as(["QUFB".len * 80]u8, std.simd.repeat("QUFB".len * 80, "QUFB".*));
     h.stream.nextSlice("\x1b]7501;state=working:progress=40:msg=" ++ long_msg ++ "\x1b\\");
     {
         var message = h.nextSurfaceMessage().?;

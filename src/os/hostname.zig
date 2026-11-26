@@ -74,8 +74,8 @@ test isValid {
     try testing.expect(isValid("a-b.com"));
     try testing.expect(isValid("a.b.c.d.e.f.g"));
     try testing.expect(isValid("127.0.0.1")); // Also a valid hostname
-    try testing.expect(isValid("a" ** 63 ++ ".com")); // Label exactly 63 chars (valid)
-    try testing.expect(isValid("a." ** 126 ++ "a")); // Total length 253 (valid)
+    try testing.expect(isValid(&@as([63]u8, @splat('a')) ++ ".com")); // Label exactly 63 chars (valid)
+    try testing.expect(isValid(&@as(["a.".len * 126]u8, std.simd.repeat("a.".len * 126, "a.".*)) ++ "a")); // Total length 253 (valid)
 
     // Invalid hostnames
     try testing.expect(!isValid(""));
@@ -88,8 +88,8 @@ test isValid {
     try testing.expect(!isValid("host_name.com"));
     try testing.expect(!isValid("."));
     try testing.expect(!isValid(".."));
-    try testing.expect(!isValid("a" ** 64 ++ ".com")); // Label length 64 (too long)
-    try testing.expect(!isValid("a." ** 126 ++ "ab")); // Total length 254 (too long)
+    try testing.expect(!isValid(&@as([64]u8, @splat('a')) ++ ".com")); // Label length 64 (too long)
+    try testing.expect(!isValid(&@as(["a.".len * 126]u8, std.simd.repeat("a.".len * 126, "a.".*)) ++ "ab")); // Total length 254 (too long)
 }
 
 /// Whether two host names are the same name. Host names are case-insensitive

@@ -859,7 +859,7 @@ test "command defaults expose last-command and prompt navigation verbs" {
         .copy_last_command_output,
         .insert_last_command,
     };
-    var found = [_]bool{false} ** expected.len;
+    var found: [expected.len]bool = @splat(false);
 
     for (defaults) |cmd| {
         for (expected, 0..) |action, i| {

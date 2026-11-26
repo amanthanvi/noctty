@@ -604,7 +604,7 @@ test "keyboard keeps its sequence state when a leader key cannot be queued" {
     }
 
     // The request outgrows the inline buffer, so it owns an allocation.
-    const req = try termio.Message.WriteReq.init(testing.allocator, "x" ** 64);
+    const req = try termio.Message.WriteReq.init(testing.allocator, &@as([64]u8, @splat('x')));
     try testing.expect(req == .alloc);
     var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 0 });
     try testing.expectError(
@@ -617,7 +617,7 @@ test "keyboard keeps its sequence state when a leader key cannot be queued" {
     try keyboard.enterSequence(
         testing.allocator,
         &set,
-        try termio.Message.WriteReq.init(testing.allocator, "y" ** 64),
+        try termio.Message.WriteReq.init(testing.allocator, &@as([64]u8, @splat('y'))),
     );
     try testing.expectEqual(&set, keyboard.sequence_set.?);
     try testing.expectEqual(@as(usize, 1), keyboard.sequence_queued.items.len);
@@ -10819,9 +10819,9 @@ test "Surface: last-command insert safety reuses paste protection and rejects co
     try testing.expect(!insertCommandIsSafe("one\xE2\x81\xA6two"));
     try testing.expect(!insertCommandIsSafe("one\xEF\xBB\xBFtwo"));
 
-    const too_long = "e" ** (insert_command_max_len + 1);
+    const too_long = &@as([insert_command_max_len + 1]u8, @splat('e'));
     try testing.expect(!insertCommandIsSafe(too_long));
-    const at_limit = "e" ** insert_command_max_len;
+    const at_limit = &@as([insert_command_max_len]u8, @splat('e'));
     try testing.expect(insertCommandIsSafe(at_limit));
 }
 

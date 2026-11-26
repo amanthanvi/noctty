@@ -799,7 +799,7 @@ test "modal tick drains safely under an outer tick and rejects recursive modal d
     const rt_app: *apprt.App = @ptrFromInt(@alignOf(apprt.App));
     const surface: *Surface = @ptrFromInt(@alignOf(Surface));
     try std.testing.expect(app.mailbox.push(.quit, .instant) != 0);
-    const payload = try apprt.surface.Message.WriteReq.init(app.alloc, &([_]u8{'x'} ** 300));
+    const payload = try apprt.surface.Message.WriteReq.init(app.alloc, &@as([300]u8, @splat('x')));
     try std.testing.expect(app.mailbox.push(.{ .surface_message = .{
         .surface = surface,
         .message = .{ .pwd_change = payload },

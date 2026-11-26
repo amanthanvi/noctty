@@ -1473,15 +1473,9 @@ comptime {
 
 const FieldWindows = handles: {
     const empty: ?HWND = null;
-    var members: [settings_clipped_control_count]std.builtin.Type.StructField = undefined;
-    for (settings_control_specs[0..settings_clipped_control_count], 0..) |row, i| members[i] = .{
-        .name = row.binding ++ "\x00",
-        .type = ?HWND,
-        .default_value_ptr = @ptrCast(&empty),
-        .is_comptime = false,
-        .alignment = @alignOf(?HWND),
-    };
-    break :handles @Type(.{ .@"struct" = .{ .layout = .auto, .fields = &members, .decls = &.{}, .is_tuple = false } });
+    var names: [settings_clipped_control_count][]const u8 = undefined;
+    for (settings_control_specs[0..settings_clipped_control_count], &names) |row, *name| name.* = row.binding;
+    break :handles @Struct(.auto, null, &names, &@splat(?HWND), &@splat(.{ .default_value_ptr = @ptrCast(&empty) }));
 };
 
 const settings_label_specs = labels: {

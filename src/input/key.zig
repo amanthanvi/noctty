@@ -87,7 +87,7 @@ pub const KeyEvent = struct {
         /// console host's key-break record does, or nothing for a system
         /// key break. A Ctrl chord carries the control character Windows
         /// produced (U+0001 for Ctrl+A), not the letter.
-        units: [max_units]u16 = [_]u16{0} ** max_units,
+        units: [max_units]u16 = @splat(0),
         units_len: u8 = 0,
 
         /// One key press types at most a layout ligature (four units)

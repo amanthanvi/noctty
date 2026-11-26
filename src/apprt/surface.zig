@@ -45,8 +45,8 @@ pub const TerminalOutputTransport = struct {
     omission_pending: std.atomic.Value(u64) = .init(0),
     mutex: std.Thread.Mutex = .{},
     chunks: [max_chunks][chunk_bytes]u8 = undefined,
-    lengths: [max_chunks]usize = [_]usize{0} ** max_chunks,
-    resets_before: [max_chunks]bool = [_]bool{false} ** max_chunks,
+    lengths: [max_chunks]usize = @splat(0),
+    resets_before: [max_chunks]bool = @splat(false),
     trailing_reset: bool = false,
     head: usize = 0,
     count: usize = 0,
@@ -241,8 +241,8 @@ pub const TerminalOutputTransport = struct {
         const epoch = self.captureEpoch() orelse return;
 
         var chunks: [max_chunks][chunk_bytes]u8 = undefined;
-        var lengths: [max_chunks]usize = [_]usize{0} ** max_chunks;
-        var resets_before: [max_chunks]bool = [_]bool{false} ** max_chunks;
+        var lengths: [max_chunks]usize = @splat(0);
+        var resets_before: [max_chunks]bool = @splat(false);
         var count: usize = 0;
         self.mutex.lock();
         if (self.interest_state.load(.acquire) != epoch) {

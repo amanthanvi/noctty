@@ -387,7 +387,7 @@ pub const Face = struct {
             "\xd8\x00\x00\x41", // high surrogate without its partner
             "\xdc\x00\x00\x41", // low surrogate on its own
             "\x00\x41\xd8\x00", // high surrogate cut off at the end
-            "\x00a" ** 513, // 1,026 bytes: more than 512 code units
+            &@as(["\x00a".len * 513]u8, std.simd.repeat("\x00a".len * 513, "\x00a".*)), // 1,026 bytes: more than 512 code units
         };
         for (malformed) |bytes| {
             for (utf16_kinds) |kind| {
@@ -412,15 +412,15 @@ pub const Face = struct {
         // 342 x U+4E00 is 684 bytes of UTF-16, under the 1,024-byte input
         // limit, and 1,026 bytes of UTF-8: one character more than the 1,024
         // bytes `+show-face` passes. 341 fill it to 1,023 bytes.
-        try expectUtf16Family("一" ** 341, true, 1024);
-        try expectUtf16Family("一" ** 342, false, 1024);
-        try expectUtf16Family("a" ** 512, true, 1024);
+        try expectUtf16Family(&@as(["一".len * 341]u8, std.simd.repeat("一".len * 341, "一".*)), true, 1024);
+        try expectUtf16Family(&@as(["一".len * 342]u8, std.simd.repeat("一".len * 342, "一".*)), false, 1024);
+        try expectUtf16Family(&@as([512]u8, @splat('a')), true, 1024);
 
         // The synthetic bold and italic paths pass 256 bytes: 85 characters are
         // 255 bytes of UTF-8, 86 are 258.
-        try expectUtf16Family("一" ** 85, true, 256);
-        try expectUtf16Family("一" ** 86, false, 256);
-        try expectUtf16Family("a" ** 300, false, 256);
+        try expectUtf16Family(&@as(["一".len * 85]u8, std.simd.repeat("一".len * 85, "一".*)), true, 256);
+        try expectUtf16Family(&@as(["一".len * 86]u8, std.simd.repeat("一".len * 86, "一".*)), false, 256);
+        try expectUtf16Family(&@as([300]u8, @splat('a')), false, 256);
 
         // A buffer of exactly the UTF-8 length is enough; one byte less is not.
         try expectUtf16Family("一", true, 3);
