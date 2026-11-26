@@ -995,7 +995,7 @@ pub const App = struct {
     /// are owned by `core_app.alloc` and freed in `App.deinit`. The
     /// palette's hint names the newest when the query is empty
     /// (`overlay_view.compose`, through `Host.overlayFacts`).
-    palette_mru: [5]?[:0]const u8 = .{null} ** 5,
+    palette_mru: [5]?[:0]const u8 = @splat(null),
     /// Singleton settings window. Lazily created by the `open_config`
     /// action; `App.terminate` destroys the HWND if still alive.
     settings_window: win32_settings.SettingsWindow = undefined,

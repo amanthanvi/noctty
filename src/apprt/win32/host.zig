@@ -4718,7 +4718,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(usize, 0), host.active_tab);
 
         // Backward with Shift held.
-        var held = [_]u8{0} ** 256;
+        var held = @as([256]u8, @splat(0));
         held[c.VK_SHIFT] = 0x80;
         keyboard.set(&held);
         _ = sys.SetFocus(stops[0]);
@@ -4728,7 +4728,7 @@ pub const Host = struct {
             try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(from, c.WM_KEYDOWN, c.VK_TAB, 0));
             try std.testing.expectEqual(@as(?HWND, stops[(count - i - 1) % count]), sys.GetFocus());
         }
-        keyboard.set(&([_]u8{0} ** 256));
+        keyboard.set(&(@as([256]u8, @splat(0))));
 
         // Enter is a keyboard activation, not a synthetic mouse press.
         const Clicks = struct {

@@ -1,5 +1,6 @@
 //! Single-instance IPC transport, authentication, forwarding and server dispatch.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const win32_types = @import("../win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -2691,7 +2692,7 @@ test "win32 forwarded rejection reasons are classified and safe to log" {
     try std.testing.expect(!forwardedKeyLoggable("has space"));
     try std.testing.expect(!forwardedKeyLoggable("newline\ninjected"));
     try std.testing.expect(!forwardedKeyLoggable("UPPER"));
-    try std.testing.expect(!forwardedKeyLoggable("a" ** 65));
+    try std.testing.expect(!forwardedKeyLoggable(comptime win32_repeat.repeat("a", 65)));
     try std.testing.expect(forwardedKeyLoggable("window-height"));
 }
 

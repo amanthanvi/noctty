@@ -150,7 +150,7 @@ pub const LOGFONTW = extern struct {
     lfClipPrecision: u8 = c.CLIP_DEFAULT_PRECIS,
     lfQuality: u8 = c.CLEARTYPE_QUALITY,
     lfPitchAndFamily: u8 = c.DEFAULT_PITCH | c.FF_DONTCARE,
-    lfFaceName: [c.LF_FACESIZE]u16 = [_]u16{0} ** c.LF_FACESIZE,
+    lfFaceName: [c.LF_FACESIZE]u16 = @as([c.LF_FACESIZE]u16, @splat(0)),
 };
 
 pub const NONCLIENTMETRICSW = extern struct {

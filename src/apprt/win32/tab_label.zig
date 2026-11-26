@@ -5,6 +5,7 @@
 //! rebuilds the button only when that Key differs from the one it last drew
 //! (`Tab.cachedKey`). Nothing here touches a window.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 const win32_chrome_state = @import("../win32_chrome_state.zig");
 const win32_theme = @import("../win32_theme.zig");
@@ -394,10 +395,10 @@ test "win32 tab label charges its decorations to the button's budget" {
     // "* " + "1: " + " (3)" is nine cells the title cannot also spend, so a
     // 24-cell button leaves it 15; without the count 19, and the inactive
     // second tab ("2: ") 21.
-    const long = "a" ** 40;
-    try expectText("* 1: " ++ "a" ** 12 ++ "... (3)", testKey(long, 0, true, 3, 24, true));
-    try expectText("* 1: " ++ "a" ** 16 ++ "...", testKey(long, 0, true, 3, 24, false));
-    try expectText("2: " ++ "a" ** 18 ++ "...", testKey(long, 1, false, 1, 24, false));
+    const long = comptime win32_repeat.repeat("a", 40);
+    try expectText("* 1: " ++ comptime win32_repeat.repeat("a", 12) ++ "... (3)", testKey(long, 0, true, 3, 24, true));
+    try expectText("* 1: " ++ comptime win32_repeat.repeat("a", 16) ++ "...", testKey(long, 0, true, 3, 24, false));
+    try expectText("2: " ++ comptime win32_repeat.repeat("a", 18) ++ "...", testKey(long, 1, false, 1, 24, false));
     // A button too narrow for its own decorations still shows an ellipsis.
     try expectText("* 1: ... (3)", testKey(long, 0, true, 3, 6, true));
 
@@ -434,7 +435,7 @@ test "win32 tab UIA name keeps the pane count the drawn label shows" {
     // One pane is the ordinary case and carries no count, matching the label.
     try testing.expectEqualStrings("1: pwsh", uiaName(&buf, "pwsh", 0, 1).?);
     // The name is the full title, not the compacted one the button draws.
-    const long = "a" ** 40;
+    const long = comptime win32_repeat.repeat("a", 40);
     try testing.expectEqualStrings("1: " ++ long, uiaName(&buf, long, 0, 1).?);
     // A title too long for the provider's buffer is refused so the caller can
     // fall back to the drawn label instead of reporting a cut name, and so is
@@ -478,7 +479,7 @@ test "win32 tab UIA name changes with a split the drawn label hides" {
 }
 
 test "win32 tab tooltip keeps a runaway title bounded" {
-    const shown = (try tooltip(testing.allocator, testKey("a" ** 600, 0, false, 1, 24, false))).?;
+    const shown = (try tooltip(testing.allocator, testKey(comptime win32_repeat.repeat("a", 600), 0, false, 1, 24, false))).?;
     defer testing.allocator.free(shown);
     try testing.expectEqual(tooltip_max_width, displayWidth(shown));
     try testing.expect(std.mem.endsWith(u8, shown, "..."));
@@ -537,12 +538,12 @@ test "win32 bell tab label keeps the glyph on a narrow tab" {
     // The tooltip gate's budget is the label's: twenty cells fit tab 2's 21
     // without a bell and are compacted to 18 with one, and the tooltip
     // appears exactly then.
-    const twenty = "a" ** 20;
+    const twenty = comptime win32_repeat.repeat("a", 20);
     var alerted = testKey(twenty, 1, false, 1, 24, false);
     try expectText("2: " ++ twenty, alerted);
     try expectTooltip(null, alerted);
     alerted.bell = true;
-    try expectText(glyph ++ "2: " ++ "a" ** 15 ++ "...", alerted);
+    try expectText(glyph ++ "2: " ++ comptime win32_repeat.repeat("a", 15) ++ "...", alerted);
     try expectTooltip(twenty, alerted);
     // A budget smaller than the glyph leaves the title the minimum, not less.
     var tiny = testKey("beta", 0, false, 1, 2, false);
