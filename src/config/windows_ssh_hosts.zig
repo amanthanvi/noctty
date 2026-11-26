@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win = @import("../os/windows.zig");
+const windows_ext = @import("../os/windows_ext.zig");
 const thread_role = @import("../sync/thread_role.zig");
 const log = std.log.scoped(.windows_ssh_hosts);
 
@@ -57,7 +58,7 @@ pub fn userProfileDir(buf: []u8) !?[]const u8 {
         error.OutOfMemory => return error.BufferTooSmall,
         error.InvalidWtf8, error.EnvironmentVariableNotFound => {},
     }
-    return try win.knownFolderPathUtf8(&win.FOLDERID_Profile, buf);
+    return try windows_ext.knownFolderPathUtf8(&windows_ext.FOLDERID_Profile, buf);
 }
 
 pub fn load(alloc: Allocator) ![]Host {

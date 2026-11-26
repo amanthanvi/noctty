@@ -1673,7 +1673,7 @@ fn launchPortableHelper(
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
-    try internal_os.windows.spawnChildHoldingInheritLock(&child);
+    try internal_os.windows_ext.spawnChildHoldingInheritLock(&child);
     var child_open = true;
     errdefer if (child_open) {
         win32_sys.terminateProcess(child.id, 1) catch {};
@@ -2004,7 +2004,7 @@ fn spawnInstalledNoctty(
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
-    try internal_os.windows.spawnChildHoldingInheritLock(&child);
+    try internal_os.windows_ext.spawnChildHoldingInheritLock(&child);
     child.env_map = null;
     return child;
 }

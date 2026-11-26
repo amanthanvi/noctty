@@ -2165,8 +2165,8 @@ pub fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
 
     const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch known: {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = internal_os.windows.knownFolderPathUtf8(
-            &internal_os.windows.FOLDERID_LocalAppData,
+        const path = internal_os.windows_ext.knownFolderPathUtf8(
+            &internal_os.windows_ext.FOLDERID_LocalAppData,
             &buf,
         ) catch return null;
         break :known alloc.dupe(u8, path orelse return null) catch return null;
@@ -2180,8 +2180,8 @@ pub fn warnPortableIgnoredLocalData(alloc: Allocator) void {
     defer alloc.free(portable_root);
     const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch known: {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = internal_os.windows.knownFolderPathUtf8(
-            &internal_os.windows.FOLDERID_LocalAppData,
+        const path = internal_os.windows_ext.knownFolderPathUtf8(
+            &internal_os.windows_ext.FOLDERID_LocalAppData,
             &buf,
         ) catch return;
         break :known alloc.dupe(u8, path orelse return) catch return;

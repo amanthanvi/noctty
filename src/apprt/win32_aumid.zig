@@ -55,6 +55,7 @@ const consts = @import("win32/consts.zig");
 const win32_elevation = @import("win32_elevation.zig");
 const win32_toast_activator = @import("win32_toast_activator.zig");
 const os_windows = @import("../os/windows.zig");
+const windows_ext = @import("../os/windows_ext.zig");
 
 const HRESULT = win32_types.HRESULT;
 const LPCWSTR = win32_types.LPCWSTR;
@@ -99,7 +100,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
     const name = std.unicode.utf8ToUtf16LeStringLiteral(aumid_utf8);
     const elevated = win32_elevation.isProcessElevated() catch true;
     const installer_managed = if (std.fs.path.dirname(exe_path)) |dir|
-        os_windows.isInstallerManagedInstallDir(dir)
+        windows_ext.isInstallerManagedInstallDir(dir)
     else
         false;
     // A test that starts a real App reaches this; it must never name an

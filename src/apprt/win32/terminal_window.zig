@@ -1902,8 +1902,8 @@ pub const Surface = struct {
 
         if (env.get("USERPROFILE") == null) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (try internal_os.windows.knownFolderPathUtf8(
-                &internal_os.windows.FOLDERID_Profile,
+            if (try internal_os.windows_ext.knownFolderPathUtf8(
+                &internal_os.windows_ext.FOLDERID_Profile,
                 &buf,
             )) |profile| {
                 try env.put("USERPROFILE", profile);
@@ -1912,8 +1912,8 @@ pub const Surface = struct {
 
         if (env.get("LOCALAPPDATA") == null) {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (try internal_os.windows.knownFolderPathUtf8(
-                &internal_os.windows.FOLDERID_LocalAppData,
+            if (try internal_os.windows_ext.knownFolderPathUtf8(
+                &internal_os.windows_ext.FOLDERID_LocalAppData,
                 &buf,
             )) |local_appdata| {
                 try env.put("LOCALAPPDATA", local_appdata);

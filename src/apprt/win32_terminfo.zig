@@ -94,7 +94,7 @@ fn isAbsolute(path: []const u8) bool {
 fn isRemote(path: []const u8) bool {
     if (path.len >= 2 and isSeparator(path[0]) and isSeparator(path[1])) return true;
     if (comptime builtin.os.tag != .windows) return false;
-    return internal_os.windows.driveTypeForLetter(path[0]) == internal_os.windows.DRIVE_REMOTE;
+    return internal_os.windows_ext.driveTypeForLetter(path[0]) == internal_os.windows_ext.DRIVE_REMOTE;
 }
 
 fn isSeparator(c: u8) bool {

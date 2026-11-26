@@ -1,0 +1,25 @@
+src/Command.zig: CloseHandle->ext FOLDERID_Profile->ext exp.STILL_ACTIVE->ext exp.kernel32.ResumeThread->ext inheritable_spawn_lock->ext kernel32->ext knownFolderPathUtf8->ext
+src/apprt/win32.zig: FOLDERID_LocalAppData->ext knownFolderPathUtf8->ext
+src/apprt/win32/app.zig: AssocQueryStringW->ext DRIVE_NO_ROOT_DIR->ext FOLDERID_Profile->ext driveTypeForLetter->ext isInstallerManagedInstallDir->ext knownFolderPathUtf8->ext spawnChildHoldingInheritLock->ext
+src/apprt/win32/gl_startup.zig: IMAGE_FILE_MACHINE_AMD64->ext IMAGE_FILE_MACHINE_ARM64->ext IMAGE_FILE_MACHINE_ARMNT->ext IMAGE_FILE_MACHINE_I386->ext IMAGE_FILE_MACHINE_UNKNOWN->ext ProcessArchitecture->ext build_machine->ext detectProcessArchitecture->ext machineArchitectureLabel->ext resolveProcessArchitecture->ext
+src/apprt/win32/terminal_window.zig: FOLDERID_LocalAppData->ext FOLDERID_Profile->ext knownFolderPathUtf8->ext
+src/apprt/win32_aumid.zig: isInstallerManagedInstallDir->ext
+src/apprt/win32_powershell_install.zig: FOLDERID_LocalAppData->ext knownFolderPathUtf8->ext
+src/apprt/win32_terminfo.zig: DRIVE_REMOTE->ext driveTypeForLetter->ext
+src/cli/diagnostic_bundle.zig: IMAGE_FILE_MACHINE_UNKNOWN->ext detectProcessArchitecture->ext isInstallerManagedInstallDir->ext machineArchitectureName->ext
+src/cli/version.zig: IMAGE_FILE_MACHINE_AMD64->ext IMAGE_FILE_MACHINE_ARM64->ext IMAGE_FILE_MACHINE_UNKNOWN->ext ProcessArchitecture->ext build_machine->ext detectProcessArchitecture->ext machineArchitectureLabel->ext machineArchitectureName->ext
+src/config/windows_shell.zig: DRIVE_FIXED->ext DRIVE_RAMDISK->ext DRIVE_REMOTE->ext DeviceIoControl->ext FOLDERID_Profile->ext GetACP->ext GetOEMCP->ext TestHooks->ext directVolumePath->ext driveTypeForLetter->ext knownFolderPathUtf8->ext spawnChildHoldingInheritLock->ext
+src/config/windows_ssh_hosts.zig: FOLDERID_Profile->ext knownFolderPathUtf8->ext
+src/os/file.zig: kernel32->ext
+src/os/homedir.zig: FOLDERID_Profile->ext knownFolderPathUtf8->ext
+src/os/hostname.zig: exp.kernel32.GetComputerNameExW->ext
+src/os/local_path.zig: DRIVE_CDROM->ext DRIVE_FIXED->ext DRIVE_NO_ROOT_DIR->ext DRIVE_RAMDISK->ext DRIVE_REMOVABLE->ext GetDriveTypeW->ext GetFinalPathNameByHandleW->exp.kernel32 TestHooks->ext directVolumeDeviceName->ext directVolumePath->ext driveTypeForLetter->ext
+src/os/windows_text_editor.zig: AssocQueryStringW->ext
+src/os/xdg.zig: FOLDERID_LocalAppData->ext innoUninstallRegistryMatchesInstallDir->ext knownFolderPathUtf8->ext
+src/pty.zig: CloseHandle->ext HMODULE->ext HWND->ext SetHandleInformation->ext exp.ClearPseudoConsoleFn->ext exp.ClosePseudoConsoleFn->ext exp.CreatePseudoConsoleFn->ext exp.HPCON->top exp.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR->ext exp.LOAD_LIBRARY_SEARCH_SYSTEM32->ext exp.PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH->ext exp.ReparentPseudoConsoleFn->ext exp.ResizePseudoConsoleFn->ext exp.ShowHidePseudoConsoleFn->ext kernel32->ext
+src/pty_transport_probe.zig: CloseHandle->ext kernel32->ext
+src/terminal/kitty/graphics_image.zig: TestHooks->ext deleteOpenedFile->ext directVolumeDeviceName->ext
+src/termio/Exec.zig: CloseHandle->ext exp.FILE_FLAG_FIRST_PIPE_INSTANCE->top exp.STILL_ACTIVE->ext kernel32->ext
+src/termio/Termio.zig: CloseHandle->ext kernel32->ext
+src/termio/wsl_env.zig: DRIVE_FIXED->ext DRIVE_RAMDISK->ext DRIVE_REMOVABLE->ext TestHooks->ext driveTypeForLetter->ext
+src/update/github_releases.zig: spawnChildHoldingInheritLock->ext

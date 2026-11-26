@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
 const win32 = @import("../os/windows.zig");
+const windows_ext = @import("../os/windows_ext.zig");
 const thread_role = @import("../sync/thread_role.zig");
 const Command = @import("command.zig").Command;
 const windows_shell_types = @import("windows_shell_types.zig");
@@ -47,7 +48,7 @@ pub fn shouldApplyUtf8Console(
 
 pub fn shouldApplyUtf8ConsoleForCurrentSystem(mode: Utf8Console) bool {
     if (comptime builtin.os.tag != .windows) return false;
-    return shouldApplyUtf8Console(mode, win32.GetACP(), win32.GetOEMCP());
+    return shouldApplyUtf8Console(mode, windows_ext.GetACP(), windows_ext.GetOEMCP());
 }
 
 fn isLegacyCjkCodePage(code_page: u32) bool {
@@ -2335,11 +2336,11 @@ fn searchPath(
     dirs: while (dirs.next()) |raw_dir| {
         const dir = stripOuterQuotes(std.mem.trim(u8, raw_dir, " \t"));
         if (internal_os.path.isNetworkOrDevicePath(dir) or !isDriveAbsolutePath(dir)) continue;
-        const drive_type = internal_os.windows.driveTypeForLetter(dir[0]);
-        if (drive_type == internal_os.windows.DRIVE_REMOTE) continue;
+        const drive_type = internal_os.windows_ext.driveTypeForLetter(dir[0]);
+        if (drive_type == internal_os.windows_ext.DRIVE_REMOTE) continue;
         // Discovery never spins up removable/optical media on the UI thread.
-        if (discovery and drive_type != internal_os.windows.DRIVE_FIXED and
-            drive_type != internal_os.windows.DRIVE_RAMDISK) continue;
+        if (discovery and drive_type != internal_os.windows_ext.DRIVE_FIXED and
+            drive_type != internal_os.windows_ext.DRIVE_RAMDISK) continue;
         if (discovery and !isLocalSearchDirectory(dir)) continue;
         var extensions = std.mem.splitScalar(u8, if (extension.len > 0) "" else pathext orelse ".COM;.EXE;.BAT;.CMD", ';');
         exts: while (extensions.next()) |raw_ext| {
@@ -2406,8 +2407,8 @@ fn windowsNonDirectoryPathExists(path: []const u8) bool {
 /// ancestor link into a share or an unchecked redirect chain.
 fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
     if (!isDriveAbsolutePath(path) or internal_os.path.isNetworkOrDevicePath(path)) return null;
-    const drive_type = internal_os.windows.driveTypeForLetter(path[0]);
-    if (drive_type != internal_os.windows.DRIVE_FIXED and drive_type != internal_os.windows.DRIVE_RAMDISK) return null;
+    const drive_type = internal_os.windows_ext.driveTypeForLetter(path[0]);
+    if (drive_type != internal_os.windows_ext.DRIVE_FIXED and drive_type != internal_os.windows_ext.DRIVE_RAMDISK) return null;
     var handle: windows.HANDLE = undefined;
     const status = ntOpenDontReparse(
         path,
@@ -2436,7 +2437,7 @@ pub fn ntOpenDontReparse(
     // Older Windows also treats the DOS drive-letter mapping as a reparse.
     // Resolve just that mapping without opening a filesystem target, and accept
     // only a direct local volume device. The rest keeps the kernel guard.
-    if (!internal_os.windows.directVolumePath(&wide)) return null;
+    if (!internal_os.windows_ext.directVolumePath(&wide)) return null;
     const span = wide.span();
     var name: windows.UNICODE_STRING = .{
         .Length = @intCast(span.len * 2),
@@ -2506,7 +2507,7 @@ fn isLocalExecutableInfo(info: win32_types.FILE_ATTRIBUTE_TAG_INFO) bool {
 /// the call filled, or null.
 fn readReparseData(handle: windows.HANDLE, buf: []align(4) u8) ?[]const u8 {
     var returned: windows.DWORD = 0;
-    if (internal_os.windows.DeviceIoControl(
+    if (internal_os.windows_ext.DeviceIoControl(
         handle,
         win32_types.FSCTL_GET_REPARSE_POINT,
         null,
@@ -2627,7 +2628,7 @@ test "PKG08 round3 child lookup accepts a real App Execution Alias" {
     const dir = try std.fs.path.join(alloc, &.{ local_app_data, "Microsoft", "WindowsApps" });
     if (internal_os.path.isNetworkOrDevicePath(dir) or
         dir.len < 3 or dir[1] != ':' or
-        internal_os.windows.driveTypeForLetter(dir[0]) == internal_os.windows.DRIVE_REMOTE)
+        internal_os.windows_ext.driveTypeForLetter(dir[0]) == internal_os.windows_ext.DRIVE_REMOTE)
         return error.SkipZigTest;
     var env = std.process.EnvMap.init(alloc);
     try env.put("PATH", dir);
@@ -4264,7 +4265,7 @@ fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
 
-    win32.spawnChildHoldingInheritLock(&child) catch |err| {
+    windows_ext.spawnChildHoldingInheritLock(&child) catch |err| {
         log.warn("failed to probe wsl responsiveness exe={s} err={}", .{ exe_path, err });
         return false;
     };
@@ -4714,7 +4715,7 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     child.create_no_window = true;
 
     if (builtin.is_test) if (test_wsl_list_spawn) |hook| try hook(&child);
-    try win32.spawnChildHoldingInheritLock(&child);
+    try windows_ext.spawnChildHoldingInheritLock(&child);
     var child_running = true;
     errdefer {
         if (child_running) _ = child.kill() catch {};
@@ -5147,8 +5148,8 @@ fn deinitOwnedStringList(alloc: Allocator, values: []const []u8) void {
 
 fn defaultWindowsHome(alloc: Allocator) !?[]const u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (try internal_os.windows.knownFolderPathUtf8(
-        &internal_os.windows.FOLDERID_Profile,
+    if (try internal_os.windows_ext.knownFolderPathUtf8(
+        &internal_os.windows_ext.FOLDERID_Profile,
         &buf,
     )) |path| {
         return try alloc.dupe(u8, path);
@@ -5174,7 +5175,7 @@ pub const isDriveAbsolutePath = internal_os.path.isDriveAbsolutePath;
 fn isOnLocalDrive(path: []const u8) bool {
     return isDriveAbsolutePath(path) and
         !internal_os.path.isNetworkOrDevicePath(path) and
-        internal_os.windows.driveTypeForLetter(path[0]) != internal_os.windows.DRIVE_REMOTE;
+        internal_os.windows_ext.driveTypeForLetter(path[0]) != internal_os.windows_ext.DRIVE_REMOTE;
 }
 
 /// `value` without one pair of enclosing double quotes, if it has them.
@@ -5581,12 +5582,12 @@ test "shell discovery uses the production DOS mapping before metadata opens" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pwsh.exe", .data = "not executed" });
     const path = try tmp.dir.realPathFileAlloc(std.testing.io, "pwsh.exe", alloc);
     defer alloc.free(path);
-    win32.TestHooks.direct_volume_mapping = Reject.map;
-    defer win32.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = Reject.map;
+    defer windows_ext.TestHooks.direct_volume_mapping = null;
     try std.testing.expectEqual(null, pathInfo(path));
-    win32.TestHooks.direct_volume_mapping = win32.TestHooks.unavailableVolume;
+    windows_ext.TestHooks.direct_volume_mapping = windows_ext.TestHooks.unavailableVolume;
     try std.testing.expectEqual(null, pathInfo(path));
-    win32.TestHooks.direct_volume_mapping = null;
+    windows_ext.TestHooks.direct_volume_mapping = null;
     try std.testing.expect(pathInfo(path) != null);
 }
 

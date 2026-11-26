@@ -4,6 +4,7 @@ const win32_types = @import("apprt/win32_types.zig");
 const builtin = @import("builtin");
 const internal_os = @import("os/main.zig");
 const windows = internal_os.windows;
+const windows_ext = internal_os.windows_ext;
 const ptypkg = @import("pty.zig");
 
 const child_env_name = "NOCTTY_CONPTY_TRANSPORT_PROBE_CHILD";
@@ -479,7 +480,7 @@ fn writeFragment(
         0,
         win32_types.EVENT_ALL_ACCESS,
     );
-    defer _ = windows.CloseHandle(event);
+    defer _ = windows_ext.CloseHandle(event);
 
     var overlapped: win32_types.OVERLAPPED = .{
         .Internal = 0,
@@ -651,7 +652,7 @@ pub fn runParentIfRequested() !void {
                 if (!child_exited) terminateAndConfirm(process) catch |err| {
                     std.debug.print("ConPTY exact child cleanup failed err={}\n", .{err});
                 };
-                _ = windows.CloseHandle(process);
+                _ = windows_ext.CloseHandle(process);
             }
             const child_pid = GetProcessId(process);
             try std.testing.expect(child_pid != 0);
@@ -889,7 +890,7 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
             };
             try command.start(std.testing.allocator);
             const process = command.pid.?;
-            defer _ = windows.CloseHandle(process);
+            defer _ = windows_ext.CloseHandle(process);
 
             const child_pid = GetProcessId(process);
             std.debug.print("transport-probe child_pid={d}\n", .{child_pid});
@@ -1083,7 +1084,7 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
                 if (!child_finished) terminateAndConfirm(process) catch |err| {
                     std.debug.print("key-input-probe cleanup failed err={}\n", .{err});
                 };
-                _ = windows.CloseHandle(process);
+                _ = windows_ext.CloseHandle(process);
             }
             std.debug.print("key-input-probe parent_pid={d} child_pid={d}\n", .{
                 windows.GetCurrentProcessId(),

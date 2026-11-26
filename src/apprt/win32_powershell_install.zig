@@ -93,8 +93,8 @@ pub fn resolveInstallPath(alloc: Allocator) ![]u8 {
         (std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => known: {
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
-                const path = try internal_os.windows.knownFolderPathUtf8(
-                    &internal_os.windows.FOLDERID_LocalAppData,
+                const path = try internal_os.windows_ext.knownFolderPathUtf8(
+                    &internal_os.windows_ext.FOLDERID_LocalAppData,
                     &buf,
                 );
                 break :known try alloc.dupe(u8, path orelse return error.EnvironmentVariableNotFound);

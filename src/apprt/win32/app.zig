@@ -433,7 +433,7 @@ const InstallKind = enum {
         if (isPortableModeActive(alloc)) return .portable;
         const install_dir = currentInstallDir(alloc) catch return .other;
         defer alloc.free(install_dir);
-        return classify(false, internal_os.windows.isInstallerManagedInstallDir(install_dir));
+        return classify(false, internal_os.windows_ext.isInstallerManagedInstallDir(install_dir));
     }
 
     test "only setup-managed and portable-marker copies stage an update" {
@@ -3852,7 +3852,7 @@ pub const App = struct {
             return;
         }
 
-        if (!internal_os.windows.isInstallerManagedInstallDir(install_dir)) {
+        if (!internal_os.windows_ext.isInstallerManagedInstallDir(install_dir)) {
             self.showUpdateApplyFailure(error.InvalidInstallPath);
             return error.InvalidInstallPath;
         }
@@ -3936,7 +3936,7 @@ pub const App = struct {
         }
         const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
         defer self.core_app.alloc.free(install_dir);
-        return internal_os.windows.isInstallerManagedInstallDir(install_dir) and
+        return internal_os.windows_ext.isInstallerManagedInstallDir(install_dir) and
             updatepkg.hasStagedWindowsInstall(self.core_app.alloc, state_path, .installer);
     }
 
@@ -5528,7 +5528,7 @@ pub const App = struct {
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Ignore;
         child.stderr_behavior = .Ignore;
-        try internal_os.windows.spawnChildHoldingInheritLock(&child);
+        try internal_os.windows_ext.spawnChildHoldingInheritLock(&child);
         return true;
     }
 
@@ -9282,8 +9282,8 @@ pub const App = struct {
         }
 
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const profile = (try internal_os.windows.knownFolderPathUtf8(
-            &internal_os.windows.FOLDERID_Profile,
+        const profile = (try internal_os.windows_ext.knownFolderPathUtf8(
+            &internal_os.windows_ext.FOLDERID_Profile,
             &buf,
         )) orelse return error.NoHomeDir;
         const profile_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, profile);
@@ -9474,7 +9474,7 @@ pub const App = struct {
         const alloc = surface.app.core_app.alloc;
         const owned = try alloc.dupe(u8, link);
         errdefer alloc.free(owned);
-        const handler = linkHandlerName(alloc, scheme, internal_os.windows.AssocQueryStringW);
+        const handler = linkHandlerName(alloc, scheme, internal_os.windows_ext.AssocQueryStringW);
         defer if (handler == .app) alloc.free(handler.app);
         var words: confirm_text.Words = .{};
         defer words.deinit(alloc);
@@ -9879,7 +9879,7 @@ pub const App = struct {
             try std.testing.expectEqualStrings(link, preview.text);
             // The body is the one for its scheme and what Windows says
             // opens it now: a machine's handler is no fixed answer.
-            const handler = linkHandlerName(alloc, scheme, internal_os.windows.AssocQueryStringW);
+            const handler = linkHandlerName(alloc, scheme, internal_os.windows_ext.AssocQueryStringW);
             defer if (handler == .app) alloc.free(handler.app);
             var words: confirm_text.Words = .{};
             defer words.deinit(alloc);
@@ -15017,7 +15017,7 @@ test "win32 link opener opens the Windows path of an MSYS2 link, never the text 
 
     // A letter that is no drive here is refused without a lookup.
     for ("BHJKMNOPQRSTUVWY") |letter| {
-        if (internal_os.windows.driveTypeForLetter(letter) != internal_os.windows.DRIVE_NO_ROOT_DIR) continue;
+        if (internal_os.windows_ext.driveTypeForLetter(letter) != internal_os.windows_ext.DRIVE_NO_ROOT_DIR) continue;
         const text = [_]u8{ '/', std.ascii.toLower(letter), '/', 'x' };
         const mapped = try internal_os.local_path.linkTarget(alloc, &text, .{ .wsl = false }) orelse return error.TestUnexpectedResult;
         defer alloc.free(mapped);

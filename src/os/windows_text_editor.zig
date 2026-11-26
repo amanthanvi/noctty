@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 const os_path = @import("path.zig");
 const os_windows = @import("windows.zig");
+const windows_ext = @import("windows_ext.zig");
 const local_path = @import("local_path.zig");
 
 pub const failure_message = "Could not open the config file in a text editor. Check that the file is accessible and a text editor is installed, then try again.";
@@ -48,7 +49,7 @@ pub fn open(alloc: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn queryAssociation(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) !win32_types.HRESULT {
-    return os_windows.AssocQueryStringW(flags, str, assoc, extra, out, len);
+    return windows_ext.AssocQueryStringW(flags, str, assoc, extra, out, len);
 }
 
 fn execute(info: *ShellExecuteInfo) !bool {
