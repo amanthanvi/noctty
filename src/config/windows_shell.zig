@@ -5,6 +5,7 @@ const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
 const win32 = @import("../os/windows.zig");
 const windows_ext = @import("../os/windows_ext.zig");
 const thread_role = @import("../sync/thread_role.zig");
@@ -17,10 +18,10 @@ const windows = std.os.windows;
 
 const wsl_probe_timeout_ms: windows.DWORD = 1500;
 const wsl_list_timeout_ms: windows.DWORD = 1500;
-var wsl_probe_mutex: std.Thread.Mutex = .{};
+var wsl_probe_mutex: std.Io.Mutex = .init;
 var wsl_probe_cache: ?bool = null;
 var wsl_profile_probe_cache: ?bool = null;
-var ssh_missing_mutex: std.Thread.Mutex = .{};
+var ssh_missing_mutex: std.Io.Mutex = .init;
 var ssh_missing_logged = false;
 const wsl_shell_integration_next_step =
     "Enable shell integration inside the selected WSL shell startup.";
@@ -341,9 +342,9 @@ pub const ProcessEnvironment = struct {
     /// The value of `name` (compared without case, as Windows does), or null
     /// when it is not set.
     pub fn get(_: ProcessEnvironment, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
-        return std.process.getEnvVarOwned(alloc, name) catch |err| switch (err) {
+        return global.environ().getAlloc(alloc, name) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+            error.EnvironmentVariableMissing, error.InvalidWtf8 => null,
         };
     }
 };
@@ -437,7 +438,7 @@ const ExpandEnvironment = struct {
 pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const u8 {
     const wide = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, line);
     defer alloc.free(wide);
-    var it = try std.process.ArgIteratorWindows.init(alloc, wide);
+    var it = try std.process.Args.Iterator.Windows.init(alloc, wide);
     defer it.deinit();
     var argv: std.ArrayList([:0]const u8) = .empty;
     errdefer {
@@ -619,8 +620,10 @@ fn userWorkingDirectory(
     if (std.mem.eql(u8, value, "home")) return .home;
     if (std.mem.eql(u8, value, "inherit")) return .inherit;
     if (value.len >= 2 and value[0] == '~' and (value[1] == '/' or value[1] == '\\')) {
+        var environ_map = try global.environ().createMap(alloc);
+        defer environ_map.deinit();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (internal_os.home(&buf) catch null) |home| {
+        if (internal_os.home(global.io(), &environ_map, &buf) catch null) |home| {
             return .{ .path = try std.fmt.allocPrintSentinel(alloc, "{s}\\{s}", .{
                 std.mem.trimEnd(u8, home, "\\/"),
                 value[2..],
@@ -783,7 +786,7 @@ test "user profile %NAME% reads env lines before noctty's environment" {
     } };
     // `env = Path=C:\team` and `env = PATH=C:\later` (Windows sees the
     // later one), plus a variable only noctty's environment has.
-    const global = [_]EnvEntry{
+    const global_env = [_]EnvEntry{
         .{ .key = "Path", .value = "C:\\team" },
         .{ .key = "OTHER", .value = "%USERPROFILE%" },
         .{ .key = "PATH", .value = "C:\\later" },
@@ -798,7 +801,7 @@ test "user profile %NAME% reads env lines before noctty's environment" {
             // The profile's own variable is not visible to its values.
             .{ .key = "SEEN", .value = "%MODE%" },
         },
-        .global_env = &global,
+        .global_env = &global_env,
     }};
     const profiles = try appendUserProfiles(alloc, try alloc.alloc(Profile, 0), &definitions, process);
     defer deinitProfiles(alloc, profiles);
@@ -882,8 +885,10 @@ test "user profile working directories take the working-directory values" {
         try testing.expectEqual(case.want, std.meta.activeTag(dir));
     }
     if (builtin.os.tag == .windows) {
+        var environ_map = try testing.environ.createMap(alloc);
+        defer environ_map.deinit();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (try internal_os.home(&buf)) |home| {
+        if (try internal_os.home(testing.io, &environ_map, &buf)) |home| {
             const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{});
             defer alloc.free(dir.path);
             try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimEnd(u8, home, "\\/")));
@@ -1956,7 +1961,7 @@ test "the machine's Visual Studio shells, through the stages a listing runs" {
                 try testing.expect(!std.mem.containsAtLeast(u8, profile.key, 1, first_id.?));
             }
         }
-        if (std.process.hasEnvVarConstant("NOCTTY_PRINT_VISUAL_STUDIO_PROFILES")) {
+        if (std.testing.environ.containsConstant("NOCTTY_PRINT_VISUAL_STUDIO_PROFILES")) {
             std.debug.print("visual-studio-profiles = {s}: {d} shown, {d} hidden\n", .{ @tagName(mode), shown_vs, vs_count - shown_vs });
             for (profiles) |profile| {
                 if (std.mem.startsWith(u8, profile.key, "vs:")) std.debug.print("  {s} {s}{s}\n", .{ profile.key, profile.label, if (profile.hidden) " (hidden)" else "" });
@@ -2296,7 +2301,7 @@ pub fn executableCommand(alloc: Allocator, command: Command) !Command {
 /// Resolve a bare integration executable using the child's search environment.
 /// Never consult the app's PATH or cwd, and never probe a network PATH entry.
 /// A batch/script match keeps the caller on its original shell launch path.
-pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.process.EnvMap) !?[:0]const u8 {
+pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.process.Environ.Map) !?[:0]const u8 {
     if (builtin.os.tag != .windows or exe.len == 0 or
         std.mem.indexOfAny(u8, exe, "\\/:") != null) return null;
     const path = env.get("PATH") orelse return null;
@@ -2366,7 +2371,7 @@ fn searchPath(
 /// Disable cmd's implicit cwd executable search for the final shell wrapper.
 /// Keep this in its environment: clearing it before the target immediately
 /// restores cwd lookup. Explicit paths and PATH entries retain cmd semantics.
-pub fn configureShellSearch(env: *std.process.EnvMap, windows_cmd_shell: bool) !void {
+pub fn configureShellSearch(env: *std.process.Environ.Map, windows_cmd_shell: bool) !void {
     if (builtin.os.tag == .windows and windows_cmd_shell and
         env.get("NoDefaultCurrentDirectoryInExePath") == null)
         try env.put("NoDefaultCurrentDirectoryInExePath", "1");
@@ -2374,7 +2379,7 @@ pub fn configureShellSearch(env: *std.process.EnvMap, windows_cmd_shell: bool) !
 
 test "PKG48 only shell wrappers receive the inherited cwd search guard" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var env = std.process.EnvMap.init(std.testing.allocator);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("PATH", "relative;C:\\Tools!;%literal%");
     try configureShellSearch(&env, false);
@@ -2426,14 +2431,15 @@ fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
 /// is open for the caller to close.
 pub fn ntOpenDontReparse(
     path: []const u8,
-    access: windows.ACCESS_MASK,
+    access: u32,
     options: windows.ULONG,
     handle: *windows.HANDLE,
 ) ?windows.NTSTATUS {
-    // Zig 0.15.2's `sliceToPrefixedFileW` writes past its fixed buffer for a
-    // longer path; a WTF-8 byte is at most one unit, so this always fits.
+    // Zig's `sliceToPrefixedFileW` (0.15.2's, and 0.17's in `std.Io.Threaded`)
+    // writes past its fixed buffer for a longer path; a WTF-8 byte is at most
+    // one unit, so this always fits.
     if (path.len > windows.PATH_MAX_WIDE) return null;
-    var wide = windows.sliceToPrefixedFileW(null, path) catch return null;
+    var wide = std.Io.Threaded.sliceToPrefixedFileW(null, path, .{}) catch return null;
     // Older Windows also treats the DOS drive-letter mapping as a reparse.
     // Resolve just that mapping without opening a filesystem target, and accept
     // only a direct local volume device. The rest keeps the kernel guard.
@@ -2474,7 +2480,7 @@ fn pathInfo(path: []const u8) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
     defer windows.CloseHandle(handle);
     var info: win32_types.FILE_ATTRIBUTE_TAG_INFO = undefined;
     var io: windows.IO_STATUS_BLOCK = undefined;
-    if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .FileAttributeTagInformation) != .SUCCESS) return null;
+    if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .AttributeTag) != .SUCCESS) return null;
     return info;
 }
 
@@ -2598,7 +2604,7 @@ test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.exe", .data = "exe" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.com", .data = "com" });
     const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
-    var env = std.process.EnvMap.init(alloc);
+    var env = std.process.Environ.Map.init(alloc);
     try env.put("PATH", try std.fmt.allocPrint(alloc, "relative;;\\\\server\\share;\\??\\UNC\\server\\share;\"{s}\"", .{dir}));
     try env.put("PATHEXT", ".com;.exe");
     try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.com", alloc), (try lookupChildExecutable(alloc, "nu", &env)).?);
@@ -2623,14 +2629,14 @@ test "PKG08 round3 child lookup accepts a real App Execution Alias" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    var host_env = try std.process.getEnvMap(alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     const local_app_data = host_env.get("LOCALAPPDATA") orelse return error.SkipZigTest;
     const dir = try std.fs.path.join(alloc, &.{ local_app_data, "Microsoft", "WindowsApps" });
     if (internal_os.path.isNetworkOrDevicePath(dir) or
         dir.len < 3 or dir[1] != ':' or
         internal_os.windows_ext.driveTypeForLetter(dir[0]) == internal_os.windows_ext.DRIVE_REMOTE)
         return error.SkipZigTest;
-    var env = std.process.EnvMap.init(alloc);
+    var env = std.process.Environ.Map.init(alloc);
     try env.put("PATH", dir);
     try env.put("PATHEXT", ".EXE");
     // These aliases are installed by Store PowerShell or the Windows Python
@@ -2668,8 +2674,8 @@ test "PKG08 whole executable path with spaces launches directly" {
     try std.testing.expect(result == .direct);
     try std.testing.expectEqual(@as(usize, 1), result.direct.len);
     try std.testing.expectEqualStrings(path, result.direct[0]);
-    const current = try std.process.getCwdAlloc(alloc);
-    const relative = try std.fs.path.relative(alloc, current, path);
+    const current = try std.process.currentPathAlloc(std.testing.io, alloc);
+    const relative = try std.fs.path.relativeAlloc(alloc, current, null, current, path);
     const relative_input: Command = .{ .shell = try alloc.dupeSentinel(u8, relative, 0) };
     const preserved = try executableCommand(alloc, relative_input);
     try std.testing.expect(preserved == .shell);
@@ -2815,13 +2821,12 @@ fn safeCurrentDirectoryWithCurrent(
 }
 
 fn currentWindowsDirectory(alloc: Allocator) !?[]const u8 {
-    return std.process.getCwdAlloc(alloc) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => {
-            log.warn("failed to read current windows cwd err={}", .{err});
-            return null;
-        },
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = std.process.currentPath(global.io(), &buf) catch |err| {
+        log.warn("failed to read current windows cwd err={}", .{err});
+        return null;
     };
+    return try alloc.dupe(u8, buf[0..len]);
 }
 
 fn prepareCommandWithLookup(
@@ -3253,20 +3258,20 @@ fn resolveSshExecutable(alloc: Allocator, lookup: anytype, access: anytype) !?[]
 }
 
 fn accessAbsolute(path: []const u8) !void {
-    try std.fs.accessAbsolute(path, .{});
+    try std.Io.Dir.accessAbsolute(global.io(), path, .{});
 }
 
 fn warnSshDiscoveryOnce(err: anyerror) void {
-    ssh_missing_mutex.lock();
-    defer ssh_missing_mutex.unlock();
+    ssh_missing_mutex.lockUncancelable(global.io());
+    defer ssh_missing_mutex.unlock(global.io());
     if (ssh_missing_logged) return;
     ssh_missing_logged = true;
     log.warn("SSH hosts skipped: discovery failed err={}", .{err});
 }
 
 fn warnMissingSshOnce() void {
-    ssh_missing_mutex.lock();
-    defer ssh_missing_mutex.unlock();
+    ssh_missing_mutex.lockUncancelable(global.io());
+    defer ssh_missing_mutex.unlock(global.io());
     if (ssh_missing_logged) return;
     ssh_missing_logged = true;
     log.warn("SSH hosts skipped: ssh.exe was not found on PATH or in Windows OpenSSH", .{});
@@ -3278,7 +3283,7 @@ fn deinitProfileList(alloc: Allocator, profiles: *std.ArrayList(Profile)) void {
 }
 
 fn detectProfileOrderHint(alloc: Allocator) ?[]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
+    const raw = global.environ().getAlloc(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
         return null;
     errdefer alloc.free(raw);
 
@@ -4231,8 +4236,8 @@ test "UserProfiles frees profile-order and profile-hidden when no profile is def
 fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
 
-    wsl_probe_mutex.lock();
-    defer wsl_probe_mutex.unlock();
+    wsl_probe_mutex.lockUncancelable(global.io());
+    defer wsl_probe_mutex.unlock(global.io());
 
     if (wsl_probe_cache) |cached| return cached;
 
@@ -4244,8 +4249,8 @@ fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
 fn probeWslExecutableForProfiles(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
 
-    wsl_probe_mutex.lock();
-    defer wsl_probe_mutex.unlock();
+    wsl_probe_mutex.lockUncancelable(global.io());
+    defer wsl_probe_mutex.unlock(global.io());
 
     if ((wsl_profile_probe_cache orelse false) or (wsl_probe_cache orelse false)) return true;
 
@@ -4258,39 +4263,40 @@ fn probeWslExecutableForProfiles(alloc: Allocator, exe_path: []const u8) !bool {
 
 fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
+    // A spawn takes no allocator: the Io allocates what it needs.
+    _ = alloc;
+    const io = global.io();
 
-    var child = std.process.Child.init(&.{ exe_path, "--status" }, alloc);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.create_no_window = true;
-
-    windows_ext.spawnChildHoldingInheritLock(&child) catch |err| {
+    var child = windows_ext.spawnChildHoldingInheritLock(io, .{
+        .argv = &.{ exe_path, "--status" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .create_no_window = true,
+    }) catch |err| {
         log.warn("failed to probe wsl responsiveness exe={s} err={}", .{ exe_path, err });
         return false;
     };
-    errdefer {
-        _ = child.kill() catch {};
-    }
+    errdefer child.kill(io);
 
-    win32_sys.waitForSingleObjectEx(child.id, wsl_probe_timeout_ms, false) catch |err| switch (err) {
+    win32_sys.waitForSingleObjectEx(child.id.?, wsl_probe_timeout_ms, false) catch |err| switch (err) {
         error.WaitTimeOut => {
             log.warn("skipping unresponsive wsl default shell exe={s} timeout_ms={}", .{
                 exe_path,
                 wsl_probe_timeout_ms,
             });
-            _ = child.kill() catch {};
+            child.kill(io);
             return false;
         },
 
         else => {
             log.warn("wsl probe wait failed exe={s} err={}", .{ exe_path, err });
-            _ = child.kill() catch {};
+            child.kill(io);
             return false;
         },
     };
 
-    _ = child.wait() catch |err| {
+    _ = child.wait(io) catch |err| {
         log.warn("wsl probe wait cleanup failed exe={s} err={}", .{ exe_path, err });
         return false;
     };
@@ -4397,8 +4403,11 @@ fn directCommand(alloc: Allocator, argv: []const []const u8) !Command {
 /// on what is installed: local absolute `PATH` entries only, quoted entries
 /// understood, and guarded metadata handles (no reparse ancestor is followed).
 fn lookupExecutable(alloc: Allocator, exe: []const u8) !?[]u8 {
-    if (builtin.os.tag != .windows or std.mem.indexOfAny(u8, exe, "\\/:") != null)
-        return try internal_os.path.expand(alloc, exe);
+    if (builtin.os.tag != .windows or std.mem.indexOfAny(u8, exe, "\\/:") != null) {
+        var environ_map = try global.environ().createMap(alloc);
+        defer environ_map.deinit();
+        return try internal_os.path.expand(global.io(), alloc, &environ_map, exe);
+    }
     // The built-in shells live in the system directory, where `defaultCommand`
     // takes them from, so the picker lists exactly the executable a new tab runs.
     if (std.ascii.eqlIgnoreCase(exe, "cmd.exe")) {
@@ -4406,7 +4415,7 @@ fn lookupExecutable(alloc: Allocator, exe: []const u8) !?[]u8 {
     } else if (std.ascii.eqlIgnoreCase(exe, "powershell.exe")) {
         return try DefaultShellHost.systemShell(alloc, windows_powershell_relative);
     }
-    const path = std.process.getEnvVarOwned(alloc, "PATH") catch |err| switch (err) {
+    const path = global.environ().getAlloc(alloc, "PATH") catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
@@ -4436,7 +4445,7 @@ const git_registry_hives = 2;
 
 const GitBashHost = struct {
     fn fileExists(path: []const u8) bool {
-        std.fs.cwd().access(path, .{}) catch return false;
+        std.Io.Dir.cwd().access(global.io(), path, .{}) catch return false;
         return true;
     }
 
@@ -4455,8 +4464,8 @@ const GitBashHost = struct {
     }
 
     fn systemRoot(alloc: Allocator) ![]u8 {
-        return std.process.getEnvVarOwned(alloc, "SystemRoot") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound, error.InvalidWtf8 => try alloc.dupe(u8, "C:\\Windows"),
+        return global.environ().getAlloc(alloc, "SystemRoot") catch |err| switch (err) {
+            error.EnvironmentVariableMissing, error.InvalidWtf8 => try alloc.dupe(u8, "C:\\Windows"),
             else => |e| return e,
         };
     }
@@ -4584,7 +4593,7 @@ pub fn isWslBashLauncherPath(alloc: Allocator, path: []const u8) !bool {
 const WslOutputDrain = struct {
     /// The read end of a pipe opened for overlapped I/O, as
     /// `std.process.Child` makes a child's stdout and stderr.
-    pipe: std.fs.File,
+    pipe: std.Io.File,
     /// Set when a read completes (manual reset; `ReadFile` resets it).
     io_event: windows.HANDLE,
     /// Set by `stop` (manual reset), and left set: the read in progress ends,
@@ -4596,7 +4605,7 @@ const WslOutputDrain = struct {
     /// ended (`error.WslListCancelled`). Null when the pipe ended.
     err: ?anyerror = null,
 
-    fn init(pipe: std.fs.File) !WslOutputDrain {
+    fn init(pipe: std.Io.File) !WslOutputDrain {
         const io_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         errdefer windows.CloseHandle(io_event);
         const stop_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
@@ -4679,7 +4688,7 @@ extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) win32_typ
 var test_wsl_before_read: if (builtin.is_test) ?*const fn () void else void = if (builtin.is_test) null else {};
 
 fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
-    var env = try std.process.getEnvMap(alloc);
+    var env = try global.environ().createMap(alloc);
     defer env.deinit();
     return listWslDistrosIn(alloc, exe_path, &env);
 }
@@ -4692,41 +4701,45 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
 /// before it, and the inbox WSL of Windows 10, write UTF-16 whatever it is
 /// (inferred from that opt-in, not run). An inherited `WSL_UTF8`, in any
 /// case (the map compares names as Windows does), would otherwise decide it.
-fn pinWslOutputEncoding(env: *std.process.EnvMap) void {
-    env.remove("WSL_UTF8");
+fn pinWslOutputEncoding(env: *std.process.Environ.Map) void {
+    _ = env.swapRemove("WSL_UTF8");
 }
 
-/// Tests only: called with the `wsl -l -q` child just before it would be
-/// spawned (`listWslDistrosIn`); an error it returns ends the list there.
-var test_wsl_list_spawn: if (builtin.is_test) ?*const fn (*const std.process.Child) anyerror!void else void = if (builtin.is_test) null else {};
+/// Tests only: called with the `wsl -l -q` child's spawn options just
+/// before it would be spawned (`listWslDistrosIn`); an error it returns ends
+/// the list there.
+var test_wsl_list_spawn: if (builtin.is_test) ?*const fn (*const std.process.SpawnOptions) anyerror!void else void = if (builtin.is_test) null else {};
 
 /// `listWslDistros` with `env` (this process's) for `wsl.exe`'s
 /// environment, which it pins first (`pinWslOutputEncoding`).
-fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.EnvMap) ![][]u8 {
+fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.Environ.Map) ![][]u8 {
     pinWslOutputEncoding(env);
-    var child = std.process.Child.init(&.{ exe_path, "-l", "-q" }, alloc);
-    child.env_map = env;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    // Its errors are read on a failure, wherever wsl.exe writes them: the
-    // Store WSL writes them to stdout, and the inbox stub's stream is not
-    // known. A success's warnings on stderr are not distribution names.
-    child.stderr_behavior = .Pipe;
-    child.create_no_window = true;
+    const io = global.io();
+    const options: std.process.SpawnOptions = .{
+        .argv = &.{ exe_path, "-l", "-q" },
+        .environ_map = env,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        // Its errors are read on a failure, wherever wsl.exe writes them: the
+        // Store WSL writes them to stdout, and the inbox stub's stream is not
+        // known. A success's warnings on stderr are not distribution names.
+        .stderr = .pipe,
+        .create_no_window = true,
+    };
 
-    if (builtin.is_test) if (test_wsl_list_spawn) |hook| try hook(&child);
-    try windows_ext.spawnChildHoldingInheritLock(&child);
+    if (builtin.is_test) if (test_wsl_list_spawn) |hook| try hook(&options);
+    var child = try windows_ext.spawnChildHoldingInheritLock(io, options);
     var child_running = true;
     errdefer {
-        if (child_running) _ = child.kill() catch {};
+        if (child_running) child.kill(io);
     }
 
     const stdout = child.stdout orelse {
-        _ = child.kill() catch {};
+        child.kill(io);
         return error.Unexpected;
     };
     const stderr = child.stderr orelse {
-        _ = child.kill() catch {};
+        child.kill(io);
         return error.Unexpected;
     };
 
@@ -4741,23 +4754,23 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // No thread reads the pipes yet: the errdefer may kill.
     const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
     const errors_thread = std.Thread.spawn(.{}, WslOutputDrain.run, .{&errors}) catch |err| {
-        win32_sys.terminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id.?, 1) catch {};
         joinWslDrains(&.{&drain}, &.{drain_thread});
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
         child_running = false;
         return err;
     };
     const drains = [_]*WslOutputDrain{ &drain, &errors };
     const threads = [_]std.Thread{ drain_thread, errors_thread };
 
-    win32_sys.waitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
+    win32_sys.waitForSingleObjectEx(child.id.?, wsl_list_timeout_ms, false) catch |err| {
         if (err == error.WaitTimeOut) log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
             exe_path,
             wsl_list_timeout_ms,
         });
-        win32_sys.terminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id.?, 1) catch {};
         joinWslDrains(&drains, &threads);
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
         child_running = false;
         return if (err == error.WaitTimeOut) error.WslListTimeout else err;
     };
@@ -4766,8 +4779,8 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     // The whole exit code, before `child.wait()` keeps only its low byte: a
     // crash whose code ends in a zero byte is no success.
     var code: windows.DWORD = undefined;
-    const exit_code: ?u32 = if (win32_sys.GetExitCodeProcess(child.id, &code) != 0) code else null;
-    _ = try child.wait();
+    const exit_code: ?u32 = if (win32_sys.GetExitCodeProcess(child.id.?, &code) != 0) code else null;
+    _ = try child.wait(io);
     child_running = false;
     // Stdout read whole to the pipe's end, or the list is not complete: a
     // read that failed or was stopped may have cut it short.
@@ -5378,12 +5391,12 @@ fn appExecLinkRecord(alloc: Allocator, strings: []const []const u8) ![]u8 {
 /// Creates an empty file `name` in `dir` and makes it an App Execution Alias to
 /// `target`, as the Store does for an installed package. Skips the test where
 /// the volume refuses a reparse point.
-fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) !void {
+fn createTestAppExecLink(dir: std.Io.Dir, name: []const u8, target: []const u8) !void {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     // Reopen it for the reparse write, without following what it will become.
-    (try dir.createFile(name, .{})).close();
+    (try dir.createFile(std.testing.io, name, .{})).close(std.testing.io);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try dir.realpath(name, &path_buf);
+    const path = path_buf[0..try dir.realPathFile(std.testing.io, name, &path_buf)];
     const path_w = try prefixed_path.sliceToPrefixedFileW(path);
     const handle = win32_sys.CreateFileW(
         path_w.span().ptr,
@@ -5550,7 +5563,7 @@ test "explicit commands and child PATH keep junctions with spaces" {
     defer command.deinit(alloc);
     try std.testing.expect(command == .direct);
     try std.testing.expectEqualStrings(exe, command.direct[0]);
-    var env = std.process.EnvMap.init(alloc);
+    var env = std.process.Environ.Map.init(alloc);
     defer env.deinit();
     try env.put("PATH", link);
     const child = (try lookupChildExecutable(alloc, "pwsh.exe", &env)).?;
@@ -5594,7 +5607,7 @@ test "shell discovery uses the production DOS mapping before metadata opens" {
 test "shell discovery accepts a real installed Store execution alias" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
-    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return error.SkipZigTest;
+    const local = std.testing.environ.getAlloc(alloc, "LOCALAPPDATA") catch return error.SkipZigTest;
     defer alloc.free(local);
     for ([_][]const u8{ "wt.exe", "winget.exe" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ local, "Microsoft", "WindowsApps", name });
@@ -6321,7 +6334,7 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         var write_end: windows.HANDLE = undefined;
         try testWslPipe(&read_end, &write_end);
         defer windows.CloseHandle(read_end);
-        var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+        var drain: WslOutputDrain = try .init(.{ .handle = read_end, .flags = .{ .nonblocking = true } });
         defer drain.deinit();
         _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         windows.CloseHandle(write_end);
@@ -6340,7 +6353,7 @@ test "a WSL drain ends with what came when its pipe ends, and is stopped, then j
         defer windows.CloseHandle(read_end);
         var write_open: ?windows.HANDLE = write_end;
         defer if (write_open) |handle| windows.CloseHandle(handle);
-        var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+        var drain: WslOutputDrain = try .init(.{ .handle = read_end, .flags = .{ .nonblocking = true } });
         defer drain.deinit();
         _ = try win32_sys.writeFile(write_end, "Ubuntu\r\n", null);
         const thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
@@ -6378,9 +6391,9 @@ test "a WSL drain held outside its read until long after it was stopped still en
         fn releaseAfterStop() void {
             var waited: u32 = 0;
             while (!drain.?.stopping.load(.acquire) and waited < 5000) : (waited += 10) {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
             }
-            std.Thread.sleep(1500 * std.time.ns_per_ms);
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1500), .awake) catch {};
             _ = SetEvent(release.?);
         }
     };
@@ -6399,7 +6412,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
     defer windows.CloseHandle(read_end);
     var write_open: ?windows.HANDLE = write_end;
     defer if (write_open) |handle| windows.CloseHandle(handle);
-    var drain: WslOutputDrain = try .init(.{ .handle = read_end });
+    var drain: WslOutputDrain = try .init(.{ .handle = read_end, .flags = .{ .nonblocking = true } });
     defer drain.deinit();
     Hold.drain = &drain;
     defer Hold.drain = null;
@@ -6437,8 +6450,8 @@ test "wsl -l -q runs without an inherited WSL_UTF8, so it writes the UTF-16LE it
 
         /// Reads the child's environment and stops before it runs: no
         /// wsl.exe runs.
-        fn check(child: *const std.process.Child) anyerror!void {
-            const env = child.env_map orelse return error.TestExpectedEnv;
+        fn check(options: *const std.process.SpawnOptions) anyerror!void {
+            const env = options.environ_map orelse return error.TestExpectedEnv;
             pinned = env.get("WSL_UTF8") == null and env.get("Path") != null;
             return error.TestNotSpawned;
         }
@@ -6447,7 +6460,7 @@ test "wsl -l -q runs without an inherited WSL_UTF8, so it writes the UTF-16LE it
     defer test_wsl_list_spawn = null;
     // Windows compares the names without case, and so does the map.
     for ([_][]const u8{ "WSL_UTF8", "wsl_utf8" }) |name| {
-        var env = std.process.EnvMap.init(alloc);
+        var env = std.process.Environ.Map.init(alloc);
         defer env.deinit();
         try env.put("Path", "C:\\Windows\\System32");
         try env.put(name, "1");
