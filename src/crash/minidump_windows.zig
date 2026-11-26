@@ -68,24 +68,32 @@ var crash_dir_w: prefixed_path.PathSpace = undefined;
 var dump_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 var dump_path_w: [windows.PATH_MAX_WIDE:0]u16 = undefined;
 
-pub fn init(alloc: std.mem.Allocator) !void {
+pub fn init(io: std.Io, alloc: std.mem.Allocator, environ_map: *const std.process.Environ.Map) !void {
     // Preserve the original exception filter across repeated crash init calls.
     if (installed) return;
 
-    const crash = try dir.defaultDir(alloc);
+    const crash = try dir.defaultDir(io, alloc, environ_map);
     defer alloc.free(crash.path);
 
-    try initIn(crash.path);
+    try initIn(io, crash.path);
 }
 
-fn initIn(path: []const u8) !void {
+fn initIn(io: std.Io, path: []const u8) !void {
     if (installed) return;
 
     if (path.len > crash_dir_buf.len) return error.NameTooLong;
     // Normalize and convert on the healthy startup stack, before the filter
     // is installed. The filter only appends its ASCII filename.
     crash_dir_w = try dumpDirectoryW(path);
-    try std.fs.cwd().makePath(path);
+    // Zig 0.17's `createDirPath` does not follow a link it finds on the way
+    // (0.15's `makePath` did), so an existing directory, a link to one
+    // included, is opened first and created only when it is missing.
+    if (std.Io.Dir.cwd().openDir(io, path, .{ .follow_symlinks = true })) |existing| {
+        existing.close(io);
+    } else |err| switch (err) {
+        error.FileNotFound => try std.Io.Dir.cwd().createDirPath(io, path),
+        else => |e| return e,
+    }
 
     @memcpy(crash_dir_buf[0..path.len], path);
     crash_dir = crash_dir_buf[0..path.len];
@@ -104,13 +112,13 @@ test "minidump init creates missing parent directories" {
     const path = try std.fs.path.join(alloc, &.{ root, "absent", "noctty", "crash" });
     defer alloc.free(path);
 
-    try initIn(path);
+    try initIn(std.testing.io, path);
     defer deinit();
-    var created = try std.fs.openDirAbsolute(path, .{});
-    defer created.close();
+    var created = try std.Io.Dir.openDirAbsolute(std.testing.io, path, .{});
+    defer created.close(std.testing.io);
     try std.testing.expect(installed);
     try std.testing.expectEqualStrings(path, crash_dir);
-    try initIn(path);
+    try initIn(std.testing.io, path);
 }
 
 pub fn deinit() void {
@@ -159,7 +167,7 @@ fn writeMinidumpIn(base_dir: []const u8, base_dir_w: [:0]const u16, info: *windo
         &dump_path_buf,
         base_dir,
         windows.GetCurrentProcessId(),
-        std.time.milliTimestamp(),
+        std.Io.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .real).toMilliseconds(),
     );
 
     const filename = std.fs.path.basename(path);
@@ -271,37 +279,37 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     try tmp.dir.createDirPath(std.testing.io, sub_path);
     var dump_dir = try tmp.dir.openDir(std.testing.io, sub_path, .{ .iterate = true });
     defer dump_dir.close(std.testing.io);
-    const dir_path = try dump_dir.realpath(".", &dir_buf);
+    const dir_path = dir_buf[0..try dump_dir.realPathFile(std.testing.io, ".", &dir_buf)];
     try std.testing.expect(try std.unicode.calcWtf16LeLen(dir_path) > windows.MAX_PATH);
     const dir_w = try dumpDirectoryW(dir_path);
 
     try writeMinidumpIn(dir_path, dir_w.span(), &pointers);
 
     var it = dump_dir.iterate();
-    const entry = (try it.next()) orelse return error.TestExpectedDump;
+    const entry = (try it.next(std.testing.io)) orelse return error.TestExpectedDump;
     try std.testing.expect(std.mem.endsWith(u8, entry.name, ".dmp"));
-    try std.testing.expect((try it.next()) == null);
+    try std.testing.expect((try it.next(std.testing.io)) == null);
 
     // MINIDUMP_HEADER starts with "MDMP". The exception stream (type 6)
     // must carry this thread and the record above, which proves dbghelp
     // read our exception pointers rather than something else.
-    var file = try dump_dir.openFile(entry.name, .{});
-    defer file.close();
+    var file = try dump_dir.openFile(std.testing.io, entry.name, .{});
+    defer file.close(std.testing.io);
     var header: [32]u8 = undefined;
-    try std.testing.expectEqual(header.len, try file.preadAll(&header, 0));
+    try std.testing.expectEqual(header.len, try file.readPositionalAll(std.testing.io, &header, 0));
     try std.testing.expectEqualStrings("MDMP", header[0..4]);
     const stream_count = std.mem.readInt(u32, header[8..12], .little);
     const directory_rva = std.mem.readInt(u32, header[12..16], .little);
     const stream_rva = for (0..stream_count) |i| {
         var dir_entry: [12]u8 = undefined;
-        try std.testing.expectEqual(dir_entry.len, try file.preadAll(&dir_entry, directory_rva + i * dir_entry.len));
+        try std.testing.expectEqual(dir_entry.len, try file.readPositionalAll(std.testing.io, &dir_entry, directory_rva + i * dir_entry.len));
         if (std.mem.readInt(u32, dir_entry[0..4], .little) == 6) break std.mem.readInt(u32, dir_entry[8..12], .little);
     } else return error.TestExpectedExceptionStream;
 
     // MINIDUMP_EXCEPTION_STREAM: ThreadId, padding, then MINIDUMP_EXCEPTION
     // (code, flags, record, address, parameter count, padding, parameters).
     var stream: [56]u8 = undefined;
-    try std.testing.expectEqual(stream.len, try file.preadAll(&stream, stream_rva));
+    try std.testing.expectEqual(stream.len, try file.readPositionalAll(std.testing.io, &stream, stream_rva));
     try std.testing.expectEqual(windows.GetCurrentThreadId(), std.mem.readInt(u32, stream[0..4], .little));
     try std.testing.expectEqual(record.ExceptionCode, std.mem.readInt(u32, stream[8..12], .little));
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, stream[32..36], .little));

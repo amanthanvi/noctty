@@ -4,6 +4,7 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const build_config = @import("../build_config.zig");
 const xdg = @import("../os/xdg.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.config);
 
@@ -41,7 +42,9 @@ pub fn configHomePath(alloc: Allocator, subdir: []const u8) ![]u8 {
         const root = test_config_root orelse return error.NoTestConfigRoot;
         return try std.fs.path.join(alloc, &.{ root, subdir });
     }
-    return try xdg.config(alloc, .{ .subdir = subdir });
+    var environ_map = try global.environMap();
+    defer environ_map.deinit();
+    return try xdg.config(global.io(), alloc, &environ_map, .{ .subdir = subdir });
 }
 
 /// Default path for the XDG home configuration file. Returned value
@@ -71,13 +74,14 @@ pub const FileState = enum { missing, empty, content };
 pub const FileProbe = *const fn (alloc: Allocator, path: []const u8) ?FileState;
 
 fn fileState(path: []const u8) FileState {
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const io = global.io();
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound, error.BadPathName => return .missing,
         // Something is there that we cannot open; it still exists.
         else => return .content,
     };
-    defer file.close();
-    const stat = file.stat() catch return .content;
+    defer file.close(io);
+    const stat = file.stat(io) catch return .content;
     return if (stat.size == 0) .empty else .content;
 }
 

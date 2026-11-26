@@ -106,21 +106,21 @@ pub const Key = key: {
 
 /// Returns the value type for a key.
 pub fn Value(comptime key: Key) type {
-    const field = comptime field: {
+    const field_type = comptime field_type: {
         @setEvalBranchQuota(100_000);
 
-        const fields = std.meta.fields(Config);
-        for (fields) |field| {
-            if (!@hasField(Key, field.name)) continue;
-            if (@field(Key, field.name) == key) {
-                break :field field;
+        const fields = @typeInfo(Config).@"struct".field_names;
+        for (fields) |field_name| {
+            if (!@hasField(Key, field_name)) continue;
+            if (@field(Key, field_name) == key) {
+                break :field_type @FieldType(Config, field_name);
             }
         }
 
         unreachable;
     };
 
-    return field.type;
+    return field_type;
 }
 
 /// Used on Unixes for some defaults.
@@ -4396,14 +4396,14 @@ test "launch-layout is ignored in configuration files" {
         {
             var file = try td.dir.createFile(std.testing.io, "theme", .{});
             defer file.close(std.testing.io);
-            var writer = file.writer(&write_buf);
+            var writer = file.writer(std.testing.io, &write_buf);
             try writer.interface.writeAll(
                 "launch-layout = Theme Layout\nbackground = #123abc\n",
             );
             try writer.end();
         }
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try td.dir.realpath("theme", &path_buf);
+        const path = path_buf[0..try td.dir.realPathFile(std.testing.io, "theme", &path_buf)];
 
         var arena = ArenaAllocator.init(alloc);
         defer arena.deinit();
@@ -4966,8 +4966,10 @@ test "a default config file that is there and will not open is a problem, naming
     const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
     // Another program holds it with no sharing.
-    const wide = try std.os.windows.sliceToPrefixedFileW(null, path);
-    const handle = std.os.windows.kernel32.CreateFileW(wide.span().ptr, std.os.windows.GENERIC_READ, 0, null, std.os.windows.OPEN_EXISTING, 0, null);
+    const win32_sys = @import("../apprt/win32/sys.zig");
+    const win32_types = @import("../apprt/win32_types.zig");
+    const wide = try @import("../apprt/win32_prefixed_path.zig").sliceToPrefixedFileW(path);
+    const handle = win32_sys.CreateFileW(wide.span().ptr, win32_types.GENERIC_READ, 0, null, win32_types.OPEN_EXISTING, 0, null);
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.CouldNotHoldFile;
     var held = true;
     defer if (held) std.os.windows.CloseHandle(handle);
@@ -5028,7 +5030,7 @@ test "a UTF-16 theme whose read fails partway is a problem of the theme, not the
     var io: std.os.windows.IO_STATUS_BLOCK = undefined;
     const offset: std.os.windows.LARGE_INTEGER = 2 * file_read_buffer_len;
     const length: std.os.windows.LARGE_INTEGER = @intCast(utf16.len);
-    try std.os.windows.LockFile(locker.handle, null, null, null, &io, &offset, &length, null, std.os.windows.TRUE, std.os.windows.TRUE);
+    try @import("../apprt/win32/sys.zig").lockFile(locker.handle, null, null, null, &io, &offset, &length, null, 1, 1);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
     try cfg.loadFile(alloc, path);
@@ -5077,9 +5079,10 @@ test "the embedded config template has LF line endings in every checkout" {
 }
 
 fn defaultConfigIsEmpty(path: []const u8) bool {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    defer file.close();
-    const stat = file.stat() catch return false;
+    const io = global.io();
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch return false;
+    defer file.close(io);
+    const stat = file.stat(io) catch return false;
     return stat.kind == .file and stat.size == 0;
 }
 
@@ -5251,8 +5254,8 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         var home_dir = try tmp.dir.openDir(std.testing.io, home_name, .{});
         defer home_dir.close(std.testing.io);
         for (case.files) |file| {
-            if (std.fs.path.dirname(file.path)) |parent| try home_dir.makePath(parent);
-            try home_dir.writeFile(.{ .sub_path = file.path, .data = file.content });
+            if (std.fs.path.dirname(file.path)) |parent| try home_dir.createDirPath(std.testing.io, parent);
+            try home_dir.writeFile(std.testing.io, .{ .sub_path = file.path, .data = file.content });
         }
 
         // What a launch does first, including writing the template when
@@ -5266,7 +5269,7 @@ test "default config files: an edit to the edit-target takes effect on reload" {
         // Migration may fill an empty default file, but never replace content
         // or a legacy file, including when a legacy config is the edit target.
         for (case.files) |file| {
-            const content = try home_dir.readFileAlloc(alloc, file.path, 8192);
+            const content = try home_dir.readFileAlloc(std.testing.io, file.path, alloc, .limited(8192));
             defer alloc.free(content);
             if (file.content.len == 0 and std.mem.eql(u8, case.target, file.path)) {
                 try testing.expect(content.len > 0);
@@ -5290,10 +5293,9 @@ test "default config files: an edit to the edit-target takes effect on reload" {
 
         // What Settings does: put a value into the target...
         {
-            const f = try std.fs.openFileAbsolute(target, .{ .mode = .read_write });
-            defer f.close();
-            try f.seekFromEnd(0);
-            try f.writeAll("font-size = 77\n");
+            const f = try std.Io.Dir.openFileAbsolute(std.testing.io, target, .{ .mode = .read_write });
+            defer f.close(std.testing.io);
+            try f.writePositionalAll(std.testing.io, "font-size = 77\n", try f.length(std.testing.io));
         }
 
         // ...and the next launch has to see it.
@@ -5644,7 +5646,13 @@ fn expandHome(path: []const u8, buf: []u8) []const u8 {
     if (!std.mem.startsWith(u8, path, "~/"))
         return path;
 
-    return internal_os.expandHome(path, buf) catch |err| {
+    var environ_map = global.environMap() catch |err| {
+        log.warn("failed to get environment map for path={f}: {}", .{ internal_os.redact.bytes(path), err });
+        return path;
+    };
+    defer environ_map.deinit();
+
+    return internal_os.expandHome(global.io(), &environ_map, path, buf) catch |err| {
         log.warn("failed to expand home directory in path={f}: {}", .{ internal_os.redact.bytes(path), err });
         return path;
     };
@@ -5881,7 +5889,7 @@ pub fn finalize(self: *Config) !void {
                 // read from SHELL if we're in a probable CLI environment.
                 if (!probable_cli) break :shell_env;
 
-                if (std.process.getEnvVarOwned(alloc, "SHELL")) |value| {
+                if (global.environ().getAlloc(alloc, "SHELL")) |value| {
                     log.info("default shell source=env value={f}", .{internal_os.redact.bytes(value)});
 
                     const copy = try alloc.dupeSentinel(u8, value, 0);
@@ -5895,8 +5903,10 @@ pub fn finalize(self: *Config) !void {
             switch (builtin.target.os.tag) {
                 .windows => {
                     if (wd == .home and !windows_shell.isWslCommand(self.command.?)) {
+                        var environ_map = try global.environMap();
+                        defer environ_map.deinit();
                         var buf: [std.fs.max_path_bytes]u8 = undefined;
-                        if (try internal_os.home(&buf)) |home| {
+                        if (try internal_os.home(global.io(), &environ_map, &buf)) |home| {
                             wd = .{ .path = try alloc.dupe(u8, home) };
                         } else {
                             wd = .inherit;
@@ -6187,9 +6197,9 @@ test "default-profile, profile-order and profile-hidden load and format back" {
 
 /// Load `files` (name, text), the first as the main config, through the real
 /// file reader and include order, and finalize, as a real load does.
-fn testLoadProfileFiles(alloc: Allocator, dir: std.fs.Dir, files: []const [2][]const u8) !Config {
-    for (files) |file| try dir.writeFile(.{ .sub_path = file[0], .data = file[1] });
-    const path = try dir.realpathAlloc(alloc, files[0][0]);
+fn testLoadProfileFiles(alloc: Allocator, dir: std.Io.Dir, files: []const [2][]const u8) !Config {
+    for (files) |file| try dir.writeFile(std.testing.io, .{ .sub_path = file[0], .data = file[1] });
+    const path = try dir.realPathFileAlloc(std.testing.io, files[0][0], alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     errdefer cfg.deinit();
@@ -6567,7 +6577,7 @@ test "a theme file's problems are its own and are reported once, however the con
 /// `docs/windows.md` (and its subsections), read from the checkout at test
 /// time (`zig build test` runs from its root), joined in order.
 fn testDocExamples(alloc: Allocator, comptime heading: []const u8, blocks: *usize) ![]u8 {
-    const raw = std.fs.cwd().readFileAlloc(alloc, "docs/windows.md", 4 << 20) catch |err| {
+    const raw = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/windows.md", alloc, .limited(4 << 20)) catch |err| {
         std.debug.print("cannot read docs/windows.md from the current directory: {}\n", .{err});
         return err;
     };
@@ -6760,7 +6770,7 @@ test "handoff embedding switch is consumed by Windows config parsing" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var cfg = try Config.default(std.testing.allocator);
     defer cfg.deinit();
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, "-Embedding");
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(std.testing.allocator, "-Embedding");
     defer iter.deinit();
     try cli.args.parse(Config, std.testing.allocator, &cfg, &iter);
     try std.testing.expect(cfg._diagnostics.empty());
@@ -6799,9 +6809,9 @@ test "a command line's notification flags are read byte for byte" {
     for (cases) |case| {
         var cfg = try Config.default(std.testing.allocator);
         defer cfg.deinit();
-        var windows_iter = try std.process.ArgIteratorWindows.init(std.testing.allocator, case.line);
+        var windows_iter = try std.process.Args.Iterator.Windows.init(std.testing.allocator, case.line);
         _ = windows_iter.next();
-        var iter: cli.args.ArgsIterator(std.process.ArgIteratorWindows) = .{ .iterator = windows_iter };
+        var iter: cli.args.ArgsIterator(std.process.Args.Iterator.Windows) = .{ .iterator = windows_iter };
         defer iter.deinit();
         try cli.args.parse(Config, std.testing.allocator, &cfg, &iter);
         try std.testing.expectEqual(case.desktop, cfg.@"desktop-notifications");
@@ -7093,11 +7103,11 @@ pub fn changeIterator(old: *const Config, new: *const Config) ChangeIterator {
 pub fn changed(self: *const Config, new: *const Config, comptime key: Key) bool {
     // Get the field at comptime
     const field = comptime field: {
-        const fields = std.meta.fields(Config);
-        for (fields) |field| {
-            if (!@hasField(Key, field.name)) continue;
-            if (@field(Key, field.name) == key) {
-                break :field field;
+        const fields = @typeInfo(Config).@"struct".field_names;
+        for (fields) |field_name| {
+            if (!@hasField(Key, field_name)) continue;
+            if (@field(Key, field_name) == key) {
+                break :field field_name;
             }
         }
 
@@ -7116,14 +7126,14 @@ pub const ChangeIterator = struct {
     i: usize = 0,
 
     pub fn next(self: *ChangeIterator) ?Key {
-        const fields = comptime std.meta.fields(Config);
+        const fields = comptime @typeInfo(Config).@"struct".field_names;
         while (self.i < fields.len) {
             switch (self.i) {
                 inline 0...(fields.len - 1) => |i| {
                     const field = fields[i];
                     self.i += 1;
-                    if (!@hasField(Key, field.name)) continue;
-                    const key = @field(Key, field.name);
+                    if (!@hasField(Key, field)) continue;
+                    const key = @field(Key, field);
                     if (self.old.changed(self.new, key)) return key;
                 },
 
@@ -7474,8 +7484,17 @@ pub const WorkingDirectory = union(enum) {
 
         if (!std.mem.startsWith(u8, path, "~/")) return;
 
+        var environ_map = global.environMap() catch |err| {
+            log.warn(
+                "error expanding home directory for working-directory path={f}: {}",
+                .{ internal_os.redact.bytes(path), err },
+            );
+            return;
+        };
+        defer environ_map.deinit();
+
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const expanded = internal_os.expandHome(path, &buf) catch |err| {
+        const expanded = internal_os.expandHome(global.io(), &environ_map, path, &buf) catch |err| {
             log.warn(
                 "error expanding home directory for working-directory path={f}: {}",
                 .{ internal_os.redact.bytes(path), err },
@@ -9676,10 +9695,10 @@ pub const Keybinds = struct {
     ) !void {
         try formatter.writer.writeAll("\n");
         const name = @tagName(action);
-        inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
-            if (std.mem.eql(u8, decl.name, name)) {
-                const help = @field(help_strings.KeybindAction, decl.name);
-                try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
+        inline for (@typeInfo(help_strings.KeybindAction).@"struct".decl_names) |decl| {
+            if (std.mem.eql(u8, decl, name)) {
+                const help = @field(help_strings.KeybindAction, decl);
+                try formatter.writer.writeAll("# " ++ decl ++ "\n");
                 var lines = std.mem.splitScalar(u8, help, '\n');
                 while (lines.next()) |line| {
                     try formatter.writer.writeAll("#   ");
@@ -11535,16 +11554,10 @@ pub const RepeatableCommand = struct {
         try self.value.ensureUnusedCapacity(alloc, inputpkg.command.defaults.len);
         try self.value_c.ensureUnusedCapacity(alloc, inputpkg.command.defaults.len);
         for (inputpkg.command.defaults) |cmd| {
-            // Translation is currently a GTK-only feature. In particular,
-            // translating these shared strings for the embedded runtime gives
-            // the macOS app a localized command palette in an otherwise
-            // unlocalized UI.
-            const localized = if (comptime build_config.app_runtime == .gtk)
-                cmd.translated()
-            else
-                cmd;
-            self.value.appendAssumeCapacity(localized);
-            self.value_c.appendAssumeCapacity(try localized.cval(alloc));
+            // Upstream translates these for its GTK runtime only. The fork
+            // ships only the Win32 runtime, so the entries stay as written.
+            self.value.appendAssumeCapacity(cmd);
+            self.value_c.appendAssumeCapacity(try cmd.cval(alloc));
         }
     }
 
@@ -13668,8 +13681,8 @@ test "conditional replay retains theme locations after source config is freed" {
     try td.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "# dark\n# second comment\nfont-szie = 15\n" });
     var light_buf: [std.fs.max_path_bytes]u8 = undefined;
     var dark_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const light_path = try td.dir.realpath("light", &light_buf);
-    const dark_path = try td.dir.realpath("dark", &dark_buf);
+    const light_path = light_buf[0..try td.dir.realPathFile(std.testing.io, "light", &light_buf)];
+    const dark_path = dark_buf[0..try td.dir.realPathFile(std.testing.io, "dark", &dark_buf)];
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nfont-size = invalid\n", .{ light_path, dark_path });
     defer alloc.free(text);
     var source_path = "C:/theme02/config.ghostty".*;

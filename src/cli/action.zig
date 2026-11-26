@@ -141,7 +141,7 @@ test "detect stops at literal argument delimiter" {
         "+foo -- +bar",
         "+foo -- --version",
     }) |args_text| {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, args_text);
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(alloc, args_text);
         defer iter.deinit();
         try testing.expectEqual(Enum.foo, (try detectIter(Enum, &iter)).?);
     }

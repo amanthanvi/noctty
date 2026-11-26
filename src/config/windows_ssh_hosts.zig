@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const global = @import("../global.zig");
 const win = @import("../os/windows.zig");
 const windows_ext = @import("../os/windows_ext.zig");
 const thread_role = @import("../sync/thread_role.zig");
@@ -18,7 +19,7 @@ const ssh_config_read_budget_ns: u64 = if (builtin.is_test)
 else
     50 * std.time.ns_per_ms;
 
-var read_warning_mutex: std.Thread.Mutex = .{};
+var read_warning_mutex: std.Io.Mutex = .init;
 var read_warning_logged = false;
 var ssh_config_read_in_progress: std.atomic.Value(bool) = .init(false);
 
@@ -50,13 +51,11 @@ pub fn parse(alloc: Allocator, contents: []const u8) ![]Host {
 /// so we would parse a different config than Win32-OpenSSH reads and list
 /// aliases `ssh` cannot resolve.
 pub fn userProfileDir(buf: []u8) !?[]const u8 {
-    var fba_instance = std.heap.FixedBufferAllocator.init(buf);
-    const fba = fba_instance.allocator();
-    if (std.process.getEnvVarOwned(fba, "USERPROFILE")) |value| {
-        if (value.len > 0) return value;
-    } else |err| switch (err) {
-        error.OutOfMemory => return error.BufferTooSmall,
-        error.InvalidWtf8, error.EnvironmentVariableNotFound => {},
+    if (global.environ().getWindows(std.unicode.utf8ToUtf16LeStringLiteral("USERPROFILE"))) |value| {
+        if (value.len > 0) {
+            if (std.unicode.calcWtf8Len(value) > buf.len) return error.BufferTooSmall;
+            return buf[0..std.unicode.wtf16LeToWtf8(buf, value)];
+        }
     }
     return try windows_ext.knownFolderPathUtf8(&windows_ext.FOLDERID_Profile, buf);
 }
@@ -81,7 +80,7 @@ fn loadFromHome(alloc: Allocator, home_dir: []const u8) ![]Host {
         .home_dir = home_dir,
         .ssh_dir = ssh_dir,
         .hosts = &hosts,
-        .ssh_config_read_started_ns = std.time.nanoTimestamp(),
+        .ssh_config_read_started_ns = std.Io.Timestamp.now(global.io(), .real).toNanoseconds(),
     };
     try load_context.parseFile(config_path, 0);
     // Another discovery was reading a config file at the same moment, so
@@ -118,7 +117,7 @@ const LoadContext = struct {
     }
 
     fn readFileWithinBudget(self: *LoadContext, path: []const u8) Allocator.Error!ReadResult {
-        const elapsed_ns = @max(std.time.nanoTimestamp() - self.ssh_config_read_started_ns, 0);
+        const elapsed_ns = @max(std.Io.Timestamp.now(global.io(), .real).toNanoseconds() - self.ssh_config_read_started_ns, 0);
         if (elapsed_ns >= ssh_config_read_budget_ns) return .budget_exhausted;
         const remaining_ns: u64 = @intCast(ssh_config_read_budget_ns - elapsed_ns);
         const contents = readSshConfigFileBounded(
@@ -400,20 +399,36 @@ fn hasGlobMetacharacter(path: []const u8) bool {
     return std.mem.indexOfAny(u8, path, "*?[]") != null;
 }
 
+/// The Io of the SSH config read and its wait. The reader thread is detached
+/// and can outlive its caller, and the global state at exit (`global.deinit`
+/// tears its Io down), so both sides take std's blocking process-lifetime
+/// instance rather than `global.io()`; 0.15's mutex, condition and file calls
+/// needed no Io. Tests take `std.testing.io`.
+fn readerIo() std.Io {
+    if (builtin.is_test) return std.testing.io;
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 fn readFile(alloc: Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const stat = try file.stat();
+    const io = readerIo();
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false });
+    defer file.close(io);
+    const stat = try file.stat(io);
     if (stat.size > max_file_size) return error.FileTooBig;
-    return try file.readToEndAlloc(alloc, max_file_size);
+    var reader = file.reader(io, &.{});
+    return reader.interface.allocRemaining(alloc, .limited(max_file_size)) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.StreamTooLong => return error.FileTooBig,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 }
 
 const ReadFileFn = *const fn (Allocator, []const u8) anyerror![]u8;
 
 const AsyncSshConfigRead = struct {
     refs: std.atomic.Value(u32) = .init(2),
-    mutex: std.Thread.Mutex = .{},
-    done_cond: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    done_cond: std.Io.Condition = .init,
     done: bool = false,
     path: []u8,
     read_fn: ReadFileFn,
@@ -434,7 +449,8 @@ const AsyncSshConfigRead = struct {
         const alloc = std.heap.page_allocator;
         const result = self.read_fn(alloc, self.path);
 
-        self.mutex.lock();
+        const io = readerIo();
+        self.mutex.lockUncancelable(io);
         if (result) |data| {
             self.data = data;
         } else |err| {
@@ -442,8 +458,8 @@ const AsyncSshConfigRead = struct {
         }
         ssh_config_read_in_progress.store(false, .release);
         self.done = true;
-        self.done_cond.broadcast();
-        self.mutex.unlock();
+        self.done_cond.broadcast(io);
+        self.mutex.unlock(io);
 
         self.release();
     }
@@ -485,21 +501,25 @@ fn readSshConfigFileBounded(
     thread.detach();
     defer request.release();
 
-    request.mutex.lock();
+    const io = readerIo();
+    request.mutex.lockUncancelable(io);
     if (!request.done) {
-        request.done_cond.timedWait(&request.mutex, timeout_ns) catch {
-            request.mutex.unlock();
+        request.done_cond.waitTimeout(io, &request.mutex, .{ .duration = .{
+            .raw = .fromNanoseconds(timeout_ns),
+            .clock = .awake,
+        } }) catch {
+            request.mutex.unlock(io);
             return null;
         };
     }
     if (!request.done) {
-        request.mutex.unlock();
+        request.mutex.unlock(io);
         return null;
     }
     const data = request.data;
     request.data = null;
     const read_err = request.err;
-    request.mutex.unlock();
+    request.mutex.unlock(io);
 
     if (read_err) |err| return err;
     const worker_data = data orelse return error.UnexpectedEmptyRead;
@@ -508,8 +528,8 @@ fn readSshConfigFileBounded(
 }
 
 fn warnReadOnce(path: []const u8, err: anyerror) void {
-    read_warning_mutex.lock();
-    defer read_warning_mutex.unlock();
+    read_warning_mutex.lockUncancelable(global.io());
+    defer read_warning_mutex.unlock(global.io());
     if (read_warning_logged) return;
     read_warning_logged = true;
     log.warn("SSH config unreadable path={s} err={}", .{ path, err });
@@ -898,7 +918,7 @@ test "ssh config bounds file opens away from the caller" {
     const slowRead = struct {
         fn run(worker_alloc: Allocator, ignored_path: []const u8) ![]u8 {
             _ = ignored_path;
-            std.Thread.sleep(25 * std.time.ns_per_ms);
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(25), .awake);
             return try worker_alloc.dupe(u8, "late");
         }
     }.run;
@@ -909,12 +929,12 @@ test "ssh config bounds file opens away from the caller" {
         slowRead,
     )) == null);
 
-    const wait_started = std.time.nanoTimestamp();
+    const wait_started = std.Io.Timestamp.now(std.testing.io, .real).toNanoseconds();
     while (ssh_config_read_in_progress.load(.acquire)) {
-        if (std.time.nanoTimestamp() - wait_started > std.time.ns_per_s) {
+        if (std.Io.Timestamp.now(std.testing.io, .real).toNanoseconds() - wait_started > std.time.ns_per_s) {
             return error.TestUnexpectedResult;
         }
-        std.Thread.sleep(std.time.ns_per_ms);
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
 }
 

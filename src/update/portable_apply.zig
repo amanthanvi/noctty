@@ -9,6 +9,7 @@ const log = std.log.scoped(.update_portable_apply);
 const portableRelativePathAlloc = util.portableRelativePathAlloc;
 const parseSha256Hex = util.parseSha256Hex;
 const sha256File = util.sha256File;
+const updateIo = util.updateIo;
 
 pub const StagedKind = enum {
     installer,
@@ -198,7 +199,7 @@ pub fn requirePayloadEntries(alloc: Allocator, payload_root: []const u8) !void {
 /// Whether a payload has `name`: false only for a retired entry it leaves
 /// out, `IncompletePortablePayload` for any other entry it cannot show.
 fn payloadEntryPresent(path: []const u8, name: []const u8) !bool {
-    std.fs.accessAbsolute(path, .{}) catch |err| return payloadEntryAbsent(err, name);
+    std.Io.Dir.accessAbsolute(updateIo(), path, .{}) catch |err| return payloadEntryAbsent(err, name);
     return true;
 }
 
@@ -685,7 +686,7 @@ pub fn prepareBackup(
         error.FileNotFound => {},
         else => return err,
     };
-    try std.fs.cwd().makePath(backup_root);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), backup_root);
 
     for (managed_entries) |name| {
         const source = try std.fs.path.join(alloc, &.{ install_root, name });
@@ -726,7 +727,7 @@ pub fn swapPayload(
         error.FileNotFound => {},
         else => return err,
     };
-    try std.fs.cwd().makePath(displaced_root);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), displaced_root);
 
     // Check the whole payload before the first replacement, so a payload
     // that is missing a required entry changes nothing.
@@ -753,7 +754,7 @@ fn displaceManagedPath(target: []const u8, displaced: []const u8) !void {
         error.FileNotFound => {},
         else => return err,
     };
-    std.fs.renameAbsolute(target, displaced) catch |err| switch (err) {
+    std.Io.Dir.renameAbsolute(target, displaced, updateIo()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -781,7 +782,7 @@ pub fn rollback(
     const displaced_share_kind = pathKind(displaced_share) catch null;
     const restored_share_by_rename = restored: {
         if (displaced_share_kind != .directory) break :restored false;
-        std.fs.renameAbsolute(displaced_share, install_share) catch break :restored false;
+        std.Io.Dir.renameAbsolute(displaced_share, install_share, updateIo()) catch break :restored false;
         break :restored true;
     };
     if (!restored_share_by_rename) {
@@ -821,23 +822,23 @@ fn replaceManagedPath(
         error.FileNotFound => {},
         else => return err,
     };
-    std.fs.renameAbsolute(target, displaced) catch |err| switch (err) {
+    std.Io.Dir.renameAbsolute(target, displaced, updateIo()) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    std.fs.renameAbsolute(source, target) catch |err| {
-        std.fs.renameAbsolute(displaced, target) catch {};
+    std.Io.Dir.renameAbsolute(source, target, updateIo()) catch |err| {
+        std.Io.Dir.renameAbsolute(displaced, target, updateIo()) catch {};
         return err;
     };
 }
 
 fn replaceFileAtomic(alloc: Allocator, source: []const u8, target: []const u8) !void {
     if (builtin.os.tag != .windows) {
-        std.fs.deleteFileAbsolute(target) catch |err| switch (err) {
+        std.Io.Dir.deleteFileAbsolute(updateIo(), target) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
-        return std.fs.renameAbsolute(source, target);
+        return std.Io.Dir.renameAbsolute(source, target, updateIo());
     }
 
     const source_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, source);
@@ -851,19 +852,20 @@ fn replaceFileAtomic(alloc: Allocator, source: []const u8, target: []const u8) !
 
 fn copyPath(alloc: Allocator, source: []const u8, destination: []const u8) !void {
     if (pathIsWindowsReparsePoint(source)) return error.InvalidPortableUpdatePath;
+    const io = updateIo();
     if (try pathKind(source) != .directory) {
-        if (std.fs.path.dirname(destination)) |parent| try std.fs.cwd().makePath(parent);
-        try std.fs.copyFileAbsolute(source, destination, .{});
-        const copied = try std.fs.openFileAbsolute(destination, .{ .mode = .read_write });
-        defer copied.close();
-        return copied.sync();
+        if (std.fs.path.dirname(destination)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+        try std.Io.Dir.copyFileAbsolute(source, destination, io, .{});
+        const copied = try std.Io.Dir.openFileAbsolute(io, destination, .{ .mode = .read_write });
+        defer copied.close(io);
+        return copied.sync(io);
     }
 
-    try std.fs.cwd().makePath(destination);
-    var source_dir = try std.fs.openDirAbsolute(source, .{ .iterate = true });
-    defer source_dir.close();
+    try std.Io.Dir.cwd().createDirPath(io, destination);
+    var source_dir = try std.Io.Dir.openDirAbsolute(io, source, .{ .iterate = true });
+    defer source_dir.close(io);
     var iter = source_dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const child_source = try std.fs.path.join(alloc, &.{ source, entry.name });
         defer alloc.free(child_source);
         const child_destination = try std.fs.path.join(alloc, &.{ destination, entry.name });
@@ -884,9 +886,11 @@ fn copyPath(alloc: Allocator, source: []const u8, destination: []const u8) !void
 /// Non-Windows keeps the real `fsync` and its error.
 fn syncDirectory(alloc: Allocator, path: []const u8) !void {
     if (builtin.os.tag != .windows) {
-        var dir = try std.fs.openDirAbsolute(path, .{});
-        defer dir.close();
-        return std.posix.fsync(dir.fd);
+        const io = updateIo();
+        var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+        defer dir.close(io);
+        const dir_file: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+        return dir_file.sync(io);
     }
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
@@ -916,14 +920,15 @@ fn syncDirectory(alloc: Allocator, path: []const u8) !void {
 }
 
 fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
+    const io = updateIo();
     var contents: std.ArrayList(u8) = .empty;
     defer contents.deinit(alloc);
-    var backup_dir = try std.fs.openDirAbsolute(backup_root, .{ .iterate = true });
-    defer backup_dir.close();
+    var backup_dir = try std.Io.Dir.openDirAbsolute(io, backup_root, .{ .iterate = true });
+    defer backup_dir.close(io);
     var walker = try backup_dir.walk(alloc);
     defer walker.deinit();
     var file_count: usize = 0;
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind == .directory) continue;
         if (entry.kind != .file) return error.IncompletePortableUpdateBackup;
         const relative = try portableRelativePathAlloc(alloc, entry.path);
@@ -932,7 +937,7 @@ fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
         const path = try std.fs.path.join(alloc, &.{ backup_root, entry.path });
         defer alloc.free(path);
         const digest = try sha256File(path);
-        try contents.writer(alloc).print("{s} *{s}\n", .{
+        try contents.print(alloc, "{s} *{s}\n", .{
             std.fmt.bytesToHex(digest, .lower),
             relative,
         });
@@ -944,10 +949,10 @@ fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
     defer alloc.free(marker_path);
     const temp_path = try std.fmt.allocPrint(alloc, "{s}.tmp", .{marker_path});
     defer alloc.free(temp_path);
-    const marker = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true });
-    defer marker.close();
-    try marker.writeAll(contents.items);
-    try marker.sync();
+    const marker = try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true });
+    defer marker.close(io);
+    try marker.writeStreamingAll(io, contents.items);
+    try marker.sync(io);
     if (builtin.os.tag == .windows) {
         const source_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, temp_path);
         defer alloc.free(source_w);
@@ -957,7 +962,7 @@ fn commitBackupManifest(alloc: Allocator, backup_root: []const u8) !void {
             return error.PortableUpdateReplaceFailed;
         }
     } else {
-        try std.fs.renameAbsolute(temp_path, marker_path);
+        try std.Io.Dir.renameAbsolute(temp_path, marker_path, io);
     }
 }
 
@@ -969,7 +974,8 @@ fn verifyBackupManifest(
 ) !void {
     const marker_path = try std.fs.path.join(alloc, &.{ backup_root, backup_complete_name });
     defer alloc.free(marker_path);
-    const contents = try std.fs.cwd().readFileAlloc(alloc, marker_path, max_backup_manifest_bytes);
+    const io = updateIo();
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, marker_path, alloc, .limited(max_backup_manifest_bytes + 1));
     defer alloc.free(contents);
 
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -1070,11 +1076,11 @@ fn verifyBackupManifest(
                 continue;
             }
             if (kind != .directory) return error.IncompletePortableUpdateRollback;
-            var managed_dir = try std.fs.openDirAbsolute(managed_path, .{ .iterate = true });
-            defer managed_dir.close();
+            var managed_dir = try std.Io.Dir.openDirAbsolute(io, managed_path, .{ .iterate = true });
+            defer managed_dir.close(io);
             var walker = try managed_dir.walk(alloc);
             defer walker.deinit();
-            while (try walker.next()) |entry| {
+            while (try walker.next(io)) |entry| {
                 if (entry.kind == .directory) continue;
                 if (entry.kind != .file) return error.IncompletePortableUpdateRollback;
                 const native_relative = try std.fs.path.join(
@@ -1134,17 +1140,19 @@ fn removePathIfExists(path: []const u8) !void {
             attributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0)
         {
             if (attributes & file_attribute_directory != 0) {
-                return std.fs.deleteDirAbsolute(path);
+                return std.Io.Dir.deleteDirAbsolute(updateIo(), path);
             }
-            return std.fs.deleteFileAbsolute(path);
+            return std.Io.Dir.deleteFileAbsolute(updateIo(), path);
         }
     }
-    if (try pathKind(path) == .directory) return std.fs.deleteTreeAbsolute(path);
-    return std.fs.deleteFileAbsolute(path);
+    // 0.17 has no `deleteTreeAbsolute`; `deleteTree` from the cwd takes the
+    // absolute path as is.
+    if (try pathKind(path) == .directory) return std.Io.Dir.cwd().deleteTree(updateIo(), path);
+    return std.Io.Dir.deleteFileAbsolute(updateIo(), path);
 }
 
-fn pathKind(path: []const u8) !std.fs.File.Kind {
-    if (builtin.os.tag != .windows) return (try std.fs.cwd().statFile(path)).kind;
+fn pathKind(path: []const u8) !std.Io.File.Kind {
+    if (builtin.os.tag != .windows) return (try std.Io.Dir.cwd().statFile(updateIo(), path, .{})).kind;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
     const attributes = win32_sys.GetFileAttributesW(path_w.ptr);
@@ -1345,7 +1353,7 @@ test "portable rollback renames displaced share tree back exactly" {
     try prepareBackup(alloc, install_root, backup_root);
 
     try tmp.dir.createDirPath(std.testing.io, "displaced");
-    try tmp.dir.rename("install/share", "displaced/share");
+    try tmp.dir.rename("install/share", tmp.dir, "displaced/share", std.testing.io);
     try tmp.dir.createDirPath(std.testing.io, "install/share");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "new executable" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/shared.ps1", .data = "new shared" });
@@ -1370,21 +1378,21 @@ test "portable rollback renames displaced share tree back exactly" {
 
 /// A payload under `root` with every managed entry, each file holding
 /// "new <name>", except the names in `omit`.
-fn writeTestPayload(dir: std.fs.Dir, root: []const u8, omit: []const []const u8) !void {
-    try dir.makePath(root);
+fn writeTestPayload(dir: std.Io.Dir, root: []const u8, omit: []const []const u8) !void {
+    try dir.createDirPath(std.testing.io, root);
     var buf: [256]u8 = undefined;
     entries: for (managed_entries) |name| {
         for (omit) |omitted| if (std.mem.eql(u8, name, omitted)) continue :entries;
         if (std.mem.eql(u8, name, "share")) {
             const sub_path = try std.fmt.bufPrint(&buf, "{s}/share/themes/theme.txt", .{root});
-            try dir.makePath(std.fs.path.dirname(sub_path).?);
-            try dir.writeFile(.{ .sub_path = sub_path, .data = "new share" });
+            try dir.createDirPath(std.testing.io, std.fs.path.dirname(sub_path).?);
+            try dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "new share" });
             continue;
         }
         const sub_path = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ root, name });
         var data_buf: [128]u8 = undefined;
         const data = try std.fmt.bufPrint(&data_buf, "new {s}", .{name});
-        try dir.writeFile(.{ .sub_path = sub_path, .data = data });
+        try dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = data });
     }
 }
 

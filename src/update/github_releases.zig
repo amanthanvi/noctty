@@ -9,10 +9,12 @@ const conpty_redist = @import("conpty_redist.zig");
 pub const portable_apply = @import("portable_apply.zig");
 const http_windows = @import("http_windows.zig");
 const update_util = @import("util.zig");
+const win32_prefixed_path = @import("../apprt/win32_prefixed_path.zig");
 const portableRelativePathAlloc = update_util.portableRelativePathAlloc;
 const parseSha256Hex = update_util.parseSha256Hex;
 const sha256File = update_util.sha256File;
 const sha256OpenFile = update_util.sha256OpenFile;
+const updateIo = update_util.updateIo;
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -172,12 +174,12 @@ pub const StagedWindowsInstall = struct {
     artifact_path: []u8,
     payload_path: ?[]u8 = null,
     sha256_hex: []u8,
-    locked_stage_dir: ?std.fs.File = null,
-    locked_file: ?std.fs.File = null,
+    locked_stage_dir: ?std.Io.File = null,
+    locked_file: ?std.Io.File = null,
 
     pub fn deinit(self: *StagedWindowsInstall, alloc: Allocator) void {
-        if (self.locked_file) |file| file.close();
-        if (self.locked_stage_dir) |file| file.close();
+        if (self.locked_file) |file| file.close(updateIo());
+        if (self.locked_stage_dir) |file| file.close(updateIo());
         alloc.free(self.version_text);
         alloc.free(self.artifact_path);
         if (self.payload_path) |value| alloc.free(value);
@@ -293,16 +295,18 @@ pub fn resolveReleaseFeedUrl(alloc: Allocator, configured: ?[]const u8) ![]u8 {
 }
 
 pub fn defaultStatePath(alloc: Allocator) ![]u8 {
-    return internal_os.xdg.state(alloc, .{
+    var environ_map = try update_util.processEnviron().createMap(alloc);
+    defer environ_map.deinit();
+    return internal_os.xdg.state(updateIo(), alloc, &environ_map, .{
         .subdir = build_config.data_dir_name ++ "/update-state.json",
     });
 }
 
-fn openStateLock(path: []const u8) !std.fs.File {
-    if (std.fs.path.dirname(path)) |dir_path| try std.fs.cwd().makePath(dir_path);
+fn openStateLock(path: []const u8) !std.Io.File {
+    if (std.fs.path.dirname(path)) |dir_path| try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
     var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
     const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{path});
-    return std.fs.createFileAbsolute(lock_path, .{
+    return std.Io.Dir.createFileAbsolute(updateIo(), lock_path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
@@ -310,35 +314,35 @@ fn openStateLock(path: []const u8) !std.fs.File {
 }
 
 const StagingWorkLock = struct {
-    state_root: std.fs.File,
-    updates_root: std.fs.File,
-    work: std.fs.File,
+    state_root: std.Io.File,
+    updates_root: std.Io.File,
+    work: std.Io.File,
 
     fn close(self: *@This()) void {
-        self.work.close();
-        self.updates_root.close();
-        self.state_root.close();
+        self.work.close(updateIo());
+        self.updates_root.close(updateIo());
+        self.state_root.close(updateIo());
     }
 };
 
 fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !StagingWorkLock {
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     var state_root = try openLockedStageDirectory(state_dir);
-    errdefer state_root.close();
+    errdefer state_root.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, state_dir, state_root.handle)) {
         return error.InvalidUpdateStageRoot;
     }
     const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
     defer alloc.free(updates_dir);
-    try std.fs.cwd().makePath(updates_dir);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), updates_dir);
     var updates_root = try openLockedStageDirectory(updates_dir);
-    errdefer updates_root.close();
+    errdefer updates_root.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, updates_dir, updates_root.handle)) {
         return error.InvalidUpdateStageRoot;
     }
     const lock_path = try std.fs.path.join(alloc, &.{ updates_dir, "staging-work.lock" });
     defer alloc.free(lock_path);
-    const work = try std.fs.createFileAbsolute(lock_path, .{
+    const work = try std.Io.Dir.createFileAbsolute(updateIo(), lock_path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
@@ -355,18 +359,18 @@ fn pruneObsoleteStageDirectories(
     const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
     defer alloc.free(updates_dir);
     var locked_updates = try openLockedStageDirectory(updates_dir);
-    defer locked_updates.close();
+    defer locked_updates.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, updates_dir, locked_updates.handle)) {
         return error.InvalidUpdateStageRoot;
     }
-    var updates = std.fs.openDirAbsolute(updates_dir, .{ .iterate = true }) catch |err| switch (err) {
+    var updates = std.Io.Dir.openDirAbsolute(updateIo(), updates_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer updates.close();
+    defer updates.close(updateIo());
 
     var iterator = updates.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(updateIo())) |entry| {
         if (entry.kind != .directory) continue;
         if (keep_version) |keep| {
             if (windowsPathEqual(entry.name, keep)) continue;
@@ -381,13 +385,15 @@ fn pruneObsoleteStageDirectories(
 }
 
 pub fn loadState(alloc: Allocator, path: []const u8) !State {
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    // 0.15's `openFileAbsolute` refused a directory (`error.IsDir`); 0.17's
+    // opens one unless told not to.
+    const file = std.Io.Dir.openFileAbsolute(updateIo(), path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
-    defer file.close();
+    defer file.close(updateIo());
 
-    const contents = try file.readToEndAlloc(alloc, 16 * 1024);
+    const contents = try update_util.readToEndAlloc(file, alloc, 16 * 1024);
     defer alloc.free(contents);
     if (contents.len == 0) return .{};
 
@@ -510,19 +516,19 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
 
 pub fn saveState(path: []const u8, state: *const State) !void {
     if (std.fs.path.dirname(path)) |dir_path| {
-        try std.fs.cwd().makePath(dir_path);
+        try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
     }
 
     var temp_path_buf: [std.fs.max_path_bytes + ".tmp".len]u8 = undefined;
     const temp_path = try std.fmt.bufPrint(&temp_path_buf, "{s}.tmp", .{path});
-    errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
+    errdefer std.Io.Dir.deleteFileAbsolute(updateIo(), temp_path) catch {};
 
     {
-        const file = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true });
-        defer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(updateIo(), temp_path, .{ .truncate = true });
+        defer file.close(updateIo());
 
         var buf: [1024]u8 = undefined;
-        var file_writer = file.writer(&buf);
+        var file_writer = file.writer(updateIo(), &buf);
         const writer = &file_writer.interface;
 
         try writer.writeAll("{\"last_checked_at\":");
@@ -561,16 +567,17 @@ pub fn saveState(path: []const u8, state: *const State) !void {
         try writeOptionalJsonString(writer, state.portable_confirmation_token);
         try writer.writeAll("}");
         try writer.flush();
-        try file.sync();
+        try file.sync(updateIo());
     }
     // Dir.rename selects Windows' POSIX rename semantics at our 1809 floor.
-    // std.fs.renameAbsolute always uses MoveFileExW, even at that floor.
-    try std.fs.cwd().rename(temp_path, path);
+    // On Zig 0.15 std.fs.renameAbsolute always used MoveFileExW, even at that
+    // floor; on 0.17 both take the same path.
+    try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), path, updateIo());
 }
 
 pub fn recordDismissal(alloc: Allocator, path: []const u8, version_text: []const u8) !void {
     const state_lock = try openStateLock(path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, path);
     defer state.deinit(alloc);
     if (state.dismissed_version) |value| alloc.free(value);
@@ -580,7 +587,7 @@ pub fn recordDismissal(alloc: Allocator, path: []const u8, version_text: []const
 
 pub fn clearDismissal(alloc: Allocator, path: []const u8) !void {
     const state_lock = try openStateLock(path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, path);
     defer state.deinit(alloc);
     if (state.dismissed_version) |value| {
@@ -597,7 +604,7 @@ pub fn checkLatestStableRelease(
 ) !CheckOutcome {
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
-    const now = if (options.now > 0) options.now else std.time.timestamp();
+    const now = if (options.now > 0) options.now else std.Io.Timestamp.now(updateIo(), .real).toSeconds();
 
     // Staged installers, the dismissal, and the cached release all describe
     // one feed. Once the effective feed URL changes, none of them say
@@ -623,7 +630,7 @@ pub fn checkLatestStableRelease(
 
     {
         const state_lock = try openStateLock(state_path);
-        defer state_lock.close();
+        defer state_lock.close(updateIo());
         var fresh = try loadState(alloc, state_path);
         errdefer fresh.deinit(alloc);
         fresh.last_checked_at = now;
@@ -674,7 +681,7 @@ fn invalidateForeignFeedState(
         // the metadata that clearStagedInstall removes.
         if (state.staged_installer_path) |path| {
             if (std.fs.path.isAbsolute(path)) {
-                std.fs.deleteFileAbsolute(path) catch {};
+                std.Io.Dir.deleteFileAbsolute(updateIo(), path) catch {};
             }
         }
     }
@@ -824,7 +831,7 @@ fn stageWindowsInstallWithDownloader(
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
     defer alloc.free(stage_dir);
-    try std.fs.cwd().makePath(stage_dir);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), stage_dir);
     var cleanup_stage_on_error = if (baseline.staged_version) |version|
         !windowsPathEqual(version, release.version_text)
     else
@@ -835,7 +842,7 @@ fn stageWindowsInstallWithDownloader(
         };
     };
     var locked_stage_dir = try openLockedStageDirectory(stage_dir);
-    defer locked_stage_dir.close();
+    defer locked_stage_dir.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
         return error.InvalidUpdateStageRoot;
     }
@@ -857,7 +864,7 @@ fn stageWindowsInstallWithDownloader(
     }
     try download(alloc, asset_url, artifact_path);
 
-    const checksums = try std.fs.cwd().readFileAlloc(alloc, checksums_path, 1024 * 1024);
+    const checksums = try std.Io.Dir.cwd().readFileAlloc(updateIo(), checksums_path, alloc, .limited(1024 * 1024 + 1));
     defer alloc.free(checksums);
     const expected_digest = try parseExpectedSha256(checksums, asset_name);
 
@@ -893,7 +900,7 @@ fn stageWindowsInstallWithDownloader(
 
     {
         const state_lock = try openStateLock(state_path);
-        defer state_lock.close();
+        defer state_lock.close(updateIo());
         var fresh = try loadState(alloc, state_path);
         defer fresh.deinit(alloc);
         if (fresh.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
@@ -915,7 +922,7 @@ fn stageWindowsInstallWithDownloader(
         }
         replaceOptionalOwned(alloc, &fresh.staged_sha256, try alloc.dupe(u8, sha256_hex));
         replaceOptionalOwned(alloc, &fresh.staged_feed_url, try alloc.dupe(u8, release_feed_url));
-        fresh.staged_at = std.time.timestamp();
+        fresh.staged_at = std.Io.Timestamp.now(updateIo(), .real).toSeconds();
         fresh.apply_requested_at = 0;
         fresh.portable_apply_phase = null;
         clearOptionalOwned(alloc, &fresh.portable_backup_path);
@@ -993,13 +1000,13 @@ pub fn verifyStagedWindowsInstall(
         .portable => portable_layout.?.stage_dir,
     };
     var locked_stage_dir = try openLockedStageDirectory(stage_dir);
-    errdefer locked_stage_dir.close();
+    errdefer locked_stage_dir.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
         return error.InvalidStagedInstallerPath;
     }
 
     var locked_file = try openLockedInstaller(artifact_path);
-    errdefer locked_file.close();
+    errdefer locked_file.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, artifact_path, locked_file.handle)) {
         return error.InvalidStagedInstallerPath;
     }
@@ -1039,7 +1046,7 @@ pub fn verifyStagedWindowsInstall(
 
 pub fn recordStagedApplyRequested(alloc: Allocator, state_path: []const u8, now: i64) !void {
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
 
@@ -1051,7 +1058,7 @@ pub fn recordStagedApplyRequested(alloc: Allocator, state_path: []const u8, now:
         return error.NoStagedWindowsInstall;
     }
 
-    state.apply_requested_at = if (now > 0) now else std.time.timestamp();
+    state.apply_requested_at = if (now > 0) now else std.Io.Timestamp.now(updateIo(), .real).toSeconds();
     try saveState(state_path, &state);
 }
 
@@ -1071,11 +1078,23 @@ pub fn applyLogPathAlloc(alloc: Allocator, artifact_path: []const u8) ![]u8 {
 /// violation as `AccessDenied` or `SharingViolation`, depending on the path;
 /// a real permission failure on a file in the user's own profile reads the
 /// same way, and only delays the report to a later start.
+///
+/// The open is `win32_sys.openFile`, std 0.15's `OpenFile` with its status
+/// mapping, which reads a sharing violation as `AccessDenied` at once. Zig
+/// 0.17's `openFile` retries a sharing violation for about four seconds and
+/// then reports `FileBusy`, which would stall a start while Setup runs and
+/// then read as no Setup at all.
 fn installerImageInUse(path: []const u8) bool {
-    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| {
-        return err == error.SharingViolation or err == error.AccessDenied;
+    const path_w = win32_prefixed_path.sliceToPrefixedFileW(path) catch |err| {
+        return err == error.AccessDenied;
     };
-    file.close();
+    const handle = win32_sys.openFile(path_w.span(), .{
+        .access_mask = win32_types.SYNCHRONIZE | win32_types.GENERIC_READ | win32_types.GENERIC_WRITE,
+        .creation = win32_types.FILE_OPEN,
+    }) catch |err| {
+        return err == error.AccessDenied;
+    };
+    std.os.windows.CloseHandle(handle);
     return false;
 }
 
@@ -1109,11 +1128,11 @@ pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
 /// process that refuses even that is skipped.
 fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     const windows = std.os.windows;
-    var dir = std.fs.openDirAbsolute(updates_dir, .{}) catch return false;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(updateIo(), updates_dir, .{}) catch return false;
+    defer dir.close(updateIo());
     const final_buf = alloc.alloc(u16, windows.PATH_MAX_WIDE) catch return false;
     defer alloc.free(final_buf);
-    const final = win32_sys.getFinalPathNameByHandle(dir.fd, final_buf) catch return false;
+    const final = win32_sys.getFinalPathNameByHandle(dir.handle, final_buf) catch return false;
 
     var pids: []u32 = alloc.alloc(u32, 1024) catch return false;
     defer alloc.free(pids);
@@ -1201,7 +1220,7 @@ pub fn takeFailedInstallerApply(
     }
 
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     if (state.apply_requested_at == 0) return null;
@@ -1222,7 +1241,7 @@ pub fn takeFailedInstallerApply(
     const log_path: ?[]u8 = if (state.staged_installer_path) |path| applyLogPathAlloc(alloc, path) catch null else null;
     defer if (log_path) |value| alloc.free(value);
     if (log_path) |path| {
-        if (std.fs.cwd().access(path, .{})) |_| {
+        if (std.Io.Dir.cwd().access(updateIo(), path, .{})) |_| {
             return try std.fmt.allocPrint(
                 alloc,
                 "The update to noctty {s} did not finish installing. Setup's log: {s}",
@@ -1253,7 +1272,7 @@ pub fn hasStagedWindowsInstall(
             if (state.staged_portable_path == null or state.staged_payload_path == null) break :portable false;
             var layout = portableStageLayout(alloc, state_path, &state) catch break :portable false;
             defer layout.deinit(alloc);
-            const stat = std.fs.cwd().statFile(layout.manifest_path) catch break :portable false;
+            const stat = std.Io.Dir.cwd().statFile(updateIo(), layout.manifest_path, .{}) catch break :portable false;
             break :portable stat.kind == .file;
         },
     };
@@ -1350,7 +1369,7 @@ fn windowsPathEqual(a: []const u8, b: []const u8) bool {
 
 fn validatePortableStageDirectory(alloc: Allocator, stage_dir: []const u8) !void {
     var locked = try openLockedStageDirectory(stage_dir);
-    defer locked.close();
+    defer locked.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, stage_dir, locked.handle)) {
         return error.InvalidPortableUpdatePath;
     }
@@ -1373,7 +1392,7 @@ fn validatePortableInstallAndStateRoots(
 
 pub fn recordPortableApplyPending(alloc: Allocator, state_path: []const u8, now: i64) !void {
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     if (state.staged_kind != .portable or
@@ -1392,7 +1411,7 @@ pub fn recordPortableApplyPending(alloc: Allocator, state_path: []const u8, now:
     try portable_apply.cleanupBackup(layout.backup_path);
     try portable_apply.cleanupUpdatePath(layout.displaced_path);
     var token_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&token_bytes);
+    updateIo().random(&token_bytes);
     const token = try alloc.dupe(u8, &std.fmt.bytesToHex(token_bytes, .lower));
     var token_owned = true;
     errdefer if (token_owned) alloc.free(token);
@@ -1401,7 +1420,7 @@ pub fn recordPortableApplyPending(alloc: Allocator, state_path: []const u8, now:
     replaceOptionalOwned(alloc, &state.portable_confirmation_token, token);
     token_owned = false;
     state.portable_apply_phase = .pending;
-    state.apply_requested_at = if (now > 0) now else std.time.timestamp();
+    state.apply_requested_at = if (now > 0) now else std.Io.Timestamp.now(updateIo(), .real).toSeconds();
     try saveState(state_path, &state);
 }
 
@@ -1411,8 +1430,9 @@ const portable_failure_env = "NOCTTY_PORTABLE_UPDATE_FAILURE";
 const portable_bypass_env = "NOCTTY_PORTABLE_UPDATE_BYPASS";
 
 pub fn maybeRunPortableUpdateHelper(alloc: Allocator) !?u8 {
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    var args_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer args_arena.deinit();
+    const args = try update_util.processArgs().toSlice(args_arena.allocator());
     if (args.len < 2 or !std.mem.eql(u8, args[1], portable_helper_arg)) return null;
     if (args.len < 6) return 1;
 
@@ -1421,7 +1441,7 @@ pub fn maybeRunPortableUpdateHelper(alloc: Allocator) !?u8 {
     const original_args = args[6..];
     var launch_lock = claimPortableHelperLaunchLock(alloc, args[2], args[3], mode) catch |err|
         return try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
-    defer launch_lock.close();
+    defer launch_lock.close(updateIo());
     waitForProcessExit(parent_pid, 30_000) catch |err|
         return try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
     return runPortableUpdateHelper(alloc, args[2], args[3], mode, original_args) catch |err|
@@ -1433,7 +1453,7 @@ pub fn preflightPortableUpdateStartup(
     running_version: []const u8,
 ) !bool {
     if (builtin.os.tag != .windows) return false;
-    if (std.process.getEnvVarOwned(alloc, portable_bypass_env)) |value| {
+    if (update_util.processEnviron().getAlloc(alloc, portable_bypass_env)) |value| {
         alloc.free(value);
         _ = internal_os.unsetenv(portable_bypass_env);
         return false;
@@ -1460,7 +1480,7 @@ pub fn preflightPortableUpdateStartup(
     var layout = try portableStageLayout(alloc, state_path, &state);
     defer layout.deinit(alloc);
 
-    const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch null;
+    const env_token = update_util.processEnviron().getAlloc(alloc, portable_confirmation_env) catch null;
     defer if (env_token) |value| alloc.free(value);
     const token_matches = if (state.portable_confirmation_token) |expected|
         if (env_token) |actual| std.mem.eql(u8, expected, actual) else false
@@ -1482,7 +1502,7 @@ pub fn preflightPortableUpdateStartup(
             else => return err,
         };
         if (probe) |*lock| {
-            lock.close();
+            lock.close(updateIo());
             break :active false;
         }
         break :active true;
@@ -1539,7 +1559,7 @@ fn shouldDeferPortableStartupToHelper(
 }
 
 pub fn takePortableUpdateFailure(alloc: Allocator) !?[]u8 {
-    const failure = std.process.getEnvVarOwned(alloc, portable_failure_env) catch return null;
+    const failure = update_util.processEnviron().getAlloc(alloc, portable_failure_env) catch return null;
     defer alloc.free(failure);
     _ = internal_os.unsetenv(portable_failure_env);
     if (std.mem.eql(u8, failure, @errorName(error.PortableUpdateRecoveryUnavailable))) {
@@ -1582,7 +1602,7 @@ pub fn confirmPortableUpdateStartup(
         installedPortablePayloadMatches(alloc, portable_root, layout.manifest_path)
     else
         false;
-    const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch null;
+    const env_token = update_util.processEnviron().getAlloc(alloc, portable_confirmation_env) catch null;
     defer if (env_token) |value| alloc.free(value);
     const token_matches = if (baseline.portable_confirmation_token) |expected|
         if (env_token) |actual| std.mem.eql(u8, actual, expected) else false
@@ -1599,7 +1619,7 @@ pub fn confirmPortableUpdateStartup(
     if (decision != .confirm) return error.PortableUpdateConfirmationFailed;
 
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var fresh = try loadState(alloc, state_path);
     defer fresh.deinit(alloc);
     if (fresh.portable_apply_phase != .swapped) return;
@@ -1631,12 +1651,12 @@ fn launchPortableHelper(
 
     var launch_lock = (try openPortableLaunchLock(initial_layout.launch_lock_path, true)) orelse
         return true;
-    defer launch_lock.close();
+    defer launch_lock.close(updateIo());
 
     // Re-read only after winning the lock. Another launcher may have completed
     // the handoff between this process's preflight read and lock acquisition.
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     var layout = try portableStageLayout(alloc, state_path, &state);
@@ -1647,16 +1667,17 @@ fn launchPortableHelper(
         .rollback => if (phase != .swapped and phase != .confirmed and phase != .rollback) return true,
     }
 
-    const self_path = try std.fs.selfExePathAlloc(alloc);
+    const self_path = try std.process.executablePathAlloc(updateIo(), alloc);
     defer alloc.free(self_path);
     try verifyAuthenticodeSignature(self_path, null);
-    try std.fs.copyFileAbsolute(self_path, layout.helper_path, .{});
+    try std.Io.Dir.copyFileAbsolute(self_path, layout.helper_path, updateIo(), .{});
     try verifyAuthenticodeSignature(layout.helper_path, null);
 
     const parent_pid = try std.fmt.allocPrint(alloc, "{d}", .{std.os.windows.GetCurrentProcessId()});
     defer alloc.free(parent_pid);
-    const original_process_args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, original_process_args);
+    var args_arena: std.heap.ArenaAllocator = .init(alloc);
+    defer args_arena.deinit();
+    const original_process_args = try update_util.processArgs().toSlice(args_arena.allocator());
     var helper_args: std.ArrayList([]const u8) = .empty;
     defer helper_args.deinit(alloc);
     try helper_args.appendSlice(alloc, &.{
@@ -1668,26 +1689,27 @@ fn launchPortableHelper(
         parent_pid,
     });
     try helper_args.appendSlice(alloc, original_process_args[1..]);
-    var child = std.process.Child.init(helper_args.items, alloc);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.create_no_window = true;
-    try internal_os.windows_ext.spawnChildHoldingInheritLock(&child);
+    const child = try internal_os.windows_ext.spawnChildHoldingInheritLock(updateIo(), .{
+        .argv = helper_args.items,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .create_no_window = true,
+    });
     var child_open = true;
     errdefer if (child_open) {
-        win32_sys.terminateProcess(child.id, 1) catch {};
+        win32_sys.terminateProcess(child.id.?, 1) catch {};
         std.os.windows.CloseHandle(child.thread_handle);
-        std.os.windows.CloseHandle(child.id);
+        std.os.windows.CloseHandle(child.id.?);
     };
     std.os.windows.CloseHandle(child.thread_handle);
-    std.os.windows.CloseHandle(child.id);
+    std.os.windows.CloseHandle(child.id.?);
     child_open = false;
     return true;
 }
 
-fn openPortableLaunchLock(path: []const u8, nonblocking: bool) !?std.fs.File {
-    return std.fs.createFileAbsolute(path, .{
+fn openPortableLaunchLock(path: []const u8, nonblocking: bool) !?std.Io.File {
+    return std.Io.Dir.createFileAbsolute(updateIo(), path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
@@ -1703,7 +1725,7 @@ fn claimPortableHelperLaunchLock(
     state_path: []const u8,
     install_root: []const u8,
     mode: PortableHelperMode,
-) !std.fs.File {
+) !std.Io.File {
     var initial_state = try loadState(alloc, state_path);
     defer initial_state.deinit(alloc);
     var initial_layout = try portableStageLayout(alloc, state_path, &initial_state);
@@ -1713,10 +1735,10 @@ fn claimPortableHelperLaunchLock(
 
     var launch_lock = (try openPortableLaunchLock(initial_layout.launch_lock_path, false)) orelse
         return error.PortableUpdateTransactionOwned;
-    errdefer launch_lock.close();
+    errdefer launch_lock.close(updateIo());
 
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     var layout = try portableStageLayout(alloc, state_path, &state);
@@ -1728,7 +1750,7 @@ fn claimPortableHelperLaunchLock(
             return error.InvalidPortableApplyTransition,
     }
 
-    const self_path = try std.fs.selfExePathAlloc(alloc);
+    const self_path = try std.process.executablePathAlloc(updateIo(), alloc);
     defer alloc.free(self_path);
     if (!windowsPathEqual(self_path, layout.helper_path)) {
         return error.InvalidPortableUpdateHelperPath;
@@ -1749,7 +1771,7 @@ fn runPortableUpdateHelper(
     defer invocation_layout.deinit(alloc);
     try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
     try validatePortableStageDirectory(alloc, invocation_layout.stage_dir);
-    const self_path = try std.fs.selfExePathAlloc(alloc);
+    const self_path = try std.process.executablePathAlloc(updateIo(), alloc);
     defer alloc.free(self_path);
     if (!windowsPathEqual(self_path, invocation_layout.helper_path)) {
         return error.InvalidPortableUpdateHelperPath;
@@ -1759,7 +1781,7 @@ fn runPortableUpdateHelper(
         .swap => swap: {
             const state_lock = try openStateLock(state_path);
             var state_locked = true;
-            defer if (state_locked) state_lock.close();
+            defer if (state_locked) state_lock.close(updateIo());
             var state = try loadState(alloc, state_path);
             defer state.deinit(alloc);
             if (state.staged_kind != .portable or state.portable_apply_phase != .pending)
@@ -1784,7 +1806,7 @@ fn runPortableUpdateHelper(
             try portable_apply.prepareBackup(alloc, install_root, backup_path);
             state.portable_apply_phase = .swapped;
             try saveState(state_path, &state);
-            state_lock.close();
+            state_lock.close(updateIo());
             state_locked = false;
             portable_apply.swapPayload(
                 alloc,
@@ -1811,10 +1833,10 @@ fn runPortableUpdateHelper(
                 _ = try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args);
                 return err;
             };
-            win32_sys.waitForSingleObject(child.id, 15_000) catch |err| switch (err) {
+            win32_sys.waitForSingleObject(child.id.?, 15_000) catch |err| switch (err) {
                 error.WaitTimeOut => {
                     std.os.windows.CloseHandle(child.thread_handle);
-                    std.os.windows.CloseHandle(child.id);
+                    std.os.windows.CloseHandle(child.id.?);
                     var after = try loadState(alloc, state_path);
                     const confirmed = after.portable_apply_phase == .confirmed;
                     after.deinit(alloc);
@@ -1823,11 +1845,11 @@ fn runPortableUpdateHelper(
                 },
                 else => return err,
             };
-            const term = try child.wait();
+            const term = try child.wait(updateIo());
             var after = try loadState(alloc, state_path);
             defer after.deinit(alloc);
             const failed = switch (term) {
-                .Exited => |code| code != 0,
+                .exited => |code| code != 0,
                 else => true,
             };
             if (failed and
@@ -1847,7 +1869,7 @@ fn runPortableUpdateHelper(
 
 fn markPortableRollback(alloc: Allocator, state_path: []const u8) !void {
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     if (state.portable_apply_phase != .swapped and state.portable_apply_phase != .confirmed and
@@ -1866,7 +1888,7 @@ fn abandonPendingPortableApply(
 ) !bool {
     try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     if (state.staged_kind != .portable or state.portable_apply_phase != .pending) return false;
@@ -1884,7 +1906,7 @@ fn abandonUnrecoverablePortableApply(
 ) !bool {
     try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
     const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
+    defer state_lock.close(updateIo());
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     if (state.staged_kind != .portable) return false;
@@ -1925,7 +1947,7 @@ fn recoverPendingPortableFailure(
         @errorName(err),
     );
     std.os.windows.CloseHandle(child.thread_handle);
-    std.os.windows.CloseHandle(child.id);
+    std.os.windows.CloseHandle(child.id.?);
     return 0;
 }
 
@@ -1937,7 +1959,7 @@ fn rollbackPortableUpdateAndRelaunch(
 ) !u8 {
     var layout = layout: {
         const state_lock = try openStateLock(state_path);
-        defer state_lock.close();
+        defer state_lock.close(updateIo());
         var state = try loadState(alloc, state_path);
         defer state.deinit(alloc);
         if (state.staged_kind != .portable) return error.StagedKindMismatch;
@@ -1958,7 +1980,7 @@ fn rollbackPortableUpdateAndRelaunch(
     );
     {
         const state_lock = try openStateLock(state_path);
-        defer state_lock.close();
+        defer state_lock.close(updateIo());
         var state = try loadState(alloc, state_path);
         defer state.deinit(alloc);
         if (state.portable_apply_phase != .rollback) return error.InvalidPortableApplyTransition;
@@ -1971,7 +1993,7 @@ fn rollbackPortableUpdateAndRelaunch(
 
     const child = try spawnInstalledNoctty(alloc, install_root, original_args, null, null);
     std.os.windows.CloseHandle(child.thread_handle);
-    std.os.windows.CloseHandle(child.id);
+    std.os.windows.CloseHandle(child.id.?);
     return 0;
 }
 
@@ -1984,29 +2006,29 @@ fn spawnInstalledNoctty(
 ) !std.process.Child {
     const exe_path = try std.fs.path.join(alloc, &.{ install_root, "noctty.exe" });
     defer alloc.free(exe_path);
-    var env = try std.process.getEnvMap(alloc);
+    var env = try update_util.processEnviron().createMap(alloc);
     defer env.deinit();
-    if (confirmation_token) |token|
-        try env.put(portable_confirmation_env, token)
-    else
-        env.remove(portable_confirmation_env);
+    if (confirmation_token) |token| {
+        try env.put(portable_confirmation_env, token);
+    } else {
+        _ = env.swapRemove(portable_confirmation_env);
+    }
     if (failure_name) |failure| {
         try env.put(portable_failure_env, failure);
         try env.put(portable_bypass_env, "1");
     } else {
-        env.remove(portable_failure_env);
-        env.remove(portable_bypass_env);
+        _ = env.swapRemove(portable_failure_env);
+        _ = env.swapRemove(portable_bypass_env);
     }
     const child_args = try buildInstalledNocttyArgv(alloc, exe_path, original_args);
     defer alloc.free(child_args);
-    var child = std.process.Child.init(child_args, alloc);
-    child.env_map = &env;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    try internal_os.windows_ext.spawnChildHoldingInheritLock(&child);
-    child.env_map = null;
-    return child;
+    return internal_os.windows_ext.spawnChildHoldingInheritLock(updateIo(), .{
+        .argv = child_args,
+        .environ_map = &env,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
 }
 
 fn buildInstalledNocttyArgv(
@@ -2047,7 +2069,7 @@ fn finalizePortableConfirmation(alloc: Allocator, state_path: []const u8) !void 
     };
     {
         const state_lock = try openStateLock(state_path);
-        defer state_lock.close();
+        defer state_lock.close(updateIo());
         var state = try loadState(alloc, state_path);
         defer state.deinit(alloc);
         if (state.portable_apply_phase != .confirmed) return;
@@ -2203,7 +2225,7 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     const dir_path = std.fs.path.dirname(dest_path) orelse return error.InvalidDownloadPath;
     const leaf = std.fs.path.basename(dest_path);
     if (leaf.len == 0) return error.InvalidDownloadPath;
-    try std.fs.cwd().makePath(dir_path);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), dir_path);
 
     // Every child below is created, replaced, and renamed relative to this
     // one handle. Holding the stage directory keeps that directory from
@@ -2212,9 +2234,9 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     // plant a hard link or reparse point at the leaf and the write lands
     // outside the stage tree. A handle-relative open cannot be redirected
     // above the directory whose identity we just confirmed.
-    var dir = try std.fs.openDirAbsolute(dir_path, .{});
-    defer dir.close();
-    if (!try lockedHandleMatchesPath(alloc, dir_path, dir.fd)) {
+    var dir = try std.Io.Dir.openDirAbsolute(updateIo(), dir_path, .{});
+    defer dir.close(updateIo());
+    if (!try lockedHandleMatchesPath(alloc, dir_path, dir.handle)) {
         return error.InvalidUpdateStageRoot;
     }
 
@@ -2223,21 +2245,21 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
 
     var committed = false;
     defer if (!committed) {
-        dir.deleteFile(temp_leaf) catch {};
+        dir.deleteFile(updateIo(), temp_leaf) catch {};
     };
     // `Dir.deleteFile` opens with FILE_OPEN_REPARSE_POINT, so a planted link
     // is unlinked rather than followed to its target.
-    dir.deleteFile(temp_leaf) catch |err| switch (err) {
+    dir.deleteFile(updateIo(), temp_leaf) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
 
     var file = try createStageChild(alloc, dir, dir_path, temp_leaf);
     var file_open = true;
-    errdefer if (file_open) file.close();
+    errdefer if (file_open) file.close(updateIo());
 
     var file_buf: [64 * 1024]u8 = undefined;
-    var file_writer = file.writer(&file_buf);
+    var file_writer = file.writer(updateIo(), &file_buf);
     try fetchHttps(
         alloc,
         "download",
@@ -2249,14 +2271,14 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
         max_download_response_bytes,
     );
     try file_writer.interface.flush();
-    file.close();
+    file.close(updateIo());
     file_open = false;
 
-    dir.deleteFile(leaf) catch |err| switch (err) {
+    dir.deleteFile(updateIo(), leaf) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    try dir.rename(temp_leaf, leaf);
+    try dir.rename(temp_leaf, dir, leaf, updateIo());
     committed = true;
 }
 
@@ -2280,18 +2302,18 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
 /// The handle is not opened with `FILE_OPEN_REPARSE_POINT`, which would
 /// refuse the link outright, because Zig's `OpenFile` drops
 /// `FILE_SYNCHRONOUS_IO_NONALERT` in that mode and the resulting
-/// asynchronous handle is not usable with `std.fs.File.write`.
+/// asynchronous handle is not usable with `std.Io.File.write`.
 fn createStageChild(
     alloc: Allocator,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     dir_path: []const u8,
     leaf: []const u8,
-) !std.fs.File {
+) !std.Io.File {
     // `.read` only for the access right: `GENERIC_WRITE` alone does not
     // carry FILE_READ_ATTRIBUTES, and the reparse-point check below queries
     // the handle's attributes.
-    const file = try dir.createFile(leaf, .{ .exclusive = true, .read = true });
-    errdefer file.close();
+    const file = try dir.createFile(updateIo(), leaf, .{ .exclusive = true, .read = true });
+    errdefer file.close(updateIo());
     try requireStageChildHandle(alloc, dir_path, leaf, file.handle);
     return file;
 }
@@ -2320,7 +2342,7 @@ fn handleIsReparsePoint(handle: std.os.windows.HANDLE) !bool {
         &io,
         &info,
         @sizeOf(win32_types.FILE_BASIC_INFORMATION),
-        .FileBasicInformation,
+        .Basic,
     );
     return switch (rc) {
         .SUCCESS => info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0,
@@ -2402,36 +2424,36 @@ fn extractAndVerifyPortableZip(
     try portable_apply.cleanupUpdatePath(partial_root);
     try portable_apply.cleanupUpdatePath(extracted_root);
     errdefer portable_apply.cleanupUpdatePath(partial_root) catch {};
-    try std.fs.cwd().makePath(partial_root);
+    try std.Io.Dir.cwd().createDirPath(updateIo(), partial_root);
 
     // `extractPortableZip` creates every entry relative to this handle, so
     // the archive cannot escape it. The handle itself is still resolved by
     // pathname, so confirm it is the directory we asked for before anything
     // is written through it: a junction planted at `payload.partial` between
     // the makePath and this open would otherwise redirect the whole payload.
-    var destination = try std.fs.openDirAbsolute(partial_root, .{});
+    var destination = try std.Io.Dir.openDirAbsolute(updateIo(), partial_root, .{});
     var destination_open = true;
-    defer if (destination_open) destination.close();
-    if (!try lockedHandleMatchesPath(alloc, partial_root, destination.fd)) {
+    defer if (destination_open) destination.close(updateIo());
+    if (!try lockedHandleMatchesPath(alloc, partial_root, destination.handle)) {
         return error.InvalidPortableUpdatePath;
     }
     try extractPortableZip(alloc, destination, zip_path);
-    destination.close();
+    destination.close(updateIo());
     destination_open = false;
 
     const partial_payload = try std.fs.path.join(alloc, &.{ partial_root, "noctty" });
     defer alloc.free(partial_payload);
     try verifyPortablePayload(alloc, partial_payload, manifest_path);
-    try std.fs.renameAbsolute(partial_root, extracted_root);
+    try std.Io.Dir.renameAbsolute(partial_root, extracted_root, updateIo());
     return std.fs.path.join(alloc, &.{ extracted_root, "noctty" });
 }
 
 fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
-    var file = try std.fs.openFileAbsolute(zip_path, .{});
-    defer file.close();
-    if ((try file.stat()).size > max_portable_zip_bytes) return error.PortableArchiveTooLarge;
+    var file = try std.Io.Dir.openFileAbsolute(updateIo(), zip_path, .{ .allow_directory = false });
+    defer file.close(updateIo());
+    if ((try file.stat(updateIo())).size > max_portable_zip_bytes) return error.PortableArchiveTooLarge;
     var reader_buffer: [64 * 1024]u8 = undefined;
-    var reader = file.reader(&reader_buffer);
+    var reader = file.reader(updateIo(), &reader_buffer);
     var iterator = std.zip.Iterator.init(&reader) catch return error.InvalidPortableArchive;
     if (iterator.cd_record_count == 0) return error.InvalidPortableArchive;
     if (iterator.cd_record_count > max_portable_entries) return error.PortableArchiveTooLarge;
@@ -2490,11 +2512,11 @@ fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
 /// std's; the inflater is WUFFS. Unlike std, a file's decoded size and CRC-32
 /// must match its central directory record, and a directory's recorded ones
 /// must be 0 (its stored bytes are not decoded, as in std).
-fn extractPortableZip(alloc: Allocator, destination: std.fs.Dir, zip_path: []const u8) !void {
-    var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
-    defer zip_file.close();
+fn extractPortableZip(alloc: Allocator, destination: std.Io.Dir, zip_path: []const u8) !void {
+    var zip_file = try std.Io.Dir.openFileAbsolute(updateIo(), zip_path, .{ .allow_directory = false });
+    defer zip_file.close(updateIo());
     var reader_buffer: [64 * 1024]u8 = undefined;
-    var zip_reader = zip_file.reader(&reader_buffer);
+    var zip_reader = zip_file.reader(updateIo(), &reader_buffer);
     // A local extra area (at most 64 KiB) first, then the output file's,
     // the CRC's and the entry data's buffers.
     const buffers = try alloc.alloc(u8, 96 * 1024);
@@ -2512,10 +2534,10 @@ fn extractPortableZip(alloc: Allocator, destination: std.fs.Dir, zip_path: []con
 
 fn extractPortableZipEntry(
     alloc: Allocator,
-    zip_reader: *std.fs.File.Reader,
+    zip_reader: *std.Io.File.Reader,
     entry: std.zip.Iterator.Entry,
     name_buffer: *[max_portable_name_bytes]u8,
-    destination: std.fs.Dir,
+    destination: std.Io.Dir,
     buffers: []u8,
 ) ![]const u8 {
     if (entry.filename_len == 0 or entry.filename_len > max_portable_name_bytes) {
@@ -2569,14 +2591,14 @@ fn extractPortableZipEntry(
         if (entry.uncompressed_size != 0) return error.InvalidPortableArchive;
         // An empty entry's CRC-32 is 0.
         if (entry.crc32 != 0) return error.PortableArchiveChecksumMismatch;
-        try destination.makePath(name[0 .. name.len - 1]);
+        try destination.createDirPath(updateIo(), name[0 .. name.len - 1]);
         return name;
     }
-    var parent = try destination.makeOpenPath(std.fs.path.dirname(name).?, .{});
-    defer parent.close();
-    const file = try parent.createFile(std.fs.path.basename(name), .{ .exclusive = true });
-    defer file.close();
-    var file_writer = file.writer(buffers[0 .. 64 * 1024]);
+    var parent = try destination.createDirPathOpen(updateIo(), std.fs.path.dirname(name).?, .{});
+    defer parent.close(updateIo());
+    const file = try parent.createFile(updateIo(), std.fs.path.basename(name), .{ .exclusive = true });
+    defer file.close(updateIo());
+    var file_writer = file.writer(updateIo(), buffers[0 .. 64 * 1024]);
     var crc = file_writer.interface.hashed(std.hash.Crc32.init(), buffers[64 * 1024 ..][0 .. 16 * 1024]);
     try zip_reader.seekTo(entry.file_offset + @sizeOf(std.zip.LocalFileHeader) + local.filename_len + local.extra_len);
     switch (entry.compression_method) {
@@ -2610,7 +2632,7 @@ fn extractPortableZipEntry(
 
 fn verifyPortablePayloadManifest(path: []const u8) !void {
     var locked = try openLockedInstaller(path);
-    defer locked.close();
+    defer locked.close(updateIo());
     if (!try lockedHandleMatchesPath(std.heap.page_allocator, path, locked.handle)) {
         return error.InvalidPortablePayloadManifest;
     }
@@ -2619,13 +2641,13 @@ fn verifyPortablePayloadManifest(path: []const u8) !void {
 
 fn verifiedPortablePayloadManifestAlloc(alloc: Allocator, path: []const u8) ![]u8 {
     var locked = try openLockedInstaller(path);
-    defer locked.close();
+    defer locked.close(updateIo());
     if (!try lockedHandleMatchesPath(alloc, path, locked.handle)) {
         return error.InvalidPortablePayloadManifest;
     }
     try verifyAuthenticodeSignature(path, locked.handle);
-    try locked.seekTo(0);
-    return locked.readToEndAlloc(alloc, max_portable_manifest_bytes);
+    try update_util.seekFileTo(updateIo(), locked, 0);
+    return update_util.readToEndAlloc(locked, alloc, max_portable_manifest_bytes);
 }
 
 fn verifyPortablePayload(
@@ -2645,8 +2667,8 @@ fn verifyPortablePayloadAgainstManifest(
     payload_root: []const u8,
     manifest: []const u8,
 ) !void {
-    var payload_dir = try std.fs.openDirAbsolute(payload_root, .{ .iterate = true });
-    defer payload_dir.close();
+    var payload_dir = try std.Io.Dir.openDirAbsolute(updateIo(), payload_root, .{ .iterate = true });
+    defer payload_dir.close(updateIo());
     var walker = try payload_dir.walk(alloc);
     defer walker.deinit();
     var manifest_file_count: usize = 0;
@@ -2662,7 +2684,7 @@ fn verifyPortablePayloadAgainstManifest(
     }
 
     var payload_file_count: usize = 0;
-    while (try walker.next()) |entry| {
+    while (try walker.next(updateIo())) |entry| {
         if (entry.kind == .directory) continue;
         if (entry.kind != .file) return error.InvalidPortablePayload;
         const relative = try portableRelativePathAlloc(alloc, entry.path);
@@ -2715,11 +2737,11 @@ fn verifyInstalledPortablePayloadAgainstManifest(
             continue;
         }
 
-        var managed_dir = try std.fs.openDirAbsolute(managed_path, .{ .iterate = true });
-        defer managed_dir.close();
+        var managed_dir = try std.Io.Dir.openDirAbsolute(updateIo(), managed_path, .{ .iterate = true });
+        defer managed_dir.close(updateIo());
         var walker = try managed_dir.walk(alloc);
         defer walker.deinit();
-        while (try walker.next()) |entry| {
+        while (try walker.next(updateIo())) |entry| {
             if (entry.kind == .directory) continue;
             if (entry.kind != .file) return error.InvalidPortablePayload;
             const native_relative = try std.fs.path.join(
@@ -2792,13 +2814,13 @@ fn portableBinaryTrust(payload_relative_path: []const u8) PortableBinaryTrust {
 }
 
 fn verifyPortablePayloadBinaries(alloc: Allocator, payload_root: []const u8) !void {
-    var payload_dir = try std.fs.openDirAbsolute(payload_root, .{ .iterate = true });
-    defer payload_dir.close();
+    var payload_dir = try std.Io.Dir.openDirAbsolute(updateIo(), payload_root, .{ .iterate = true });
+    defer payload_dir.close(updateIo());
     var walker = try payload_dir.walk(alloc);
     defer walker.deinit();
     var verified_binary_count: usize = 0;
     var verified_conpty_count: usize = 0;
-    while (try walker.next()) |entry| {
+    while (try walker.next(updateIo())) |entry| {
         if (entry.kind == .directory) continue;
         if (entry.kind != .file) return error.InvalidPortablePayload;
         const extension = std.fs.path.extension(entry.basename);
@@ -2857,11 +2879,11 @@ fn verifyPortablePeMachine(path: []const u8) !void {
 }
 
 fn readPeMachine(path: []const u8) !u16 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.openFileAbsolute(updateIo(), path, .{ .allow_directory = false });
+    defer file.close(updateIo());
 
     var dos_signature: [2]u8 = undefined;
-    if (try file.preadAll(&dos_signature, 0) != dos_signature.len or
+    if (try file.readPositionalAll(updateIo(), &dos_signature, 0) != dos_signature.len or
         !std.mem.eql(u8, &dos_signature, "MZ"))
     {
         return error.InvalidPortableExecutable;
@@ -2870,12 +2892,12 @@ fn readPeMachine(path: []const u8) !u16 {
     // Microsoft PE/COFF specifies the PE-header file offset at DOS offset
     // 0x3c, followed by "PE\0\0" and the two-byte COFF Machine field.
     var pe_offset_bytes: [4]u8 = undefined;
-    if (try file.preadAll(&pe_offset_bytes, pe_header_pointer_offset) != pe_offset_bytes.len) {
+    if (try file.readPositionalAll(updateIo(), &pe_offset_bytes, pe_header_pointer_offset) != pe_offset_bytes.len) {
         return error.InvalidPortableExecutable;
     }
     const pe_offset = std.mem.readInt(u32, &pe_offset_bytes, .little);
     var pe_prefix: [6]u8 = undefined;
-    if (try file.preadAll(&pe_prefix, pe_offset) != pe_prefix.len or
+    if (try file.readPositionalAll(updateIo(), &pe_prefix, pe_offset) != pe_prefix.len or
         !std.mem.eql(u8, pe_prefix[0..4], "PE\x00\x00"))
     {
         return error.InvalidPortableExecutable;
@@ -2883,7 +2905,7 @@ fn readPeMachine(path: []const u8) !u16 {
     return std.mem.readInt(u16, pe_prefix[4..6], .little);
 }
 
-fn openLockedInstaller(path: []const u8) !std.fs.File {
+fn openLockedInstaller(path: []const u8) !std.Io.File {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
     const windows = std.os.windows;
@@ -2902,10 +2924,10 @@ fn openLockedInstaller(path: []const u8) !std.fs.File {
     if (handle == windows.INVALID_HANDLE_VALUE) {
         return windows.unexpectedError(std.os.windows.GetLastError());
     }
-    return .{ .handle = handle };
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
-fn openLockedStageDirectory(path: []const u8) !std.fs.File {
+fn openLockedStageDirectory(path: []const u8) !std.Io.File {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
     const windows = std.os.windows;
@@ -2924,7 +2946,7 @@ fn openLockedStageDirectory(path: []const u8) !std.fs.File {
     if (handle == windows.INVALID_HANDLE_VALUE) {
         return windows.unexpectedError(std.os.windows.GetLastError());
     }
-    return .{ .handle = handle };
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
 
 fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
@@ -3608,8 +3630,8 @@ test "canonical version strips v prefix" {
 test "update release feed resolution" {
     const alloc = std.testing.allocator;
     const env_name = "NOCTTY_UPDATE_FEED_URL";
-    const saved_env = std.process.getEnvVarOwned(alloc, env_name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
+    const saved_env = update_util.processEnviron().getAlloc(alloc, env_name) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => null,
         else => return err,
     };
     defer {
@@ -4111,7 +4133,7 @@ test "a start while Setup is still running leaves the request for a later start"
     // sees a sharing violation.
     {
         var running = try openLockedInstaller(installer_path);
-        defer running.close();
+        defer running.close(std.testing.io);
         try std.testing.expect(installerImageInUse(installer_path));
         try std.testing.expectEqual(@as(?[]u8, null), try takeFailedInstallerApply(alloc, state_path, old_build));
         var loaded = try loadState(alloc, state_path);
@@ -4156,17 +4178,17 @@ test "a staged installer reads as running only while a process runs from it" {
         const other_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", other });
         defer alloc.free(other_path);
         var held = try openLockedInstaller(other_path);
-        defer held.close();
+        defer held.close(std.testing.io);
         try std.testing.expect(installerImageInUse(other_path));
         try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
     }
 
     // Nor is a read-only leftover.
     {
-        var file = try std.fs.openFileAbsolute(installer_path, .{ .mode = .read_write });
-        defer file.close();
-        try file.setPermissions(.{ .inner = .{ .attributes = win32_types.FILE_ATTRIBUTE_READONLY } });
-        defer file.setPermissions(.{ .inner = .{ .attributes = win32_types.FILE_ATTRIBUTE_NORMAL } }) catch {};
+        var file = try std.Io.Dir.openFileAbsolute(std.testing.io, installer_path, .{ .mode = .read_write });
+        defer file.close(std.testing.io);
+        try file.setPermissions(std.testing.io, @fromBackingInt(win32_types.FILE_ATTRIBUTE_READONLY));
+        defer file.setPermissions(std.testing.io, @fromBackingInt(win32_types.FILE_ATTRIBUTE_NORMAL)) catch {};
         try std.testing.expect(installerImageInUse(installer_path));
         try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
     }
@@ -4174,7 +4196,7 @@ test "a staged installer reads as running only while a process runs from it" {
     // A running process is: this test runner, whose image sits at
     // <dir>\<subdir>\<name>.exe, the shape of updates\<version>\setup.exe.
     // Its attributes and the state record play no part.
-    const self_exe = try std.fs.selfExePathAlloc(alloc);
+    const self_exe = try std.process.executablePathAlloc(std.testing.io, alloc);
     defer alloc.free(self_exe);
     const self_dir = std.fs.path.dirname(self_exe).?;
     try std.testing.expect(processRunsFromStage(alloc, std.fs.path.dirname(self_dir).?));
@@ -4195,11 +4217,11 @@ test "a running staged Setup stays found after another feed's check drops the st
     const setup_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", "noctty-1.3.200-windows-x64-setup.exe" });
     defer alloc.free(setup_path);
     // The stand-in Setup: a copy of ping.exe, started with no console window.
-    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    const system_root = try update_util.processEnviron().getAlloc(alloc, "SystemRoot");
     defer alloc.free(system_root);
     const ping = try std.fs.path.join(alloc, &.{ system_root, "System32", "PING.EXE" });
     defer alloc.free(ping);
-    try std.fs.copyFileAbsolute(ping, setup_path, .{});
+    try std.Io.Dir.copyFileAbsolute(ping, setup_path, std.testing.io, .{});
 
     var state: State = .{
         .release_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
@@ -4213,15 +4235,16 @@ test "a running staged Setup stays found after another feed's check drops the st
     try saveState(state_path, &state);
     try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
 
-    var setup = std.process.Child.init(&.{ setup_path, "-n", "60", "127.0.0.1" }, alloc);
-    setup.stdin_behavior = .Ignore;
-    setup.stdout_behavior = .Ignore;
-    setup.stderr_behavior = .Ignore;
-    setup.create_no_window = true;
-    try setup.spawn();
+    var setup = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ setup_path, "-n", "60", "127.0.0.1" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+        .create_no_window = true,
+    });
     var running = true;
     defer if (running) {
-        _ = setup.kill() catch {};
+        setup.kill(std.testing.io);
     };
     try std.testing.expect(stagedInstallerRunning(alloc, state_path));
 
@@ -4234,10 +4257,10 @@ test "a running staged Setup stays found after another feed's check drops the st
         try std.testing.expect(loaded.staged_kind == null);
         try std.testing.expect(loaded.staged_installer_path == null);
     }
-    try std.fs.accessAbsolute(setup_path, .{});
+    try std.Io.Dir.accessAbsolute(std.testing.io, setup_path, .{});
     try std.testing.expect(stagedInstallerRunning(alloc, state_path));
 
-    _ = try setup.kill();
+    setup.kill(std.testing.io);
     running = false;
     try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
 }
@@ -4382,7 +4405,7 @@ fn testZipLocalHeader(entry: TestZipEntry) std.zip.LocalFileHeader {
     };
 }
 
-fn writeTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8, entries: []const TestZipEntry) !void {
+fn writeTestPortableZip(alloc: Allocator, dir: std.Io.Dir, sub_path: []const u8, entries: []const TestZipEntry) !void {
     var zip: std.Io.Writer.Allocating = .init(alloc);
     defer zip.deinit();
     const offsets = try alloc.alloc(u32, entries.len);
@@ -4400,7 +4423,7 @@ fn writeTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8,
         try zip.writer.writeAll(entry.name);
     }
     try zip.writer.writeStruct(testZipEndRecord(entries.len, directory_offset, zip.written().len - directory_offset, 0), .little);
-    try dir.writeFile(.{ .sub_path = sub_path, .data = zip.written() });
+    try dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = zip.written() });
 }
 
 fn testZipCentralHeader(local: std.zip.LocalFileHeader, local_offset: usize) std.zip.CentralDirectoryFileHeader {
@@ -4439,14 +4462,14 @@ fn testZipEndRecord(count: usize, directory_offset: usize, directory_len: usize,
 }
 
 /// Validate and extract `sub_path` into a fresh `out` directory beside it.
-fn extractTestPortableZip(alloc: Allocator, dir: std.fs.Dir, sub_path: []const u8) !std.fs.Dir {
-    const zip_path = try dir.realpathAlloc(alloc, sub_path);
+fn extractTestPortableZip(alloc: Allocator, dir: std.Io.Dir, sub_path: []const u8) !std.Io.Dir {
+    const zip_path = try dir.realPathFileAlloc(std.testing.io, sub_path, alloc);
     defer alloc.free(zip_path);
     try validatePortableZipEntries(alloc, zip_path);
-    try dir.deleteTree("out");
-    try dir.makeDir("out");
-    var out = try dir.openDir("out", .{});
-    errdefer out.close();
+    try dir.deleteTree(std.testing.io, "out");
+    try dir.createDir(std.testing.io, "out", .default_dir);
+    var out = try dir.openDir(std.testing.io, "out", .{});
+    errdefer out.close(std.testing.io);
     try extractPortableZip(alloc, out, zip_path);
     return out;
 }
@@ -4473,11 +4496,11 @@ test "portable update ZIP extraction inflates fixed Huffman blocks past 64 KiB (
         .{ .name = "noctty/LICENSE", .data = "stored", .contents = "stored" },
     });
     var out = try extractTestPortableZip(alloc, tmp.dir, "fixed.zip");
-    defer out.close();
-    const inflated = try out.readFileAlloc(alloc, "noctty/themes/fixed", 1 << 20);
+    defer out.close(std.testing.io);
+    const inflated = try out.readFileAlloc(std.testing.io, "noctty/themes/fixed", alloc, .limited(1 << 20));
     defer alloc.free(inflated);
     try std.testing.expectEqualSlices(u8, frame, inflated);
-    const stored = try out.readFileAlloc(alloc, "noctty/LICENSE", 64);
+    const stored = try out.readFileAlloc(std.testing.io, "noctty/LICENSE", alloc, .limited(64));
     defer alloc.free(stored);
     try std.testing.expectEqualStrings("stored", stored);
 }
@@ -4534,7 +4557,7 @@ test "portable update ZIP extraction refuses a local extra field that runs past 
         .{ .name = "noctty/framed", .data = "framed", .contents = "framed", .local_extra = framed },
     });
     var out = try extractTestPortableZip(alloc, tmp.dir, "framed.zip");
-    out.close();
+    out.close(std.testing.io);
     // The same field claiming eight data bytes overruns the nine-byte area.
     try writeTestPortableZip(alloc, tmp.dir, "overrun.zip", &.{
         .{ .name = "noctty/overrun", .data = "overrun", .contents = "overrun", .local_extra = "\x55\x54\x08\x00\x01\x00\x00\x00\x00" },
@@ -4594,8 +4617,8 @@ test "portable update ZIP extraction fails cleanly on corrupt deflate data" {
         });
         if (extractTestPortableZip(alloc, tmp.dir, "fuzz.zip")) |out_dir| {
             var out = out_dir;
-            defer out.close();
-            const inflated = try out.readFileAlloc(alloc, "noctty/fuzz", 1 << 20);
+            defer out.close(std.testing.io);
+            const inflated = try out.readFileAlloc(std.testing.io, "noctty/fuzz", alloc, .limited(1 << 20));
             defer alloc.free(inflated);
             try std.testing.expectEqualSlices(u8, frame, inflated);
         } else |err| switch (err) {
@@ -4615,7 +4638,7 @@ test "portable update serializes helper launch handoff" {
     defer alloc.free(lock_path);
 
     var first = (try openPortableLaunchLock(lock_path, true)).?;
-    defer first.close();
+    defer first.close(std.testing.io);
     try std.testing.expect((try openPortableLaunchLock(lock_path, true)) == null);
 }
 
@@ -4834,11 +4857,11 @@ test "confirmed portable cleanup failure cannot rearm startup gating" {
     const held_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup", "held.txt" });
     defer alloc.free(held_path);
     const held = try openLockedInstaller(held_path);
-    defer held.close();
+    defer held.close(std.testing.io);
     const displaced_held_path = try std.fs.path.join(alloc, &.{ stage_dir, "displaced", "held.txt" });
     defer alloc.free(displaced_held_path);
     const displaced_held = try openLockedInstaller(displaced_held_path);
-    defer displaced_held.close();
+    defer displaced_held.close(std.testing.io);
     try finalizePortableConfirmation(alloc, state_path);
 
     var loaded = try loadState(alloc, state_path);
@@ -4846,8 +4869,8 @@ test "confirmed portable cleanup failure cannot rearm startup gating" {
     try std.testing.expect(loaded.portable_apply_phase == null);
     try std.testing.expect(loaded.staged_version == null);
     try std.testing.expect(loaded.staged_kind == null);
-    try std.fs.accessAbsolute(held_path, .{});
-    try std.fs.accessAbsolute(displaced_held_path, .{});
+    try std.Io.Dir.accessAbsolute(std.testing.io, held_path, .{});
+    try std.Io.Dir.accessAbsolute(std.testing.io, displaced_held_path, .{});
 }
 
 test "portable relaunch replays original argv" {
@@ -4906,7 +4929,7 @@ test "portable concurrent launch content identity verifies the installed managed
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = managed_entry });
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(managed_entry, &digest, .{});
-        try manifest.writer(alloc).print("{s} *{s}\n", .{
+        try manifest.print(alloc, "{s} *{s}\n", .{
             std.fmt.bytesToHex(digest, .lower),
             managed_entry,
         });
@@ -4919,7 +4942,7 @@ test "portable concurrent launch content identity verifies the installed managed
     });
     var integration_digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(integration_contents, &integration_digest, .{});
-    try manifest.writer(alloc).print("{s} *{s}\n", .{
+    try manifest.print(alloc, "{s} *{s}\n", .{
         std.fmt.bytesToHex(integration_digest, .lower),
         integration_path,
     });
@@ -4967,7 +4990,7 @@ test "portable payload and installed identity without a retired file" {
         }
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(name, &digest, .{});
-        try manifest.writer(alloc).print("{s} *{s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
+        try manifest.print(alloc, "{s} *{s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
     }
     const payload_root = try tmp.dir.realPathFileAlloc(std.testing.io, "payload", alloc);
     defer alloc.free(payload_root);
@@ -4986,7 +5009,7 @@ test "portable payload and installed identity without a retired file" {
     // A target that ships it still has to match it.
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash("shipped", &digest, .{});
-    try manifest.writer(alloc).print("{s} *ghostty-vt.dll\n", .{std.fmt.bytesToHex(digest, .lower)});
+    try manifest.print(alloc, "{s} *ghostty-vt.dll\n", .{std.fmt.bytesToHex(digest, .lower)});
     try std.testing.expectError(
         error.PortablePayloadManifestMismatch,
         verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
@@ -5156,8 +5179,8 @@ test "update staging pruning rejects an updates directory reparse point" {
     defer alloc.free(outside_root);
     const updates_path = try std.fs.path.join(alloc, &.{ state_root, "updates" });
     defer alloc.free(updates_path);
-    std.fs.symLinkAbsolute(outside_root, updates_path, .{ .is_directory = true }) catch |err| switch (err) {
-        error.AccessDenied => return error.SkipZigTest,
+    std.Io.Dir.symLinkAbsolute(std.testing.io, outside_root, updates_path, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
         else => return err,
     };
     const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
@@ -5204,8 +5227,8 @@ test "update staging rejects a reparse-point state directory before creating upd
     defer alloc.free(outside_root);
     const state_root = try std.fs.path.join(alloc, &.{ root, "state" });
     defer alloc.free(state_root);
-    std.fs.symLinkAbsolute(outside_root, state_root, .{ .is_directory = true }) catch |err| switch (err) {
-        error.AccessDenied => return error.SkipZigTest,
+    std.Io.Dir.symLinkAbsolute(std.testing.io, outside_root, state_root, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
         else => return err,
     };
     const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
@@ -5245,14 +5268,14 @@ test "stage children are created only where they were named" {
     const outside_root = try tmp.dir.realPathFileAlloc(std.testing.io, "outside", alloc);
     defer alloc.free(outside_root);
 
-    var stage = try std.fs.openDirAbsolute(stage_root, .{});
-    defer stage.close();
+    var stage = try std.Io.Dir.openDirAbsolute(std.testing.io, stage_root, .{});
+    defer stage.close(std.testing.io);
 
     // The ordinary path: the handle lands on the child we named and is not
     // a reparse point.
     {
         var file = try createStageChild(alloc, stage, stage_root, "setup.exe.part");
-        defer file.close();
+        defer file.close(std.testing.io);
         try std.testing.expect(!try handleIsReparsePoint(file.handle));
     }
 
@@ -5270,8 +5293,8 @@ test "stage children are created only where they were named" {
     defer alloc.free(link_path);
     const link_target = try std.fs.path.join(alloc, &.{ outside_root, "victim.bin" });
     defer alloc.free(link_target);
-    std.fs.symLinkAbsolute(link_target, link_path, .{}) catch |err| switch (err) {
-        error.AccessDenied => return,
+    std.Io.Dir.symLinkAbsolute(std.testing.io, link_target, link_path, .{}) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return,
         else => return err,
     };
     try std.testing.expectError(
@@ -5292,8 +5315,8 @@ test "download refuses a stage directory that is not the directory it named" {
     defer alloc.free(outside_root);
     const stage_link = try std.fs.path.join(alloc, &.{ root, "stage" });
     defer alloc.free(stage_link);
-    std.fs.symLinkAbsolute(outside_root, stage_link, .{ .is_directory = true }) catch |err| switch (err) {
-        error.AccessDenied => return,
+    std.Io.Dir.symLinkAbsolute(std.testing.io, outside_root, stage_link, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return,
         else => return err,
     };
     const dest = try std.fs.path.join(alloc, &.{ stage_link, "setup.exe" });
@@ -5322,8 +5345,8 @@ test "installer staging rejects a reparse-point target before download" {
     defer alloc.free(outside_root);
     const target_stage = try std.fs.path.join(alloc, &.{ state_root, "updates", "1.3.200" });
     defer alloc.free(target_stage);
-    std.fs.symLinkAbsolute(outside_root, target_stage, .{ .is_directory = true }) catch |err| switch (err) {
-        error.AccessDenied => return error.SkipZigTest,
+    std.Io.Dir.symLinkAbsolute(std.testing.io, outside_root, target_stage, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
         else => return err,
     };
     const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
@@ -5842,12 +5865,12 @@ test "update staging leaves state lock available during stalled download" {
     defer release.deinit(alloc);
 
     const Stall = struct {
-        var entered: std.Thread.ResetEvent = .{};
-        var continue_event: std.Thread.ResetEvent = .{};
+        var entered: std.Io.Event = .unset;
+        var continue_event: std.Io.Event = .unset;
 
         fn download(_: Allocator, _: []const u8, _: []const u8) !void {
-            entered.set();
-            continue_event.wait();
+            entered.set(std.testing.io);
+            continue_event.waitUncancelable(std.testing.io);
             return error.TestDownloadStopped;
         }
     };
@@ -5869,7 +5892,7 @@ test "update staging leaves state lock available during stalled download" {
             ) catch |err| {
                 if (err != error.TestDownloadStopped) {
                     self.unexpected_error = err;
-                    Stall.entered.set();
+                    Stall.entered.set(std.testing.io);
                 }
                 return;
             };
@@ -5879,15 +5902,15 @@ test "update staging leaves state lock available during stalled download" {
     var context: StageContext = .{ .state_path = state_path, .release = &release };
     const stage_thread = try std.Thread.spawn(.{}, StageContext.run, .{&context});
     defer {
-        Stall.continue_event.set();
+        Stall.continue_event.set(std.testing.io);
         stage_thread.join();
     }
-    Stall.entered.wait();
+    Stall.entered.waitUncancelable(std.testing.io);
     if (context.unexpected_error) |err| return err;
 
     var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
     const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{state_path});
-    const competing_lock = std.fs.createFileAbsolute(lock_path, .{
+    const competing_lock = std.Io.Dir.createFileAbsolute(std.testing.io, lock_path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
@@ -5898,7 +5921,7 @@ test "update staging leaves state lock available during stalled download" {
     };
     const state_lock_available = competing_lock != null;
     if (competing_lock) |file| {
-        file.close();
+        file.close(std.testing.io);
         try recordDismissal(alloc, state_path, "1.3.200");
     }
 
@@ -6336,7 +6359,7 @@ test "locked staged installer rejects replacement until launch handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var file = try tmp.dir.createFile(std.testing.io, "installer.exe", .{});
-    try file.writeAll("test installer bytes");
+    try file.writeStreamingAll(std.testing.io, "test installer bytes");
     file.close(std.testing.io);
 
     const path = try tmp.dir.realPathFileAlloc(std.testing.io, "installer.exe", std.testing.allocator);
@@ -6347,17 +6370,17 @@ test "locked staged installer rejects replacement until launch handoff" {
 
     var locked_stage_dir = try openLockedStageDirectory(stage_dir);
     var locked_stage_dir_open = true;
-    defer if (locked_stage_dir_open) locked_stage_dir.close();
+    defer if (locked_stage_dir_open) locked_stage_dir.close(std.testing.io);
 
     var locked = try openLockedInstaller(path);
     var locked_open = true;
-    defer if (locked_open) locked.close();
+    defer if (locked_open) locked.close(std.testing.io);
 
     const renamed_stage_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}.renamed", .{stage_dir});
     defer std.testing.allocator.free(renamed_stage_dir);
     try std.testing.expectError(
         error.Unexpected,
-        std.fs.renameAbsolute(stage_dir, renamed_stage_dir),
+        std.Io.Dir.renameAbsolute(stage_dir, renamed_stage_dir, std.testing.io),
     );
 
     const replacement = win32_sys.CreateFileW(
@@ -6377,9 +6400,9 @@ test "locked staged installer rejects replacement until launch handoff" {
         std.os.windows.GetLastError(),
     );
 
-    locked.close();
+    locked.close(std.testing.io);
     locked_open = false;
-    locked_stage_dir.close();
+    locked_stage_dir.close(std.testing.io);
     locked_stage_dir_open = false;
     const after_release = win32_sys.CreateFileW(
         path_w.ptr,

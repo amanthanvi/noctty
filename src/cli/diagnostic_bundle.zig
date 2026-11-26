@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const actionpkg = @import("action.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 const build_config = @import("../build_config.zig");
 const crash = @import("../crash/main.zig");
 const pty = @import("../pty.zig");
@@ -86,9 +87,10 @@ const InstallKind = enum {
             return .portable;
         }
         if (builtin.os.tag != .windows) return .other;
-        const exe_dir = std.fs.selfExeDirPathAlloc(alloc) catch return .other;
+        const io = global.io();
+        const exe_dir = std.process.executableDirPathAlloc(io, alloc) catch return .other;
         defer alloc.free(exe_dir);
-        return classify(false, windows_ext.isInstallerManagedInstallDir(exe_dir));
+        return classify(false, windows_ext.isInstallerManagedInstallDir(io, exe_dir));
     }
 };
 
@@ -113,13 +115,21 @@ fn collectConfigKeyNames(alloc: Allocator) ![][]const u8 {
 }
 
 fn scanConfigFile(alloc: Allocator, path: []const u8, keys: *ConfigKeys) !bool {
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const io = global.io();
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
-    defer file.close();
-    if ((try file.stat()).kind != .file) return error.NotAFile;
-    const bytes = try file.readToEndAlloc(alloc, 1024 * 1024);
+    defer file.close(io);
+    if ((try file.stat(io)).kind != .file) return error.NotAFile;
+    // 0.15's `readToEndAlloc(alloc, max)`: up to `max` bytes, `FileTooBig`
+    // past it, and the read's own error.
+    var file_reader = file.reader(io, &.{});
+    const bytes = file_reader.interface.allocRemaining(alloc, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.StreamTooLong => return error.FileTooBig,
+        error.ReadFailed => return file_reader.err.?,
+        else => |e| return e,
+    };
     defer alloc.free(bytes);
     try scanConfigBytes(alloc, bytes, keys);
     return true;
@@ -192,7 +202,7 @@ const Privacy = struct {
 ///   * `--include-crash-dumps`: Copy crash dumps into the bundle. Dumps can
 ///     contain sensitive process memory and are excluded by default.
 pub fn run(alloc: Allocator) !u8 {
-    var iter = try args.argsIterator(alloc);
+    var iter = try args.argsIterator(alloc, global.args());
     defer iter.deinit();
 
     var opts: Options = .{};
@@ -200,15 +210,16 @@ pub fn run(alloc: Allocator) !u8 {
     try args.parse(Options, alloc, &opts, &iter);
 
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(global.io(), &stdout_buf);
     const result = try create(alloc, opts, &stdout_writer.interface);
     try stdout_writer.interface.flush();
     return result;
 }
 
 fn create(alloc: Allocator, opts: Options, stdout: *std.Io.Writer) !u8 {
+    const io = global.io();
     const generated_output = if (opts.output == null)
-        try std.fmt.allocPrint(alloc, "noctty-diagnostic-bundle-{d}", .{@max(std.time.milliTimestamp(), 0)})
+        try std.fmt.allocPrint(alloc, "noctty-diagnostic-bundle-{d}", .{@max(std.Io.Timestamp.now(io, .real).toMilliseconds(), 0)})
     else
         null;
     defer if (generated_output) |path| alloc.free(path);
@@ -216,27 +227,29 @@ fn create(alloc: Allocator, opts: Options, stdout: *std.Io.Writer) !u8 {
 
     // Never reuse a directory: a previous opt-in bundle may contain crash
     // dumps that a later redacted invocation must not accidentally retain.
-    std.fs.cwd().makeDir(output) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDir(io, output, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {
             try stdout.writeAll("Diagnostic output already exists. Choose a new directory with --output=<directory>; existing bundles are never reused.\n");
             return 1;
         },
         else => return err,
     };
-    const output_absolute = try std.fs.cwd().realpathAlloc(alloc, output);
+    const output_absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, output, alloc);
     defer alloc.free(output_absolute);
 
+    var environ_map = try global.environMap();
+    defer environ_map.deinit();
     var reports: usize = 0;
-    reports += try collectCrashDir(alloc, output_absolute, try crash.defaultDir(alloc), opts.@"include-crash-dumps");
-    reports += try collectCrashDir(alloc, output_absolute, try crash.legacyGhosttyDir(alloc), opts.@"include-crash-dumps");
+    reports += try collectCrashDir(alloc, output_absolute, try crash.defaultDir(io, alloc, &environ_map), opts.@"include-crash-dumps");
+    reports += try collectCrashDir(alloc, output_absolute, try crash.legacyGhosttyDir(io, alloc, &environ_map), opts.@"include-crash-dumps");
 
     const manifest_path = try std.fs.path.join(alloc, &.{ output_absolute, "manifest.json" });
     defer alloc.free(manifest_path);
-    const manifest_file = try std.fs.createFileAbsolute(manifest_path, .{ .truncate = true });
-    defer manifest_file.close();
+    const manifest_file = try std.Io.Dir.createFileAbsolute(io, manifest_path, .{ .truncate = true });
+    defer manifest_file.close(io);
 
     var file_buf: [4096]u8 = undefined;
-    var file_writer = manifest_file.writer(&file_buf);
+    var file_writer = manifest_file.writer(io, &file_buf);
     const architecture = windows_ext.detectProcessArchitecture();
     const key_names = collectConfigKeyNames(alloc) catch null;
     defer if (key_names) |names| alloc.free(names);
@@ -264,23 +277,24 @@ fn collectCrashDir(
     include_dumps: bool,
 ) !usize {
     defer alloc.free(crash_dir.path);
-    var iterator = try crash_dir.iterator();
-    defer iterator.deinit();
+    const io = global.io();
+    var iterator = try crash_dir.iterator(io);
+    defer iterator.deinit(io);
 
     var count: usize = 0;
-    while (try iterator.next()) |report| {
+    while (try iterator.next(io)) |report| {
         count += 1;
         if (!include_dumps) continue;
 
         const destination_dir = try std.fs.path.join(alloc, &.{ output, "crash-dumps" });
         defer alloc.free(destination_dir);
-        try std.fs.cwd().makePath(destination_dir);
+        try std.Io.Dir.cwd().createDirPath(io, destination_dir);
 
         const source = try std.fs.path.join(alloc, &.{ crash_dir.path, report.name });
         defer alloc.free(source);
         const destination = try std.fs.path.join(alloc, &.{ destination_dir, report.name });
         defer alloc.free(destination);
-        try std.fs.copyFileAbsolute(source, destination, .{});
+        try std.Io.Dir.copyFileAbsolute(source, destination, io, .{});
     }
     return count;
 }
@@ -384,7 +398,7 @@ test "diagnostic config scan supports UTF16 byte orders and missing files" {
     try std.testing.expect(try scanConfigFile(alloc, path, &keys));
     try std.testing.expect(keys.contains(.@"font-size"));
     const file = try tmp.dir.createFile(std.testing.io, "config.ghostty", .{});
-    try file.setEndPos(1024 * 1024 + 1);
+    try file.setLength(std.testing.io, 1024 * 1024 + 1);
     file.close(std.testing.io);
     try std.testing.expectError(error.FileTooBig, scanConfigFile(alloc, path, &keys));
 }
