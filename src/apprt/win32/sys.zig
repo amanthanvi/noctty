@@ -1424,12 +1424,15 @@ pub const GetFinalPathNameByHandleError = error{
 ///
 /// **The flags.** `FILE_NAME_OPENED | VOLUME_NAME_DOS` (0x8). Std read the name
 /// the handle was opened by (`NtQueryObject`'s object name) and only mapped its
-/// volume to a drive letter, so an 8.3 short name and the case the caller
-/// spelled stay as opened. Flags 0 would be `FILE_NAME_NORMALIZED`, which
-/// expands short names and takes the on-disk case: a caller that compares the
-/// result with the path it opened (`lockedHandleMatchesPath` in
+/// volume to a drive letter, so an 8.3 short name stayed as opened. Flags 0
+/// would be `FILE_NAME_NORMALIZED`, which expands short names: a caller that
+/// compares the result with the path it opened (`lockedHandleMatchesPath` in
 /// update/github_releases.zig) would read the same file as another, and on an
 /// SMB share normalization can fail with ACCESS_DENIED where the open worked.
+/// Case is not kept: with these flags the file system gives its own case for
+/// the name (measured on NTFS, 2026-11-26: `PRESENT FILE.TXT` opened,
+/// `present file.txt` returned), where std's object name kept the caller's.
+/// Both callers compare without case, so neither sees the difference.
 ///
 /// **Where it differs from std.** For a volume with a drive letter or a UNC
 /// share it gives std's answer, the opened spelling. A volume mounted only at a
@@ -1801,7 +1804,7 @@ test "the final path name is std's DOS form" {
     try std.testing.expectError(error.FileNotFound, getFinalPathNameByHandle(windows.INVALID_HANDLE_VALUE, &any));
 }
 
-test "the final path name is the spelling the handle was opened by: a case variant and an 8.3 alias" {
+test "the final path name keeps an 8.3 alias as opened, and matches a case variant without case" {
     const io = std.testing.io;
     const alloc = std.testing.allocator;
     // In the temp folder, through `GetShortPathNameW`: the checkout's drive may
@@ -1816,14 +1819,15 @@ test "the final path name is the spelling the handle was opened by: a case varia
     const long = try tmp.dir.realPathFileAlloc(io, folder ++ "\\" ++ leaf, alloc);
     defer alloc.free(long);
 
-    // The file's name in other case: normalization would give the on-disk case.
+    // The file's name in other case: the file system gives its own case back
+    // (see the doc), so the name matches without case.
     const variant = try alloc.dupe(u8, long);
     defer alloc.free(variant);
     for (variant[variant.len - leaf.len ..]) |*ch| ch.* = std.ascii.toUpper(ch.*);
     try std.testing.expect(!std.mem.eql(u8, variant, long));
     try expectFinalPathAsOpened(variant);
 
-    // The 8.3 alias, which normalization would expand.
+    // The 8.3 alias, which normalization would expand: it comes back short.
     const long_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, long);
     defer alloc.free(long_w);
     var short_w: [windows.PATH_MAX_WIDE]u16 = undefined;
@@ -1838,9 +1842,9 @@ test "the final path name is the spelling the handle was opened by: a case varia
     try expectFinalPathAsOpened(short);
 }
 
-/// Opens `path` and checks `getFinalPathNameByHandle` gives that spelling back,
-/// as std's own `realPath` of the handle does (std 0.17 still reads the object
-/// name, as 0.15.2's did).
+/// Opens `path` and checks `getFinalPathNameByHandle` gives that path back,
+/// compared without case (the file system's case, see its doc), and so does
+/// std's own `realPath` of the handle.
 fn expectFinalPathAsOpened(path: []const u8) !void {
     const io = std.testing.io;
     const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
@@ -1848,10 +1852,13 @@ fn expectFinalPathAsOpened(path: []const u8) !void {
     var buf: [windows.PATH_MAX_WIDE]u16 = undefined;
     const got = try getFinalPathNameByHandle(file.handle, &buf);
     var got_utf8: [std.fs.max_path_bytes]u8 = undefined;
-    errdefer std.debug.print("opened {s}\n", .{path});
-    try std.testing.expectEqualStrings(path, got_utf8[0..std.unicode.wtf16LeToWtf8(&got_utf8, got)]);
+    const got_text = got_utf8[0..std.unicode.wtf16LeToWtf8(&got_utf8, got)];
     var real: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings(path, real[0..try file.realPath(io, &real)]);
+    const real_text = real[0..try file.realPath(io, &real)];
+    if (!std.ascii.eqlIgnoreCase(path, got_text) or !std.ascii.eqlIgnoreCase(path, real_text)) {
+        std.debug.print("opened {s}\nfinal  {s}\nreal   {s}\n", .{ path, got_text, real_text });
+        return error.TestExpectedEqual;
+    }
 }
 
 test "lockFile and unlockFile keep std's status mapping" {
