@@ -260,6 +260,13 @@ $libVtStep = Get-YamlStepBlock -Content $libVtJob -Name 'Run libghostty-vt and C
 if ($libVtStep -notmatch 'run: zig build test-lib-vt -Demit-lib-vt=true --summary all') {
     throw 'CI must run the separate libghostty-vt graph and report its test count.'
 }
+# PLAN decision 15: the kept examples build on Windows (upstream's
+# build-examples-cmake-windows, with the Zig examples).
+$examplesJob = Get-YamlJobText -Content $testWorkflowText -Name 'windows-examples' -Source $testWorkflow
+$examplesStep = Get-YamlStepBlock -Content $examplesJob -Name 'Build the libghostty-vt examples' -Source $testWorkflow
+if ($examplesStep -notmatch '(?m)^        run: \./scripts/build-examples-windows\.ps1\s*$') {
+    throw 'CI must build the libghostty-vt examples on Windows.'
+}
 # Required coverage must execute and propagate failures at both YAML levels.
 # The experimental ConPTY job is intentionally excluded from this contract.
 function Test-MandatoryWorkflowCoverage {
@@ -357,6 +364,7 @@ $filteredJobs = @(
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'renderer-smoke'; Flag = 'renderer_smoke'; Steps = @('Build D3D11 lifecycle smoke tools', 'Hidden-desktop x64 WARP lifecycle smoke') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'cross-arm64'; Flag = 'cross_arm64'; Steps = @('Build ARM64 executable', 'Verify ARM64 source build stages the pinned ConPTY') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-lib-vt'; Flag = 'lib_vt'; Steps = @('Run libghostty-vt and C API tests') }
+    @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-examples'; Flag = 'lib_vt'; Steps = @('Build the libghostty-vt examples') }
     @{ Workflow = $testWorkflow; Text = $testWorkflowText; Job = 'windows-portable-smoke'; Flag = 'portable_smoke'; Steps = @('Run portable package CLI smoke') }
     @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Job = 'arm64-tests'; Flag = 'arm64_tests'; Steps = @('Verify native ARM64 runner', 'Run ARM64 Zig tests') }
     @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Job = 'arm64-build'; Flag = 'arm64_build'; Steps = @('Verify native ARM64 runner', 'Build and package ARM64 binaries', 'Run ARM64 CLI smoke', 'Build ARM64 D3D11 smoke tools', 'Hidden-desktop ARM64 WARP lifecycle smoke', 'Run packaged ARM64 CLI smoke') }
@@ -390,7 +398,7 @@ Write-Host "Filtered job coverage: $filteredMutationCount/$filteredMutationCount
 # Every Zig job restores only verified dependency packages, never build output
 # (a failed or cancelled job can save incomplete generated files).
 foreach ($zigJob in @(
-        @{ Workflow = $testWorkflow; Text = $testWorkflowText; Jobs = @('tests', 'bench', 'build', 'renderer-smoke', 'cross-arm64', 'windows-lib-vt', 'windows-conpty-probes', 'windows-portable-smoke', 'bench-trend') }
+        @{ Workflow = $testWorkflow; Text = $testWorkflowText; Jobs = @('tests', 'bench', 'build', 'renderer-smoke', 'cross-arm64', 'windows-lib-vt', 'windows-examples', 'windows-conpty-probes', 'windows-portable-smoke', 'bench-trend') }
         @{ Workflow = $windowsArmWorkflow; Text = $windowsArmWorkflowText; Jobs = @('arm64-tests', 'arm64-build') }
     )) {
     foreach ($jobName in $zigJob.Jobs) {

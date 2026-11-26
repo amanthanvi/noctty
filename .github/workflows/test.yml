@@ -659,6 +659,39 @@ jobs:
       - name: Build app-profile differential oracle (no capture)
         run: zig build oracle -Dvt-api=v140 -Dsimd=true -Doptimize=ReleaseFast -Dcpu=baseline -Dcustom-shaders=true --summary all
 
+  windows-examples:
+    name: Windows libghostty-vt Examples
+    needs: changes
+    if: needs.changes.outputs.lib_vt == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+          use-cache: false
+
+      # setup-zig exports its own global cache even with use-cache disabled.
+      - name: Configure Zig package cache
+        shell: pwsh
+        run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+      # Reuse only verified dependency packages, never compiler/build outputs.
+      - name: Cache Zig dependency packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.zig-global-cache/p
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.17.1-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon', 'example/*/build.zig.zon') }}
+      # Upstream's build-examples-cmake-windows, plus the Zig examples
+      # (PLAN decision 15): every example builds, the failures are listed.
+      - name: Build the libghostty-vt examples
+        shell: pwsh
+        run: ./scripts/build-examples-windows.ps1
+
   windows-conpty-probes:
     name: Windows ConPTY Probes (experimental)
     needs: changes
@@ -810,6 +843,7 @@ jobs:
         renderer-smoke,
         cross-arm64,
         windows-lib-vt,
+        windows-examples,
         windows-portable-smoke,
       ]
     # always(), not !cancelled(): under !cancelled() a cancelled run skips the
@@ -830,7 +864,7 @@ jobs:
         shell: pwsh
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: ./scripts/ci-gate.ps1 -NeedsJson $env:NEEDS_JSON -Expect checks:always,tests:tests,bench:bench,build:build,renderer-smoke:renderer_smoke,cross-arm64:cross_arm64,windows-lib-vt:lib_vt,windows-portable-smoke:portable_smoke
+        run: ./scripts/ci-gate.ps1 -NeedsJson $env:NEEDS_JSON -Expect checks:always,tests:tests,bench:bench,build:build,renderer-smoke:renderer_smoke,cross-arm64:cross_arm64,windows-lib-vt:lib_vt,windows-examples:lib_vt,windows-portable-smoke:portable_smoke
 
   windows-interactive:
     name: Windows 11 Interactive Composite
