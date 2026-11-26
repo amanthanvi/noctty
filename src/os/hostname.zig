@@ -108,7 +108,7 @@ fn stripTrailingDot(name: []const u8) []const u8 {
 
 /// The names `GetComputerNameExW` can report for this machine.
 pub const ComputerName = if (builtin.os.tag == .windows)
-    @import("windows.zig").exp.COMPUTER_NAME_FORMAT
+    @import("windows_ext.zig").COMPUTER_NAME_FORMAT
 else
     void;
 
@@ -121,10 +121,11 @@ pub const computer_name_max = 1024;
 /// Windows only.
 pub fn computerName(kind: ComputerName, buf: *[computer_name_max]u8) ?[]const u8 {
     const windows = @import("windows.zig");
+    const windows_ext = @import("windows_ext.zig");
     // A DNS name is at most 253 characters and a NetBIOS name 15.
     var wide: [256:0]u16 = undefined;
     var len: windows.DWORD = wide.len;
-    if (windows.exp.kernel32.GetComputerNameExW(kind, &wide, &len) == 0) return null;
+    if (windows_ext.GetComputerNameExW(kind, &wide, &len) == 0) return null;
     if (len == 0 or len > wide.len) return null;
     const n = std.unicode.utf16LeToUtf8(buf, wide[0..len]) catch return null;
     return buf[0..n];
@@ -143,7 +144,7 @@ pub fn isLocal(hostname: []const u8) LocalHostnameValidationError!bool {
     if (eql(hostname, "localhost")) return true;
 
     // If hostname is not "localhost" it must match our hostname.
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .windows => {
             // The DNS names first: they are what the shells send.
             const kinds = [_]ComputerName{ .dns_hostname, .dns_fully_qualified, .netbios };

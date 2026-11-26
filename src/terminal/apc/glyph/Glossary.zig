@@ -20,8 +20,10 @@ const Constraint = FontGlyph.RenderOptions.Constraint;
 /// Defined by the specification.
 pub const max_entries = 1024;
 
-/// Maximum size of an individual allocation made by the glyf outline decoder.
-pub const max_glyf_allocation = 64 * 1024;
+/// Maximum size of any allocation made while decoding a glyf registration.
+/// This is limited by the dynamic allocations not the struct size so the
+/// actual size allowed is slightly larger, but worst case only by 10KB.
+pub const max_glyf_allocation = 64 * 1024; // 64 KiB
 
 /// An empty glossary with no registered glyphs.
 pub const empty: Glossary = .{ .entries = .empty };
@@ -312,14 +314,13 @@ fn testRepeatedPointRegisterReq(
     defer alloc.free(payload);
     const encoded = Encoder.encode(payload, decoded.items);
 
-    const command = try std.fmt.allocPrint(alloc, "r;cp=e000;{s}", .{encoded});
+    const command = try alloc.print("r;cp=e000;{s}", .{encoded});
     defer alloc.free(command);
     return try testParseRegister(alloc, command);
 }
 
 fn testRegisterReq(alloc: Allocator, cp: u21) !RegisterReq {
-    const data = try std.fmt.allocPrint(
-        alloc,
+    const data = try alloc.print(
         "r;cp={x};upm=2048;aw=1024;lh=1536;width=2;size=stretch;align=end,start;pad=0.1,0.2,0.3,0.4;{s}",
         .{ cp, test_triangle_glyf_payload },
     );

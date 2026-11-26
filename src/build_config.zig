@@ -59,10 +59,10 @@ pub const bundle_id = "io.github.amanthanvi.noctty";
 /// be used for real work. We'd love to have an option to run a build with
 /// safety checks that could be used for real work. This lets us do that.
 pub const slow_runtime_safety = std.debug.runtime_safety and switch (builtin.mode) {
-    .Debug => true,
-    .ReleaseSafe,
-    .ReleaseSmall,
-    .ReleaseFast,
+    .debug => true,
+    .safe,
+    .small,
+    .fast,
     => false,
 };
 
@@ -96,6 +96,6 @@ pub const Artifact = enum {
 
 /// True if runtime safety checks are enabled.
 pub const is_debug = switch (builtin.mode) {
-    .Debug, .ReleaseSafe => true,
-    .ReleaseFast, .ReleaseSmall => false,
+    .debug, .safe => true,
+    .fast, .small => false,
 };

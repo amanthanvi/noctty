@@ -4,7 +4,6 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
-const lib = @import("../lib/main.zig");
 const paste_protection = @import("../apprt/win32_paste_protection.zig");
 const test_support = @import("automation_test_support.zig");
 
@@ -99,11 +98,11 @@ fn runArgsWithSend(
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
                 return actionpkg.help_error;
             }
-            if (lib.cutPrefix(u8, arg, "--class=")) |value| {
+            if (std.mem.cutPrefix(u8, arg, "--class=")) |value| {
                 opts.class = try arena.dupeZ(u8, std.mem.trim(u8, value, &std.ascii.whitespace));
                 continue;
             }
-            if (lib.cutPrefix(u8, arg, "--surface-id=")) |value| {
+            if (std.mem.cutPrefix(u8, arg, "--surface-id=")) |value| {
                 if (opts.@"surface-id" != null) {
                     return report(stderr, 1, "Invalid +send-text arguments.\n");
                 }
@@ -111,7 +110,7 @@ fn runArgsWithSend(
                     return report(stderr, 1, "Invalid --surface-id.\n");
                 continue;
             }
-            if (lib.cutPrefix(u8, arg, "--timeout=")) |value| {
+            if (std.mem.cutPrefix(u8, arg, "--timeout=")) |value| {
                 opts.timeout = std.fmt.parseInt(u64, value, 10) catch
                     return report(stderr, 1, "Invalid --timeout.\n");
                 continue;

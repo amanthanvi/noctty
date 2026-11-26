@@ -1,0 +1,746 @@
+//! The fork's Win32 declarations: everything the fork needs that upstream's
+//! `os/windows.zig` does not declare. That file stays exactly upstream's, so a
+//! later merge cannot conflict there (docs/upstream-merge-policy.md, "The
+//! ConPTY path is fork-owned by thread and function"; PLAN.md 7.4 and
+//! decision 13).
+//!
+//! - One declaration per symbol. A call upstream declares (in `exp.kernel32`,
+//!   `exp.ntdll` or at its top level) is taken from `os/windows.zig`; this file
+//!   declares only what upstream lacks. Re-read upstream's file at every
+//!   merge: a name it newly declares leaves this file.
+//! - `BOOL` here is `c_int`, with integer `TRUE` and `FALSE`, unlike upstream's
+//!   std enum `BOOL`: compare a result from an extern here with `0`, and one
+//!   from upstream's `exp` with `windows.FALSE`.
+//! - A fork extern returns `?HANDLE` where the API fails with NULL, uses
+//!   `callconv(.winapi)` and matches the SDK prototype.
+//! - This file imports nothing from `src/apprt`.
+//!
+//! Moved here from `os/windows.zig` in step 1B.1 of the Ghostty 1.4.0
+//! catch-up, as `main` had them; their 0.17 spellings are 1B.5's.
+const std = @import("std");
+const builtin = @import("builtin");
+const windows = std.os.windows;
+const os_windows = @import("windows.zig");
+
+pub const BOOL = c_int;
+pub const TRUE: BOOL = 1;
+pub const FALSE: BOOL = 0;
+
+/// Held across a spawn that hands a child inheritable pipe ends and across
+/// the shell spawn, which passes `bInheritHandles = TRUE` and so takes every
+/// inheritable handle in the process. A shell started while profile
+/// discovery was creating `wsl.exe -l -q` could otherwise inherit the write
+/// end of `wsl.exe`'s stdout pipe, and discovery's read of that pipe would
+/// never see end of file.
+pub var inheritable_spawn_lock: std.Thread.Mutex = .{};
+
+/// `std.process.Child.spawn` holding `inheritable_spawn_lock`. Child creates
+/// inheritable ends for its pipes (and NUL) and closes them in this process
+/// before it returns, so holding the lock across it keeps them out of a
+/// concurrent spawn, and keeps this child from inheriting another's.
+pub fn spawnChildHoldingInheritLock(child: *std.process.Child) !void {
+    inheritable_spawn_lock.lock();
+    defer inheritable_spawn_lock.unlock();
+    try child.spawn();
+}
+
+// Export any constants or functions we need from the Windows API so
+// we can just import one file.
+
+// Re-exports `main` kept in `os/windows.zig` that upstream's file does not
+// have. The std names among them are 1B.5's re-homing.
+pub const kernel32 = windows.kernel32;
+pub const OpenFile = windows.OpenFile;
+pub const CloseHandle = windows.CloseHandle;
+pub const SetHandleInformation = windows.SetHandleInformation;
+pub const HWND = windows.HWND;
+pub const HMODULE = windows.HMODULE;
+pub const FOLDERID_Profile = windows.GUID.parse("{5E6C858F-0E22-4760-9AFE-EA3317B67173}");
+pub const FOLDERID_LocalAppData = windows.FOLDERID_LocalAppData;
+
+
+pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
+pub extern "kernel32" fn GetOEMCP() callconv(.winapi) windows.UINT;
+/// The one declaration: the text editor opener and the Win32 runtime's
+/// link prompt both use it.
+pub extern "shlwapi" fn AssocQueryStringW(flags: u32, str: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, len: *u32) callconv(.winapi) windows.HRESULT;
+/// std's `DeviceIoControl` wrapper drops the byte count, which a reader of
+/// variable-length output (reparse data) needs.
+pub extern "kernel32" fn DeviceIoControl(
+    hDevice: windows.HANDLE,
+    dwIoControlCode: windows.DWORD,
+    lpInBuffer: ?*const anyopaque,
+    nInBufferSize: windows.DWORD,
+    lpOutBuffer: ?*anyopaque,
+    nOutBufferSize: windows.DWORD,
+    lpBytesReturned: ?*windows.DWORD,
+    lpOverlapped: ?*anyopaque,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn GetDriveTypeW(
+    lpRootPathName: ?windows.LPCWSTR,
+) callconv(.winapi) windows.UINT;
+
+/// `GetDriveTypeW` return values, as documented at
+/// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew
+pub const DRIVE_UNKNOWN: windows.UINT = 0;
+pub const DRIVE_NO_ROOT_DIR: windows.UINT = 1;
+pub const DRIVE_REMOVABLE: windows.UINT = 2;
+pub const DRIVE_FIXED: windows.UINT = 3;
+pub const DRIVE_REMOTE: windows.UINT = 4;
+pub const DRIVE_CDROM: windows.UINT = 5;
+pub const DRIVE_RAMDISK: windows.UINT = 6;
+
+/// Classify the drive named by an ASCII drive letter such as 'C'. This only
+/// reads the local drive/mount table, so it does not touch the network even
+/// for a disconnected mapped drive. Returns `DRIVE_UNKNOWN` for anything that
+/// is not a drive letter.
+pub fn driveTypeForLetter(letter: u8) windows.UINT {
+    if (builtin.os.tag != .windows) return DRIVE_UNKNOWN;
+    if (!std.ascii.isAlphabetic(letter)) return DRIVE_UNKNOWN;
+
+    // GetDriveTypeW requires the trailing backslash.
+    const root: [3:0]u16 = .{ letter, ':', '\\' };
+    return GetDriveTypeW(&root);
+}
+
+extern "kernel32" fn QueryDosDeviceW(name: [*:0]const u16, target: [*]u16, size: u32) callconv(.winapi) u32;
+
+/// Resolve only a DOS alias (drive letter or Volume{GUID}) in the local device
+/// map. Refuse filesystem paths, redirectors and intermediate aliases before
+/// any open. The caller must separately screen the drive's media type.
+pub fn directVolumeDeviceName(alias: [*:0]const u16, buf: []u16) ?[]const u16 {
+    if (builtin.os.tag != .windows or buf.len > std.math.maxInt(u32)) return null;
+    const count = QueryDosDeviceW(alias, buf.ptr, @intCast(buf.len));
+    if (count == 0 or count > buf.len) return null;
+    const end = std.mem.indexOfScalar(u16, buf[0..count], 0) orelse return null;
+    return if (isDirectVolumeDeviceName(buf[0..end])) buf[0..end] else null;
+}
+
+fn isDirectVolumeDeviceName(name: []const u16) bool {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\");
+    return name.len > prefix.len and std.mem.startsWith(u16, name, prefix) and
+        std.mem.indexOfAny(u16, name[prefix.len..], &.{ '\\', '/', ':', '?' }) == null;
+}
+
+/// Replace the DOS drive alias in a prefixed path before OBJ_DONT_REPARSE.
+/// Callers must screen the drive's media type before resolving this mapping.
+pub fn directVolumePath(path: *windows.PathSpace) bool {
+    if (builtin.is_test) {
+        if (TestHooks.direct_volume_mapping) |mapping|
+            return directVolumePathWithMapping(path, mapping);
+    }
+    return directVolumePathWithMapping(path, directVolumeDeviceName);
+}
+
+pub const DeleteOpenedFileError = error{ AccessDenied, Unexpected };
+
+/// Delete the file `handle` is open on, whatever its path names now: the
+/// delete goes through a second handle to the same file (`ReOpenFile`), so
+/// no path is resolved again. `handle` must share delete access, as every
+/// `std.fs` open does. Flags as std's `DeleteFile`: POSIX semantics, and the
+/// legacy class where a file system refuses the Ex one (FAT).
+pub fn deleteOpenedFile(handle: windows.HANDLE) DeleteOpenedFileError!void {
+    const delete_handle = ReOpenFile(
+        handle,
+        windows.DELETE,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        0,
+    );
+    if (delete_handle == windows.INVALID_HANDLE_VALUE) return switch (windows.GetLastError()) {
+        .ACCESS_DENIED, .SHARING_VIOLATION => error.AccessDenied,
+        else => |err| windows.unexpectedError(err),
+    };
+    defer windows.CloseHandle(delete_handle);
+
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    var info_ex: windows.FILE_DISPOSITION_INFORMATION_EX = .{
+        .Flags = FILE_DISPOSITION_DELETE |
+            FILE_DISPOSITION_POSIX_SEMANTICS |
+            FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+    };
+    var rc = windows.ntdll.NtSetInformationFile(
+        delete_handle,
+        &io,
+        &info_ex,
+        @sizeOf(windows.FILE_DISPOSITION_INFORMATION_EX),
+        .FileDispositionInformationEx,
+    );
+    if (rc == .INVALID_PARAMETER) {
+        var info: windows.FILE_DISPOSITION_INFORMATION = .{ .DeleteFile = windows.TRUE };
+        rc = windows.ntdll.NtSetInformationFile(
+            delete_handle,
+            &io,
+            &info,
+            @sizeOf(windows.FILE_DISPOSITION_INFORMATION),
+            .FileDispositionInformation,
+        );
+    }
+    return switch (rc) {
+        .SUCCESS => {},
+        .ACCESS_DENIED, .CANNOT_DELETE, .MEDIA_WRITE_PROTECTED => error.AccessDenied,
+        else => windows.unexpectedStatus(rc),
+    };
+}
+
+// FILE_DISPOSITION_INFORMATION_EX flags (ntifs.h); std keeps its copies private.
+const FILE_DISPOSITION_DELETE: windows.ULONG = 0x00000001;
+const FILE_DISPOSITION_POSIX_SEMANTICS: windows.ULONG = 0x00000002;
+const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: windows.ULONG = 0x00000010;
+
+/// Inject at the OS boundary so tests enter through the real production callers.
+/// The override and its dispatch are absent from non-test builds. Thread-local
+/// state keeps a test's refusal from affecting unrelated worker threads.
+pub const TestHooks = if (builtin.is_test) struct {
+    pub threadlocal var direct_volume_mapping: ?*const fn ([*:0]const u16, []u16) ?[]const u16 = null;
+
+    pub fn unavailableVolume(_: [*:0]const u16, buf: []u16) ?[]const u16 {
+        const device = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\NocttyNoSuchVolume");
+        @memcpy(buf[0..device.len], device);
+        return buf[0..device.len];
+    }
+} else struct {};
+
+fn directVolumePathWithMapping(path: *windows.PathSpace, mapping: anytype) bool {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\??\\");
+    if (path.len < 7 or !std.mem.startsWith(u16, path.span(), prefix) or
+        !((path.data[4] >= 'A' and path.data[4] <= 'Z') or (path.data[4] >= 'a' and path.data[4] <= 'z')) or
+        path.data[5] != ':' or path.data[6] != '\\') return false;
+    const drive: [2:0]u16 = .{ path.data[4], ':' };
+    var device_buf: [512]u16 = undefined;
+    const device = mapping(&drive, &device_buf) orelse return false;
+    const final_len = device.len + path.len - 6;
+    if (final_len >= path.data.len) return false;
+    std.mem.copyBackwards(u16, path.data[device.len..final_len], path.data[6..path.len]);
+    @memcpy(path.data[0..device.len], device);
+    path.len = final_len;
+    path.data[final_len] = 0;
+    return true;
+}
+
+test "direct volume path maps DOS letter before guarded opens" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    const Mapping = struct {
+        fn map(alias: [*:0]const u16, buf: []u16) ?[]const u16 {
+            std.testing.expectEqualSlices(u16, w("C:"), std.mem.span(alias)) catch unreachable;
+            const device = w("\\Device\\HarddiskVolume3");
+            @memcpy(buf[0..device.len], device);
+            return buf[0..device.len];
+        }
+    };
+    inline for (.{ "C:\\", "C:\\folder\\café.txt", "C:/folder/café.txt" }) |input| {
+        var path = try windows.sliceToPrefixedFileW(null, input);
+        try std.testing.expect(directVolumePathWithMapping(&path, Mapping.map));
+        const expected = if (std.mem.eql(u8, input, "C:\\"))
+            w("\\Device\\HarddiskVolume3\\")
+        else
+            w("\\Device\\HarddiskVolume3\\folder\\café.txt");
+        try std.testing.expectEqualSlices(u16, expected, path.span());
+        try std.testing.expectEqual(@as(u16, 0), path.data[path.len]);
+    }
+}
+
+test "direct volume path fails closed on missing mappings and oversized names" {
+    const Mapping = struct {
+        fn missing(_: [*:0]const u16, _: []u16) ?[]const u16 {
+            return null;
+        }
+        fn map(_: [*:0]const u16, buf: []u16) ?[]const u16 {
+            const device = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\HarddiskVolume3");
+            @memcpy(buf[0..device.len], device);
+            return buf[0..device.len];
+        }
+    };
+    var path = try windows.sliceToPrefixedFileW(null, "C:\\safe.txt");
+    try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.missing));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\\??\\C:\\safe.txt"), path.span());
+    @memset(path.data[7 .. path.data.len - 1], 'x');
+    path.len = path.data.len - 1;
+    path.data[path.len] = 0;
+    try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.map));
+    const device_len = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\HarddiskVolume3").len;
+    path.len = path.data.len - 1 - device_len + 6;
+    path.data[path.len] = 0;
+    try std.testing.expect(directVolumePathWithMapping(&path, Mapping.map));
+    try std.testing.expectEqual(path.data.len - 1, path.len);
+    try std.testing.expectEqual(@as(u16, 'x'), path.data[path.len - 1]);
+    try std.testing.expectEqual(@as(u16, 0), path.data[path.len]);
+}
+
+test "direct volume path refuses other native roots before mapping" {
+    const Mapping = struct {
+        fn unexpected(_: [*:0]const u16, _: []u16) ?[]const u16 {
+            unreachable;
+        }
+    };
+    inline for (.{ "", "\\??\\C:", "\\??\\C:x", "\\??\\1:\\x", "\\??\\UNC\\server\\share", "\\Device\\HarddiskVolume3\\x" }) |input| {
+        var path: windows.PathSpace = undefined;
+        const wide = std.unicode.utf8ToUtf16LeStringLiteral(input);
+        @memcpy(path.data[0..wide.len], wide);
+        path.len = wide.len;
+        path.data[path.len] = 0;
+        try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.unexpected));
+        try std.testing.expectEqualSlices(u16, wide, path.span());
+    }
+}
+
+test "direct volume device mappings exclude redirects and filesystem paths" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(isDirectVolumeDeviceName(w("\\Device\\HarddiskVolume3")));
+    inline for (.{ "\\Device\\", "\\Device\\Mup\\server\\share", "\\??\\C:\\tools", "\\Device\\HarddiskVolume3\\tools", "C:\\tools" }) |path|
+        try std.testing.expect(!isDirectVolumeDeviceName(w(path)));
+}
+
+/// `IMAGE_FILE_MACHINE_*` codes from `winnt.h`. `IsWow64Process2` reports the
+/// process and native architecture using these values.
+pub const IMAGE_FILE_MACHINE_UNKNOWN: u16 = 0x0000;
+pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+pub const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
+pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
+
+/// The `IMAGE_FILE_MACHINE_*` code this binary was built for. Comparing it
+/// against the native machine separates a native ARM64 build from an x64
+/// build running under Windows on ARM emulation, and it is the only
+/// architecture fact available when `IsWow64Process2` cannot be resolved.
+pub const build_machine: u16 = switch (builtin.target.cpu.arch) {
+    .x86_64 => IMAGE_FILE_MACHINE_AMD64,
+    .aarch64 => IMAGE_FILE_MACHINE_ARM64,
+    .x86 => IMAGE_FILE_MACHINE_I386,
+    .arm, .thumb => IMAGE_FILE_MACHINE_ARMNT,
+    else => IMAGE_FILE_MACHINE_UNKNOWN,
+};
+
+/// Name for an `IMAGE_FILE_MACHINE_*` code using the vocabulary Windows shows
+/// users and the release artifacts already use ("x64", not "AMD64").
+///
+/// Returns null for a code this build does not know so callers report the raw
+/// value instead of inventing a name. `IMAGE_FILE_MACHINE_UNKNOWN` maps to
+/// "unknown", which is only ever right for a native machine; a process
+/// machine must go through `resolveProcessArchitecture` first.
+pub fn machineArchitectureName(machine: u16) ?[]const u8 {
+    return switch (machine) {
+        IMAGE_FILE_MACHINE_UNKNOWN => "unknown",
+        IMAGE_FILE_MACHINE_I386 => "x86",
+        IMAGE_FILE_MACHINE_ARMNT => "ARM32",
+        IMAGE_FILE_MACHINE_AMD64 => "x64",
+        IMAGE_FILE_MACHINE_ARM64 => "ARM64",
+        else => null,
+    };
+}
+
+/// `machineArchitectureName` with a rendered fallback for codes this build
+/// does not name. A 24-byte `buf` always holds the fallback.
+pub fn machineArchitectureLabel(buf: []u8, machine: u16) []const u8 {
+    if (machineArchitectureName(machine)) |name| return name;
+    return std.fmt.bufPrint(buf, "machine 0x{x:0>4}", .{machine}) catch "unrecognized machine";
+}
+
+/// The architecture this process runs as and the architecture of the machine
+/// under it, after `IsWow64Process2`'s ambiguous process machine has been
+/// resolved by `resolveProcessArchitecture`.
+pub const ProcessArchitecture = struct {
+    process_machine: u16,
+    native_machine: u16,
+
+    /// Whether this process runs on a machine of a different architecture.
+    pub fn emulated(self: ProcessArchitecture) bool {
+        return self.native_machine != IMAGE_FILE_MACHINE_UNKNOWN and
+            self.process_machine != IMAGE_FILE_MACHINE_UNKNOWN and
+            self.process_machine != self.native_machine;
+    }
+};
+
+/// Turn a raw `IsWow64Process2` result into a `ProcessArchitecture`.
+///
+/// Windows documents `pProcessMachine` as `IMAGE_FILE_MACHINE_UNKNOWN` when
+/// "the target process is not a WOW64 process" and says nothing about which
+/// emulation modes count, so the field cannot be trusted to separate a native
+/// ARM64 process from an emulated x64 one on Windows on ARM: both may report
+/// UNKNOWN. `process_build_machine` is comptime-certain for the running
+/// binary, so resolving through it is right under either behaviour, and it
+/// keeps a native process from being shown the word "unknown".
+///
+/// Split out from `detectProcessArchitecture` so the resolution rule is
+/// testable without the Win32 call.
+pub fn resolveProcessArchitecture(
+    raw_process_machine: u16,
+    native_machine: u16,
+    process_build_machine: u16,
+) ProcessArchitecture {
+    return .{
+        .process_machine = if (raw_process_machine == IMAGE_FILE_MACHINE_UNKNOWN)
+            process_build_machine
+        else
+            raw_process_machine,
+        .native_machine = native_machine,
+    };
+}
+
+const IsWow64Process2Fn = *const fn (
+    hProcess: windows.HANDLE,
+    pProcessMachine: *u16,
+    pNativeMachine: *u16,
+) callconv(.winapi) BOOL;
+
+/// Ask Windows for the process and native machine architecture, or null when
+/// it cannot be determined.
+///
+/// `IsWow64Process2` needs Windows 10 1709, below noctty's own Windows 10 1809
+/// floor, so this should always succeed in practice. It is still resolved
+/// through `GetProcAddress` rather than statically imported, because a static
+/// import turns a missing export into a process-load failure for every user,
+/// and a diagnostic aid must never be the reason noctty cannot start.
+pub fn detectProcessArchitecture() ?ProcessArchitecture {
+    if (comptime builtin.os.tag != .windows) return null;
+
+    const module = windows.kernel32.GetModuleHandleW(
+        std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll"),
+    ) orelse return null;
+    const entry = windows.kernel32.GetProcAddress(
+        module,
+        "IsWow64Process2",
+    ) orelse return null;
+    // @alignCast because a function pointer is more strictly aligned than
+    // the anyopaque GetProcAddress hands back. x86_64 tolerates the plain
+    // @ptrCast; aarch64 rejects it outright, which is how the ARM64 job
+    // caught this. Same form as the wglGetProcAddress casts in
+    // apprt/win32/pixel_format.zig.
+    const isWow64Process2: IsWow64Process2Fn = @ptrCast(@alignCast(entry));
+
+    var process_machine: u16 = IMAGE_FILE_MACHINE_UNKNOWN;
+    var native_machine: u16 = IMAGE_FILE_MACHINE_UNKNOWN;
+    if (isWow64Process2(
+        windows.GetCurrentProcess(),
+        &process_machine,
+        &native_machine,
+    ) == 0) return null;
+
+    return resolveProcessArchitecture(process_machine, native_machine, build_machine);
+}
+
+test "Windows machine architecture names use the release artifact vocabulary" {
+    try std.testing.expectEqualStrings("x64", machineArchitectureName(IMAGE_FILE_MACHINE_AMD64).?);
+    try std.testing.expectEqualStrings("ARM64", machineArchitectureName(IMAGE_FILE_MACHINE_ARM64).?);
+    try std.testing.expectEqualStrings("x86", machineArchitectureName(IMAGE_FILE_MACHINE_I386).?);
+    try std.testing.expectEqualStrings("ARM32", machineArchitectureName(IMAGE_FILE_MACHINE_ARMNT).?);
+    try std.testing.expectEqualStrings("unknown", machineArchitectureName(IMAGE_FILE_MACHINE_UNKNOWN).?);
+    try std.testing.expect(machineArchitectureName(0x5032) == null);
+
+    // The raw code survives for anything unnamed so a bug report stays useful.
+    var buf: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("x64", machineArchitectureLabel(&buf, IMAGE_FILE_MACHINE_AMD64));
+    try std.testing.expectEqualStrings("machine 0x5032", machineArchitectureLabel(&buf, 0x5032));
+    try std.testing.expectEqualStrings("machine 0x0001", machineArchitectureLabel(&buf, 1));
+}
+
+test "Windows process architecture resolves the UNKNOWN process machine from the build target" {
+    // A native ARM64 process: Windows reports UNKNOWN for its own machine and
+    // the user must never be shown that as "unknown".
+    const native = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_ARM64,
+    );
+    try std.testing.expectEqual(IMAGE_FILE_MACHINE_ARM64, native.process_machine);
+    try std.testing.expect(!native.emulated());
+
+    // An x64 build on ARM64 Windows. Windows may report UNKNOWN here too,
+    // exactly as it does for the native case above, so only the build target
+    // separates them.
+    const emulated_silently = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_AMD64,
+    );
+    try std.testing.expectEqual(IMAGE_FILE_MACHINE_AMD64, emulated_silently.process_machine);
+    try std.testing.expect(emulated_silently.emulated());
+
+    // The same machine when Windows does name the WOW process type.
+    const emulated_reported = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_AMD64,
+        IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_AMD64,
+    );
+    try std.testing.expectEqual(emulated_silently, emulated_reported);
+
+    // A 32-bit process under classic WOW64 on x64.
+    const wow64 = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_I386,
+        IMAGE_FILE_MACHINE_AMD64,
+        IMAGE_FILE_MACHINE_I386,
+    );
+    try std.testing.expectEqual(IMAGE_FILE_MACHINE_I386, wow64.process_machine);
+    try std.testing.expect(wow64.emulated());
+
+    // Nothing is emulated when Windows did not name a native machine.
+    try std.testing.expect(!resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_AMD64,
+    ).emulated());
+}
+
+test "Windows process architecture detection reaches IsWow64Process2" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(build_machine != IMAGE_FILE_MACHINE_UNKNOWN);
+
+    // IsWow64Process2 needs Windows 10 1709 and noctty's own floor is 1809,
+    // so on any machine that can run this suite the export exists and the
+    // call succeeds. Accepting null here would let a broken signature, a bad
+    // cast, or a misspelled export name pass unnoticed.
+    const detected = detectProcessArchitecture() orelse
+        return error.IsWow64Process2Unavailable;
+
+    // A wrong interop would leave these as garbage rather than a machine code
+    // Windows actually defines.
+    try std.testing.expect(detected.native_machine != IMAGE_FILE_MACHINE_UNKNOWN);
+    try std.testing.expect(machineArchitectureName(detected.native_machine) != null);
+    try std.testing.expectEqual(build_machine, detected.process_machine);
+}
+
+pub const KnownFolderPathError = error{
+    BufferTooSmall,
+};
+
+extern "shell32" fn SHGetKnownFolderPath(
+    rfid: *const windows.KNOWNFOLDERID,
+    dwFlags: windows.DWORD,
+    hToken: ?windows.HANDLE,
+    ppszPath: *?windows.PWSTR,
+) callconv(.winapi) windows.HRESULT;
+extern "ole32" fn CoTaskMemFree(pv: ?*anyopaque) callconv(.winapi) void;
+
+pub fn knownFolderPathUtf8(
+    folder_id: *const windows.KNOWNFOLDERID,
+    buf: []u8,
+) KnownFolderPathError!?[]const u8 {
+    var path_w: ?windows.PWSTR = null;
+    const hr = SHGetKnownFolderPath(
+        folder_id,
+        windows.KF_FLAG_DONT_VERIFY,
+        null,
+        &path_w,
+    );
+    if (hr != windows.S_OK) return null;
+
+    const w = path_w orelse return null;
+    defer CoTaskMemFree(w);
+
+    const slice_w = std.mem.sliceTo(w, 0);
+    if (slice_w.len * 3 > buf.len) return error.BufferTooSmall;
+
+    const len = std.unicode.utf16LeToUtf8(buf, slice_w) catch {
+        return null;
+    };
+
+    return buf[0..len];
+}
+
+pub fn isInstallerManagedInstallDir(install_dir: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    var dir = std.fs.openDirAbsolute(install_dir, .{ .iterate = true }) catch return false;
+    defer dir.close();
+
+    var has_uninstaller_exe = false;
+    var has_uninstaller_dat = false;
+    var iter = dir.iterate();
+    while (iter.next() catch return false) |entry| {
+        if (entry.kind != .file) continue;
+        has_uninstaller_exe = has_uninstaller_exe or isInnoUninstallerFileName(entry.name, ".exe");
+        has_uninstaller_dat = has_uninstaller_dat or isInnoUninstallerFileName(entry.name, ".dat");
+        if (has_uninstaller_exe and has_uninstaller_dat) return true;
+    }
+
+    return false;
+}
+
+fn isInnoUninstallerFileName(name: []const u8, extension: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(name, "unins") and
+        name.len > "unins".len + extension.len and
+        std.ascii.eqlIgnoreCase(name[name.len - extension.len ..], extension);
+}
+
+pub fn innoUninstallRegistryMatchesInstallDir(install_dir: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    // dist/windows/noctty.iss deliberately retains this AppId. Inno appends
+    // `_is1` to AppId for its uninstall key and records InstallLocation there.
+    const uninstall_subkey = std.unicode.utf8ToUtf16LeStringLiteral(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\io.github.amanthanvi.winghostty_is1",
+    );
+    const install_location_name = std.unicode.utf8ToUtf16LeStringLiteral("InstallLocation");
+    var registered_buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
+    var registered_bytes: windows.DWORD = @sizeOf(@TypeOf(registered_buf));
+    const status = windows.advapi32.RegGetValueW(
+        windows.HKEY_LOCAL_MACHINE,
+        uninstall_subkey,
+        install_location_name,
+        windows.advapi32.RRF.RT_REG_SZ |
+            windows.advapi32.RRF.SUBKEY_WOW6464KEY |
+            windows.advapi32.RRF.ZEROONFAILURE,
+        null,
+        @ptrCast(&registered_buf),
+        &registered_bytes,
+    );
+    if (status != @intFromEnum(windows.Win32Error.SUCCESS)) return false;
+    if (registered_bytes < @sizeOf(u16) or
+        registered_bytes > @sizeOf(@TypeOf(registered_buf)) or
+        registered_bytes % @sizeOf(u16) != 0)
+    {
+        return false;
+    }
+    const registered_len = registered_bytes / @sizeOf(u16);
+    if (registered_buf[registered_len - 1] != 0) return false;
+
+    return registeredInstallLocationMatchesWtf8(
+        registered_buf[0 .. registered_len - 1],
+        install_dir,
+    );
+}
+
+fn registeredInstallLocationMatchesWtf8(registered: []const u16, install_dir: []const u8) bool {
+    var install_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+    const install_len = std.unicode.wtf8ToWtf16Le(&install_buf, install_dir) catch return false;
+    return windowsInstallPathsEqual(registered, install_buf[0..install_len]);
+}
+
+fn windowsInstallPathsEqual(a_raw: []const u16, b_raw: []const u16) bool {
+    const a = trimTrailingWindowsSeparators(a_raw);
+    const b = trimTrailingWindowsSeparators(b_raw);
+    return CompareStringOrdinal(
+        a.ptr,
+        @intCast(a.len),
+        b.ptr,
+        @intCast(b.len),
+        TRUE,
+    ) == cstr_equal;
+}
+
+fn trimTrailingWindowsSeparators(path: []const u16) []const u16 {
+    var end = path.len;
+    while (end > 0 and (path[end - 1] == '\\' or path[end - 1] == '/')) end -= 1;
+    return path[0..end];
+}
+
+// CSTR_EQUAL from CompareStringOrdinal's Microsoft Win32 contract.
+const cstr_equal: i32 = 2;
+
+extern "kernel32" fn CompareStringOrdinal(
+    string1: [*]const u16,
+    length1: i32,
+    string2: [*]const u16,
+    length2: i32,
+    ignore_case: BOOL,
+) callconv(.winapi) i32;
+
+test "Windows installer management recognizes Inno uninstaller markers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
+    try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
+    try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
+    try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const install_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(install_dir);
+    try tmp.dir.writeFile(.{ .sub_path = "unins000.exe", .data = "uninstaller executable" });
+    try std.testing.expect(!isInstallerManagedInstallDir(install_dir));
+    try tmp.dir.writeFile(.{ .sub_path = "unins000.dat", .data = "uninstaller data" });
+    try std.testing.expect(isInstallerManagedInstallDir(install_dir));
+}
+
+test "Windows installer registry paths compare case-insensitively with trailing separators" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(windowsInstallPathsEqual(
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty\\"),
+        std.unicode.utf8ToUtf16LeStringLiteral("c:\\program files\\noctty"),
+    ));
+    try std.testing.expect(!windowsInstallPathsEqual(
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty-old"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty"),
+    ));
+    try std.testing.expect(registeredInstallLocationMatchesWtf8(
+        &[_]u16{ 'C', ':', '\\', 0xd800 },
+        "C:\\\xed\xa0\x80",
+    ));
+}
+
+// The bundled conpty.dll: function-pointer types for the exports `pty.zig`
+// resolves by name, and the fork's constants for them.
+pub const CreatePseudoConsoleFn = *const fn (
+    size: windows.COORD,
+    hInput: windows.HANDLE,
+    hOutput: windows.HANDLE,
+    dwFlags: windows.DWORD,
+    phPC: *os_windows.HPCON,
+) callconv(.winapi) windows.HRESULT;
+pub const ResizePseudoConsoleFn = *const fn (
+    hPC: os_windows.HPCON,
+    size: windows.COORD,
+) callconv(.winapi) windows.HRESULT;
+pub const ClosePseudoConsoleFn = *const fn (
+    hPC: os_windows.HPCON,
+) callconv(.winapi) void;
+// Exported by the bundled conpty.dll only (conpty-static.h).
+pub const ClearPseudoConsoleFn = *const fn (
+    hPC: os_windows.HPCON,
+    keepCursorRow: BOOL,
+) callconv(.winapi) windows.HRESULT;
+pub const ShowHidePseudoConsoleFn = *const fn (
+    hPC: os_windows.HPCON,
+    show: BOOL,
+) callconv(.winapi) windows.HRESULT;
+pub const ReparentPseudoConsoleFn = *const fn (
+    hPC: os_windows.HPCON,
+    newParent: windows.HWND,
+) callconv(.winapi) windows.HRESULT;
+pub const PSEUDOCONSOLE_GLYPH_WIDTH_WCSWIDTH = 0x10;
+
+pub const CREATE_SUSPENDED = 0x00000004;
+pub const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x00000100;
+pub const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
+
+pub const STATUS_PENDING = 0x00000103;
+pub const STILL_ACTIVE = STATUS_PENDING;
+
+// The three externs `main` had inside upstream's `exp.kernel32`.
+pub extern "kernel32" fn ResumeThread(
+    hThread: windows.HANDLE,
+) callconv(.winapi) windows.DWORD;
+/// https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getcomputernameexw
+pub extern "kernel32" fn GetComputerNameExW(
+    NameType: COMPUTER_NAME_FORMAT,
+    lpBuffer: ?windows.LPWSTR,
+    nSize: *windows.DWORD,
+) callconv(.winapi) BOOL;
+/// https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile
+/// Fails with INVALID_HANDLE_VALUE, not NULL.
+pub extern "kernel32" fn ReOpenFile(
+    hOriginalFile: windows.HANDLE,
+    dwDesiredAccess: windows.DWORD,
+    dwShareMode: windows.DWORD,
+    dwFlagsAndAttributes: windows.DWORD,
+) callconv(.winapi) windows.HANDLE;
+
+/// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
+/// The quit byte the IO thread writes to its reader's pipe (conpty-io-boundary
+/// 4.3: never the C runtime's write on a HANDLE).
+pub extern "kernel32" fn WriteFile(
+    hFile: windows.HANDLE,
+    lpBuffer: [*]const u8,
+    nNumberOfBytesToWrite: windows.DWORD,
+    lpNumberOfBytesWritten: ?*windows.DWORD,
+    lpOverlapped: ?*os_windows.OVERLAPPED,
+) callconv(.winapi) BOOL;
+
+/// The `NameType` values of `GetComputerNameExW` that name this machine.
+pub const COMPUTER_NAME_FORMAT = enum(c_int) {
+    /// The NetBIOS name: upper-case and cut at 15 characters.
+    netbios = 0,
+    /// The DNS host name, without the domain: what `hostname` prints in
+    /// Git Bash and, for a machine named the same, in WSL.
+    dns_hostname = 1,
+    /// The fully qualified DNS name.
+    dns_fully_qualified = 3,
+};

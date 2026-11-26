@@ -9,7 +9,7 @@ const process_shared = @import("process_shared.zig");
 const thread_role = @import("sync/thread_role.zig");
 
 const App = @import("App.zig");
-const state = &@import("global.zig").state;
+const global = @import("global.zig");
 
 /// The return type for main() depends on the build artifact. The retained
 /// non-app artifacts can still call "main" in order to run CLI actions,
@@ -19,7 +19,7 @@ const MainReturn = switch (build_config.artifact) {
     else => void,
 };
 
-pub fn main() !MainReturn {
+pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // The UI thread (sync/thread_role.zig): every window the app makes is
     // made and dispatched on it, so it enters .ui before any window exists
     // (the first is `App.run`'s message window).
@@ -47,12 +47,12 @@ pub fn main() !MainReturn {
     }
 
     // We first start by initializing our global process state.
-    state.init() catch |err| {
+    global.init(.{ .main = minimal }) catch |err| {
         defer posix.exit(1);
         try process_shared.reportStateInitError(err);
     };
-    defer state.deinit();
-    const alloc = state.alloc;
+    defer global.deinit();
+    const alloc = global.alloc();
 
     if (dll_search_error) |err| {
         std.log.warn(
@@ -61,14 +61,14 @@ pub fn main() !MainReturn {
         );
     }
 
-    if (comptime builtin.mode == .Debug) {
+    if (comptime builtin.mode == .debug) {
         std.log.warn("This is a debug build. Performance will be very poor.", .{});
         std.log.warn("You should only use a debug build for developing noctty.", .{});
         std.log.warn("Otherwise, please rebuild in a release mode.", .{});
     }
 
     // Execute our action if we have one
-    if (state.action) |action| {
+    if (global.action()) |action| {
         std.log.info("executing noctty CLI action={}", .{action});
         posix.exit(process_shared.runCliAction(action, alloc));
     }
@@ -101,7 +101,7 @@ pub fn main() !MainReturn {
     {
         var loader_dialogs = apprt.win32.suppressStartupLoaderErrorDialogs();
         defer loader_dialogs.restore();
-        try app_runtime.init(app, .{ .safe_mode = state.safe_mode });
+        try app_runtime.init(app, .{ .safe_mode = global.safeMode() });
     } else {
         try app_runtime.init(app, .{});
     }
@@ -121,7 +121,13 @@ pub export fn WinMain(
         return 1;
     }
 
-    main() catch |err| {
+    // The CRT calls WinMain for the GUI subsystem, so start.zig never builds
+    // the std.process.Init.Minimal it gives `main`. Build the one its
+    // WinStartup would: the process's command line and environment.
+    main(.{
+        .args = .{ .vector = std.os.windows.peb().ProcessParameters.CommandLine.slice() },
+        .environ = .{ .block = .global },
+    }) catch |err| {
         std.log.err("WinMain failed error={}", .{err});
         apprt.win32.reportStartupFailure(err);
         return 1;

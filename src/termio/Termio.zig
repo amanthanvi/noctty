@@ -9,21 +9,24 @@ const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
 const posix = std.posix;
 const termio = @import("../termio.zig");
 const StreamHandler = @import("stream_handler.zig").StreamHandler;
 const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
-const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
+const xev = global.xev;
 const renderer = @import("../renderer.zig");
 const thread_role = @import("../sync/thread_role.zig");
 const apprt = @import("../apprt.zig");
 const internal_os = @import("../os/main.zig");
 const windows = internal_os.windows;
+const windows_ext = internal_os.windows_ext;
 const configpkg = @import("../config.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const BenchmarkEndMarker = @import("bench_marker.zig").BenchmarkEndMarker;
+const compat_file = @import("../lib/compat/file.zig");
 
 const log = std.log.scoped(.io_exec);
 
@@ -288,7 +291,7 @@ test "termio output trace aggregates Windows PTY hot-path timings in memory" {
 /// Whether any handle to `path` is still open, measured by asking for the
 /// file with no sharing at all: that fails while another handle exists.
 fn fileHeldOpen(alloc: Allocator, path: []const u8) !bool {
-    const k32 = windows.kernel32;
+    const k32 = windows_ext.kernel32;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
     defer alloc.free(path_w);
     const h = k32.CreateFileW(
@@ -303,7 +306,7 @@ fn fileHeldOpen(alloc: Allocator, path: []const u8) !bool {
     if (h == windows.INVALID_HANDLE_VALUE) {
         return k32.GetLastError() == .SHARING_VIOLATION;
     }
-    _ = windows.CloseHandle(h);
+    _ = windows_ext.CloseHandle(h);
     return false;
 }
 
@@ -460,7 +463,7 @@ stopping: std.atomic.Value(bool) = .init(false),
 
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
-last_cursor_reset: ?std.time.Instant = null,
+last_cursor_reset: ?std.Io.Timestamp = null,
 
 /// Optional PTY/output trace for debugging render wake cadence.
 output_trace: OutputTrace = .{},
@@ -519,19 +522,18 @@ const ThreadEnterState = struct {
     ) (Allocator.Error || error{InputNotFound})![]const Input {
         const alloc = self.arena.allocator();
 
-        var input = try alloc.alloc(
-            Input,
+        var inputs: std.ArrayList(Input) = try .initCapacity(
+            alloc,
             self.input.list.items.len,
         );
-        // The arena frees memory but never closes a handle, so a failure
-        // part way through must close the files already opened.
-        var opened: usize = 0;
-        errdefer closeInputs(input[0..opened]);
-        for (self.input.list.items, 0..) |item, i| {
-            input[i] = switch (item) {
-                .raw => |v| .{ .string = try alloc.dupe(u8, v) },
+        errdefer for (inputs.items) |item| item.deinit();
+
+        for (self.input.list.items) |item| {
+            inputs.appendAssumeCapacity(switch (item) {
+                .raw => |v| .{ .string = v },
                 .path => |path| file: {
-                    const f = std.fs.cwd().openFile(
+                    const f = std.Io.Dir.cwd().openFile(
+                        global.io(),
                         path,
                         .{},
                     ) catch |err| {
@@ -544,30 +546,47 @@ const ThreadEnterState = struct {
 
                     break :file .{ .file = f };
                 },
-            };
-            opened = i + 1;
+            });
         }
 
-        return input;
+        return inputs.items;
     }
 
     /// Close the files `prepareInput` opened.
     fn closeInputs(inputs: []const Input) void {
-        for (inputs) |input| switch (input) {
-            .string => {},
-            .file => |f| f.close(),
-        };
+        for (inputs) |input| input.deinit();
     }
 
     const Input = union(enum) {
         string: []const u8,
-        file: std.fs.File,
+        file: std.Io.File,
+
+        fn deinit(self: Input) void {
+            switch (self) {
+                .string => {},
+                .file => |f| f.close(global.io()),
+            }
+        }
     };
 };
 
 /// The configuration for this IO that is derived from the main
 /// configuration. This must be exported so that we don't need to
 /// pass around Config pointers which makes memory management a pain.
+/// Convert the vt-xt-checksum-extension config, whose values are named for
+/// what they turn on, to the XTCHECKSUM bits, which turn things off.
+fn xtChecksumFlags(
+    ext: configpkg.Config.XtChecksumExtension,
+) terminalpkg.xt_checksum.Flags {
+    return .{
+        .positive = !ext.negate,
+        .no_attributes = !ext.attributes,
+        .no_trim = !ext.trim,
+        .undrawn = ext.undrawn,
+        .full = ext.full,
+    };
+}
+
 pub const DerivedConfig = struct {
     arena: ArenaAllocator,
 
@@ -580,7 +599,10 @@ pub const DerivedConfig = struct {
     background: configpkg.Config.Color,
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
     clipboard_write: configpkg.ClipboardAccess,
+    clipboard_write_limit: usize,
     enquiry_response: []const u8,
+    xt_checksum_report: bool,
+    xt_checksum_extension: terminalpkg.xt_checksum.Flags,
     conditional_state: configpkg.ConditionalState,
 
     pub fn init(
@@ -617,7 +639,10 @@ pub const DerivedConfig = struct {
             .background = config.background,
             .osc_color_report_format = config.@"osc-color-report-format",
             .clipboard_write = config.@"clipboard-write",
+            .clipboard_write_limit = config.@"clipboard-write-limit-bytes".value,
             .enquiry_response = try alloc.dupe(u8, config.@"enquiry-response"),
+            .xt_checksum_report = config.@"vt-xt-checksum-report",
+            .xt_checksum_extension = xtChecksumFlags(config.@"vt-xt-checksum-extension"),
             // Config.changeConditionalState intentionally skips replay when no
             // config field uses the changed condition. The terminal still
             // needs the live state for color-scheme reports in that case.
@@ -657,15 +682,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     };
 
     // Create our terminal
-    var term = try terminalpkg.Terminal.init(alloc, opts: {
+    var term = try terminalpkg.Terminal.init(global.io(), alloc, opts: {
         const grid_size = opts.size.grid();
         break :opts .{
             .cols = grid_size.columns,
             .rows = grid_size.rows,
-            .max_scrollback = opts.full_config.@"scrollback-limit",
+            .max_scrollback_bytes = opts.full_config.@"scrollback-limit-bytes".optional(),
+            .max_scrollback_lines = opts.full_config.@"scrollback-limit-lines".optional(),
             .default_modes = default_modes,
             .default_cursor_style = opts.config.cursor_style,
             .default_cursor_blink = opts.config.cursor_blink,
+            .default_xt_checksum = opts.config.xt_checksum_extension,
             .colors = .{
                 .background = .init(opts.config.background.toTerminalRGB()),
                 .foreground = .init(opts.config.foreground.toTerminalRGB()),
@@ -674,13 +701,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
                     const rgb = color.toTerminalRGB() orelse break :cursor .unset;
                     break :cursor .init(rgb);
                 },
-                .palette = .init(opts.config.palette),
+                .palette = .default,
             },
             .kitty_image_storage_limit = opts.config.image_storage_limit,
-            .kitty_image_loading_limits = .all,
+            .kitty_image_loading_limits = .allWithTempDir(global.tmpDirPath()),
         };
     });
     errdefer term.deinit(alloc);
+
+    // The default palette may be an allocator-owned copy, so it is set
+    // once the terminal owns its memory and can release it on deinit.
+    try term.colors.palette.changeDefault(alloc, opts.config.palette);
 
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
@@ -704,7 +735,9 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .terminal = &self.terminal,
         .osc_color_report_format = opts.config.osc_color_report_format,
         .clipboard_write = opts.config.clipboard_write,
+        .clipboard_write_limit = opts.config.clipboard_write_limit,
         .enquiry_response = opts.config.enquiry_response,
+        .xt_checksum_report = opts.config.xt_checksum_report,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
@@ -764,7 +797,9 @@ pub fn threadEnter(
         try v.prepareInput()
     else
         null;
-    defer if (inputs) |v| ThreadEnterState.closeInputs(v);
+    defer if (inputs) |items| {
+        for (items) |input| input.deinit();
+    };
 
     data.* = .{
         .alloc = self.alloc,
@@ -796,15 +831,17 @@ fn queueInputs(
             return error.InputFailed;
         },
         .file => |f| {
-            const bytes = f.readToEndAlloc(
+            const contents = compat_file.readToEndAlloc(
+                f,
                 self.alloc,
                 10 * 1024 * 1024, // 10 MiB max
             ) catch |err| {
                 log.warn("failed to read input file err={}", .{err});
                 return error.InputFailed;
             };
-            defer self.alloc.free(bytes);
-            self.queueWrite(data, bytes, false) catch |err| {
+            defer self.alloc.free(contents);
+
+            self.queueWrite(data, contents, false) catch |err| {
                 log.warn("failed to queue input file err={}", .{err});
                 return error.InputFailed;
             };
@@ -855,8 +892,8 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     // The remainder of this function is modifying terminal state or
     // the read thread data, all of which requires holding the renderer
     // state lock.
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
 
     // Deinit our old config. We do this in the lock because the
     // stream handler may be referencing the old config (i.e. enquiry resp)
@@ -878,8 +915,16 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     //   - command, working-directory: we never restart the underlying
     //   process so we don't care or need to know about these.
 
-    // Update the default palette.
-    self.terminal.colors.palette.changeDefault(config.palette);
+    // Update the default palette. A config change must not fail here, so
+    // if we can't allocate the copy of the configured palette we fall back
+    // to the built-in default, which never allocates.
+    self.terminal.colors.palette.changeDefault(
+        self.alloc,
+        config.palette,
+    ) catch |err| {
+        log.warn("error changing default palette, using built-in default err={}", .{err});
+        self.terminal.colors.palette.resetDefault(self.alloc);
+    };
     self.terminal.flags.dirty.palette = true;
 
     // Update all our other colors
@@ -902,8 +947,16 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     };
 
     // Set the image limits
-    try self.terminal.setKittyGraphicsSizeLimit(self.alloc, config.image_storage_limit);
-    self.terminal.setKittyGraphicsLoadingLimits(.all);
+    self.terminal.setKittyGraphicsSizeLimit(self.alloc, config.image_storage_limit);
+    self.terminal.setKittyGraphicsLoadingLimits(.allWithTempDir(global.tmpDirPath()));
+
+    // The config could have changed any of our colors so update mode 2031.
+    // This is written directly rather than queued as a color_scheme_report
+    // message because we're on the io thread, the only reader of our
+    // mailbox: if the mailbox were full, queueing would wait forever.
+    self.colorSchemeReportLocked(td, false) catch |err| {
+        log.warn("error sending color scheme report err={}", .{err});
+    };
 }
 
 /// Replace the live derived config. Split out so the ordering contract with
@@ -924,8 +977,13 @@ pub fn resize(
 
     // Enter the critical area that we want to keep small
     {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+
+        // Resizing the pty can immediately wake the shell with SIGWINCH.
+        // Hold the same lock used by processOutput before notifying it, so
+        // its redraw cannot be parsed against the old terminal dimensions.
+        try self.backend.resize(grid_size, size.terminal());
 
         // Resizing the pty can make the shell, or the pseudo console's host,
         // redraw at once. Hold the same lock used by processOutput before
@@ -1016,8 +1074,8 @@ pub fn resizeBeforeThreadStart(
 
 /// Make a size report.
 pub fn sizeReport(self: *Termio, td: *ThreadData, style: termio.Message.SizeReport) !void {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
     try self.sizeReportLocked(td, style);
 }
 
@@ -1046,8 +1104,8 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
 /// Reset the synchronized output mode. This is usually called by timer
 /// expiration from the termio thread.
 pub fn resetSynchronizedOutput(self: *Termio) void {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
     self.terminal.modes.set(.synchronized_output, false);
     self.renderer_wakeup.notify() catch {};
 }
@@ -1109,6 +1167,7 @@ fn clearTerminalScreen(t: *terminalpkg.Terminal, history: bool) ScreenClear {
         // Keep the screen clear consistent by dropping Kitty graphics
         // state alongside the text clear.
         t.screens.active.kitty_images.delete(
+            t.io(),
             t.screens.active.alloc,
             t,
             .{ .all = true },
@@ -1134,16 +1193,16 @@ pub fn scrollViewport(
     self: *Termio,
     scroll: terminalpkg.Terminal.ScrollViewport,
 ) void {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
     self.terminal.scrollViewport(scroll);
 }
 
 /// Jump the viewport to the prompt.
 pub fn jumpToPrompt(self: *Termio, delta: isize) !void {
     {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
         self.terminal.screens.active.scroll(.{ .delta_prompt = delta });
     }
 
@@ -1178,9 +1237,9 @@ pub fn ptyClear(self: *Termio, keep_cursor_row: bool) void {
 
 /// Called when focus is gained or lost (when focus events are enabled)
 pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
-    self.renderer_state.mutex.lock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
     const focus_event = self.renderer_state.terminal.modes.get(.focus_event);
-    self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.unlock(global.io());
 
     // If we have focus events enabled, we send the focus event.
     if (focus_event) {
@@ -1328,20 +1387,19 @@ fn processOutputLocked(self: *Termio, buf: []const u8) struct {
     // HEAVY read load, we don't want to send a ton of these so we
     // use a timer under the covers
     if (buf.len > 0) {
-        if (std.time.Instant.now()) |now| cursor_reset: {
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        cursor_reset: {
             if (self.last_cursor_reset) |last| {
-                if (now.since(last) <= (500 * std.time.ns_per_ms)) {
+                if (last.durationTo(now).toMilliseconds() <= 500) {
                     break :cursor_reset;
                 }
             }
 
             self.last_cursor_reset = now;
-            _ = self.renderer_mailbox.push(.{
+            _ = self.renderer_mailbox.push(global.io(), .{
                 .reset_cursor_blink = {},
             }, .{ .instant = {} });
             queued_renderer_message = true;
-        } else |err| {
-            log.warn("failed to get current time err={}", .{err});
         }
     }
 
@@ -1400,10 +1458,23 @@ pub fn shouldWakeRendererAfterOutput(
     return false;
 }
 
+/// Record a Kitty clipboard protocol session grant so future requests
+/// carrying the password skip the permission prompt.
+pub fn kittyClipboardGrant(
+    self: *Termio,
+    pw: []const u8,
+    dir: terminalpkg.kitty.clipboard.Grants.Direction,
+) error{OutOfMemory}!void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    try self.terminal_stream.handler.kittyClipboardGrant(pw, dir);
+}
+
 /// Sends a DSR response for the current color scheme to the pty.
 pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
 
     try self.colorSchemeReportLocked(td, force);
 }
@@ -1424,6 +1495,30 @@ fn colorSchemeReportBytes(theme: configpkg.ConditionalState.Theme) []const u8 {
         .light => "\x1B[?997;2n",
         .dark => "\x1B[?997;1n",
     };
+}
+
+/// Sends a visibility report to the pty. Unforced reports are only sent while
+/// DEC mode 2033 is enabled.
+pub fn visibilityReport(
+    self: *Termio,
+    td: *ThreadData,
+    visible: bool,
+    force: bool,
+) !void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    if (!force and !self.renderer_state.terminal.modes.get(.report_visibility)) {
+        return;
+    }
+
+    var buf: [terminalpkg.device_status.max_visibility_report_encode_size]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try terminalpkg.device_status.encodeVisibilityReport(
+        &writer,
+        if (visible) .potentially_visible else .not_visible,
+    );
+    try self.queueWrite(td, writer.buffered(), false);
 }
 
 /// ThreadData is the data created and stored in the termio thread

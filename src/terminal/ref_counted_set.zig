@@ -212,6 +212,30 @@ pub fn RefCountedSet(
             @memset(table.ptr(base)[0..l.table_cap], 0);
             @memset(items.ptr(base)[0..l.cap], .{});
 
+            return initFromParts(table, items, l, context);
+        }
+
+        /// Like `init`, but for backing memory that the caller guarantees
+        /// is already zero-filled (e.g. fresh OS pages). This writes
+        /// nothing to the backing buffer, so the OS pages behind the table
+        /// and items stay untouched until the first `add`.
+        ///
+        /// Behavior is undefined if the backing memory is not zero.
+        pub fn initAssumeZeroed(base: OffsetBuf, l: Layout, context: Context) Self {
+            return initFromParts(
+                base.member(Id, l.table_start),
+                base.member(Item, l.items_start),
+                l,
+                context,
+            );
+        }
+
+        fn initFromParts(
+            table: Offset(Id),
+            items: Offset(Item),
+            l: Layout,
+            context: Context,
+        ) Self {
             return .{
                 .table = table,
                 .items = items,
@@ -726,7 +750,9 @@ pub fn RefCountedSet(
 
                 var psl_stats: [32]Id = @splat(0);
 
-                for (items[0..self.layout.cap], 0..) |item, id| {
+                // Start at item 1 because item 0 is reserved and never
+                // assigned to. Its metadata doesn't matter.
+                for (items[1..self.next_id], 1..) |item, id| {
                     if (item.meta.bucket < std.math.maxInt(Id)) {
                         assert(table[item.meta.bucket] == id);
                         psl_stats[item.meta.psl] += 1;
@@ -740,6 +766,7 @@ pub fn RefCountedSet(
                 psl_stats = @splat(0);
 
                 for (table[0..self.layout.table_cap], 0..) |id, bucket| {
+                    if (id == 0) continue;
                     const item = items[id];
                     if (item.meta.bucket < std.math.maxInt(Id)) {
                         assert(item.meta.bucket == bucket);

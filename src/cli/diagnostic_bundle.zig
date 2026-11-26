@@ -8,7 +8,7 @@ const crash = @import("../crash/main.zig");
 const pty = @import("../pty.zig");
 const Config = @import("../config/Config.zig");
 const config_file = @import("../config/file_load.zig");
-const os_windows = @import("../os/windows.zig");
+const windows_ext = @import("../os/main.zig").windows_ext;
 const xdg = @import("../os/xdg.zig");
 const sys = @import("../apprt/win32/sys.zig");
 const powershell = @import("../apprt/win32_powershell_install.zig");
@@ -88,7 +88,7 @@ const InstallKind = enum {
         if (builtin.os.tag != .windows) return .other;
         const exe_dir = std.fs.selfExeDirPathAlloc(alloc) catch return .other;
         defer alloc.free(exe_dir);
-        return classify(false, os_windows.isInstallerManagedInstallDir(exe_dir));
+        return classify(false, windows_ext.isInstallerManagedInstallDir(exe_dir));
     }
 };
 
@@ -237,13 +237,13 @@ fn create(alloc: Allocator, opts: Options, stdout: *std.Io.Writer) !u8 {
 
     var file_buf: [4096]u8 = undefined;
     var file_writer = manifest_file.writer(&file_buf);
-    const architecture = os_windows.detectProcessArchitecture();
+    const architecture = windows_ext.detectProcessArchitecture();
     const key_names = collectConfigKeyNames(alloc) catch null;
     defer if (key_names) |names| alloc.free(names);
     try std.json.Stringify.value(Manifest{
         .os_version = OsVersion.detect(),
-        .native_architecture = if (architecture) |value| os_windows.machineArchitectureName(value.native_machine) else null,
-        .emulated = if (architecture) |value| if (value.native_machine == os_windows.IMAGE_FILE_MACHINE_UNKNOWN) null else value.emulated() else null,
+        .native_architecture = if (architecture) |value| windows_ext.machineArchitectureName(value.native_machine) else null,
+        .emulated = if (architecture) |value| if (value.native_machine == windows_ext.IMAGE_FILE_MACHINE_UNKNOWN) null else value.emulated() else null,
         .install_kind = InstallKind.detect(alloc),
         .config_key_names = key_names,
         .conpty = pty.conPtyInfo(),

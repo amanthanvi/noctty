@@ -4,7 +4,8 @@ pub const Thread = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
+const xev = global.xev;
 const crash = @import("../crash/main.zig");
 const internal_os = @import("../os/main.zig");
 const rendererpkg = @import("../renderer.zig");
@@ -370,7 +371,7 @@ pub fn sendMessage(
     notify(wakeup);
 
     // Renderer messages may transfer ownership or required state.
-    _ = mailbox.push(msg, .{ .forever = {} });
+    _ = mailbox.push(global.io(), msg, .{ .forever = {} });
 
     notify(wakeup);
 }
@@ -390,7 +391,7 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
     const pool = darwin.beginAutoreleasePool();
     defer darwin.endAutoreleasePool(pool);
 
-    while (self.mailbox.pop()) |message| {
+    while (self.mailbox.pop(global.io())) |message| {
         log.debug("mailbox message={}", .{message});
         switch (message) {
             .crash => @panic("crash request, crashing intentionally"),
@@ -492,6 +493,9 @@ fn drainMailbox(self: *Thread, changes: *std.EnumSet(Pacer.Change)) !void {
                 self.flags.has_inspector = v;
             },
 
+            // GTK's DMABUF export reports it (47693cc4b); nothing on Win32
+            // sends it.
+            .presentation_health => {},
             .macos_display_id => |v| {
                 if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
                     try self.renderer.setMacOSDisplayID(v);
@@ -952,7 +956,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
     defer mailbox.destroy(alloc);
 
     var filled: usize = 0;
-    while (mailbox.push(.{ .reset_cursor_blink = {} }, .{ .instant = {} }) != 0) {
+    while (mailbox.push(testing.io, .{ .reset_cursor_blink = {} }, .{ .instant = {} }) != 0) {
         filled += 1;
     }
     try testing.expect(filled > 0);
@@ -960,7 +964,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
     // Confirm the mailbox really is full before we test the blocking path.
     try testing.expectEqual(
         @as(Mailbox.Size, 0),
-        mailbox.push(.{ .focus = true }, .{ .instant = {} }),
+        mailbox.push(testing.io, .{ .focus = true }, .{ .instant = {} }),
     );
 
     const Consumer = struct {
@@ -979,7 +983,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
         /// Pop exactly the messages we pre-filled, leaving whatever the
         /// sender adds. Draining until empty would race the sender's push.
         fn drain(self: *Consumer) void {
-            for (0..self.to_drain) |_| _ = self.mailbox.pop();
+            for (0..self.to_drain) |_| _ = self.mailbox.pop(std.testing.io);
             self.loop.stop();
         }
 
@@ -1041,10 +1045,10 @@ test "send wakes the renderer before waiting on a full mailbox" {
     try testing.expect(consumer.woken);
 
     // And the message was delivered rather than dropped.
-    const delivered = mailbox.pop();
+    const delivered = mailbox.pop(testing.io);
     try testing.expect(delivered != null);
     try testing.expect(std.meta.activeTag(delivered.?) == .focus);
-    try testing.expect(mailbox.pop() == null);
+    try testing.expect(mailbox.pop(testing.io) == null);
 }
 
 /// The renderer's state for a `Frame` whose reads a test calls: `screen` and

@@ -7,6 +7,7 @@
 //! APIs. The renderers in this package assume that the renderer is already
 //! setup (OpenGL has a context, Vulkan has a surface, etc.)
 
+const std = @import("std");
 const build_config = @import("build_config.zig");
 
 const cursor = @import("renderer/cursor.zig");
@@ -18,14 +19,7 @@ else
     @import("renderer/shadertoy_stub.zig");
 pub const Backend = @import("renderer/backend.zig").Backend;
 pub const GenericRenderer = @import("renderer/generic.zig").Renderer;
-pub const OpenGL = if (build_config.renderer == .opengl)
-    @import("renderer/OpenGL.zig")
-else
-    struct {};
-pub const WebGL = if (build_config.renderer == .webgl)
-    @import("renderer/WebGL.zig")
-else
-    struct {};
+pub const OpenGL = @import("renderer/OpenGL.zig");
 pub const Direct3D11 = if (build_config.d3d11) @import("renderer/Direct3D11.zig") else struct {};
 pub const Options = @import("renderer/Options.zig");
 pub const Overlay = @import("renderer/Overlay.zig");
@@ -48,7 +42,29 @@ pub const lib = @import("lib/main.zig");
 /// two generic graphics APIs using each surface's runtime preference.
 pub const Renderer = switch (build_config.renderer) {
     .opengl => if (build_config.d3d11) @import("renderer/Windows.zig") else GenericRenderer(OpenGL),
-    .webgl => WebGL,
+};
+
+/// The app-scoped render device from which surface renderers are created
+/// (upstream 40d5b860d: `App.device`, made from the apprt surface's
+/// `renderDeviceOptions`, and handed to every renderer in `Options.device`).
+///
+/// noctty divergence: the device holds nothing. The Win32 renderers create
+/// their GPU contexts per surface (the runtime's WGL context for OpenGL, its
+/// own device for each D3D11 renderer, with a fallback between them), so
+/// there is no app-wide GPU state to share, and upstream's EGL device
+/// (`renderer/opengl/Device.zig`) is not used.
+pub const Device = struct {
+    /// What the apprt passes to `init`: nothing on Windows.
+    pub const Options = struct {};
+
+    pub fn init(alloc: std.mem.Allocator, options: Device.Options) std.mem.Allocator.Error!*Device {
+        _ = options;
+        return try alloc.create(Device);
+    }
+
+    pub fn deinit(self: *Device, alloc: std.mem.Allocator) void {
+        alloc.destroy(self);
+    }
 };
 
 /// The health status of a renderer. These must be shared across all

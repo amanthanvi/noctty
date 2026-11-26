@@ -15,6 +15,7 @@ const Config = configpkg.Config;
 const BlockingQueue = @import("datastruct/main.zig").BlockingQueue;
 const renderer = @import("renderer.zig");
 const font = @import("font/main.zig");
+const global = @import("global.zig");
 
 const log = std.log.scoped(.app);
 
@@ -59,10 +60,13 @@ modal_tick_active: bool = false,
 /// same font configuration.
 font_grid_set: font.SharedGridSet,
 
+/// The app-scoped render device, shared by the renderers of all surfaces.
+device: ?*renderer.Device,
+
 // Used to rate limit desktop notifications. Some platforms (notably macOS) will
 // run out of resources if desktop notifications are sent too fast and the OS
 // will kill Ghostty.
-last_notification_time: ?std.time.Instant = null,
+last_notification_time: ?std.Io.Timestamp = null,
 last_notification_digest: u64 = 0,
 
 /// The conditional state of the configuration. See the equivalent field
@@ -102,9 +106,10 @@ pub fn init(
 
     self.* = .{
         .alloc = alloc,
-        .surfaces = .{},
+        .surfaces = .empty,
         .mailbox = .{},
         .font_grid_set = font_grid_set,
+        .device = null,
         .config_conditional_state = .{},
     };
 }
@@ -123,6 +128,10 @@ pub fn deinit(self: *App) void {
     // should gracefully close all surfaces.
     assert(self.font_grid_set.count() == 0);
     self.font_grid_set.deinit();
+
+    // Clean up our render device. This must happen after all surfaces
+    // are gone since their renderers borrow it.
+    if (self.device) |dev| dev.deinit(self.alloc);
 }
 
 pub fn destroy(self: *App) void {
@@ -440,12 +449,19 @@ fn drainMailbox(self: *App, rt_app: *apprt.App, mode: MailboxTickMode) !void {
         if (comptime std.log.logEnabled(.debug, .app)) {
             switch (message) {
                 // these tend to be way too verbose for normal debugging
-                .redraw_surface => {},
                 else => log.debug("mailbox message={t}", .{message}),
             }
         }
         const handled = switch (message) {
-            .open_config => self.performAction(rt_app, .open_config),
+            .open_config => |v| self.performAction(
+                rt_app,
+                .{
+                    .open_config = switch (v) {
+                        .os_open => .os_open,
+                        .new_window => .new_window,
+                    },
+                },
+            ),
             .new_window => |msg| new_window: {
                 defer msg.deinit(self.alloc);
                 break :new_window self.newWindow(rt_app, msg);
@@ -829,20 +845,6 @@ pub fn focusSurface(self: *App, surface: *Surface) void {
     self.focused_surface = surface;
 }
 
-fn redrawSurface(
-    self: *App,
-    rt_app: *apprt.App,
-    surface: *apprt.Surface,
-) !void {
-    if (!self.hasRtSurface(surface)) return;
-
-    _ = try rt_app.performAction(
-        .{ .surface = surface.core() },
-        .render,
-        {},
-    );
-}
-
 /// Create a new window
 pub fn newWindow(self: *App, rt_app: *apprt.App, msg: Message.NewWindow) !void {
     const target: apprt.Target = target: {
@@ -1018,7 +1020,14 @@ pub fn performAction(
             null,
             profile_key,
         ),
-        .open_config => _ = try rt_app.performAction(.app, .open_config, {}),
+        .open_config => |v| _ = try rt_app.performAction(
+            .app,
+            .open_config,
+            switch (v) {
+                .os_open => .os_open,
+                .new_window => .new_window,
+            },
+        ),
         .reload_config => _ = try rt_app.performAction(.app, .reload_config, .{}),
         .close_all_windows => _ = try rt_app.performAction(.app, .close_all_windows, {}),
         .toggle_quick_terminal => _ = try rt_app.performAction(.app, .toggle_quick_terminal, {}),
@@ -1388,8 +1397,8 @@ pub fn performAllAction(
 
                 fn visit(v: @This(), surface: *apprt.Surface) void {
                     _ = surface.core().performBindingAction(v.action) catch |err| {
-                        log.warn("error performing binding action on surface ptr={X} err={}", .{
-                            @intFromPtr(surface),
+                        log.warn("error performing binding action on surface id={x} err={}", .{
+                            surface.core().id,
                             err,
                         });
                     };
@@ -1608,7 +1617,7 @@ fn hasRtSurface(self: *const App, surface: *apprt.Surface) bool {
 /// The message types that can be sent to the app thread.
 pub const Message = union(enum) {
     // Open the configuration file
-    open_config: void,
+    open_config: OpenConfig,
 
     /// Create a new terminal window.
     new_window: NewWindow,
@@ -1860,6 +1869,13 @@ pub const Message = union(enum) {
             }
         }
     };
+
+    pub const OpenConfig = enum {
+        /// Open the config in the OS default editor.
+        os_open,
+        /// Open the config in a new window using $EDITOR or $VISUAL
+        new_window,
+    };
 };
 
 test "queued automation messages release consumer ownership during teardown" {
@@ -1991,7 +2007,7 @@ pub const Mailbox = struct {
 
     /// Send a message to the surface.
     pub fn push(self: Mailbox, msg: Message, timeout: Queue.Timeout) Queue.Size {
-        const result = self.mailbox.push(msg, timeout);
+        const result = self.mailbox.push(global.io(), msg, timeout);
 
         // Wake up our app loop
         self.rt_app.wakeup();

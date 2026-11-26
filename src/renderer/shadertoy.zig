@@ -5,6 +5,8 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const glslang = @import("glslang");
 const spvcross = @import("spirv_cross");
 const configpkg = @import("../config.zig");
+const compat_file = @import("../lib/compat/file.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.shadertoy);
 
@@ -91,11 +93,11 @@ pub fn loadFromFile(
     // Read it all into memory -- we don't expect shaders to be large.
     const src = src: {
         // Load the shader file
-        const cwd = std.fs.cwd();
-        const file = try cwd.openFile(path, .{});
-        defer file.close();
-
-        break :src try file.readToEndAlloc(
+        const cwd = std.Io.Dir.cwd();
+        const file = try cwd.openFile(global.io(), path, .{});
+        defer file.close(global.io());
+        break :src try compat_file.readToEndAlloc(
+            file,
             alloc,
             4 * 1024 * 1024, // 4MB
         );
@@ -227,8 +229,8 @@ pub const SpirvLog = struct {
         const debug = try shader.getDebugInfoLog();
         self.info = "";
         self.debug = "";
-        if (info.len > 0) self.info = try self.alloc.dupeZ(u8, info);
-        if (debug.len > 0) self.debug = try self.alloc.dupeZ(u8, debug);
+        if (info.len > 0) self.info = try self.alloc.dupeSentinel(u8, info, 0);
+        if (debug.len > 0) self.debug = try self.alloc.dupeSentinel(u8, debug, 0);
     }
 
     fn fromProgram(self: *SpirvLog, program: *glslang.Program) !void {
@@ -236,8 +238,8 @@ pub const SpirvLog = struct {
         const debug = try program.getDebugInfoLog();
         self.info = "";
         self.debug = "";
-        if (info.len > 0) self.info = try self.alloc.dupeZ(u8, info);
-        if (debug.len > 0) self.debug = try self.alloc.dupeZ(u8, debug);
+        if (info.len > 0) self.info = try self.alloc.dupeSentinel(u8, info, 0);
+        if (debug.len > 0) self.debug = try self.alloc.dupeSentinel(u8, debug, 0);
     }
 };
 
@@ -345,7 +347,7 @@ fn spvCross(
         return error.SpvcFailed;
     }
 
-    return try alloc.dupeZ(u8, std.mem.sliceTo(result, 0));
+    return try alloc.dupeSentinel(u8, std.mem.sliceTo(result, 0), 0);
 }
 
 /// Convert ShaderToy shader to null-terminated glsl for testing.

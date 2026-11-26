@@ -4,18 +4,13 @@ const WasmTarget = @import("../os/wasm/target.zig").Target;
 /// Possible implementations, used for build options.
 pub const Backend = enum {
     opengl,
-    webgl,
 
     pub fn default(
         target: std.Target,
         wasm_target: WasmTarget,
     ) Backend {
-        if (target.cpu.arch == .wasm32) {
-            return switch (wasm_target) {
-                .browser => .webgl,
-            };
-        }
-
+        _ = target;
+        _ = wasm_target;
         return .opengl;
     }
 };

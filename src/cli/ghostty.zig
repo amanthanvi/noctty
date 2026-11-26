@@ -33,6 +33,7 @@ const new_split = @import("new_split.zig");
 const register_shell_menu = @import("register_shell_menu.zig");
 const unregister_shell_menu = @import("unregister_shell_menu.zig");
 const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
+const global = @import("../global.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -142,7 +143,7 @@ test "parse action none" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         alloc,
         "--a=42 --b --b-f=false",
     );
@@ -156,7 +157,7 @@ test "parse action version" {
     const alloc = testing.allocator;
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--a=42 --b --b-f=false --version",
         );
@@ -166,7 +167,7 @@ test "parse action version" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--version --a=42 --b --b-f=false",
         );
@@ -176,7 +177,7 @@ test "parse action version" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--c=84 --d --version --a=42 --b --b-f=false",
         );
@@ -191,7 +192,7 @@ test "parse action plus" {
     const alloc = testing.allocator;
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--a=42 --b --b-f=false +version",
         );
@@ -201,7 +202,7 @@ test "parse action plus" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "+version --a=42 --b --b-f=false",
         );
@@ -211,7 +212,7 @@ test "parse action plus" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--c=84 --d +version --a=42 --b --b-f=false",
         );
@@ -240,7 +241,7 @@ test "parse action plus ignores -e" {
     const alloc = testing.allocator;
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "--a=42 -e +version",
         );
@@ -250,7 +251,7 @@ test "parse action plus ignores -e" {
     }
 
     {
-        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
             alloc,
             "+list-fonts --a=42 -e +version",
         );

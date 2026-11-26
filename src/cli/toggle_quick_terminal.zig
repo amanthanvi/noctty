@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Action = @import("ghostty.zig").Action;
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
+const global = @import("../global.zig");
 
 pub const Options = struct {
     _arena: ?std.heap.ArenaAllocator = null,
@@ -36,7 +37,7 @@ pub fn run(alloc: Allocator) !u8 {
     defer iter.deinit();
 
     var buf: [256]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buf);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buf);
     const stderr = &stderr_writer.interface;
     defer stderr.flush() catch {};
 

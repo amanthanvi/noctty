@@ -4,7 +4,6 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const diags = @import("diagnostics.zig");
-const os_args = @import("../os/args.zig");
 const Diagnostic = diags.Diagnostic;
 const DiagnosticList = diags.DiagnosticList;
 const CommaSplitter = @import("CommaSplitter.zig");
@@ -152,7 +151,7 @@ pub fn parse(
 
             // Add our diagnostic
             try dst._diagnostics.append(arena_alloc, .{
-                .key = try arena_alloc.dupeZ(u8, arg),
+                .key = try arena_alloc.dupeSentinel(u8, arg, 0),
                 .message = "invalid field",
                 .location = try diags.Location.fromIter(iter, arena_alloc),
             });
@@ -209,8 +208,7 @@ pub fn parse(
                 error.ProfileEnvNoName,
                 error.ProfileNotUtf8,
                 => |e| try formatProfileProblem(arena_alloc, key, value orelse "", e),
-                else => try std.fmt.allocPrintSentinel(
-                    arena_alloc,
+                else => try arena_alloc.printSentinel(
                     "unknown error {}",
                     .{err},
                     0,
@@ -219,7 +217,7 @@ pub fn parse(
 
             // Add our diagnostic
             try dst._diagnostics.append(arena_alloc, .{
-                .key = try arena_alloc.dupeZ(u8, key),
+                .key = try arena_alloc.dupeSentinel(u8, key, 0),
                 .message = message,
                 .location = try diags.Location.fromIter(iter, arena_alloc),
             });
@@ -380,14 +378,14 @@ fn formatValues(
 ) std.Io.Writer.Error!void {
     @setEvalBranchQuota(2000);
     const typeinfo = @typeInfo(T);
-    inline for (typeinfo.@"struct".fields) |f| {
-        if (std.mem.eql(u8, key, f.name)) {
-            switch (@typeInfo(f.type)) {
+    inline for (typeinfo.@"struct".field_names, typeinfo.@"struct".field_types) |f, f_type| {
+        if (std.mem.eql(u8, key, f)) {
+            switch (@typeInfo(f_type)) {
                 .@"enum" => |e| {
                     try writer.print(", valid values are: ", .{});
-                    inline for (e.fields, 0..) |field, i| {
+                    inline for (e.field_names, 0..) |field, i| {
                         if (i != 0) try writer.print(", ", .{});
-                        try writer.print("{s}", .{field.name});
+                        try writer.print("{s}", .{field});
                     }
                 },
                 else => {},
@@ -417,14 +415,14 @@ pub fn parseIntoField(
     const info = @typeInfo(T);
     assert(info == .@"struct");
 
-    inline for (info.@"struct".fields) |field| {
-        if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {
+    inline for (info.@"struct".field_names, info.@"struct".field_types, info.@"struct".field_attrs) |field, field_type, field_attrs| {
+        if (field[0] != '_' and mem.eql(u8, field, key)) {
             // For optional fields, we just treat it as the child type.
             // This lets optional fields default to null but get set by
             // the CLI.
-            const Field = switch (@typeInfo(field.type)) {
+            const Field = switch (@typeInfo(field_type)) {
                 .optional => |opt| opt.child,
-                else => field.type,
+                else => field_type,
             };
             const fieldInfo = @typeInfo(Field);
             const canHaveDecls = fieldInfo == .@"struct" or
@@ -437,12 +435,11 @@ pub fn parseIntoField(
                 if (v.len != 0) break :default;
                 // Set default value if possible.
                 if (canHaveDecls and @hasDecl(Field, "init")) {
-                    try @field(dst, field.name).init(alloc);
+                    try @field(dst, field).init(alloc);
                     return;
                 }
-                const raw = field.default_value_ptr orelse break :default;
-                const ptr: *const field.type = @ptrCast(@alignCast(raw));
-                @field(dst, field.name) = ptr.*;
+                const default = field_attrs.defaultValue(field_type) orelse break :default;
+                @field(dst, field) = default;
                 return;
             }
 
@@ -451,21 +448,21 @@ pub fn parseIntoField(
             if (canHaveDecls) {
                 if (@hasDecl(Field, "parseCLI")) {
                     const fnInfo = @typeInfo(@TypeOf(Field.parseCLI)).@"fn";
-                    switch (fnInfo.params.len) {
+                    switch (fnInfo.param_types.len) {
                         // 1 arg = (input) => output
-                        1 => @field(dst, field.name) = try Field.parseCLI(value),
+                        1 => @field(dst, field) = try Field.parseCLI(value),
 
                         // 2 arg = (self, input) => void
-                        2 => switch (@typeInfo(field.type)) {
+                        2 => switch (@typeInfo(field_type)) {
                             .@"struct",
                             .@"union",
                             .@"enum",
-                            => try @field(dst, field.name).parseCLI(value),
+                            => try @field(dst, field).parseCLI(value),
 
                             // If the field is optional and set, then we use
                             // the pointer value directly into it. If its not
                             // set we need to create a new instance.
-                            .optional => if (@field(dst, field.name)) |*v| {
+                            .optional => if (@field(dst, field)) |*v| {
                                 try v.parseCLI(value);
                             } else {
                                 // Note: you cannot do @field(dst, name) = undefined
@@ -473,25 +470,25 @@ pub fn parseIntoField(
                                 // in ReleaseFast modes.
                                 var tmp: Field = undefined;
                                 try tmp.parseCLI(value);
-                                @field(dst, field.name) = tmp;
+                                @field(dst, field) = tmp;
                             },
 
                             else => @compileError("unexpected field type"),
                         },
 
                         // 3 arg = (self, alloc, input) => void
-                        3 => switch (@typeInfo(field.type)) {
+                        3 => switch (@typeInfo(field_type)) {
                             .@"struct",
                             .@"union",
                             .@"enum",
-                            => try @field(dst, field.name).parseCLI(alloc, value),
+                            => try @field(dst, field).parseCLI(alloc, value),
 
-                            .optional => if (@field(dst, field.name)) |*v| {
+                            .optional => if (@field(dst, field)) |*v| {
                                 try v.parseCLI(alloc, value);
                             } else {
                                 var tmp: Field = undefined;
                                 try tmp.parseCLI(alloc, value);
-                                @field(dst, field.name) = tmp;
+                                @field(dst, field) = tmp;
                             },
 
                             else => @compileError("unexpected field type"),
@@ -505,7 +502,7 @@ pub fn parseIntoField(
             }
 
             // No parseCLI, magic the value based on the type
-            @field(dst, field.name) = switch (Field) {
+            @field(dst, field) = switch (Field) {
                 []const u8 => value: {
                     const slice = value orelse return error.ValueRequired;
                     const buf = try alloc.alloc(u8, slice.len);
@@ -591,35 +588,30 @@ pub fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
     const value = if (colon_idx < v.len) v[colon_idx + 1 ..] else "";
 
     // Find the field in the union that matches the tag.
-    inline for (info.fields) |field| {
-        if (mem.eql(u8, field.name, tag_str)) {
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (mem.eql(u8, field_name, tag_str)) {
             // Special case void types where we don't need a value.
-            if (field.type == void) {
+            if (field_type == void) {
                 if (value.len > 0) return error.InvalidValue;
-                return @unionInit(T, field.name, {});
+                return @unionInit(T, field_name, {});
             }
 
             // We need to create a struct that looks like this union field.
             // This lets us use parseIntoField as if its a dedicated struct.
-            const Target = @Type(.{ .@"struct" = .{
-                .layout = .auto,
-                .fields = &.{.{
-                    .name = field.name,
-                    .type = field.type,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(field.type),
-                }},
-                .decls = &.{},
-                .is_tuple = false,
-            } });
+            const Target = @Struct(
+                .auto,
+                null,
+                &.{field_name},
+                &.{field_type},
+                &.{.{ .@"align" = @alignOf(field_type) }},
+            );
 
             // Parse the value into the struct
             var t: Target = undefined;
-            try parseIntoField(Target, alloc, &t, field.name, value);
+            try parseIntoField(Target, alloc, &t, field_name, value);
 
             // Build our union
-            return @unionInit(T, field.name, @field(t, field.name));
+            return @unionInit(T, field_name, @field(t, field_name));
         }
     }
 
@@ -651,8 +643,8 @@ pub fn parseAutoStruct(
 
     // Keep track of which fields were set so we can error if a required
     // field was not set.
-    const FieldSet = std.StaticBitSet(info.fields.len);
-    var fields_set: FieldSet = .initEmpty();
+    const FieldSet = std.bit_set.Static(info.field_names.len);
+    var fields_set: FieldSet = .empty;
 
     // We split each value by "," allowing for quoting and escaping.
     var iter: CommaSplitter = .init(v);
@@ -683,8 +675,8 @@ pub fn parseAutoStruct(
             break :value value;
         };
 
-        inline for (info.fields, 0..) |field, i| {
-            if (std.mem.eql(u8, field.name, key)) {
+        inline for (info.field_names, 0..) |field, i| {
+            if (std.mem.eql(u8, field, key)) {
                 try parseIntoField(T, alloc, &result, key, value);
                 fields_set.set(i);
                 continue :loop;
@@ -696,18 +688,16 @@ pub fn parseAutoStruct(
     }
 
     // Ensure all required fields are set
-    inline for (info.fields, 0..) |field, i| {
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |field, field_type, field_attrs, i| {
         if (!fields_set.isSet(i)) {
-            @field(result, field.name) = default: {
+            @field(result, field) = default: {
                 // If we're given a default value then we inherit those.
                 // Otherwise we use the default values as specified by the
                 // struct.
                 if (default_) |default| {
-                    break :default @field(default, field.name);
+                    break :default @field(default, field);
                 } else {
-                    const default_ptr = field.default_value_ptr orelse return error.InvalidValue;
-                    const typed_ptr: *const field.type = @ptrCast(@alignCast(default_ptr));
-                    break :default typed_ptr.*;
+                    break :default field_attrs.defaultValue(field_type) orelse return error.InvalidValue;
                 }
             };
         }
@@ -726,9 +716,9 @@ pub fn parsePackedStruct(comptime T: type, v: []const u8) !T {
     // turn on or off all of the struct's fields.
     bools: {
         const b = parseBool(v) catch break :bools;
-        inline for (info.fields) |field| {
-            assert(field.type == bool);
-            @field(result, field.name) = b;
+        inline for (info.field_names, info.field_types) |field, field_type| {
+            assert(field_type == bool);
+            @field(result, field) = b;
         }
         return result;
     }
@@ -748,10 +738,10 @@ pub fn parsePackedStruct(comptime T: type, v: []const u8) !T {
             }
         };
 
-        inline for (info.fields) |field| {
-            assert(field.type == bool);
-            if (std.mem.eql(u8, field.name, part)) {
-                @field(result, field.name) = value;
+        inline for (info.field_names, info.field_types) |field, field_type| {
+            assert(field_type == bool);
+            if (std.mem.eql(u8, field, part)) {
+                @field(result, field) = value;
                 continue :loop;
             }
         }
@@ -789,7 +779,7 @@ test "parse: simple" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--a=42 --b --b-f=false",
     );
@@ -801,7 +791,7 @@ test "parse: simple" {
     try testing.expect(!data.@"b-f");
 
     // Reparsing works
-    var iter2 = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter2 = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--a=84",
     );
@@ -823,7 +813,7 @@ test "parse: quoted value" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--a=\"42\" --b=\"hello!\"",
     );
@@ -843,7 +833,7 @@ test "parse: empty value resets to default" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--a= --b=",
     );
@@ -862,7 +852,7 @@ test "parse: positional arguments are invalid" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--a=84 what",
     );
@@ -886,7 +876,7 @@ test "parse: diagnostic tracking" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--what --a=42",
     );
@@ -970,7 +960,7 @@ test "parse: compatibility handler" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--a=yuh",
     );
@@ -996,7 +986,7 @@ test "parse: compatibility renamed" {
     } = .{};
     defer if (data._arena) |arena| arena.deinit();
 
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+    var iter = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--old=true --b=true",
     );
@@ -1485,8 +1475,11 @@ pub fn ArgsIterator(comptime Iterator: type) type {
 }
 
 /// Create an args iterator for the process args. This will skip argv0.
-pub fn argsIterator(alloc_gpa: Allocator) os_args.ArgIterator.InitError!ArgsIterator(os_args.ArgIterator) {
-    var iter = try os_args.iterator(alloc_gpa);
+pub fn argsIterator(
+    alloc_gpa: Allocator,
+    args: std.process.Args,
+) std.process.Args.Iterator.InitError!ArgsIterator(std.process.Args.Iterator) {
+    var iter: std.process.Args.Iterator = try .initAllocator(args, alloc_gpa);
     errdefer iter.deinit();
     _ = iter.next(); // skip argv0
     return .{ .iterator = iter };
@@ -1495,7 +1488,7 @@ pub fn argsIterator(alloc_gpa: Allocator) os_args.ArgIterator.InitError!ArgsIter
 test "ArgsIterator" {
     const testing = std.testing;
 
-    const child = try std.process.ArgIteratorGeneral(.{}).init(
+    const child = try std.process.Args.IteratorGeneral(.{}).init(
         testing.allocator,
         "--what +list-things --a=42",
     );
@@ -1574,7 +1567,11 @@ pub const LineIterator = struct {
 
     /// This is the buffer where we store the current entry that
     /// is formatted to be compatible with the parse function.
-    entry: [MAX_LINE_SIZE + 1]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 1)),
+    entry: [MAX_LINE_SIZE + 1]u8 = entry: {
+        var buf: [MAX_LINE_SIZE + 1]u8 = @splat(0);
+        @memcpy(buf[0..2], "--");
+        break :entry buf;
+    },
 
     /// Whether reading the input failed (`error.ReadFailed`) before its end.
     /// `next` stops there as at the end, as it always has, so what came after

@@ -9,19 +9,17 @@ pub fn build(b: *std.Build) !void {
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
+            // On MSVC, we must not link libc++ because Zig unconditionally
+            // passes -nostdinc++ and then adds its bundled libc++/libc++abi
+            // include paths, which conflict with MSVC's own C++ runtime headers.
+            // The MSVC SDK include directories (added by linking libc) contain
+            // both C and C++ headers, so libc++ is not needed.
+            .link_libc = true,
+            .link_libcpp = target.result.abi != .msvc,
         }),
         .linkage = .static,
     });
-    lib.linkLibC();
-    // On MSVC, we must not use linkLibCpp because Zig unconditionally
-    // passes -nostdinc++ and then adds its bundled libc++/libc++abi
-    // include paths, which conflict with MSVC's own C++ runtime headers.
-    // The MSVC SDK include directories (added via linkLibC) contain
-    // both C and C++ headers, so linkLibCpp is not needed.
-    if (target.result.abi != .msvc) {
-        lib.linkLibCpp();
-    }
-    lib.addIncludePath(b.path("vendor"));
+    lib.root_module.addIncludePath(b.path("vendor"));
     if (target.result.os.tag.isDarwin()) {
         const apple_sdk = @import("apple_sdk");
         try apple_sdk.addPaths(b, lib);
@@ -37,20 +35,20 @@ pub fn build(b: *std.Build) !void {
     }
 
     if (b.lazyDependency("breakpad", .{})) |upstream| {
-        lib.addIncludePath(upstream.path("src"));
-        lib.addCSourceFiles(.{
+        lib.root_module.addIncludePath(upstream.path("src"));
+        lib.root_module.addCSourceFiles(.{
             .root = upstream.path(""),
             .files = common,
             .flags = flags.items,
         });
 
         if (target.result.os.tag.isDarwin()) {
-            lib.addCSourceFiles(.{
+            lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = common_apple,
                 .flags = flags.items,
             });
-            lib.addCSourceFiles(.{
+            lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = client_apple,
                 .flags = flags.items,
@@ -58,19 +56,19 @@ pub fn build(b: *std.Build) !void {
 
             switch (target.result.os.tag) {
                 .macos => {
-                    lib.addCSourceFiles(.{
+                    lib.root_module.addCSourceFiles(.{
                         .root = upstream.path(""),
                         .files = common_mac,
                         .flags = flags.items,
                     });
-                    lib.addCSourceFiles(.{
+                    lib.root_module.addCSourceFiles(.{
                         .root = upstream.path(""),
                         .files = client_mac,
                         .flags = flags.items,
                     });
                 },
 
-                .ios => lib.addCSourceFiles(.{
+                .ios => lib.root_module.addCSourceFiles(.{
                     .root = upstream.path(""),
                     .files = client_ios,
                     .flags = flags.items,
@@ -81,12 +79,12 @@ pub fn build(b: *std.Build) !void {
         }
 
         if (target.result.os.tag == .linux) {
-            lib.addCSourceFiles(.{
+            lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = common_linux,
                 .flags = flags.items,
             });
-            lib.addCSourceFiles(.{
+            lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = client_linux,
                 .flags = flags.items,

@@ -5,7 +5,6 @@ const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
 const input = @import("../input.zig");
-const lib = @import("../lib/main.zig");
 
 pub const Options = struct {
     /// This is set by the CLI parser for deinit.
@@ -115,11 +114,11 @@ fn runArgsWithPerform(
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             return actionpkg.help_error;
         }
-        if (lib.cutPrefix(u8, arg, "--class=")) |class| {
+        if (std.mem.cutPrefix(u8, arg, "--class=")) |class| {
             opts.class = try opts_alloc.dupeZ(u8, std.mem.trim(u8, class, &std.ascii.whitespace));
             continue;
         }
-        if (lib.cutPrefix(u8, arg, "--surface-id=")) |raw| {
+        if (std.mem.cutPrefix(u8, arg, "--surface-id=")) |raw| {
             const id = std.fmt.parseInt(u64, raw, 10) catch {
                 try stderr.print("Invalid --surface-id value: {s}\n", .{raw});
                 return 1;
@@ -131,7 +130,7 @@ fn runArgsWithPerform(
             opts.@"surface-id" = id;
             continue;
         }
-        if (lib.cutPrefix(u8, arg, "--timeout=")) |raw| {
+        if (std.mem.cutPrefix(u8, arg, "--timeout=")) |raw| {
             opts.timeout = std.fmt.parseInt(u64, raw, 10) catch {
                 try stderr.print("Invalid --timeout value: {s}\n", .{raw});
                 return 1;

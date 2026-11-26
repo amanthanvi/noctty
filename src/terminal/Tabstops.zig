@@ -218,14 +218,14 @@ test "Tabstops: dynamic allocations" {
     try testing.expect(t.get(cap + 4));
     try testing.expect(!t.get(cap + 3));
 
+    // Unsetting a column with no tabstop should be a no-op, not a toggle.
+    t.unset(cap + 3);
+    try testing.expect(!t.get(cap + 3));
+
     // Growing again preserves existing stops and clears the new unit.
     try t.resize(testing.allocator, cap + unit_bits + 1);
     try testing.expect(t.get(cap + 4));
     try testing.expect(!t.get(cap + unit_bits));
-
-    // Unsetting a column with no tabstop should be a no-op, not a toggle.
-    t.unset(cap + 3);
-    try testing.expect(!t.get(cap + 3));
 
     // Prealloc still works
     try testing.expect(!t.get(5));

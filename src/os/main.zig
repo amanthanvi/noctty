@@ -1,5 +1,5 @@
 //! The "os" package contains utilities for interfacing with the operating
-//! system. These aren't restricted to syscalls or low-level operations, but
+//! system. These aren't restricted to syscalls or low-level operations, butos/main.zig
 //! also OS-specific features and conventions.
 
 const std = @import("std");
@@ -55,8 +55,8 @@ const kernel_info = if (builtin.os.tag == .linux) @import("kernel_info.zig") els
 };
 
 // Namespaces
-pub const args = @import("args.zig");
 pub const cgroup = @import("cgroup.zig");
+pub const edit = @import("edit.zig");
 pub const hostname = @import("hostname.zig");
 pub const i18n = @import("i18n.zig");
 pub const mach = if (builtin.os.tag.isDarwin()) @import("mach.zig") else struct {};
@@ -67,10 +67,13 @@ pub const passwd = @import("passwd.zig");
 pub const redact = @import("redact.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
+/// The fork's Win32 declarations that upstream's `windows.zig` lacks.
+pub const windows_ext = @import("windows_ext.zig");
 pub const macos = if (builtin.os.tag.isDarwin()) @import("macos.zig") else struct {};
 pub const monotonic = @import("monotonic.zig");
 pub const gui_probe_trace = @import("gui_probe_trace.zig");
 pub const shell = @import("shell.zig");
+pub const stderr = @import("stderr.zig");
 pub const uri = @import("uri.zig");
 
 // Functions and types
@@ -92,8 +95,6 @@ pub const desktopEnvironment = desktop.desktopEnvironment;
 pub const rlimit = file.rlimit;
 pub const fixMaxFiles = file.fixMaxFiles;
 pub const restoreMaxFiles = file.restoreMaxFiles;
-pub const allocTmpDir = file.allocTmpDir;
-pub const freeTmpDir = file.freeTmpDir;
 pub const randomTmpPath = file.randomTmpPath;
 pub const isFlatpak = flatpak.isFlatpak;
 pub const FlatpakHostCommand = flatpak.FlatpakHostCommand;
@@ -108,6 +109,7 @@ pub const resourcesDir = resourcesdir.resourcesDir;
 pub const ResourcesDir = resourcesdir.ResourcesDir;
 pub const ShellEscapeWriter = shell.ShellEscapeWriter;
 pub const getKernelInfo = kernel_info.getKernelInfo;
+pub const getConfigEditCommand = edit.getConfigEditCommand;
 
 /// Per-surface terminal threads are numerous on Windows, where Zig's default
 /// 16 MiB stack is committed by CreateThread. Keep process-global and
@@ -289,6 +291,8 @@ test "Windows surface thread stack carries local_path.open through a junction cy
 
 test {
     _ = file;
+    _ = stderr;
+    _ = edit;
     _ = i18n;
     _ = monotonic;
     _ = gui_probe_trace;
@@ -296,9 +300,9 @@ test {
     _ = uri;
     _ = shell;
 
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         _ = kernel_info;
-    } else if (comptime builtin.os.tag.isDarwin()) {
+    } else if (comptime builtin.target.os.tag.isDarwin()) {
         _ = mach;
         _ = macos;
     } else if (comptime builtin.os.tag == .windows) {

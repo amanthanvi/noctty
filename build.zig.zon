@@ -8,36 +8,39 @@
     .fingerprint = 0x80bfc21ea312488b,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
-        // Zig libs
+        // Our higher-level C translation helper (this also helps ensure we
+        // only need to maintain one external dependency point)
+        .translate_c = .{ .path = "./pkg/translate-c" },
 
+        // Zig libs
         .libxev = .{
             // mitchellh/libxev
-            .url = "https://deps.files.ghostty.org/libxev-34fa50878aec6e5fa8f532867001ab3c36fae23e.tar.gz",
-            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
+            .url = "https://deps.files.ghostty.org/libxev-819ffa180ca20e31c7eded74e2e1aceb1eab557f.tar.gz",
+            .hash = "libxev-0.0.0-86vtc8QQFACz0sVc7U-VDiDIgH-XfBuEY5JpABLjHNpn",
             .lazy = true,
         },
         .vaxis = .{
             // rockorager/libvaxis
-            .url = "https://deps.files.ghostty.org/vaxis-7dbb9fd3122e4ffad262dd7c151d80d863b68558.tar.gz",
-            .hash = "vaxis-0.5.1-BWNV_LosCQAGmCCNOLljCIw6j6-yt53tji6n6rwJ2BhS",
+            .url = "https://deps.files.ghostty.org/vaxis-6fd944a27fb3d6f596e981076381a3131f2448b4.tar.gz",
+            .hash = "vaxis-0.6.0-BWNV_MafDAAEzkVUvrW9NFUqnnMUoeHqrs2mecnD6D7w",
             .lazy = true,
         },
         .z2d = .{
             // vancluever/z2d
-            .url = "https://deps.files.ghostty.org/z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ.tar.gz",
-            .hash = "z2d-0.10.0-j5P_Hu-6FgBsZNgwphIqh17jDnj8_yPtD8yzjO6PpHRQ",
+            .url = "https://deps.files.ghostty.org/z2d-40af3e84a4e15a9f31d126b3f281f23ce6a3dae5.tar.gz",
+            .hash = "z2d-0.13.0-j5P_HgsRFABzZDH54gI35P0OSrg7HFyJwS2bXX5uBdU4",
             .lazy = true,
         },
         .uucode = .{
             // jacobsandlund/uucode
-            .url = "https://deps.files.ghostty.org/uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9.tar.gz",
-            .hash = "uucode-0.2.0-ZZjBPqZVVABQepOqZHR7vV_NcaN-wats0IB6o-Exj6m9",
+            .url = "https://deps.files.ghostty.org/uucode-ea62149739404a73c202b48a33bf6dd2af4bd9b0.tar.gz",
+            .hash = "uucode-0.2.0-ZZjBPoGFVgCiflJNFc6Io8xzC67B6PA5bUkk4LT0kCxg",
             .lazy = true,
         },
         .zf = .{
             // natecraddock/zf
-            .url = "https://deps.files.ghostty.org/zf-3c52637b7e937c5ae61fd679717da3e276765b23.tar.gz",
-            .hash = "zf-0.10.3-OIRy8RuJAACKA3Lohoumrt85nRbHwbpMcUaLES8vxDnh",
+            .url = "https://deps.files.ghostty.org/zf-87153bb86b75d21fbac897b738f316d449f5d0c9.tar.gz",
+            .hash = "zf-0.11.0-OIRy8XCRAAB6FiMwIrtD6FqlagnFwpI6YyOu7bXeYH5J",
             .lazy = true,
         },
 
@@ -70,8 +73,8 @@
             .lazy = true,
         },
         .iterm2_themes = .{
-            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20260713-155359-c3968b3.tgz",
-            .hash = "N-V-__8AALZGBAAS5NLVH-c8eC-6VtCdcH-9nUvVfUSkWS__",
+            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20261019-151001-86a776d.tgz",
+            .hash = "N-V-__8AAJ3vBQAq1fLMh5J8uWLkeDLS6WAdR2x5KcrmEyz6",
             .lazy = true,
         },
     },

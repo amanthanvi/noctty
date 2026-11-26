@@ -21,6 +21,12 @@ pub const std_options: std.Options = if (@hasDecl(entrypoint, "std_options"))
 else
     .{};
 
+comptime {
+    // Force-reference our memset override so its export is emitted.
+    // See quirks_memset.zig for details on why this exists.
+    _ = @import("quirks_memset.zig");
+}
+
 /// noctty.exe's panic handler (see process_shared.panic). The other
 /// entrypoints are build-time tools and keep Zig's default.
 pub const panic = if (build_config.exe_entrypoint == .ghostty)
@@ -58,5 +64,11 @@ test "ConPTY transport probe child dispatch only" {
 // through the named test above, so its two probe tests run only when the
 // filter also matches that one (use ConPTY).
 test {
+    // Zig 0.16.0 has made test logging more strict. Now, *anything* that gets
+    // printed to stderr results in a "failed command" message, even if the
+    // tests ultimately passed. To reduce confusion here (and honestly, test
+    // log spam in general), we bump the default testing log level to error.
+    std.testing.log_level = std.log.Level.err;
     _ = entrypoint;
+    _ = @import("quirks_memset.zig");
 }

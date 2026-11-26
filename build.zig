@@ -28,10 +28,11 @@ pub fn build(b: *std.Build) !void {
     // If we have a VERSION file (present in source tarballs) then we
     // use that as the version source of truth. Otherwise we fall back
     // to what is in the build.zig.zon.
-    const file_version: ?[]const u8 = if (b.build_root.handle.readFileAlloc(
-        b.allocator,
+    const file_version: ?[]const u8 = if (b.root.root_dir.handle.readFileAlloc(
+        b.graph.io,
         "VERSION",
-        128,
+        b.allocator,
+        .limited(128),
     )) |content| std.mem.trim(
         u8,
         content,
@@ -300,8 +301,8 @@ pub fn build(b: *std.Build) !void {
             // -Dtest-optimize sets the mode, not the `.optimize` below.
             .root_module = config.testModule(b, .{
                 .root_source_file = b.path("src/main.zig"),
-                .target = config.baselineTarget(),
-                .optimize = .Debug,
+                .target = config.baselineTarget(b.graph.io),
+                .optimize = .debug,
                 .strip = false,
                 .omit_frame_pointer = false,
                 .unwind_tables = .sync,

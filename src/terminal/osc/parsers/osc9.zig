@@ -1,6 +1,9 @@
 const std = @import("std");
 const lib = @import("../../lib.zig");
 
+const Parser = @import("../../osc.zig").Parser;
+const Command = @import("../../osc.zig").Command;
+
 /// Parse OSC 9, which could be an iTerm2 notification or a ConEmu extension.
 pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
     const cap = if (parser.capture) |*c| c else {
@@ -287,12 +290,12 @@ pub fn parse(parser: anytype, _: ?u8) ?*@TypeOf(parser.command) {
 test "OSC 9: numeric fields reject digit separators" {
     const testing = std.testing;
 
-    var sleep = @import("../../osc.zig").Parser.init(null);
+    var sleep: Parser = .init(null);
     for ("9;1;4_2") |ch| sleep.next(ch);
     const sleep_cmd = sleep.end(null).?.*;
     try testing.expectEqual(100, sleep_cmd.conemu_sleep.duration_ms);
 
-    var progress = @import("../../osc.zig").Parser.init(null);
+    var progress: Parser = .init(null);
     for ("9;4;1;4_2") |ch| progress.next(ch);
     const progress_cmd = progress.end(null).?.*;
     try testing.expectEqual(null, progress_cmd.conemu_progress_report.progress);

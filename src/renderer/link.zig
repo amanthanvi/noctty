@@ -173,7 +173,7 @@ test "renderCellMap" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
         .cols = 5,
         .rows = 3,
     });
@@ -226,7 +226,7 @@ test "renderCellMap hover links" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
         .cols = 5,
         .rows = 3,
     });
@@ -303,8 +303,9 @@ test "renderCellMap hover links" {
 test "renderCellMap inactive links don't allocate" {
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(io, alloc, .{
         .cols = 5,
         .rows = 3,
     });
@@ -363,7 +364,7 @@ test "renderCellMap mods no match" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
         .cols = 5,
         .rows = 3,
     });

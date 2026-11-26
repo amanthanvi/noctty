@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const apprt = @import("../apprt.zig");
+const global = @import("../global.zig");
 const redact = @import("redact.zig");
 const thread_role = @import("../sync/thread_role.zig");
 
@@ -20,7 +21,6 @@ const log = std.log.scoped(.@"os-open");
 /// Untrusted kinds (`unknown`, `osc8`) return `error.UntrustedLink`
 /// because the apprt must check them first.
 pub fn open(
-    alloc: Allocator,
     kind: apprt.action.OpenUrl.Kind,
     url: []const u8,
 ) !void {
@@ -28,29 +28,28 @@ pub fn open(
     // the apprt's safety checks by passing it to FileProtocolHandler, which
     // runs whatever program the target names.
     if (!genericOpenAllowed(kind)) return error.UntrustedLink;
-    if (builtin.os.tag != .windows) return error.Unimplemented;
+    if (builtin.target.os.tag != .windows) return error.Unimplemented;
 
-    var exe: std.process.Child = .init(
-        &.{ "rundll32", "url.dll,FileProtocolHandler", url },
-        alloc,
-    );
+    var spawn_opts: std.process.SpawnOptions = .{
+        .argv = &.{ "rundll32", "url.dll,FileProtocolHandler", url },
+    };
 
     // Ignore anything from stdout. This must be set before spawning the
     // process.
-    exe.stdout_behavior = .Ignore;
+    spawn_opts.stdout = .ignore;
     // Pipe stderr so we can log the stderr from the command. This must be set
     // before spawning the process.
-    exe.stderr_behavior = .Pipe;
+    spawn_opts.stderr = .pipe;
 
     // Spawn the process on our same thread so we can detect failure
     // quickly.
-    try exe.spawn();
+    const exe = try std.process.spawn(global.io(), spawn_opts);
 
     // Create a thread that handles collecting output and reaping the process.
     // This is done in a separate thread because SOME open implementations block
     // and some do not. It's easier to just spawn a thread to handle this so
     // that we never block.
-    const thread = try std.Thread.spawn(.{}, openThread, .{exe});
+    const thread = try std.Thread.spawn(.{}, openThread, .{ global.io(), exe });
     thread.detach();
 }
 
@@ -73,7 +72,7 @@ test "untrusted links have no generic opener fallback" {
     try std.testing.expect(genericOpenAllowed(.html));
 }
 
-fn openThread(exe_: std.process.Child) void {
+fn openThread(io: std.Io, exe_: std.process.Child) void {
     const role_scope = thread_role.enter(.{ .worker = "open" });
     defer role_scope.exit();
     // Copy the exe so it is non-const. This is necessary because wait()
@@ -82,10 +81,10 @@ fn openThread(exe_: std.process.Child) void {
     var exe = exe_;
     if (exe.stderr) |stderr| {
         var buffer: [256]u8 = undefined;
-        var stream = stderr.readerStreaming(&buffer);
+        var stream = stderr.readerStreaming(io, &buffer);
         _ = drainOpenerStderr(&stream.interface);
     }
-    _ = exe.wait() catch {};
+    _ = exe.wait(io) catch {};
 }
 
 /// Reads an opener's stderr to its end, logging each line, and returns how

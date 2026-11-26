@@ -12,6 +12,7 @@ pub fn alloc(
     alloc_: ?*const CAllocator,
     len: usize,
 ) callconv(lib.calling_conv) ?[*]u8 {
+    // Zig's empty allocation pointer is not safe to expose to foreign runtimes.
     if (len == 0) return null;
     const allocator = lib.alloc.default(alloc_);
     const buf = allocator.alloc(u8, len) catch return null;

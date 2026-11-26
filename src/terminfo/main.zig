@@ -7,6 +7,7 @@
 
 pub const compiled = @import("compiled.zig");
 pub const ghostty = @import("ghostty.zig").ghostty;
+pub const version = @import("ghostty.zig").version;
 pub const Source = @import("Source.zig");
 
 test {

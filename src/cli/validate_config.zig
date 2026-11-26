@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
 const actionpkg = @import("action.zig");
 const Config = @import("../config.zig").Config;
+const global = @import("../global.zig");
 
 pub const Options = struct {
     /// The path of the config file to validate. If this isn't specified,
@@ -34,7 +35,7 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(Options, alloc, &opts, &iter);
     }
@@ -44,7 +45,7 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
     // truncates there, which wipes an appended log and, on a Windows pipe,
     // fails with FileTooBig.
     var buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writerStreaming(&buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(global.io(), &buffer);
     const stdout = &stdout_writer.interface;
     const result = runInner(alloc, opts, stdout);
     try stdout.flush();
@@ -61,8 +62,12 @@ fn runInner(
 
     // If a config path is passed, validate it, otherwise validate default configs
     if (opts.@"config-file") |config_path| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const abs_path = try std.fs.cwd().realpath(config_path, &buf);
+        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const abs_path = buf[0..try std.Io.Dir.cwd().realPathFile(
+            global.io(),
+            config_path,
+            &buf,
+        )];
         try cfg.loadFile(alloc, abs_path);
         try cfg.loadRecursiveFiles(alloc);
     } else {

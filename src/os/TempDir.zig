@@ -5,8 +5,9 @@ const TempDir = @This();
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
-const Dir = std.fs.Dir;
+const Dir = std.Io.Dir;
 const file = @import("file.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.tempdir);
 
@@ -29,26 +30,26 @@ pub fn init() !TempDir {
     var tmp_path_buf: [file.random_basename_len:0]u8 = undefined;
 
     // The parent is always a handle of our own, so `close` can close it.
-    var dir = dir: {
-        const cwd = std.fs.cwd();
-        const tmp_dir = try file.allocTmpDir(std.heap.page_allocator);
+    const dir = dir: {
+        const cwd = std.Io.Dir.cwd();
+        const tmp_dir = try file.allocTmpDir(std.heap.page_allocator, global.environ());
         defer file.freeTmpDir(std.heap.page_allocator, tmp_dir);
-        break :dir try cwd.openDir(tmp_dir, .{});
+        break :dir try cwd.openDir(global.io(), tmp_dir, .{});
     };
-    errdefer dir.close();
+    errdefer dir.close(global.io());
 
     // We now loop forever until we can find a directory that we can create.
     while (true) {
         const tmp_path = try file.randomBasename(&tmp_path_buf);
         tmp_path_buf[tmp_path.len] = 0;
 
-        dir.makeDir(tmp_path) catch |err| switch (err) {
+        dir.createDir(global.io(), tmp_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => |e| return e,
         };
 
         return TempDir{
-            .dir = try dir.openDir(tmp_path, .{}),
+            .dir = try dir.openDir(global.io(), tmp_path, .{}),
             .parent = dir,
             .name_buf = tmp_path_buf,
         };
@@ -72,13 +73,13 @@ pub const CloseMode = enum { delete, retain };
 /// Close the directory handles, optionally retaining the temporary directory
 /// and its contents on disk.
 pub fn close(self: *TempDir, mode: CloseMode) void {
-    self.dir.close();
+    self.dir.close(global.io());
     switch (mode) {
-        .delete => self.parent.deleteTree(self.name()) catch |err|
+        .delete => self.parent.deleteTree(global.io(), self.name()) catch |err|
             log.err("error deleting temp dir err={}", .{err}),
         .retain => {},
     }
-    self.parent.close();
+    self.parent.close(global.io());
 }
 
 test {

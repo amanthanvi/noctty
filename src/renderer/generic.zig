@@ -541,6 +541,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells for the draw call.
         cells_rebuilt: bool = false,
 
+        /// Set to true after the Kitty image placements are rebuilt. Like
+        /// `cells_rebuilt`, this means the next frame must be drawn. This
+        /// matters when the images change but no cell does, for example
+        /// when a program places an image.
+        images_rebuilt: bool = false,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -1516,6 +1522,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             //     );
             // }
 
+            // CoreText shaping accumulates objects for deferred release over
+            // the course of a frame. Always flush those objects, including
+            // when rebuilding the frame fails due to memory pressure.
+            defer self.font_shaper.endFrame();
+
             // We fully deinit and reset the terminal state every so often
             // so that a particularly large terminal state doesn't cause
             // the renderer to hold on to retained memory.
@@ -1642,14 +1653,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     break :preedit try p.clone(arena_alloc);
                 };
 
-                // If we have Kitty graphics data, we enter a SLOW SLOW SLOW path.
-                // We only do this if the Kitty image state is dirty meaning only if
-                // it changes.
-                //
-                // If we have any virtual references, we must also rebuild our
-                // kitty state on every frame because any cell change can move
-                // an image.
-                if (self.images.kittyRequiresUpdate(state.terminal)) {
+                // Rebuild our Kitty image placements when the placements
+                // or the images changed. The render state update above
+                // has already positioned every placement, so this is
+                // cheap. Most frames that only change text skip it.
+                if (self.images.kittyRequiresUpdate(
+                    state.terminal,
+                    &self.terminal_state,
+                )) {
                     // We need to grab the draw mutex since this updates
                     // our image state that drawFrame uses.
                     self.draw_mutex.lock();
@@ -1657,11 +1668,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.images.kittyUpdate(
                         self.alloc,
                         state.terminal,
-                        .{
-                            .width = self.grid_metrics.cell_width,
-                            .height = self.grid_metrics.cell_height,
-                        },
+                        &self.terminal_state,
                     );
+                    self.images_rebuilt = true;
                 }
 
                 // Get our OSC8 links we're hovering if we have a mouse.
@@ -1849,9 +1858,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.updateCustomShaderUniformsFromState();
             }
 
-            // Notify our shaper we're done for the frame. For some shapers,
-            // such as CoreText, this triggers off-thread cleanup logic.
-            self.font_shaper.endFrame();
             return .{
                 .cursor_blinking = critical.cursor_blinking,
                 .output_progress = output_progress,
@@ -1917,6 +1923,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 (if (@hasDecl(GraphicsAPI, "needsRedraw")) self.api.needsRedraw() else false) or
                 size_changed or
                 self.cells_rebuilt or
+                self.images_rebuilt or
                 self.hasAnimations() or
                 sync;
 
@@ -1940,6 +1947,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return;
             }
             self.cells_rebuilt = false;
+            self.images_rebuilt = false;
 
             // Wait for a frame to be available. Once `beginFrame` succeeds the
             // frame context owns the frame and `complete` releases it on every
@@ -2058,13 +2066,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     if (self.fg_cells_dirty_from) |start| {
                         self.fg_cell_count = try frame.cells.syncFromArrayListsStart(
-                            self.cells.fg_rows.lists,
+                            self.cells.fg_rows,
                             start,
                         );
                     }
                 } else {
                     try frame.cells_bg.sync(self.cells.bg_cells);
-                    self.fg_cell_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows.lists);
+                    self.fg_cell_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
                 }
 
                 self.bg_cells_dirty.reset();
@@ -2603,12 +2611,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             ).add(self.size.padding);
 
             // Setup our uniforms
-            self.uniforms.projection_matrix = math.ortho2d(
+            self.uniforms.projection_matrix = @bitCast(math.ortho2d(
                 -1 * @as(f32, @floatFromInt(self.size.padding.left)),
                 @floatFromInt(terminal_size.width + self.size.padding.right),
                 @floatFromInt(terminal_size.height + self.size.padding.bottom),
                 -1 * @as(f32, @floatFromInt(self.size.padding.top)),
-            );
+            ));
             self.uniforms.grid_padding = .{
                 @floatFromInt(blank.top),
                 @floatFromInt(blank.right),
@@ -3104,9 +3112,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.bg_cells_dirty = bg_cells_dirty;
             const cursor_end_list = @as(usize, self.cells.size.rows) + 1;
             const old_cursor_start = self.cells.size.rows > 0 and
-                self.cells.fg_rows.lists[0].items.len > 0;
+                self.cells.fg_rows[0].items.len > 0;
             const old_cursor_end = self.cells.size.rows > 0 and
-                self.cells.fg_rows.lists[cursor_end_list].items.len > 0;
+                self.cells.fg_rows[cursor_end_list].items.len > 0;
             const old_cursor = self.cells.getCursorGlyph();
 
             // Setup our cursor rendering information.
@@ -3267,9 +3275,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             const new_cursor_start = self.cells.size.rows > 0 and
-                self.cells.fg_rows.lists[0].items.len > 0;
+                self.cells.fg_rows[0].items.len > 0;
             const new_cursor_end = self.cells.size.rows > 0 and
-                self.cells.fg_rows.lists[cursor_end_list].items.len > 0;
+                self.cells.fg_rows[cursor_end_list].items.len > 0;
             const new_cursor = self.cells.getCursorGlyph();
             if (!std.meta.eql(old_cursor, new_cursor) or
                 old_cursor_start != new_cursor_start or

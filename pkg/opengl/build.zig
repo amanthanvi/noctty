@@ -1,4 +1,5 @@
 const std = @import("std");
+const translate_c = @import("translate_c");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -8,5 +9,15 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    module.addIncludePath(b.path("../../vendor/glad/include"));
+    try translate_c.addImportToModule(b, "opengl_c", module, .{
+        .source = .{ .includes = .{
+            .files = &.{
+                .{ .path = "glad/gl.h" },
+                .{ .path = "glad/glad_egl.h" },
+            },
+        } },
+        .target = target,
+        .optimize = optimize,
+        .include_paths = &.{b.path("../../vendor/glad/include")},
+    });
 }

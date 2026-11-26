@@ -6,6 +6,7 @@ const RunStep = std.Build.Step.Run;
 const CombineArchivesStep = @import("CombineArchivesStep.zig");
 const GhosttyZig = @import("GhosttyZig.zig");
 const SharedDeps = @import("SharedDeps.zig");
+const GhosttyPkgConfig = @import("GhosttyPkgConfig.zig");
 
 /// The step that generates the file.
 step: *std.Build.Step,
@@ -52,6 +53,12 @@ pub fn initWasm(
 
     // There is no entrypoint for this wasm module.
     exe.entry = .disabled;
+
+    // Default Zig stack size in Zig 0.16 is 1MB. Lower to 128 KB since
+    // this has to be preallocated up front in Wasm linear memory. Peak
+    // stack under various artificial loads is 17 KB at the time of this
+    // comment but lets do 128KB to be safe. We can lower later.
+    exe.stack_size = 128 * 1024;
 
     // Zig's WASM linker doesn't support --growable-table, so the table
     // is emitted with max == min and can't be grown from JS. Run a
@@ -103,7 +110,7 @@ pub fn initShared(
 fn initLib(
     b: *std.Build,
     zig: *const GhosttyZig,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
 ) !GhosttyLibVt {
     const kind: Kind = switch (linkage) {
         .static => .static,
@@ -132,13 +139,28 @@ fn initLib(
 
         // Enable PIC so the static library can be linked into PIE
         // executables, which is the default on most Linux distributions.
-        lib.root_module.pic = true;
+        // Native freestanding targets don't have a dynamic loader and some,
+        // such as Xtensa, don't support PIC relocations.
+        lib.root_module.pic = target.result.os.tag != .freestanding;
     }
 
     if (target.result.os.tag == .windows) {
         // Zig's ubsan emits /exclude-symbols linker directives that
         // are incompatible with the MSVC linker (LNK4229).
         lib.bundle_ubsan_rt = false;
+
+        if (kind == .static) {
+            if (target.result.abi == .msvc) {
+                // Zig's compiler runtime doesn't provide MSVC's security
+                // cookie symbols when libc is linked. Disable stack-protector
+                // generation so static consumers don't need BufferOverflowU.
+                lib.root_module.stack_protector = false;
+            }
+
+            // The Zig standard library uses NT and kernel32 symbols.
+            lib.root_module.linkSystemLibrary("ntdll", .{});
+            lib.root_module.linkSystemLibrary("kernel32", .{});
+        }
     }
 
     if (lib.rootModuleTarget().os.tag.isDarwin()) {
@@ -170,7 +192,7 @@ fn initLib(
     // both shared and static libraries are installed. Install a dedicated
     // static module so consumers can request the archive explicitly.
     const pcs: ?PkgConfigFiles = if (kind == .shared)
-        pkgConfigFiles(b, zig, target.result.os.tag)
+        try pkgConfigFiles(b, zig, target.result.os.tag)
     else
         null;
 
@@ -227,46 +249,22 @@ fn pkgConfigFiles(
     b: *std.Build,
     zig: *const GhosttyZig,
     os_tag: std.Target.Os.Tag,
-) PkgConfigFiles {
-    const wf = b.addWriteFiles();
-    const libs_private = libsPrivate(zig);
-    const requires_private = requiresPrivate(b);
+) !PkgConfigFiles {
+    const pkg_config: GhosttyPkgConfig = try .init(b, .{
+        .name = "ghostty-vt",
+        .name_static = "ghostty-vt-static",
+        .description = "Ghostty VT library",
+        .description_static = "Ghostty VT library (static)",
+        .version = zig.version,
+        .libs = &.{ "-L${libdir}", "-lghostty-vt" },
+        .libs_static = &.{b.fmt("${{libdir}}/{s}", .{staticLibraryName(os_tag)})},
+        .libs_private = &.{libsPrivate(zig)},
+        .reqs_private = &.{requiresPrivate(b)},
+    });
 
     return .{
-        .shared = wf.add("libghostty-vt.pc", b.fmt(
-            \\prefix={s}
-            \\includedir=${{prefix}}/include
-            \\libdir=${{prefix}}/lib
-            \\
-            \\Name: libghostty-vt
-            \\URL: https://github.com/ghostty-org/ghostty
-            \\Description: Ghostty VT library
-            \\Version: {f}
-            \\Cflags: -I${{includedir}}
-            \\Libs: -L${{libdir}} -lghostty-vt
-            \\Libs.private: {s}
-            \\Requires.private: {s}
-        , .{ b.install_prefix, zig.version, libs_private, requires_private })),
-        .static = wf.add("libghostty-vt-static.pc", b.fmt(
-            \\prefix={s}
-            \\includedir=${{prefix}}/include
-            \\libdir=${{prefix}}/lib
-            \\
-            \\Name: libghostty-vt-static
-            \\URL: https://github.com/ghostty-org/ghostty
-            \\Description: Ghostty VT library (static)
-            \\Version: {f}
-            \\Cflags: -I${{includedir}}
-            \\Libs: ${{libdir}}/{s}
-            \\Libs.private: {s}
-            \\Requires.private: {s}
-        , .{
-            b.install_prefix,
-            zig.version,
-            staticLibraryName(os_tag),
-            libs_private,
-            requires_private,
-        })),
+        .shared = pkg_config.getSharedFile(),
+        .static = pkg_config.getStaticFile(),
     };
 }
 

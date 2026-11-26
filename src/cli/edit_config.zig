@@ -8,6 +8,7 @@ const configpkg = @import("../config.zig");
 const internal_os = @import("../os/main.zig");
 const Config = configpkg.Config;
 const windows_text_editor = @import("../os/windows_text_editor.zig");
+const global = @import("../global.zig");
 
 pub const Options = struct {
     pub fn deinit(self: Options) void {
@@ -44,14 +45,14 @@ pub fn run(alloc: Allocator) !u8 {
     // critical where setting up the defer cleanup is a problem.
 
     var buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&buffer);
+    var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
     const stderr = &stderr_writer.interface;
 
     var opts: Options = .{};
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(Options, alloc, &opts, &iter);
     }
