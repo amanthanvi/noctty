@@ -1771,7 +1771,7 @@ fn pushIpcMailboxMessage(app: *App, message: CoreApp.Message) bool {
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
     };
-    return mailbox.push(global.io(), message, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) != 0;
+    return mailbox.push(message, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) != 0;
 }
 
 fn requestAutomationWindowListJson(

@@ -15665,7 +15665,7 @@ fn expectUserPasteWithoutText(held: ?[]const u8, brackets: bool, readonly: bool)
     fixture.surface.core_surface.readonly = readonly;
     EmptyPasteClipboard.install(&fixture, held);
 
-    const pasted = try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard });
+    const pasted = (try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard })) == .started;
     if (brackets and !readonly) {
         try std.testing.expect(pasted);
         try fixture.expectReply(empty_bracketed_pair);
@@ -15710,12 +15710,12 @@ test "win32 empty-bracketed-paste: a program's OSC 52 read of a clipboard with n
     fixture.surface.core_surface.config.clipboard_read = .allow;
 
     EmptyPasteClipboard.install(&fixture, null);
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
     try fixture.expectReply("\x1b]52;c;\x1b\\");
 
     // An empty text answers the same way.
     EmptyPasteClipboard.install(&fixture, "");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
     try fixture.expectReply("\x1b]52;c;\x1b\\");
 }
 
@@ -15727,7 +15727,7 @@ test "win32 empty-bracketed-paste: text still pastes between the fences and unsa
     fixture.setBracketedPaste(true);
 
     EmptyPasteClipboard.install(&fixture, "ab");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     const queue = fixture.surface.core_surface.io.mailbox.spsc.queue;
     var collected: [3][]const u8 = undefined;
     var storage: [3][16]u8 = undefined;
@@ -15755,7 +15755,7 @@ test "win32 empty-bracketed-paste: text still pastes between the fences and unsa
     fixture.setBracketedPaste(false);
     fixture.surface.core_surface.config.clipboard_paste_protection = true;
     EmptyPasteClipboard.install(&fixture, "a\nb");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqual(HostOverlayMode.confirm, fixture.host.overlay_mode);
     try fixture.expectSilent();
 }
@@ -15828,7 +15828,7 @@ test "win32 copied-files-paste: a clipboard of only copied files pastes their qu
 
     // Bracketed, as Windows Terminal sends a path; ours takes every file.
     fixture.setBracketedPaste(true);
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings("\x1b[200~" ++ payload ++ "\x1b[201~", try takePastedBytes(&fixture, &buf));
     try std.testing.expect(EmptyPasteClipboard.hdrop_read);
 
@@ -15851,7 +15851,7 @@ test "win32 copied-files-paste: a path that could run a command asks first" {
 
     // Nothing reaches the program until the user allows it.
     fixture.app.config.@"clipboard-paste-protection" = true;
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqual(HostOverlayMode.confirm, fixture.host.overlay_mode);
     try std.testing.expectEqualStrings(payload, fixture.surface.pending_clipboard_op.?.paste.data);
     try fixture.expectSilent();
@@ -15860,13 +15860,13 @@ test "win32 copied-files-paste: a path that could run a command asks first" {
     try fixture.expectSilent();
 
     // Allow pastes the same bytes, between the fences.
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     fixture.host.invokeConfirmAccept();
     try std.testing.expectEqualStrings("\x1b[200~" ++ payload ++ "\x1b[201~", try takePastedBytes(&fixture, &buf));
 
     // With the protection off, as for a drop, it pastes at once.
     fixture.app.config.@"clipboard-paste-protection" = false;
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqual(HostOverlayMode.none, fixture.host.overlay_mode);
     try std.testing.expectEqualStrings("\x1b[200~" ++ payload ++ "\x1b[201~", try takePastedBytes(&fixture, &buf));
 }
@@ -15885,36 +15885,36 @@ test "win32 copied-files-paste: the reader takes text over files, an empty text 
     // the files.
     EmptyPasteClipboard.installFiles(&fixture, &.{"C:\\f.txt"});
     EmptyPasteClipboard.text = "ab";
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings("\x1b[200~ab\x1b[201~", try takePastedBytes(&fixture, &buf));
     try std.testing.expect(!EmptyPasteClipboard.hdrop_read);
 
     // An empty text beside files is no text: the files paste.
     EmptyPasteClipboard.text = "";
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings("\x1b[200~C:\\f.txt\x1b[201~", try takePastedBytes(&fixture, &buf));
     try std.testing.expect(EmptyPasteClipboard.hdrop_read);
 
     // An empty text and no files: the empty paste of a clipboard with no text.
     EmptyPasteClipboard.install(&fixture, "");
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings(empty_bracketed_pair, try takePastedBytes(&fixture, &buf));
     try std.testing.expect(EmptyPasteClipboard.hdrop_read);
 
     // Neither text nor files: the same.
     EmptyPasteClipboard.install(&fixture, null);
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .paste = .standard }));
     try std.testing.expectEqualStrings(empty_bracketed_pair, try takePastedBytes(&fixture, &buf));
 
     // A program's OSC 52 read of a clipboard holding only files, or an empty
     // text beside them, never looks at the files and gets the empty reply,
     // with no fences.
     EmptyPasteClipboard.installFiles(&fixture, &.{"C:\\f.txt"});
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
     try std.testing.expect(!EmptyPasteClipboard.hdrop_read);
     try fixture.expectReply("\x1b]52;c;\x1b\\");
     EmptyPasteClipboard.text = "";
-    try std.testing.expect(try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
+    try std.testing.expectEqual(apprt.ClipboardReadResult.started, try fixture.surface.clipboardRequest(.standard, .{ .osc_52_read = .standard }));
     try std.testing.expect(!EmptyPasteClipboard.hdrop_read);
     try fixture.expectReply("\x1b]52;c;\x1b\\");
 
@@ -22948,7 +22948,7 @@ test "automation send text enforces receiver policy and protected paste path" {
             confirmed: bool,
         ) !void {
             try std.testing.expectEqual(@as(u64, 201), surface.core().id);
-            try std.testing.expectEqual(apprt.ClipboardRequest.paste, state);
+            try std.testing.expectEqual(apprt.ClipboardRequest{ .paste = .standard }, state);
             try std.testing.expectEqualStrings(expected, text);
             try std.testing.expect(!confirmed);
             calls += 1;

@@ -1762,12 +1762,29 @@ pub const Surface = struct {
         return clipboard_type == .standard;
     }
 
+    /// Core's clipboard read (`Surface.startClipboardRequest`). Started means
+    /// it was served, here before this returns; a request it does not serve
+    /// was not started.
     pub fn clipboardRequest(
         self: *Surface,
         clipboard_type: apprt.Clipboard,
         state: apprt.ClipboardRequest,
-    ) !bool {
-        if (clipboard_type != .standard) return false;
+    ) !apprt.ClipboardReadResult {
+        // Windows has no selection or primary clipboard.
+        if (clipboard_type != .standard) return .unsupported;
+        switch (state) {
+            .paste, .osc_52_read => {},
+            // Upstream 1.4's Kitty clipboard protocol (OSC 5522): its reads,
+            // writes and paste-event listing are not served by the Win32
+            // runtime yet. OSC 52 writes never come here (setClipboard).
+            .kitty_read, .kitty_write, .list, .osc_52_write => return .unsupported,
+        }
+        return if (try self.clipboardRequestStarted(state)) .started else .unavailable;
+    }
+
+    /// The Win32 clipboard read behind `clipboardRequest`, true when the
+    /// request was served.
+    fn clipboardRequestStarted(self: *Surface, state: apprt.ClipboardRequest) !bool {
         // A paste, from any key, menu or palette; a program's own read is not.
         if (state == .paste) self.noteProgramInput();
         // A program's read that would only be declined does not read the
@@ -1823,6 +1840,8 @@ pub const Surface = struct {
             .paste => return try self.core_surface.completeClipboardPasteWithoutText(),
             .osc_52_read => try self.app.core_app.alloc.dupeSentinel(u8, "", 0),
             .osc_52_write => unreachable,
+            // Never started (`clipboardRequest`).
+            .kitty_read, .kitty_write, .list => return false,
         };
         defer self.app.core_app.alloc.free(str);
 
@@ -1926,6 +1945,14 @@ pub const Surface = struct {
         }
 
         return env;
+    }
+
+    /// The app-wide render device's options, which core `Surface.init` asks
+    /// for: nothing on Windows, where each pane's renderer makes its own GPU
+    /// context (`renderer.Device`).
+    pub fn renderDeviceOptions(self: *const Surface) !rendererpkg.Device.Options {
+        _ = self;
+        return .{};
     }
 
     pub fn redrawInspector(self: *Surface) void {
