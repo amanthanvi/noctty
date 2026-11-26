@@ -582,7 +582,7 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
     var io: windows.IO_STATUS_BLOCK = undefined;
     return windows.ntdll.NtCreateFile(
         handle,
-        windows.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE | (if (options.read_data) @as(u32, windows.FILE_READ_DATA) else 0),
+        win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE | (if (options.read_data) @as(u32, win32_types.FILE_READ_DATA) else 0),
         &attrs,
         &io,
         null,
@@ -590,8 +590,8 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
         // Pin only reparse objects against replacement and reparse-data writes.
         // Ordinary files (including actively written logs) retain shared access.
         if (options.pin_reparse) win32_types.FILE_SHARE_READ else win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
-        windows.FILE_OPEN,
-        windows.FILE_SYNCHRONOUS_IO_NONALERT | (if (options.no_follow) @as(u32, windows.FILE_OPEN_REPARSE_POINT) else 0),
+        win32_types.FILE_OPEN,
+        win32_types.FILE_SYNCHRONOUS_IO_NONALERT | (if (options.no_follow) @as(u32, win32_types.FILE_OPEN_REPARSE_POINT) else 0),
         null,
         0,
     );
@@ -644,7 +644,7 @@ fn walk(alloc: Allocator, path: []const u8, read_data: bool, depth: usize, state
             }
             windows.CloseHandle(child);
             child = pinned;
-            if (info.ReparseTag == windows.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == windows.IO_REPARSE_TAG_MOUNT_POINT) {
+            if (info.ReparseTag == win32_types.IO_REPARSE_TAG_SYMLINK or info.ReparseTag == win32_types.IO_REPARSE_TAG_MOUNT_POINT) {
                 const target = readLinkTarget(alloc, child, info.ReparseTag, path[0..start]) orelse return null;
                 defer alloc.free(target);
                 const joined = std.fs.path.resolve(alloc, &.{ target, path[if (last) end else end + 1..] }) catch return null;
@@ -763,13 +763,13 @@ fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const
     const length: usize = std.mem.readInt(u16, buffer[4..6], .little);
     const offset: usize = std.mem.readInt(u16, buffer[8..10], .little);
     const name_len: usize = std.mem.readInt(u16, buffer[10..12], .little);
-    const base: usize = if (tag == windows.IO_REPARSE_TAG_SYMLINK) 20 else 16;
+    const base: usize = if (tag == win32_types.IO_REPARSE_TAG_SYMLINK) 20 else 16;
     if (length + 8 > buffer.len or base + offset + name_len > length + 8 or (offset | name_len) & 1 != 0) return null;
     const name_w: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, buffer[base + offset ..][0..name_len]));
     const target = std.unicode.utf16LeToUtf8Alloc(alloc, name_w) catch return null;
     defer alloc.free(target);
     if (std.mem.indexOfScalar(u8, target, 0) != null) return null;
-    const relative = tag == windows.IO_REPARSE_TAG_SYMLINK and std.mem.readInt(u32, buffer[16..20], .little) & windows.SYMLINK_FLAG_RELATIVE != 0;
+    const relative = tag == win32_types.IO_REPARSE_TAG_SYMLINK and std.mem.readInt(u32, buffer[16..20], .little) & windows.SYMLINK_FLAG_RELATIVE != 0;
     if (relative) {
         // Relative targets must not be rooted, drive-relative, streams or UNC.
         if (target.len == 0 or target[0] == '\\' or target[0] == '/' or std.mem.indexOfScalar(u8, target, ':') != null) return null;
@@ -779,7 +779,7 @@ fn reparseTarget(alloc: Allocator, buffer: []const u8, tag: u32, parent: []const
     if (os_path.isDriveAbsolutePath(stripped)) return alloc.dupe(u8, stripped) catch null;
     // Volume mount points (including volumes without a drive letter) use this
     // exact local-volume namespace. Other device/NT namespaces remain refused.
-    if (tag == windows.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
+    if (tag == win32_types.IO_REPARSE_TAG_MOUNT_POINT and std.mem.startsWith(u8, stripped, "Volume{"))
         return std.fmt.allocPrint(alloc, "\\\\?\\{s}", .{stripped}) catch null;
     return null;
 }
@@ -847,7 +847,7 @@ pub const test_links = struct {
         var dir_w = try windows.sliceToPrefixedFileW(null, dir);
         const handle = try windows.OpenFile(dir_w.span(), .{
             .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
-            .creation = windows.FILE_OPEN,
+            .creation = win32_types.FILE_OPEN,
             .filter = .dir_only,
             .follow_symlinks = false,
         });
@@ -861,7 +861,7 @@ pub const test_links = struct {
         const buffer = try alloc.alloc(u8, 8 + data_len);
         defer alloc.free(buffer);
         @memset(buffer, 0);
-        std.mem.writeInt(u32, buffer[0..4], windows.IO_REPARSE_TAG_MOUNT_POINT, .little);
+        std.mem.writeInt(u32, buffer[0..4], win32_types.IO_REPARSE_TAG_MOUNT_POINT, .little);
         std.mem.writeInt(u16, buffer[4..6], @intCast(data_len), .little);
         std.mem.writeInt(u16, buffer[10..12], @intCast(target_bytes), .little);
         std.mem.writeInt(u16, buffer[12..14], @intCast(target_bytes + 2), .little);
@@ -1114,7 +1114,7 @@ test "local path open allows only the cloud reparse tag family" {
         try std.testing.expectEqual(Opened.refused, try open(alloc, path, .{ .cloud = .refuse }));
     }
     // Any other tag on a file that is no link is refused, under either policy.
-    for ([_]u32{ windows.IO_REPARSE_TAG_SYMLINK, windows.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
+    for ([_]u32{ win32_types.IO_REPARSE_TAG_SYMLINK, win32_types.IO_REPARSE_TAG_MOUNT_POINT, 0x9000001b, 0x9001001a, 0xa000001a }) |tag| {
         errdefer std.debug.print("local path open of a reparse tag {x}\n", .{tag});
         test_cloud.reset();
         test_cloud.name = "cloud.ghostty";

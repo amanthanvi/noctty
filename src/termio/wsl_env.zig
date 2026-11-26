@@ -393,7 +393,7 @@ fn localPathState(path: []const u8) LocalPath {
     if (comptime builtin.os.tag != .windows) return .unsafe;
     if (!isLocalAbsolute(path)) return .unsafe;
     var handle: windows.HANDLE = undefined;
-    const status = windows_shell.ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle) orelse
+    const status = windows_shell.ntOpenDontReparse(path, win32_types.FILE_READ_ATTRIBUTES, 0, &handle) orelse
         return .unsafe;
     switch (status) {
         .SUCCESS => {},

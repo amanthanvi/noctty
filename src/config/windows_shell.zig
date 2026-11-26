@@ -2410,8 +2410,8 @@ fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
     var handle: windows.HANDLE = undefined;
     const status = ntOpenDontReparse(
         path,
-        windows.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE,
-        windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT,
+        win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE,
+        win32_types.FILE_OPEN_REPARSE_POINT | win32_types.FILE_SYNCHRONOUS_IO_NONALERT,
         &handle,
     ) orelse return null;
     return if (status == .SUCCESS) handle else null;
@@ -2459,7 +2459,7 @@ pub fn ntOpenDontReparse(
         null,
         win32_types.FILE_ATTRIBUTE_NORMAL,
         win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
-        windows.FILE_OPEN,
+        win32_types.FILE_OPEN,
         options,
         null,
         0,
@@ -5461,7 +5461,7 @@ test "ntOpenDontReparse refuses a path past PATH_MAX_WIDE before converting it" 
         @memset(path, 'a');
         @memcpy(path[0..3], "C:\\");
         var handle: windows.HANDLE = undefined;
-        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, windows.FILE_READ_ATTRIBUTES, 0, &handle));
+        try std.testing.expectEqual(@as(?windows.NTSTATUS, null), ntOpenDontReparse(path, win32_types.FILE_READ_ATTRIBUTES, 0, &handle));
     }
 }
 

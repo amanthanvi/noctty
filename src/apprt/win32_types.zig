@@ -107,8 +107,10 @@ pub const WNDCLASSEXW = extern struct {
 // untyped integers std had so every use site still coerces as before.
 pub const GENERIC_READ = 0x80000000;
 pub const GENERIC_WRITE = 0x40000000;
+pub const FILE_READ_DATA = 0x00000001;
 pub const FILE_WRITE_DATA = 0x00000002;
 pub const FILE_APPEND_DATA = 0x00000004;
+pub const FILE_READ_ATTRIBUTES = 0x00000080;
 pub const FILE_SHARE_READ = 0x00000001;
 pub const FILE_SHARE_WRITE = 0x00000002;
 pub const FILE_SHARE_DELETE = 0x00000004;
@@ -126,6 +128,12 @@ pub const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000;
 pub const FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
 pub const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
 pub const FILE_FLAG_OVERLAPPED = 0x40000000;
+// NT-level options and codes, still passed to std's ntdll calls on 0.15.2.
+pub const FILE_OPEN = 1;
+pub const FILE_OPEN_REPARSE_POINT = 0x00200000;
+pub const FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020;
+pub const IO_REPARSE_TAG_MOUNT_POINT: ULONG = 0xa0000003;
+pub const IO_REPARSE_TAG_SYMLINK: ULONG = 0xa000000c;
 pub const PIPE_ACCESS_INBOUND = 0x00000001;
 pub const PIPE_TYPE_BYTE = 0x00000000;
 pub const WAIT_OBJECT_0 = 0x00000000;
@@ -252,6 +260,7 @@ test "shared Win32 type layouts" {
 
     // minwinbase.h and fileapi.h declare both outside any pshpack block: natural packing.
     try testing.expectEqual(@as(usize, 8), @sizeOf(FILETIME));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(FILETIME, "dwLowDateTime"));
     try testing.expectEqual(@as(usize, 4), @offsetOf(FILETIME, "dwHighDateTime"));
     try testing.expectEqual(@alignOf(?*anyopaque), @alignOf(OVERLAPPED));
     try testing.expectEqual(@as(usize, @sizeOf(usize) * 4), @sizeOf(OVERLAPPED));
