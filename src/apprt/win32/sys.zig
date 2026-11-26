@@ -1597,8 +1597,17 @@ test "event and wait helpers keep std's result mapping" {
     try std.testing.expect(SetEvent(event) != 0);
     try waitForSingleObjectEx(event, 0, false);
 
-    const handles = [_]HANDLE{ event, event };
-    try std.testing.expectEqual(@as(u32, 0), try waitForMultipleObjectsEx(&handles, false, 0, false));
+    // Two distinct events (the call refuses a handle given twice), only the
+    // second signaled: the index names it, which a wrapper answering 0
+    // whatever was signaled would get wrong.
+    const first = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(first);
+    const second = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(second);
+    const handles = [_]HANDLE{ first, second };
+    try std.testing.expectError(error.WaitTimeOut, waitForMultipleObjectsEx(&handles, false, 0, false));
+    try std.testing.expect(SetEvent(second) != 0);
+    try std.testing.expectEqual(@as(u32, 1), try waitForMultipleObjectsEx(&handles, false, 0, false));
 }
 
 test "the re-homed process and module helpers keep std's error mapping" {
