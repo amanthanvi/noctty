@@ -106,21 +106,21 @@ pub const Key = key: {
 
 /// Returns the value type for a key.
 pub fn Value(comptime key: Key) type {
-    const field = comptime field: {
+    const field_type = comptime field_type: {
         @setEvalBranchQuota(100_000);
 
-        const fields = std.meta.fields(Config);
-        for (fields) |field| {
-            if (!@hasField(Key, field.name)) continue;
-            if (@field(Key, field.name) == key) {
-                break :field field;
+        const fields = @typeInfo(Config).@"struct".field_names;
+        for (fields) |field_name| {
+            if (!@hasField(Key, field_name)) continue;
+            if (@field(Key, field_name) == key) {
+                break :field_type @FieldType(Config, field_name);
             }
         }
 
         unreachable;
     };
 
-    return field.type;
+    return field_type;
 }
 
 /// Used on Unixes for some defaults.
@@ -7103,11 +7103,11 @@ pub fn changeIterator(old: *const Config, new: *const Config) ChangeIterator {
 pub fn changed(self: *const Config, new: *const Config, comptime key: Key) bool {
     // Get the field at comptime
     const field = comptime field: {
-        const fields = std.meta.fields(Config);
-        for (fields) |field| {
-            if (!@hasField(Key, field.name)) continue;
-            if (@field(Key, field.name) == key) {
-                break :field field;
+        const fields = @typeInfo(Config).@"struct".field_names;
+        for (fields) |field_name| {
+            if (!@hasField(Key, field_name)) continue;
+            if (@field(Key, field_name) == key) {
+                break :field field_name;
             }
         }
 
@@ -7126,14 +7126,14 @@ pub const ChangeIterator = struct {
     i: usize = 0,
 
     pub fn next(self: *ChangeIterator) ?Key {
-        const fields = comptime std.meta.fields(Config);
+        const fields = comptime @typeInfo(Config).@"struct".field_names;
         while (self.i < fields.len) {
             switch (self.i) {
                 inline 0...(fields.len - 1) => |i| {
                     const field = fields[i];
                     self.i += 1;
-                    if (!@hasField(Key, field.name)) continue;
-                    const key = @field(Key, field.name);
+                    if (!@hasField(Key, field)) continue;
+                    const key = @field(Key, field);
                     if (self.old.changed(self.new, key)) return key;
                 },
 

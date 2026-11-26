@@ -826,6 +826,6 @@ test "every kind of profile has a source" {
         .{ .vs_dev_cmd, "visual-studio" },
         .{ .vs_dev_shell, "visual-studio" },
     };
-    try testing.expectEqual(@typeInfo(Kind).@"enum".fields.len, expected.len);
+    try testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len, expected.len);
     for (expected) |entry| try testing.expectEqualStrings(entry[1], sourceName(entry[0]));
 }

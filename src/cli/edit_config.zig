@@ -128,7 +128,7 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
     }
 
     const command = command: {
-        var buffer: std.io.Writer.Allocating = .init(alloc);
+        var buffer: std.Io.Writer.Allocating = .init(alloc);
         defer buffer.deinit();
         const writer = &buffer.writer;
         try writer.writeAll(editor);

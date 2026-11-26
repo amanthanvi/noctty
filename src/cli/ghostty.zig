@@ -48,13 +48,13 @@ pub fn run(self: Action, alloc: Allocator) !u8 {
 }
 
 fn printActionHelp(self: Action) !u8 {
-    inline for (@typeInfo(Action).@"enum".fields) |field| {
+    inline for (@typeInfo(Action).@"enum".field_names) |field_name| {
         // All action help text is emitted through this shared path.
-        if (self == @field(Action, field.name)) {
+        if (self == @field(Action, field_name)) {
             var buffer: [1024]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(global.io(), &buffer);
             const stdout = &stdout_writer.interface;
-            const text = @field(help_strings.Action, field.name) ++ "\n";
+            const text = @field(help_strings.Action, field_name) ++ "\n";
             stdout.writeAll(text) catch return error.ActionHelpOutputUnavailable;
             stdout.flush() catch return error.ActionHelpOutputUnavailable;
             return 0;
