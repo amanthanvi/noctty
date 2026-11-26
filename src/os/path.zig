@@ -35,12 +35,11 @@ pub fn expand(
         path_buf[path_len] = 0;
         const full_path = path_buf[0..path_len :0];
 
-        // Stat it. A directory fails the open with `error.IsDir`, which ends
-        // the search, as Zig 0.15's open did on Windows.
+        // Stat it
         const f = std.Io.Dir.cwd().openFile(
             io,
             full_path,
-            .{ .allow_directory = false },
+            .{},
         ) catch |err| switch (err) {
             error.FileNotFound => continue,
             error.AccessDenied => {
