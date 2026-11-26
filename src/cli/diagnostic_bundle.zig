@@ -116,7 +116,7 @@ fn collectConfigKeyNames(alloc: Allocator) ![][]const u8 {
 
 fn scanConfigFile(alloc: Allocator, path: []const u8, keys: *ConfigKeys) !bool {
     const io = global.io();
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };

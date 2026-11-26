@@ -75,7 +75,7 @@ pub const FileProbe = *const fn (alloc: Allocator, path: []const u8) ?FileState;
 
 fn fileState(path: []const u8) FileState {
     const io = global.io();
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound, error.BadPathName => return .missing,
         // Something is there that we cannot open; it still exists.
         else => return .content,

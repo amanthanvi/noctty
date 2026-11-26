@@ -5080,7 +5080,7 @@ test "the embedded config template has LF line endings in every checkout" {
 
 fn defaultConfigIsEmpty(path: []const u8) bool {
     const io = global.io();
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch return false;
     defer file.close(io);
     const stat = file.stat(io) catch return false;
     return stat.kind == .file and stat.size == 0;
