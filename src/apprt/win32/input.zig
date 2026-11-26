@@ -783,12 +783,12 @@ fn keyFromVirtualKey(vk: UINT, lParam: LPARAM) input.Key {
         c.VK_ABNT_C1 => .intl_ro,
         c.VK_0...c.VK_9 => input.Key.fromASCII(@as(u8, @intCast('0' + (vk - c.VK_0)))) orelse .unidentified,
         c.VK_A...c.VK_Z => input.Key.fromASCII(@as(u8, @intCast('a' + (vk - c.VK_A)))) orelse .unidentified,
-        c.VK_NUMPAD0...c.VK_NUMPAD9 => @enumFromInt(
-            @intFromEnum(input.Key.numpad_0) + @as(c_int, @intCast(vk - c.VK_NUMPAD0)),
-        ),
-        c.VK_F1...c.VK_F24 => @enumFromInt(
-            @intFromEnum(input.Key.f1) + @as(c_int, @intCast(vk - c.VK_F1)),
-        ),
+        c.VK_NUMPAD0...c.VK_NUMPAD9 => @fromBackingInt(@intCast(
+            @backingInt(input.Key.numpad_0) + @as(c_int, @intCast(vk - c.VK_NUMPAD0)),
+        )),
+        c.VK_F1...c.VK_F24 => @fromBackingInt(@intCast(
+            @backingInt(input.Key.f1) + @as(c_int, @intCast(vk - c.VK_F1)),
+        )),
         else => .unidentified,
     };
 }
@@ -823,18 +823,18 @@ fn hotkeyModifiers(mods: input.Mods) UINT {
 }
 
 fn hotkeyPhysicalVirtualKey(key: input.Key) ?UINT {
-    const key_int = @intFromEnum(key);
-    if (key_int >= @intFromEnum(input.Key.key_a) and key_int <= @intFromEnum(input.Key.key_z)) {
-        return c.VK_A + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.key_a)));
+    const key_int = @backingInt(key);
+    if (key_int >= @backingInt(input.Key.key_a) and key_int <= @backingInt(input.Key.key_z)) {
+        return c.VK_A + @as(UINT, @intCast(key_int - @backingInt(input.Key.key_a)));
     }
-    if (key_int >= @intFromEnum(input.Key.digit_0) and key_int <= @intFromEnum(input.Key.digit_9)) {
-        return c.VK_0 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.digit_0)));
+    if (key_int >= @backingInt(input.Key.digit_0) and key_int <= @backingInt(input.Key.digit_9)) {
+        return c.VK_0 + @as(UINT, @intCast(key_int - @backingInt(input.Key.digit_0)));
     }
-    if (key_int >= @intFromEnum(input.Key.numpad_0) and key_int <= @intFromEnum(input.Key.numpad_9)) {
-        return c.VK_NUMPAD0 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.numpad_0)));
+    if (key_int >= @backingInt(input.Key.numpad_0) and key_int <= @backingInt(input.Key.numpad_9)) {
+        return c.VK_NUMPAD0 + @as(UINT, @intCast(key_int - @backingInt(input.Key.numpad_0)));
     }
-    if (key_int >= @intFromEnum(input.Key.f1) and key_int <= @intFromEnum(input.Key.f24)) {
-        return c.VK_F1 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.f1)));
+    if (key_int >= @backingInt(input.Key.f1) and key_int <= @backingInt(input.Key.f24)) {
+        return c.VK_F1 + @as(UINT, @intCast(key_int - @backingInt(input.Key.f1)));
     }
 
     return switch (key) {

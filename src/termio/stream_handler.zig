@@ -164,7 +164,7 @@ pub const StreamHandler = struct {
     /// §19.1). Release code is the inline fn's, as Exec.zig's reader keeps
     /// its always_inline processOutput call outside Debug.
     const surface_message_writer_cc: std.builtin.CallingConvention =
-        if (builtin.mode == .Debug) .auto else .@"inline";
+        if (builtin.mode == .debug) .auto else .@"inline";
 
     fn surfaceMessageWriter(
         self: *StreamHandler,

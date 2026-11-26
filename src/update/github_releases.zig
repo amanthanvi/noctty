@@ -1556,7 +1556,7 @@ pub fn takePortableUpdateFailure(alloc: Allocator) !?[]u8 {
 }
 
 fn setPortableFailureEnvironment(alloc: Allocator, err: anyerror) !void {
-    const value = try alloc.dupeZ(u8, @errorName(err));
+    const value = try alloc.dupeSentinel(u8, @errorName(err), 0);
     defer alloc.free(value);
     if (internal_os.setenv(portable_failure_env, value) < 0) return error.EnvironmentUpdateFailed;
 }
@@ -2331,7 +2331,7 @@ fn requireOkHttpStatus(context: []const u8, url: []const u8, status: std.http.St
 
     log.warn("{s} HTTP request failed status={} phrase={s} url={s}", .{
         context,
-        @intFromEnum(status),
+        @backingInt(status),
         status.phrase() orelse "unknown",
         url,
     });
@@ -2369,7 +2369,7 @@ const ChecksumLine = struct {
 fn checksumLine(line: []const u8) ?ChecksumLine {
     const separator = std.mem.indexOfAny(u8, line, " \t") orelse return null;
     const hex = line[0..separator];
-    const raw_filename = std.mem.trimLeft(u8, line[separator..], " \t");
+    const raw_filename = std.mem.trimStart(u8, line[separator..], " \t");
     if (raw_filename.len == 0) return null;
     const filename = if (raw_filename[0] == '*') raw_filename[1..] else raw_filename;
     if (filename.len == 0) return null;
@@ -3617,7 +3617,7 @@ test "update release feed resolution" {
     };
     defer {
         if (saved_env) |value| {
-            const sentinel = alloc.dupeZ(u8, value) catch unreachable;
+            const sentinel = alloc.dupeSentinel(u8, value, 0) catch unreachable;
             defer alloc.free(sentinel);
             _ = internal_os.setenv(env_name, sentinel);
             alloc.free(value);
@@ -3769,7 +3769,7 @@ test "update state replaces a destination held open with delete sharing" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(path);
@@ -3801,7 +3801,7 @@ test "state persists staged windows install metadata with escaped path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
@@ -3858,13 +3858,13 @@ test "changing the feed discards the previous feed's staged install and notice s
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
     const installer_path = try std.fs.path.join(alloc, &.{ tmp_path, "staged-installer.exe" });
     defer alloc.free(installer_path);
-    try tmp.dir.writeFile(.{ .sub_path = "staged-installer.exe", .data = "not a real installer" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "staged-installer.exe", .data = "not a real installer" });
 
     var state: State = .{
         .last_checked_at = 123,
@@ -3909,7 +3909,7 @@ test "changing the feed discards the previous feed's staged install and notice s
     try std.testing.expect(state.release_url == null);
     try std.testing.expectError(
         error.FileNotFound,
-        tmp.dir.access("staged-installer.exe", .{}),
+        tmp.dir.access(std.testing.io, "staged-installer.exe", .{}),
     );
 
     // It was persisted, not just cleared in memory.
@@ -3932,7 +3932,7 @@ test "staged install from another feed is refused at apply time" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
@@ -3956,11 +3956,11 @@ test "state loader ignores retired portable watcher fields" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "update-state.json",
         .data =
         \\{"last_checked_at":123,"portable_watcher_pid":4242,"portable_watcher_started_at":123456789}
@@ -3971,7 +3971,7 @@ test "state loader ignores retired portable watcher fields" {
     defer state.deinit(alloc);
     try std.testing.expectEqual(@as(i64, 123), state.last_checked_at);
     try saveState(state_path, &state);
-    const saved = try std.fs.cwd().readFileAlloc(alloc, state_path, 16 * 1024);
+    const saved = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, state_path, alloc, .limited(16 * 1024));
     defer alloc.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, "portable_watcher") == null);
 }
@@ -3981,7 +3981,7 @@ test "record staged apply request requires staged installer metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
@@ -4003,7 +4003,7 @@ test "record staged apply request persists timestamp" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
@@ -4028,7 +4028,7 @@ test "a start after an install that did not replace the build reports it once, w
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4067,8 +4067,8 @@ test "a start after an install that did not replace the build reports it once, w
     try std.testing.expectEqual(@as(?[]u8, null), try takeFailedInstallerApply(alloc, state_path, old_build));
 
     // With a log, the message names it.
-    try tmp.dir.makePath("updates/1.3.101/logs");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.101/logs/apply.log", .data = "setup log" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.101/logs");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.101/logs/apply.log", .data = "setup log" });
     try recordStagedApplyRequested(alloc, state_path, 1_000_000);
     const with_log = (try takeFailedInstallerApply(alloc, state_path, old_build)).?;
     defer alloc.free(with_log);
@@ -4090,12 +4090,12 @@ test "a start while Setup is still running leaves the request for a later start"
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
-    try tmp.dir.makePath("updates/1.3.101");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.101/setup.exe", .data = "setup" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.101");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.101/setup.exe", .data = "setup" });
     const installer_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.101", "setup.exe" });
     defer alloc.free(installer_path);
     var state: State = .{
@@ -4134,7 +4134,7 @@ test "a staged installer reads as running only while a process runs from it" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4143,10 +4143,10 @@ test "a staged installer reads as running only while a process runs from it" {
     try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
 
     const name = "noctty-1.3.200-windows-x64-setup.exe";
-    try tmp.dir.makePath("updates/1.3.200/backup");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/" ++ name, .data = "setup" });
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/noctty-1.3.200-windows-x64-portable.zip", .data = "zip" });
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/backup/noctty.exe", .data = "old" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200/backup");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.200/" ++ name, .data = "setup" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.200/noctty-1.3.200-windows-x64-portable.zip", .data = "zip" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.200/backup/noctty.exe", .data = "old" });
     const installer_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", name });
     defer alloc.free(installer_path);
     try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
@@ -4190,11 +4190,11 @@ test "a running staged Setup stays found after another feed's check drops the st
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
-    try tmp.dir.makePath("updates/1.3.200");
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200");
     const setup_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", "noctty-1.3.200-windows-x64-setup.exe" });
     defer alloc.free(setup_path);
     // The stand-in Setup: a copy of ping.exe, started with no console window.
@@ -4267,7 +4267,7 @@ test "a start leaves a portable apply request to the portable recovery" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4294,7 +4294,7 @@ test "portable update rejects persisted paths outside its stage" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4338,16 +4338,16 @@ test "portable update ZIP preflight binds EOCD to archive end" {
     std.mem.writeInt(u32, archive[central_len + 16 ..][0..4], 0, .little);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "valid.zip", .data = &archive });
-    const valid_path = try tmp.dir.realpathAlloc(alloc, "valid.zip");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "valid.zip", .data = &archive });
+    const valid_path = try tmp.dir.realPathFileAlloc(std.testing.io, "valid.zip", alloc);
     defer alloc.free(valid_path);
     try validatePortableZipEntries(alloc, valid_path);
 
     var with_trailing_byte: [archive.len + 1]u8 = undefined;
     @memcpy(with_trailing_byte[0..archive.len], &archive);
     with_trailing_byte[archive.len] = 0;
-    try tmp.dir.writeFile(.{ .sub_path = "trailing.zip", .data = &with_trailing_byte });
-    const trailing_path = try tmp.dir.realpathAlloc(alloc, "trailing.zip");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trailing.zip", .data = &with_trailing_byte });
+    const trailing_path = try tmp.dir.realPathFileAlloc(std.testing.io, "trailing.zip", alloc);
     defer alloc.free(trailing_path);
     try std.testing.expectError(
         error.InvalidPortableArchive,
@@ -4567,7 +4567,7 @@ test "portable update ZIP extraction refuses a local header cut off by the end o
         try zip.writer.writeStruct(testZipEndRecord(1, 0, directory_len, @sizeOf(std.zip.LocalFileHeader) + name_left.len), .little);
         try zip.writer.writeStruct(local, .little);
         try zip.writer.writeAll(name_left);
-        try tmp.dir.writeFile(.{ .sub_path = "cut.zip", .data = zip.written() });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cut.zip", .data = zip.written() });
         try std.testing.expectError(error.EndOfStream, extractTestPortableZip(alloc, tmp.dir, "cut.zip"));
     }
 }
@@ -4612,7 +4612,7 @@ test "portable update serializes helper launch handoff" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const lock_path = try std.fs.path.join(alloc, &.{ root, "portable-update-launch.lock" });
     defer alloc.free(lock_path);
@@ -4626,7 +4626,7 @@ test "portable pre-swap failure clears pending intent" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    const install_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(install_root);
     const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4653,7 +4653,7 @@ test "portable recovery abandons stranded swapped transaction" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    const install_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(install_root);
     const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4678,7 +4678,7 @@ test "portable recovery abandons stranded swapped transaction" {
     };
     defer state.deinit(alloc);
     for ([_]portable_apply.Phase{ .swapped, .rollback }) |phase| {
-        if (phase == .rollback) try tmp.dir.makePath("updates/1.3.200");
+        if (phase == .rollback) try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200");
         state.portable_apply_phase = phase;
         try saveState(state_path, &state);
 
@@ -4697,8 +4697,8 @@ test "portable recovery abandons stranded swapped transaction" {
         try std.testing.expectEqual(@as(i64, 0), loaded.apply_requested_at);
     }
 
-    try tmp.dir.makePath("updates/1.3.200/backup");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200/backup");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "updates/1.3.200/backup/.complete",
         .data = "locked",
     });
@@ -4740,8 +4740,8 @@ test "portable recovery preserves complete rollback" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.com", .data = "old-build" });
-    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.com", .data = "old-build" });
+    const install_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(install_root);
     const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4773,7 +4773,7 @@ test "portable recovery preserves complete rollback" {
     defer state.deinit(alloc);
 
     for ([_]portable_apply.Phase{ .swapped, .rollback }) |phase| {
-        try tmp.dir.writeFile(.{ .sub_path = "noctty.com", .data = "broken-new-build" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.com", .data = "broken-new-build" });
         state.portable_apply_phase = phase;
         try saveState(state_path, &state);
 
@@ -4796,7 +4796,7 @@ test "portable recovery preserves complete rollback" {
         try std.testing.expectEqualStrings(state.portable_confirmation_token.?, loaded.portable_confirmation_token.?);
 
         try portable_apply.rollback(alloc, install_root, backup_path, displaced_path);
-        const restored = try tmp.dir.readFileAlloc(alloc, "noctty.com", 32);
+        const restored = try tmp.dir.readFileAlloc(std.testing.io, "noctty.com", alloc, .limited(32));
         defer alloc.free(restored);
         try std.testing.expectEqualStrings("old-build", restored);
     }
@@ -4807,11 +4807,11 @@ test "confirmed portable cleanup failure cannot rearm startup gating" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("updates/1.3.200/backup");
-    try tmp.dir.makePath("updates/1.3.200/displaced");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/backup/held.txt", .data = "held" });
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/displaced/held.txt", .data = "held" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200/backup");
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200/displaced");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.200/backup/held.txt", .data = "held" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.200/displaced/held.txt", .data = "held" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -4877,12 +4877,12 @@ test "authenticated portable manifest rejects mismatched non-PE resource" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("payload/share/shell-integration/powershell");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "payload/share/shell-integration/powershell");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "payload/share/shell-integration/powershell/integration.ps1",
         .data = "malicious replacement",
     });
-    const payload_root = try tmp.dir.realpathAlloc(alloc, "payload");
+    const payload_root = try tmp.dir.realPathFileAlloc(std.testing.io, "payload", alloc);
     defer alloc.free(payload_root);
     try std.testing.expectError(
         error.PortablePayloadManifestMismatch,
@@ -4898,7 +4898,7 @@ test "portable concurrent launch content identity verifies the installed managed
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("install/share/shell-integration/powershell");
+    try tmp.dir.createDirPath(std.testing.io, "install/share/shell-integration/powershell");
 
     var manifest: std.ArrayList(u8) = .empty;
     defer manifest.deinit(alloc);
@@ -4906,7 +4906,7 @@ test "portable concurrent launch content identity verifies the installed managed
         if (std.mem.eql(u8, managed_entry, "share")) continue;
         const sub_path = try std.fs.path.join(alloc, &.{ "install", managed_entry });
         defer alloc.free(sub_path);
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = managed_entry });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = managed_entry });
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(managed_entry, &digest, .{});
         try manifest.writer(alloc).print("{s} *{s}\n", .{
@@ -4916,7 +4916,7 @@ test "portable concurrent launch content identity verifies the installed managed
     }
     const integration_path = "share/shell-integration/powershell/integration.ps1";
     const integration_contents = "new integration content";
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "install/share/shell-integration/powershell/integration.ps1",
         .data = integration_contents,
     });
@@ -4928,22 +4928,22 @@ test "portable concurrent launch content identity verifies the installed managed
     });
 
     // User-owned top-level data is outside the managed payload identity.
-    try tmp.dir.writeFile(.{ .sub_path = "install/config.ghostty", .data = "user config" });
-    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
-    const install_root = try tmp.dir.realpathAlloc(alloc, "install");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/config.ghostty", .data = "user config" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/user-data.txt", .data = "keep" });
+    const install_root = try tmp.dir.realPathFileAlloc(std.testing.io, "install", alloc);
     defer alloc.free(install_root);
     try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
 
     // A file present only in the new share tree makes the installed set differ.
-    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "extra" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/share/new-only.ps1", .data = "extra" });
     try std.testing.expectError(
         error.PortablePayloadManifestEntryMissing,
         verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
     );
-    try tmp.dir.deleteFile("install/share/new-only.ps1");
+    try tmp.dir.deleteFile(std.testing.io, "install/share/new-only.ps1");
 
     // Equal paths with different bytes are not content identity.
-    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "tampered" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/noctty.com", .data = "tampered" });
     try std.testing.expectError(
         error.PortablePayloadManifestMismatch,
         verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
@@ -4954,8 +4954,8 @@ test "portable payload and installed identity without a retired file" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("payload/share");
-    try tmp.dir.makePath("install/share");
+    try tmp.dir.createDirPath(std.testing.io, "payload/share");
+    try tmp.dir.createDirPath(std.testing.io, "install/share");
 
     // A payload of a release that no longer ships the retired files.
     var manifest: std.ArrayList(u8) = .empty;
@@ -4966,15 +4966,15 @@ test "portable payload and installed identity without a retired file" {
         for ([_][]const u8{ "payload", "install" }) |root| {
             const sub_path = try std.fs.path.join(alloc, &.{ root, name });
             defer alloc.free(sub_path);
-            try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = name });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = name });
         }
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(name, &digest, .{});
         try manifest.writer(alloc).print("{s} *{s}\n", .{ std.fmt.bytesToHex(digest, .lower), name });
     }
-    const payload_root = try tmp.dir.realpathAlloc(alloc, "payload");
+    const payload_root = try tmp.dir.realPathFileAlloc(std.testing.io, "payload", alloc);
     defer alloc.free(payload_root);
-    const install_root = try tmp.dir.realpathAlloc(alloc, "install");
+    const install_root = try tmp.dir.realPathFileAlloc(std.testing.io, "install", alloc);
     defer alloc.free(install_root);
 
     // What staging checks after the manifest's signature.
@@ -4983,7 +4983,7 @@ test "portable payload and installed identity without a retired file" {
     // What the new build checks to confirm the swap, with or without a
     // leftover copy that the target does not ship.
     try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
-    try tmp.dir.writeFile(.{ .sub_path = "install/ghostty-vt.dll", .data = "leftover" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "install/ghostty-vt.dll", .data = "leftover" });
     try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
 
     // A target that ships it still has to match it.
@@ -4994,13 +4994,13 @@ test "portable payload and installed identity without a retired file" {
         error.PortablePayloadManifestMismatch,
         verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
     );
-    try tmp.dir.deleteFile("install/ghostty-vt.dll");
+    try tmp.dir.deleteFile(std.testing.io, "install/ghostty-vt.dll");
     try std.testing.expectError(
         error.FileNotFound,
         verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
     );
     // And a payload that leaves out anything else is incomplete.
-    try tmp.dir.deleteFile("payload/noctty.com");
+    try tmp.dir.deleteFile(std.testing.io, "payload/noctty.com");
     try std.testing.expectError(
         error.IncompletePortablePayload,
         portable_apply.requirePayloadEntries(alloc, payload_root),
@@ -5044,20 +5044,20 @@ test "portable update validates PE machine from file bytes" {
         else => unreachable,
     };
     const mismatched = PeFixture.bytes(mismatched_machine);
-    try tmp.dir.writeFile(.{ .sub_path = "matching.exe", .data = &matching });
-    try tmp.dir.writeFile(.{ .sub_path = "mismatched.exe", .data = &mismatched });
-    try tmp.dir.writeFile(.{ .sub_path = "truncated.exe", .data = "MZ" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "matching.exe", .data = &matching });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mismatched.exe", .data = &mismatched });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "truncated.exe", .data = "MZ" });
     var out_of_bounds = matching;
     std.mem.writeInt(u32, out_of_bounds[pe_header_pointer_offset..][0..4], std.math.maxInt(u32), .little);
-    try tmp.dir.writeFile(.{ .sub_path = "out-of-bounds.exe", .data = &out_of_bounds });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out-of-bounds.exe", .data = &out_of_bounds });
 
-    const matching_path = try tmp.dir.realpathAlloc(alloc, "matching.exe");
+    const matching_path = try tmp.dir.realPathFileAlloc(std.testing.io, "matching.exe", alloc);
     defer alloc.free(matching_path);
-    const mismatched_path = try tmp.dir.realpathAlloc(alloc, "mismatched.exe");
+    const mismatched_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mismatched.exe", alloc);
     defer alloc.free(mismatched_path);
-    const truncated_path = try tmp.dir.realpathAlloc(alloc, "truncated.exe");
+    const truncated_path = try tmp.dir.realPathFileAlloc(std.testing.io, "truncated.exe", alloc);
     defer alloc.free(truncated_path);
-    const out_of_bounds_path = try tmp.dir.realpathAlloc(alloc, "out-of-bounds.exe");
+    const out_of_bounds_path = try tmp.dir.realPathFileAlloc(std.testing.io, "out-of-bounds.exe", alloc);
     defer alloc.free(out_of_bounds_path);
 
     try verifyPortablePeMachine(matching_path);
@@ -5110,37 +5110,37 @@ test "update staging prunes only obsolete semantic version directories" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
 
-    try tmp.dir.makePath("updates/1.3.198");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/old.txt", .data = "old-198" });
-    try tmp.dir.makePath("updates/1.3.199");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.199/old.txt", .data = "old-199" });
-    try tmp.dir.makePath("updates/1.3.200-BETA");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200-BETA/current.txt", .data = "current" });
-    try tmp.dir.makePath("updates/manual");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/manual/keep.txt", .data = "manual" });
-    try tmp.dir.makePath("updates/1.3");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3/keep.txt", .data = "not-semver" });
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.197", .data = "not-a-directory" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.198");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.198/old.txt", .data = "old-198" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.199");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.199/old.txt", .data = "old-199" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.200-BETA");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.200-BETA/current.txt", .data = "current" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/manual");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/manual/keep.txt", .data = "manual" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3/keep.txt", .data = "not-semver" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.197", .data = "not-a-directory" });
 
     try pruneObsoleteStageDirectories(alloc, state_path, "1.3.200-beta");
 
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.198", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.199", .{}));
-    const current = try tmp.dir.readFileAlloc(alloc, "updates/1.3.200-BETA/current.txt", 32);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "updates/1.3.198", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "updates/1.3.199", .{}));
+    const current = try tmp.dir.readFileAlloc(std.testing.io, "updates/1.3.200-BETA/current.txt", alloc, .limited(32));
     defer alloc.free(current);
     try std.testing.expectEqualStrings("current", current);
-    const manual = try tmp.dir.readFileAlloc(alloc, "updates/manual/keep.txt", 32);
+    const manual = try tmp.dir.readFileAlloc(std.testing.io, "updates/manual/keep.txt", alloc, .limited(32));
     defer alloc.free(manual);
     try std.testing.expectEqualStrings("manual", manual);
-    const non_semver = try tmp.dir.readFileAlloc(alloc, "updates/1.3/keep.txt", 32);
+    const non_semver = try tmp.dir.readFileAlloc(std.testing.io, "updates/1.3/keep.txt", alloc, .limited(32));
     defer alloc.free(non_semver);
     try std.testing.expectEqualStrings("not-semver", non_semver);
-    const regular_file = try tmp.dir.readFileAlloc(alloc, "updates/1.3.197", 32);
+    const regular_file = try tmp.dir.readFileAlloc(std.testing.io, "updates/1.3.197", alloc, .limited(32));
     defer alloc.free(regular_file);
     try std.testing.expectEqualStrings("not-a-directory", regular_file);
 }
@@ -5150,12 +5150,12 @@ test "update staging pruning rejects an updates directory reparse point" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("state");
-    try tmp.dir.makePath("outside/1.3.198");
-    try tmp.dir.writeFile(.{ .sub_path = "outside/1.3.198/keep.txt", .data = "outside" });
-    const state_root = try tmp.dir.realpathAlloc(alloc, "state");
+    try tmp.dir.createDirPath(std.testing.io, "state");
+    try tmp.dir.createDirPath(std.testing.io, "outside/1.3.198");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outside/1.3.198/keep.txt", .data = "outside" });
+    const state_root = try tmp.dir.realPathFileAlloc(std.testing.io, "state", alloc);
     defer alloc.free(state_root);
-    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    const outside_root = try tmp.dir.realPathFileAlloc(std.testing.io, "outside", alloc);
     defer alloc.free(outside_root);
     const updates_path = try std.fs.path.join(alloc, &.{ state_root, "updates" });
     defer alloc.free(updates_path);
@@ -5185,12 +5185,12 @@ test "update staging pruning rejects an updates directory reparse point" {
         error.InvalidUpdateStageRoot,
         stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/staging-work.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "outside/staging-work.lock", .{}));
     try std.testing.expectError(
         error.InvalidUpdateStageRoot,
         pruneObsoleteStageDirectories(alloc, state_path, null),
     );
-    const outside = try tmp.dir.readFileAlloc(alloc, "outside/1.3.198/keep.txt", 32);
+    const outside = try tmp.dir.readFileAlloc(std.testing.io, "outside/1.3.198/keep.txt", alloc, .limited(32));
     defer alloc.free(outside);
     try std.testing.expectEqualStrings("outside", outside);
 }
@@ -5200,10 +5200,10 @@ test "update staging rejects a reparse-point state directory before creating upd
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("outside");
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
-    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    const outside_root = try tmp.dir.realPathFileAlloc(std.testing.io, "outside", alloc);
     defer alloc.free(outside_root);
     const state_root = try std.fs.path.join(alloc, &.{ root, "state" });
     defer alloc.free(state_root);
@@ -5233,7 +5233,7 @@ test "update staging rejects a reparse-point state directory before creating upd
         error.InvalidUpdateStageRoot,
         stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/updates", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "outside/updates", .{}));
 }
 
 test "stage children are created only where they were named" {
@@ -5241,11 +5241,11 @@ test "stage children are created only where they were named" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("stage");
-    try tmp.dir.makePath("outside");
-    const stage_root = try tmp.dir.realpathAlloc(alloc, "stage");
+    try tmp.dir.createDirPath(std.testing.io, "stage");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    const stage_root = try tmp.dir.realPathFileAlloc(std.testing.io, "stage", alloc);
     defer alloc.free(stage_root);
-    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    const outside_root = try tmp.dir.realPathFileAlloc(std.testing.io, "outside", alloc);
     defer alloc.free(outside_root);
 
     var stage = try std.fs.openDirAbsolute(stage_root, .{});
@@ -5288,10 +5288,10 @@ test "download refuses a stage directory that is not the directory it named" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("outside");
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
-    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    const outside_root = try tmp.dir.realPathFileAlloc(std.testing.io, "outside", alloc);
     defer alloc.free(outside_root);
     const stage_link = try std.fs.path.join(alloc, &.{ root, "stage" });
     defer alloc.free(stage_link);
@@ -5307,8 +5307,8 @@ test "download refuses a stage directory that is not the directory it named" {
         error.InvalidUpdateStageRoot,
         downloadUrlToFile(alloc, "https://example.invalid/setup.exe", dest),
     );
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe", .{}));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe.part", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "outside/setup.exe", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "outside/setup.exe.part", .{}));
 }
 
 test "installer staging rejects a reparse-point target before download" {
@@ -5316,12 +5316,12 @@ test "installer staging rejects a reparse-point target before download" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("state/updates");
-    try tmp.dir.makePath("outside");
-    try tmp.dir.writeFile(.{ .sub_path = "outside/keep.txt", .data = "outside-target" });
-    const state_root = try tmp.dir.realpathAlloc(alloc, "state");
+    try tmp.dir.createDirPath(std.testing.io, "state/updates");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outside/keep.txt", .data = "outside-target" });
+    const state_root = try tmp.dir.realPathFileAlloc(std.testing.io, "state", alloc);
     defer alloc.free(state_root);
-    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    const outside_root = try tmp.dir.realPathFileAlloc(std.testing.io, "outside", alloc);
     defer alloc.free(outside_root);
     const target_stage = try std.fs.path.join(alloc, &.{ state_root, "updates", "1.3.200" });
     defer alloc.free(target_stage);
@@ -5359,27 +5359,27 @@ test "installer staging rejects a reparse-point target before download" {
         error.InvalidUpdateStageRoot,
         stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
-    const outside = try tmp.dir.readFileAlloc(alloc, "outside/keep.txt", 32);
+    const outside = try tmp.dir.readFileAlloc(std.testing.io, "outside/keep.txt", alloc, .limited(32));
     defer alloc.free(outside);
     try std.testing.expectEqualStrings("outside-target", outside);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "outside/setup.exe", .{}));
     const outside_checksums = try std.fs.path.join(alloc, &.{ "outside", windowsChecksumsAssetName() });
     defer alloc.free(outside_checksums);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access(outside_checksums, .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, outside_checksums, .{}));
 }
 
 test "failed update staging removes attempts and preserves the prior staged version" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
-    try tmp.dir.makePath("updates/1.3.100");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.100/keep.txt", .data = "prior-stage" });
-    try tmp.dir.makePath("updates/1.3.198");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/orphan.txt", .data = "old-failure" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.100");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.100/keep.txt", .data = "prior-stage" });
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.198");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.198/orphan.txt", .data = "old-failure" });
     var state: State = .{
         .staged_version = try alloc.dupe(u8, "1.3.100"),
         .staged_kind = .installer,
@@ -5411,10 +5411,10 @@ test "failed update staging removes attempts and preserves the prior staged vers
         );
         const failed_path = try std.fs.path.join(alloc, &.{ "updates", version });
         defer alloc.free(failed_path);
-        try std.testing.expectError(error.FileNotFound, tmp.dir.access(failed_path, .{}));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, failed_path, .{}));
     }
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.198", .{}));
-    const prior = try tmp.dir.readFileAlloc(alloc, "updates/1.3.100/keep.txt", 32);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "updates/1.3.198", .{}));
+    const prior = try tmp.dir.readFileAlloc(std.testing.io, "updates/1.3.100/keep.txt", alloc, .limited(32));
     defer alloc.free(prior);
     try std.testing.expectEqualStrings("prior-stage", prior);
 }
@@ -5489,7 +5489,7 @@ test "a cached release stages as the verified install already on disk, without d
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5516,7 +5516,7 @@ test "a staged install that does not match or no longer verifies is staged again
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5550,7 +5550,7 @@ test "a cached release with nothing to reuse is not staged and costs no download
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5573,7 +5573,7 @@ test "reusing a staged install still refuses an active portable apply" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5604,9 +5604,9 @@ test "update staging refuses a new target when obsolete pruning is blocked" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("updates/1.3.198");
-    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/locked.txt", .data = "locked-old-stage" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "updates/1.3.198");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "updates/1.3.198/locked.txt", .data = "locked-old-stage" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5653,7 +5653,7 @@ test "update staging refuses a new target when obsolete pruning is blocked" {
         stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Guarded.download),
     );
     try std.testing.expect(!Guarded.called);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.200", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "updates/1.3.200", .{}));
 }
 
 test "state JSON writer escapes ASCII control characters" {
@@ -5661,7 +5661,7 @@ test "state JSON writer escapes ASCII control characters" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
@@ -5673,7 +5673,7 @@ test "state JSON writer escapes ASCII control characters" {
     defer state.deinit(alloc);
 
     try saveState(state_path, &state);
-    const contents = try std.fs.cwd().readFileAlloc(alloc, state_path, 16 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, state_path, alloc, .limited(16 * 1024));
     defer alloc.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\\u0000") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\\b") != null);
@@ -5828,7 +5828,7 @@ test "update staging leaves state lock available during stalled download" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5934,7 +5934,7 @@ test "portable staging fails closed before download without signed manifest asse
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -5955,14 +5955,14 @@ test "portable staging fails closed before download without signed manifest asse
         error.PortablePayloadManifestUnavailable,
         stageWindowsInstall(alloc, state_path, latest_stable_api_url, &release, .portable),
     );
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "updates", .{}));
 }
 
 test "portable staging refuses every active apply phase" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
     defer alloc.free(state_path);
@@ -6338,11 +6338,11 @@ test "locked staged installer rejects replacement until launch handoff" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("installer.exe", .{});
+    var file = try tmp.dir.createFile(std.testing.io, "installer.exe", .{});
     try file.writeAll("test installer bytes");
-    file.close();
+    file.close(std.testing.io);
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "installer.exe");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "installer.exe", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const stage_dir = std.fs.path.dirname(path) orelse return error.InvalidStagedInstallerPath;
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
@@ -6540,8 +6540,8 @@ test "portable ConPTY pin rejects bytes that are not the pinned redistributable"
     defer tmp.cleanup();
 
     const contents = "not the Microsoft ConPTY redistributable";
-    try tmp.dir.writeFile(.{ .sub_path = "conpty.dll", .data = contents });
-    const path = try tmp.dir.realpathAlloc(alloc, "conpty.dll");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "conpty.dll", .data = contents });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "conpty.dll", alloc);
     defer alloc.free(path);
 
     const pinned = conpty_redist.find("conpty.dll").?;

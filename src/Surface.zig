@@ -783,7 +783,7 @@ const DerivedConfig = struct {
             .window_width = config.@"window-width",
             // Copied: `config` is not owned past this call. It is a
             // conditional-state clone, or a reload config the caller frees.
-            .title = if (config.title) |title| try alloc.dupeZ(u8, title) else null,
+            .title = if (config.title) |title| try alloc.dupeSentinel(u8, title, 0) else null,
             .title_report = config.@"title-report",
             .vt_window_resize_allowed = config.@"vt-window-resize-allowed",
             .links = links,
@@ -876,7 +876,7 @@ const DerivedConfig = struct {
         var source = try configpkg.Config.default(testing.allocator);
         var source_alive = true;
         defer if (source_alive) source.deinit();
-        const title = try source._arena.?.allocator().dupeZ(u8, "pinned title");
+        const title = try source._arena.?.allocator().dupeSentinel(u8, "pinned title", 0);
         source.title = title;
 
         var derived = try DerivedConfig.init(testing.allocator, &source);
@@ -1576,7 +1576,7 @@ fn expectRecordedPairs(pairs: []const RecordedPair) !void {
     }
 
     for (pairs) |pair| {
-        const tag = @intFromEnum(std.meta.activeTag(pair.role));
+        const tag = @backingInt(std.meta.activeTag(pair.role));
         const held = for (recorder.process.slots) |*slot| {
             switch (slot.state.load(.acquire)) {
                 .ready, .written => {},
@@ -3576,8 +3576,8 @@ test "only a pane that is not WSL reads /c/x as C:\\x (#514)" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
-    const file = try tmp.dir.realpathAlloc(alloc, "a.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.txt", .data = "" });
+    const file = try tmp.dir.realPathFileAlloc(std.testing.io, "a.txt", alloc);
     defer alloc.free(file);
     if (!configpkg.windows_shell.isDriveAbsolutePath(file)) return error.SkipZigTest;
     const text = try internal_os.local_path.testMsysPath(alloc, "", file);
@@ -4452,7 +4452,7 @@ fn preeditFromText(
     var it = view.iterator();
 
     const Codepoint = rendererpkg.State.Preedit.Codepoint;
-    var codepoints: std.ArrayListUnmanaged(Codepoint) = .{};
+    var codepoints: std.ArrayListUnmanaged(Codepoint) = .empty;
     defer codepoints.deinit(alloc);
     // Kept codepoints before the caret and before each end of the target.
     var kept_before_caret: usize = 0;
@@ -7478,10 +7478,10 @@ fn linkAtLocked(self: *Surface, pos: apprt.CursorPos) !?OpenLink {
         }),
 
         // The URI is a slice of page memory, so it must be copied.
-        ._open_osc8 => try self.alloc.dupeZ(u8, self.osc8URI(link.selection.start()) orelse {
+        ._open_osc8 => try self.alloc.dupeSentinel(u8, self.osc8URI(link.selection.start()) orelse {
             log.warn("failed to get URI for OSC8 hyperlink", .{});
             return null;
-        }),
+        }, 0),
     };
     return .{ .action = link.action, .target = target };
 }
@@ -7564,7 +7564,7 @@ pub fn mousePressureCallback(
     // If our left mouse button is pressed and we're entering a deep
     // click then we want to start a selection. We treat this as a
     // word selection since that is typical macOS behavior.
-    const left_idx = @intFromEnum(input.MouseButton.left);
+    const left_idx = @backingInt(input.MouseButton.left);
     if (self.mouse.click_state[left_idx] == .press and
         stage == .deep)
     select: {

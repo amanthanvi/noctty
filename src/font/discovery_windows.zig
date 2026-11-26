@@ -500,7 +500,7 @@ pub const Windows = struct {
         defer alloc.free(base);
         const path = try std.fmt.allocPrint(alloc, "{s}\\Fonts", .{base});
         defer alloc.free(path);
-        return try alloc.dupeZ(u8, path);
+        return try alloc.dupeSentinel(u8, path, 0);
     }
 
     fn userFontsDir(alloc: Allocator) ![:0]const u8 {
@@ -508,7 +508,7 @@ pub const Windows = struct {
         defer alloc.free(base);
         const path = try std.fmt.allocPrint(alloc, "{s}\\Microsoft\\Windows\\Fonts", .{base});
         defer alloc.free(path);
-        return try alloc.dupeZ(u8, path);
+        return try alloc.dupeSentinel(u8, path, 0);
     }
 
     fn envDir(alloc: Allocator, key: []const u8) ![]u8 {
@@ -521,7 +521,7 @@ pub const Windows = struct {
     fn scanAll(self: *Windows) error{ OutOfMemory, ScanStopped }![]Record {
         const alloc = self.alloc;
 
-        var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
+        var paths: std.ArrayListUnmanaged([:0]const u8) = .empty;
         defer {
             for (paths.items) |path| alloc.free(path);
             paths.deinit(alloc);
@@ -549,7 +549,7 @@ pub const Windows = struct {
         };
         defer lib.deinit();
 
-        var records: std.ArrayListUnmanaged(Record) = .{};
+        var records: std.ArrayListUnmanaged(Record) = .empty;
         errdefer {
             for (records.items) |*record| record.deinit(alloc);
             records.deinit(alloc);
@@ -700,7 +700,7 @@ pub const Windows = struct {
             return;
         }
         // The key is now owned by the map; the caller's defer frees it.
-        const owned = try alloc.dupeZ(u8, path);
+        const owned = try alloc.dupeSentinel(u8, path, 0);
         errdefer alloc.free(owned);
         try paths.append(alloc, owned);
     }
@@ -768,7 +768,7 @@ pub const Windows = struct {
         const face_flags = face.handle.*.face_flags;
 
         return .{
-            .path = try alloc.dupeZ(u8, path),
+            .path = try alloc.dupeSentinel(u8, path, 0),
             .face_index = face_index,
             .family_name = family_name,
             .style_name = style_name,
@@ -874,7 +874,7 @@ pub const Windows = struct {
 
         if (entry.platform_id == platform_macintosh) {
             // Treated as ASCII; sfntNameRank already rejected high bytes.
-            return try alloc.dupeZ(u8, entry.string);
+            return try alloc.dupeSentinel(u8, entry.string, 0);
         }
         return utf16BeToUtf8Alloc(alloc, entry.string) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -935,7 +935,7 @@ pub const Windows = struct {
             else => return error.InvalidUtf16,
         };
         defer alloc.free(utf8);
-        return try alloc.dupeZ(u8, utf8);
+        return try alloc.dupeSentinel(u8, utf8, 0);
     }
 
     //-------------------------------------------------------------------
@@ -951,7 +951,7 @@ pub const Windows = struct {
         alloc: Allocator,
         desc: Descriptor,
     ) Allocator.Error![]u32 {
-        var result: std.ArrayListUnmanaged(u32) = .{};
+        var result: std.ArrayListUnmanaged(u32) = .empty;
         errdefer result.deinit(alloc);
         for (self.records, 0..) |record, index| {
             if (!matchesDescriptor(record, desc)) continue;
@@ -1056,7 +1056,7 @@ pub const Windows = struct {
             return try alloc.alloc(CodepointRange, 0);
         }
 
-        var ranges: std.ArrayListUnmanaged(CodepointRange) = .{};
+        var ranges: std.ArrayListUnmanaged(CodepointRange) = .empty;
         errdefer ranges.deinit(alloc);
 
         // FT_Get_Next_Char returns codepoints in ascending order.
@@ -1081,21 +1081,21 @@ pub const Windows = struct {
     /// copied: `next` reads it from the master record, for the one face it
     /// returns.
     fn copyRecord(alloc: Allocator, record: Record) error{OutOfMemory}!Record {
-        const path = try alloc.dupeZ(u8, record.path);
+        const path = try alloc.dupeSentinel(u8, record.path, 0);
         errdefer alloc.free(path);
-        const family_name = try alloc.dupeZ(u8, record.family_name);
+        const family_name = try alloc.dupeSentinel(u8, record.family_name, 0);
         errdefer alloc.free(family_name);
-        const style_name = try alloc.dupeZ(u8, record.style_name);
+        const style_name = try alloc.dupeSentinel(u8, record.style_name, 0);
         errdefer alloc.free(style_name);
-        const full_name = try alloc.dupeZ(u8, record.full_name);
+        const full_name = try alloc.dupeSentinel(u8, record.full_name, 0);
         errdefer alloc.free(full_name);
         const typographic_family: ?[:0]const u8 = if (record.typographic_family) |name|
-            try alloc.dupeZ(u8, name)
+            try alloc.dupeSentinel(u8, name, 0)
         else
             null;
         errdefer if (typographic_family) |name| alloc.free(name);
         const typographic_style: ?[:0]const u8 = if (record.typographic_style) |name|
-            try alloc.dupeZ(u8, name)
+            try alloc.dupeSentinel(u8, name, 0)
         else
             null;
 
@@ -1240,7 +1240,7 @@ pub const Windows = struct {
             std.mem.span(value)
         else
             fallback;
-        return try alloc.dupeZ(u8, bytes);
+        return try alloc.dupeSentinel(u8, bytes, 0);
     }
 
     fn buildFullName(
@@ -1249,12 +1249,12 @@ pub const Windows = struct {
         style_name: []const u8,
     ) ![:0]const u8 {
         if (style_name.len == 0 or std.ascii.eqlIgnoreCase(style_name, "Regular")) {
-            return try alloc.dupeZ(u8, family_name);
+            return try alloc.dupeSentinel(u8, family_name, 0);
         }
 
         const full_name = try std.fmt.allocPrint(alloc, "{s} {s}", .{ family_name, style_name });
         defer alloc.free(full_name);
-        return try alloc.dupeZ(u8, full_name);
+        return try alloc.dupeSentinel(u8, full_name, 0);
     }
 
     fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -1559,7 +1559,7 @@ test "windows system fallback puts DirectWrite's face first end to end" {
         const Face = struct { path: [:0]const u8, face_index: i32 };
         const collect = struct {
             fn all(it: *Windows.DiscoverIterator) ![]Face {
-                var faces: std.ArrayListUnmanaged(Face) = .{};
+                var faces: std.ArrayListUnmanaged(Face) = .empty;
                 errdefer {
                     for (faces.items) |face| testing.allocator.free(face.path);
                     faces.deinit(testing.allocator);
@@ -1567,7 +1567,7 @@ test "windows system fallback puts DirectWrite's face first end to end" {
                 while (try it.next()) |found| {
                     var face = found;
                     defer face.deinit();
-                    const path = try testing.allocator.dupeZ(u8, face.win.path);
+                    const path = try testing.allocator.dupeSentinel(u8, face.win.path, 0);
                     errdefer testing.allocator.free(path);
                     try faces.append(testing.allocator, .{ .path = path, .face_index = face.win.face_index });
                 }
@@ -1595,7 +1595,7 @@ test "windows system fallback puts DirectWrite's face first end to end" {
         const named: ?usize = for (plain, 0..) |face, i| {
             if (face.face_index == preferred.face_index and dwrite.samePath(face.path, preferred.path)) break i;
         } else null;
-        var expected: std.ArrayListUnmanaged(Face) = .{};
+        var expected: std.ArrayListUnmanaged(Face) = .empty;
         defer expected.deinit(alloc);
         if (named) |i| try expected.append(alloc, plain[i]);
         for (plain, 0..) |face, i| {
@@ -1834,7 +1834,7 @@ test "windowsRegistryFontPathResolve" {
 test "windowsFontPathDedupe" {
     const alloc = testing.allocator;
 
-    var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
+    var paths: std.ArrayListUnmanaged([:0]const u8) = .empty;
     defer {
         for (paths.items) |path| alloc.free(path);
         paths.deinit(alloc);
@@ -2018,7 +2018,7 @@ fn fixtureDiscovery(dir: std.fs.Dir, fixtures: []const Fixture) !Windows {
     var lib = try freetype.Library.init();
     defer lib.deinit();
 
-    var records: std.ArrayListUnmanaged(Windows.Record) = .{};
+    var records: std.ArrayListUnmanaged(Windows.Record) = .empty;
     errdefer {
         for (records.items) |*record| record.deinit(disco.alloc);
         records.deinit(disco.alloc);
@@ -2027,7 +2027,7 @@ fn fixtureDiscovery(dir: std.fs.Dir, fixtures: []const Fixture) !Windows {
         try dir.writeFile(.{ .sub_path = fixture.name, .data = fixture.data });
         const path = try dir.realpathAlloc(testing.allocator, fixture.name);
         defer testing.allocator.free(path);
-        const path_z = try testing.allocator.dupeZ(u8, path);
+        const path_z = try testing.allocator.dupeSentinel(u8, path, 0);
         defer testing.allocator.free(path_z);
         try Windows.scanPath(disco.alloc, lib, path_z, &records);
     }
@@ -2052,8 +2052,8 @@ test "FONTVF HKLM paths and last-write changes reach the scan" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "machine-only.ttf", .data = @import("embedded.zig").regular });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "machine-only.ttf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "machine-only.ttf", .data = @import("embedded.zig").regular });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "machine-only.ttf", testing.allocator);
     defer testing.allocator.free(path);
     const FixtureRegistry = struct {
         path: []const u8,
@@ -2403,10 +2403,10 @@ test "windows discovery scan stopped between files publishes nothing" {
     var disco = try fixtureDiscovery(tmp.dir, &fixtureFonts());
     defer disco.deinit();
     const published = disco.state.?;
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
     if (disco.system_dir) |old| disco.alloc.free(old);
-    disco.system_dir = try disco.alloc.dupeZ(u8, dir);
+    disco.system_dir = try disco.alloc.dupeSentinel(u8, dir, 0);
     if (disco.user_dir) |old| disco.alloc.free(old);
     disco.user_dir = null;
 

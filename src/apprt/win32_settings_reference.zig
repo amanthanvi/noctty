@@ -37,12 +37,12 @@ pub const raw_docs: [key_count][]const u8 = docs: {
 };
 
 pub fn index(key: Key) usize {
-    return @intFromEnum(key);
+    return @backingInt(key);
 }
 
 comptime {
     // `index` relies on the key enum counting from zero in declaration order.
-    for (keys, 0..) |key, i| if (@intFromEnum(key) != i) @compileError("Config.Key is not dense");
+    for (keys, 0..) |key, i| if (@backingInt(key) != i) @compileError("Config.Key is not dense");
 }
 
 /// What Windows does with a config key that it accepts but does not honour
@@ -162,7 +162,7 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
     // A heading ends its line, so the text after it starts a new one.
     var after_heading = false;
     while (lines.next()) |line_crlf| {
-        const line = std.mem.trimRight(u8, line_crlf, "\r");
+        const line = std.mem.trimEnd(u8, line_crlf, "\r");
         if (std.mem.trim(u8, line, " \t").len == 0) {
             block = .none;
             continue;
@@ -179,11 +179,11 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
             .code => {
                 if (line_open) try writer.writeByte('\n');
                 try writer.writeAll("  ");
-                try writer.writeAll(if (std.mem.startsWith(u8, line, "    ")) line[4..] else std.mem.trimLeft(u8, line, " \t"));
+                try writer.writeAll(if (std.mem.startsWith(u8, line, "    ")) line[4..] else std.mem.trimStart(u8, line, " \t"));
                 line_open = true;
             },
             .text => {
-                const trimmed = std.mem.trimLeft(u8, line, " \t");
+                const trimmed = std.mem.trimStart(u8, line, " \t");
                 if (bulletText(trimmed)) |item| {
                     if (line_open) try writer.writeByte('\n');
                     try writer.writeAll("\u{2022} ");
@@ -191,7 +191,7 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
                     after_heading = false;
                 } else if (trimmed[0] == '#') {
                     if (line_open) try writer.writeByte('\n');
-                    try writeInline(writer, std.mem.trimLeft(u8, std.mem.trimLeft(u8, trimmed, "#"), " \t"));
+                    try writeInline(writer, std.mem.trimStart(u8, std.mem.trimStart(u8, trimmed, "#"), " \t"));
                     after_heading = true;
                 } else {
                     if (line_open) try writer.writeByte(if (after_heading) '\n' else ' ');
@@ -206,7 +206,7 @@ pub fn writePlain(writer: *std.Io.Writer, raw: []const u8) std.Io.Writer.Error!v
 
 fn bulletText(trimmed: []const u8) ?[]const u8 {
     if (trimmed.len >= 2 and (trimmed[0] == '*' or trimmed[0] == '-' or trimmed[0] == '+') and trimmed[1] == ' ')
-        return std.mem.trimLeft(u8, trimmed[2..], " \t");
+        return std.mem.trimStart(u8, trimmed[2..], " \t");
     return null;
 }
 
@@ -872,8 +872,8 @@ test "settings reference rows carry the effective value, its count and the locat
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const text = "font-size = 15\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var current = try Config.default(alloc);
     defer current.deinit();
@@ -949,8 +949,8 @@ test "settings reference keys the app works out when unset count as changed only
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
@@ -972,7 +972,7 @@ test "settings reference keys the app works out when unset count as changed only
         .{ .text = "click-repeat-interval = abc", .differs = false },
     }) |case| {
         errdefer std.debug.print("settings reference differs case {s}\n", .{case.text});
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = case.text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = case.text });
         var current = try Config.default(alloc);
         defer current.deinit();
         try current.loadFile(alloc, path);
@@ -1011,8 +1011,8 @@ test "settings reference finds where a BOM or UTF-16 config sets a key, and @mod
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
@@ -1025,7 +1025,7 @@ test "settings reference finds where a BOM or UTF-16 config sets a key, and @mod
     for (files) |file| {
         // Read by the loader, as the app does; without `finalize`, which would
         // set the interval from the system when the file did not.
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = file });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = file });
         var loaded = try Config.default(alloc);
         defer loaded.deinit();
         try loaded.loadFile(alloc, path);
@@ -1098,16 +1098,16 @@ test "settings reference says where a value comes from: an included file, the th
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "\nfont-size = 15\nkeybind = ctrl+shift+y=new_tab\n" });
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "\nfont-size = 15\nkeybind = ctrl+shift+y=new_tab\n" });
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
     const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = included.conf\ntheme = {s}\nkeybind = ctrl+shift+u=new_tab\n", .{theme_path});
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
     defer alloc.free(included_path);
 
     var current = try Config.default(alloc);
@@ -1172,12 +1172,12 @@ test "settings reference does not claim a reset accumulating assignment still co
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     // The included file clears both lists the config file added to.
-    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "keybind = clear\nfont-family =\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "keybind = clear\nfont-family =\n" });
     const text = "keybind = ctrl+shift+u=new_tab\nfont-family = Cascadia Code\nconfig-file = included.conf\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
     defer alloc.free(included_path);
 
     var current = try Config.default(alloc);
@@ -1210,11 +1210,11 @@ test "settings reference default-profile's shown value and location, with and wi
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
     defer alloc.free(included_path);
 
     const Where = union(enum) {
@@ -1241,7 +1241,7 @@ test "settings reference default-profile's shown value and location, with and wi
         .{ .text = "default-profile = cmd.exe\nconfig-file = ?missing.conf\n", .cli = true, .value = "cmd.exe", .where = .{ .target = 1 } },
     }, 0..) |case, n| {
         errdefer std.debug.print("settings reference default-profile case {d}\n", .{n});
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = case.text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = case.text });
         var current = try Config.default(alloc);
         defer current.deinit();
         try current.loadFile(alloc, path);
@@ -1282,11 +1282,11 @@ test "settings reference names -e for the shell-integration it set, and the file
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "background = #101010\n" });
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "background = #101010\n" });
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
     defer alloc.free(theme_path);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     const themed = try std.fmt.allocPrint(alloc, "config-file = included.conf\ntheme = {s}\n", .{theme_path});
     defer alloc.free(themed);
@@ -1296,12 +1296,12 @@ test "settings reference names -e for the shell-integration it set, and the file
         .{ .include = "shell-integration = fish\n", .by_e = true },
         .{ .include = "shell-integration = none\n", .by_e = false },
     }) |case| {
-        try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = case.include });
-        const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = case.include });
+        const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
         defer alloc.free(included_path);
         for ([_][]const u8{ "config-file = included.conf\n", themed }) |text| {
             errdefer std.debug.print("settings reference -e shell-integration case {s}", .{case.include});
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
             var current = try Config.default(alloc);
             defer current.deinit();
             try current.loadFile(alloc, path);
@@ -1333,12 +1333,12 @@ test "settings reference saved default-profile keeps its included-file origin un
     defer tmp.cleanup();
     // The config file names A, a file it includes names B, and noctty's
     // command line names C.
-    try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "default-profile = pwsh.exe\n" });
     const text = "font-size = 12\ndefault-profile = cmd.exe\nconfig-file = included.conf\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
-    const included_path = try tmp.dir.realpathAlloc(alloc, "included.conf");
+    const included_path = try tmp.dir.realPathFileAlloc(std.testing.io, "included.conf", alloc);
     defer alloc.free(included_path);
 
     var current = try Config.default(alloc);
@@ -1374,7 +1374,7 @@ test "settings reference saved default-profile keeps its included-file origin un
     // With no `default-profile` line in the config file, the included file's
     // line is still named, not "Not set".
     const bare = "config-file = included.conf\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = bare });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = bare });
     var only_included = try Config.default(alloc);
     defer only_included.deinit();
     try only_included.loadFile(alloc, path);
@@ -1394,8 +1394,8 @@ test "settings reference says a line of the file Settings saves to sets a key on
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = "\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var defaults = try Config.default(alloc);
     defer defaults.deinit();
@@ -1450,7 +1450,7 @@ test "settings reference says a line of the file Settings saves to sets a key on
             },
         },
     }, 0..) |file, n| {
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = file.text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = file.text });
         var current = try Config.default(alloc);
         defer current.deinit();
         try current.loadFile(alloc, path);
@@ -1569,8 +1569,8 @@ test "settings reference counts the lines of a large generated config" {
     defer tmp.cleanup();
     const text = try generatedConfig(alloc, 3000);
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var current = try Config.default(alloc);
     defer current.deinit();
@@ -1670,8 +1670,8 @@ test "settings reference counts the lines of a generated config with 5000 refuse
     defer tmp.cleanup();
     const text = try generatedRefusedConfig(alloc, 10_000);
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var current = try Config.default(alloc);
     defer current.deinit();
@@ -1708,10 +1708,10 @@ test "settings reference counts a line once when the loader read the file Settin
     // the config file, then the included file, then the config file again,
     // and only then notes the cycle. The default file is not among the files
     // it remembers having read (`loadRecursiveFiles`).
-    try tmp.dir.writeFile(.{ .sub_path = "extra.conf", .data = "font-size = 15\nconfig-file = config\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "extra.conf", .data = "font-size = 15\nconfig-file = config\n" });
     const text = "font-size = 12\nfont-size = 13\nconfig-file = extra.conf\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var current = try Config.default(alloc);
     defer current.deinit();
@@ -1843,7 +1843,7 @@ test "settings reference a value the app works out set only in an included file 
     const path = try buildLoaded(alloc, tmp.dir, "config-file = extra.conf\n", "click-repeat-interval = 500\n", &.{}, &model, &current, &defaults, .readable);
     defer alloc.free(path);
     defer current.deinit();
-    const extra_path = try tmp.dir.realpathAlloc(alloc, "extra.conf");
+    const extra_path = try tmp.dir.realPathFileAlloc(std.testing.io, "extra.conf", alloc);
     defer alloc.free(extra_path);
     const row = &model.rows[index(.@"click-repeat-interval")];
     try testing.expectEqualStrings("500", row.value);

@@ -96,7 +96,7 @@ test "minidump init creates missing parent directories" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fs.path.join(alloc, &.{ root, "absent", "noctty", "crash" });
     defer alloc.free(path);
@@ -265,9 +265,9 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     // Twelve components are 300 characters on their own, so the path passes
     // MAX_PATH however short the checkout is. The limit counts UTF-16 units.
     const sub_path = "用户-Ü/" ++ comptime win32_repeat.repeat("long-directory-component/", 12);
-    try tmp.dir.makePath(sub_path);
-    var dump_dir = try tmp.dir.openDir(sub_path, .{ .iterate = true });
-    defer dump_dir.close();
+    try tmp.dir.createDirPath(std.testing.io, sub_path);
+    var dump_dir = try tmp.dir.openDir(std.testing.io, sub_path, .{ .iterate = true });
+    defer dump_dir.close(std.testing.io);
     const dir_path = try dump_dir.realpath(".", &dir_buf);
     try std.testing.expect(try std.unicode.calcWtf16LeLen(dir_path) > windows.MAX_PATH);
     const dir_w = try dumpDirectoryW(dir_path);

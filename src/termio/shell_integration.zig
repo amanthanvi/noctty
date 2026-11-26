@@ -107,7 +107,7 @@ pub fn setup(
             if (try windows_shell.lookupChildExecutable(alloc_arena, exe, env)) |path| {
                 var argv: std.ArrayList([:0]const u8) = .empty;
                 try argv.append(alloc_arena, path);
-                while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeZ(u8, arg));
+                while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeSentinel(u8, arg, 0));
                 command = .{ .direct = try argv.toOwnedSlice(alloc_arena) };
                 program = path;
             } else if (command == .shell) {
@@ -342,7 +342,7 @@ test "PKG08 full executable config path is detected before integration" {
     const path = try res.tmp_dir.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
     var env = EnvMap.init(alloc);
     const result = (try setup(alloc, res.path, .{
-        .shell = try alloc.dupeZ(u8, path),
+        .shell = try alloc.dupeSentinel(u8, path, 0),
     }, &env, null, false)).?;
     try std.testing.expectEqual(Shell.powershell, result.shell);
     try std.testing.expect(result.command == .direct);
@@ -678,7 +678,7 @@ test "setup powershell: a Developer PowerShell runs its script, then the integra
     const script = try visual_studio.devShellScript(alloc, "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll", instance, .x64);
     const shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
     // What `windows_shell.appendVisualStudioInstance` gives the profile.
-    const profile_argv = [_][:0]const u8{ shell, "-NoExit", "-Command", try alloc.dupeZ(u8, script) };
+    const profile_argv = [_][:0]const u8{ shell, "-NoExit", "-Command", try alloc.dupeSentinel(u8, script, 0) };
     const result = (try setup(alloc, res.path, .{ .direct = &profile_argv }, &env, null, true)).?;
     try testing.expectEqual(.powershell, result.shell);
     try testing.expectEqual(@as(usize, 4), result.command.direct.len);
@@ -1471,13 +1471,13 @@ test "cmd Clink setup fails closed for semicolon integration path" {
 
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-    try tmp_dir.dir.makePath("resources;unsafe/shell-integration/cmd");
-    try tmp_dir.dir.writeFile(.{
+    try tmp_dir.dir.createDirPath(std.testing.io, "resources;unsafe/shell-integration/cmd");
+    try tmp_dir.dir.writeFile(std.testing.io, .{
         .sub_path = "resources;unsafe/shell-integration/cmd/noctty-shell-integration.lua",
         .data = "",
     });
 
-    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const root = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     const resource_dir = try std.fs.path.join(alloc, &.{ root, "resources;unsafe" });
 
     var env = EnvMap.init(alloc);
@@ -1678,7 +1678,7 @@ const IntegrationCommandBuilder = struct {
 
     fn appendArg(self: *IntegrationCommandBuilder, arg: []const u8) !void {
         if (builtin.os.tag != .windows and arg.len == 0) return;
-        try self.args.append(self.alloc, try self.alloc.dupeZ(u8, arg));
+        try self.args.append(self.alloc, try self.alloc.dupeSentinel(u8, arg, 0));
     }
 
     fn finish(self: *IntegrationCommandBuilder) !config.Command {
@@ -1853,7 +1853,7 @@ test "PKG17 WSL's bash.exe launcher gets no bash injection" {
     for (launchers) |launcher| {
         var env = EnvMap.init(alloc);
         const result = try setup(alloc, res.path, .{
-            .direct = &.{ try alloc.dupeZ(u8, launcher), "--login", "-i" },
+            .direct = &.{ try alloc.dupeSentinel(u8, launcher, 0), "--login", "-i" },
         }, &env, null, false);
         try std.testing.expect(result == null);
         // Nothing was injected, so the launcher's environment is untouched.

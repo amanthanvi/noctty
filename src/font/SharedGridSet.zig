@@ -287,7 +287,7 @@ pub const MissingFamilies = struct {
         for (self.names.items) |seen| {
             if (std.ascii.eqlIgnoreCase(seen, family)) return;
         }
-        const owned = try alloc.dupeZ(u8, family);
+        const owned = try alloc.dupeSentinel(u8, family, 0);
         errdefer alloc.free(owned);
         try self.names.append(alloc, owned);
     }
@@ -1150,7 +1150,7 @@ fn testRenderTinySample(alloc: Allocator, grid: *SharedGrid) !void {
 
     for (std.enums.values(font.sprite.Sprite)) |sprite| {
         errdefer std.debug.print("sprite {s}\n", .{@tagName(sprite)});
-        const render = try grid.renderGlyph(alloc, font.sprite_index, @intFromEnum(sprite), .{
+        const render = try grid.renderGlyph(alloc, font.sprite_index, @backingInt(sprite), .{
             .grid_metrics = grid.metrics,
             .cell_width = 1,
         });
@@ -1198,9 +1198,9 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
         var tmp = testing.tmpDir(.{});
         defer tmp.cleanup();
         for ([_][]const u8{ "a.ttf", "b.ttf", "c.ttf", "d.ttf" }) |name| {
-            try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "" });
         }
-        const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+        const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
         defer testing.allocator.free(dir);
 
         const Hold = struct {
@@ -1228,7 +1228,7 @@ test "SharedGridSet deinit stops the startup font scan at its next file" {
         defer if (set_live) set.deinit();
         const disco = (try set.discover()).?;
         if (disco.system_dir) |old| disco.alloc.free(old);
-        disco.system_dir = try disco.alloc.dupeZ(u8, dir);
+        disco.system_dir = try disco.alloc.dupeSentinel(u8, dir, 0);
         if (disco.user_dir) |old| disco.alloc.free(old);
         disco.user_dir = null;
         disco.test_scan_hook = .{ .ctx = &hold, .call = Hold.call };

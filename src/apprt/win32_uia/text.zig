@@ -37,7 +37,7 @@ pub const RowNumbering = struct {
 pub fn rowNumbering(state: *const terminal.Terminal) RowNumbering {
     const pages = &state.screens.active.pages;
     return .{
-        .active_key = @intFromEnum(state.screens.active_key),
+        .active_key = @backingInt(state.screens.active_key),
         .screen_generation = state.screens.generation(state.screens.active_key),
         .page_serial_epoch = pages.page_serial_epoch,
         .first_page_serial = pages.pages.first.?.serial,

@@ -131,7 +131,7 @@ test "win32 a restore that ended by itself is moved aside, never deleted or repl
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
     defer std.testing.allocator.free(path);
@@ -141,14 +141,14 @@ test "win32 a restore that ended by itself is moved aside, never deleted or repl
     for (0..win32_session_persistence.max_quarantined_copies) |index| {
         var content_buf: [64]u8 = undefined;
         const content = try std.fmt.bufPrint(&content_buf, "{{\"schema_version\":1,\"windows\":[],\"n\":{d}}}", .{index});
-        try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = content });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = content });
         try std.testing.expect(setAsideSessionStateAt(std.testing.allocator, path));
-        try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json", .{}));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "session-state.json", .{}));
         const name = if (index == 0)
             "session-state.json" ++ restore_ended_suffix
         else
             try std.fmt.bufPrint(&name_buf, "session-state.json{s}.{d}", .{ restore_ended_suffix, index });
-        const moved = try tmp.dir.readFileAlloc(std.testing.allocator, name, 64);
+        const moved = try tmp.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(64));
         defer std.testing.allocator.free(moved);
         try std.testing.expectEqualStrings(content, moved);
     }
@@ -157,19 +157,19 @@ test "win32 a restore that ended by itself is moved aside, never deleted or repl
 
     // Every slot taken: the session stays, and no copy is replaced.
     const latest = "{\"schema_version\":1,\"windows\":[],\"n\":5}";
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = latest });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = latest });
     try std.testing.expect(!setAsideSessionStateAt(std.testing.allocator, path));
-    const stayed = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 64);
+    const stayed = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json", std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(stayed);
     try std.testing.expectEqualStrings(latest, stayed);
-    const first = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ restore_ended_suffix, 64);
+    const first = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json" ++ restore_ended_suffix, std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(first);
     try std.testing.expectEqualStrings("{\"schema_version\":1,\"windows\":[],\"n\":0}", first);
 
     // These copies never take the crash-loop breaker's slots: with all of
     // them taken, a session the last launches died restoring still moves.
     try std.testing.expect(setAsideCrashedSessionState(std.testing.allocator, path));
-    const crashed = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json" ++ recovery_set_aside_suffix, 64);
+    const crashed = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json" ++ recovery_set_aside_suffix, std.testing.allocator, .limited(64));
     defer std.testing.allocator.free(crashed);
     try std.testing.expectEqualStrings(latest, crashed);
 }
@@ -419,7 +419,7 @@ pub fn restoreSessionState(self: *App) !bool {
     // Debug-only fault for the restore crash-loop harness: the process
     // ends mid-restore, as a release abort does (ExitProcess(3)), without
     // the breakpoint a Debug panic raises.
-    if (builtin.mode == .Debug and std.process.hasEnvVarConstant("NOCTTY_DEBUG_CRASH_SESSION_RESTORE")) {
+    if (builtin.mode == .debug and std.process.hasEnvVarConstant("NOCTTY_DEBUG_CRASH_SESSION_RESTORE")) {
         std.process.exit(3);
     }
 
@@ -1058,8 +1058,8 @@ pub fn buildSessionLayout(
                     .vertical => .vertical,
                 },
                 .ratio = @floatCast(split.ratio),
-                .first = @intFromEnum(split.left),
-                .second = @intFromEnum(split.right),
+                .first = @backingInt(split.left),
+                .second = @backingInt(split.right),
             } },
         };
     }
@@ -1171,8 +1171,8 @@ pub fn buildRestoredSessionSplitTree(
                     .vertical => .vertical,
                 },
                 .ratio = SplitTreeSurface.canonicalRatio(@floatCast(split.ratio)),
-                .left = @enumFromInt(remap[split.first]),
-                .right = @enumFromInt(remap[split.second]),
+                .left = @fromBackingInt(@intCast(remap[split.first])),
+                .right = @fromBackingInt(@intCast(remap[split.second])),
             } },
         };
     }
@@ -2486,7 +2486,7 @@ test "win32 explicit startup flows bypass session restore" {
 test "win32 session state is saved only by the process that owns it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
     defer std.testing.allocator.free(state_path);
@@ -2555,7 +2555,7 @@ test "win32 session state is saved only by the process that owns it" {
 test "win32 a structural change arms one session checkpoint, only in the session's owner" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
     defer std.testing.allocator.free(state_path);
@@ -2603,7 +2603,7 @@ test "win32 a structural change arms one session checkpoint, only in the session
 test "win32 a session a newer build wrote, or one too large to be ours, is left alone and never owned" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
     defer std.testing.allocator.free(state_path);
@@ -2617,23 +2617,23 @@ test "win32 a session a newer build wrote, or one too large to be ours, is left 
 
     // A field a later build added within this version loads.
     const added = "{\"schema_version\":1,\"added_later\":1,\"windows\":[]}";
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = added });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = added });
     var loaded = (try app.loadSessionStateAt(state_path)).?;
     loaded.deinit();
     try std.testing.expect(!app.session_state_left_alone);
 
     // A newer schema is neither restored, quarantined nor owned.
     const newer = "{\"schema_version\":2,\"windows\":[{\"layout_v2\":true}]}";
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = newer });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = newer });
     try std.testing.expect((try app.loadSessionStateAt(state_path)) == null);
     try std.testing.expect(app.session_state_left_alone);
     const lock = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
     app.adoptSessionOwner(lock);
     try std.testing.expect(app.session_owner == null);
-    const kept = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 1024);
+    const kept = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json", std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(kept);
     try std.testing.expectEqualStrings(newer, kept);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json.corrupt", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "session-state.json.corrupt", .{}));
     // The lock was given back, so the build that wrote the file can take it.
     const next = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
     next.release();
@@ -2641,7 +2641,7 @@ test "win32 a session a newer build wrote, or one too large to be ours, is left 
     // A file that cannot be read now is not replaced either: it may be a
     // newer build's, held for a moment.
     app.session_state_left_alone = false;
-    try tmp.dir.makeDir("session-state.d");
+    try tmp.dir.createDir(std.testing.io, "session-state.d", .default_dir);
     const unreadable = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.d" });
     defer std.testing.allocator.free(unreadable);
     try std.testing.expect(std.meta.isError(app.loadSessionStateAt(unreadable)));
@@ -2650,8 +2650,8 @@ test "win32 a session a newer build wrote, or one too large to be ours, is left 
     // So is a file larger than this build ever writes.
     app.session_state_left_alone = false;
     {
-        var file = try tmp.dir.createFile("session-state.json", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "session-state.json", .{});
+        defer file.close(std.testing.io);
         const chunk = @as([4096]u8, @splat(' '));
         var remaining: usize = win32_session_persistence.default_max_state_bytes + 1;
         while (remaining > 0) {
@@ -2677,8 +2677,8 @@ test "win32 a snapshot with no session window leaves the saved session alone" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const saved = "{\"schema_version\":1,\"windows\":[]}";
-    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = saved });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-state.json", .data = saved });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "session-state.json", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     // A quick terminal with a tab, and a window kept empty for undo after
@@ -2708,7 +2708,7 @@ test "win32 a snapshot with no session window leaves the saved session alone" {
     // it. The session's last window saves as it goes now, so an empty
     // snapshot writes nothing and deletes nothing, checkpoint or final.
     try std.testing.expect(!app.writeSessionStateAt(path));
-    const kept = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 256);
+    const kept = try tmp.dir.readFileAlloc(std.testing.io, "session-state.json", std.testing.allocator, .limited(256));
     defer std.testing.allocator.free(kept);
     try std.testing.expectEqualStrings(saved, kept);
 }
@@ -2716,7 +2716,7 @@ test "win32 a snapshot with no session window leaves the saved session alone" {
 test "win32 session owner lock admits one live owner" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     // The directory does not exist yet on a first run.
     const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "noctty", "session-state.json" });
@@ -3226,13 +3226,13 @@ test "win32 session restore rebuilds saved split tree shape" {
     try std.testing.expectEqual(@as(usize, 5), tree.nodes.len);
     try std.testing.expectEqual(SplitTreeSurface.Split.Layout.horizontal, tree.nodes[0].split.layout);
     try std.testing.expectEqual(@as(f16, 0.25), tree.nodes[0].split.ratio);
-    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(1)), tree.nodes[0].split.left);
-    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(2)), tree.nodes[0].split.right);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @fromBackingInt(@intCast(1))), tree.nodes[0].split.left);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @fromBackingInt(@intCast(2))), tree.nodes[0].split.right);
     try std.testing.expectEqual(&surface_a, tree.nodes[1].leaf);
     try std.testing.expectEqual(SplitTreeSurface.Split.Layout.vertical, tree.nodes[2].split.layout);
     try std.testing.expectEqual(@as(f16, 0.75), tree.nodes[2].split.ratio);
-    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(3)), tree.nodes[2].split.left);
-    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(4)), tree.nodes[2].split.right);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @fromBackingInt(@intCast(3))), tree.nodes[2].split.left);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @fromBackingInt(@intCast(4))), tree.nodes[2].split.right);
     try std.testing.expectEqual(&surface_b, tree.nodes[3].leaf);
     try std.testing.expectEqual(&surface_c, tree.nodes[4].leaf);
 }

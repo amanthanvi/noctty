@@ -279,7 +279,7 @@ fn parseDirective(raw_line: []const u8) ?Directive {
     var line = std.mem.trim(u8, raw_line, " \t\r");
     if (line.len == 0 or line[0] == '#') return null;
     if (sshCommentStart(line)) |comment_start| {
-        line = std.mem.trimRight(u8, line[0..comment_start], " \t\r");
+        line = std.mem.trimEnd(u8, line[0..comment_start], " \t\r");
     }
     if (line.len == 0) return null;
 
@@ -302,7 +302,7 @@ fn parseDirective(raw_line: []const u8) ?Directive {
 
     return .{
         .keyword = line[0..keyword_end],
-        .value = std.mem.trimRight(u8, line[value_start..], " \t\r"),
+        .value = std.mem.trimEnd(u8, line[value_start..], " \t\r"),
     };
 }
 
@@ -646,18 +646,18 @@ test "ssh config loads one include level and resolves supported paths" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/relative.conf", .data = "Include nested.conf\nHost relative\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/nested.conf", .data = "Host nested\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/tilde.conf", .data = "Host tilde\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/absolute.conf", .data = "Host absolute\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/globbed.conf", .data = "Host globbed\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/matched.conf", .data = "Host matched\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/host-scoped.conf", .data = "Host leaked\n" });
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/relative.conf", .data = "Include nested.conf\nHost relative\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/nested.conf", .data = "Host nested\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/tilde.conf", .data = "Host tilde\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/absolute.conf", .data = "Host absolute\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/globbed.conf", .data = "Host globbed\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/matched.conf", .data = "Host matched\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/host-scoped.conf", .data = "Host leaked\n" });
 
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
-    const absolute = try tmp.dir.realpathAlloc(alloc, ".ssh/absolute.conf");
+    const absolute = try tmp.dir.realPathFileAlloc(std.testing.io, ".ssh/absolute.conf", alloc);
     defer alloc.free(absolute);
     const root = try std.fmt.allocPrint(
         alloc,
@@ -665,7 +665,7 @@ test "ssh config loads one include level and resolves supported paths" {
         .{absolute},
     );
     defer alloc.free(root);
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/config", .data = root });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/config", .data = root });
 
     const hosts = try loadFromHome(alloc, home);
     defer deinitHosts(alloc, hosts);
@@ -733,15 +733,15 @@ test "ssh config loads a quoted include whose filename contains spaces" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/work hosts.conf", .data = "Host spaced\n" });
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/plain.conf", .data = "Host plain\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/work hosts.conf", .data = "Host spaced\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/plain.conf", .data = "Host plain\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = ".ssh/config",
         .data = "Include \"work hosts.conf\" plain.conf\nHost root\n",
     });
 
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
     const hosts = try loadFromHome(alloc, home);
     defer deinitHosts(alloc, hosts);
@@ -757,14 +757,14 @@ test "ssh config continues after a missing include argument" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/valid.conf", .data = "Host valid\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/valid.conf", .data = "Host valid\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = ".ssh/config",
         .data = "Include missing.conf valid.conf\nHost root\n",
     });
 
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
     const hosts = try loadFromHome(alloc, home);
     defer deinitHosts(alloc, hosts);
@@ -779,14 +779,14 @@ test "ssh config loads a quoted include whose filename contains a hash" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/work#hosts.conf", .data = "Host hashed\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/work#hosts.conf", .data = "Host hashed\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = ".ssh/config",
         .data = "Include \"work#hosts.conf\" # trailing comment\nHost root\n",
     });
 
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
     const hosts = try loadFromHome(alloc, home);
     defer deinitHosts(alloc, hosts);
@@ -830,14 +830,14 @@ test "ssh config skips remote and device include paths without opening them" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
     // A blocking SMB open here would hang the picker, so the path must be
     // rejected before `openFileAbsolute` is reached.
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = ".ssh/config",
         .data = "Include \\\\10.0.0.1\\share\\hosts.conf\nInclude \\\\?\\C:\\hosts.conf\nHost root\n",
     });
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
 
     const hosts = try loadFromHome(alloc, home);
@@ -851,7 +851,7 @@ test "ssh config caps the number of include files read" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
 
     var root: std.ArrayList(u8) = .empty;
     defer root.deinit(alloc);
@@ -862,13 +862,13 @@ test "ssh config caps the number of include files read" {
         defer alloc.free(sub_path);
         const body = try std.fmt.allocPrint(alloc, "Host inc-{d}\n", .{index});
         defer alloc.free(body);
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = body });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = body });
         const line = try std.fmt.allocPrint(alloc, "Include {s}\n", .{name});
         defer alloc.free(line);
         try root.appendSlice(alloc, line);
     }
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/config", .data = root.items });
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/config", .data = root.items });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
 
     const hosts = try loadFromHome(alloc, home);
@@ -881,8 +881,8 @@ test "ssh config bounds file opens away from the caller" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "include.conf", .data = "Host bounded\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "include.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "include.conf", .data = "Host bounded\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "include.conf", alloc);
     defer alloc.free(path);
 
     const contents = (try readSshConfigFileBounded(
@@ -922,9 +922,9 @@ test "ssh config load reports a read skipped for a concurrent one" {
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath(".ssh");
-    try tmp.dir.writeFile(.{ .sub_path = ".ssh/config", .data = "Host alpha\n" });
-    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/config", .data = "Host alpha\n" });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(home);
 
     // Another discovery's read holds the single slot.
@@ -942,7 +942,7 @@ test "ssh config missing unreadable and oversized roots produce empty lists" {
 
     var missing = testing.tmpDir(.{});
     defer missing.cleanup();
-    const missing_home = try missing.dir.realpathAlloc(alloc, ".");
+    const missing_home = try missing.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(missing_home);
     const missing_hosts = try loadFromHome(alloc, missing_home);
     defer deinitHosts(alloc, missing_hosts);
@@ -950,8 +950,8 @@ test "ssh config missing unreadable and oversized roots produce empty lists" {
 
     var unreadable = testing.tmpDir(.{});
     defer unreadable.cleanup();
-    try unreadable.dir.makePath(".ssh/config");
-    const unreadable_home = try unreadable.dir.realpathAlloc(alloc, ".");
+    try unreadable.dir.createDirPath(std.testing.io, ".ssh/config");
+    const unreadable_home = try unreadable.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(unreadable_home);
     const unreadable_hosts = try loadFromHome(alloc, unreadable_home);
     defer deinitHosts(alloc, unreadable_hosts);
@@ -959,12 +959,12 @@ test "ssh config missing unreadable and oversized roots produce empty lists" {
 
     var oversized = testing.tmpDir(.{});
     defer oversized.cleanup();
-    try oversized.dir.makePath(".ssh");
+    try oversized.dir.createDirPath(std.testing.io, ".ssh");
     const data = try alloc.alloc(u8, max_file_size + 1);
     defer alloc.free(data);
     @memset(data, '#');
-    try oversized.dir.writeFile(.{ .sub_path = ".ssh/config", .data = data });
-    const oversized_home = try oversized.dir.realpathAlloc(alloc, ".");
+    try oversized.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/config", .data = data });
+    const oversized_home = try oversized.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(oversized_home);
     const oversized_hosts = try loadFromHome(alloc, oversized_home);
     defer deinitHosts(alloc, oversized_hosts);

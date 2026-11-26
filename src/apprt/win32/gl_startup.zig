@@ -28,7 +28,7 @@ pub const StartupLoaderErrorDialogSuppression = struct {
         if (sys.SetThreadErrorMode(self.previous_mode, null) == 0) {
             log.warn(
                 "failed to restore startup loader thread error mode win32_error={d}",
-                .{@intFromEnum(windows.kernel32.GetLastError())},
+                .{@backingInt(windows.kernel32.GetLastError())},
             );
         }
         self.active = false;
@@ -42,7 +42,7 @@ pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
     if (sys.SetThreadErrorMode(c.SEM_FAILCRITICALERRORS | c.SEM_NOOPENFILEERRORBOX, &previous_mode) == 0) {
         log.warn(
             "failed to suppress startup loader error dialogs win32_error={d}",
-            .{@intFromEnum(windows.kernel32.GetLastError())},
+            .{@backingInt(windows.kernel32.GetLastError())},
         );
         return .{};
     }
@@ -208,7 +208,7 @@ fn currentOpenGLStartupFailure() ?OpenGLStartupFailure {
 }
 
 pub fn recordOpenGLStartupWin32Failure(step: OpenGLStartupStep, win32_error: windows.Win32Error) void {
-    const code: DWORD = @intFromEnum(win32_error);
+    const code: DWORD = @backingInt(win32_error);
     if (!recordOpenGLStartupFailure(.{
         .step = step,
         .win32_error = code,

@@ -503,7 +503,7 @@ const TestUserData = struct {
     fn callback(event: Event, generation: u64, userdata: ?*anyopaque) void {
         _ = generation;
         const ud: *Self = @ptrCast(@alignCast(userdata.?));
-        _ = ud.events_seen.fetchOr(@as(u32, 1) << @intFromEnum(std.meta.activeTag(event)), .release);
+        _ = ud.events_seen.fetchOr(@as(u32, 1) << @backingInt(std.meta.activeTag(event)), .release);
         switch (event) {
             .quit, .invalid_query, .selected_match => {},
             .complete => ud.reset.set(),
@@ -603,7 +603,7 @@ test {
             });
             const seen = ud.events_seen.load(.acquire);
             inline for (std.meta.fields(Event)) |field| {
-                if (seen & (@as(u32, 1) << @intFromEnum(@field(std.meta.Tag(Event), field.name))) != 0) {
+                if (seen & (@as(u32, 1) << @backingInt(@field(std.meta.Tag(Event), field.name))) != 0) {
                     std.debug.print(" {s}", .{field.name});
                 }
             }

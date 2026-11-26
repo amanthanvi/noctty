@@ -493,9 +493,9 @@ fn legacy(
     // codes. Its supported shifted F1-F12 forms carry these keys in legacy
     // mode, at the cost of aliasing a physical Shift+F1-F12 chord.
     const function_key, const function_mods = function: {
-        const value = @intFromEnum(event.key);
-        if (windows_legacy and value >= @intFromEnum(key.Key.f13) and value <= @intFromEnum(key.Key.f24)) {
-            const mapped: key.Key = @enumFromInt(value - 12);
+        const value = @backingInt(event.key);
+        if (windows_legacy and value >= @backingInt(key.Key.f13) and value <= @backingInt(key.Key.f24)) {
+            const mapped: key.Key = @fromBackingInt(@intCast(value - 12));
             var mods = all_mods;
             mods.shift = true;
             break :function .{ mapped, mods };

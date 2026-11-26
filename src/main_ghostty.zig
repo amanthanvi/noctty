@@ -57,7 +57,7 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     if (dll_search_error) |err| {
         std.log.warn(
             "failed to restrict default DLL search directories win32_error={d}",
-            .{@intFromEnum(err)},
+            .{@backingInt(err)},
         );
     }
 

@@ -240,8 +240,8 @@ pub const Stage = enum {
 /// presents it with focus.
 pub fn advance(host: *Host, comptime at: Stage) !(if (at == .before_show) bool else void) {
     const pending = if (host.pending_start) |*start| start else return error.NoWindowStart;
-    std.debug.assert(pending.reached == null or @intFromEnum(pending.reached.?) < @intFromEnum(at));
-    std.debug.assert(@intFromEnum(at) < @intFromEnum(Stage.restore_placed) or pending.plan.kind == .restore);
+    std.debug.assert(pending.reached == null or @backingInt(pending.reached.?) < @backingInt(at));
+    std.debug.assert(@backingInt(at) < @backingInt(Stage.restore_placed) or pending.plan.kind == .restore);
     const last: Stage = if (pending.plan.kind == .restore) .restore_complete else .after_show;
     defer {
         if (at == last) host.pending_start = null;
@@ -4052,16 +4052,16 @@ test "win32 a light/dark change and its reload apply each window's opacity once,
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background-opacity = 0.6\nsplit-divider-color = #102030\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background-opacity = 0.8\nsplit-divider-color = #405060\n" });
-            const light = try tmp.dir.realpathAlloc(alloc, "light");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "background-opacity = 0.6\nsplit-divider-color = #102030\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "background-opacity = 0.8\nsplit-divider-color = #405060\n" });
+            const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
             defer alloc.free(light);
-            const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+            const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
             defer alloc.free(dark);
             const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nwindow-theme = system\n", .{ light, dark });
             defer alloc.free(text);
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-            const path = try tmp.dir.realpathAlloc(alloc, "config");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
             defer alloc.free(path);
             const loaded = try load(alloc, path);
             app.config.deinit();

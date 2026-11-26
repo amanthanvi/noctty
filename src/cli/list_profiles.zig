@@ -723,20 +723,20 @@ test "list-profiles applies the color scheme Windows reports before it asks disc
     // the main file sets none of them. `Config.load` leaves the config in
     // the light state, so without the scheme a dark desktop lists the light
     // theme's profiles.
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "profile-hidden = cmd\nssh-config-hosts = true\nvisual-studio-profiles = none\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "profile-hidden = cmd\nssh-config-hosts = true\nvisual-studio-profiles = none\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dark",
         .data = "profile-command = darkonly: cmd.exe /k dark\nprofile-order = darkonly\n" ++
             "profile-hidden = pwsh\nprofile-hidden = wsl\nssh-config-hosts = false\nvisual-studio-profiles = all\n",
     });
-    const light_path = try tmp.dir.realpathAlloc(alloc, "light");
+    const light_path = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light_path);
-    const dark_path = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark_path = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark_path);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light_path, dark_path });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = text });
-    const main_path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "main.ghostty", .data = text });
+    const main_path = try tmp.dir.realPathFileAlloc(std.testing.io, "main.ghostty", alloc);
     defer alloc.free(main_path);
 
     var config = try configpkg.Config.default(alloc);

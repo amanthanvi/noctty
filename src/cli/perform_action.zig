@@ -115,7 +115,7 @@ fn runArgsWithPerform(
             return actionpkg.help_error;
         }
         if (std.mem.cutPrefix(u8, arg, "--class=")) |class| {
-            opts.class = try opts_alloc.dupeZ(u8, std.mem.trim(u8, class, &std.ascii.whitespace));
+            opts.class = try opts_alloc.dupeSentinel(u8, std.mem.trim(u8, class, &std.ascii.whitespace), 0);
             continue;
         }
         if (std.mem.cutPrefix(u8, arg, "--surface-id=")) |raw| {

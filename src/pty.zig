@@ -1421,7 +1421,7 @@ test "handoff visibility resize and close share the signal lock" {
 fn saveConPtyEnvForTest(alloc: std.mem.Allocator) !?[:0]u8 {
     const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_CONPTY") catch return null;
     defer alloc.free(raw);
-    return try alloc.dupeZ(u8, raw);
+    return try alloc.dupeSentinel(u8, raw, 0);
 }
 
 fn restoreConPtyEnvForTest(original: ?[:0]const u8) void {
@@ -1634,7 +1634,7 @@ test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
 
     // What a source build that could not download the pair runs into.
@@ -1645,7 +1645,7 @@ test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
     );
 
     // A conpty.dll that is there but does not load is not "missing".
-    try tmp.dir.writeFile(.{ .sub_path = "conpty.dll", .data = "stale" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "conpty.dll", .data = "stale" });
     try testing.expectError(error.LoadFailed, WindowsConPty.loadBundledFrom(dir));
 }
 
@@ -1886,7 +1886,7 @@ test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     // stand-in (and keep the cleanup from deleting a mapped image).
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
     const conpty_path = try std.fs.path.join(testing.allocator, &.{ dir, "conpty.dll" });
     defer testing.allocator.free(conpty_path);

@@ -91,7 +91,7 @@ pub const SettingValue = value: {
     var names: [tags.field_names.len][]const u8 = undefined;
     var types: [tags.field_names.len]type = undefined;
     for (tags.field_names, tags.field_values, &names, &types) |tag_name, tag_value, *name, *T| {
-        const field: SettingField = @enumFromInt(tag_value);
+        const field: SettingField = @fromBackingInt(@intCast(tag_value));
         const spec = descriptor(field);
         T.* = if (projection(field)) |part| @FieldType(spec.Value(), part.member) else spec.Value();
         name.* = tag_name;

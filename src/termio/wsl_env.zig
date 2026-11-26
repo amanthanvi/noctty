@@ -145,7 +145,7 @@ pub fn cmdAutoRunAbsent() bool {
 fn cmdAutoRunAbsentWithQuery(query: anytype) bool {
     for ([_]windows.HKEY{ windows.HKEY_CURRENT_USER, windows.HKEY_LOCAL_MACHINE }) |root| {
         for ([_]windows.DWORD{ windows.advapi32.RRF.SUBKEY_WOW6432KEY, windows.advapi32.RRF.SUBKEY_WOW6464KEY }) |view| {
-            if (query(root, view) != @intFromEnum(windows.Win32Error.FILE_NOT_FOUND)) return false;
+            if (query(root, view) != @backingInt(windows.Win32Error.FILE_NOT_FOUND)) return false;
         }
     }
     return true;
@@ -163,7 +163,7 @@ fn splitWords(alloc: Allocator, line: []const u8) Allocator.Error![]const [:0]co
             quoted = !quoted;
             in_word = true;
         } else if (!quoted and std.ascii.isWhitespace(c)) {
-            if (in_word) try out.append(alloc, try alloc.dupeZ(u8, word.items));
+            if (in_word) try out.append(alloc, try alloc.dupeSentinel(u8, word.items, 0));
             word.clearRetainingCapacity();
             in_word = false;
         } else {
@@ -171,7 +171,7 @@ fn splitWords(alloc: Allocator, line: []const u8) Allocator.Error![]const [:0]co
             in_word = true;
         }
     }
-    if (in_word) try out.append(alloc, try alloc.dupeZ(u8, word.items));
+    if (in_word) try out.append(alloc, try alloc.dupeSentinel(u8, word.items, 0));
     return out.toOwnedSlice(alloc);
 }
 
@@ -311,7 +311,7 @@ fn readDefaultDistribution() ?DefaultDistribution {
 fn defaultDistributionWithQuery(query: anytype) ?DefaultDistribution {
     var buf: [39]u16 = @splat(0);
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-    if (query(&buf, &bytes) != @intFromEnum(windows.Win32Error.SUCCESS) or
+    if (query(&buf, &bytes) != @backingInt(windows.Win32Error.SUCCESS) or
         bytes != @sizeOf(@TypeOf(buf)) or buf[38] != 0) return null;
     // WSL stores a braced GUID. Validate before using it as an identity,
     // including rejecting embedded NULs and truncated registry strings.
@@ -354,7 +354,7 @@ fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
 fn distributionNameWithQuery(alloc: Allocator, key: [*:0]const u16, query: anytype) ?[]u8 {
     var buf: [257]u16 = @splat(0);
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
-    if (query(key, &buf, &bytes) != @intFromEnum(windows.Win32Error.SUCCESS) or
+    if (query(key, &buf, &bytes) != @backingInt(windows.Win32Error.SUCCESS) or
         bytes < 4 or bytes > @sizeOf(@TypeOf(buf)) or bytes % 2 != 0) return null;
     const len = bytes / 2 - 1;
     if (buf[len] != 0) return null;
@@ -643,7 +643,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
     defer arena.deinit();
     const temp = arena.allocator();
     const args = temp.alloc([:0]const u8, probe.len) catch return null;
-    for (probe, args) |arg, *dest| dest.* = temp.dupeZ(u8, arg) catch return null;
+    for (probe, args) |arg, *dest| dest.* = temp.dupeSentinel(u8, arg, 0) catch return null;
     var sa: windows.SECURITY_ATTRIBUTES = .{
         .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
         .bInheritHandle = windows.TRUE,
@@ -909,7 +909,7 @@ test "CMD AutoRun must be absent in both hives and registry views" {
         fn query(_: windows.HKEY, _: windows.DWORD) windows.LSTATUS {
             defer calls += 1;
             if (bad_call == calls) return status;
-            return @intFromEnum(windows.Win32Error.FILE_NOT_FOUND);
+            return @backingInt(windows.Win32Error.FILE_NOT_FOUND);
         }
     };
     Queries.calls = 0;
@@ -917,7 +917,7 @@ test "CMD AutoRun must be absent in both hives and registry views" {
     try std.testing.expect(cmdAutoRunAbsentWithQuery(Queries.query));
     try std.testing.expectEqual(@as(usize, 4), Queries.calls);
     for (0..4) |bad| {
-        for ([_]windows.LSTATUS{ 0, @intFromEnum(windows.Win32Error.ACCESS_DENIED) }) |status| {
+        for ([_]windows.LSTATUS{ 0, @backingInt(windows.Win32Error.ACCESS_DENIED) }) |status| {
             Queries.calls = 0;
             Queries.bad_call = bad;
             Queries.status = status;
@@ -1167,7 +1167,7 @@ test "WSLCACHE registry query rejects errors and malformed default IDs" {
     Query.status = 0;
     try std.testing.expectEqual(Query.id[0..38].*, defaultDistributionWithQuery(Query.query));
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
-        Query.status = @intFromEnum(err);
+        Query.status = @backingInt(err);
         try std.testing.expectEqual(null, defaultDistributionWithQuery(Query.query));
     }
     Query.status = 0;
@@ -1208,7 +1208,7 @@ test "WSLCACHE registry name query validates strings without starting WSL" {
     defer alloc.free(actual);
     try std.testing.expectEqualStrings("Ubuntu-24.04_amd64", actual);
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
-        Query.status = @intFromEnum(err);
+        Query.status = @backingInt(err);
         try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
     }
     Query.status = 0;
@@ -1456,7 +1456,7 @@ test "WSLCACHE runProbe treats exit minus one as unanswered" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     var env = try std.process.getEnvMap(alloc);
     defer env.deinit();
@@ -1600,8 +1600,8 @@ test "WSL guarded paths map DOS roots without an unchecked fallback" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
-    const path = try tmp.dir.realpathAlloc(alloc, "safe.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "safe.txt", .data = "safe" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "safe.txt", alloc);
     defer alloc.free(path);
     os_windows.TestHooks.direct_volume_mapping = Reject.map;
     defer os_windows.TestHooks.direct_volume_mapping = null;
@@ -1610,7 +1610,7 @@ test "WSL guarded paths map DOS roots without an unchecked fallback" {
     try std.testing.expect(localPathState(path) != .safe);
     os_windows.TestHooks.direct_volume_mapping = null;
     try std.testing.expectEqual(LocalPath.safe, localPathState(path));
-    try tmp.dir.deleteFile("safe.txt");
+    try tmp.dir.deleteFile(std.testing.io, "safe.txt");
     try std.testing.expectEqual(LocalPath.missing, localPathState(path));
 }
 
@@ -1624,8 +1624,8 @@ test "WSL executable probe enters production DOS mapping" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "wsl.exe", .data = "not executed" });
-    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wsl.exe", .data = "not executed" });
+    const cwd = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     var env = EnvMap.init(alloc);
     defer env.deinit();
@@ -1651,7 +1651,7 @@ test "localExecutable refuses remote device and ambiguous search paths" {
     const alloc = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     var env = EnvMap.init(alloc);
     defer env.deinit();
@@ -1666,8 +1666,8 @@ test "localExecutable refuses remote device and ambiguous search paths" {
 
     // An empty opt-out is still set. Even with a cwd executable planted,
     // the probe follows CMD to PATH (unsafe here, so it gives up).
-    var planted = try td.dir.createFile("wsl.exe", .{});
-    planted.close();
+    var planted = try td.dir.createFile(std.testing.io, "wsl.exe", .{});
+    planted.close(std.testing.io);
     try env.put("NoDefaultCurrentDirectoryInExePath", "");
     try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
 
@@ -1689,18 +1689,18 @@ test "probe paths refuse ancestor and final symlinks without following them" {
     const alloc = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    try td.dir.makeDir("target");
-    var exe_file = try td.dir.createFile("target/wsl.exe", .{});
-    exe_file.close();
-    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    try td.dir.createDir(std.testing.io, "target", .default_dir);
+    var exe_file = try td.dir.createFile(std.testing.io, "target/wsl.exe", .{});
+    exe_file.close(std.testing.io);
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     const target = try std.fs.path.join(alloc, &.{ cwd, "target" });
     defer alloc.free(target);
-    td.dir.symLink(target, "link", .{ .is_directory = true }) catch |err| switch (err) {
+    td.dir.symLink(std.testing.io, target, "link", .{ .is_directory = true }) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
-    try td.dir.symLink("target/wsl.exe", "wsl.exe", .{});
+    try td.dir.symLink(std.testing.io, "target/wsl.exe", "wsl.exe", .{});
     const good = try std.fs.path.join(alloc, &.{ target, "wsl.exe" });
     defer alloc.free(good);
     const linked_dir = try std.fs.path.join(alloc, &.{ cwd, "link" });
@@ -1726,16 +1726,16 @@ test "runProbe does not execute a PATHEXT sibling of a missing exe" {
     const alloc = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
-    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(cwd);
     const exe = try std.fs.path.join(alloc, &.{ cwd, "wsl.exe" });
     defer alloc.free(exe);
-    var script = try td.dir.createFile("wsl.exe.cmd", .{});
+    var script = try td.dir.createFile(std.testing.io, "wsl.exe.cmd", .{});
     try script.writeAll("@echo off\r\necho executed>probe-executed.txt\r\nexit /b 0\r\n");
-    script.close();
+    script.close(std.testing.io);
     var env = try std.process.getEnvMap(alloc);
     defer env.deinit();
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
     try std.testing.expectEqual(null, runProbe(alloc, &env, &.{ exe, "--exec", "infocmp", "xterm-ghostty" }, cwd));
-    try std.testing.expectError(error.FileNotFound, td.dir.access("probe-executed.txt", .{}));
+    try std.testing.expectError(error.FileNotFound, td.dir.access(std.testing.io, "probe-executed.txt", .{}));
 }

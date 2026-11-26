@@ -626,13 +626,13 @@ fn ownedEditChanged(comptime field: OwnedSettingField, comptime binding: []const
     }.changed;
 }
 fn display_edit_font_family(self: *SettingsWindow) void {
-    if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]) self.displayFontFamilyInEdit();
+    if (!self.owned_text_changed[@backingInt(OwnedSettingField.font_family)]) self.displayFontFamilyInEdit();
 }
 fn display_edit_theme(self: *SettingsWindow) void {
-    if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.theme)]) self.displayThemeInEdit();
+    if (!self.owned_text_changed[@backingInt(OwnedSettingField.theme)]) self.displayThemeInEdit();
 }
 fn display_edit_command(self: *SettingsWindow) void {
-    if (!self.owned_text_changed[@intFromEnum(OwnedSettingField.command)]) self.displayCommandInEdit();
+    if (!self.owned_text_changed[@backingInt(OwnedSettingField.command)]) self.displayCommandInEdit();
 }
 /// A dropdown whose items are the field's curated `Combo` options.
 fn comboAdapter(comptime field: SettingField) FieldAdapter {
@@ -1561,7 +1561,7 @@ fn formItemCount(section: Section) usize {
     return count;
 }
 fn formItemsForSection(section: Section) []const FormItem {
-    return section_form_items[@intFromEnum(section)][0..formItemCount(section)];
+    return section_form_items[@backingInt(section)][0..formItemCount(section)];
 }
 const settings_max_form_items = maximum: {
     var result: usize = 0;
@@ -3149,10 +3149,10 @@ pub const SettingsWindow = struct {
     fn pendingFieldCount(self: *const SettingsWindow) usize {
         var fields = @as([setting_field_count]bool, @splat(false));
         if (self.transaction) |transaction| for (transaction.entries) |entry| {
-            fields[@intFromEnum(entry.field)] = entry.dirty or entry.conflict;
+            fields[@backingInt(entry.field)] = entry.dirty or entry.conflict;
         };
         for (std.enums.values(RawScalarField)) |field| {
-            if (self.raw_scalar_dirty[@intFromEnum(field)]) fields[@intFromEnum(field.setting())] = true;
+            if (self.raw_scalar_dirty[@backingInt(field)]) fields[@backingInt(field.setting())] = true;
         }
         var count: usize = self.profileChangeCount() + @intFromBool(self.profileEditTypedInto());
         for (fields) |changed| count += @intFromBool(changed);
@@ -3272,11 +3272,11 @@ pub const SettingsWindow = struct {
     }
 
     fn markRawScalarEdit(self: *SettingsWindow, field: RawScalarField) void {
-        self.raw_scalar_dirty[@intFromEnum(field)] = true;
+        self.raw_scalar_dirty[@backingInt(field)] = true;
     }
 
     fn finishRawScalarEdit(self: *SettingsWindow, field: RawScalarField) void {
-        const index = @intFromEnum(field);
+        const index = @backingInt(field);
         self.raw_scalar_error[index] = null;
         self.raw_scalar_shown[index] = false;
         if (self.active_raw_validation == field) {
@@ -3296,7 +3296,7 @@ pub const SettingsWindow = struct {
     }
 
     fn shouldRefreshRawScalar(self: *const SettingsWindow, field: RawScalarField) bool {
-        return !self.raw_scalar_dirty[@intFromEnum(field)];
+        return !self.raw_scalar_dirty[@backingInt(field)];
     }
 
     fn setValidationError(self: *SettingsWindow, control: HWND, message: []const u8) void {
@@ -3321,7 +3321,7 @@ pub const SettingsWindow = struct {
         control: HWND,
         message: []const u8,
     ) void {
-        const index = @intFromEnum(field);
+        const index = @backingInt(field);
         self.raw_scalar_error[index] = message;
         if (self.raw_scalar_shown[index]) {
             self.active_raw_validation = field;
@@ -3349,7 +3349,7 @@ pub const SettingsWindow = struct {
     fn showRawScalarErrors(self: *SettingsWindow, only: ?RawScalarField) void {
         var changed = false;
         for (std.enums.values(RawScalarField)) |field| {
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (only != null and only.? != field) continue;
             if (self.raw_scalar_error[index] == null or self.raw_scalar_shown[index]) continue;
             self.raw_scalar_shown[index] = true;
@@ -3377,11 +3377,11 @@ pub const SettingsWindow = struct {
 
     fn nextRawScalarValidation(self: *const SettingsWindow) ?RawScalarField {
         if (self.active_raw_validation) |field| {
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (self.raw_scalar_error[index] != null and self.raw_scalar_shown[index]) return field;
         }
         for (std.enums.values(RawScalarField)) |field| {
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (self.raw_scalar_error[index] != null and self.raw_scalar_shown[index]) return field;
         }
         return null;
@@ -3433,21 +3433,21 @@ pub const SettingsWindow = struct {
         var markers = @as([section_count]Marker, @splat(.none));
         const Mark = struct {
             fn at(all: *[section_count]Marker, section: Section, marker: Marker) void {
-                const slot = &all[@intFromEnum(section)];
-                if (@intFromEnum(marker) > @intFromEnum(slot.*)) slot.* = marker;
+                const slot = &all[@backingInt(section)];
+                if (@backingInt(marker) > @backingInt(slot.*)) slot.* = marker;
             }
         };
         if (self.transaction) |transaction| for (transaction.entries) |entry| {
             if (entry.dirty or entry.conflict) Mark.at(&markers, self.settingDestination(entry.field).section, .unsaved);
         };
         for (std.enums.values(RawScalarField)) |field| {
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (self.raw_scalar_dirty[index]) Mark.at(&markers, field.section(), .unsaved);
             if (self.raw_scalar_error[index] != null and self.raw_scalar_shown[index]) Mark.at(&markers, field.section(), .invalid);
         }
         if (self.profileDraftDiffers()) Mark.at(&markers, .profiles, .unsaved);
         for (std.enums.values(OwnedSettingField)) |field| {
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (self.owned_text_changed[index] or self.owned_dirty[index] or self.owned_conflict[index]) {
                 Mark.at(&markers, field.section(), .unsaved);
             }
@@ -3461,7 +3461,7 @@ pub const SettingsWindow = struct {
     /// Whether `field`'s control is showing an error now.
     fn fieldIsInvalid(self: *const SettingsWindow, control: HWND) bool {
         for (std.enums.values(RawScalarField)) |field| {
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (self.rawScalarEdit(field) == control) return self.raw_scalar_error[index] != null and self.raw_scalar_shown[index];
         }
         return self.owned_validation_control == control;
@@ -3473,7 +3473,7 @@ pub const SettingsWindow = struct {
     fn syncMarkers(self: *SettingsWindow) void {
         const markers = self.sectionMarkers();
         for (std.enums.values(Section)) |section| {
-            const index = @intFromEnum(section);
+            const index = @backingInt(section);
             if (markers[index] == self.section_markers[index]) continue;
             self.section_markers[index] = markers[index];
             if (self.sectionProvider(section)) |provider| provider.setMarker(markers[index]);
@@ -3510,7 +3510,7 @@ pub const SettingsWindow = struct {
         // Typed text reaches the draft when the field loses focus. Until then
         // the field says what it holds: a blank default is differed from by
         // any text.
-        if (self.owned_text_changed[@intFromEnum(owned)] and ownedSettingBlank(defaults, owned)) {
+        if (self.owned_text_changed[@backingInt(owned)] and ownedSettingBlank(defaults, owned)) {
             if (self.ownedEdit(owned)) |edit| return editHoldsText(edit, if (owned == .font_family) " \t," else " \t");
         }
         return !ownedSettingEql(pending, defaults, owned);
@@ -3524,11 +3524,11 @@ pub const SettingsWindow = struct {
         if (self.rowDiffersFromDefault(row)) return true;
         if (comptime row.field) |field| {
             inline for (comptime std.enums.values(RawScalarField)) |raw| {
-                if (comptime raw.setting() == field) return self.raw_scalar_dirty[@intFromEnum(raw)];
+                if (comptime raw.setting() == field) return self.raw_scalar_dirty[@backingInt(raw)];
             }
             return false;
         }
-        return self.owned_text_changed[@intFromEnum(comptime ownedFieldFor(row.descriptor.key))];
+        return self.owned_text_changed[@backingInt(comptime ownedFieldFor(row.descriptor.key))];
     }
 
     /// What the file holds now (`current`, the last config read from it):
@@ -3543,7 +3543,7 @@ pub const SettingsWindow = struct {
             const transaction = if (self.transaction) |*value| value else return false;
             return (transaction.entryConst(field) orelse return false).dirty;
         }
-        return self.owned_dirty[@intFromEnum(comptime ownedFieldFor(row.descriptor.key))];
+        return self.owned_dirty[@backingInt(comptime ownedFieldFor(row.descriptor.key))];
     }
 
     /// Bring every row's "differs from its default" cue up to date: the bar
@@ -3824,7 +3824,7 @@ pub const SettingsWindow = struct {
     fn rowOfWindow(self: *const SettingsWindow, hwnd: HWND) ?usize {
         if (self.resetButtonIndex(hwnd)) |index| return index;
         inline for (comptime std.enums.values(Companion)) |kind| {
-            if (self.companions[@intFromEnum(kind)] == hwnd) return comptime kind.controlIndex();
+            if (self.companions[@backingInt(kind)] == hwnd) return comptime kind.controlIndex();
         }
         for (self.formItems()) |item| {
             if (item.control_index >= form_field_count) continue;
@@ -3838,7 +3838,7 @@ pub const SettingsWindow = struct {
     /// its control.
     fn rowEnd(self: *const SettingsWindow, index: usize) ?HWND {
         if (Companion.ofControl(index)) |kind| if (kind != .opacity_slider) {
-            if (self.companions[@intFromEnum(kind)]) |spin| return spin;
+            if (self.companions[@backingInt(kind)]) |spin| return spin;
         };
         return self.controlHwnd(index);
     }
@@ -3846,7 +3846,7 @@ pub const SettingsWindow = struct {
     /// Row `index`'s trackbar or up-down, if it has one.
     fn companionOf(self: *const SettingsWindow, index: usize) ?HWND {
         const kind = Companion.ofControl(index) orelse return null;
-        return self.companions[@intFromEnum(kind)];
+        return self.companions[@backingInt(kind)];
     }
 
     /// Where row `index` starts (viewport client coordinates): at its
@@ -3854,7 +3854,7 @@ pub const SettingsWindow = struct {
     /// whose rectangle is `control`.
     fn rowLeft(self: *const SettingsWindow, viewport: HWND, index: usize, control: RECT) i32 {
         if (Companion.ofControl(index) != .opacity_slider) return control.left;
-        const slider = self.companions[@intFromEnum(Companion.opacity_slider)] orelse return control.left;
+        const slider = self.companions[@backingInt(Companion.opacity_slider)] orelse return control.left;
         const rect = childRectIn(viewport, slider) orelse return control.left;
         return @min(rect.left, control.left);
     }
@@ -3909,7 +3909,7 @@ pub const SettingsWindow = struct {
             // Nothing here can fail: the values are copied, not allocated.
             // A half-typed number goes with its error: the field shows the default.
             inline for (comptime std.enums.values(RawScalarField)) |raw| {
-                if (comptime raw.setting() == field) if (self.raw_scalar_dirty[@intFromEnum(raw)]) self.finishRawScalarEdit(raw);
+                if (comptime raw.setting() == field) if (self.raw_scalar_dirty[@backingInt(raw)]) self.finishRawScalarEdit(raw);
             }
             if (self.hasConflict(field)) self.resolveConflict(field, .keep_mine);
             setSettingValue(pending, resetSettingValue(self.fileConfig(), defaults, field));
@@ -3926,7 +3926,7 @@ pub const SettingsWindow = struct {
                 return self.setResetNote(row, .reset_failed);
             };
             prepared.store(pending, original);
-            self.owned_text_changed[@intFromEnum(owned)] = false;
+            self.owned_text_changed[@backingInt(owned)] = false;
             if (self.ownedEdit(owned)) |control| self.clearValidationError(control);
             self.refreshOwnedControl(owned);
             self.trackOwnedEdit(owned);
@@ -4015,7 +4015,7 @@ pub const SettingsWindow = struct {
                 const destination = self.rawScalarDestination(field);
                 self.active_raw_validation = field;
                 self.validation_control = destination.hwnd;
-                self.setErrorStatus(self.raw_scalar_error[@intFromEnum(field)].?);
+                self.setErrorStatus(self.raw_scalar_error[@backingInt(field)].?);
                 if (focus) if (destination.hwnd) |control| {
                     self.revealControl(destination.section, control);
                     _ = SetFocus(control);
@@ -4054,7 +4054,7 @@ pub const SettingsWindow = struct {
         // No draft to stage it in (`owes_draft`): its controls are held, and
         // nothing is recorded.
         if (self.owes_draft) return;
-        self.owned_text_changed[@intFromEnum(field)] = true;
+        self.owned_text_changed[@backingInt(field)] = true;
         self.clearValidationError(control);
         // Font family, theme and default command are only read at save.
         self.status_note = .applies_on_save;
@@ -4068,7 +4068,7 @@ pub const SettingsWindow = struct {
         const current = &(self.current orelse return);
         const original = &(self.original orelse return);
         const pending = &(self.pending orelse return);
-        const index = @intFromEnum(field);
+        const index = @backingInt(field);
         self.owned_text_changed[index] = false;
 
         if (ownedSettingEql(pending, original, field)) {
@@ -4128,7 +4128,7 @@ pub const SettingsWindow = struct {
     pub fn externalConfigChanged(self: *SettingsWindow, config: *const Config, revision: u64) void {
         const transaction = &(self.transaction orelse return);
         for (std.enums.values(OwnedSettingField)) |field| {
-            if (self.owned_text_changed[@intFromEnum(field)]) self.syncOwnedControl(field);
+            if (self.owned_text_changed[@backingInt(field)]) self.syncOwnedControl(field);
         }
         var replacement = config.clone(self.handle.alloc) catch |err| {
             // Taken in once it can be (`retryRefresh`), rather than never.
@@ -4170,7 +4170,7 @@ pub const SettingsWindow = struct {
         const baselines = &self.profile_baselines.?;
         for (std.enums.values(OwnedSettingField)) |field| {
             if (ownedSettingEql(previous_current, &replacement, field)) continue;
-            const index = @intFromEnum(field);
+            const index = @backingInt(field);
             if (self.owned_dirty[index] or self.owned_text_changed[index]) {
                 self.owned_conflict[index] =
                     !ownedSettingEql(original, &replacement, field) and
@@ -4360,7 +4360,7 @@ pub const SettingsWindow = struct {
         self.active_conflict_field = next;
         var next_owned: ?OwnedSettingField = null;
         if (next == null) for (std.enums.values(OwnedSettingField)) |field| {
-            if (self.owned_conflict[@intFromEnum(field)]) {
+            if (self.owned_conflict[@backingInt(field)]) {
                 next_owned = field;
                 break;
             }
@@ -4408,7 +4408,7 @@ pub const SettingsWindow = struct {
     }
 
     fn resolveOwnedConflict(self: *SettingsWindow, field: OwnedSettingField, resolution: ConflictResolution) void {
-        const index = @intFromEnum(field);
+        const index = @backingInt(field);
         self.status_note = .none;
         if (resolution == .keep_mine and self.owned_text_changed[index]) {
             self.syncOwnedControl(field);
@@ -4738,16 +4738,16 @@ pub const SettingsWindow = struct {
                     page_keys.set(key);
                     form_keys.set(key);
                 } else not_keys += 1;
-                self.search_counts[@intFromEnum(section)] += 1;
+                self.search_counts[@backingInt(section)] += 1;
             }
         }
         // Each binding on the Keybindings page counts once more: it is a
         // `keybind` line of its own. So does each row of the Profiles page,
         // a profile or one of its fields.
         const bindings_found = self.findKeybindRows();
-        self.search_counts[@intFromEnum(Section.keybindings)] += bindings_found;
+        self.search_counts[@backingInt(Section.keybindings)] += bindings_found;
         const profiles_found = self.findProfileRows();
-        self.search_counts[@intFromEnum(Section.profiles)] += profiles_found;
+        self.search_counts[@backingInt(Section.profiles)] += profiles_found;
         self.ensureReferenceModel();
         if (!self.reference_model.built()) {
             self.reference_found = @splat(false);
@@ -4759,7 +4759,7 @@ pub const SettingsWindow = struct {
             found.* = self.referenceFinds(key);
             if (found.*) keys_found += 1;
         }
-        self.search_counts[@intFromEnum(Section.reference)] = keys_found;
+        self.search_counts[@backingInt(Section.reference)] = keys_found;
         self.search_total = keys_found + not_keys + bindings_found + profiles_found;
     }
 
@@ -4879,7 +4879,7 @@ pub const SettingsWindow = struct {
     /// search.
     fn searchCountOf(self: *const SettingsWindow, section: Section) ?u16 {
         if (!self.search_query.active()) return null;
-        return self.search_counts[@intFromEnum(section)];
+        return self.search_counts[@backingInt(section)];
     }
 
     /// Tell each rail button how many rows the search found on its page, or
@@ -4888,7 +4888,7 @@ pub const SettingsWindow = struct {
     fn syncSearchCounts(self: *SettingsWindow) void {
         const active = self.search_query.active();
         for (std.enums.values(Section)) |section| {
-            const count: ?u16 = if (active) self.search_counts[@intFromEnum(section)] else null;
+            const count: ?u16 = if (active) self.search_counts[@backingInt(section)] else null;
             if (self.sectionProvider(section)) |provider| provider.setSearchCount(count);
             if (self.sectionButton(section)) |button| _ = InvalidateRect(button, null, 0);
         }
@@ -5033,7 +5033,7 @@ pub const SettingsWindow = struct {
         // The field the focus lands on is spoken; the count would follow it.
         self.killSearchAnnounce();
         self.showKeyboardCues();
-        if (self.search_counts[@intFromEnum(self.active_section)] == 0) {
+        if (self.search_counts[@backingInt(self.active_section)] == 0) {
             if (firstPageWithMatches(&self.search_counts)) |section| self.showSection(section, true);
             // With `@modified` the counts were the last pass's; the switch
             // found again, and the first page may have none now.
@@ -5180,7 +5180,7 @@ pub const SettingsWindow = struct {
     }
 
     fn sectionProvider(self: *const SettingsWindow, section: Section) ?*win32_uia.SettingsSectionProvider {
-        return self.section_uia_providers[@intFromEnum(section)];
+        return self.section_uia_providers[@backingInt(section)];
     }
 
     fn sectionForButton(self: *const SettingsWindow, hwnd: HWND) ?Section {
@@ -5210,16 +5210,16 @@ pub const SettingsWindow = struct {
                 std.heap.page_allocator,
                 button,
                 section.headerText(),
-                @intFromEnum(section),
+                @backingInt(section),
                 group,
             ) catch |err| {
                 std.log.warn("settings section UIA provider unavailable section={s} err={}", .{ section.headerText(), err });
                 continue;
             };
-            self.section_uia_providers[@intFromEnum(section)] = provider;
-            group.setSection(@intFromEnum(section), provider);
+            self.section_uia_providers[@backingInt(section)] = provider;
+            group.setSection(@backingInt(section), provider);
         }
-        group.setSelected(@intFromEnum(self.active_section));
+        group.setSelected(@backingInt(self.active_section));
     }
 
     fn subclassSectionButtons(self: *SettingsWindow) void {
@@ -5313,7 +5313,7 @@ pub const SettingsWindow = struct {
         self.syncDefaultMarksShowing(false);
         // Neither list page holds a Reset button.
         if (next == .reference or next == .profiles) self.destroyResetSpares();
-        if (self.section_uia_group) |group| group.setSelected(@intFromEnum(next));
+        if (self.section_uia_group) |group| group.setSelected(@backingInt(next));
         self.content_scroll_y = 0;
         self.refreshNativeSectionText();
         layoutChildren(self);
@@ -5936,7 +5936,7 @@ pub const SettingsWindow = struct {
         // The Keybindings page's list scrolls with the page's rows when the
         // page is too short for it.
         var is_form_control = (self.keybind_list.hwnd != null and control == self.keybind_list.hwnd.?) or
-            self.companions[@intFromEnum(Companion.opacity_slider)] == control;
+            self.companions[@backingInt(Companion.opacity_slider)] == control;
         for (self.formItems()) |item| {
             const reset = if (item.control_index < form_field_count) self.reset_buttons[item.control_index] else null;
             if (self.controlHwnd(item.control_index) == control or reset == control) {
@@ -5988,7 +5988,7 @@ pub const SettingsWindow = struct {
         for (self.reset_buttons, 0..) |button, index| if (button) |control| {
             setChildShown(control, active.controls[index] and self.differs_from_default[index]);
         };
-        inline for (comptime std.enums.values(Companion)) |kind| if (self.companions[@intFromEnum(kind)]) |control| {
+        inline for (comptime std.enums.values(Companion)) |kind| if (self.companions[@backingInt(kind)]) |control| {
             setChildShown(control, active.controls[comptime kind.controlIndex()]);
         };
         if (self.reference_list.hwnd) |list| setChildShown(list, self.referenceListShows());
@@ -6072,7 +6072,7 @@ pub const SettingsWindow = struct {
             else => sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("msctls_updown32"), std.unicode.utf8ToUtf16LeStringLiteral(""), WS_CHILD | WS_GROUP | UDS_ARROWKEYS | UDS_HOTTRACK | UDS_NOTHOUSANDS | shown, 0, 0, 1, 1, form, null, hinstance, null),
         };
         const control = self.finishChild(window, null, .control) orelse return;
-        self.companions[@intFromEnum(kind)] = control;
+        self.companions[@backingInt(kind)] = control;
         if (kind == .opacity_slider) subclassKeepingPrevious(control, &settingsSliderProc);
         if (kind != .opacity_slider and paintsOwnSpins(self.handle.os_build)) subclassKeepingPrevious(control, &settingsSpinProc);
         switch (kind) {
@@ -6108,7 +6108,7 @@ pub const SettingsWindow = struct {
     /// range). Setting either sends nothing back.
     fn syncCompanion(self: *SettingsWindow, comptime field: RawScalarField) void {
         const kind = comptime Companion.of(field) orelse return;
-        const control = self.companions[@intFromEnum(kind)] orelse return;
+        const control = self.companions[@backingInt(kind)] orelse return;
         const p = self.pending orelse return;
         const value = numberAsF64(fieldValue(&p, field.setting()));
         switch (kind) {
@@ -6173,7 +6173,7 @@ pub const SettingsWindow = struct {
     /// and the preview, with the preview's floor), unless the field already
     /// says that, as "0.875" at 88 does.
     fn sliderMoved(self: *SettingsWindow) void {
-        const slider = self.companions[@intFromEnum(Companion.opacity_slider)] orelse return;
+        const slider = self.companions[@backingInt(Companion.opacity_slider)] orelse return;
         const edit = self.rawScalarEdit(.background_opacity) orelse return;
         const position: i32 = @intCast(SendMessageW(slider, TBM_GETPOS, 0, 0));
         if (self.typedValue(.background_opacity)) |value| if (sliderPosition(value) == position) return;
@@ -6222,19 +6222,19 @@ pub const SettingsWindow = struct {
         const header: *const NMHDR = @ptrFromInt(@as(usize, @bitCast(lParam)));
         const from = header.hwndFrom orelse return null;
         if (@as(i32, @bitCast(header.code)) == NM_CUSTOMDRAW) {
-            if (self.companions[@intFromEnum(Companion.opacity_slider)] != from) return null;
+            if (self.companions[@backingInt(Companion.opacity_slider)] != from) return null;
             return self.sliderCustomDraw(@ptrFromInt(@as(usize, @bitCast(lParam))));
         }
         if (@as(i32, @bitCast(header.code)) != UDN_DELTAPOS) return null;
         const change: *const NMUPDOWN = @ptrFromInt(@as(usize, @bitCast(lParam)));
         inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
-            if (self.companions[@intFromEnum(kind)] == from) return self.spinStep(kind, change.delta);
+            if (self.companions[@backingInt(kind)] == from) return self.spinStep(kind, change.delta);
         }
         return null;
     }
 
     fn syncFontFamilyFromEdit(self: *SettingsWindow) void {
-        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]) return;
+        if (self.suppress_edit_events or !self.owned_text_changed[@backingInt(OwnedSettingField.font_family)]) return;
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.fields.edit_font_family orelse return;
@@ -6260,7 +6260,7 @@ pub const SettingsWindow = struct {
     }
 
     fn syncThemeFromEdit(self: *SettingsWindow) void {
-        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.theme)]) return;
+        if (self.suppress_edit_events or !self.owned_text_changed[@backingInt(OwnedSettingField.theme)]) return;
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.fields.edit_theme orelse return;
@@ -6293,7 +6293,7 @@ pub const SettingsWindow = struct {
     }
 
     fn syncCommandFromEdit(self: *SettingsWindow) void {
-        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.command)]) return;
+        if (self.suppress_edit_events or !self.owned_text_changed[@backingInt(OwnedSettingField.command)]) return;
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.fields.edit_command orelse return;
@@ -6412,7 +6412,7 @@ pub const SettingsWindow = struct {
         if (index < 0 or index >= self.profile_rows.len) return;
         const next = self.profile_rows.valueFor(&self.profile_choices, self.profile_saved_value, self.profile_draft_value, @intCast(index));
         const arena = p.*._arena.?.allocator();
-        p.*.@"default-profile" = if (next) |text| arena.dupeZ(u8, text) catch {
+        p.*.@"default-profile" = if (next) |text| arena.dupeSentinel(u8, text, 0) catch {
             std.log.warn("settings: could not stage the default profile", .{});
             return;
         } else null;
@@ -6568,7 +6568,7 @@ pub const SettingsWindow = struct {
         // Scalar EN_CHANGE already validates and stages every typed value.
         // Only owned text waiting for EN_KILLFOCUS needs a save-time parse.
         for (std.enums.values(OwnedSettingField)) |field| {
-            if (self.owned_text_changed[@intFromEnum(field)]) self.syncOwnedControl(field);
+            if (self.owned_text_changed[@backingInt(field)]) self.syncOwnedControl(field);
         }
         // A close prompt's "Save and close" gets here with a field still inside
         // its quiet period.
@@ -7713,7 +7713,7 @@ pub const SettingsWindow = struct {
                 const style: u32 = shown | if (group) WS_GROUP else 0;
                 if (comptime Companion.ofControl(item.control_index) == .opacity_slider) {
                     self.makeCompanion(form, .opacity_slider, shown);
-                    order.place(self.companions[@intFromEnum(Companion.opacity_slider)]);
+                    order.place(self.companions[@backingInt(Companion.opacity_slider)]);
                 }
                 if (comptime item.control_index < field_model.form_fields.len) {
                     const row = comptime field_model.form_fields[item.control_index];
@@ -7739,7 +7739,7 @@ pub const SettingsWindow = struct {
                 }
                 if (comptime Companion.ofControl(item.control_index)) |kind| if (comptime kind != .opacity_slider) {
                     self.makeCompanion(form, kind, shown);
-                    order.place(self.companions[@intFromEnum(kind)]);
+                    order.place(self.companions[@backingInt(kind)]);
                 };
             },
         }
@@ -7764,7 +7764,7 @@ pub const SettingsWindow = struct {
 
     fn laterSectionMaterialized(self: *const SettingsWindow, section: Section) bool {
         for (std.enums.values(Section)) |other| {
-            if (@intFromEnum(other) > @intFromEnum(section) and self.materialized.contains(other)) return true;
+            if (@backingInt(other) > @backingInt(section) and self.materialized.contains(other)) return true;
         }
         return false;
     }
@@ -7773,11 +7773,11 @@ pub const SettingsWindow = struct {
     /// nearest earlier section that has rows, or else the help text, the
     /// viewport's first window.
     fn lastFormWindowBefore(self: *const SettingsWindow, section: Section) ?HWND {
-        var earlier = @intFromEnum(section);
+        var earlier = @backingInt(section);
         while (earlier > 0) {
             earlier -= 1;
-            if (!self.materialized.contains(@enumFromInt(earlier))) continue;
-            const items = formItemsForSection(@enumFromInt(earlier));
+            if (!self.materialized.contains(@fromBackingInt(@intCast(earlier)))) continue;
+            const items = formItemsForSection(@fromBackingInt(@intCast(earlier)));
             var index = items.len;
             while (index > 0) {
                 index -= 1;
@@ -8333,7 +8333,7 @@ pub const SettingsWindow = struct {
         if (!self.search_query.active()) return;
         const was = self.profile_found_count;
         const now = self.findProfileRows();
-        const counts = &self.search_counts[@intFromEnum(Section.profiles)];
+        const counts = &self.search_counts[@backingInt(Section.profiles)];
         counts.* = counts.* - was + now;
         self.search_total = self.search_total - was + now;
         self.syncSearchCounts();
@@ -9318,7 +9318,7 @@ pub const SettingsWindow = struct {
         if (list.kind != .reference and self.search_query.active()) {
             const was = self.listFoundCount(list.kind);
             const now = self.findListRows(list.kind);
-            const counts = &self.search_counts[@intFromEnum(self.active_section)];
+            const counts = &self.search_counts[@backingInt(self.active_section)];
             counts.* = counts.* - was + now;
             self.search_total = self.search_total - was + now;
             self.refreshListShown(list, false);
@@ -9784,7 +9784,7 @@ fn annotateAccessibleControls(self: *SettingsWindow, section: Section) void {
     // spin button) and value are the stock control's.
     inline for (comptime std.enums.values(Companion)) |kind| {
         const spec = comptime settings_control_specs[kind.controlIndex()];
-        if (spec.section == section) setAccessibleName(service, self.companions[@intFromEnum(kind)], spec.name);
+        if (spec.section == section) setAccessibleName(service, self.companions[@backingInt(kind)], spec.name);
     }
     // A name that did not take is tried again with the next section made.
     if (name_search) self.search_named = setAccessibleNameText(service, self.edit_search.?, search_field_name);
@@ -10330,15 +10330,15 @@ fn isFindShortcut(ctrl: bool, alt: bool, shift: bool) bool {
 fn searchSummaryText(buf: []u8, counts: *const [section_count]u16, total: usize, shown: Section) []const u8 {
     if (total == 0) return "No settings match.";
     const noun = if (total == 1) "setting matches" else "settings match";
-    const here = counts[@intFromEnum(shown)];
+    const here = counts[@backingInt(shown)];
     if (here != 0) return std.fmt.bufPrint(buf, "{d} {s}: {d} on this page.", .{ total, noun, here }) catch "";
     const first = firstPageWithMatches(counts).?;
-    return std.fmt.bufPrint(buf, "{d} {s}: none on this page, {d} on {s}.", .{ total, noun, counts[@intFromEnum(first)], first.headerText() }) catch "";
+    return std.fmt.bufPrint(buf, "{d} {s}: none on this page, {d} on {s}.", .{ total, noun, counts[@backingInt(first)], first.headerText() }) catch "";
 }
 
 /// The first page in rail order with a row the search found.
 fn firstPageWithMatches(counts: *const [section_count]u16) ?Section {
-    for (std.enums.values(Section)) |section| if (counts[@intFromEnum(section)] != 0) return section;
+    for (std.enums.values(Section)) |section| if (counts[@backingInt(section)] != 0) return section;
     return null;
 }
 
@@ -10365,7 +10365,7 @@ fn writeSearchEmptyText(writer: *std.Io.Writer, query: *const SearchQuery, count
     try writer.writeAll(" Found on ");
     var listed: usize = 0;
     for (std.enums.values(Section)) |section| {
-        const count = counts[@intFromEnum(section)];
+        const count = counts[@backingInt(section)];
         if (count == 0) continue;
         if (listed != 0) try writer.writeAll(", ");
         try writer.print("{s} ({d})", .{ section.headerText(), count });
@@ -10398,8 +10398,8 @@ test "SET Discard count includes invalid raw text and owned edits once per field
     settings.markRawScalarEdit(.font_size);
     try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
     settings.markRawScalarEdit(.window_padding_x);
-    settings.owned_text_changed[@intFromEnum(OwnedSettingField.command)] = true;
-    settings.owned_conflict[@intFromEnum(OwnedSettingField.command)] = true;
+    settings.owned_text_changed[@backingInt(OwnedSettingField.command)] = true;
+    settings.owned_conflict[@backingInt(OwnedSettingField.command)] = true;
     try std.testing.expectEqual(@as(usize, 3), settings.pendingFieldCount());
 }
 
@@ -10504,7 +10504,7 @@ test "settings untouched owned controls survive focus loss without reparsing" {
     settings.syncFontFamilyFromEdit(); // The EN_KILLFOCUS production path.
     try std.testing.expectEqual(@as(usize, 1), settings.pending.?.@"font-family".list.items.len);
     try std.testing.expectEqualStrings("Alpha, Beta", settings.pending.?.@"font-family".list.items[0]);
-    try std.testing.expect(!settings.owned_dirty[@intFromEnum(OwnedSettingField.font_family)]);
+    try std.testing.expect(!settings.owned_dirty[@backingInt(OwnedSettingField.font_family)]);
 }
 
 test "settings numeric edits reject nonfinite floats and excessive padding" {
@@ -10514,13 +10514,13 @@ test "settings numeric edits reject nonfinite floats and excessive padding" {
     defer pending.deinit();
     var settings: SettingsWindow = .{ .handle = undefined, .pending = pending, .fields = .{ .edit_font_size = edit, .edit_bg_opacity = edit, .edit_pad_x = edit } };
     settings.syncNumberFromEdit(.font_size);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.font_size)] != null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.font_size)] != null);
     try std.testing.expectEqual(@as(f32, 12), settings.pending.?.@"font-size");
     settings.syncNumberFromEdit(.background_opacity);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] != null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.background_opacity)] != null);
     _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("4294967295"));
     settings.syncPaddingFromEdit(.window_padding_x);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.window_padding_x)] != null);
 }
 
 test "settings a number field reads all it holds, so text past a valid start is an error, not that start" {
@@ -10533,12 +10533,12 @@ test "settings a number field reads all it holds, so text past a valid start is 
     defer pending.deinit();
     var settings: SettingsWindow = .{ .handle = modelOnlyHandle(), .pending = pending, .fields = .{ .edit_bg_opacity = edit } };
     settings.syncNumberFromEdit(.background_opacity);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] != null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.background_opacity)] != null);
     try std.testing.expectEqual(@as(f64, 1), settings.pending.?.@"background-opacity");
     // A long text that does parse is taken whole.
     _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0.25" ++ comptime win32_repeat.repeat("0", 60)));
     settings.syncNumberFromEdit(.background_opacity);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] == null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.background_opacity)] == null);
     try std.testing.expectEqual(@as(f64, 0.25), settings.pending.?.@"background-opacity");
 }
 
@@ -10552,11 +10552,11 @@ test "settings a padding field reads all it holds, however long, so a long text 
     defer pending.deinit();
     var settings: SettingsWindow = .{ .handle = modelOnlyHandle(), .pending = pending, .fields = .{ .edit_pad_x = edit } };
     settings.syncPaddingFromEdit(.window_padding_x);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.window_padding_x)] != null);
     // A long text that does parse is taken whole.
     _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral(comptime win32_repeat.repeat("0", 70) ++ "7"));
     settings.syncPaddingFromEdit(.window_padding_x);
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] == null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.window_padding_x)] == null);
     const draft = settings.pending orelse return error.TestExpectedDraft;
     try std.testing.expectEqual(@as(u32, 7), draft.@"window-padding-x".top_left);
 }
@@ -11015,7 +11015,7 @@ test "settings open and a first visit create each window once in its final form"
         fn expectedFrameChanges(settings: *const SettingsWindow, hwnd: HWND) u16 {
             if (settings.isEditControl(hwnd)) return 1;
             inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
-                if (settings.companions[@intFromEnum(kind)] == hwnd) return 2;
+                if (settings.companions[@backingInt(kind)] == hwnd) return 2;
             }
             return 0;
         }
@@ -11381,7 +11381,7 @@ test "settings status priority survives validation and conflict mutations" {
     );
     try std.testing.expectEqual(raw_control, settings.validation_control.?);
 
-    settings.raw_scalar_error[@intFromEnum(RawScalarField.font_size)] = null;
+    settings.raw_scalar_error[@backingInt(RawScalarField.font_size)] = null;
     settings.active_raw_validation = null;
     settings.surfaceNextValidation(false);
     try std.testing.expectEqual(
@@ -11466,9 +11466,9 @@ test "settings fixing one of two invalid scalars surfaces the other" {
     try std.testing.expectEqual(font_size_control, settings.validation_control.?);
     try std.testing.expectEqualStrings(
         "Font size is required.",
-        settings.raw_scalar_error[@intFromEnum(RawScalarField.font_size)].?,
+        settings.raw_scalar_error[@backingInt(RawScalarField.font_size)].?,
     );
-    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] == null);
+    try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.background_opacity)] == null);
 }
 
 /// Type `text` into `edit` as a person would: the field's own EN_CHANGE reaches
@@ -11563,8 +11563,8 @@ test "settings the quiet period is a real timer and leaving the field ends it" {
             // Another key restarts the countdown: no message for a fresh error.
             typeInto(edit, "12");
             typeInto(edit, "1");
-            try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.font_size)] != null);
-            try std.testing.expect(!settings.raw_scalar_shown[@intFromEnum(RawScalarField.font_size)]);
+            try std.testing.expect(settings.raw_scalar_error[@backingInt(RawScalarField.font_size)] != null);
+            try std.testing.expect(!settings.raw_scalar_shown[@backingInt(RawScalarField.font_size)]);
 
             // Focus leaving the field for the Discard button does not show it:
             // the click that follows throws the text away.
@@ -11572,13 +11572,13 @@ test "settings the quiet period is a real timer and leaving the field ends it" {
             _ = sys.SetFocus(settings.btn_discard_changes.?);
             _ = sys.SendMessageW(hwnd, WM_COMMAND, kill_focus, @bitCast(@intFromPtr(edit)));
             dialog_test.pump();
-            try std.testing.expect(!settings.raw_scalar_shown[@intFromEnum(RawScalarField.font_size)]);
+            try std.testing.expect(!settings.raw_scalar_shown[@backingInt(RawScalarField.font_size)]);
 
             // Focus leaving the field for anywhere else shows it without waiting.
             _ = sys.SetFocus(settings.sectionButton(.terminal).?);
             _ = sys.SendMessageW(hwnd, WM_COMMAND, kill_focus, @bitCast(@intFromPtr(edit)));
             dialog_test.pump();
-            try std.testing.expect(settings.raw_scalar_shown[@intFromEnum(RawScalarField.font_size)]);
+            try std.testing.expect(settings.raw_scalar_shown[@backingInt(RawScalarField.font_size)]);
             try std.testing.expectEqualStrings(
                 "Error: Font size must be from 6 through 72 points.",
                 try statusTextOf(settings, &buf),
@@ -13466,7 +13466,7 @@ fn layoutChildren(self: *SettingsWindow) void {
         var field_right = geometry.control.right;
         // A trackbar takes the lane and leaves its field a narrow box at the
         // end; an up-down sits at the end, beside its narrowed field.
-        if (Companion.ofControl(item.control_index)) |kind| if (self.companions[@intFromEnum(kind)]) |companion| switch (kind) {
+        if (Companion.ofControl(item.control_index)) |kind| if (self.companions[@backingInt(kind)]) |companion| switch (kind) {
             .opacity_slider => {
                 const box = @min(self.px(settings_slider_field_width), @divTrunc(field_right - field_left, 2));
                 field_left = field_right - box;
@@ -15018,7 +15018,7 @@ test "settings Escape without the close prompt closes a clean window and prompts
             try std.testing.expectEqual(settings.fields.edit_font_size.?, sys.GetFocus().?);
 
             // A clean window closes.
-            settings.raw_scalar_dirty[@intFromEnum(RawScalarField.font_size)] = false;
+            settings.raw_scalar_dirty[@backingInt(RawScalarField.font_size)] = false;
             try std.testing.expect(fixture.pumpKey(0x1B));
             try std.testing.expectEqual(@as(u32, 1), fixture.closed);
             try std.testing.expect(sys.IsWindow(hwnd) == 0);
@@ -15268,13 +15268,13 @@ test "settings generated form labels immediately precede their controls" {
                 const companion = Companion.ofControl(item.control_index);
                 if (companion == .opacity_slider) {
                     window = sys.GetWindow(window.?, GW_HWNDNEXT);
-                    try std.testing.expectEqual(settings.companions[@intFromEnum(Companion.opacity_slider)].?, window.?);
+                    try std.testing.expectEqual(settings.companions[@backingInt(Companion.opacity_slider)].?, window.?);
                 }
                 window = sys.GetWindow(window.?, GW_HWNDNEXT);
                 try std.testing.expectEqual(settings.controlHwnd(item.control_index).?, window.?);
                 if (companion) |kind| if (kind != .opacity_slider) {
                     window = sys.GetWindow(window.?, GW_HWNDNEXT);
-                    try std.testing.expectEqual(settings.companions[@intFromEnum(kind)].?, window.?);
+                    try std.testing.expectEqual(settings.companions[@backingInt(kind)].?, window.?);
                 };
             };
             try std.testing.expectEqual(@as(?HWND, null), sys.GetWindow(window.?, GW_HWNDNEXT));
@@ -15310,7 +15310,7 @@ test "settings Tab visits the fields in form order and Save last" {
                     // The opacity's trackbar before its field, as it sits
                     // left of it. An up-down is no tab stop.
                     if (Companion.ofControl(item.control_index) == .opacity_slider) {
-                        fields[field_count] = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+                        fields[field_count] = settings.companions[@backingInt(Companion.opacity_slider)].?;
                         field_count += 1;
                     }
                     fields[field_count] = control;
@@ -15456,13 +15456,13 @@ test "settings search says how many it found, and where, or what it looks in" {
     var buf: [SettingsWindow.help_text_bytes]u8 = undefined;
     var counts: [section_count]u16 = @splat(0);
     try std.testing.expectEqualStrings("No settings match.", searchSummaryText(&buf, &counts, 0, .appearance));
-    counts[@intFromEnum(Section.appearance)] = 1;
-    counts[@intFromEnum(Section.reference)] = 1;
+    counts[@backingInt(Section.appearance)] = 1;
+    counts[@backingInt(Section.reference)] = 1;
     try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", searchSummaryText(&buf, &counts, 1, .appearance));
-    counts[@intFromEnum(Section.appearance)] = 0;
-    counts[@intFromEnum(Section.terminal)] = 2;
-    counts[@intFromEnum(Section.privacy)] = 4;
-    counts[@intFromEnum(Section.reference)] = 9;
+    counts[@backingInt(Section.appearance)] = 0;
+    counts[@backingInt(Section.terminal)] = 2;
+    counts[@backingInt(Section.privacy)] = 4;
+    counts[@backingInt(Section.reference)] = 9;
     // The total counts each setting once: the All settings page holds every
     // key the other pages do. A page with none says where the first are: a
     // reader hears this line.
@@ -15500,8 +15500,8 @@ test "settings a search counts a key shown as two rows once, on its page and in 
             // are one key, and of no other setting.
             typeSearch(settings, "toast");
             try std.testing.expectEqual(@as(usize, 2), settings.formItems().len);
-            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.privacy)]);
-            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.reference)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@backingInt(Section.privacy)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@backingInt(Section.reference)]);
             try std.testing.expectEqual(@as(usize, 1), settings.search_total);
             try std.testing.expectEqualStrings("1 setting matches: 1 on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
         }
@@ -15524,8 +15524,8 @@ test "settings @modified on the All settings page finds a key a UTF-16 or BOM co
     std.mem.writeInt(u16, utf16[0..2], 0xFEFF, .little);
     for (text, 0..) |c, i| std.mem.writeInt(u16, utf16[2 + 2 * i ..][0..2], c, .little);
     for ([_][]const u8{ &utf16, "\xef\xbb\xbf" ++ text }) |bytes| {
-        try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = bytes });
-        const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = bytes });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", std.testing.allocator);
         defer std.testing.allocator.free(path);
         Lender.path = path;
         var context: u8 = 0;
@@ -15558,11 +15558,11 @@ test "settings the All settings page never follows a link to a share to read the
     const links = local_path.test_links;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
-    try tmp.dir.makeDir("cfg-on-share");
-    try tmp.dir.makeDir("cfg-local");
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(std.testing.io, "real", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
+    try tmp.dir.createDir(std.testing.io, "cfg-on-share", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "cfg-local", .default_dir);
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(base);
     const join = struct {
         fn path(a: std.mem.Allocator, root: []const u8, rel: []const u8) ![]u8 {
@@ -15592,10 +15592,10 @@ test "settings the All settings page never follows a link to a share to read the
     const symlinks = try links.symlink(alloc, file_link, share ++ "\\config.ghostty", false) and
         try links.symlink(alloc, dir_link, share, true);
     defer {
-        tmp.dir.deleteDir("cfg-on-share") catch {};
-        tmp.dir.deleteDir("cfg-local") catch {};
-        tmp.dir.deleteFile("config-on-share.ghostty") catch {};
-        tmp.dir.deleteDir("dir-on-share") catch {};
+        tmp.dir.deleteDir(std.testing.io, "cfg-on-share") catch {};
+        tmp.dir.deleteDir(std.testing.io, "cfg-local") catch {};
+        tmp.dir.deleteFile(std.testing.io, "config-on-share.ghostty") catch {};
+        tmp.dir.deleteDir(std.testing.io, "dir-on-share") catch {};
     }
 
     const Case = struct { rel: []const u8, want: std.meta.Tag(settings_reference.ConfigFile), symlink: bool = false };
@@ -15704,8 +15704,8 @@ test "settings the All settings page refuses a share or device path before norma
     // A local file is still read, with either separator.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 15\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 15\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
     const slashed = try alloc.dupe(u8, path);
     defer alloc.free(slashed);
@@ -15724,11 +15724,11 @@ test "settings the All settings page never opens a cloud placeholder as its prov
     const cloud = local_path.test_cloud;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
-    try tmp.dir.makeDir("cfg-local");
-    defer tmp.dir.deleteDir("cfg-local") catch {};
-    const base = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(std.testing.io, "real", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real\\config.ghostty", .data = "font-size = 15\n" });
+    try tmp.dir.createDir(std.testing.io, "cfg-local", .default_dir);
+    defer tmp.dir.deleteDir(std.testing.io, "cfg-local") catch {};
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(base);
     const real_dir = try std.fs.path.join(alloc, &.{ base, "real" });
     defer alloc.free(real_dir);
@@ -15771,7 +15771,7 @@ fn longestOwnWord(doc: []const u8, name: []const u8) ?[]const u8 {
         while (end < doc.len and std.ascii.isAlphabetic(doc[end])) end += 1;
         const candidate = doc[start..end];
         const longer = candidate.len > (if (best) |word| word.len else 0);
-        if (longer and std.ascii.indexOfIgnoreCase(name, candidate) == null) best = candidate;
+        if (longer and std.ascii.findIgnoreCase(name, candidate) == null) best = candidate;
         start = end;
     }
     return best;
@@ -15860,8 +15860,8 @@ test "settings a search shows only the rows it finds, and the others leave the T
             // The total counts each setting once, and the All settings page
             // has every key: the three, and `window-padding-color`.
             try std.testing.expectEqual(@as(usize, 4), settings.search_total);
-            try std.testing.expectEqual(@as(u16, 3), settings.search_counts[@intFromEnum(Section.appearance)]);
-            try std.testing.expectEqual(@as(u16, 4), settings.search_counts[@intFromEnum(Section.reference)]);
+            try std.testing.expectEqual(@as(u16, 3), settings.search_counts[@backingInt(Section.appearance)]);
+            try std.testing.expectEqual(@as(u16, 4), settings.search_counts[@backingInt(Section.reference)]);
             try std.testing.expectEqualStrings("4 settings match: 3 on this page.", readEditUtf8(settings.text_summary.?, &text_buf).?);
             // The help text is not shown on a page with rows found.
             try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) == 0);
@@ -15998,7 +15998,7 @@ test "settings a page opened for its own sake drops the search and moves the foc
             var expected_buf: [SettingsWindow.help_text_bytes]u8 = undefined;
             // A search Advanced has nothing for, and the focus on a row it found.
             typeSearch(settings, "font");
-            try std.testing.expectEqual(@as(u16, 0), settings.search_counts[@intFromEnum(Section.advanced)]);
+            try std.testing.expectEqual(@as(u16, 0), settings.search_counts[@backingInt(Section.advanced)]);
             const row = settings.fields.edit_font_size.?;
             try std.testing.expect(sys.IsWindowVisible(row) != 0);
             _ = SetFocus(row);
@@ -16177,7 +16177,7 @@ test "settings Enter in the search goes to the first setting found, on another p
             // two App notifications checkboxes are one).
             _ = SetFocus(search);
             typeSearch(settings, "notification");
-            try std.testing.expectEqual(@as(u16, 2), settings.search_counts[@intFromEnum(Section.privacy)]);
+            try std.testing.expectEqual(@as(u16, 2), settings.search_counts[@backingInt(Section.privacy)]);
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
             try std.testing.expectEqual(Section.privacy, settings.active_section);
             try std.testing.expectEqual(settings.fields.chk_desktop_notifications.?, GetFocus().?);
@@ -16185,7 +16185,7 @@ test "settings Enter in the search goes to the first setting found, on another p
             // A match on the shown page wins over an earlier page.
             _ = SetFocus(search);
             typeSearch(settings, "clipboard");
-            try std.testing.expect(settings.search_counts[@intFromEnum(Section.terminal)] != 0);
+            try std.testing.expect(settings.search_counts[@backingInt(Section.terminal)] != 0);
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
             try std.testing.expectEqual(Section.privacy, settings.active_section);
             try std.testing.expectEqual(settings.fields.combo_clipboard_read.?, GetFocus().?);
@@ -16244,7 +16244,7 @@ test "settings a word past the sixteenth still has to match, and changing it run
             const font_total = settings.search_total;
             typeSearch(settings, fonts ++ "font");
             try std.testing.expectEqual(font_total, settings.search_total);
-            try std.testing.expectEqual(@as(u16, 2), settings.search_counts[@intFromEnum(Section.appearance)]);
+            try std.testing.expectEqual(@as(u16, 2), settings.search_counts[@backingInt(Section.appearance)]);
             // A seventeenth word no row has.
             typeSearch(settings, fonts ++ "zzzz");
             try std.testing.expectEqual(@as(usize, 0), settings.search_total);
@@ -16256,7 +16256,7 @@ test "settings a word past the sixteenth still has to match, and changing it run
             try std.testing.expect(size_total < font_total);
             typeSearch(settings, fonts ++ "size");
             try std.testing.expectEqual(size_total, settings.search_total);
-            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.appearance)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@backingInt(Section.appearance)]);
             try std.testing.expect(sys.IsWindowVisible(settings.fields.edit_font_size.?) != 0);
         }
     }.body);
@@ -16511,11 +16511,11 @@ test "settings Enter follows @modified as it is now, not as the counts last said
             settings.setActiveSection(.privacy);
             _ = SetFocus(search);
             typeSearch(settings, "@modified");
-            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.appearance)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@backingInt(Section.appearance)]);
             // Font size goes back to its default after the search ran: the
             // counts still say Appearance.
             settings.resetRow(settings.controlIndex(settings.fields.edit_font_size.?).?);
-            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.appearance)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@backingInt(Section.appearance)]);
             // Enter finds Appearance empty when it gets there, and goes on to
             // Terminal.
             try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
@@ -17289,7 +17289,7 @@ test "settings a pressed rail button draws its mark and focus ring in the select
             settings.validationQuietElapsed();
             settings.showSection(.terminal, false);
             const button = settings.sectionButton(.appearance).?;
-            try std.testing.expectEqual(win32_uia.SettingsSectionMarker.invalid, settings.section_markers[@intFromEnum(Section.appearance)]);
+            try std.testing.expectEqual(win32_uia.SettingsSectionMarker.invalid, settings.section_markers[@backingInt(Section.appearance)]);
             try std.testing.expect(SendMessageW(button, BM_GETCHECK, 0, 0) != BST_CHECKED);
 
             // A press, as the pointer makes it: focus and the pushed state,
@@ -17505,10 +17505,10 @@ test "settings pending changes drop a line that does not fit, not the lines befo
     // The owned fields: a short font family stays when a long command cannot fit.
     const arena = pending._arena.?.allocator();
     pending.@"font-family" = try parseFontFamilyEditText(arena, "Cascadia Mono");
-    settings.owned_dirty[@intFromEnum(OwnedSettingField.font_family)] = true;
-    const long_command = try arena.dupeZ(u8, "pwsh.exe " ++ comptime win32_repeat.repeat("-NoLogo ", 40));
+    settings.owned_dirty[@backingInt(OwnedSettingField.font_family)] = true;
+    const long_command = try arena.dupeSentinel(u8, "pwsh.exe " ++ comptime win32_repeat.repeat("-NoLogo ", 40), 0);
     pending.command = .{ .shell = long_command };
-    settings.owned_dirty[@intFromEnum(OwnedSettingField.command)] = true;
+    settings.owned_dirty[@backingInt(OwnedSettingField.command)] = true;
     var buf: [256]u8 = undefined;
     const text = settings.pendingDiffText(&buf);
     try std.testing.expect(std.mem.indexOf(u8, text, "Font size: 12 pt -> 14 pt\n") != null);
@@ -17963,7 +17963,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 // another profile.
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
-                fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "pwsh");
+                fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeSentinel(u8, "pwsh", 0);
                 const settings = &fixture.settings;
                 try settings.open();
                 settings.setActiveSection(.shell);
@@ -17985,7 +17985,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
                 const arena = fixture.config._arena.?.allocator();
-                fixture.config.@"default-profile" = try arena.dupeZ(u8, "wsl:docker-desktop");
+                fixture.config.@"default-profile" = try arena.dupeSentinel(u8, "wsl:docker-desktop", 0);
                 const settings = &fixture.settings;
                 try settings.open();
                 settings.setActiveSection(.shell);
@@ -17993,7 +17993,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "WSL: docker-desktop (hidden)" });
                 try std.testing.expectEqual(@as(LRESULT, 4), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
 
-                fixture.config.@"default-profile" = try arena.dupeZ(u8, "user:gone");
+                fixture.config.@"default-profile" = try arena.dupeSentinel(u8, "user:gone", 0);
                 try settings.adoptCurrentConfig();
                 settings.refreshAllControls();
                 try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:gone (not found)" });
@@ -18021,7 +18021,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 settings.ensureControlVisible(combo);
                 _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 1, 0);
                 try std.testing.expect(sys.SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) != 0);
-                fixture.config.@"default-profile" = try arena.dupeZ(u8, "user:other");
+                fixture.config.@"default-profile" = try arena.dupeSentinel(u8, "user:other", 0);
                 try settings.adoptCurrentConfig();
                 settings.refreshAllControls();
                 settings.profilesChanged();
@@ -18078,9 +18078,9 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
                 const arena = fixture.config._arena.?.allocator();
-                fixture.config._launch.default_profile_cli = try arena.dupeZ(u8, "user:py312");
+                fixture.config._launch.default_profile_cli = try arena.dupeSentinel(u8, "user:py312", 0);
                 fixture.config.@"default-profile" = fixture.config._launch.default_profile_cli;
-                fixture.config._launch.default_profile_file = try arena.dupeZ(u8, "pwsh");
+                fixture.config._launch.default_profile_file = try arena.dupeSentinel(u8, "pwsh", 0);
                 const settings = &fixture.settings;
                 try settings.open();
                 settings.setActiveSection(.shell);
@@ -18097,7 +18097,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
                 try std.testing.expect(!settings.hasPendingChanges());
                 // A reload keeps showing the files' value.
-                fixture.config._launch.default_profile_file = try arena.dupeZ(u8, "cmd.exe");
+                fixture.config._launch.default_profile_file = try arena.dupeSentinel(u8, "cmd.exe", 0);
                 settings.externalConfigChanged(&fixture.config, 2);
                 try std.testing.expectEqualStrings("cmd.exe", settings.original.?.@"default-profile".?);
                 try std.testing.expectEqual(@as(LRESULT, 2), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
@@ -18108,7 +18108,7 @@ test "settings default profile dropdown offers the listed profiles and saves key
                 // shows that profile's label and is not called missing.
                 const fixture = try dialog_test.Fixture.prepare(false);
                 defer fixture.finish();
-                fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "ssh:box");
+                fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeSentinel(u8, "ssh:box", 0);
                 fixture.resolved_label = "SSH: box";
                 const settings = &fixture.settings;
                 try settings.open();
@@ -18152,7 +18152,7 @@ test "settings default profile announces a changed label on the same row" {
             const events = @import("win32_uia/events.zig");
             const fixture = try dialog_test.Fixture.prepare(true);
             defer fixture.finish();
-            fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "user:py312");
+            fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeSentinel(u8, "user:py312", 0);
             const settings = &fixture.settings;
             try settings.open();
             settings.setActiveSection(.shell);
@@ -18169,7 +18169,7 @@ test "settings default profile announces a changed label on the same row" {
             try std.testing.expectEqual(@as(LRESULT, 3), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
             try std.testing.expectEqual(quiet + 1, events.testing_property_changes);
             // A new row is announced once, by the provider.
-            fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "cmd.exe");
+            fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeSentinel(u8, "cmd.exe", 0);
             try settings.adoptCurrentConfig();
             const moved = events.testing_property_changes;
             settings.profilesChanged();
@@ -18588,7 +18588,7 @@ test "settings marks each field that differs from its default, and its Reset but
                     try std.testing.expect(marker.right < field_rect.left and marker.left >= 0);
                     // Left of the whole row: the trackbar, where it has one.
                     if (Companion.ofControl(index) == .opacity_slider)
-                        try std.testing.expectEqual(dialog_test.rectIn(viewport, settings.companions[@intFromEnum(Companion.opacity_slider)].?).left - settings.px(settings_marker_gap), marker.right);
+                        try std.testing.expectEqual(dialog_test.rectIn(viewport, settings.companions[@backingInt(Companion.opacity_slider)].?).left - settings.px(settings_marker_gap), marker.right);
                     // A click on the marker is the row's (its menu, `rowAtPoint`).
                     try std.testing.expectEqual(@as(?usize, index), settings.rowAtPoint(.{ .x = marker.left, .y = marker.top + 1 }));
                     try std.testing.expectEqual(field_rect.top, marker.top);
@@ -18940,7 +18940,7 @@ test "settings a Reset button stays right after its control whatever order the s
                     const companion = Companion.ofControl(item.control_index);
                     if (companion == .opacity_slider) {
                         window = try nextPastSpares(settings, window.?, &spares);
-                        try std.testing.expectEqual(settings.companions[@intFromEnum(Companion.opacity_slider)].?, window.?);
+                        try std.testing.expectEqual(settings.companions[@backingInt(Companion.opacity_slider)].?, window.?);
                     }
                     window = try nextPastSpares(settings, window.?, &spares);
                     try std.testing.expectEqual(settings.controlHwnd(item.control_index).?, window.?);
@@ -18952,7 +18952,7 @@ test "settings a Reset button stays right after its control whatever order the s
                     // An up-down after its row's button.
                     if (companion) |kind| if (kind != .opacity_slider) {
                         window = try nextPastSpares(settings, window.?, &spares);
-                        try std.testing.expectEqual(settings.companions[@intFromEnum(kind)].?, window.?);
+                        try std.testing.expectEqual(settings.companions[@backingInt(kind)].?, window.?);
                     };
                 };
                 // A page's list, made with its page, comes last.
@@ -19012,14 +19012,14 @@ test "settings a reset after the file changed under an edit is the default, to s
             settings.syncOwnedControl(.font_family);
             fixture.config.@"font-family" = try parseFontFamilyEditText(arena, "Cascadia Mono");
             settings.externalConfigChanged(&fixture.config, 2);
-            try std.testing.expect(settings.owned_conflict[@intFromEnum(OwnedSettingField.font_family)]);
+            try std.testing.expect(settings.owned_conflict[@backingInt(OwnedSettingField.font_family)]);
             settings.resetRow(settings.controlIndex(family).?);
             // The field keeps the default it was reset to, which differs from
             // the file's font, so Save writes it.
             try std.testing.expect(!editHoldsText(family, " \t,"));
             try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"font-family".count());
-            try std.testing.expect(!settings.owned_conflict[@intFromEnum(OwnedSettingField.font_family)]);
-            try std.testing.expect(settings.owned_dirty[@intFromEnum(OwnedSettingField.font_family)]);
+            try std.testing.expect(!settings.owned_conflict[@backingInt(OwnedSettingField.font_family)]);
+            try std.testing.expect(settings.owned_dirty[@backingInt(OwnedSettingField.font_family)]);
             try std.testing.expect(!ownedSettingEql(&settings.original.?, &settings.pending.?, .font_family));
             try std.testing.expect(std.mem.endsWith(u8, try statusTextOf(settings, &buf), "back to its default. Save to keep it."));
 
@@ -19192,14 +19192,14 @@ test "settings a row says where its saved value comes from, in its label and its
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "mytheme", .data = "cursor-style = underline\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
-            const theme_path = try tmp.dir.realpathAlloc(alloc, "mytheme");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mytheme", .data = "cursor-style = underline\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
+            const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
             defer alloc.free(theme_path);
             const text = try std.fmt.allocPrint(alloc, "scrollback-limit = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
             defer alloc.free(text);
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = text });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
             var fake: FakeAnnotations = .{};
@@ -19290,8 +19290,8 @@ test "settings a row says where its saved value comes from, in its label and its
 
             // A new config works them out once more, one per made row, and a
             // note that changed renews the row's description.
-            try tmp.dir.writeFile(.{ .sub_path = "other.conf", .data = "font-size = 15\n" });
-            const other_path = try tmp.dir.realpathAlloc(alloc, "other.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other.conf", .data = "font-size = 15\n" });
+            const other_path = try tmp.dir.realPathFileAlloc(std.testing.io, "other.conf", alloc);
             defer alloc.free(other_path);
             var next = try Config.default(alloc);
             defer next.deinit();
@@ -19324,9 +19324,9 @@ test "settings a long origin note is shortened, and the field's label keeps its 
             defer tmp.cleanup();
             // Longer than a note held before review (96 bytes in all).
             const long_name = "a-config-file-whose-name-is-much-longer-than-the-label-it-is-drawn-beside-and-longer-than-a-note-once-held.conf";
-            try tmp.dir.writeFile(.{ .sub_path = long_name, .data = "font-size = 15\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "config-file = " ++ long_name ++ "\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = long_name, .data = "font-size = 15\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "config-file = " ++ long_name ++ "\n" });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -19368,9 +19368,9 @@ test "settings Save of a value an included file overrides writes the target file
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             const included_before = "\nfont-size = 15\n";
-            try tmp.dir.writeFile(.{ .sub_path = "included.conf", .data = included_before });
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "font-size = 12\nconfig-file = included.conf\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = included_before });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "font-size = 12\nconfig-file = included.conf\n" });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -19394,10 +19394,10 @@ test "settings Save of a value an included file overrides writes the target file
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
             // The edit goes to the file Settings saves to, on the line that
             // set it; the included file is not touched.
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 20));
             defer alloc.free(after);
             try std.testing.expectEqualStrings("font-size = 18\nconfig-file = included.conf\n", after);
-            const included_after = try tmp.dir.readFileAlloc(alloc, "included.conf", 1 << 20);
+            const included_after = try tmp.dir.readFileAlloc(std.testing.io, "included.conf", alloc, .limited(1 << 20));
             defer alloc.free(included_after);
             try std.testing.expectEqualStrings(included_before, included_after);
             // The status says the saved value is not used, and which line wins.
@@ -19419,8 +19419,8 @@ test "settings Save of a default profile the command line overrides names the co
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "default-profile = pwsh.exe\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "default-profile = pwsh.exe\n" });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
             // noctty was started with `--default-profile=` (a jump-list link,
@@ -19449,7 +19449,7 @@ test "settings Save of a default profile the command line overrides names the co
             _ = sys.SendMessageW(settings.hwnd.?, WM_COMMAND, id | (@as(usize, CBN_SELCHANGE) << 16), @bitCast(@intFromPtr(combo)));
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 20));
             defer alloc.free(after);
             try std.testing.expectEqualStrings("default-profile = cmd.exe\n", after);
             // The status names what wins, the command line, not the line the
@@ -19469,8 +19469,8 @@ test "settings an origin-note says when the line it names has changed since the 
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
-            const path = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -19487,7 +19487,7 @@ test "settings an origin-note says when the line it names has changed since the 
 
             // The first line taken out, and the config not read again: both
             // lines named no longer hold what was read there.
-            try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = "scrollback-limit = 5000\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "scrollback-limit = 5000\n" });
             settings.externalConfigChanged(&fixture.config, 2);
             try std.testing.expectEqualStrings("Set in noctty.conf, line 1; the file has changed since", settings.origin_notes[font].text());
             try std.testing.expectEqualStrings("Set in noctty.conf, line 2; the file has changed since", settings.origin_notes[scrollback].text());
@@ -19586,7 +19586,7 @@ test "settings a reset that cannot make its copies changes nothing and says so" 
             settings.syncOwnedControl(owned);
             fixture.config.@"font-family" = try parseFontFamilyEditText(arena, "Cascadia Mono");
             settings.externalConfigChanged(&fixture.config, 2);
-            try std.testing.expect(settings.owned_conflict[@intFromEnum(owned)]);
+            try std.testing.expect(settings.owned_conflict[@backingInt(owned)]);
 
             // Each allocation the reset makes fails in turn. The draft and the
             // baseline get fresh arenas, so every copy asks the failing
@@ -19610,8 +19610,8 @@ test "settings a reset that cannot make its copies changes nothing and says so" 
                     for (fresh) |unused| unused.deinit();
                     try std.testing.expectEqual(@as(usize, 1), settings.pending.?.@"font-family".count());
                     try std.testing.expectEqual(@as(usize, 0), settings.original.?.@"font-family".count());
-                    try std.testing.expect(settings.owned_dirty[@intFromEnum(owned)]);
-                    try std.testing.expect(settings.owned_conflict[@intFromEnum(owned)]);
+                    try std.testing.expect(settings.owned_dirty[@backingInt(owned)]);
+                    try std.testing.expect(settings.owned_conflict[@backingInt(owned)]);
                     try std.testing.expect(settings.hasPendingChanges());
                     try std.testing.expect(editHoldsText(family, " \t,"));
                     const status = try statusTextOf(settings, &buf);
@@ -19625,8 +19625,8 @@ test "settings a reset that cannot make its copies changes nothing and says so" 
                 try std.testing.expect(fail_index > 0);
                 try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"font-family".count());
                 try std.testing.expect(ownedSettingEql(&settings.original.?, &fixture.config, owned));
-                try std.testing.expect(settings.owned_dirty[@intFromEnum(owned)]);
-                try std.testing.expect(!settings.owned_conflict[@intFromEnum(owned)]);
+                try std.testing.expect(settings.owned_dirty[@backingInt(owned)]);
+                try std.testing.expect(!settings.owned_conflict[@backingInt(owned)]);
                 break;
             } else return error.TestUnexpectedResult;
 
@@ -19778,7 +19778,7 @@ test "settings a Reset button joins its row's arrow-key run and never a label's"
                 }
             }
             settings.setActiveSection(.appearance);
-            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
             for ([_]windows.BOOL{ 0, 1 }) |previous| try std.testing.expectEqual(slider, dialog_test.GetNextDlgGroupItem(hwnd, slider, previous).?);
 
             // The button starts no group (a hidden one would still end its
@@ -19863,7 +19863,7 @@ test "settings a text field's marker follows what it holds before it is staged" 
                 const index = settings.controlIndex(edit).?;
                 // Typed over the blank default: marked at once, with its button.
                 typeInto(edit, "Consolas");
-                try std.testing.expect(settings.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]);
+                try std.testing.expect(settings.owned_text_changed[@backingInt(OwnedSettingField.font_family)]);
                 try std.testing.expect(settings.differs_from_default[index]);
                 try std.testing.expect(sys.IsWindowVisible(settings.reset_buttons[index].?) != 0);
                 // Separators alone are still the default.
@@ -19887,7 +19887,7 @@ test "settings a text field's marker follows what it holds before it is staged" 
                 settings.resetRow(index);
                 var text: [64]u8 = undefined;
                 try std.testing.expectEqualStrings("", readEditUtf8(edit, &text).?);
-                try std.testing.expect(!settings.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]);
+                try std.testing.expect(!settings.owned_text_changed[@backingInt(OwnedSettingField.font_family)]);
                 try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"font-family".count());
             }
         }
@@ -20163,11 +20163,11 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
             if (msg == win32_uia.SettingsControlProvider.action_message) {
                 if (settings.control_uia_providers[index]) |provider| {
                     const trace_action = settings.combo_trace.enabled() and
-                        (wParam == @intFromEnum(win32_uia.SettingsControlProvider.Action.expand) or
-                            wParam == @intFromEnum(win32_uia.SettingsControlProvider.Action.collapse));
+                        (wParam == @backingInt(win32_uia.SettingsControlProvider.Action.expand) or
+                            wParam == @backingInt(win32_uia.SettingsControlProvider.Action.collapse));
                     if (trace_action)
                         settings.combo_trace.noteEvent(.action_received, sys.GetDlgCtrlID(hwnd), sys.SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0) != 0);
-                    if (wParam == @intFromEnum(win32_uia.SettingsControlProvider.Action.expand) and sys.IsWindowEnabled(hwnd) != 0)
+                    if (wParam == @backingInt(win32_uia.SettingsControlProvider.Action.expand) and sys.IsWindowEnabled(hwnd) != 0)
                         settings.ensureControlVisible(hwnd);
                     const hr = provider.handleAction(wParam, lParam);
                     if (trace_action)
@@ -20985,7 +20985,7 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
         colors.text;
     _ = SetTextColor(hdc, text_color);
     // The label stops short of the marker's place, or of the count.
-    if (section) |value| if (settings.section_markers[@intFromEnum(value)] != .none) {
+    if (section) |value| if (settings.section_markers[@backingInt(value)] != .none) {
         text_rect.right = @max(text_rect.left, sectionMarkerRect(settings, rect, .invalid).left - settings.px(settings_metrics.space_2));
     };
     if (found) |count| if (count != 0) {
@@ -21003,7 +21003,7 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
     if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     if (section) |value| {
-        const marker = settings.section_markers[@intFromEnum(value)];
+        const marker = settings.section_markers[@backingInt(value)];
         if (marker != .none) drawSectionMarker(hdc, settings, rect, marker, fill_color, on_selection);
     }
 
@@ -21482,7 +21482,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             // A scalar departure is posted because EN_KILLFOCUS does not say
             // where focus went. Owned fields keep their existing deferred parse.
             if (notify == EN_KILLFOCUS) if (rawScalarForEditId(id)) |field| {
-                if (owner != null) _ = sys.PostMessageW(hwnd, WM_SETTINGS_FIELD_LEFT, @intFromEnum(field), 0);
+                if (owner != null) _ = sys.PostMessageW(hwnd, WM_SETTINGS_FIELD_LEFT, @backingInt(field), 0);
                 return 0;
             };
             inline for (field_model.form_fields) |row| if (id == row.native.id) {
@@ -21542,7 +21542,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             return 0;
         },
         WM_SETTINGS_FIELD_LEFT => {
-            if (owner) |o| if (wParam < raw_scalar_field_count) o.fieldLeft(@enumFromInt(wParam));
+            if (owner) |o| if (wParam < raw_scalar_field_count) o.fieldLeft(@fromBackingInt(@intCast(wParam)));
             return 0;
         },
         WM_SETTINGS_PROFILES_CHANGED => {
@@ -23383,7 +23383,7 @@ test "settings a save after the app went dark is no conflict for the dark theme'
                 settings.save();
                 try std.testing.expectEqual(@as(u32, 1), fixture.saved);
                 try std.testing.expect(settings.status_note != .profile_changed);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order =\n") != null);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-hidden =\n") != null);
@@ -23420,7 +23420,7 @@ test "settings a list that followed the file and one that kept its baseline are 
                 try std.testing.expectEqual(@as(usize, 1), pending.@"profile-hidden".list.items.len);
                 // Another program edits the file's own line for either list,
                 // or neither.
-                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const before = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(before);
                 const added: []const u8 = switch (outside) {
                     .none => "",
@@ -23429,10 +23429,10 @@ test "settings a list that followed the file and one that kept its baseline are 
                 };
                 const edited = try std.mem.concat(alloc, u8, &.{ before, added });
                 defer alloc.free(edited);
-                try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = edited });
+                try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = edited });
                 settings.save();
                 try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(after);
                 switch (outside) {
                     // Each list in its own state: no false conflict.
@@ -23484,7 +23484,7 @@ test "settings the Profiles page lists the profiles and their fields, made with 
             try std.testing.expect(profileRowValue(settings, 0, &buf) == null);
             try expectSameText("Profiles", referenceUiaName(&settings.profile_list, &buf));
             // A Default profile chosen on Shell marks its profile here.
-            settings.pending.?.@"default-profile" = try settings.pending.?._arena.?.allocator().dupeZ(u8, "user:py");
+            settings.pending.?.@"default-profile" = try settings.pending.?._arena.?.allocator().dupeSentinel(u8, "user:py", 0);
             settings.trackOwnedEdit(.default_profile);
             settings.setActiveSection(.shell);
             settings.setActiveSection(.profiles);
@@ -23637,7 +23637,7 @@ test "settings a profile's field is typed into in place, and Save writes its lin
 
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 20));
             defer alloc.free(after);
             try expectSameText("# mine\nprofile-command = py: python.exe -X utf8\nprofile-name = py: Python\nprofile-command = other: o.exe\n", after);
             try std.testing.expect(!settings.hasPendingChanges());
@@ -23691,7 +23691,7 @@ test "settings a new profile asks for its id, then its command line, and Save ap
             try expectSameText("dev, profile user:dev, new, not saved yet", profileRowName(settings, selected, &buf));
 
             settings.save();
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 20));
             defer alloc.free(after);
             try expectSameText("profile-command = py: python.exe\n\nprofile-command = dev: cmd.exe /k\n", after);
         }
@@ -23743,7 +23743,7 @@ test "settings removing a profile takes a second Delete, says what it does, and 
             // it: its line becomes the tombstone, which keeps the id known
             // to the loader (`settings_patch.referencedElsewhere`).
             settings.save();
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 20));
             defer alloc.free(after);
             try expectSameText("profile-command = py:\ndefault-profile = py\nprofile-command = keep: k.exe\n", after);
         }
@@ -24217,8 +24217,8 @@ test "settings a save whose reload could not read an included file whole says so
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "font-size = 13\n" });
-            const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "font-size = 13\n" });
+            const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
             defer alloc.free(more);
             const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
             defer alloc.free(text);
@@ -24235,8 +24235,8 @@ test "settings a save whose reload could not read an included file whole says so
             try std.testing.expect(fixture.pumpKey(VK_RETURN));
             // Another program locks the include's bytes while the save
             // reloads: it opens, and its read fails.
-            var lock = try tmp.dir.openFile("more.conf", .{ .mode = .read_write, .lock = .exclusive });
-            defer lock.close();
+            var lock = try tmp.dir.openFile(std.testing.io, "more.conf", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close(std.testing.io);
             settings.save();
             dialog_test.pump();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
@@ -24622,7 +24622,7 @@ test "settings the Profiles page lists every profile, and Alt+Up, Ctrl+H and the
 
             // Saved: the file gets both lists whole, after its own lines.
             settings.save();
-            const text = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+            const text = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
             defer alloc.free(text);
             try std.testing.expect(std.mem.indexOf(u8, text, "profile-order =\nprofile-order = user:py\nprofile-order = pwsh.exe\nprofile-order = cmd.exe\n") != null);
             try std.testing.expect(std.mem.indexOf(u8, text, "profile-hidden =\nprofile-hidden = cmd.exe\n") != null);
@@ -25072,11 +25072,11 @@ test "settings the Profiles page moves and hides nothing while the command line,
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = cmd.exe\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "light-theme", .data = "# light\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "dark-theme", .data = "profile-hidden = pwsh.exe\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order = cmd.exe\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light-theme", .data = "# light\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark-theme", .data = "profile-hidden = pwsh.exe\n" });
             var names: [3][]u8 = undefined;
-            for ([_][]const u8{ "later.conf", "light-theme", "dark-theme" }, &names) |name, *full| full.* = try tmp.dir.realpathAlloc(alloc, name);
+            for ([_][]const u8{ "later.conf", "light-theme", "dark-theme" }, &names) |name, *full| full.* = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
             defer for (names) |full| alloc.free(full);
             const later_line = try std.fmt.allocPrint(alloc, "config-file = {s}\n", .{names[0]});
             defer alloc.free(later_line);
@@ -25145,7 +25145,7 @@ test "settings the Profiles page moves and hides nothing while the command line,
                 // Nothing to save, and nothing written.
                 try std.testing.expect(!settings.hasPendingChanges());
                 settings.save();
-                const file = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const file = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(file);
                 try expectSameText(text, file);
             }
@@ -25196,12 +25196,12 @@ test "settings a profile change whose lists could not be worked out is worked ou
                 try std.testing.expect(settings.profile_lists_unsettled);
                 // Save while it still cannot: nothing is written, the draft
                 // and its new profile are kept, and the status says so.
-                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const before = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(before);
                 const saves = fixture.saved;
                 settings.save();
                 try std.testing.expectEqual(saves, fixture.saved);
-                const unchanged = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const unchanged = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(unchanged);
                 try expectSameText(before, unchanged);
                 try std.testing.expect((settings.pending orelse return error.TestExpectedDraft).@"profile-command".get("dev") != null);
@@ -25212,7 +25212,7 @@ test "settings a profile change whose lists could not be worked out is worked ou
                 SettingsWindow.test_profile_settle_fails = false;
                 settings.save();
                 try std.testing.expect(!settings.profile_lists_unsettled);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:dev\n") != null);
             }
@@ -25260,7 +25260,7 @@ test "settings a profile change on a page with part of the profiles leaves its l
                 try std.testing.expect(fixture.pumpKey(VK_RETURN));
                 try std.testing.expect(settings.profile_lists_unsettled);
                 try std.testing.expect(!settings.profile_model.complete);
-                const before = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const before = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(before);
                 if (part == .discovery_partial) {
                     // Save asks for the rest; none comes yet: nothing is
@@ -25270,7 +25270,7 @@ test "settings a profile change on a page with part of the profiles leaves its l
                     settings.save();
                     try std.testing.expect(fixture.find_all_calls > asked);
                     try std.testing.expectEqual(saves, fixture.saved);
-                    const unchanged = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                    const unchanged = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                     defer alloc.free(unchanged);
                     try expectSameText(before, unchanged);
                     try std.testing.expectEqual(StatusNote.profile_refused, settings.status_note);
@@ -25282,7 +25282,7 @@ test "settings a profile change on a page with part of the profiles leaves its l
                 // out, and the saved order names the new profile.
                 settings.save();
                 try std.testing.expect(!settings.profile_lists_unsettled);
-                const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 16);
+                const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 16));
                 defer alloc.free(after);
                 try std.testing.expect(std.mem.indexOf(u8, after, "profile-order = user:dev\n") != null);
             }
@@ -25596,7 +25596,7 @@ test "settings a list that arrives while another page is shown counts the Profil
             };
             giveProfilePage(fixture, &part, false);
             typeSearch(settings, "pwsh");
-            const counts = &settings.search_counts[@intFromEnum(Section.profiles)];
+            const counts = &settings.search_counts[@backingInt(Section.profiles)];
             try std.testing.expectEqual(@as(@TypeOf(counts.*), 0), counts.*);
             // On another page, PowerShell arrives: the Profiles count follows,
             // and the page shown stays.
@@ -25902,7 +25902,7 @@ test "settings a profile field a later file masks is saved, and the status names
             defer tmp.cleanup();
             // The later file sets another profile's label after team's, so the
             // line named is team's own, not the key's last.
-            try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-command = other: o.exe\nprofile-name = team: Team\nprofile-name = other: Other\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-command = other: o.exe\nprofile-name = team: Team\nprofile-name = other: Other\n" });
             var path: []u8 = &.{};
             const fixture = try profileFixture(&tmp, "profile-command = team: t.exe\nconfig-file = later.conf\n", &path);
             defer alloc.free(path);
@@ -25917,7 +25917,7 @@ test "settings a profile field a later file masks is saved, and the status names
             _ = sys.SendMessageW(settings.btn_save.?, BM_CLICK, 0, 0);
             try std.testing.expect(settings.profile_edit == null);
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "noctty.conf", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "noctty.conf", alloc, .limited(1 << 20));
             defer alloc.free(after);
             try expectSameText("profile-command = team: t.exe\nprofile-name = team: Mine\nconfig-file = later.conf\n", after);
             try std.testing.expectEqual(StatusNote.saved_overridden, settings.status_note);
@@ -26350,8 +26350,8 @@ test "settings an edit begun on the All settings page round-trips through Save, 
                 "  # an indented comment, and lines Settings has no control for\n" ++
                 "keybind = ctrl+shift+t=new_tab\n" ++
                 "window-padding-x = 4\n";
-            try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = before });
-            const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = before });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -26377,7 +26377,7 @@ test "settings an edit begun on the All settings page round-trips through Save, 
 
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
             defer alloc.free(after);
             // The edited line is rewritten in place and the new key is added
             // at the end; every other byte is the file's.
@@ -26511,7 +26511,7 @@ test "settings a search finds key bindings by their keys and actions, counts the
             }
             try std.testing.expect(expected >= 3);
             try std.testing.expectEqual(expected, list.shown_count);
-            try std.testing.expectEqual(expected, settings.search_counts[@intFromEnum(Section.keybindings)]);
+            try std.testing.expectEqual(expected, settings.search_counts[@backingInt(Section.keybindings)]);
             // The page's help steps aside for what the search found.
             try std.testing.expect(sys.IsWindowVisible(settings.text_help.?) == 0);
             try std.testing.expectEqual(@as(i32, 0), dialog_test.rectIn(settings.viewport.?, list.hwnd.?).top);
@@ -26626,7 +26626,7 @@ test "settings a reload finds the Keybindings page's bindings again, keeps the s
             settings.externalConfigChanged(&reloaded, 100);
             try std.testing.expectEqual(@as(usize, 1), list.shown_count);
             try std.testing.expectEqualStrings("ctrl+alt+shift+f12", settings.keybind_model.rows[list.shown[0]].trigger);
-            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.keybindings)]);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@backingInt(Section.keybindings)]);
             try std.testing.expectEqual(total_before + 1, settings.search_total);
             try std.testing.expect(sys.IsWindowVisible(list.hwnd.?) != 0);
 
@@ -27494,7 +27494,7 @@ fn viewportProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(
             return 0;
         },
         WM_HSCROLL => {
-            if (lParam != 0 and owner.companions[@intFromEnum(Companion.opacity_slider)] == @as(?HWND, @ptrFromInt(@as(usize, @bitCast(lParam))))) owner.sliderMoved();
+            if (lParam != 0 and owner.companions[@backingInt(Companion.opacity_slider)] == @as(?HWND, @ptrFromInt(@as(usize, @bitCast(lParam))))) owner.sliderMoved();
             return 0;
         },
         WM_NOTIFY => if (owner.companionNotify(lParam)) |result| return result,
@@ -27729,7 +27729,7 @@ fn cloneOwnedSetting(target: *Config, source: *const Config, field: OwnedSetting
         .font_family => .{ .font_family = try source.@"font-family".clone(alloc) },
         .theme => .{ .theme = if (source.theme) |*value| try value.clone(alloc) else null },
         .command => .{ .command = if (source.command) |*value| try value.clone(alloc) else null },
-        .default_profile => .{ .default_profile = if (source.@"default-profile") |value| try alloc.dupeZ(u8, value) else null },
+        .default_profile => .{ .default_profile = if (source.@"default-profile") |value| try alloc.dupeSentinel(u8, value, 0) else null },
     };
 }
 
@@ -27791,7 +27791,7 @@ fn writeOwnedSettingDiffs(
 ) OwnedDiffs {
     var result: OwnedDiffs = .{ .lines = 0, .truncated = false };
     for (std.enums.values(OwnedSettingField)) |field| {
-        const index = @intFromEnum(field);
+        const index = @backingInt(field);
         if (!dirty[index] and !conflict[index]) continue;
         const line_start = writer.end;
         writeOwnedSettingDiffLine(writer, original, pending, field, conflict[index]) catch {
@@ -28004,7 +28004,7 @@ test "win32_settings: every tracked field maps to its matching config value" {
 test "win32_settings: owned snapshots survive source config deinit" {
     var source = try Config.default(std.testing.allocator);
     const source_alloc = source._arena.?.allocator();
-    source.command = .{ .shell = try source_alloc.dupeZ(u8, "pwsh.exe -NoLogo") };
+    source.command = .{ .shell = try source_alloc.dupeSentinel(u8, "pwsh.exe -NoLogo", 0) };
 
     var snapshot = try source.clone(std.testing.allocator);
     defer snapshot.deinit();
@@ -28050,10 +28050,10 @@ test "win32_settings: arena-backed equality compares semantic content" {
     var b = try Config.default(std.testing.allocator);
     defer b.deinit();
 
-    a.command = .{ .shell = try a._arena.?.allocator().dupeZ(u8, "pwsh.exe") };
-    b.command = .{ .shell = try b._arena.?.allocator().dupeZ(u8, "pwsh.exe") };
+    a.command = .{ .shell = try a._arena.?.allocator().dupeSentinel(u8, "pwsh.exe", 0) };
+    b.command = .{ .shell = try b._arena.?.allocator().dupeSentinel(u8, "pwsh.exe", 0) };
     try std.testing.expect(ownedSettingEql(&a, &b, .command));
-    b.command = .{ .shell = try b._arena.?.allocator().dupeZ(u8, "cmd.exe") };
+    b.command = .{ .shell = try b._arena.?.allocator().dupeSentinel(u8, "cmd.exe", 0) };
     try std.testing.expect(!ownedSettingEql(&a, &b, .command));
 }
 
@@ -28068,7 +28068,7 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     var original_theme: Config.Theme = undefined;
     try original_theme.parseCLI(original_alloc, "Old Theme");
     original.theme = original_theme;
-    original.command = .{ .shell = try original_alloc.dupeZ(u8, "cmd.exe") };
+    original.command = .{ .shell = try original_alloc.dupeSentinel(u8, "cmd.exe", 0) };
 
     const pending_alloc = pending._arena.?.allocator();
     pending.@"font-family" = try parseFontFamilyEditText(pending_alloc, "JetBrains Mono, Symbols Nerd Font");
@@ -28078,11 +28078,11 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     var pending_command: Config.Command = undefined;
     try pending_command.parseCLI(pending_alloc, "direct:pwsh.exe -NoLogo");
     pending.command = pending_command;
-    pending.@"default-profile" = try pending_alloc.dupeZ(u8, "user:py312");
+    pending.@"default-profile" = try pending_alloc.dupeSentinel(u8, "user:py312", 0);
 
     const dirty = @as([owned_setting_field_count]bool, @splat(true));
     var conflict = @as([owned_setting_field_count]bool, @splat(false));
-    conflict[@intFromEnum(OwnedSettingField.theme)] = true;
+    conflict[@backingInt(OwnedSettingField.theme)] = true;
     var buf: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     const owned = writeOwnedSettingDiffs(&writer, &original, &pending, dirty, conflict);
@@ -28519,8 +28519,8 @@ test "settings toggles round-trip through Save from a click and from Space, the 
                 "\n" ++
                 "  # an indented comment, and a line Settings has no control for\n" ++
                 "keybind = ctrl+shift+t=new_tab\n";
-            try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = before });
-            const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = before });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -28560,7 +28560,7 @@ test "settings toggles round-trip through Save from a click and from Space, the 
 
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
             defer alloc.free(after);
             // The edited line is rewritten in place and the new key is added
             // at the end; every other byte is the file's.
@@ -28588,7 +28588,7 @@ test "settings the opacity trackbar steps its field from the keyboard, follows w
             defer fixture.finish();
             fixture.live_previews = true;
             const settings = &fixture.settings;
-            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
             const edit = settings.fields.edit_bg_opacity.?;
             var buf: [edit_text_max_utf8]u8 = undefined;
             // It starts where the field is, at the default 1.
@@ -28655,7 +28655,7 @@ test "settings an up-down steps its number field, held to the field's range, and
             // The font size: Up and Down in the field step it a point, as a
             // number box does, and the up-down's value follows.
             const font = settings.fields.edit_font_size.?;
-            const font_spin = settings.companions[@intFromEnum(Companion.font_size_spin)].?;
+            const font_spin = settings.companions[@backingInt(Companion.font_size_spin)].?;
             const size = settings.pending.?.@"font-size";
             try std.testing.expectEqual(@as(LRESULT, @intFromFloat(@round(size))), position(font_spin));
             _ = sys.SetFocus(font);
@@ -28699,7 +28699,7 @@ test "settings an up-down steps its number field, held to the field's range, and
             // The scrollback limit steps a megabyte, and not below 0.
             settings.showSection(.terminal, false);
             const scrollback = settings.fields.edit_scrollback.?;
-            const scrollback_spin = settings.companions[@intFromEnum(Companion.scrollback_spin)].?;
+            const scrollback_spin = settings.companions[@backingInt(Companion.scrollback_spin)].?;
             const limit = settings.pending.?.@"scrollback-limit";
             _ = sys.SetFocus(scrollback);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
@@ -28734,8 +28734,8 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
                 "\n" ++
                 "  # an indented comment, and a line Settings has no control for\n" ++
                 "keybind = ctrl+shift+t=new_tab\n";
-            try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = before });
-            const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = before });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
             defer alloc.free(path);
 
             const fixture = try dialog_test.Fixture.prepare(false);
@@ -28749,7 +28749,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
             const limit = settings.pending.?.@"scrollback-limit";
 
             // The opacity, which the file sets: a step down on its trackbar.
-            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
             settings.ensureControlVisible(slider);
             _ = sys.SetFocus(slider);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_left));
@@ -28763,7 +28763,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
 
             settings.save();
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
-            const after = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+            const after = try tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(1 << 20));
             defer alloc.free(after);
             // The edited line is rewritten in place and the new keys are
             // added at the end; every other byte is the file's.
@@ -28804,7 +28804,7 @@ test "settings the opacity trackbar draws its channel and thumb in the theme's c
             defer fixture.finish();
             const settings = &fixture.settings;
             const hwnd = fixture.hwnd();
-            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
             const edit = settings.fields.edit_bg_opacity.?;
             // Away from the ends, so the channel shows on both sides.
             typeInto(edit, "0.5");
@@ -28901,7 +28901,7 @@ test "settings paints its own up-downs below Windows 11, in the dark theme only,
                 const hwnd = fixture.hwnd();
                 dialog_test.makeAllSections(settings);
                 inline for (.{ Companion.font_size_spin, Companion.scrollback_spin }) |kind| {
-                    const spin = settings.companions[@intFromEnum(kind)].?;
+                    const spin = settings.companions[@backingInt(kind)].?;
                     try std.testing.expectEqual(ours, sys.GetWindowLongPtrW(spin, GWLP_WNDPROC) == @as(LONG_PTR, @intCast(@intFromPtr(&settingsSpinProc))));
                     for ([_]enum { dark, light, high_contrast }{ .dark, .light, .high_contrast }) |mode| {
                         dark = mode != .light;
@@ -29033,7 +29033,7 @@ test "settings an up-down it paints repaints through its own paint, never the st
             try settings.open();
             const hwnd = fixture.hwnd();
             settings.showSection(.appearance, false);
-            const spin = settings.companions[@intFromEnum(Companion.font_size_spin)].?;
+            const spin = settings.companions[@backingInt(Companion.font_size_spin)].?;
             settings.ensureControlVisible(settings.rawScalarEdit(.font_size).?);
             dialog_test.flushPaint(hwnd);
             const edit_bg = settings.theme_adapter.colors.edit_bg;
@@ -29122,16 +29122,16 @@ test "settings the trackbar and up-downs are named for their fields, and the tra
             // MSAA reads the stock role (slider, spin button) and value; the
             // name is the field's, as the field's own is.
             try std.testing.expectEqualStrings("Background opacity", fake.nameOf(settings.fields.edit_bg_opacity.?));
-            try std.testing.expectEqualStrings("Background opacity", fake.nameOf(settings.companions[@intFromEnum(Companion.opacity_slider)].?));
-            try std.testing.expectEqualStrings("Font size", fake.nameOf(settings.companions[@intFromEnum(Companion.font_size_spin)].?));
-            try std.testing.expectEqualStrings("Scrollback limit", fake.nameOf(settings.companions[@intFromEnum(Companion.scrollback_spin)].?));
+            try std.testing.expectEqualStrings("Background opacity", fake.nameOf(settings.companions[@backingInt(Companion.opacity_slider)].?));
+            try std.testing.expectEqualStrings("Font size", fake.nameOf(settings.companions[@backingInt(Companion.font_size_spin)].?));
+            try std.testing.expectEqualStrings("Scrollback limit", fake.nameOf(settings.companions[@backingInt(Companion.scrollback_spin)].?));
 
             // The trackbar's focus rectangle is the stock one: hidden while
             // the dialog manager hides focus cues (a click), shown once a
             // navigation key reveals them.
             const hwnd = fixture.hwnd();
             settings.showSection(.appearance, false);
-            const slider = settings.companions[@intFromEnum(Companion.opacity_slider)].?;
+            const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
             settings.ensureControlVisible(slider);
             const UIS_SET: usize = 1;
             const UIS_CLEAR: usize = 2;

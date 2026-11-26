@@ -51,7 +51,7 @@ pub fn appendOwnedString(
     // previous allocation instead of a dangling freed pointer, and
     // (b) a caller passing a `value` that aliases the current slot
     // is copied to fresh storage before the free, avoiding UAF.
-    const next: ?[:0]const u8 = if (value) |v| try alloc.dupeZ(u8, v) else null;
+    const next: ?[:0]const u8 = if (value) |v| try alloc.dupeSentinel(u8, v, 0) else null;
     if (target.*) |existing| alloc.free(existing);
     target.* = next;
 }

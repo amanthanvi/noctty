@@ -984,7 +984,7 @@ test "isolated: the compare names the acquiring function of every site shape (ac
         }
 
         fn shapeAutoCaller(m: *StateMutex) void {
-            @call(if (builtin.mode == .Debug) .auto else .always_inline, shapeAutoTarget, .{m});
+            @call(if (builtin.mode == .debug) .auto else .always_inline, shapeAutoTarget, .{m});
         }
 
         /// The caller holds the mutex, and the relock is this function's

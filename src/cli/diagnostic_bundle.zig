@@ -369,23 +369,23 @@ test "diagnostic config scan supports UTF16 byte orders and missing files" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fs.path.join(alloc, &.{ root, "config.ghostty" });
     defer alloc.free(path);
     var keys = ConfigKeys.initEmpty();
     try std.testing.expect(!try scanConfigFile(alloc, path, &keys));
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "" });
     // An empty default file still exists, so the caller must not load the
     // pre-rename fallback just because no keys were collected from it.
     try std.testing.expect(try scanConfigFile(alloc, path, &keys));
     try std.testing.expectEqual(@as(usize, 0), keys.count());
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size=22\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size=22\n" });
     try std.testing.expect(try scanConfigFile(alloc, path, &keys));
     try std.testing.expect(keys.contains(.@"font-size"));
-    const file = try tmp.dir.createFile("config.ghostty", .{});
+    const file = try tmp.dir.createFile(std.testing.io, "config.ghostty", .{});
     try file.setEndPos(1024 * 1024 + 1);
-    file.close();
+    file.close(std.testing.io);
     try std.testing.expectError(error.FileTooBig, scanConfigFile(alloc, path, &keys));
 }
 
@@ -393,10 +393,10 @@ test "diagnostic bundle existing output is refused with guidance" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preserved.txt", .data = "existing bundle" });
-    const output = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "preserved.txt", .data = "existing bundle" });
+    const output = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(output);
-    const output_z = try alloc.dupeZ(u8, output);
+    const output_z = try alloc.dupeSentinel(u8, output, 0);
     defer alloc.free(output_z);
 
     var buffer: [1024]u8 = undefined;
@@ -404,10 +404,10 @@ test "diagnostic bundle existing output is refused with guidance" {
     try std.testing.expectEqual(@as(u8, 1), try create(alloc, .{ .output = output_z }, &writer));
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "already exists") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "--output") != null);
-    const preserved = try tmp.dir.readFileAlloc(alloc, "preserved.txt", 1024);
+    const preserved = try tmp.dir.readFileAlloc(std.testing.io, "preserved.txt", alloc, .limited(1024));
     defer alloc.free(preserved);
     try std.testing.expectEqualStrings("existing bundle", preserved);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("manifest.json", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "manifest.json", .{}));
 }
 
 test "diagnostic manifest defaults exclude sensitive data" {
@@ -454,11 +454,11 @@ test "diagnostic crash dump copy uses canonical output path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("crash");
-    try tmp.dir.writeFile(.{ .sub_path = "crash/report.dmp", .data = "test dump" });
-    try tmp.dir.makePath("bundle");
+    try tmp.dir.createDirPath(std.testing.io, "crash");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "crash/report.dmp", .data = "test dump" });
+    try tmp.dir.createDirPath(std.testing.io, "bundle");
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const crash_path = try std.fs.path.join(alloc, &.{ root, "crash" });
     const output_path = try std.fs.path.join(alloc, &.{ root, "bundle" });
@@ -471,7 +471,7 @@ test "diagnostic crash dump copy uses canonical output path" {
         true,
     ));
 
-    const copied = try tmp.dir.readFileAlloc(alloc, "bundle/crash-dumps/report.dmp", 1024);
+    const copied = try tmp.dir.readFileAlloc(std.testing.io, "bundle/crash-dumps/report.dmp", alloc, .limited(1024));
     defer alloc.free(copied);
     try std.testing.expectEqualStrings("test dump", copied);
 }

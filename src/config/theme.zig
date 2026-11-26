@@ -393,28 +393,28 @@ test "theme list keeps first duplicate by directory priority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("user");
-    try tmp.dir.makePath("legacy-user");
-    try tmp.dir.makePath("resources");
+    try tmp.dir.createDirPath(std.testing.io, "user");
+    try tmp.dir.createDirPath(std.testing.io, "legacy-user");
+    try tmp.dir.createDirPath(std.testing.io, "resources");
     {
-        var file = try tmp.dir.createFile("user/Dupe", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "user/Dupe", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("legacy-user/Dupe", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "legacy-user/Dupe", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("legacy-user/LegacyWins", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "legacy-user/LegacyWins", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("resources/Dupe", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "resources/Dupe", .{});
+        file.close(std.testing.io);
     }
     {
-        var file = try tmp.dir.createFile("resources/LegacyWins", .{});
-        file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "resources/LegacyWins", .{});
+        file.close(std.testing.io);
     }
 
     var user_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -481,7 +481,7 @@ test "a theme no directory has is one diagnostic that names every path tried" {
     // names (a test build has none otherwise), so the paths tried are there.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const home = try tmp.dir.realpathAlloc(arena.allocator(), ".");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena.allocator());
     file_load.test_config_root = home;
     defer file_load.test_config_root = null;
 
@@ -523,23 +523,23 @@ test "a test build looks for user themes only under the config home its test nam
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const themes_dir = build_config.data_dir_name ++ "/themes";
-    try tmp.dir.makePath(themes_dir);
-    try tmp.dir.writeFile(.{ .sub_path = themes_dir ++ "/test-config-guard-theme", .data = "font-size = 31\n" });
-    const home = try tmp.dir.realpathAlloc(arena.allocator(), ".");
+    try tmp.dir.createDirPath(std.testing.io, themes_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = themes_dir ++ "/test-config-guard-theme", .data = "font-size = 31\n" });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena.allocator());
     const saved: ?[:0]u8 = saved: {
         const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => break :saved null,
             else => return err,
         };
         defer alloc.free(value);
-        break :saved try alloc.dupeZ(u8, value);
+        break :saved try alloc.dupeSentinel(u8, value, 0);
     };
     defer if (saved) |value| alloc.free(value);
     defer _ = if (saved) |value|
         internal_os.setenv("XDG_CONFIG_HOME", value)
     else
         internal_os.unsetenv("XDG_CONFIG_HOME");
-    try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", try arena.allocator().dupeZ(u8, home)));
+    try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", try arena.allocator().dupeSentinel(u8, home, 0)));
 
     // No root named: the theme is not found, and no user theme directory is
     // there to look in.

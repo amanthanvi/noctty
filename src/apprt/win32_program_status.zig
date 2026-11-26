@@ -557,8 +557,8 @@ pub fn hashAnnounced(
     record: *const Record,
 ) void {
     hasher.update(subject(records, record) orelse "");
-    const kind: u8 = if (record.kind) |value| @as(u8, @intCast(@intFromEnum(value))) + 1 else 0;
-    hasher.update(&.{ 0, @as(u8, @intCast(@intFromEnum(record.state))), kind });
+    const kind: u8 = if (record.kind) |value| @as(u8, @intCast(@backingInt(value))) + 1 else 0;
+    hasher.update(&.{ 0, @as(u8, @intCast(@backingInt(record.state))), kind });
     if (record.needsUser()) if (record.msg) |msg| hasher.update(msg);
 }
 

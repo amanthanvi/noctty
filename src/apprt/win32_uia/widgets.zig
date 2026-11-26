@@ -1708,7 +1708,7 @@ pub const SettingsControlProvider = struct {
     fn requestAction(self: *SettingsControlProvider, action: Action, index: isize) com.HRESULT {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         var result: usize = 0;
-        if (SendMessageTimeoutW(self.hwnd, action_message, @intFromEnum(action), index, SMTO_BLOCK | SMTO_ABORTIFHUNG, settings_selection_timeout_ms, &result) == 0)
+        if (SendMessageTimeoutW(self.hwnd, action_message, @backingInt(action), index, SMTO_BLOCK | SMTO_ABORTIFHUNG, settings_selection_timeout_ms, &result) == 0)
             return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (result == action_success) return com.S_OK;
         if (result == 0) return com.UIA_E_ELEMENTNOTAVAILABLE;
@@ -2135,7 +2135,7 @@ pub const SettingsSectionProvider = struct {
     container: *SettingsSectionGroupProvider,
     detached: std.atomic.Value(bool),
     disconnected: std.atomic.Value(bool),
-    marker: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(SettingsSectionMarker.none)),
+    marker: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(SettingsSectionMarker.none)),
     /// How many rows the Settings search found on this section's page, or
     /// `no_search` while nothing is searched for.
     search_count: std.atomic.Value(i32) = std.atomic.Value(i32).init(no_search),
@@ -2208,12 +2208,12 @@ pub const SettingsSectionProvider = struct {
     }
 
     pub fn markerState(self: *const SettingsSectionProvider) SettingsSectionMarker {
-        return @enumFromInt(self.marker.load(.acquire));
+        return @fromBackingInt(@intCast(self.marker.load(.acquire)));
     }
 
     /// Say what the section holds; a change is announced as a new `ItemStatus`.
     pub fn setMarker(self: *SettingsSectionProvider, marker: SettingsSectionMarker) void {
-        if (self.marker.swap(@intFromEnum(marker), .acq_rel) == @intFromEnum(marker)) return;
+        if (self.marker.swap(@backingInt(marker), .acq_rel) == @backingInt(marker)) return;
         if (!self.available()) return;
         events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ItemStatusPropertyId);
     }

@@ -251,8 +251,8 @@ pub fn mergeRecords(
                 }
             }
             const phase_order = std.math.order(
-                @intFromEnum(next.phase),
-                @intFromEnum(current.phase),
+                @backingInt(next.phase),
+                @backingInt(current.phase),
             );
             if (phase_order == .gt) {
                 current.phase = next.phase;

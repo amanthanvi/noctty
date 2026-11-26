@@ -480,7 +480,7 @@ fn handleOfView(tree: *const TestTree, label: []const u8) TestTree.Node.Handle {
 fn parentOf(tree: *const TestTree, child: TestTree.Node.Handle) TestTree.Node.Handle {
     for (tree.nodes, 0..) |node, i| switch (node) {
         .leaf => {},
-        .split => |s| if (s.left == child or s.right == child) return @enumFromInt(i),
+        .split => |s| if (s.left == child or s.right == child) return @fromBackingInt(@intCast(i)),
     };
     unreachable;
 }

@@ -4282,7 +4282,7 @@ fn decodeUtf16(
 
 fn invalidUtf16(self: *Config, path: []const u8, what: TextFile, reason: []const u8) error{ OutOfMemory, InvalidUtf16 } {
     const arena_alloc = self._arena.?.allocator();
-    const skipped = arena_alloc.dupeZ(u8, path) catch return error.OutOfMemory;
+    const skipped = arena_alloc.dupeSentinel(u8, path, 0) catch return error.OutOfMemory;
     switch (what) {
         .config, .include => self._undecodable_file = skipped,
         .theme => self._undecodable_theme = skipped,
@@ -4394,8 +4394,8 @@ test "launch-layout is ignored in configuration files" {
         defer td.deinit();
         var write_buf: [4096]u8 = undefined;
         {
-            var file = try td.dir.createFile("theme", .{});
-            defer file.close();
+            var file = try td.dir.createFile(std.testing.io, "theme", .{});
+            defer file.close(std.testing.io);
             var writer = file.writer(&write_buf);
             try writer.interface.writeAll(
                 "launch-layout = Theme Layout\nbackground = #123abc\n",
@@ -4440,14 +4440,14 @@ test "launch-layout does not survive in the replay log once consumed" {
 
     // What `loadCliArgs` leaves behind for `noctty --launch-layout=<name>`.
     try cfg._replay_steps.append(arena_alloc, .{
-        .arg = .{ .value = try arena_alloc.dupeZ(u8, "--launch-layout=Project Alpha") },
+        .arg = .{ .value = try arena_alloc.dupeSentinel(u8, "--launch-layout=Project Alpha", 0) },
     });
     try cfg._replay_steps.append(arena_alloc, .{ .@"-e" = .none });
     try cfg._replay_steps.append(arena_alloc, .{
-        .arg = .{ .value = try arena_alloc.dupeZ(u8, "tool.exe") },
+        .arg = .{ .value = try arena_alloc.dupeSentinel(u8, "tool.exe", 0) },
     });
     try cfg._replay_steps.append(arena_alloc, .{
-        .arg = .{ .value = try arena_alloc.dupeZ(u8, "--launch-layout=child-option") },
+        .arg = .{ .value = try arena_alloc.dupeSentinel(u8, "--launch-layout=child-option", 0) },
     });
     cfg.@"launch-layout" = "Project Alpha";
 
@@ -4592,11 +4592,11 @@ test "the record of a skipped UTF-16 file survives the theme replay and a clone"
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "bad16.conf", .data = "\xff\xfe\x00\xd8f\x00o\x00" });
-    try tmp.dir.writeFile(.{ .sub_path = "x.theme", .data = "cursor-style = underline\n" });
-    const bad_path = try tmp.dir.realpathAlloc(alloc, "bad16.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad16.conf", .data = "\xff\xfe\x00\xd8f\x00o\x00" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.theme", .data = "cursor-style = underline\n" });
+    const bad_path = try tmp.dir.realPathFileAlloc(std.testing.io, "bad16.conf", alloc);
     defer alloc.free(bad_path);
-    const theme_path = try tmp.dir.realpathAlloc(alloc, "x.theme");
+    const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.theme", alloc);
     defer alloc.free(theme_path);
 
     var cfg = try Config.default(alloc);
@@ -4626,8 +4626,8 @@ test "a UTF-16 config file on disk is read through loadFile" {
     defer tmp.cleanup();
     const data = try testUtf16Bytes(alloc, "font-size = 16\r\n", .little);
     defer alloc.free(data);
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = data });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = data });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
 
     var cfg = try Config.default(alloc);
@@ -4718,8 +4718,8 @@ test "loadFile reads lines after an ignored line that ends at the read buffer bo
 
         const name = try std.fmt.allocPrint(alloc, "case{d}.ghostty", .{i});
         defer alloc.free(name);
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = data.items });
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = data.items });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
 
         var cfg = try Config.default(alloc);
@@ -4798,19 +4798,19 @@ test "a light/dark switch that cannot copy a recorded problem fails, rather than
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "font-size = 13\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "font-size = 14\n" });
-    const light = try tmp.dir.realpathAlloc(testing.allocator, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "font-size = 13\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "font-size = 14\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", testing.allocator);
     defer testing.allocator.free(light);
-    const dark = try tmp.dir.realpathAlloc(testing.allocator, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", testing.allocator);
     defer testing.allocator.free(dark);
     const missing = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(light) orelse return error.TestExpectedDir, "missing.conf" });
     defer testing.allocator.free(missing);
     // A problem the load records and replays: an include that is not there.
     const text = try std.fmt.allocPrint(testing.allocator, "theme = light:{s},dark:{s}\nconfig-file = {s}\n", .{ light, dark, missing });
     defer testing.allocator.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", testing.allocator);
     defer testing.allocator.free(path);
     const problem = try std.fmt.allocPrint(testing.allocator, "error opening config-file {s}: error.FileNotFound", .{missing});
     defer testing.allocator.free(problem);
@@ -4873,17 +4873,17 @@ test "a UTF-16 theme is decoded as a config file is, and one that does not decod
     defer tmp.cleanup();
     const good = try testUtf16Le("font-size = 14\n");
     defer alloc.free(good);
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = good });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = good });
     // A lone high surrogate: not UTF-16.
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\xff\xfe\x00\xd8a\x00" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\xff\xfe\x00\xd8a\x00" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -4919,13 +4919,13 @@ test "a theme repaired between two finalizes leaves no stale marker, and one tha
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = "\xff\xfe\x00\xd8a\x00" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "theme", .data = "\xff\xfe\x00\xd8a\x00" });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "theme", alloc);
     defer alloc.free(theme);
     const text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{theme});
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -4943,14 +4943,14 @@ test "a theme repaired between two finalizes leaves no stale marker, and one tha
     }
     try testing.expectEqual(@as(usize, 1), named);
     // Repaired and finalized again: read, with no marker and no problem left.
-    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = "font-size = 14\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "theme", .data = "font-size = 14\n" });
     try cfg.finalize();
     try testing.expectEqual(@as(f32, 14), cfg.@"font-size");
     try testing.expect(cfg._undecodable_theme == null);
     try testing.expect(cfg._undecodable_file == null);
     for (cfg._diagnostics.items()) |diag| try testing.expect(!std.mem.eql(u8, expected, diag.message));
     // Broken again: the theme's values go with it.
-    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = "\xff\xfe\x00\xd8a\x00" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "theme", .data = "\xff\xfe\x00\xd8a\x00" });
     try cfg.finalize();
     try testing.expectEqual(@as(f32, 12), cfg.@"font-size");
     try testing.expect(cfg._undecodable_theme != null);
@@ -4962,8 +4962,8 @@ test "a default config file that is there and will not open is a problem, naming
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 13\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 13\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
     // Another program holds it with no sharing.
     const wide = try std.os.windows.sliceToPrefixedFileW(null, path);
@@ -4992,7 +4992,7 @@ test "a default config file that is there and will not open is a problem, naming
     try testing.expectEqual(@as(f32, 13), after.@"font-size");
     try testing.expect(after._diagnostics.empty());
     // An empty one sets nothing and is no problem either.
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "" });
     var empty = try Config.default(alloc);
     defer empty.deinit();
     _ = empty.loadOptionalFile(alloc, path);
@@ -5014,17 +5014,17 @@ test "a UTF-16 theme whose read fails partway is a problem of the theme, not the
     const utf16 = try testUtf16Le(text.written());
     defer alloc.free(utf16);
     try testing.expect(utf16.len > 2 * file_read_buffer_len);
-    try tmp.dir.writeFile(.{ .sub_path = "theme", .data = utf16 });
-    const theme = try tmp.dir.realpathAlloc(alloc, "theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "theme", .data = utf16 });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "theme", alloc);
     defer alloc.free(theme);
     const config_text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{theme});
     defer alloc.free(config_text);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = config_text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = config_text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     // Another program locks the bytes past the first fill.
-    var locker = try tmp.dir.openFile("theme", .{ .mode = .read_write });
-    defer locker.close();
+    var locker = try tmp.dir.openFile(std.testing.io, "theme", .{ .mode = .read_write });
+    defer locker.close(std.testing.io);
     var io: std.os.windows.IO_STATUS_BLOCK = undefined;
     const offset: std.os.windows.LARGE_INTEGER = 2 * file_read_buffer_len;
     const length: std.os.windows.LARGE_INTEGER = @intCast(utf16.len);
@@ -5049,21 +5049,21 @@ test "writeConfigTemplate writes the template with its path" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fs.path.join(alloc, &.{ root, "config.ghostty" });
     defer alloc.free(path);
 
     try writeConfigTemplate(path);
-    const content = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 8192);
+    const content = try tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(8192));
     defer alloc.free(content);
     try std.testing.expect(content.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, content, path) != null);
 
     const user_content = "# keep this config\nfont-size = 13\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = user_content });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = user_content });
     try writeConfigTemplate(path);
-    const preserved = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 8192);
+    const preserved = try tmp.dir.readFileAlloc(std.testing.io, "config.ghostty", alloc, .limited(8192));
     defer alloc.free(preserved);
     try std.testing.expectEqualStrings(user_content, preserved);
 }
@@ -5150,7 +5150,7 @@ test "default config files: an edit to the edit-target takes effect on reload" {
     // the portable root, `XDG_CONFIG_HOME` and `LOCALAPPDATA`.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
 
     const File = struct { path: []const u8, content: []const u8 };
@@ -5242,14 +5242,14 @@ test "default config files: an edit to the edit-target takes effect on reload" {
 
         const home_name = try std.fmt.allocPrint(alloc, "case{d}", .{i});
         defer alloc.free(home_name);
-        try tmp.dir.makePath(home_name);
+        try tmp.dir.createDirPath(std.testing.io, home_name);
         const home = try std.fs.path.join(alloc, &.{ tmp_path, home_name });
         defer alloc.free(home);
         file_load.test_config_root = home;
         defer file_load.test_config_root = null;
 
-        var home_dir = try tmp.dir.openDir(home_name, .{});
-        defer home_dir.close();
+        var home_dir = try tmp.dir.openDir(std.testing.io, home_name, .{});
+        defer home_dir.close(std.testing.io);
         for (case.files) |file| {
             if (std.fs.path.dirname(file.path)) |parent| try home_dir.makePath(parent);
             try home_dir.writeFile(.{ .sub_path = file.path, .data = file.content });
@@ -5366,7 +5366,7 @@ pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
             errdefer builder.deinit(arena_alloc);
             for (args) |arg_raw| {
                 const arg = std.mem.sliceTo(arg_raw, 0);
-                const copy = try arena_alloc.dupeZ(u8, arg);
+                const copy = try arena_alloc.dupeSentinel(u8, arg, 0);
                 try self._replay_steps.append(arena_alloc, .{ .arg = .{ .value = copy } });
                 try builder.append(arena_alloc, copy);
             }
@@ -5784,7 +5784,7 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     // The replay re-applies values, not the loader's record of a file it
     // skipped; carry that over before the old arena goes.
     if (self._undecodable_file) |skipped| {
-        new_config._undecodable_file = try new_config._arena.?.allocator().dupeZ(u8, skipped);
+        new_config._undecodable_file = try new_config._arena.?.allocator().dupeSentinel(u8, skipped, 0);
     }
 
     // Success, swap our new config in and free the old.
@@ -5884,7 +5884,7 @@ pub fn finalize(self: *Config) !void {
                 if (std.process.getEnvVarOwned(alloc, "SHELL")) |value| {
                     log.info("default shell source=env value={f}", .{internal_os.redact.bytes(value)});
 
-                    const copy = try alloc.dupeZ(u8, value);
+                    const copy = try alloc.dupeSentinel(u8, value, 0);
                     self.command = .{ .shell = copy };
 
                     // If we don't need the working directory, then we can exit now.
@@ -6358,11 +6358,11 @@ test "profile keys: a line the loader refuses is reported at its line, without i
     // replay before the conditional replay below.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background = #000000\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "background = #ffffff\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "background = #000000\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark_theme = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark_theme);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n{s}", .{ light, dark_theme, body });
     defer alloc.free(text);
@@ -6412,11 +6412,11 @@ test "a config line longer than the reader takes is reported once and the next l
     const long_env = prefix ++ &@as([max - prefix.len - 2]u8, @splat('x')) ++ "\xe2\x82\xac";
     // Theme files that exist: `finalize` then swaps in a config rebuilt by
     // replay (`loadTheme`), which `changeConditionalState` replays again.
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background = #000000\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "background = #ffffff\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "background = #000000\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark_theme = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark_theme);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n" ++
         "env = BEFORE=1\n" ++
@@ -6424,8 +6424,8 @@ test "a config line longer than the reader takes is reported once and the next l
         "title = after the long line\n" ++
         "config-file = missing-include.ghostty\n", .{ light, dark_theme });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "main.ghostty", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "main.ghostty", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -6482,19 +6482,19 @@ test "a theme file's problems are its own and are reported once, however the con
     // is only a replay step), an unknown key and a refused profile line
     // (both parse problems of a line that is replayed).
     const long = "background = #" ++ &@as([cli.args.LineIterator.max_line_len - "background = #".len + 1]u8, @splat('1'));
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = long ++ "\nforeground = #111111\n" ++
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = long ++ "\nforeground = #111111\n" ++
         "foo-bogus = 1\nprofile-command = C:\\Tools\\x.exe\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "foreground = #eeeeee\n" });
-    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "foreground = #eeeeee\n" });
+    const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
     defer alloc.free(light);
-    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    const dark_theme = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
     defer alloc.free(dark_theme);
     // And one of the main file, which every config keeps.
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n" ++
         "config-file = missing-include.ghostty\n", .{ light, dark_theme });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "main.ghostty", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "main.ghostty", alloc);
     defer alloc.free(path);
 
     // Start light and start dark (a cold start in that mode), finalize twice
@@ -6607,8 +6607,8 @@ test "every example in the user profile docs loads with no problem" {
     // not read: a load reads includes in a later step).
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -6710,7 +6710,7 @@ pub fn parseManuallyHook(
         errdefer command.deinit(alloc);
 
         while (iter.next()) |param| {
-            const copy = try alloc.dupeZ(u8, param);
+            const copy = try alloc.dupeSentinel(u8, param, 0);
             try self._replay_steps.append(alloc, .{ .arg = .{
                 .value = copy,
                 .location = try cli.Location.fromIter(iter, alloc),
@@ -6747,7 +6747,7 @@ pub fn parseManuallyHook(
     try self._replay_steps.append(
         alloc,
         .{ .arg = .{
-            .value = try alloc.dupeZ(u8, arg),
+            .value = try alloc.dupeSentinel(u8, arg, 0),
             .location = try cli.Location.fromIter(iter, alloc),
         } },
     );
@@ -7006,11 +7006,11 @@ pub fn clone(
     result._launch = try self._launch.clone(alloc_arena);
     if (self._e_command) |words| {
         const copy = try alloc_arena.alloc([:0]const u8, words.len);
-        for (words, copy) |word, *slot| slot.* = try alloc_arena.dupeZ(u8, word);
+        for (words, copy) |word, *slot| slot.* = try alloc_arena.dupeSentinel(u8, word, 0);
         result._e_command = copy;
     }
-    if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);
-    if (self._undecodable_theme) |skipped| result._undecodable_theme = try alloc_arena.dupeZ(u8, skipped);
+    if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeSentinel(u8, skipped, 0);
+    if (self._undecodable_theme) |skipped| result._undecodable_theme = try alloc_arena.dupeSentinel(u8, skipped, 0);
 
     // Preserve our replay steps. We copy them exactly to also preserve
     // the exact conditionals required for some steps.
@@ -7219,7 +7219,7 @@ const Replay = struct {
                 .@"-e" => |v| .{ .@"-e" = try v.clone(alloc) },
                 .diagnostic => |v| .{ .diagnostic = try v.clone(alloc) },
                 .arg => |v| .{ .arg = .{
-                    .value = try alloc.dupeZ(u8, v.value),
+                    .value = try alloc.dupeSentinel(u8, v.value, 0),
                     .location = try v.location.clone(alloc),
                 } },
                 .expand => |v| .{ .expand = try alloc.dupe(u8, v) },
@@ -11379,11 +11379,11 @@ pub const QuickSelectAlphabet = struct {
         const alphabet = try RepeatableLink.parseRegexValue(alloc, input);
         defer alloc.free(alphabet);
         validate(alphabet) catch return error.InvalidValue;
-        self.value = try alloc.dupeZ(u8, alphabet);
+        self.value = try alloc.dupeSentinel(u8, alphabet, 0);
     }
 
     pub fn clone(self: *const Self, alloc: Allocator) Allocator.Error!Self {
-        return .{ .value = try alloc.dupeZ(u8, self.value) };
+        return .{ .value = try alloc.dupeSentinel(u8, self.value, 0) };
     }
 
     pub fn equal(self: Self, other: Self) bool {
@@ -13664,8 +13664,8 @@ test "conditional replay retains theme locations after source config is freed" {
     const alloc = testing.allocator;
     var td = try internal_os.TempDir.init();
     defer td.deinit();
-    try td.dir.writeFile(.{ .sub_path = "light", .data = "# light\nfont-szie = 14\n" });
-    try td.dir.writeFile(.{ .sub_path = "dark", .data = "# dark\n# second comment\nfont-szie = 15\n" });
+    try td.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "# light\nfont-szie = 14\n" });
+    try td.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "# dark\n# second comment\nfont-szie = 15\n" });
     var light_buf: [std.fs.max_path_bytes]u8 = undefined;
     var dark_buf: [std.fs.max_path_bytes]u8 = undefined;
     const light_path = try td.dir.realpath("light", &light_buf);

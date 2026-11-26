@@ -137,7 +137,7 @@ pub fn scriptRevision(script: []const u8) ?u32 {
     var seen: usize = 0;
     while (lines.next()) |line| : (seen += 1) {
         if (seen == 16) return null;
-        const trimmed = std.mem.trimRight(u8, line, "\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\r");
         if (!std.mem.startsWith(u8, trimmed, revision_prefix)) continue;
         return std.fmt.parseInt(u32, std.mem.trim(u8, trimmed[revision_prefix.len..], " \t"), 10) catch std.math.maxInt(u32);
     }
@@ -308,14 +308,14 @@ pub fn buildInjectedArgvAfter(
     }
 
     for (pwsh_argv) |arg| {
-        try result.append(alloc, try alloc.dupeZ(u8, arg));
+        try result.append(alloc, try alloc.dupeSentinel(u8, arg, 0));
     }
 
     if (!mode.has_no_exit) {
-        try result.append(alloc, try alloc.dupeZ(u8, "-NoExit"));
+        try result.append(alloc, try alloc.dupeSentinel(u8, "-NoExit", 0));
     }
-    try result.append(alloc, try alloc.dupeZ(u8, "-Command"));
-    try result.append(alloc, try alloc.dupeZ(u8, cmd_val));
+    try result.append(alloc, try alloc.dupeSentinel(u8, "-Command", 0));
+    try result.append(alloc, try alloc.dupeSentinel(u8, cmd_val, 0));
     return try result.toOwnedSlice(alloc);
 }
 
@@ -630,7 +630,7 @@ fn stripLeadingTypeCast(statement: []const u8) []const u8 {
                 else => {},
             }
         } else return statement;
-        rest = std.mem.trimLeft(u8, rest[end + 1 ..], " \t");
+        rest = std.mem.trimStart(u8, rest[end + 1 ..], " \t");
     }
     return rest;
 }
@@ -649,7 +649,7 @@ const BraceKind = enum { scope, transparent };
 /// Keywords whose block does not introduce a PowerShell scope.
 fn isTransparentKeyword(word: []const u8) bool {
     // A `}` or `;` can be glued to the keyword (`} else {`, `};try {`).
-    const bare = std.mem.trimLeft(u8, word, "};");
+    const bare = std.mem.trimStart(u8, word, "};");
     for ([_][]const u8{
         "if",      "elseif", "else",  "try",    "catch", "finally",
         "foreach", "for",    "while", "switch", "do",
@@ -660,7 +660,7 @@ fn isTransparentKeyword(word: []const u8) bool {
 }
 
 fn lastWord(text: []const u8) []const u8 {
-    const trimmed = std.mem.trimRight(u8, text, " \t");
+    const trimmed = std.mem.trimEnd(u8, text, " \t");
     var start = trimmed.len;
     while (start > 0 and trimmed[start - 1] != ' ' and trimmed[start - 1] != '\t') {
         start -= 1;
@@ -769,7 +769,7 @@ const BraceTracker = struct {
         last_paren_open: ?usize,
         continued_condition: bool,
     ) BraceKind {
-        const prefix = std.mem.trimRight(u8, prefix_raw, " \t");
+        const prefix = std.mem.trimEnd(u8, prefix_raw, " \t");
         // A brace alone on its line. `integration.ps1` is K&R throughout, so
         // this does not occur today; call it transparent because a loud
         // false positive on an Allman-style function body beats silently
@@ -837,8 +837,8 @@ test "integration.ps1 honours the injected block scope" {
     var top_level_variables: usize = 0;
     var braces: BraceTracker = .{};
     while (lines.next()) |raw| {
-        const line = std.mem.trimRight(u8, raw, " \t\r");
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        const line = std.mem.trimEnd(u8, raw, " \t\r");
+        const trimmed = std.mem.trimStart(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
         // Scoping depth as of the START of this line. Not indentation:
@@ -857,7 +857,7 @@ test "integration.ps1 honours the injected block scope" {
             const name_end = for (statement[1..], 1..) |c, idx| {
                 if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ':') break idx;
             } else statement.len;
-            const after = std.mem.trimLeft(u8, statement[name_end..], " \t");
+            const after = std.mem.trimStart(u8, statement[name_end..], " \t");
             if (after.len > 0 and after[0] == '=' and
                 (after.len == 1 or after[1] != '='))
             {
@@ -886,7 +886,7 @@ test "integration.ps1 honours the injected block scope" {
 
         // Function declarations, anywhere a statement can start.
         var idx: usize = 0;
-        while (std.ascii.indexOfIgnoreCasePos(line, idx, "function")) |at| {
+        while (std.ascii.findIgnoreCasePos(line, idx, "function")) |at| {
             idx = at + "function".len;
             const before_ok = at == 0 or switch (line[at - 1]) {
                 ' ', '\t', '{', ';' => true,
@@ -899,7 +899,7 @@ test "integration.ps1 honours the injected block scope" {
             if (prefix.len != 0 and prefix[prefix.len - 1] != '{' and
                 prefix[prefix.len - 1] != ';') continue;
             if (idx >= line.len or (line[idx] != ' ' and line[idx] != '\t')) continue;
-            const rest = std.mem.trimLeft(u8, line[idx..], " \t");
+            const rest = std.mem.trimStart(u8, line[idx..], " \t");
             declarations += 1;
             if (!std.ascii.startsWithIgnoreCase(rest, "global:")) {
                 std.debug.print(
@@ -1306,10 +1306,10 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "integration.ps1", .data = integration_script });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "integration.ps1", .data = integration_script });
     // A downloaded resources copy is the RemoteSigned failure case.
-    try tmp.dir.writeFile(.{ .sub_path = "integration.ps1:Zone.Identifier", .data = "[ZoneTransfer]\r\nZoneId=3\r\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "integration.ps1");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "integration.ps1:Zone.Identifier", .data = "[ZoneTransfer]\r\nZoneId=3\r\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "integration.ps1", alloc);
     defer alloc.free(path);
 
     // Each host rebuilds its own module paths. In particular, a pwsh parent
@@ -1682,7 +1682,7 @@ test "buildInjectedArgv: empty argv" {
 test "installIfStale: first install writes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dp = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dp = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dp);
     const fp = try std.fs.path.join(std.testing.allocator, &.{ dp, "integration.ps1" });
     defer std.testing.allocator.free(fp);
@@ -1692,7 +1692,7 @@ test "installIfStale: first install writes" {
 test "installIfStale: same content skips" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dp = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dp = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dp);
     const fp = try std.fs.path.join(std.testing.allocator, &.{ dp, "integration.ps1" });
     defer std.testing.allocator.free(fp);
@@ -1703,19 +1703,19 @@ test "installIfStale: same content skips" {
 test "installIfStale: different content on disk triggers reinstall" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dp = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dp = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dp);
     const fp = try std.fs.path.join(std.testing.allocator, &.{ dp, "integration.ps1" });
     defer std.testing.allocator.free(fp);
 
-    const f = try tmp.dir.createFile("integration.ps1", .{ .truncate = true });
+    const f = try tmp.dir.createFile(std.testing.io, "integration.ps1", .{ .truncate = true });
     try f.writeAll("# stale");
-    f.close();
+    f.close(std.testing.io);
 
     try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fp));
 
-    const verify = try tmp.dir.openFile("integration.ps1", .{});
-    defer verify.close();
+    const verify = try tmp.dir.openFile(std.testing.io, "integration.ps1", .{});
+    defer verify.close(std.testing.io);
     const contents = try verify.readToEndAlloc(std.testing.allocator, 1024 * 1024);
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings(integration_script, contents);

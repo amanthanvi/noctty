@@ -106,7 +106,7 @@ pub const Profile = struct {
         var command = try self.command.clone(alloc);
         errdefer command.deinit(alloc);
         const working_directory: ?WorkingDirectory = if (self.working_directory) |dir| switch (dir) {
-            .path => |path| .{ .path = try alloc.dupeZ(u8, path) },
+            .path => |path| .{ .path = try alloc.dupeSentinel(u8, path, 0) },
             .home, .inherit => dir,
         } else null;
         errdefer if (working_directory) |dir| switch (dir) {
@@ -193,7 +193,7 @@ pub const UserLaunch = struct {
     env: []const EnvEntry = &.{},
 
     pub fn clone(self: UserLaunch, alloc: Allocator) Allocator.Error!UserLaunch {
-        const line = try alloc.dupeZ(u8, self.command_line);
+        const line = try alloc.dupeSentinel(u8, self.command_line, 0);
         errdefer alloc.free(line);
         const env = try alloc.alloc(EnvEntry, self.env.len);
         var copied: usize = 0;
@@ -205,9 +205,9 @@ pub const UserLaunch = struct {
             alloc.free(env);
         }
         for (self.env, env) |src, *dst| {
-            const key = try alloc.dupeZ(u8, src.key);
+            const key = try alloc.dupeSentinel(u8, src.key, 0);
             errdefer alloc.free(key);
-            dst.* = .{ .key = key, .value = try alloc.dupeZ(u8, src.value) };
+            dst.* = .{ .key = key, .value = try alloc.dupeSentinel(u8, src.value, 0) };
             copied += 1;
         }
         return .{ .command_line = line, .env = env };
@@ -237,7 +237,7 @@ pub fn layerEnv(alloc: Allocator, env: anytype, entries: []const EnvEntry) Alloc
             } else index += 1;
         }
         if (entry.value.len == 0) continue;
-        try env.map.put(alloc, try alloc.dupeZ(u8, entry.key), try alloc.dupeZ(u8, entry.value));
+        try env.map.put(alloc, try alloc.dupeSentinel(u8, entry.key, 0), try alloc.dupeSentinel(u8, entry.value, 0));
     }
 }
 
@@ -311,8 +311,8 @@ pub const UserProfiles = struct {
         var i: usize = 0;
         while (it.next()) |kv| : (i += 1) {
             out[i] = .{
-                .key = try alloc.dupeZ(u8, kv.key_ptr.*),
-                .value = try alloc.dupeZ(u8, kv.value_ptr.*),
+                .key = try alloc.dupeSentinel(u8, kv.key_ptr.*, 0),
+                .value = try alloc.dupeSentinel(u8, kv.value_ptr.*, 0),
             };
         }
         return out;
@@ -441,7 +441,7 @@ pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const 
         argv.deinit(alloc);
     }
     while (it.next()) |arg| {
-        const copy = try alloc.dupeZ(u8, arg);
+        const copy = try alloc.dupeSentinel(u8, arg, 0);
         argv.append(alloc, copy) catch |err| {
             alloc.free(copy);
             return err;
@@ -583,9 +583,9 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
     for (definition.env, env) |src, *dst| {
         const value = try expandProfileText(alloc, src.value, definition.global_env, expander);
         defer alloc.free(value);
-        const owned_value = try alloc.dupeZ(u8, value);
+        const owned_value = try alloc.dupeSentinel(u8, value, 0);
         errdefer alloc.free(owned_value);
-        dst.* = .{ .key = try alloc.dupeZ(u8, src.key), .value = owned_value };
+        dst.* = .{ .key = try alloc.dupeSentinel(u8, src.key, 0), .value = owned_value };
         filled += 1;
     }
 
@@ -595,7 +595,7 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
         .label = label,
         .command = command,
         .working_directory = working_directory,
-        .user = .{ .command_line = try alloc.dupeZ(u8, line), .env = env },
+        .user = .{ .command_line = try alloc.dupeSentinel(u8, line, 0), .env = env },
     };
 }
 
@@ -618,12 +618,12 @@ fn userWorkingDirectory(
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (internal_os.home(&buf) catch null) |home| {
             return .{ .path = try std.fmt.allocPrintSentinel(alloc, "{s}\\{s}", .{
-                std.mem.trimRight(u8, home, "\\/"),
+                std.mem.trimEnd(u8, home, "\\/"),
                 value[2..],
             }, 0) };
         }
     }
-    return .{ .path = try alloc.dupeZ(u8, value) };
+    return .{ .path = try alloc.dupeSentinel(u8, value, 0) };
 }
 
 /// noctty's environment for tests, a fixed table: the seam
@@ -882,7 +882,7 @@ test "user profile working directories take the working-directory values" {
         if (try internal_os.home(&buf)) |home| {
             const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{});
             defer alloc.free(dir.path);
-            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimRight(u8, home, "\\/")));
+            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimEnd(u8, home, "\\/")));
             try testing.expect(std.mem.endsWith(u8, dir.path, "\\src"));
         }
     }
@@ -1366,7 +1366,7 @@ fn appendVisualStudioInstance(
     if (!visual_studio.isPlainInstanceId(instance.id)) return;
     if (!isOnLocalDrive(instance.path)) return;
     if (!host.installDirectory(instance.path)) return;
-    const root = std.mem.trimRight(u8, instance.path, "\\/");
+    const root = std.mem.trimEnd(u8, instance.path, "\\/");
     const dev_args = visual_studio.devCmdArguments(arch, instance.version);
 
     const bat = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, visual_studio.dev_cmd_relative });
@@ -1740,10 +1740,10 @@ test "Visual Studio installs on a share or behind a link are skipped" {
     // refused, the same install by its own path is listed.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("real/Common7/Tools");
-    try tmp.dir.makePath("link");
-    try tmp.dir.writeFile(.{ .sub_path = "real/Common7/Tools/VsDevCmd.bat", .data = "@echo off" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "real/Common7/Tools");
+    try tmp.dir.createDirPath(std.testing.io, "link");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/Common7/Tools/VsDevCmd.bat", .data = "@echo off" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const real = try std.fmt.allocPrint(alloc, "{s}\\real", .{root});
     defer alloc.free(real);
@@ -2153,10 +2153,10 @@ test "cloneProfiles copies every field into the target allocator" {
     defer arena.deinit();
     const src_alloc = arena.allocator();
     const argv = try src_alloc.alloc([:0]const u8, 2);
-    argv[0] = try src_alloc.dupeZ(u8, "wsl.exe");
-    argv[1] = try src_alloc.dupeZ(u8, "-d");
+    argv[0] = try src_alloc.dupeSentinel(u8, "wsl.exe", 0);
+    argv[1] = try src_alloc.dupeSentinel(u8, "-d", 0);
     const source = [_]Profile{
-        .{ .kind = .pwsh, .key = "pwsh", .label = "PowerShell", .command = .{ .shell = try src_alloc.dupeZ(u8, "pwsh.exe") } },
+        .{ .kind = .pwsh, .key = "pwsh", .label = "PowerShell", .command = .{ .shell = try src_alloc.dupeSentinel(u8, "pwsh.exe", 0) } },
         .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "Ubuntu", .palette_title = "WSL: Ubuntu", .command = .{ .direct = argv } },
     };
     const copy = try cloneProfiles(testing.allocator, &source);
@@ -2285,7 +2285,7 @@ pub fn executableCommand(alloc: Allocator, command: Command) !Command {
     if (!windowsNonDirectoryPathExists(path)) return command;
     const argv = try alloc.alloc([:0]const u8, 1);
     errdefer alloc.free(argv);
-    argv[0] = try alloc.dupeZ(u8, path);
+    argv[0] = try alloc.dupeSentinel(u8, path, 0);
     return .{ .direct = argv };
 }
 
@@ -2298,7 +2298,7 @@ pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.
     const path = env.get("PATH") orelse return null;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const found = searchPath(&buf, exe, path, env.get("PATHEXT"), false, acceptAnyPath) orelse return null;
-    return try alloc.dupeZ(u8, found);
+    return try alloc.dupeSentinel(u8, found, 0);
 }
 
 fn acceptAnyPath(_: []const u8) bool {
@@ -2591,24 +2591,24 @@ test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
     const alloc = arena.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nu.exe", .data = "exe" });
-    try tmp.dir.writeFile(.{ .sub_path = "nu.com", .data = "com" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.exe", .data = "exe" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.com", .data = "com" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     var env = std.process.EnvMap.init(alloc);
     try env.put("PATH", try std.fmt.allocPrint(alloc, "relative;;\\\\server\\share;\\??\\UNC\\server\\share;\"{s}\"", .{dir}));
     try env.put("PATHEXT", ".com;.exe");
-    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.com"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.com", alloc), (try lookupChildExecutable(alloc, "nu", &env)).?);
     try env.put("PATHEXT", ".exe;.com");
-    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.exe", alloc), (try lookupChildExecutable(alloc, "nu", &env)).?);
     // An explicit extension is looked up exactly, regardless of PATHEXT.
     try env.put("PATHEXT", ".com");
-    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu.exe", &env)).?);
+    try std.testing.expectEqualStrings(try tmp.dir.realPathFileAlloc(std.testing.io, "nu.exe", alloc), (try lookupChildExecutable(alloc, "nu.exe", &env)).?);
     // Preserve a cmd/batch wrapper that wins PATHEXT instead of skipping it.
-    try tmp.dir.writeFile(.{ .sub_path = "nu.cmd", .data = "wrapper" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "nu.cmd", .data = "wrapper" });
     try env.put("PATHEXT", ".cmd;.exe");
     try std.testing.expect(try lookupChildExecutable(alloc, "nu", &env) == null);
     try std.testing.expect(try lookupChildExecutable(alloc, "missing", &env) == null);
-    try tmp.dir.makeDir("directory.exe");
+    try tmp.dir.createDir(std.testing.io, "directory.exe", .default_dir);
     try std.testing.expect(try lookupChildExecutable(alloc, "directory.exe", &env) == null);
     for ([_][]const u8{ "C:nu", ".\\nu", "\\nu", "\\\\server\\nu" }) |value|
         try std.testing.expect(try lookupChildExecutable(alloc, value, &env) == null);
@@ -2639,7 +2639,7 @@ test "PKG08 round3 child lookup accepts a real App Execution Alias" {
         const result = try lookupChildExecutable(alloc, name, &env);
         try std.testing.expect(result != null);
         try std.testing.expectEqualStrings(path, result.?);
-        const normalized = try executableCommand(alloc, .{ .shell = try alloc.dupeZ(u8, path) });
+        const normalized = try executableCommand(alloc, .{ .shell = try alloc.dupeSentinel(u8, path, 0) });
         try std.testing.expect(normalized == .direct);
         try std.testing.expectEqualStrings(path, normalized.direct[0]);
         return;
@@ -2654,11 +2654,11 @@ test "PKG08 whole executable path with spaces launches directly" {
     const alloc = arena.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("PowerShell 7");
-    const exe = try tmp.dir.createFile("PowerShell 7/pwsh.exe", .{});
-    exe.close();
-    const path = try tmp.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
-    const input: Command = .{ .shell = try alloc.dupeZ(u8, path) };
+    try tmp.dir.createDir(std.testing.io, "PowerShell 7", .default_dir);
+    const exe = try tmp.dir.createFile(std.testing.io, "PowerShell 7/pwsh.exe", .{});
+    exe.close(std.testing.io);
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "PowerShell 7/pwsh.exe", alloc);
+    const input: Command = .{ .shell = try alloc.dupeSentinel(u8, path, 0) };
     const result = try prepareCommandWithLookup(std.testing.allocator, input, null, false, false, lookupExecutable);
     defer result.deinit(std.testing.allocator);
     try std.testing.expect(result == .direct);
@@ -2666,7 +2666,7 @@ test "PKG08 whole executable path with spaces launches directly" {
     try std.testing.expectEqualStrings(path, result.direct[0]);
     const current = try std.process.getCwdAlloc(alloc);
     const relative = try std.fs.path.relative(alloc, current, path);
-    const relative_input: Command = .{ .shell = try alloc.dupeZ(u8, relative) };
+    const relative_input: Command = .{ .shell = try alloc.dupeSentinel(u8, relative, 0) };
     const preserved = try executableCommand(alloc, relative_input);
     try std.testing.expect(preserved == .shell);
     try std.testing.expectEqualStrings(relative, preserved.shell);
@@ -4330,17 +4330,17 @@ fn prepareWslDirect(
     const args = try alloc.alloc([:0]const u8, count);
     var j: usize = 0;
     if (resolved_exe) |path| {
-        args[j] = try alloc.dupeZ(u8, path);
+        args[j] = try alloc.dupeSentinel(u8, path, 0);
     } else {
-        args[j] = try alloc.dupeZ(u8, argv[0]);
+        args[j] = try alloc.dupeSentinel(u8, argv[0], 0);
     }
     j += 1;
 
     if (target_cwd) |cwd| {
         _ = target_home;
-        args[j] = try alloc.dupeZ(u8, "--cd");
+        args[j] = try alloc.dupeSentinel(u8, "--cd", 0);
         j += 1;
-        args[j] = try alloc.dupeZ(u8, cwd);
+        args[j] = try alloc.dupeSentinel(u8, cwd, 0);
         j += 1;
     }
 
@@ -4355,7 +4355,7 @@ fn prepareWslDirect(
             continue;
         }
 
-        args[j] = try alloc.dupeZ(u8, argv[i]);
+        args[j] = try alloc.dupeSentinel(u8, argv[i], 0);
         j += 1;
     }
 
@@ -4382,7 +4382,7 @@ fn directCommand(alloc: Allocator, argv: []const []const u8) !Command {
         alloc.free(args);
     }
     for (argv, args) |arg, *dst| {
-        dst.* = try alloc.dupeZ(u8, arg);
+        dst.* = try alloc.dupeSentinel(u8, arg, 0);
         filled += 1;
     }
     return .{ .direct = args };
@@ -4477,7 +4477,7 @@ fn registryString(
         @ptrCast(&buf),
         &bytes,
     );
-    if (status != @intFromEnum(windows.Win32Error.SUCCESS)) return null;
+    if (status != @backingInt(windows.Win32Error.SUCCESS)) return null;
     // The size counts the terminator.
     if (bytes < @sizeOf(u16) or bytes % @sizeOf(u16) != 0) return null;
     const len = bytes / @sizeOf(u16) - 1;
@@ -4560,7 +4560,7 @@ fn isWslBashLauncher(path: []const u8, system_root: []const u8) bool {
 /// Whether `path` is `dir` or below it, ignoring case and the kind of
 /// separator, as Windows does.
 fn pathIsUnder(path: []const u8, dir: []const u8) bool {
-    const root = std.mem.trimRight(u8, dir, "/\\");
+    const root = std.mem.trimEnd(u8, dir, "/\\");
     if (root.len == 0 or path.len <= root.len) return false;
     for (root, path[0..root.len]) |a, b| {
         if (isSeparator(a) and isSeparator(b)) continue;
@@ -4880,10 +4880,10 @@ fn classifyWslList(alloc: Allocator, run: WslListRun) Allocator.Error!WslListOut
     defer alloc.free(err);
     const text = try std.mem.concat(alloc, u8, &.{ out, "\n", err });
     defer alloc.free(text);
-    if (std.ascii.indexOfIgnoreCase(text, "WSL_E_DEFAULT_DISTRO_NOT_FOUND") != null) return .{ .absent = .no_distributions };
-    if (std.ascii.indexOfIgnoreCase(text, "WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED") != null or
-        std.ascii.indexOfIgnoreCase(text, "0x8007019e") != null) return .{ .absent = .not_enabled };
-    if (exit_code == 1 and std.ascii.indexOfIgnoreCase(text, "wsl.exe --install") != null) return .{ .absent = .not_installed };
+    if (std.ascii.findIgnoreCase(text, "WSL_E_DEFAULT_DISTRO_NOT_FOUND") != null) return .{ .absent = .no_distributions };
+    if (std.ascii.findIgnoreCase(text, "WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED") != null or
+        std.ascii.findIgnoreCase(text, "0x8007019e") != null) return .{ .absent = .not_enabled };
+    if (exit_code == 1 and std.ascii.findIgnoreCase(text, "wsl.exe --install") != null) return .{ .absent = .not_installed };
     return .failed;
 }
 
@@ -5202,7 +5202,7 @@ fn isSeparator(c: u8) bool {
 }
 
 fn trimLeadingSeparators(path: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, path, "/\\");
+    return std.mem.trimStart(u8, path, "/\\");
 }
 
 const normalizeWslPath = internal_os.path.normalizeWslPath;
@@ -5468,13 +5468,13 @@ test "shell discovery refuses reparse ancestors before reading the target" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("real/bin");
-    try tmp.dir.writeFile(.{ .sub_path = "real/bin/pwsh.exe", .data = "MZ" });
-    tmp.dir.symLink("real", "link", .{ .is_directory = true }) catch |err| switch (err) {
+    try tmp.dir.createDirPath(std.testing.io, "real/bin");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/bin/pwsh.exe", .data = "MZ" });
+    tmp.dir.symLink(std.testing.io, "real", "link", .{ .is_directory = true }) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fmt.allocPrint(alloc, "{s}\\link\\bin\\pwsh.exe", .{root});
     defer alloc.free(path);
@@ -5492,7 +5492,7 @@ test "shell discovery searches only ordinary local folders" {
     // A real folder passes, a missing one does not (nothing to search).
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     try std.testing.expect(isLocalSearchDirectory(root));
     const missing = try std.fmt.allocPrint(alloc, "{s}\\absent", .{root});
@@ -5530,10 +5530,10 @@ test "explicit commands and child PATH keep junctions with spaces" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("real");
-    try tmp.dir.makePath("current tools");
-    try tmp.dir.writeFile(.{ .sub_path = "real/pwsh.exe", .data = "MZ" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "real");
+    try tmp.dir.createDirPath(std.testing.io, "current tools");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/pwsh.exe", .data = "MZ" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const link = try std.fmt.allocPrint(alloc, "{s}\\current tools", .{root});
     defer alloc.free(link);
@@ -5575,8 +5575,8 @@ test "shell discovery uses the production DOS mapping before metadata opens" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "not executed" });
-    const path = try tmp.dir.realpathAlloc(alloc, "pwsh.exe");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pwsh.exe", .data = "not executed" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "pwsh.exe", alloc);
     defer alloc.free(path);
     win32.TestHooks.direct_volume_mapping = Reject.map;
     defer win32.TestHooks.direct_volume_mapping = null;
@@ -5632,15 +5632,15 @@ test "pwsh search skips what cannot start and keeps going down PATH" {
 
     // 1: a directory named pwsh.exe. 2: an alias whose package is gone.
     // 3: the real thing. 4: one that must not be reached.
-    try tmp.dir.makePath("dir/pwsh.exe");
-    try tmp.dir.makePath("gone");
+    try tmp.dir.createDirPath(std.testing.io, "dir/pwsh.exe");
+    try tmp.dir.createDirPath(std.testing.io, "gone");
     try createTestAppExecLink(tmp.dir, "gone/pwsh.exe", "C:\\Program Files\\WindowsApps\\Missing.Package_1.0.0.0_x64__abc\\pwsh.exe");
-    try tmp.dir.makePath("real");
-    try tmp.dir.writeFile(.{ .sub_path = "real/pwsh.exe", .data = "MZ" });
-    try tmp.dir.makePath("later");
-    try tmp.dir.writeFile(.{ .sub_path = "later/pwsh.exe", .data = "MZ" });
+    try tmp.dir.createDirPath(std.testing.io, "real");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "real/pwsh.exe", .data = "MZ" });
+    try tmp.dir.createDirPath(std.testing.io, "later");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later/pwsh.exe", .data = "MZ" });
 
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const path = try std.fmt.allocPrint(
         alloc,
@@ -5666,10 +5666,10 @@ test "an App Execution Alias counts only while its target exists" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("pkg");
-    try tmp.dir.writeFile(.{ .sub_path = "pkg/pwsh.exe", .data = "MZ" });
-    try tmp.dir.makePath("pkg/folder");
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "pkg");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pkg/pwsh.exe", .data = "MZ" });
+    try tmp.dir.createDirPath(std.testing.io, "pkg/folder");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
 
     const present = try std.fmt.allocPrint(alloc, "{s}\\pkg\\pwsh.exe", .{root});

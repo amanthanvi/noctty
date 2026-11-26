@@ -1203,10 +1203,10 @@ const Subprocess = struct {
                 cfg.working_directory,
                 windows_shell.isWslCommand(launch_command),
             );
-            if (resolved) |value| break :pwd try alloc.dupeZ(u8, value);
+            if (resolved) |value| break :pwd try alloc.dupeSentinel(u8, value, 0);
             break :pwd null;
         } else if (cfg.working_directory) |cwd|
-            try alloc.dupeZ(u8, cwd)
+            try alloc.dupeSentinel(u8, cwd, 0)
         else
             null;
         const cwd: ?[:0]u8 = if (builtin.os.tag == .windows) cwd: {
@@ -1216,7 +1216,7 @@ const Subprocess = struct {
                 cfg.working_directory_home,
                 windows_shell.isWslCommand(launch_command),
             );
-            if (resolved) |value| break :cwd try alloc.dupeZ(u8, value);
+            if (resolved) |value| break :cwd try alloc.dupeSentinel(u8, value, 0);
             break :cwd null;
         } else shell_pwd;
 
@@ -1866,7 +1866,7 @@ pub const ReadThread = struct {
     /// processOutput's own. Zig 0.15.2 names the caller for a site inlined
     /// into it (PLAN.md §2.7 RQ11, §19.1).
     const process_output_modifier: std.builtin.CallModifier =
-        if (builtin.mode == .Debug) .auto else .always_inline;
+        if (builtin.mode == .debug) .auto else .always_inline;
 
     fn threadMainPosix(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
@@ -3250,9 +3250,9 @@ test "putWindowsTerm keeps TERM when the child's HOME has the entry" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try terminfo.compiled.encode(testing.allocator, terminfo.ghostty, &out.writer);
-    try tmp.dir.makePath(".terminfo/78");
-    try tmp.dir.writeFile(.{ .sub_path = ".terminfo/78/xterm-ghostty", .data = out.written() });
-    const home = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    try tmp.dir.createDirPath(std.testing.io, ".terminfo/78");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".terminfo/78/xterm-ghostty", .data = out.written() });
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(home);
 
     var env: EnvMap = .init(testing.allocator);
@@ -3263,7 +3263,7 @@ test "putWindowsTerm keeps TERM when the child's HOME has the entry" {
     try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
 
     // The same HOME without the entry, as in portable mode.
-    try tmp.dir.deleteTree(".terminfo");
+    try tmp.dir.deleteTree(std.testing.io, ".terminfo");
     try putWindowsTerm(testing.allocator, &env, "xterm-ghostty");
     try testing.expectEqualStrings("xterm-256color", env.get("TERM").?);
 }
@@ -3571,12 +3571,12 @@ test "a pane that starts WSL's bash.exe launcher runs WSL (#520 review)" {
     // integration: WSL's alias lives in a WindowsApps folder, Git's does not.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("WindowsApps");
-    try tmp.dir.makePath("Git\\bin");
-    try tmp.dir.writeFile(.{ .sub_path = "WindowsApps\\bash.exe", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "Git\\bin\\bash.exe", .data = "" });
-    const apps = try tmp.dir.realpathAlloc(a, "WindowsApps");
-    const git = try tmp.dir.realpathAlloc(a, "Git\\bin");
+    try tmp.dir.createDirPath(std.testing.io, "WindowsApps");
+    try tmp.dir.createDirPath(std.testing.io, "Git\\bin");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "WindowsApps\\bash.exe", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Git\\bin\\bash.exe", .data = "" });
+    const apps = try tmp.dir.realPathFileAlloc(std.testing.io, "WindowsApps", a);
+    const git = try tmp.dir.realPathFileAlloc(std.testing.io, "Git\\bin", a);
 
     const system_root = try std.process.getEnvVarOwned(a, "SystemRoot");
     const system_bash = try std.fs.path.joinZ(a, &.{ system_root, "System32", "bash.exe" });

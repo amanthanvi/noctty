@@ -317,7 +317,7 @@ const Builder = struct {
     }
 
     fn actionDoc(self: *Builder, action: Binding.Action) ![]const u8 {
-        const tag = @intFromEnum(std.meta.activeTag(action));
+        const tag = @backingInt(std.meta.activeTag(action));
         if (self.docs[tag]) |doc| return doc;
         self.scratch.clearRetainingCapacity();
         try settings_reference.writePlain(&self.scratch.writer, action_raw_docs[tag]);
@@ -619,7 +619,7 @@ test "keybinds the list holds every binding in effect, sequences, chains, flags 
     } else return error.TestUnexpectedResult;
     var close_doc: std.Io.Writer.Allocating = .init(alloc);
     defer close_doc.deinit();
-    try settings_reference.writePlain(&close_doc.writer, action_raw_docs[@intFromEnum(Binding.Action.close_surface)]);
+    try settings_reference.writePlain(&close_doc.writer, action_raw_docs[@backingInt(Binding.Action.close_surface)]);
     const close_summary = settings_reference.summaryOf(close_doc.written());
     try std.testing.expect(std.mem.indexOf(u8, chain.doc, "\n\nThen close_surface: ") != null);
     try std.testing.expect(std.mem.indexOf(u8, chain.doc, close_summary) != null);

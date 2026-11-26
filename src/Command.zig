@@ -1128,7 +1128,7 @@ test "a Developer Command Prompt line runs its batch file through cmd whatever t
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ windir, "System32", "cmd.exe" });
     var td = try TempDir.init();
     defer td.deinit();
-    const root = try td.dir.realpathAlloc(alloc, ".");
+    const root = try td.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     // The install's files are all there; only cmd is found.
     const Fake = struct {
@@ -1151,8 +1151,8 @@ test "a Developer Command Prompt line runs its batch file through cmd whatever t
     // space, made cmd run something else from Windows Terminal's line (and
     // from the usual quoting) when measured; `(x86)` with a space did not.
     for ([_][]const u8{ "VS&calc", "V S&calc", "VS^x", "VS(1)", "VS;a,b=c", "Program Files (x86)" }) |name| {
-        try td.dir.makePath(try std.fmt.allocPrint(alloc, "{s}/Common7/Tools", .{name}));
-        try td.dir.writeFile(.{
+        try td.dir.createDirPath(std.testing.io, try std.fmt.allocPrint(alloc, "{s}/Common7/Tools", .{name}));
+        try td.dir.writeFile(std.testing.io, .{
             .sub_path = try std.fmt.allocPrint(alloc, "{s}/Common7/Tools/VsDevCmd.bat", .{name}),
             .data = "@echo BAT RAN %*\r\n",
         });
@@ -1210,12 +1210,12 @@ test "PKG48 shell wrapper ignores implicit cwd programs and retains native synta
     const alloc = arena.allocator();
     var td = try TempDir.init();
     defer td.deinit();
-    try td.dir.makeDir("trusted tools");
-    try td.dir.makeDir("untrusted");
-    try td.dir.writeFile(.{ .sub_path = "untrusted/pkg48probe.cmd", .data = "@echo PLANTED\r\n" });
-    try td.dir.writeFile(.{ .sub_path = "trusted tools/my.tool.cmd", .data = "@echo DOTTED\r\n" });
-    const trusted = try td.dir.realpathAlloc(alloc, "trusted tools");
-    const cwd = try td.dir.realpathAlloc(alloc, "untrusted");
+    try td.dir.createDir(std.testing.io, "trusted tools", .default_dir);
+    try td.dir.createDir(std.testing.io, "untrusted", .default_dir);
+    try td.dir.writeFile(std.testing.io, .{ .sub_path = "untrusted/pkg48probe.cmd", .data = "@echo PLANTED\r\n" });
+    try td.dir.writeFile(std.testing.io, .{ .sub_path = "trusted tools/my.tool.cmd", .data = "@echo DOTTED\r\n" });
+    const trusted = try td.dir.realPathFileAlloc(std.testing.io, "trusted tools", alloc);
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, "untrusted", alloc);
     var env = try std.process.getEnvMap(alloc);
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ env.get("WINDIR").?, "System32", "cmd.exe" });
     const probe = try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" });
@@ -1224,7 +1224,7 @@ test "PKG48 shell wrapper ignores implicit cwd programs and retains native synta
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
     env.remove("NoDefaultCurrentDirectoryInExePath");
     try configpkg.windows_shell.configureShellSearch(&env, true);
-    try td.dir.writeFile(.{ .sub_path = "untrusted/echo.cmd", .data = "@echo PLANTED\r\n" });
+    try td.dir.writeFile(std.testing.io, .{ .sub_path = "untrusted/echo.cmd", .data = "@echo PLANTED\r\n" });
     const dotted_probe = try std.fs.path.join(alloc, &.{ cwd, "echo.message" });
     try std.fs.copyFileAbsolute(cmd_path, dotted_probe, .{});
     const cases = .{
@@ -1277,10 +1277,10 @@ test "PKG48 shell wrapper supports literal expansion characters in PATH" {
     const alloc = arena.allocator();
     var td = try TempDir.init();
     defer td.deinit();
-    try td.dir.makePath("untrusted/bin");
+    try td.dir.createDirPath(std.testing.io, "untrusted/bin");
     inline for (.{ "untrusted/pkg48probe.cmd", "untrusted/bin/pkg48probe.cmd", "untrusted/my.tool.cmd" }) |path|
-        try td.dir.writeFile(.{ .sub_path = path, .data = "@echo PLANTED\r\n" });
-    const cwd = try td.dir.realpathAlloc(alloc, "untrusted");
+        try td.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = "@echo PLANTED\r\n" });
+    const cwd = try td.dir.realPathFileAlloc(std.testing.io, "untrusted", alloc);
     var env = try std.process.getEnvMap(alloc);
     const cmd_path = try std.fs.path.joinZ(alloc, &.{ env.get("WINDIR").?, "System32", "cmd.exe" });
     try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
@@ -1288,10 +1288,10 @@ test "PKG48 shell wrapper supports literal expansion characters in PATH" {
     try env.put("PKG48_PATH^", "ALSO_WRONG");
     try env.put("PKG48_ARG", "EXPANDED");
     inline for (.{ "trusted %PKG48_PATH%", "trusted !PKG48_PATH!", "trusted %PKG48_PATH% !PKG48_PATH! ^caret!" }) |directory| {
-        try td.dir.makeDir(directory);
-        const trusted = try td.dir.realpathAlloc(alloc, directory);
+        try td.dir.createDir(std.testing.io, directory, .default_dir);
+        const trusted = try td.dir.realPathFileAlloc(std.testing.io, directory, alloc);
         try std.fs.copyFileAbsolute(cmd_path, try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" }), .{});
-        try td.dir.writeFile(.{ .sub_path = try std.fs.path.join(alloc, &.{ directory, "my.tool.cmd" }), .data = "@echo SCRIPT\r\n" });
+        try td.dir.writeFile(std.testing.io, .{ .sub_path = try std.fs.path.join(alloc, &.{ directory, "my.tool.cmd" }), .data = "@echo SCRIPT\r\n" });
         inline for (.{ false, true }) |delayed| {
             inline for (.{
                 .{ "pkg48probe /d /c echo TRUSTED && echo %PKG48_ARG% && echo !PKG48_ARG!", if (delayed) "TRUSTED \r\nEXPANDED \r\nEXPANDED\r\n" else "TRUSTED \r\nEXPANDED \r\n!PKG48_ARG!\r\n" },

@@ -286,7 +286,7 @@ pub fn ProfileMap(comptime kind: Kind) type {
                     // A removal of a profile not defined yet: a later file
                     // may define it, and must not bring it back.
                     if (kind == .command) try self.entries.append(alloc, .{
-                        .id = try alloc.dupeZ(u8, id),
+                        .id = try alloc.dupeSentinel(u8, id, 0),
                         .value = "",
                         .removed = true,
                     });
@@ -302,13 +302,13 @@ pub fn ProfileMap(comptime kind: Kind) type {
 
             switch (kind) {
                 .command, .name, .text => {
-                    const copy = try alloc.dupeZ(u8, text);
+                    const copy = try alloc.dupeSentinel(u8, text, 0);
                     if (self.indexOf(id)) |index| {
                         self.entries.items[index].value = copy;
                         self.entries.items[index].removed = false;
                         return;
                     }
-                    try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = copy });
+                    try self.entries.append(alloc, .{ .id = try alloc.dupeSentinel(u8, id, 0), .value = copy });
                 },
                 .env => {
                     const eq = std.mem.indexOfScalar(u8, text, '=').?;
@@ -327,7 +327,7 @@ pub fn ProfileMap(comptime kind: Kind) type {
                     var map: RepeatableStringMap = .{};
                     try map.parseCLI(alloc, text);
                     if (map.count() == 0) return;
-                    try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = map });
+                    try self.entries.append(alloc, .{ .id = try alloc.dupeSentinel(u8, id, 0), .value = map });
                 },
             }
         }
@@ -355,13 +355,13 @@ pub fn ProfileMap(comptime kind: Kind) type {
         /// `.env`, whose values are `parseCLI`'s.
         pub fn put(self: *Self, alloc: Allocator, id: []const u8, text: []const u8) Allocator.Error!void {
             if (kind == .env) @compileError("profile-env values go through parseCLI");
-            const copy = try alloc.dupeZ(u8, text);
+            const copy = try alloc.dupeSentinel(u8, text, 0);
             if (self.indexOf(id)) |index| {
                 self.entries.items[index].value = copy;
                 self.entries.items[index].removed = false;
                 return;
             }
-            try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = copy });
+            try self.entries.append(alloc, .{ .id = try alloc.dupeSentinel(u8, id, 0), .value = copy });
         }
 
         /// Whether a line named `id`, defining or removing it.
@@ -384,9 +384,9 @@ pub fn ProfileMap(comptime kind: Kind) type {
             try out.entries.ensureTotalCapacity(alloc, self.entries.items.len);
             for (self.entries.items) |entry| {
                 out.entries.appendAssumeCapacity(.{
-                    .id = try alloc.dupeZ(u8, entry.id),
+                    .id = try alloc.dupeSentinel(u8, entry.id, 0),
                     .value = switch (kind) {
-                        .command, .name, .text => try alloc.dupeZ(u8, entry.value),
+                        .command, .name, .text => try alloc.dupeSentinel(u8, entry.value, 0),
                         .env => try entry.value.clone(alloc),
                     },
                     .removed = entry.removed,

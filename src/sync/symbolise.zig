@@ -72,7 +72,7 @@ pub const names_attributed = switch (builtin.cpu.arch) {
 /// a test left with nothing else to check, such as acceptance test 10's
 /// site shapes, is skipped.
 pub const names_checked = names_attributed and
-    (builtin.mode == .Debug or builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) != .lt);
+    (builtin.mode == .debug or builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) != .lt);
 
 /// The symbolise mode's variables (`runFromEnvironment`): the raw dumps'
 /// directory, the directory the symbolised ones are written to (it must
@@ -286,11 +286,11 @@ pub const Session = struct {
     /// Loads `image` (its PDB beside it) at `base`, a virtual load: nothing
     /// of the image runs.
     pub fn open(a: Allocator, image: []const u16, base: u64, size: u32) OpenError!Session {
-        const image_z = try a.dupeZ(u16, image);
+        const image_z = try a.dupeSentinel(u16, image, 0);
         defer a.free(image_z);
         // The search path: the image's directory.
         const dir_len = dirLength(image) orelse return error.NameTooLong;
-        const dir_z = try a.dupeZ(u16, image[0..dir_len]);
+        const dir_z = try a.dupeSentinel(u16, image[0..dir_len], 0);
         defer a.free(dir_z);
 
         session_lock.lock();
@@ -838,7 +838,7 @@ test "symbolise names each site shape's acquiring function in this file" {
         try expectShapeLine(second, null);
     }
     // 0.15.2 attributes a site in an inline fn to its caller (§19.1).
-    try expectShapeLine(lines.next().?, if (builtin.mode == .Debug) "symboliseInlineCaller" else null);
+    try expectShapeLine(lines.next().?, if (builtin.mode == .debug) "symboliseInlineCaller" else null);
     try expectShapeLine(lines.next().?, "test.symbolise names each site shape's acquiring function in this file");
     try testing.expectEqualStrings(
         try std.fmt.bufPrint(&line, "?outside-image:0x{x:0>16} termio", .{own.base + own.size + 16}),

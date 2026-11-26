@@ -99,7 +99,7 @@ fn runArgsWithSend(
                 return actionpkg.help_error;
             }
             if (std.mem.cutPrefix(u8, arg, "--class=")) |value| {
-                opts.class = try arena.dupeZ(u8, std.mem.trim(u8, value, &std.ascii.whitespace));
+                opts.class = try arena.dupeSentinel(u8, std.mem.trim(u8, value, &std.ascii.whitespace), 0);
                 continue;
             }
             if (std.mem.cutPrefix(u8, arg, "--surface-id=")) |value| {

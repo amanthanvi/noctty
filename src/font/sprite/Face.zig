@@ -598,7 +598,7 @@ test "sprite face centres a cursor that is shorter or taller than the cell" {
         metrics.cursor_height = case.cursor_height;
         const face: Face = .{ .metrics = metrics };
         for (sprites) |sprite| {
-            const glyph = try face.renderGlyph(alloc, &atlas, @intFromEnum(sprite), .{
+            const glyph = try face.renderGlyph(alloc, &atlas, @backingInt(sprite), .{
                 .grid_metrics = metrics,
             });
             errdefer std.debug.print("sprite {s} cursor_height {d}\n", .{ @tagName(sprite), case.cursor_height });
@@ -652,7 +652,7 @@ test "sprite face renders every sprite into an atlas at the zoom-out floor cell 
             }
         }
         for (std.enums.values(Sprite)) |sprite| {
-            try testRenderTiny(face, &atlas, @intFromEnum(sprite), cell.width, cell.height);
+            try testRenderTiny(face, &atlas, @backingInt(sprite), cell.width, cell.height);
         }
     }
 }

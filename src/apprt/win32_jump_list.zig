@@ -2265,11 +2265,11 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     {
-        var file = try tmp.dir.createFile("corrupt.json", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "corrupt.json", .{});
+        defer file.close(std.testing.io);
         try file.writeAll("{not json");
     }
-    const corrupt_path = try tmp.dir.realpathAlloc(std.testing.allocator, "corrupt.json");
+    const corrupt_path = try tmp.dir.realPathFileAlloc(std.testing.io, "corrupt.json", std.testing.allocator);
     defer std.testing.allocator.free(corrupt_path);
     var corrupt = loadStateAlloc(std.testing.allocator, corrupt_path);
     defer corrupt.deinit(std.testing.allocator);
@@ -2285,8 +2285,8 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     );
 
     {
-        var file = try tmp.dir.createFile("oversized.json", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "oversized.json", .{});
+        defer file.close(std.testing.io);
         var remaining = max_state_bytes + 1;
         const chunk = @as([1024]u8, @splat('x'));
         while (remaining > 0) {
@@ -2295,7 +2295,7 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
             remaining -= count;
         }
     }
-    const oversized_path = try tmp.dir.realpathAlloc(std.testing.allocator, "oversized.json");
+    const oversized_path = try tmp.dir.realPathFileAlloc(std.testing.io, "oversized.json", std.testing.allocator);
     defer std.testing.allocator.free(oversized_path);
     var oversized = loadStateAlloc(std.testing.allocator, oversized_path);
     defer oversized.deinit(std.testing.allocator);
@@ -2363,7 +2363,7 @@ test "jump_list persistence recovers from an oversized valid model" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const directory = try tmp.dir.realpathAlloc(alloc, ".");
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(directory);
     const state_path = try std.fs.path.join(alloc, &.{ directory, state_filename });
     defer alloc.free(state_path);

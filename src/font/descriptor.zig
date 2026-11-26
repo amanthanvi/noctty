@@ -74,8 +74,8 @@ pub const Descriptor = struct {
     /// itself doesn't support fine-grained deallocation of fields.
     pub fn clone(self: *const Descriptor, alloc: Allocator) !Descriptor {
         var copy = self.*;
-        copy.family = if (self.family) |src| try alloc.dupeZ(u8, src) else null;
-        copy.style = if (self.style) |src| try alloc.dupeZ(u8, src) else null;
+        copy.family = if (self.family) |src| try alloc.dupeSentinel(u8, src, 0) else null;
+        copy.style = if (self.style) |src| try alloc.dupeSentinel(u8, src, 0) else null;
         copy.variations = try alloc.dupe(Variation, self.variations);
         return copy;
     }

@@ -1053,7 +1053,7 @@ pub const found_hidden_help = "noctty hides it: with visual-studio-profiles = ne
 /// alias with its case, as OpenSSH tells them apart.
 pub fn identity(kind: RowKind, id: []const u8, name: ?[]const u8) u64 {
     var hasher: std.hash.Wyhash = .init(0);
-    hasher.update(&.{@intFromEnum(kind)});
+    hasher.update(&.{@backingInt(kind)});
     const exact_from: usize = if (std.ascii.startsWithIgnoreCase(id, "ssh:")) "ssh:".len else id.len;
     for (id[0..exact_from]) |c| hasher.update(&.{std.ascii.toLower(c)});
     hasher.update(id[exact_from..]);
@@ -1452,9 +1452,9 @@ pub fn setHidden(draft: *Config, keys: []const []const u8) Allocator.Error!void 
 pub fn setLists(draft: *Config, order: anytype, hidden: anytype) Allocator.Error!void {
     const a = arenaOf(draft);
     var next_order: Config.RepeatableString = .{};
-    for (order) |key| try next_order.list.append(a, try a.dupeZ(u8, key));
+    for (order) |key| try next_order.list.append(a, try a.dupeSentinel(u8, key, 0));
     var next_hidden: Config.RepeatableString = .{};
-    for (hidden) |key| try next_hidden.list.append(a, try a.dupeZ(u8, key));
+    for (hidden) |key| try next_hidden.list.append(a, try a.dupeSentinel(u8, key, 0));
     draft.@"profile-order" = next_order;
     draft.@"profile-hidden" = next_hidden;
 }
@@ -1462,7 +1462,7 @@ pub fn setLists(draft: *Config, order: anytype, hidden: anytype) Allocator.Error
 fn setList(draft: *Config, list: *Config.RepeatableString, keys: []const []const u8) Allocator.Error!void {
     const a = arenaOf(draft);
     var next: Config.RepeatableString = .{};
-    for (keys) |key| try next.list.append(a, try a.dupeZ(u8, key));
+    for (keys) |key| try next.list.append(a, try a.dupeSentinel(u8, key, 0));
     list.* = next;
 }
 
@@ -1489,10 +1489,10 @@ pub fn setVariable(draft: *Config, id: []const u8, name: []const u8, value: []co
         const map = &env.entries.items[index].value.map;
         for (map.keys(), 0..) |key, at| {
             if (!std.ascii.eqlIgnoreCase(key, name)) continue;
-            map.values()[at] = try a.dupeZ(u8, value);
+            map.values()[at] = try a.dupeSentinel(u8, value, 0);
             return;
         }
-        try map.put(a, try a.dupeZ(u8, name), try a.dupeZ(u8, value));
+        try map.put(a, try a.dupeSentinel(u8, name, 0), try a.dupeSentinel(u8, value, 0));
         return;
     }
     const line = try std.fmt.allocPrint(a, "{s}: {s}={s}", .{ id, name, value });
@@ -1551,9 +1551,9 @@ fn restoreEntry(comptime kind: profile_map.Kind, a: Allocator, original: *const 
     const was = original.indexOf(id) orelse return draft.remove(id);
     const entry = original.entries.items[was];
     const copy: profile_map.ProfileMap(kind).Entry = .{
-        .id = try a.dupeZ(u8, entry.id),
+        .id = try a.dupeSentinel(u8, entry.id, 0),
         .value = switch (kind) {
-            .command, .name, .text => try a.dupeZ(u8, entry.value),
+            .command, .name, .text => try a.dupeSentinel(u8, entry.value, 0),
             .env => try entry.value.clone(a),
         },
         .removed = entry.removed,
@@ -1749,8 +1749,8 @@ test "settings profiles: a draft the page changed saves and reads back as the pa
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const text = "# mine\nprofile-command = tomb:\nprofile-command = py: python.exe\nprofile-name = py: Py\nprofile-env = py: A=1\nprofile-env = py: B=2\nprofile-command = old: o.exe\n";
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var original = try Config.default(alloc);
     defer original.deinit();
@@ -1790,7 +1790,7 @@ test "settings profiles: a draft the page changed saves and reads back as the pa
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(alloc);
     try settings_patch.patchProfileEdits(alloc, text, edits, &out);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = out.items });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = out.items });
     var reloaded = try Config.default(alloc);
     defer reloaded.deinit();
     try reloaded.loadFile(alloc, path);
@@ -2267,20 +2267,20 @@ test "settings profiles: a list's recorded lines follow the file with that list,
     };
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "earlier", .data = "# read first\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "earlier", .data = "# read first\n" });
     // A later file clears the order and gives its own: the config file's
     // own order line is masked.
-    try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = pwsh.exe\n" });
-    const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = pwsh.exe\n" });
+    const later = try tmp.dir.realPathFileAlloc(std.testing.io, "later.conf", alloc);
     defer alloc.free(later);
     const before = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nprofile-order = cmd.exe\nconfig-file = {s}\n", .{later});
     defer alloc.free(before);
     const after = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nprofile-order = git-bash\nconfig-file = {s}\n", .{later});
     defer alloc.free(after);
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = before });
-    const earlier = try tmp.dir.realpathAlloc(alloc, "earlier");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = before });
+    const earlier = try tmp.dir.realPathFileAlloc(std.testing.io, "earlier", alloc);
     defer alloc.free(earlier);
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
 
     // 1. The page moved a profile; another program changes the file's own
@@ -2288,13 +2288,13 @@ test "settings profiles: a list's recorded lines follow the file with that list,
     // keeps its baseline, and the lines it was read from with it: the save
     // sees the outside edit and stops.
     {
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = before });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = before });
         var original = try Load.config(alloc, earlier, path);
         defer original.deinit();
         var draft = try original.clone(alloc);
         defer draft.deinit();
         try setOrder(&draft, &.{ "user:py", "pwsh.exe" });
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = after });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = after });
         var replacement = try Load.config(alloc, earlier, path);
         defer replacement.deinit();
         var baselines: Baselines = .of(&original);
@@ -2309,13 +2309,13 @@ test "settings profiles: a list's recorded lines follow the file with that list,
     // lines too. A move after that is checked against the file as it is
     // now: no conflict.
     {
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = before });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = before });
         var original = try Load.config(alloc, earlier, path);
         defer original.deinit();
         var draft = try original.clone(alloc);
         defer draft.deinit();
         try setCommand(&draft, "py", "python3.exe");
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = after });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = after });
         var replacement = try Load.config(alloc, earlier, path);
         defer replacement.deinit();
         var baselines: Baselines = .of(&original);

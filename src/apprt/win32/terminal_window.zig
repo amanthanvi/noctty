@@ -1062,7 +1062,7 @@ pub const Surface = struct {
                 // title, and a button with a UIA provider for the new tab.
                 // `syncTabButtons` cannot make the button here, since the
                 // test executable has no manifest for the layered chrome.
-                surface.title = try surface.app.core_app.alloc.dupeZ(u8, "PKG-05");
+                surface.title = try surface.app.core_app.alloc.dupeSentinel(u8, "PKG-05", 0);
                 const owner = surface.host.?;
                 const tab = &owner.tabs.items[owner.tabs.items.len - 1];
                 tab.button_hwnd = sys.CreateWindowExW(
@@ -1816,7 +1816,7 @@ pub const Surface = struct {
             // as Windows Terminal does. A program's OSC 52 read gets the
             // empty reply below and never an empty paste.
             .paste => return try self.core_surface.completeClipboardPasteWithoutText(),
-            .osc_52_read => try self.app.core_app.alloc.dupeZ(u8, ""),
+            .osc_52_read => try self.app.core_app.alloc.dupeSentinel(u8, "", 0),
             .osc_52_write => unreachable,
         };
         defer self.app.core_app.alloc.free(str);
@@ -3204,7 +3204,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         const session = if (self.quick_select_session) |*value| value else return;
         if (index >= session.scan.matches.len) return;
-        const payload = try alloc.dupeZ(u8, session.scan.matchText(index));
+        const payload = try alloc.dupeSentinel(u8, session.scan.matchText(index), 0);
         defer alloc.free(payload);
 
         // Re-verify against the LIVE viewport before acting.
@@ -4903,7 +4903,7 @@ pub const Surface = struct {
         if (self.pending_clipboard_op) |*old| old.deinit(alloc);
         self.pending_clipboard_op = null;
 
-        const data_copy = try alloc.dupeZ(u8, data);
+        const data_copy = try alloc.dupeSentinel(u8, data, 0);
         // Single errdefer — if showConfirm fails we free the buffer
         // and leave `pending_clipboard_op` untouched (still null from
         // the defensive clear above). Committing the op BEFORE
@@ -4964,9 +4964,9 @@ pub const Surface = struct {
             alloc.free(owned);
         }
         for (contents) |content| {
-            const mime_copy = try alloc.dupeZ(u8, content.mime);
+            const mime_copy = try alloc.dupeSentinel(u8, content.mime, 0);
             errdefer alloc.free(mime_copy);
-            const data_copy = try alloc.dupeZ(u8, content.data);
+            const data_copy = try alloc.dupeSentinel(u8, content.data, 0);
             // Both dupes succeeded — commit atomically into owned[]
             // and advance filled. The per-iter mime errdefer goes
             // out of scope without firing.
@@ -5711,8 +5711,8 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
     // on this thread, so that boundary genuinely holds.
     {
         const sub_path = "teardown-failed.jsonl";
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
-        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, sub_path, alloc);
         defer alloc.free(path);
 
         surface.* = uninitializedInertStorage(Surface);
@@ -5723,7 +5723,7 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
 
         surface.destroyGL();
 
-        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, sub_path, alloc, .limited(16 * 1024));
         defer alloc.free(contents);
         try std.testing.expect(
             std.mem.indexOf(u8, contents, "\"stage\":\"wgl_context_unbound\"") != null,
@@ -5743,8 +5743,8 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
     // so the fail-closed rule does not break the ordinary teardown path.
     {
         const sub_path = "teardown-released.jsonl";
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
-        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, sub_path, alloc);
         defer alloc.free(path);
 
         const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
@@ -5774,7 +5774,7 @@ test "win32 destroyGL records a teardown stage only when the cleanup succeeded" 
 
         surface.destroyGL();
 
-        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        const contents = try tmp.dir.readFileAlloc(std.testing.io, sub_path, alloc, .limited(16 * 1024));
         defer alloc.free(contents);
         try std.testing.expect(
             std.mem.indexOf(u8, contents, "\"stage\":\"dc_released\"") != null,

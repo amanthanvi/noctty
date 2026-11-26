@@ -745,19 +745,19 @@ fn writePaletteMruLine(writer: *std.Io.Writer, mru_key: []const u8) std.Io.Write
 fn paletteMruKeyFromLine(alloc: std.mem.Allocator, line: []const u8) std.mem.Allocator.Error![:0]u8 {
     // An odd run of trailing backslashes escapes the closing quote, and Zig
     // 0.15.2's parseWrite then reads past the end of the literal.
-    if ((line.len - std.mem.trimEnd(u8, line, "\\").len) % 2 == 1) return alloc.dupeZ(u8, line);
+    if ((line.len - std.mem.trimEnd(u8, line, "\\").len) % 2 == 1) return alloc.dupeSentinel(u8, line, 0);
     const quoted = try std.mem.concat(alloc, u8, &.{ "\"", line, "\"" });
     defer alloc.free(quoted);
     const decoded = std.zig.string_literal.parseAlloc(alloc, quoted) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidLiteral => return alloc.dupeZ(u8, line),
+        error.InvalidLiteral => return alloc.dupeSentinel(u8, line, 0),
     };
     defer alloc.free(decoded);
     // parseAlloc stops at the first unescaped quote, so compare.
     var escaped: std.Io.Writer.Allocating = .init(alloc);
     defer escaped.deinit();
     escaped.writer.print("{f}", .{std.zig.fmtString(decoded)}) catch return error.OutOfMemory;
-    return alloc.dupeZ(u8, if (std.mem.eql(u8, escaped.written(), line)) decoded else line);
+    return alloc.dupeSentinel(u8, if (std.mem.eql(u8, escaped.written(), line)) decoded else line, 0);
 }
 
 /// Decodes palette-mru.txt into `mru`, newest first. A line is a whole key:
@@ -888,7 +888,7 @@ pub const AppControls = struct {
             return;
         }
         // Insert as new head. Free whatever falls off the end.
-        const duped = try self.core_app.alloc.dupeZ(u8, action);
+        const duped = try self.core_app.alloc.dupeSentinel(u8, action, 0);
         errdefer self.core_app.alloc.free(duped);
         if (self.palette_mru[self.palette_mru.len - 1]) |oldest| {
             self.core_app.alloc.free(oldest);

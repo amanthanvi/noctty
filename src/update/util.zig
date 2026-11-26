@@ -92,10 +92,10 @@ test "update util hashes whole open file from midfile and resets cursor" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const contents = "portable updater hash fixture";
-    try tmp.dir.writeFile(.{ .sub_path = "payload", .data = contents });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "payload", .data = contents });
 
-    var file = try tmp.dir.openFile("payload", .{});
-    defer file.close();
+    var file = try tmp.dir.openFile(std.testing.io, "payload", .{});
+    defer file.close(std.testing.io);
     try file.seekTo(7);
     var expected: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(contents, &expected, .{});
@@ -103,7 +103,7 @@ test "update util hashes whole open file from midfile and resets cursor" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
     try std.testing.expectEqual(@as(u64, 0), try file.getPos());
 
-    const path = try tmp.dir.realpathAlloc(alloc, "payload");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "payload", alloc);
     defer alloc.free(path);
     const from_path = try sha256File(path);
     try std.testing.expectEqualSlices(u8, &expected, &from_path);

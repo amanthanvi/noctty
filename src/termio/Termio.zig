@@ -316,8 +316,8 @@ test "termio input files are closed after prepareInput fails part way" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "first.txt", .data = "one" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "first.txt", .data = "one" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const first = try std.fs.path.join(alloc, &.{ dir, "first.txt" });
     defer alloc.free(first);
@@ -330,8 +330,8 @@ test "termio input files are closed after prepareInput fails part way" {
     };
     defer state.destroy();
     const arena_alloc = state.arena.allocator();
-    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeZ(u8, first) });
-    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeZ(u8, missing) });
+    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeSentinel(u8, first, 0) });
+    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeSentinel(u8, missing, 0) });
 
     // Positive control: the probe sees a handle that is open.
     {
@@ -350,8 +350,8 @@ test "termio input files are closed and read buffers freed once queued" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "in.txt", .data = "echo hi\r" });
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "in.txt", .data = "echo hi\r" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "in.txt" });
     defer alloc.free(path);
@@ -362,7 +362,7 @@ test "termio input files are closed and read buffers freed once queued" {
     };
     defer state.destroy();
     const arena_alloc = state.arena.allocator();
-    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeZ(u8, path) });
+    try state.input.list.append(arena_alloc, .{ .path = try arena_alloc.dupeSentinel(u8, path, 0) });
     const inputs = try state.prepareInput();
     try testing.expect(try fileHeldOpen(alloc, path));
 

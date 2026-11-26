@@ -3779,7 +3779,7 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const root = try tmp.dir.realpathAlloc(alloc, ".");
+        const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
         defer alloc.free(root);
         const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
         defer alloc.free(state_path);
@@ -5336,7 +5336,7 @@ pub const App = struct {
                 if (!automationTextAllowed(value.text)) return error.AutomationPolicyRefused;
                 surface.noteProgramInput();
 
-                const text_z = try self.core_app.alloc.dupeZ(u8, value.text);
+                const text_z = try self.core_app.alloc.dupeSentinel(u8, value.text, 0);
                 defer self.core_app.alloc.free(text_z);
                 if (self.test_automation_paste) |paste| {
                     paste(surface, .paste, text_z, false) catch |err| switch (err) {
@@ -5664,9 +5664,9 @@ pub const App = struct {
         // surface returned, and a forwarded new window says it could not be
         // opened when this fails).
         const alloc = self.core_app.alloc;
-        const key = if (opts.launch.key) |value| try alloc.dupeZ(u8, value) else null;
+        const key = if (opts.launch.key) |value| try alloc.dupeSentinel(u8, value, 0) else null;
         errdefer if (key) |value| alloc.free(value);
-        const tab_title = if (opts.launch.title) |value| try alloc.dupeZ(u8, value) else null;
+        const tab_title = if (opts.launch.title) |value| try alloc.dupeSentinel(u8, value, 0) else null;
         errdefer if (tab_title) |value| alloc.free(value);
         const surface = if (self.test_create_window_surface) |hook|
             try hook(self, config, title, opts)
@@ -6817,7 +6817,7 @@ pub const App = struct {
         // every window, so the theme does not show the previewed opacity
         // first.
         comptime {
-            if (@intFromEnum(win32_settings.PreviewEffect.theme) > @intFromEnum(win32_settings.PreviewEffect.opacity)) {
+            if (@backingInt(win32_settings.PreviewEffect.theme) > @backingInt(win32_settings.PreviewEffect.opacity)) {
                 @compileError("endSettingsPreview ends the theme before the opacity: PreviewEffect must declare .theme before .opacity");
             }
         }
@@ -6888,8 +6888,8 @@ pub const App = struct {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         core_app.alloc = failing.allocator();
         defer core_app.alloc = std.testing.allocator;
-        app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh");
-        app.launcher_quick_slot_keys[1] = try std.testing.allocator.dupeZ(u8, "cmd");
+        app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeSentinel(u8, "pwsh", 0);
+        app.launcher_quick_slot_keys[1] = try std.testing.allocator.dupeSentinel(u8, "cmd", 0);
         defer for (app.launcher_quick_slot_keys) |value| {
             if (value) |key| std.testing.allocator.free(key);
         };
@@ -6958,7 +6958,7 @@ pub const App = struct {
     pub fn auditShellNativeMapping(self: *App, context: []const u8) void {
         if (!self.shell_runtime_initialized) return;
         self.validateShellNativeMapping() catch |err| {
-            if (comptime builtin.mode == .Debug) {
+            if (comptime builtin.mode == .debug) {
                 log.err("shell/native invariant failed context={s} err={}", .{ context, err });
                 return;
             }
@@ -9634,7 +9634,7 @@ pub const App = struct {
 
     fn dispatchOpenTarget(self: *App, target: []const u8) !void {
         if (self.test_open_target) |hook| return hook(self, target);
-        if (builtin.mode == .Debug and
+        if (builtin.mode == .debug and
             try recordOpenUrlForTest(self.core_app.alloc, target)) return;
 
         return shellExecuteOpenTarget(self, target);
@@ -9642,7 +9642,7 @@ pub const App = struct {
 
     fn dispatchTextEditor(self: *App, path: []const u8) !void {
         if (self.test_open_target) |hook| return hook(self, path);
-        if (builtin.mode == .Debug and
+        if (builtin.mode == .debug and
             try recordOpenUrlForTest(self.core_app.alloc, path)) return;
         try @import("../../os/windows_text_editor.zig").open(self.core_app.alloc, path);
     }
@@ -9767,8 +9767,8 @@ pub const App = struct {
         // the name its folder stores.
         var tmp = try internal_os.TempDir.init();
         defer tmp.deinit();
-        try tmp.dir.writeFile(.{ .sub_path = ".cmd", .data = "fixture" });
-        const script = try tmp.dir.realpathAlloc(std.testing.allocator, ".cmd");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".cmd", .data = "fixture" });
+        const script = try tmp.dir.realPathFileAlloc(std.testing.io, ".cmd", std.testing.allocator);
         defer std.testing.allocator.free(script);
         const alias = try test_short_path.of(std.testing.allocator, script);
         defer std.testing.allocator.free(alias);
@@ -10055,7 +10055,7 @@ pub const App = struct {
         // Teardown owns pending payloads too; the testing allocator checks
         // both the successful dispatch and undispatched cleanup for leaks.
         {
-            const parameters = try std.testing.allocator.dupeZ(u8, "--test-pending");
+            const parameters = try std.testing.allocator.dupeSentinel(u8, "--test-pending", 0);
             errdefer std.testing.allocator.free(parameters);
             const cwd = try std.testing.allocator.dupe(u8, "C:\\pending");
             errdefer std.testing.allocator.free(cwd);
@@ -10813,12 +10813,12 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.makeDir("launch");
-        try tmp.dir.makeDir("sanitized");
-        try tmp.dir.writeFile(.{ .sub_path = "launch/custom.conf", .data = "font-size = 17\n" });
-        const launch = try tmp.dir.realpathAlloc(alloc, "launch");
+        try tmp.dir.createDir(std.testing.io, "launch", .default_dir);
+        try tmp.dir.createDir(std.testing.io, "sanitized", .default_dir);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "launch/custom.conf", .data = "font-size = 17\n" });
+        const launch = try tmp.dir.realPathFileAlloc(std.testing.io, "launch", alloc);
         defer alloc.free(launch);
-        const sanitized = try tmp.dir.realpathAlloc(alloc, "sanitized");
+        const sanitized = try tmp.dir.realPathFileAlloc(std.testing.io, "sanitized", alloc);
         defer alloc.free(sanitized);
         const missing = try std.fs.path.join(alloc, &.{ launch, "deleted" });
         defer alloc.free(missing);
@@ -11010,8 +11010,8 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         var held = try configpkg.Config.default(alloc);
         defer held.deinit();
@@ -11053,16 +11053,16 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         const load = struct {
             fn config(a: Allocator, file: []const u8) !configpkg.Config {
@@ -11084,8 +11084,8 @@ pub const App = struct {
         defer pending.deinit();
         try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
         // The dark theme defines `py` now.
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
-        const before = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "profile-command = py: python.exe -X dark\n" });
+        const before = try tmp.dir.readFileAlloc(std.testing.io, "config", alloc, .limited(1 << 16));
         defer alloc.free(before);
         var detail: win32_settings.FailureDetail = .{};
         defer detail.clear(alloc);
@@ -11099,8 +11099,8 @@ pub const App = struct {
         // cannot be put in its place; std's `.lock` is the byte-range lock
         // that does this.
         {
-            var lock = try tmp.dir.openFile("dark", .{ .mode = .read_write, .lock = .exclusive });
-            defer lock.close();
+            var lock = try tmp.dir.openFile(std.testing.io, "dark", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close(std.testing.io);
             const fresh = try load(alloc, path);
             try std.testing.expectError(error.FileUnopenable, App.settingsProfileEditsFromDisk(arena.allocator(), alloc, &detail, fresh, &held, dark_state, &held, &pending, path, null));
             const expected = try std.fmt.allocPrint(alloc, "the theme file {s}", .{dark});
@@ -11108,7 +11108,7 @@ pub const App = struct {
             try std.testing.expect(std.mem.eql(u8, expected, detail.text.?));
         }
         // Nothing was written.
-        const after = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        const after = try tmp.dir.readFileAlloc(std.testing.io, "config", alloc, .limited(1 << 16));
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, before, after));
         // Read whole: the dark theme's `py` keeps the tombstone.
@@ -11300,8 +11300,8 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const path = blk: {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
-            break :blk try tmp.dir.realpathAlloc(alloc, "config");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
+            break :blk try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         };
         defer alloc.free(path);
         SaveTest.files = &.{path};
@@ -11310,7 +11310,7 @@ pub const App = struct {
 
         const Case = enum { between, before_write };
         for ([_]Case{ .between, .before_write }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
@@ -11326,7 +11326,7 @@ pub const App = struct {
             // Another program sets the same setting: between the check and
             // the save, or as the save is about to put its bytes in place.
             switch (case) {
-                .between => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 20\n" }),
+                .between => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 20\n" }),
                 .before_write => {
                     SaveTest.hook_path = path;
                     SaveTest.hook_text = "font-size = 20\n";
@@ -11344,7 +11344,7 @@ pub const App = struct {
 
         // An edit to another setting is kept: the file is checked again, and
         // the save goes on top of it.
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
@@ -11380,8 +11380,8 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const raw = "font-size = 12\nprofile-command = py: python.exe\nprofile-command = node: node.exe\n";
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = raw });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11393,7 +11393,7 @@ pub const App = struct {
             // Another profile's: saved over, the other edit kept.
             .{ .other = "font-size = 12\nprofile-command = py: python.exe\nprofile-command = node: node.exe --inspect\n", .refused = false },
         }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = raw });
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
@@ -11438,20 +11438,20 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
-        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+        const lower = try tmp.dir.realPathFileAlloc(std.testing.io, "lower.conf", alloc);
         defer alloc.free(lower);
         const raw = "font-size = 12\nprofile-command = py: python.exe\nprofile-env = py: Path=C:\\bin\n";
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = raw });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{ lower, path };
         try SaveTest.begin(&app, path);
         defer SaveTest.end(&app);
         const Case = enum { same_field, lower_label, renamed_variable };
         for ([_]Case{ .same_field, .lower_label, .renamed_variable }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = raw });
             {
                 var loaded = try SaveTest.load(alloc);
                 defer loaded.deinit();
@@ -11470,9 +11470,9 @@ pub const App = struct {
             try app.settingsReconcileDisk(&pending, &original, true);
             // Before Save, another program edits the files.
             switch (case) {
-                .same_field => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe -O\nprofile-env = py: Path=C:\\bin\n" }),
-                .lower_label => try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-name = py: Python\nprofile-env = py: MODE=1\n" }),
-                .renamed_variable => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe\nprofile-env = py: PATH=C:\\bin\n" }),
+                .same_field => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe -O\nprofile-env = py: Path=C:\\bin\n" }),
+                .lower_label => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "profile-name = py: Python\nprofile-env = py: MODE=1\n" }),
+                .renamed_variable => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe\nprofile-env = py: PATH=C:\\bin\n" }),
             }
             const before = try SaveTest.read(path);
             defer alloc.free(before);
@@ -11516,13 +11516,13 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "profile-command = py: python.exe\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "profile-command = py: python.exe\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11536,8 +11536,8 @@ pub const App = struct {
         // layers again: `py` is missing from that reading, which is the
         // file's doing, not another program's edit of `py`.
         {
-            var lock = try tmp.dir.openFile("more.conf", .{ .mode = .read_write, .lock = .exclusive });
-            defer lock.close();
+            var lock = try tmp.dir.openFile(std.testing.io, "more.conf", .{ .mode = .read_write, .lock = .exclusive });
+            defer lock.close(std.testing.io);
             try std.testing.expectError(error.FileUnopenable, app.settingsSaveAndReload(&pending, &original));
         }
         const expected = try std.fmt.allocPrint(alloc, "the included file {s}", .{more});
@@ -11560,8 +11560,8 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const raw = "profile-command = py: python.exe\n";
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = raw });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = raw });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         // Recovery: the running config is the recovery one, not the file.
         app.safe_mode = true;
@@ -11599,8 +11599,8 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         // Recovery: the running config is the recovery one, not the file.
         app.safe_mode = true;
@@ -11648,8 +11648,8 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11686,13 +11686,13 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11728,16 +11728,16 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
-        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        const picked = try tmp.dir.realPathFileAlloc(std.testing.io, "picked", alloc);
         defer alloc.free(picked);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11768,26 +11768,26 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
-        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        const picked = try tmp.dir.realPathFileAlloc(std.testing.io, "picked", alloc);
         defer alloc.free(picked);
         // An include names a light/dark pair, so the reload after the pick has
         // a switch to make; the app runs dark.
         const more_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark });
         defer alloc.free(more_text);
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = more_text });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = more_text });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         app.core_app.config_conditional_state = .{ .theme = .dark };
         SaveTest.files = &.{path};
@@ -11821,13 +11821,13 @@ pub const App = struct {
         defer tmp.cleanup();
         // The include overrides `font-size`, so a save of it has a masked
         // setting to name; `cursor-style` is overridden by nothing.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "font-size = 20\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "font-size = 20\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11840,7 +11840,7 @@ pub const App = struct {
         defer app.core_app.alloc = real;
         const Case = enum { masked_check, apply };
         for ([_]Case{ .masked_check, .apply }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
             SaveTest.fail_next = &fail_next;
             settings_patch.test_config_load = SaveTest.starvedLoad;
             save_target.test_before_compare = SaveTest.failAppNext;
@@ -11888,23 +11888,23 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "other", .data = "font-size = 14\n" });
-        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "picked", .data = "font-size = 20\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other", .data = "font-size = 14\n" });
+        const picked = try tmp.dir.realPathFileAlloc(std.testing.io, "picked", alloc);
         defer alloc.free(picked);
-        const other = try tmp.dir.realpathAlloc(alloc, "other");
+        const other = try tmp.dir.realPathFileAlloc(std.testing.io, "other", alloc);
         defer alloc.free(other);
         // An include names another theme, so the pick is overridden and the
         // check after the write has a setting to name.
         const more_text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{other});
         defer alloc.free(more_text);
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = more_text });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = more_text });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11939,12 +11939,12 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
-        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const picked = try tmp.dir.realPathFileAlloc(std.testing.io, "picked", alloc);
         defer alloc.free(picked);
         const text = "font-size = 12\n";
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -11994,11 +11994,11 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
-        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "picked", .data = "font-size = 20\n" });
+        const picked = try tmp.dir.realPathFileAlloc(std.testing.io, "picked", alloc);
         defer alloc.free(picked);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12031,13 +12031,13 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         // The include overrides `font-size` and py's label.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "font-size = 20\nprofile-name = py: Other\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "font-size = 20\nprofile-name = py: Other\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nprofile-command = py: python.exe\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12050,7 +12050,7 @@ pub const App = struct {
         defer app.core_app.alloc = real;
         const Case = enum { report, describe, apply };
         for ([_]Case{ .report, .describe, .apply }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
             SaveTest.fail_next = &fail_next;
             SaveTest.fail_step = switch (case) {
                 .report => .report,
@@ -12116,22 +12116,22 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "picked", .data = "font-size = 20\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "other", .data = "font-size = 14\n" });
-        const picked = try tmp.dir.realpathAlloc(alloc, "picked");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "picked", .data = "font-size = 20\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other", .data = "font-size = 14\n" });
+        const picked = try tmp.dir.realPathFileAlloc(std.testing.io, "picked", alloc);
         defer alloc.free(picked);
-        const other = try tmp.dir.realpathAlloc(alloc, "other");
+        const other = try tmp.dir.realPathFileAlloc(std.testing.io, "other", alloc);
         defer alloc.free(other);
         const more_text = try std.fmt.allocPrint(alloc, "theme = {s}\n", .{other});
         defer alloc.free(more_text);
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "font-size = 12\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
         const path = blk: {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-            break :blk try tmp.dir.realpathAlloc(alloc, "config");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+            break :blk try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         };
         defer alloc.free(path);
         SaveTest.files = &.{path};
@@ -12143,9 +12143,9 @@ pub const App = struct {
         defer app.core_app.alloc = real;
         const Case = enum { plain, masked };
         for ([_]Case{ .plain, .masked }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
             // The include names another theme, so it masks the pick.
-            try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = if (case == .masked) more_text else "\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = if (case == .masked) more_text else "\n" });
             // The app runs the files as they are now, so the pick's check
             // finds no change on disk.
             {
@@ -12179,15 +12179,15 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "copy-on-select = true\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const Case = enum { ordinary, profile };
         for ([_]Case{ .ordinary, .profile }) |case| {
             const text = try std.fmt.allocPrint(alloc, "font-size = 12\nprofile-command = py: python.exe\nconfig-file = {s}\n", .{more});
             defer alloc.free(text);
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-            const path = try tmp.dir.realpathAlloc(alloc, "config");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
             defer alloc.free(path);
             SaveTest.files = &.{path};
             try SaveTest.begin(&app, path);
@@ -12245,16 +12245,16 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "default-profile = pwsh.exe\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "# light\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "default-profile = pwsh.exe\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\ndefault-profile = cmd.exe\n", .{ light, dark });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         // The app runs dark.
         core_app.config_conditional_state = .{ .theme = .dark };
@@ -12274,7 +12274,7 @@ pub const App = struct {
         // In the light state nothing overrides it.
         app.settings_masked_keys.clear(alloc);
         core_app.config_conditional_state = .{};
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
@@ -12302,11 +12302,11 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         // A file loaded first orders and hides profiles of its own.
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
-        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "profile-order = cmd.exe\nprofile-hidden = pwsh.exe\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "profile-command = py: python.exe\n" });
+        const lower = try tmp.dir.realPathFileAlloc(std.testing.io, "lower.conf", alloc);
         defer alloc.free(lower);
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{ lower, path };
         try SaveTest.begin(&app, path);
@@ -12359,13 +12359,13 @@ pub const App = struct {
         // lists while it sets one (`settings_patch.listsForeign`), so here it
         // comes to clear the order and give one of its own only while the
         // save runs, after that check.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# nothing yet\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "# nothing yet\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12387,8 +12387,8 @@ pub const App = struct {
         // Another program hides a profile while Settings has the page's
         // visibility changed: nothing is saved, and the status names the key.
         // The include sets no list again.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# nothing yet\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "# nothing yet\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
         {
             var loaded = try SaveTest.load(alloc);
             defer loaded.deinit();
@@ -12401,7 +12401,7 @@ pub const App = struct {
         try settings_profiles.setHidden(&pending, &.{"pwsh.exe"});
         const changed = try std.fmt.allocPrint(alloc, "{s}profile-hidden = wsl\n", .{text});
         defer alloc.free(changed);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = changed });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = changed });
         try std.testing.expectError(error.ProfileChanged, app.settingsSaveAndReload(&pending, &original));
         try std.testing.expectEqualStrings("profile-hidden", app.settings_failure_detail.text orelse return error.TestExpectedDetail);
         const after = try SaveTest.read(path);
@@ -12425,12 +12425,12 @@ pub const App = struct {
         // An include, read after the file, comes to hide PowerShell by its
         // alias while the save runs (Settings refuses to change the lists
         // while a later file sets one, `settings_patch.listsForeign`).
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# nothing yet\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "# nothing yet\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        const path = try tmp.dir.realpathAlloc(alloc, ".");
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
         defer alloc.free(path);
         const config_path = try std.fs.path.join(alloc, &.{ path, "config" });
         defer alloc.free(config_path);
@@ -12445,8 +12445,8 @@ pub const App = struct {
         defer _ = app.registry.detachHost(&host);
         const Case = enum { whole, partial, none };
         for ([_]Case{ .whole, .partial, .none }) |case| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-            try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# nothing yet\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "# nothing yet\n" });
             SaveTest.files = &.{config_path};
             try SaveTest.begin(&app, config_path);
             defer SaveTest.end(&app);
@@ -12494,16 +12494,16 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         // The dark theme labels py; the light one gives nothing.
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "# light\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "profile-name = py: Python (dark)\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "# light\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "profile-name = py: Python (dark)\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, dark });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12548,10 +12548,10 @@ pub const App = struct {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         // A file read first defines py and orders the profiles.
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-command = py: python.exe\nprofile-order = cmd.exe\n" });
-        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "profile-command = py: python.exe\nprofile-order = cmd.exe\n" });
+        const lower = try tmp.dir.realPathFileAlloc(std.testing.io, "lower.conf", alloc);
         defer alloc.free(lower);
-        const dir = try tmp.dir.realpathAlloc(alloc, ".");
+        const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
         defer alloc.free(dir);
         const path = try std.fs.path.join(alloc, &.{ dir, "config" });
         defer alloc.free(path);
@@ -12577,10 +12577,10 @@ pub const App = struct {
         Layers.target_path = path;
         const Target = enum { empty, comments, missing };
         for ([_]Target{ .empty, .comments, .missing }) |target| {
-            tmp.dir.deleteFile("config") catch {};
+            tmp.dir.deleteFile(std.testing.io, "config") catch {};
             switch (target) {
-                .empty => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "" }),
-                .comments => try tmp.dir.writeFile(.{ .sub_path = "config", .data = "# Settings saves here\n" }),
+                .empty => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "" }),
+                .comments => try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "# Settings saves here\n" }),
                 .missing => {},
             }
             SaveTest.files = if (target == .comments) &.{ lower, path } else &.{lower};
@@ -12614,13 +12614,13 @@ pub const App = struct {
         // The file Settings saves to includes one that orders the profiles
         // and then clears `config-file` (Terra's case): it still loads after
         // the file, and would override a saved order on every launch.
-        try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
-        const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order =\nprofile-order = cmd.exe\nconfig-file =\n" });
+        const later = try tmp.dir.realPathFileAlloc(std.testing.io, "later.conf", alloc);
         defer alloc.free(later);
         const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{later});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12649,8 +12649,8 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "profile-command = py: python.exe\nprofile-hidden = cmd.exe\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12662,12 +12662,12 @@ pub const App = struct {
         try settings_profiles.setOrder(&pending, &.{ "user:py", "pwsh.exe" });
         // Since the page was built, the file has come to include one that
         // orders the profiles.
-        try tmp.dir.writeFile(.{ .sub_path = "later.conf", .data = "profile-order = cmd.exe\n" });
-        const later = try tmp.dir.realpathAlloc(alloc, "later.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "later.conf", .data = "profile-order = cmd.exe\n" });
+        const later = try tmp.dir.realPathFileAlloc(std.testing.io, "later.conf", alloc);
         defer alloc.free(later);
         const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nprofile-hidden = cmd.exe\nconfig-file = {s}\n", .{later});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
         try std.testing.expectError(error.ProfileListsForeign, app.settingsSaveAndReload(&pending, &original));
         try std.testing.expectEqualStrings(settings_patch.ListsForeign.later_file.text(), app.settings_failure_detail.text orelse return error.TestExpectedDetail);
         const after = try SaveTest.read(path);
@@ -12690,13 +12690,13 @@ pub const App = struct {
         defer tmp.cleanup();
         // An include, read after the file, comes to hide `dev` by its bare
         // id while the save runs.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# nothing yet\n" });
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "# nothing yet\n" });
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "profile-command = py: python.exe\nconfig-file = {s}\n", .{more});
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12741,12 +12741,12 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
         const text = "profile-command = py: python.exe\n";
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const lower = try tmp.dir.realPathFileAlloc(std.testing.io, "lower.conf", alloc);
         defer alloc.free(lower);
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{ lower, path };
         try SaveTest.begin(&app, path);
@@ -12761,7 +12761,7 @@ pub const App = struct {
         try std.testing.expect(pending.@"profile-hidden".equal(original.@"profile-hidden"));
         // Before Save, another program hides PowerShell in the lower file.
         const hides = "profile-hidden = pwsh.exe\n";
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = hides });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = hides });
         try std.testing.expectError(error.ProfileChanged, app.settingsSaveAndReload(&pending, &original));
         try std.testing.expectEqualStrings("profile-hidden", app.settings_failure_detail.text orelse return error.TestExpectedDetail);
         // Nothing is written: both files are as they were left.
@@ -12784,11 +12784,11 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe\n" });
-        const lower = try tmp.dir.realpathAlloc(alloc, "lower.conf");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "# a file loaded first\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\nprofile-command = py: python.exe\n" });
+        const lower = try tmp.dir.realPathFileAlloc(std.testing.io, "lower.conf", alloc);
         defer alloc.free(lower);
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{ lower, path };
         try SaveTest.begin(&app, path);
@@ -12802,7 +12802,7 @@ pub const App = struct {
         try pending.@"profile-command".parseCLI(pending._arena.?.allocator(), "py:");
         // While Settings is open, the file loaded first gains `py`, with no
         // reload.
-        try tmp.dir.writeFile(.{ .sub_path = "lower.conf", .data = "profile-command = py: other.exe\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lower.conf", .data = "profile-command = py: other.exe\n" });
         try app.settingsSaveAndReload(&pending, &original);
         // Deleting the line would bring `py` back from the lower file: the
         // save read the layers again and wrote a tombstone.
@@ -12817,14 +12817,14 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "profile-command = py: python.exe -X dark\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "new-dark", .data = "\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-dark", .data = "profile-command = py: python.exe -X dark\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-dark", .data = "\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const old_dark = try tmp.dir.realpathAlloc(alloc, "old-dark");
+        const old_dark = try tmp.dir.realPathFileAlloc(std.testing.io, "old-dark", alloc);
         defer alloc.free(old_dark);
-        const new_dark = try tmp.dir.realpathAlloc(alloc, "new-dark");
+        const new_dark = try tmp.dir.realPathFileAlloc(std.testing.io, "new-dark", alloc);
         defer alloc.free(new_dark);
         const load = struct {
             fn config(a: Allocator, file: []const u8) !configpkg.Config {
@@ -12840,8 +12840,8 @@ pub const App = struct {
         // defines `py`; the draft removes `py`.
         const held_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, old_dark });
         defer alloc.free(held_text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = held_text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = held_text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         var held = try load(alloc, path);
         defer held.deinit();
@@ -12852,8 +12852,8 @@ pub const App = struct {
         // UTF-16 that does not decode. The app runs dark.
         const fresh_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, new_dark });
         defer alloc.free(fresh_text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = fresh_text });
-        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "\xff\xfe\x00\xd8a\x00" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = fresh_text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-dark", .data = "\xff\xfe\x00\xd8a\x00" });
         var detail: win32_settings.FailureDetail = .{};
         defer detail.clear(alloc);
         var arena: std.heap.ArenaAllocator = .init(alloc);
@@ -12867,7 +12867,7 @@ pub const App = struct {
         defer alloc.free(expected);
         try std.testing.expect(std.mem.eql(u8, expected, detail.text orelse return error.TestExpectedDetail));
         // The file is as it was.
-        const after = try tmp.dir.readFileAlloc(alloc, "config", 1 << 16);
+        const after = try tmp.dir.readFileAlloc(std.testing.io, "config", alloc, .limited(1 << 16));
         defer alloc.free(after);
         try std.testing.expect(std.mem.eql(u8, fresh_text, after));
     }
@@ -12883,21 +12883,21 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "profile-command = py: python.exe -X dark\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "new-dark", .data = "\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-dark", .data = "profile-command = py: python.exe -X dark\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-dark", .data = "\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const old_dark = try tmp.dir.realpathAlloc(alloc, "old-dark");
+        const old_dark = try tmp.dir.realPathFileAlloc(std.testing.io, "old-dark", alloc);
         defer alloc.free(old_dark);
-        const new_dark = try tmp.dir.realpathAlloc(alloc, "new-dark");
+        const new_dark = try tmp.dir.realPathFileAlloc(std.testing.io, "new-dark", alloc);
         defer alloc.free(new_dark);
         // The config as the app last read it (light), naming the old dark
         // theme, which defines `py`; the draft removes `py`.
         const held_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, old_dark });
         defer alloc.free(held_text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = held_text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = held_text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         SaveTest.files = &.{path};
         try SaveTest.begin(&app, path);
@@ -12913,8 +12913,8 @@ pub const App = struct {
         app.core_app.config_conditional_state = .{ .theme = .dark };
         const fresh_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ light, new_dark });
         defer alloc.free(fresh_text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = fresh_text });
-        try tmp.dir.writeFile(.{ .sub_path = "old-dark", .data = "\xff\xfe\x00\xd8a\x00" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = fresh_text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-dark", .data = "\xff\xfe\x00\xd8a\x00" });
         // A removal decided from the held config read dark could delete the
         // line where the old theme still defines `py`: the save stops and
         // names that theme.
@@ -12939,16 +12939,16 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\n" });
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nfont-size = 12\n", .{ light, dark });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         app.core_app.config_conditional_state = .{ .theme = .dark };
         SaveTest.files = &.{path};
@@ -12959,7 +12959,7 @@ pub const App = struct {
             // The light theme, which the app does not apply, cannot be read:
             // UTF-16 that does not decode, or held by another program with no
             // sharing. The dark theme reads whole.
-            try tmp.dir.writeFile(.{ .sub_path = "light", .data = switch (case) {
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = switch (case) {
                 .undecodable => "\xff\xfe\x00\xd8a\x00",
                 .unopenable => "\n",
             } });
@@ -12998,16 +12998,16 @@ pub const App = struct {
         defer testFreeConfigProblems(&app, alloc);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\n" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nfont-size = 12\n", .{ light, dark });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         app.core_app.config_conditional_state = .{ .theme = .dark };
         SaveTest.files = &.{path};
@@ -13015,7 +13015,7 @@ pub const App = struct {
         defer SaveTest.end(&app);
         const Case = enum { switch_fails, read_fails };
         for ([_]Case{ .switch_fails, .read_fails }, [_]f32{ 15, 16 }) |case, size| {
-            try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
             // The reload after the write is read whole, and from then on its
             // allocator has no memory, so the switch to the dark state
             // fails; or the reload cannot be read at all.
@@ -13053,14 +13053,14 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "old-light", .data = "\xff\xfe\x00\xd8a\x00" });
-        try tmp.dir.writeFile(.{ .sub_path = "new-light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
-        const old_light = try tmp.dir.realpathAlloc(alloc, "old-light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-light", .data = "\xff\xfe\x00\xd8a\x00" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\n" });
+        const old_light = try tmp.dir.realPathFileAlloc(std.testing.io, "old-light", alloc);
         defer alloc.free(old_light);
-        const new_light = try tmp.dir.realpathAlloc(alloc, "new-light");
+        const new_light = try tmp.dir.realPathFileAlloc(std.testing.io, "new-light", alloc);
         defer alloc.free(new_light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
         const load = struct {
             fn config(a: Allocator, file: []const u8) !configpkg.Config {
@@ -13077,8 +13077,8 @@ pub const App = struct {
         // missing from it. The draft removes `py`.
         const held_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ old_light, dark });
         defer alloc.free(held_text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = held_text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = held_text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         var held = try load(alloc, path);
         defer held.deinit();
@@ -13089,7 +13089,7 @@ pub const App = struct {
         // Since then the file names a readable light theme.
         const fresh_text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\n", .{ new_light, dark });
         defer alloc.free(fresh_text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = fresh_text });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = fresh_text });
         var detail: win32_settings.FailureDetail = .{};
         defer detail.clear(alloc);
         var arena: std.heap.ArenaAllocator = .init(alloc);
@@ -13112,21 +13112,21 @@ pub const App = struct {
         const alloc = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "light", .data = "\n" });
-        try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light", .data = "\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark", .data = "\n" });
         // The include, as the app last read it: UTF-16 that does not decode,
         // so whatever it defined is missing from that reading.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "\xff\xfe\x00\xd8a\x00" });
-        const light = try tmp.dir.realpathAlloc(alloc, "light");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "\xff\xfe\x00\xd8a\x00" });
+        const light = try tmp.dir.realPathFileAlloc(std.testing.io, "light", alloc);
         defer alloc.free(light);
-        const dark = try tmp.dir.realpathAlloc(alloc, "dark");
+        const dark = try tmp.dir.realPathFileAlloc(std.testing.io, "dark", alloc);
         defer alloc.free(dark);
-        const more = try tmp.dir.realpathAlloc(alloc, "more.conf");
+        const more = try tmp.dir.realPathFileAlloc(std.testing.io, "more.conf", alloc);
         defer alloc.free(more);
         const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\nprofile-command = py: python.exe\nconfig-file = {s}\n", .{ light, dark, more });
         defer alloc.free(text);
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-        const path = try tmp.dir.realpathAlloc(alloc, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
         defer alloc.free(path);
         const load = struct {
             fn config(a: Allocator, file: []const u8) !configpkg.Config {
@@ -13147,7 +13147,7 @@ pub const App = struct {
         defer live.deinit();
         try std.testing.expect(live._undecodable_file == null);
         // Since then the include decodes, and names nothing.
-        try tmp.dir.writeFile(.{ .sub_path = "more.conf", .data = "# repaired\n" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "more.conf", .data = "# repaired\n" });
         const Case = enum { switched_here, switched_live };
         for ([_]Case{ .switched_here, .switched_live }) |case| {
             // The held config: the light reading, switched to dark here; or
@@ -13207,8 +13207,8 @@ pub const App = struct {
         app.test_open_target = &Hook.open;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "font-size = 12\n" });
-        const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config");
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "font-size = 12\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", std.testing.allocator);
         defer std.testing.allocator.free(path);
         app.cli_config_override_path = path;
         defer app.cli_config_override_path = null;
@@ -13232,7 +13232,7 @@ pub const App = struct {
         // A queued document replaced by a PE must fail the same gate used by
         // the old URL path, before even reaching the test shell hook.
         try app.openConfigInEditor();
-        try tmp.dir.writeFile(.{ .sub_path = "config", .data = "MZ\x00\x00" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "MZ\x00\x00" });
         try std.testing.expect(app.runDeferredOpens());
         try std.testing.expectEqual(@as(usize, 2), Hook.calls);
         try std.testing.expectError(error.OpenUrlRejected, app.openConfigInEditor());
@@ -13263,8 +13263,8 @@ pub const App = struct {
                 }
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
-                try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
-                const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+                try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+                const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", std.testing.allocator);
                 defer std.testing.allocator.free(path);
                 app.cli_config_override_path = path;
                 defer app.cli_config_override_path = null;
@@ -13317,8 +13317,8 @@ pub const App = struct {
                 }
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
-                try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
-                const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+                try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+                const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", std.testing.allocator);
                 defer std.testing.allocator.free(path);
                 app.cli_config_override_path = path;
                 defer app.cli_config_override_path = null;
@@ -13330,7 +13330,7 @@ pub const App = struct {
                 };
                 Hook.calls = 0;
                 app.test_open_target = &Hook.open;
-                const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+                const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
                 defer std.testing.allocator.free(dir);
                 const trace_path = try std.fs.path.join(std.testing.allocator, &.{ dir, "settings-open.jsonl" });
                 defer std.testing.allocator.free(trace_path);
@@ -13348,7 +13348,7 @@ pub const App = struct {
                 try app.openConfig();
                 try std.testing.expectEqual(@as(usize, 0), Hook.calls);
 
-                const data = try tmp.dir.readFileAlloc(std.testing.allocator, "settings-open.jsonl", 64 * 1024);
+                const data = try tmp.dir.readFileAlloc(std.testing.io, "settings-open.jsonl", std.testing.allocator, .limited(64 * 1024));
                 defer std.testing.allocator.free(data);
                 try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, data, "\"stage\":\"settings_open_ok\""));
                 try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, data, "\"stage\":\"create_begin\""));
@@ -14656,7 +14656,7 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
     }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const fake_local = try tmp.dir.realpathAlloc(alloc, ".");
+    const fake_local = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(fake_local);
 
     // Point LOCALAPPDATA at an empty directory for the length of this test,
@@ -14667,14 +14667,14 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
             else => return err,
         };
         defer alloc.free(value);
-        break :saved try alloc.dupeZ(u8, value);
+        break :saved try alloc.dupeSentinel(u8, value, 0);
     };
     defer if (saved) |value| alloc.free(value);
     defer _ = if (saved) |value|
         internal_os.setenv("LOCALAPPDATA", value)
     else
         internal_os.unsetenv("LOCALAPPDATA");
-    const fake_z = try alloc.dupeZ(u8, fake_local);
+    const fake_z = try alloc.dupeSentinel(u8, fake_local, 0);
     defer alloc.free(fake_z);
     try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("LOCALAPPDATA", fake_z));
 
@@ -14690,11 +14690,11 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
     // unfinished launch in it, which is how repeated test runs put the
     // developer's next real launch into safe mode, and replaced the
     // installed PowerShell integration script with the one under test.
-    var data_dir = tmp.dir.openDir(build_config.data_dir_name, .{}) catch |err| switch (err) {
+    var data_dir = tmp.dir.openDir(std.testing.io, build_config.data_dir_name, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer data_dir.close();
+    defer data_dir.close(std.testing.io);
     try std.testing.expectError(
         error.FileNotFound,
         data_dir.access("startup-attempts.json", .{}),
@@ -14730,10 +14730,10 @@ const TestConfigHomeEnv = struct {
                 else => return err,
             };
             defer alloc.free(value);
-            break :saved try alloc.dupeZ(u8, value);
+            break :saved try alloc.dupeSentinel(u8, value, 0);
         };
         errdefer if (saved) |value| alloc.free(value);
-        const path_z = try alloc.dupeZ(u8, path);
+        const path_z = try alloc.dupeSentinel(u8, path, 0);
         defer alloc.free(path_z);
         if (internal_os.setenv("XDG_CONFIG_HOME", path_z) != 0) return error.TestSetEnvFailed;
         return .{ .tmp = tmp, .path = path, .saved = saved };
@@ -14941,11 +14941,11 @@ test "security regression win32 link opener allows local junctions without PATHE
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("target");
-    try tmp.dir.writeFile(.{ .sub_path = "target/safe.txt", .data = "safe" });
-    try tmp.dir.writeFile(.{ .sub_path = "target/probe.cmd", .data = "@exit /b 0\r\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "target/binary", .data = "MZ\x00\x00" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDir(std.testing.io, "target", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target/safe.txt", .data = "safe" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target/probe.cmd", .data = "@exit /b 0\r\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target/binary", .data = "MZ\x00\x00" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const target = try std.fs.path.join(alloc, &.{ root, "target" });
     defer alloc.free(target);
@@ -14962,9 +14962,9 @@ test "security regression win32 link opener allows local junctions without PATHE
     defer alloc.free(result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, result.term);
     // Remove just our junction before tmpDir cleanup, never its target contents.
-    defer tmp.dir.deleteDir("junction") catch {};
-    var writer = try tmp.dir.createFile("target/active.log", .{ .read = true });
-    defer writer.close();
+    defer tmp.dir.deleteDir(std.testing.io, "junction") catch {};
+    var writer = try tmp.dir.createFile(std.testing.io, "target/active.log", .{ .read = true });
+    defer writer.close(std.testing.io);
     const active = try std.fs.path.join(alloc, &.{ junction, "active.log" });
     defer alloc.free(active);
     try std.testing.expect(try App.isAllowedWin32OpenTarget(alloc, active));
@@ -14986,10 +14986,10 @@ test "win32 link opener opens the Windows path of an MSYS2 link, never the text 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("conf.d");
-    try tmp.dir.writeFile(.{ .sub_path = "conf.d/config.fish", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "conf.d/run.cmd", .data = "@exit /b 0\r\n" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "conf.d");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "conf.d/config.fish", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "conf.d/run.cmd", .data = "@exit /b 0\r\n" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     if (!windows_shell.isDriveAbsolutePath(root)) return error.SkipZigTest;
 
@@ -15029,20 +15029,20 @@ test "security regression win32 link opener allows local symlinks" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
-    const target = try tmp.dir.realpathAlloc(alloc, "safe.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "safe.txt", .data = "safe" });
+    const target = try tmp.dir.realPathFileAlloc(std.testing.io, "safe.txt", alloc);
     defer alloc.free(target);
-    tmp.dir.symLink(target, "absolute.txt", .{}) catch |err| switch (err) {
+    tmp.dir.symLink(std.testing.io, target, "absolute.txt", .{}) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
-    try tmp.dir.symLink("safe.txt", "relative.txt", .{});
-    try tmp.dir.makeDir("directory");
-    try tmp.dir.writeFile(.{ .sub_path = "directory/safe.txt", .data = "safe" });
-    try tmp.dir.symLink("directory", "folder", .{ .is_directory = true });
-    try tmp.dir.symLink("cycle-b.txt", "cycle-a.txt", .{});
-    try tmp.dir.symLink("cycle-a.txt", "cycle-b.txt", .{});
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.symLink(std.testing.io, "safe.txt", "relative.txt", .{});
+    try tmp.dir.createDir(std.testing.io, "directory", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "directory/safe.txt", .data = "safe" });
+    try tmp.dir.symLink(std.testing.io, "directory", "folder", .{ .is_directory = true });
+    try tmp.dir.symLink(std.testing.io, "cycle-b.txt", "cycle-a.txt", .{});
+    try tmp.dir.symLink(std.testing.io, "cycle-a.txt", "cycle-b.txt", .{});
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     for ([_][]const u8{ "absolute.txt", "relative.txt", "folder/safe.txt", "folder" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ root, name });
@@ -15059,15 +15059,15 @@ test "security regression win32 link opener refuses UNC symlinks and local chain
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    tmp.dir.symLink("\\\\noctty-invalid-host.invalid\\share\\safe.txt", "network.txt", .{}) catch |err| switch (err) {
+    tmp.dir.symLink(std.testing.io, "\\\\noctty-invalid-host.invalid\\share\\safe.txt", "network.txt", .{}) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const network = try std.fs.path.join(alloc, &.{ root, "network.txt" });
     defer alloc.free(network);
-    try tmp.dir.symLink(network, "chain.txt", .{});
+    try tmp.dir.symLink(std.testing.io, network, "chain.txt", .{});
     for ([_][]const u8{ "network.txt", "chain.txt" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ root, name });
         defer alloc.free(path);
@@ -15102,12 +15102,12 @@ test "security regression win32 link opener allows known schemes and safe local 
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a b.txt", .data = "ordinary document" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "a b.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a b.txt", .data = "ordinary document" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "a b.txt", std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expect(try App.isAllowedWin32OpenTarget(std.testing.allocator, path));
-    try tmp.dir.makeDir("directory");
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    try tmp.dir.createDir(std.testing.io, "directory", .default_dir);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     for ([_][]const u8{ "./a b.txt", "directory/../a b.txt" }) |relative| {
         const navigation = try std.fs.path.join(std.testing.allocator, &.{ root, relative });
@@ -15124,11 +15124,11 @@ test "security regression win32 link opener rejects PATHEXT siblings and path al
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "probe.cmd", .data = "@exit /b 0\r\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
-    try tmp.dir.makeDir("directory");
-    try tmp.dir.writeFile(.{ .sub_path = "directory/safe.txt", .data = "safe" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "probe.cmd", .data = "@exit /b 0\r\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "safe.txt", .data = "safe" });
+    try tmp.dir.createDir(std.testing.io, "directory", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "directory/safe.txt", .data = "safe" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     for ([_][]const u8{ "probe", "safe.txt.", "safe.txt ", "probe.cmd.", "probe.cmd ", "directory./safe.txt", "directory /safe.txt", "directory./../safe.txt" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ root, name });
@@ -15147,12 +15147,12 @@ test "security regression win32 link opener preserves directories and extensionl
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("directory.exe");
-    try tmp.dir.writeFile(.{ .sub_path = "README", .data = "plain text" });
-    try tmp.dir.writeFile(.{ .sub_path = "empty", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "binary", .data = "MZ\x00\x00" });
+    try tmp.dir.createDir(std.testing.io, "directory.exe", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "README", .data = "plain text" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "binary", .data = "MZ\x00\x00" });
     for ([_][]const u8{ "directory.exe", "README", "empty", "binary" }) |name| {
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
         try std.testing.expectEqual(!std.mem.eql(u8, name, "binary"), try App.isAllowedWin32OpenTarget(alloc, path));
     }
@@ -15171,16 +15171,16 @@ test "security regression win32 link opener rejects dangerous handler files" {
     }) |extension| {
         const name = try std.fmt.allocPrint(alloc, "dangerous.{s}", .{extension});
         defer alloc.free(name);
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = "fixture" });
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "fixture" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, path));
     }
     // Windows treats the whole leading-dot basename as its extension, unlike
     // std.fs.path.extension, which is intended to preserve Unix dotfiles.
     for ([_][]const u8{ ".cmd", ".rdp", ".exe", ".lnk", ".ps1" }) |name| {
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = "fixture" });
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "fixture" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, path));
         std.mem.replaceScalar(u8, path, '\\', '/');
@@ -15236,8 +15236,8 @@ test "security regression win32 link opener screens the long name behind an 8.3 
         .{ .name = "photo.jpeg", .allowed = true },
         .{ .name = ".gitignore", .allowed = true },
     }) |case| {
-        try tmp.dir.writeFile(.{ .sub_path = case.name, .data = "fixture" });
-        const long = try tmp.dir.realpathAlloc(alloc, case.name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = case.name, .data = "fixture" });
+        const long = try tmp.dir.realPathFileAlloc(std.testing.io, case.name, alloc);
         defer alloc.free(long);
         const short = try test_short_path.of(alloc, long);
         defer alloc.free(short);
@@ -15260,10 +15260,10 @@ test "security regression win32 link opener screens normalized navigation target
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "probe.cmd", .data = "@exit /b 0\r\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "binary", .data = "MZ\x00\x00" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "probe.cmd", .data = "@exit /b 0\r\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "binary", .data = "MZ\x00\x00" });
     for ([_][]const u8{ "probe.cmd", "binary" }) |name| {
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
         const navigation = try std.fmt.allocPrint(alloc, "{s}\\.", .{path});
         defer alloc.free(navigation);
@@ -15326,9 +15326,9 @@ test "security regression win32 link opener refuses a hidden control decoded fro
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     // Shown as "invoicetxt.doc"; the control file differs by one character.
-    try tmp.dir.writeFile(.{ .sub_path = "invoice\u{202E}cod.txt", .data = "text" });
-    try tmp.dir.writeFile(.{ .sub_path = "invoice\u{6587}cod.txt", .data = "text" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "invoice\u{202E}cod.txt", .data = "text" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "invoice\u{6587}cod.txt", .data = "text" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     for ([_]struct { []const u8, bool }{
         .{ "%E2%80%AE", false },
@@ -15379,10 +15379,10 @@ test "security regression win32 link opener dispatches the exact decoded file UR
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a b%.txt", .data = "document" });
-    const path = try tmp.dir.realpathAlloc(alloc, "a b%.txt");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a b%.txt", .data = "document" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "a b%.txt", alloc);
     defer alloc.free(path);
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     std.mem.replaceScalar(u8, root, '\\', '/');
     const uri = try std.fmt.allocPrint(alloc, "file://localhost/{s}/a%20b%25.txt", .{root});
@@ -15462,8 +15462,8 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
             defer tmp.cleanup();
             // This is the only executable supplied to ShellExecute: a harmless
             // marker command inside this test's own temporary directory.
-            try tmp.dir.writeFile(.{ .sub_path = "probe.cmd", .data = "@echo off\r\necho ran>\"%~dp0marker\"\r\nexit /b 0\r\n" });
-            const root = try tmp.dir.realpathAlloc(alloc, ".");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "probe.cmd", .data = "@echo off\r\necho ran>\"%~dp0marker\"\r\nexit /b 0\r\n" });
+            const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
             defer alloc.free(root);
             const path = try std.fs.path.join(alloc, &.{ root, "probe" });
             defer alloc.free(path);
@@ -15476,7 +15476,7 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
                 var probe: @This() = .{};
                 try std.testing.expectError(error.OpenUrlRejected, App.openWin32Target(alloc, &probe, path, dispatch));
                 try std.testing.expectEqual(@as(usize, 0), probe.calls);
-                try std.testing.expectError(error.FileNotFound, tmp.dir.access("marker", .{}));
+                try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "marker", .{}));
             }
             const uri = try std.fmt.allocPrint(alloc, "file:///{s}", .{path});
             defer alloc.free(uri);
@@ -15485,7 +15485,7 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
             var probe: @This() = .{};
             try std.testing.expectError(error.OpenUrlRejected, App.openWin32Target(alloc, &probe, uri, dispatch));
             try std.testing.expectEqual(@as(usize, 0), probe.calls);
-            try std.testing.expectError(error.FileNotFound, tmp.dir.access("marker", .{}));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "marker", .{}));
 
             try tmp.dir.copyFile("probe.cmd", tmp.dir, ".cmd", .{});
             const dotfile = try std.fs.path.join(alloc, &.{ root, ".cmd" });
@@ -15499,7 +15499,7 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
             defer alloc.free(dotfile_uri);
             try std.testing.expectError(error.OpenUrlRejected, App.openWin32Target(alloc, &probe, dotfile_uri, dispatch));
             try std.testing.expectEqual(@as(usize, 0), probe.calls);
-            try std.testing.expectError(error.FileNotFound, tmp.dir.access("marker", .{}));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "marker", .{}));
         }
     };
     const name = try std.fmt.allocPrint(std.testing.allocator, "noctty-link-probe-{}", .{windows.GetCurrentProcessId()});

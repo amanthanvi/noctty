@@ -1678,20 +1678,20 @@ pub const Message = union(enum) {
 
         pub fn init(deadline_ms: u64, now_ms: *const fn () u64) @This() {
             return .{
-                .state = .init(@intFromEnum(State.pending)),
+                .state = .init(@backingInt(State.pending)),
                 .deadline_ms = deadline_ms,
                 .now_ms = now_ms,
             };
         }
 
         pub fn load(self: *const @This()) State {
-            return @enumFromInt(self.state.load(.acquire));
+            return @fromBackingInt(@intCast(self.state.load(.acquire)));
         }
 
         pub fn claim(self: *@This()) bool {
             if (self.state.cmpxchgStrong(
-                @intFromEnum(State.pending),
-                @intFromEnum(State.claimed),
+                @backingInt(State.pending),
+                @backingInt(State.claimed),
                 .acq_rel,
                 .acquire,
             ) != null) return false;
@@ -1701,8 +1701,8 @@ pub const Message = union(enum) {
             // Equality is the documented zero-timeout one-attempt window.
             if (self.now_ms() <= self.deadline_ms) return true;
             const observed = self.state.cmpxchgStrong(
-                @intFromEnum(State.claimed),
-                @intFromEnum(State.cancelled),
+                @backingInt(State.claimed),
+                @backingInt(State.cancelled),
                 .acq_rel,
                 .acquire,
             );
@@ -1712,8 +1712,8 @@ pub const Message = union(enum) {
 
         pub fn cancel(self: *@This()) bool {
             return self.state.cmpxchgStrong(
-                @intFromEnum(State.pending),
-                @intFromEnum(State.cancelled),
+                @backingInt(State.pending),
+                @backingInt(State.cancelled),
                 .acq_rel,
                 .acquire,
             ) == null;
@@ -1721,7 +1721,7 @@ pub const Message = union(enum) {
 
         pub fn complete(self: *@This()) void {
             std.debug.assert(self.load() == .claimed);
-            self.state.store(@intFromEnum(State.completed), .release);
+            self.state.store(@backingInt(State.completed), .release);
         }
     };
 

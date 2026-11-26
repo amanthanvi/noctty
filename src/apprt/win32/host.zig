@@ -2602,7 +2602,7 @@ pub const Host = struct {
 
     fn setConfigTheme(config: *configpkg.Config, name: []const u8) !void {
         const arena = config._arena.?.allocator();
-        const owned = try arena.dupeZ(u8, name);
+        const owned = try arena.dupeSentinel(u8, name, 0);
         config.theme = .{
             .light = owned,
             .dark = owned,
@@ -4394,7 +4394,7 @@ pub const Host = struct {
         const prior_target_tree = self.tabs.items[self.active_tab].tree;
         const prior_target_focus = self.tabs.items[self.active_tab].focused;
         self.tabs.items[self.active_tab].tree = next_tree;
-        self.tabs.items[self.active_tab].focused = @enumFromInt(target_node_count + source_focus.idx());
+        self.tabs.items[self.active_tab].focused = @fromBackingInt(@intCast(target_node_count + source_focus.idx()));
         var removed = self.tabs.orderedRemove(source_index);
         self.destroyTabButton(&removed);
         removed.button_placement = .{};
@@ -6591,7 +6591,7 @@ pub const Host = struct {
     pub fn bannerButtonOf(self: *const Host, hwnd: ?HWND) ?BannerButton {
         const value = hwnd orelse return null;
         for (self.banner_buttons, 0..) |button, i| {
-            if (button == value) return @enumFromInt(i);
+            if (button == value) return @fromBackingInt(@intCast(i));
         }
         return null;
     }
@@ -6808,7 +6808,7 @@ pub const Host = struct {
         // UIA Invoke is posted, so it can arrive after the button went away
         // (an overlay opened, the notice changed): a hidden button does
         // nothing.
-        if (!self.bannerShown() or !self.banner_button_placements[@intFromEnum(button)].visible) return;
+        if (!self.bannerShown() or !self.banner_button_placements[@backingInt(button)].visible) return;
         if (self.banner_text != null) {
             if (button != .dismiss) return;
             const had_focus = self.banner_focused;
@@ -6845,7 +6845,7 @@ pub const Host = struct {
             .dismiss => self.activateBannerButton(.dismiss),
             .other_button => {
                 const other: BannerButton = if (button == .primary) .dismiss else .primary;
-                if (focusableHwnd(self.banner_buttons[@intFromEnum(other)])) |target| {
+                if (focusableHwnd(self.banner_buttons[@backingInt(other)])) |target| {
                     if (target != hwnd) _ = sys.SetFocus(target);
                 }
             },
@@ -6975,7 +6975,7 @@ pub const Host = struct {
         }
         const notice = self.app.update_notice orelse return "";
         const label = if (notice.staged) "Install" else "Open Release";
-        return switch (@as(BannerButton, @enumFromInt(tag))) {
+        return switch (@as(BannerButton, @fromBackingInt(@intCast(tag)))) {
             .primary => if (notice.message_text) |text|
                 std.fmt.bufPrint(buf, "{s}: {s}", .{ label, utf8BoundedPrefix(text, buf.len -| label.len -| 2) }) catch label
             else
@@ -7135,8 +7135,8 @@ pub const Host = struct {
 
     fn bannerTestPress(host: *Host, button: BannerButton) void {
         const banner = host.banner_hwnd.?;
-        const child = host.banner_buttons[@intFromEnum(button)].?;
-        const id: usize = 1914 + @as(usize, @intFromEnum(button));
+        const child = host.banner_buttons[@backingInt(button)].?;
+        const id: usize = 1914 + @as(usize, @backingInt(button));
         _ = sys.SendMessageW(banner, c.WM_COMMAND, (c.BN_CLICKED << 16) | id, @bitCast(@intFromPtr(child)));
     }
 
@@ -7156,7 +7156,7 @@ pub const Host = struct {
         const window = try BannerTestWindow.init(&host);
         defer window.deinit(&host);
         const banner = host.banner_hwnd.?;
-        const close_button = host.banner_buttons[@intFromEnum(BannerButton.dismiss)].?;
+        const close_button = host.banner_buttons[@backingInt(BannerButton.dismiss)].?;
 
         // Nothing to show: hidden, so F6 skips it.
         host.layoutBanner(window.content, window.content.top);
@@ -7179,7 +7179,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(i32, 32), banner_rect.bottom - banner_rect.top);
         // A close button, nothing else.
         try std.testing.expect(bannerTestVisible(close_button));
-        try std.testing.expect(!bannerTestVisible(host.banner_buttons[@intFromEnum(BannerButton.primary)].?));
+        try std.testing.expect(!bannerTestVisible(host.banner_buttons[@backingInt(BannerButton.primary)].?));
         // Opaque to the pointer, unlike the hit-transparent child it was.
         const center_x: LPARAM = @divTrunc(banner_rect.left + banner_rect.right, 2);
         const center_y: LPARAM = @divTrunc(banner_rect.top + banner_rect.bottom, 2);
@@ -7245,8 +7245,8 @@ pub const Host = struct {
         const window = try BannerTestWindow.init(&host);
         defer window.deinit(&host);
         const banner = host.banner_hwnd.?;
-        const primary = host.banner_buttons[@intFromEnum(BannerButton.primary)].?;
-        const dismiss = host.banner_buttons[@intFromEnum(BannerButton.dismiss)].?;
+        const primary = host.banner_buttons[@backingInt(BannerButton.primary)].?;
+        const dismiss = host.banner_buttons[@backingInt(BannerButton.dismiss)].?;
         host.layoutBanner(window.content, window.content.top);
 
         // Never press these here: Dismiss writes the real update state and
@@ -7267,13 +7267,13 @@ pub const Host = struct {
         );
         try std.testing.expectEqualStrings(
             "Open Release: Update available: noctty 1.3.200 is ready on GitHub Releases.",
-            bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.primary), &name_buf),
+            bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.primary), &name_buf),
         );
-        try std.testing.expectEqualStrings("Dismiss update notice", bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.dismiss), &name_buf));
+        try std.testing.expectEqualStrings("Dismiss update notice", bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.dismiss), &name_buf));
         // A staged update offers Install instead, in the label and the name.
         app.update_notice.?.staged = true;
         try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Install"), host.bannerButtonLabel(.primary));
-        try std.testing.expect(std.mem.startsWith(u8, bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.primary), &name_buf), "Install: "));
+        try std.testing.expect(std.mem.startsWith(u8, bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.primary), &name_buf), "Install: "));
         try std.testing.expectEqual(chrome_layout.BannerActions.update_staged, host.bannerActions());
         app.update_notice.?.staged = false;
         // Updates never count down.
@@ -7293,7 +7293,7 @@ pub const Host = struct {
         try host.setBanner(.info, "Layout saved.");
         try std.testing.expectEqual(chrome_layout.BannerActions.close, host.bannerActions());
         try std.testing.expect(!bannerTestVisible(primary));
-        try std.testing.expectEqualStrings("Close: Layout saved.", bannerButtonUiaName(@ptrCast(&host), @intFromEnum(BannerButton.dismiss), &name_buf));
+        try std.testing.expectEqualStrings("Close: Layout saved.", bannerButtonUiaName(@ptrCast(&host), @backingInt(BannerButton.dismiss), &name_buf));
         // UIA Invoke is posted: one that lands while an overlay hides the
         // banner does nothing.
         host.overlay_mode = .tab_title;
@@ -7435,7 +7435,7 @@ pub const Host = struct {
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         host.bannerPointerLeft();
         try std.testing.expect(host.banner_expires_at != null);
-        host.setHoveredButton(host.banner_buttons[@intFromEnum(BannerButton.dismiss)]);
+        host.setHoveredButton(host.banner_buttons[@backingInt(BannerButton.dismiss)]);
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         host.setHoveredButton(null);
         try std.testing.expect(host.banner_expires_at != null);
@@ -9080,10 +9080,10 @@ pub const Host = struct {
     pub fn chromeUiaProviderForHwnd(self: *Host, child: HWND) ?*win32_uia.ChromeControlProvider {
         if (self.new_tab_hwnd == child) return self.new_tab_uia_provider;
         if (self.overflow_hwnd == child) return self.overflow_uia_provider;
-        if (self.bannerButtonOf(child)) |button| return self.banner_button_uia_providers[@intFromEnum(button)];
+        if (self.bannerButtonOf(child)) |button| return self.banner_button_uia_providers[@backingInt(button)];
         const surface = self.searchControlSurface(child) orelse return null;
         const role = surface.searchBarButtonRole(child) orelse return null;
-        return surface.search_bar_button_uia_providers[@intFromEnum(role)];
+        return surface.search_bar_button_uia_providers[@backingInt(role)];
     }
 
     pub const searchBarButtonRole = search_controls.HostControls.searchBarButtonRole;
@@ -10131,7 +10131,7 @@ pub const Host = struct {
         var profiles = [_]windows_shell.Profile{.{ .kind = .powershell, .key = "chrome57-profile", .label = "PowerShell", .command = .{ .shell = "pwsh" } }};
         host.profiles = &profiles;
         defer host.profiles = null;
-        const key = try std.testing.allocator.dupeZ(u8, profiles[0].key);
+        const key = try std.testing.allocator.dupeSentinel(u8, profiles[0].key, 0);
         defer std.testing.allocator.free(key);
         app.launcher_quick_slot_keys[0] = key;
         defer app.launcher_quick_slot_keys[0] = null;
@@ -12451,8 +12451,8 @@ test "win32 settings patch persists a palette theme selection" {
     try Host.setConfigTheme(&pending, "0x96f");
 
     var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
-    edited.set(@intFromEnum(ConfigKey.theme));
-    var patched: std.ArrayListUnmanaged(u8) = .{};
+    edited.set(@backingInt(ConfigKey.theme));
+    var patched: std.ArrayListUnmanaged(u8) = .empty;
     defer patched.deinit(testing.allocator);
     try patchOrAppendEdits(
         testing.allocator,
@@ -12507,8 +12507,8 @@ test "win32 a palette theme preview drops the startup launch-layout it parses ag
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "preview-theme", alloc);
     defer alloc.free(theme);
 
     // What `loadPaletteThemeConfig` has before it finishes: the command line,
@@ -12534,8 +12534,8 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
-    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realPathFileAlloc(std.testing.io, "preview-theme", alloc);
     defer alloc.free(theme);
 
     // The running config, which the hosts' lists were built from.

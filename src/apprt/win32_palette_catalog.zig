@@ -327,7 +327,7 @@ pub fn stableStringId(kind: Kind, key: []const u8) universal.StableId {
     return .{
         .kind = kind,
         .value = std.hash.Wyhash.hash(
-            @as(u64, 0x7061_6c65_7474_6500) + @intFromEnum(kind),
+            @as(u64, 0x7061_6c65_7474_6500) + @backingInt(kind),
             key,
         ),
     };

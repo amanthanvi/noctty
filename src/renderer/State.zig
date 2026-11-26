@@ -231,7 +231,7 @@ pub const WakeSource = enum(u5) {
     inspector,
 
     pub fn bit(self: WakeSource) u32 {
-        return @as(u32, 1) << @intFromEnum(self);
+        return @as(u32, 1) << @backingInt(self);
     }
 };
 

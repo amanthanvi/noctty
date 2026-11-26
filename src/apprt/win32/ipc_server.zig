@@ -49,7 +49,7 @@ const ForwardedArgIterator = struct {
 };
 
 fn defaultIpcNamespace() []const u8 {
-    return if (builtin.mode == .Debug)
+    return if (builtin.mode == .debug)
         "io.github.amanthanvi.noctty-debug"
     else
         "io.github.amanthanvi.noctty";
@@ -1091,7 +1091,7 @@ fn normalizeForwardedStartupArg(
     // only a URI that the same parser used by the receiver accepts; malformed
     // lookalikes still fall through to the non-flag rejection below.
     if (win32_toast_activation.parseLaunchArg(arg)) |_| {
-        return try alloc.dupeZ(u8, arg);
+        return try alloc.dupeSentinel(u8, arg, 0);
     } else |_| {}
 
     // Drop anything the running instance would refuse, so an ordinary launch
@@ -1115,7 +1115,7 @@ fn normalizeForwardedStartupArg(
         const raw = arg["--working-directory=".len..];
         const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
         if (std.mem.eql(u8, trimmed, "home") or std.mem.eql(u8, trimmed, "inherit")) {
-            return try alloc.dupeZ(u8, arg);
+            return try alloc.dupeSentinel(u8, arg, 0);
         }
 
         const cwd = std.fs.cwd();
@@ -1133,7 +1133,7 @@ fn normalizeForwardedStartupArg(
         return try allocForwardedWorkingDirectoryArg(alloc, normalized);
     }
 
-    return try alloc.dupeZ(u8, arg);
+    return try alloc.dupeSentinel(u8, arg, 0);
 }
 
 fn allocForwardedWorkingDirectoryArg(
@@ -1884,7 +1884,7 @@ fn serverAutomationDeadline(client_deadline_ms: u64) u64 {
 fn coldToastForwardArgument(alloc: Allocator, activation: ?win32_toast_activation.ActivationTarget) ![:0]u8 {
     const launch = try win32_toast_activation.buildLaunchArg(alloc, activation orelse .{});
     defer alloc.free(launch);
-    return alloc.dupeZ(u8, launch);
+    return alloc.dupeSentinel(u8, launch, 0);
 }
 
 test "a cold toast activation start forwards the click, not its argv" {
@@ -3304,11 +3304,11 @@ test "win32 handleIpcClient bounds truncated request failures with an ack" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var file = try tmp.dir.createFile("ipc-request-truncated.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-request-truncated.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var request: [4]u8 = undefined;
     std.mem.writeInt(u32, request[0..4], win32_ipc.wire_version, .little);

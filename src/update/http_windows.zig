@@ -132,7 +132,7 @@ pub const Response = struct {
         // Preserve the old TLS floor. Older Windows builds may reject TLS 1.3.
         var protocols: u32 = secure_protocol_tls1_2 | secure_protocol_tls1_3;
         if (WinHttpSetOption(session, option_secure_protocols, &protocols, @sizeOf(u32)) == 0) {
-            if (@intFromEnum(windows.kernel32.GetLastError()) != error_invalid_parameter) return failure();
+            if (@backingInt(windows.kernel32.GetLastError()) != error_invalid_parameter) return failure();
             protocols = secure_protocol_tls1_2;
             if (WinHttpSetOption(session, option_secure_protocols, &protocols, @sizeOf(u32)) == 0) return failure();
         }
@@ -181,7 +181,7 @@ pub const Response = struct {
         var status_len: u32 = @sizeOf(u32);
         if (WinHttpQueryHeaders(request, query_status_code | query_flag_number, null, &status, &status_len, null) == 0) return failure();
         if (status > 999) return error.InvalidHttpStatus;
-        return .{ .session = session, .connection = connection, .request = request, .context = context, .allocator = alloc, .status = @enumFromInt(status) };
+        return .{ .session = session, .connection = connection, .request = request, .context = context, .allocator = alloc, .status = @fromBackingInt(@intCast(status)) };
     }
 
     pub fn deinit(self: *Response) void {
@@ -203,7 +203,7 @@ pub const Response = struct {
         var buffer: [8192]u16 = undefined;
         var len: u32 = @sizeOf(@TypeOf(buffer));
         if (WinHttpQueryHeaders(self.request, query, null, &buffer, &len, index) == 0) {
-            if (@intFromEnum(windows.kernel32.GetLastError()) == error_winhttp_header_not_found) return null;
+            if (@backingInt(windows.kernel32.GetLastError()) == error_winhttp_header_not_found) return null;
             return failure();
         }
         return try std.unicode.utf16LeToUtf8Alloc(alloc, buffer[0 .. len / 2]);
@@ -322,7 +322,7 @@ const BodyReader = struct {
 };
 
 fn failure() error{ UpdateHttpTimeout, UpdateHttpTransportFailed } {
-    return failureCode(@intFromEnum(windows.kernel32.GetLastError()));
+    return failureCode(@backingInt(windows.kernel32.GetLastError()));
 }
 
 fn failureCode(code: u32) error{ UpdateHttpTimeout, UpdateHttpTransportFailed } {

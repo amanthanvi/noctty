@@ -479,12 +479,12 @@ test "disk cache clear" {
     defer tmp.cleanup();
     var buf: [4096]u8 = undefined;
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
         var file_writer = file.writer(&buf);
         try file_writer.interface.writeAll("HELLO!");
     }
-    const path = try tmp.dir.realpathAlloc(alloc, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", alloc);
     defer alloc.free(path);
 
     // Setup our cache
@@ -494,7 +494,7 @@ test "disk cache clear" {
     // Verify the file is gone
     try testing.expectError(
         error.FileNotFound,
-        tmp.dir.openFile("cache", .{}),
+        tmp.dir.openFile(std.testing.io, "cache", .{}),
     );
 }
 
@@ -507,14 +507,14 @@ test "disk cache operations" {
     defer tmp.cleanup();
     var buf: [4096]u8 = undefined;
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
         var file_writer = file.writer(&buf);
         const writer = &file_writer.interface;
         try writer.writeAll("HELLO!");
         try writer.flush();
     }
-    const path = try tmp.dir.realpathAlloc(alloc, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", alloc);
     defer alloc.free(path);
 
     // Setup our cache. Adding the same key twice exercises both the new
@@ -543,7 +543,7 @@ test "disk cache cleans up temp files" {
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const cache_path = try std.fs.path.join(alloc, &.{ tmp_path, "cache" });
     defer alloc.free(cache_path);
@@ -568,7 +568,7 @@ test "disk cache prune" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const cache_path = try std.fs.path.join(alloc, &.{ tmp_path, "cache" });
     defer alloc.free(cache_path);
@@ -602,7 +602,7 @@ test "disk cache prune missing file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(tmp_path);
     const cache_path = try std.fs.path.join(alloc, &.{ tmp_path, "cache" });
     defer alloc.free(cache_path);
@@ -622,8 +622,8 @@ test "disk cache reads duplicate keys" {
     // key with the updated entry and ensure (via testing.allocator) that
     // we don't double-free or leak.
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
         var buf: [256]u8 = undefined;
         var file_writer = file.writer(&buf);
         try file_writer.interface.writeAll(
@@ -631,7 +631,7 @@ test "disk cache reads duplicate keys" {
         );
         try file_writer.interface.flush();
     }
-    const path = try tmp.dir.realpathAlloc(alloc, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", alloc);
     defer alloc.free(path);
 
     const cache: DiskCache = .{ .path = path };
@@ -653,8 +653,8 @@ test "disk cache reads survive allocation failure" {
     // Exercise a populated cache containing a duplicate key to ensure
     // that we hit all of the possible allocation behaviors below.
     {
-        var file = try tmp.dir.createFile("cache", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "cache", .{});
+        defer file.close(std.testing.io);
         var buf: [256]u8 = undefined;
         var file_writer = file.writer(&buf);
         try file_writer.interface.writeAll(
@@ -665,7 +665,7 @@ test "disk cache reads survive allocation failure" {
         );
         try file_writer.interface.flush();
     }
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "cache");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "cache", testing.allocator);
     defer testing.allocator.free(path);
 
     const cache: DiskCache = .{ .path = path };
@@ -698,7 +698,7 @@ test "disk cache add survives allocation failure" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const tmp_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(tmp_path);
     const path = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cache" });
     defer testing.allocator.free(path);
@@ -711,7 +711,7 @@ test "disk cache add survives allocation failure" {
     // from a clean cache file.
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
         var failing = std.testing.FailingAllocator.init(
             testing.allocator,
             .{ .fail_index = fail_index },
