@@ -582,7 +582,7 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
     var io: windows.IO_STATUS_BLOCK = undefined;
     return windows.ntdll.NtCreateFile(
         handle,
-        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE | (if (options.read_data) @as(u32, windows.FILE_READ_DATA) else 0),
+        windows.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE | (if (options.read_data) @as(u32, windows.FILE_READ_DATA) else 0),
         &attrs,
         &io,
         null,
@@ -846,7 +846,7 @@ pub const test_links = struct {
     pub fn junction(alloc: Allocator, dir: []const u8, nt_target: []const u8) !void {
         var dir_w = try windows.sliceToPrefixedFileW(null, dir);
         const handle = try windows.OpenFile(dir_w.span(), .{
-            .access_mask = win32_types.GENERIC_WRITE | windows.SYNCHRONIZE,
+            .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
             .creation = windows.FILE_OPEN,
             .filter = .dir_only,
             .follow_symlinks = false,

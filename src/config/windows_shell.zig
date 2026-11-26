@@ -2410,7 +2410,7 @@ fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
     var handle: windows.HANDLE = undefined;
     const status = ntOpenDontReparse(
         path,
-        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE,
+        windows.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE,
         windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT,
         &handle,
     ) orelse return null;
@@ -4271,7 +4271,7 @@ fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
         _ = child.kill() catch {};
     }
 
-    windows.WaitForSingleObjectEx(child.id, wsl_probe_timeout_ms, false) catch |err| switch (err) {
+    win32_sys.waitForSingleObjectEx(child.id, wsl_probe_timeout_ms, false) catch |err| switch (err) {
         error.WaitTimeOut => {
             log.warn("skipping unresponsive wsl default shell exe={s} timeout_ms={}", .{
                 exe_path,
@@ -4595,9 +4595,9 @@ const WslOutputDrain = struct {
     err: ?anyerror = null,
 
     fn init(pipe: std.fs.File) !WslOutputDrain {
-        const io_event = try windows.CreateEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+        const io_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         errdefer windows.CloseHandle(io_event);
-        const stop_event = try windows.CreateEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+        const stop_event = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
         return .{ .pipe = pipe, .io_event = io_event, .stop_event = stop_event };
     }
 
@@ -4748,7 +4748,7 @@ fn listWslDistrosIn(alloc: Allocator, exe_path: []const u8, env: *std.process.En
     const drains = [_]*WslOutputDrain{ &drain, &errors };
     const threads = [_]std.Thread{ drain_thread, errors_thread };
 
-    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
+    win32_sys.waitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| {
         if (err == error.WaitTimeOut) log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
             exe_path,
             wsl_list_timeout_ms,
@@ -4799,7 +4799,7 @@ const wsl_drain_grace_ms = 500;
 /// failed.
 fn joinWslDrains(drains: []const *WslOutputDrain, threads: []const std.Thread) void {
     for (drains, threads) |drain, thread| {
-        windows.WaitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
+        win32_sys.waitForSingleObjectEx(thread.getHandle(), wsl_drain_grace_ms, false) catch drain.stop();
         thread.join();
     }
 }
@@ -6298,13 +6298,13 @@ fn testJoinWithin(drain: *WslOutputDrain, thread: std.Thread, write_end: windows
         thread.join();
         return err;
     };
-    const ended = if (windows.WaitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
+    const ended = if (win32_sys.waitForSingleObjectEx(joiner.getHandle(), limit_ms, false)) |_| true else |_| false;
     windows.CloseHandle(write_end);
     // Bounded too. With the write end closed, a read ends at the pipe's
     // end, and a reader held in a test hook is released by its test within
     // seconds. A join still running after this would leave the drain freed
     // under live threads if the test returned, so it ends the run instead.
-    windows.WaitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
+    win32_sys.waitForSingleObjectEx(joiner.getHandle(), 10_000, false) catch
         @panic("a WSL drain's join did not end after its pipe closed");
     joiner.join();
     if (!ended) return error.TestJoinHung;
@@ -6364,7 +6364,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
             if (held) return;
             held = true;
             _ = SetEvent(at_hook.?);
-            windows.WaitForSingleObjectEx(release.?, win32_types.INFINITE, false) catch {};
+            win32_sys.waitForSingleObjectEx(release.?, win32_types.INFINITE, false) catch {};
         }
 
         /// Releases the reader once the join has stopped it (the drain's
@@ -6382,9 +6382,9 @@ test "a WSL drain held outside its read until long after it was stopped still en
             _ = SetEvent(release.?);
         }
     };
-    Hold.at_hook = try windows.CreateEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    Hold.at_hook = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
     defer windows.CloseHandle(Hold.at_hook.?);
-    Hold.release = try windows.CreateEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    Hold.release = try win32_sys.createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
     defer windows.CloseHandle(Hold.release.?);
     Hold.held = false;
     test_wsl_before_read = &Hold.before;
@@ -6412,7 +6412,7 @@ test "a WSL drain held outside its read until long after it was stopped still en
         drain.stop();
         thread.join();
     };
-    try windows.WaitForSingleObjectEx(Hold.at_hook.?, 3000, false);
+    try win32_sys.waitForSingleObjectEx(Hold.at_hook.?, 3000, false);
     const releaser = try std.Thread.spawn(.{}, Hold.releaseAfterStop, .{});
     defer releaser.join();
     // The reader and the write end are `testJoinWithin`'s from here: it

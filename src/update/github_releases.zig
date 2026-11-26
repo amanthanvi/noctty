@@ -2021,7 +2021,7 @@ fn buildInstalledNocttyArgv(
 }
 
 fn waitForProcessExit(pid: u32, timeout_ms: u32) !void {
-    const handle = OpenProcess(std.os.windows.SYNCHRONIZE, 0, pid) orelse return;
+    const handle = OpenProcess(win32_types.SYNCHRONIZE, 0, pid) orelse return;
     defer std.os.windows.CloseHandle(handle);
     return std.os.windows.WaitForSingleObject(handle, timeout_ms);
 }

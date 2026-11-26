@@ -129,6 +129,8 @@ pub const FILE_FLAG_OVERLAPPED = 0x40000000;
 pub const PIPE_ACCESS_INBOUND = 0x00000001;
 pub const PIPE_TYPE_BYTE = 0x00000000;
 pub const WAIT_OBJECT_0 = 0x00000000;
+pub const WAIT_ABANDONED_0 = 0x00000080;
+pub const MAXIMUM_WAIT_OBJECTS = 64;
 pub const WAIT_ABANDONED = 0x00000080;
 pub const WAIT_TIMEOUT = 0x00000102;
 pub const WAIT_FAILED = 0xFFFFFFFF;
@@ -139,6 +141,7 @@ pub const STD_INPUT_HANDLE = std.math.maxInt(DWORD) - 10 + 1;
 pub const STD_OUTPUT_HANDLE = std.math.maxInt(DWORD) - 11 + 1;
 pub const STD_ERROR_HANDLE = std.math.maxInt(DWORD) - 12 + 1;
 pub const KEY_READ = 0x20019;
+pub const SYNCHRONIZE = 0x00100000;
 
 /// `RegGetValueW`'s `dwFlags`.
 pub const RRF = struct {

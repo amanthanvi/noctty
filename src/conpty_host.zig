@@ -659,7 +659,7 @@ fn createHostPipe(
 }
 
 fn createManualResetEvent() !windows.HANDLE {
-    return windows.CreateEventExW(
+    return win32_sys.createEventExW(
         null,
         null,
         win32_types.CREATE_EVENT_MANUAL_RESET,
@@ -692,7 +692,7 @@ fn acceptClientOrShellExit(
     }
 
     const handles = [_]windows.HANDLE{ accept_event, shell };
-    const signalled = try windows.WaitForMultipleObjectsEx(&handles, false, win32_types.INFINITE, false);
+    const signalled = try win32_sys.waitForMultipleObjectsEx(&handles, false, win32_types.INFINITE, false);
     if (signalled == 0) {
         var transferred: windows.DWORD = 0;
         if (win32_sys.GetOverlappedResult(pipe, &overlapped, &transferred, win32_types.FALSE) == 0) {

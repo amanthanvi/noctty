@@ -651,7 +651,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
         .lpSecurityDescriptor = null,
     };
     const nul = windows.OpenFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
-        .access_mask = win32_types.GENERIC_READ | win32_types.GENERIC_WRITE | windows.SYNCHRONIZE,
+        .access_mask = win32_types.GENERIC_READ | win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
         .share_access = win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
         .creation = win32_types.OPEN_EXISTING,
         .sa = &sa,
@@ -680,10 +680,10 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
     };
 
     defer std.posix.close(child.pid.?);
-    windows.WaitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
+    win32_sys.waitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
         log.warn("terminfo probe did not finish err={}", .{err});
         _ = win32_sys.TerminateProcess(child.pid.?, 1);
-        windows.WaitForSingleObjectEx(child.pid.?, 5000, false) catch {};
+        win32_sys.waitForSingleObjectEx(child.pid.?, 5000, false) catch {};
         return probeExitAnswer(null);
     };
     const result = child.wait(true) catch return null;

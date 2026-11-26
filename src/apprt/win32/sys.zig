@@ -1011,6 +1011,61 @@ pub extern "kernel32" fn WriteFile(
     lpOverlapped: ?*OVERLAPPED,
 ) callconv(.winapi) BOOL;
 
+/// NULL when the event cannot be created.
+pub extern "kernel32" fn CreateEventExW(
+    lpEventAttributes: ?*SECURITY_ATTRIBUTES,
+    lpName: ?LPCWSTR,
+    dwFlags: DWORD,
+    dwDesiredAccess: DWORD,
+) callconv(.winapi) ?HANDLE;
+
+pub extern "kernel32" fn WaitForSingleObjectEx(hHandle: HANDLE, dwMilliseconds: DWORD, bAlertable: BOOL) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn WaitForMultipleObjectsEx(
+    nCount: DWORD,
+    lpHandles: [*]const HANDLE,
+    bWaitAll: BOOL,
+    dwMilliseconds: DWORD,
+    bAlertable: BOOL,
+) callconv(.winapi) DWORD;
+
+/// `CreateEventExW` with std's former error mapping.
+pub fn createEventExW(attributes: ?*SECURITY_ATTRIBUTES, name: ?LPCWSTR, flags: DWORD, desired_access: DWORD) error{Unexpected}!HANDLE {
+    return CreateEventExW(attributes, name, flags, desired_access) orelse
+        windows.unexpectedError(windows.GetLastError());
+}
+
+pub const WaitForSingleObjectError = error{ WaitAbandoned, WaitTimeOut, Unexpected };
+
+/// `WaitForSingleObjectEx` with std's former result mapping.
+pub fn waitForSingleObjectEx(handle: HANDLE, milliseconds: DWORD, alertable: bool) WaitForSingleObjectError!void {
+    switch (WaitForSingleObjectEx(handle, milliseconds, @intFromBool(alertable))) {
+        win32_types.WAIT_ABANDONED => return error.WaitAbandoned,
+        win32_types.WAIT_OBJECT_0 => return,
+        win32_types.WAIT_TIMEOUT => return error.WaitTimeOut,
+        win32_types.WAIT_FAILED => return windows.unexpectedError(windows.GetLastError()),
+        else => return error.Unexpected,
+    }
+}
+
+/// `WaitForMultipleObjectsEx` with std's former result mapping: the index of
+/// the signalled handle.
+pub fn waitForMultipleObjectsEx(handles: []const HANDLE, wait_all: bool, milliseconds: DWORD, alertable: bool) WaitForSingleObjectError!u32 {
+    std.debug.assert(handles.len > 0 and handles.len <= win32_types.MAXIMUM_WAIT_OBJECTS);
+    const count: DWORD = @intCast(handles.len);
+    switch (WaitForMultipleObjectsEx(count, handles.ptr, @intFromBool(wait_all), milliseconds, @intFromBool(alertable))) {
+        win32_types.WAIT_OBJECT_0...win32_types.WAIT_OBJECT_0 + win32_types.MAXIMUM_WAIT_OBJECTS => |n| {
+            const index = n - win32_types.WAIT_OBJECT_0;
+            std.debug.assert(index < count);
+            return index;
+        },
+        win32_types.WAIT_ABANDONED_0...win32_types.WAIT_ABANDONED_0 + win32_types.MAXIMUM_WAIT_OBJECTS => return error.WaitAbandoned,
+        win32_types.WAIT_TIMEOUT => return error.WaitTimeOut,
+        win32_types.WAIT_FAILED => return windows.unexpectedError(windows.GetLastError()),
+        else => return error.Unexpected,
+    }
+}
+
 pub const GetOverlappedResultError = error{ WouldBlock, Unexpected };
 
 /// `GetOverlappedResult` with std's former error mapping: `WouldBlock` when the
@@ -1035,3 +1090,14 @@ pub extern "advapi32" fn RegGetValueW(
     pvData: ?*anyopaque,
     pcbData: ?*DWORD,
 ) callconv(.winapi) i32;
+
+test "event and wait helpers keep std's result mapping" {
+    const event = try createEventExW(null, null, win32_types.CREATE_EVENT_MANUAL_RESET, win32_types.EVENT_ALL_ACCESS);
+    defer windows.CloseHandle(event);
+    try std.testing.expectError(error.WaitTimeOut, waitForSingleObjectEx(event, 0, false));
+    try std.testing.expect(SetEvent(event) != 0);
+    try waitForSingleObjectEx(event, 0, false);
+
+    const handles = [_]HANDLE{ event, event };
+    try std.testing.expectEqual(@as(u32, 0), try waitForMultipleObjectsEx(&handles, false, 0, false));
+}
