@@ -142,7 +142,7 @@ function Get-AbiPinProblems {
     return $problems
 }
 
-$abiPinStructs = @('FILETIME', 'OVERLAPPED', 'BY_HANDLE_FILE_INFORMATION', 'UNICODE_STRING')
+$abiPinStructs = @('FILETIME', 'OVERLAPPED', 'BY_HANDLE_FILE_INFORMATION', 'UNICODE_STRING', 'OBJECT_ATTRIBUTES', 'FILE_BASIC_INFORMATION', 'FILE_ATTRIBUTE_TAG_INFO')
 $abiPinSource = Get-Content -LiteralPath (Join-Path $repoRoot 'src/apprt/win32_types.zig') -Raw
 $abiPinProblems = @(Get-AbiPinProblems $abiPinSource $abiPinStructs)
 if ($abiPinProblems.Count -ne 0) {

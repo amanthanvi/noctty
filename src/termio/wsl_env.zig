@@ -650,7 +650,7 @@ fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd
         .bInheritHandle = win32_types.TRUE,
         .lpSecurityDescriptor = null,
     };
-    const nul = windows.OpenFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
+    const nul = win32_sys.openFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
         .access_mask = win32_types.GENERIC_READ | win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
         .share_access = win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE,
         .creation = win32_types.OPEN_EXISTING,

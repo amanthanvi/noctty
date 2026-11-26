@@ -132,6 +132,12 @@ pub const FILE_FLAG_OVERLAPPED = 0x40000000;
 pub const FILE_OPEN = 1;
 pub const FILE_OPEN_REPARSE_POINT = 0x00200000;
 pub const FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020;
+pub const FILE_DIRECTORY_FILE = 0x00000001;
+pub const FILE_NON_DIRECTORY_FILE = 0x00000040;
+pub const OBJ_INHERIT = 0x00000002;
+pub const FILE_DEVICE_FILE_SYSTEM = 0x00000009;
+pub const FSCTL_GET_REPARSE_POINT: DWORD = 0x900a8;
+pub const FSCTL_SET_REPARSE_POINT: DWORD = 0x900a4;
 pub const IO_REPARSE_TAG_MOUNT_POINT: ULONG = 0xa0000003;
 pub const IO_REPARSE_TAG_SYMLINK: ULONG = 0xa000000c;
 pub const PIPE_ACCESS_INBOUND = 0x00000001;
@@ -172,6 +178,32 @@ pub const RRF = struct {
 pub const FILETIME = extern struct {
     dwLowDateTime: DWORD,
     dwHighDateTime: DWORD,
+};
+
+/// ntifs.h `OBJECT_ATTRIBUTES`, natural packing. `ObjectName` is std's
+/// `UNICODE_STRING` (a `STRING(WCHAR)` of the same layout on 0.17).
+pub const OBJECT_ATTRIBUTES = extern struct {
+    Length: ULONG,
+    RootDirectory: ?*anyopaque,
+    ObjectName: *std.os.windows.UNICODE_STRING,
+    Attributes: ULONG,
+    SecurityDescriptor: ?*anyopaque,
+    SecurityQualityOfService: ?*anyopaque,
+};
+
+/// winternl.h `FILE_BASIC_INFORMATION`, natural packing.
+pub const FILE_BASIC_INFORMATION = extern struct {
+    CreationTime: i64,
+    LastAccessTime: i64,
+    LastWriteTime: i64,
+    ChangeTime: i64,
+    FileAttributes: ULONG,
+};
+
+/// ntifs.h `FILE_ATTRIBUTE_TAG_INFORMATION` (`FileAttributeTagInformation`).
+pub const FILE_ATTRIBUTE_TAG_INFO = extern struct {
+    FileAttributes: DWORD,
+    ReparseTag: DWORD,
 };
 
 /// winternl.h `UNICODE_STRING`, natural packing.
@@ -292,4 +324,23 @@ test "shared Win32 type layouts" {
     try testing.expectEqual(@as(usize, 0), @offsetOf(UNICODE_STRING, "Length"));
     try testing.expectEqual(@as(usize, 2), @offsetOf(UNICODE_STRING, "MaximumLength"));
     try testing.expectEqual(@as(usize, @alignOf(?[*]u16)), @offsetOf(UNICODE_STRING, "Buffer"));
+
+    // ntifs.h and winternl.h declare these outside any pshpack block: natural packing.
+    const ptr = @sizeOf(usize);
+    try testing.expectEqual(@as(usize, ptr * 6), @sizeOf(OBJECT_ATTRIBUTES));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(OBJECT_ATTRIBUTES, "Length"));
+    try testing.expectEqual(@as(usize, ptr), @offsetOf(OBJECT_ATTRIBUTES, "RootDirectory"));
+    try testing.expectEqual(@as(usize, ptr * 2), @offsetOf(OBJECT_ATTRIBUTES, "ObjectName"));
+    try testing.expectEqual(@as(usize, ptr * 3), @offsetOf(OBJECT_ATTRIBUTES, "Attributes"));
+    try testing.expectEqual(@as(usize, ptr * 4), @offsetOf(OBJECT_ATTRIBUTES, "SecurityDescriptor"));
+    try testing.expectEqual(@as(usize, ptr * 5), @offsetOf(OBJECT_ATTRIBUTES, "SecurityQualityOfService"));
+    try testing.expectEqual(@as(usize, 40), @sizeOf(FILE_BASIC_INFORMATION));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(FILE_BASIC_INFORMATION, "CreationTime"));
+    try testing.expectEqual(@as(usize, 8), @offsetOf(FILE_BASIC_INFORMATION, "LastAccessTime"));
+    try testing.expectEqual(@as(usize, 16), @offsetOf(FILE_BASIC_INFORMATION, "LastWriteTime"));
+    try testing.expectEqual(@as(usize, 24), @offsetOf(FILE_BASIC_INFORMATION, "ChangeTime"));
+    try testing.expectEqual(@as(usize, 32), @offsetOf(FILE_BASIC_INFORMATION, "FileAttributes"));
+    try testing.expectEqual(@as(usize, 8), @sizeOf(FILE_ATTRIBUTE_TAG_INFO));
+    try testing.expectEqual(@as(usize, 0), @offsetOf(FILE_ATTRIBUTE_TAG_INFO, "FileAttributes"));
+    try testing.expectEqual(@as(usize, 4), @offsetOf(FILE_ATTRIBUTE_TAG_INFO, "ReparseTag"));
 }
