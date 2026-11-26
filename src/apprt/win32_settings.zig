@@ -18,6 +18,7 @@
 //! through `AppHandle.saveAndReload`.
 
 const std = @import("std");
+const win32_repeat = @import("win32_repeat.zig");
 const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
 const config_origin = @import("../config/origin.zig");
@@ -2232,7 +2233,7 @@ fn profileRowText(
 test "settings default profile row text is cut at a character with an ellipsis" {
     var items = [_]ProfileChoice{
         // 1 + 2 * 300 bytes: the 512-byte row ends inside a character.
-        .{ .key = "user:long", .label = "a" ++ "\u{e9}" ** 300 },
+        .{ .key = "user:long", .label = "a" ++ comptime win32_repeat.repeat("\u{e9}", 300) },
         .{ .key = "user:short", .label = "Short", .hidden = true },
     };
     const choices: ProfileChoices = .{ .items = &items, .complete = true };
@@ -2544,7 +2545,7 @@ pub const SettingsWindow = struct {
     /// their fields' section.
     companions: [Companion.count]?HWND = @splat(null),
     section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
-    section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
+    section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = @as([section_count]?*win32_uia.SettingsSectionProvider, @splat(null)),
     /// Writes the draft; while the close prompt is up, the prompt's "Save
     /// and close" (`placeSaveButton`).
     btn_save: ?HWND = null,
@@ -2608,11 +2609,11 @@ pub const SettingsWindow = struct {
     /// lay them out, and with the repaint, in microseconds.
     proof_search_filter_us: u32 = 0,
     proof_search_total_us: u32 = 0,
-    field_labels: [settings_label_specs.len]?HWND = [_]?HWND{null} ** settings_label_specs.len,
+    field_labels: [settings_label_specs.len]?HWND = @as([settings_label_specs.len]?HWND, @splat(null)),
     text_uia_prev_proc: ?*const anyopaque = null,
-    text_uia_providers: [settings_text_count]?*win32_uia.SettingsControlProvider = [_]?*win32_uia.SettingsControlProvider{null} ** settings_text_count,
-    control_uia_prev_procs: [settings_control_count]?*const anyopaque = [_]?*const anyopaque{null} ** settings_control_count,
-    control_uia_providers: [settings_control_count]?*win32_uia.SettingsControlProvider = [_]?*win32_uia.SettingsControlProvider{null} ** settings_control_count,
+    text_uia_providers: [settings_text_count]?*win32_uia.SettingsControlProvider = @as([settings_text_count]?*win32_uia.SettingsControlProvider, @splat(null)),
+    control_uia_prev_procs: [settings_control_count]?*const anyopaque = @as([settings_control_count]?*const anyopaque, @splat(null)),
+    control_uia_providers: [settings_control_count]?*win32_uia.SettingsControlProvider = @as([settings_control_count]?*win32_uia.SettingsControlProvider, @splat(null)),
     ui_font: HGDIOBJ = null,
     secondary_font: HGDIOBJ = null,
     emphasis_font: HGDIOBJ = null,
@@ -2753,25 +2754,25 @@ pub const SettingsWindow = struct {
     validation_control: ?HWND = null,
     owned_validation_control: ?HWND = null,
     owned_validation_message: ?[]const u8 = null,
-    owned_text_changed: [owned_setting_field_count]bool = [_]bool{false} ** owned_setting_field_count,
-    owned_dirty: [owned_setting_field_count]bool = [_]bool{false} ** owned_setting_field_count,
-    owned_conflict: [owned_setting_field_count]bool = [_]bool{false} ** owned_setting_field_count,
+    owned_text_changed: [owned_setting_field_count]bool = @as([owned_setting_field_count]bool, @splat(false)),
+    owned_dirty: [owned_setting_field_count]bool = @as([owned_setting_field_count]bool, @splat(false)),
+    owned_conflict: [owned_setting_field_count]bool = @as([owned_setting_field_count]bool, @splat(false)),
     /// Raw scalar text that has not parsed successfully yet. Keep this
     /// separate from the typed transaction so invalid/empty edits still
     /// participate in dirty-close confirmation and survive config reloads.
-    raw_scalar_dirty: [raw_scalar_field_count]bool = [_]bool{false} ** raw_scalar_field_count,
+    raw_scalar_dirty: [raw_scalar_field_count]bool = @as([raw_scalar_field_count]bool, @splat(false)),
     /// Borrowed static validation messages for each unparsed scalar field.
-    raw_scalar_error: [raw_scalar_field_count]?[]const u8 = [_]?[]const u8{null} ** raw_scalar_field_count,
+    raw_scalar_error: [raw_scalar_field_count]?[]const u8 = @splat(null),
     /// Whether the message in `raw_scalar_error` is on screen yet. Text that
     /// does not parse is wrong for as long as it is half typed ("1" on the way
     /// to "16"), so the message waits for `validation_quiet_ms` without a key,
     /// for the field to lose focus, or for a save. Until then the field only
     /// keeps Save off (`raw_scalar_dirty`).
-    raw_scalar_shown: [raw_scalar_field_count]bool = [_]bool{false} ** raw_scalar_field_count,
+    raw_scalar_shown: [raw_scalar_field_count]bool = @as([raw_scalar_field_count]bool, @splat(false)),
     active_raw_validation: ?RawScalarField = null,
     /// What each rail button and the title were last drawn to say
     /// (`syncMarkers`), so only a change repaints.
-    section_markers: [section_count]win32_uia.SettingsSectionMarker = [_]win32_uia.SettingsSectionMarker{.none} ** section_count,
+    section_markers: [section_count]win32_uia.SettingsSectionMarker = @as([section_count]win32_uia.SettingsSectionMarker, @splat(.none)),
     title_marked: bool = false,
     active_conflict_field: ?SettingField = null,
     active_owned_conflict_field: ?OwnedSettingField = null,
@@ -3032,12 +3033,12 @@ pub const SettingsWindow = struct {
         self.validation_control = null;
         self.owned_validation_control = null;
         self.owned_validation_message = null;
-        self.owned_text_changed = [_]bool{false} ** owned_setting_field_count;
-        self.owned_dirty = [_]bool{false} ** owned_setting_field_count;
-        self.owned_conflict = [_]bool{false} ** owned_setting_field_count;
-        self.raw_scalar_dirty = [_]bool{false} ** raw_scalar_field_count;
-        self.raw_scalar_error = [_]?[]const u8{null} ** raw_scalar_field_count;
-        self.raw_scalar_shown = [_]bool{false} ** raw_scalar_field_count;
+        self.owned_text_changed = @as([owned_setting_field_count]bool, @splat(false));
+        self.owned_dirty = @as([owned_setting_field_count]bool, @splat(false));
+        self.owned_conflict = @as([owned_setting_field_count]bool, @splat(false));
+        self.raw_scalar_dirty = @as([raw_scalar_field_count]bool, @splat(false));
+        self.raw_scalar_error = @splat(null);
+        self.raw_scalar_shown = @as([raw_scalar_field_count]bool, @splat(false));
         self.killValidationTimer();
         self.active_raw_validation = null;
         self.active_conflict_field = null;
@@ -3152,7 +3153,7 @@ pub const SettingsWindow = struct {
     }
 
     fn pendingFieldCount(self: *const SettingsWindow) usize {
-        var fields = [_]bool{false} ** setting_field_count;
+        var fields = @as([setting_field_count]bool, @splat(false));
         if (self.transaction) |transaction| for (transaction.entries) |entry| {
             fields[@intFromEnum(entry.field)] = entry.dirty or entry.conflict;
         };
@@ -3435,7 +3436,7 @@ pub const SettingsWindow = struct {
     /// value is the more urgent, so it wins over unsaved changes.
     fn sectionMarkers(self: *const SettingsWindow) [section_count]win32_uia.SettingsSectionMarker {
         const Marker = win32_uia.SettingsSectionMarker;
-        var markers = [_]Marker{.none} ** section_count;
+        var markers = @as([section_count]Marker, @splat(.none));
         const Mark = struct {
             fn at(all: *[section_count]Marker, section: Section, marker: Marker) void {
                 const slot = &all[@intFromEnum(section)];
@@ -4466,7 +4467,7 @@ pub const SettingsWindow = struct {
         self.text_status = null;
         self.text_help = null;
         self.forgetSearch();
-        self.field_labels = [_]?HWND{null} ** settings_label_specs.len;
+        self.field_labels = @as([settings_label_specs.len]?HWND, @splat(null));
         self.deleteUiFont();
         self.btn_section_appearance = null;
         self.btn_section_terminal = null;
@@ -4615,7 +4616,7 @@ pub const SettingsWindow = struct {
                 settingsControlRelease,
             );
         }
-        self.control_uia_prev_procs = [_]?*const anyopaque{null} ** settings_control_count;
+        self.control_uia_prev_procs = @as([settings_control_count]?*const anyopaque, @splat(null));
         if (self.viewport_uia_provider) |provider| {
             self.viewport_uia_provider = null;
             provider.detach();
@@ -10531,7 +10532,7 @@ test "settings numeric edits reject nonfinite floats and excessive padding" {
 test "settings a number field reads all it holds, so text past a valid start is an error, not that start" {
     // 31 units that parse ("0.5" and 28 zeros), then one that does not. The
     // field reads 4095 units like the others, so the whole text is checked.
-    const text = "0.5" ++ "0" ** 28 ++ "x";
+    const text = "0.5" ++ comptime win32_repeat.repeat("0", 28) ++ "x";
     const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(text), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
     defer _ = sys.DestroyWindow(edit);
     var pending = try Config.default(std.testing.allocator);
@@ -10541,7 +10542,7 @@ test "settings a number field reads all it holds, so text past a valid start is 
     try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] != null);
     try std.testing.expectEqual(@as(f64, 1), settings.pending.?.@"background-opacity");
     // A long text that does parse is taken whole.
-    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0.25" ++ "0" ** 60));
+    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0.25" ++ comptime win32_repeat.repeat("0", 60)));
     settings.syncNumberFromEdit(.background_opacity);
     try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] == null);
     try std.testing.expectEqual(@as(f64, 0.25), settings.pending.?.@"background-opacity");
@@ -10550,7 +10551,7 @@ test "settings a number field reads all it holds, so text past a valid start is 
 test "settings a padding field reads all it holds, however long, so a long text is checked whole" {
     // More than the 64 bytes the field was once read into: 70 zeros, then a
     // unit that does not parse.
-    const text = "0" ** 70 ++ "x";
+    const text = comptime win32_repeat.repeat("0", 70) ++ "x";
     const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(text), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
     defer _ = sys.DestroyWindow(edit);
     var pending = try Config.default(std.testing.allocator);
@@ -10559,7 +10560,7 @@ test "settings a padding field reads all it holds, however long, so a long text 
     settings.syncPaddingFromEdit(.window_padding_x);
     try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
     // A long text that does parse is taken whole.
-    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0" ** 70 ++ "7"));
+    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral(comptime win32_repeat.repeat("0", 70) ++ "7"));
     settings.syncPaddingFromEdit(.window_padding_x);
     try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] == null);
     const draft = settings.pending orelse return error.TestExpectedDraft;
@@ -12764,8 +12765,8 @@ test "settings action bar pins normal conflict prompt and stacked actions" {
 }
 
 test "settings checkbox and label classification agrees with form model" {
-    var controls = [_]bool{false} ** settings_clipped_control_count;
-    var labels = [_]bool{false} ** settings_label_specs.len;
+    var controls = @as([settings_clipped_control_count]bool, @splat(false));
+    var labels = @as([settings_label_specs.len]bool, @splat(false));
     for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
         try std.testing.expect(!controls[item.control_index]);
         controls[item.control_index] = true;
@@ -15404,13 +15405,13 @@ test "settings search reads the words typed and @modified, in any case" {
 
     // Every word is looked for, however many the field holds: a seventeenth
     // that no row has finds nothing, and a change to it is a new search.
-    const fonts = "font " ** 16;
+    const fonts = comptime win32_repeat.repeat("font ", 16);
     query = SearchQuery.parse(fonts ++ "zzzz");
     try std.testing.expectEqual(@as(usize, 17), query.word_count);
     for (settings_search_text) |row| try std.testing.expect(!query.matchesText(row));
     try std.testing.expect(!query.sameSearch(&SearchQuery.parse(fonts ++ "zzzy")));
     // The most words the field's 128 units can hold: 64 of one letter.
-    query = SearchQuery.parse(("a " ** 63) ++ "a");
+    query = SearchQuery.parse((comptime win32_repeat.repeat("a ", 63)) ++ "a");
     try std.testing.expectEqual(@as(usize, 64), query.word_count);
     // The text is kept whole up to its capacity and cut only between
     // characters.
@@ -16111,13 +16112,13 @@ test "settings a value set on the search field through UIA is cut to the field's
             // in "siz", which finds Font size; the rest would find nothing.
             const long = comptime blk: {
                 @setEvalBranchQuota(10_000);
-                break :blk std.unicode.utf8ToUtf16LeStringLiteral(("font " ** 25) ++ "size zzzz");
+                break :blk std.unicode.utf8ToUtf16LeStringLiteral((win32_repeat.repeat("font ", 25)) ++ "size zzzz");
             };
             try std.testing.expect(long.len > search_text_max_code_units);
             try std.testing.expectEqual(com.S_OK, value.vtbl.SetValue(value, long));
             try std.testing.expectEqual(limit, sys.GetWindowTextLengthW(search));
             const shown = readEditUtf8(search, &field_buf).?;
-            try std.testing.expectEqualStrings(("font " ** 25) ++ "siz", shown);
+            try std.testing.expectEqualStrings((comptime win32_repeat.repeat("font ", 25)) ++ "siz", shown);
             // What the field shows is what was searched.
             try std.testing.expectEqualStrings(shown, settings.search_query.typedText());
 
@@ -16125,7 +16126,7 @@ test "settings a value set on the search field through UIA is cut to the field's
             // straddle the limit goes whole.
             const pair = comptime blk: {
                 @setEvalBranchQuota(10_000);
-                break :blk std.unicode.utf8ToUtf16LeStringLiteral(("a" ** 127) ++ "\u{1F600}b");
+                break :blk std.unicode.utf8ToUtf16LeStringLiteral((win32_repeat.repeat("a", 127)) ++ "\u{1F600}b");
             };
             try std.testing.expectEqual(com.S_OK, value.vtbl.SetValue(value, pair));
             try std.testing.expectEqual(limit - 1, sys.GetWindowTextLengthW(search));
@@ -16139,7 +16140,7 @@ test "settings a value set on the search field through UIA is cut to the field's
             // is what `readEditUtf8` reads of them.
             const family = settings.fields.edit_font_family.?;
             const family_value = &settings.control_uia_providers[settings.controlIndex(family).?].?.value_iface;
-            var many = [_:0]u16{'a'} ** (edit_text_max_code_units + 100);
+            var many = @as([edit_text_max_code_units + 100:0]u16, @splat('a'));
             try std.testing.expectEqual(com.S_OK, family_value.vtbl.SetValue(family_value, &many));
             try std.testing.expectEqual(@as(i32, @intCast(edit_text_max_code_units - 1)), sys.GetWindowTextLengthW(family));
         }
@@ -16244,7 +16245,7 @@ test "settings a word past the sixteenth still has to match, and changing it run
             const fixture = try dialog_test.Fixture.start();
             defer fixture.finish();
             const settings = &fixture.settings;
-            const fonts = "font " ** 16;
+            const fonts = comptime win32_repeat.repeat("font ", 16);
             typeSearch(settings, "font");
             const font_total = settings.search_total;
             typeSearch(settings, fonts ++ "font");
@@ -17511,7 +17512,7 @@ test "settings pending changes drop a line that does not fit, not the lines befo
     const arena = pending._arena.?.allocator();
     pending.@"font-family" = try parseFontFamilyEditText(arena, "Cascadia Mono");
     settings.owned_dirty[@intFromEnum(OwnedSettingField.font_family)] = true;
-    const long_command = try arena.dupeZ(u8, "pwsh.exe " ++ "-NoLogo " ** 40);
+    const long_command = try arena.dupeZ(u8, "pwsh.exe " ++ comptime win32_repeat.repeat("-NoLogo ", 40));
     pending.command = .{ .shell = long_command };
     settings.owned_dirty[@intFromEnum(OwnedSettingField.command)] = true;
     var buf: [256]u8 = undefined;
@@ -17545,7 +17546,7 @@ test "settings a save that something overrides names the settings and no log" {
     // A detail too long for the buffer gives way to the names alone, and
     // names too long to the sentence without them.
     var medium: [200]u8 = undefined;
-    const long_detail = "font-size (line 2 of " ++ "a" ** 200 ++ ".conf)";
+    const long_detail = "font-size (line 2 of " ++ comptime win32_repeat.repeat("a", 200) ++ ".conf)";
     try std.testing.expect(std.mem.startsWith(u8, maskedNotificationBody(&medium, long_detail, "font-size"), "font-size: a later config file"));
     var small: [16]u8 = undefined;
     try std.testing.expectEqualStrings(unnamed, maskedNotificationBody(&small, long_detail, "font-size, theme"));
@@ -25820,10 +25821,10 @@ test "settings variables are added, typed into and taken out, and Discard brings
             list.selectPosition(5);
             try expectSameText("Variable MODE of py", profileRowName(settings, 5, &buf));
             {
-                var ctrl = [_]u8{0} ** 256;
+                var ctrl = @as([256]u8, @splat(0));
                 ctrl[VK_CONTROL] = 0x80;
                 keyboard.set(&ctrl);
-                defer keyboard.set(&([_]u8{0} ** 256));
+                defer keyboard.set(&(@as([256]u8, @splat(0))));
                 _ = fixture.pumpKey('C');
             }
             try expectSameText("Variable MODE of py", profileRowName(settings, 5, &buf));
@@ -27880,7 +27881,7 @@ fn utf8ToW(buf: []u16, text: []const u8) [*:0]const u16 {
 }
 
 test "win32_settings: utf8ToW rejects invalid input without a partial prefix" {
-    var buf = [_]u16{0xAAAA} ** 8;
+    var buf = @as([8]u16, @splat(0xAAAA));
     const converted = utf8ToW(&buf, "valid\xFFinvalid");
 
     try std.testing.expectEqual(@as(usize, 0), std.mem.len(converted));
@@ -27896,7 +27897,7 @@ test "win32_settings: utf8ToW truncates ASCII for the terminator" {
 }
 
 test "win32_settings: utf8ToW never splits a supplementary scalar" {
-    var too_small = [_]u16{0xAAAA} ** 2;
+    var too_small = @as([2]u16, @splat(0xAAAA));
     const omitted = utf8ToW(&too_small, "🚀");
     try std.testing.expectEqual(@as(usize, 0), std.mem.len(omitted));
     try std.testing.expectEqual(@as(u16, 0), too_small[0]);
@@ -28085,8 +28086,8 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     pending.command = pending_command;
     pending.@"default-profile" = try pending_alloc.dupeZ(u8, "user:py312");
 
-    const dirty = [_]bool{true} ** owned_setting_field_count;
-    var conflict = [_]bool{false} ** owned_setting_field_count;
+    const dirty = @as([owned_setting_field_count]bool, @splat(true));
+    var conflict = @as([owned_setting_field_count]bool, @splat(false));
     conflict[@intFromEnum(OwnedSettingField.theme)] = true;
     var buf: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
