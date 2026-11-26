@@ -1645,13 +1645,23 @@ test "getOverlappedResult is WouldBlock while an overlapped operation is pending
     try std.testing.expect(ConnectNamedPipe(pipe, &overlapped) == 0);
     try std.testing.expectEqual(windows.Win32Error.IO_PENDING, windows.GetLastError());
 
-    try std.testing.expectError(error.WouldBlock, getOverlappedResult(pipe, &overlapped, false));
-
-    // Cancel it and let it finish before `overlapped` goes out of scope.
-    try std.testing.expect(CancelIoEx(pipe, &overlapped) != 0);
-    var bytes: DWORD = undefined;
-    try std.testing.expect(GetOverlappedResult(pipe, &overlapped, &bytes, 1) == 0);
-    try std.testing.expectEqual(windows.Win32Error.OPERATION_ABORTED, windows.GetLastError());
+    // The connect is cancelled and drained while `overlapped` and its event
+    // are live on every path, a failed check included: the defer runs before
+    // the check's error leaves the block (council T5). Its results are
+    // checked after.
+    var drain: struct { cancelled: bool = false, finished: win32_types.BOOL = 1, err: windows.Win32Error = .SUCCESS } = .{};
+    {
+        defer {
+            drain.cancelled = CancelIoEx(pipe, &overlapped) != 0;
+            var bytes: DWORD = undefined;
+            drain.finished = GetOverlappedResult(pipe, &overlapped, &bytes, 1);
+            drain.err = windows.GetLastError();
+        }
+        try std.testing.expectError(error.WouldBlock, getOverlappedResult(pipe, &overlapped, false));
+    }
+    try std.testing.expect(drain.cancelled);
+    try std.testing.expect(drain.finished == 0);
+    try std.testing.expectEqual(windows.Win32Error.OPERATION_ABORTED, drain.err);
 }
 
 test "the re-homed process and module helpers keep std's error mapping" {
