@@ -1,4 +1,5 @@
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const Allocator = std.mem.Allocator;
 const unicode = @import("../../unicode/main.zig");
 
@@ -200,9 +201,9 @@ fn displayWidthFloor(value: []const u8, max_width: usize) usize {
 
 test "bounded UTF-16 long ASCII and BMP text preserve buffer guards" {
     // 300 copies of U+65E5 is 300 units; 200 would fit the 256-unit buffer.
-    const cases = .{ "a" ** 300, "\u{65e5}" ** 300 };
+    const cases = .{ comptime win32_repeat.repeat("a", 300), comptime win32_repeat.repeat("\u{65e5}", 300) };
     inline for (cases) |src| {
-        var guarded = [_]u16{0xabcd} ** 258;
+        var guarded = @as([258]u16, @splat(0xabcd));
         const n = utf8ToUtf16LeBounded(guarded[1..257], src);
         try std.testing.expectEqual(@min(try std.unicode.calcUtf16LeLen(src), 255), n);
         try std.testing.expectEqual(@as(u16, 0), guarded[1 + n]);
@@ -213,9 +214,9 @@ test "bounded UTF-16 long ASCII and BMP text preserve buffer guards" {
 
 test "bounded UTF-16 preserves supplementary pairs at capacity" {
     var buf: [256]u16 = undefined;
-    try std.testing.expectEqual(@as(usize, 254), utf8ToUtf16LeBounded(&buf, "a" ** 254 ++ "\u{1f600}"));
+    try std.testing.expectEqual(@as(usize, 254), utf8ToUtf16LeBounded(&buf, comptime win32_repeat.repeat("a", 254) ++ "\u{1f600}"));
     try std.testing.expectEqual(@as(u16, 0), buf[254]);
-    try std.testing.expectEqual(@as(usize, 255), utf8ToUtf16LeBounded(&buf, "a" ** 253 ++ "\u{1f600}"));
+    try std.testing.expectEqual(@as(usize, 255), utf8ToUtf16LeBounded(&buf, comptime win32_repeat.repeat("a", 253) ++ "\u{1f600}"));
     try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\u{1f600}"), buf[253..255]);
     try std.testing.expectEqual(@as(u16, 0), buf[255]);
 }
@@ -228,10 +229,10 @@ test "bounded UTF-16 handles empty tiny exact and invalid inputs" {
     try std.testing.expectEqual(@as(u16, 0), tiny[0]);
     var buf: [256]u16 = undefined;
     inline for (.{ 0, 255, 256, 257 }) |len| {
-        try std.testing.expectEqual(@min(len, 255), utf8ToUtf16LeBounded(&buf, "a" ** len));
+        try std.testing.expectEqual(@min(len, 255), utf8ToUtf16LeBounded(&buf, comptime win32_repeat.repeat("a", len)));
         try std.testing.expectEqual(@as(u16, 0), buf[@min(len, 255)]);
     }
-    inline for (.{ "ok\xff", "a" ** 300 ++ "\xff", "\xed\xa0\x80", "\xf0\x9f\x98" }) |src| {
+    inline for (.{ "ok\xff", comptime win32_repeat.repeat("a", 300) ++ "\xff", "\xed\xa0\x80", "\xf0\x9f\x98" }) |src| {
         try std.testing.expectEqual(@as(usize, 0), utf8ToUtf16LeBounded(&buf, src));
         try std.testing.expectEqual(@as(u16, 0), buf[0]);
     }
@@ -341,7 +342,7 @@ test "win32 appendOwnedString leaves target untouched on OOM" {
     try testing.expectEqualStrings("warm-up", target.?);
 
     // Force an allocation failure with a value too large to fit.
-    const huge = "x" ** 512;
+    const huge = comptime win32_repeat.repeat("x", 512);
     const before = target.?.ptr;
     try testing.expectError(error.OutOfMemory, appendOwnedString(alloc, &target, huge));
     try testing.expect(target != null);

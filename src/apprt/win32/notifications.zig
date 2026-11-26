@@ -12,6 +12,7 @@
 //! `pumpUntilColdToastActivation`): what a `-ToastActivated` start receives
 //! before the App's channel exists, which the App then hands to `click`.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Target = @import("../action.zig").Target;
@@ -996,7 +997,7 @@ test "a toast shows its tab's name without controls or bidi overrides, cut to 64
         // refuse the toast.
         .{ .name = "x\u{FFFE}y\u{FFFF}z", .shown = "x y z" },
         // 21 three-byte characters fit in 64 bytes.
-        .{ .name = "安" ** 30, .shown = "安" ** 21 ++ "\u{2026}" },
+        .{ .name = comptime win32_repeat.repeat("安", 30), .shown = comptime win32_repeat.repeat("安", 21) ++ "\u{2026}" },
     };
     for (cases) |case| {
         t.panes.put(0x2002, testing.inTab(2, 1, case.name));

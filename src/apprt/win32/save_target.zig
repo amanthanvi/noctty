@@ -7,6 +7,7 @@
 //! the first time. `resolve` finds the file the name reaches, `write` puts the
 //! bytes there.
 const std = @import("std");
+const win32_repeat = @import("../win32_repeat.zig");
 const prefixed_path = @import("../win32_prefixed_path.zig");
 const win32_sys = @import("sys.zig");
 const win32_types = @import("../win32_types.zig");
@@ -699,8 +700,8 @@ test "final path names lose the extended-length prefix and keep other shapes" {
         .{ .name = "\\\\?\\C:\\dotfiles\\console\\auxiliary.conf", .plain = "C:\\dotfiles\\console\\auxiliary.conf" },
         .{ .name = "\\\\?\\C:\\dotfiles\\com10", .plain = "C:\\dotfiles\\com10" },
         // Too long for MAX_PATH once plain: the extended form stays.
-        .{ .name = "\\\\?\\C:\\" ++ "d" ** 240 ++ "\\config.ghostty", .plain = "\\\\?\\C:\\" ++ "d" ** 240 ++ "\\config.ghostty" },
-        .{ .name = "\\\\?\\UNC\\server\\share\\" ++ "d" ** 240, .plain = "\\\\?\\UNC\\server\\share\\" ++ "d" ** 240 },
+        .{ .name = "\\\\?\\C:\\" ++ comptime win32_repeat.repeat("d", 240) ++ "\\config.ghostty", .plain = "\\\\?\\C:\\" ++ comptime win32_repeat.repeat("d", 240) ++ "\\config.ghostty" },
+        .{ .name = "\\\\?\\UNC\\server\\share\\" ++ comptime win32_repeat.repeat("d", 240), .plain = "\\\\?\\UNC\\server\\share\\" ++ comptime win32_repeat.repeat("d", 240) },
     };
     for (cases) |case| {
         const buffer = try testing.allocator.dupe(u8, case.name);

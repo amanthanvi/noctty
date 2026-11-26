@@ -338,9 +338,9 @@ pub fn Fixtures(comptime runtime: anytype) type {
             app: ?*App = null,
             core_app_initialized: bool = false,
             app_initialized: bool = false,
-            hosts: [max_hosts]?*Host = .{null} ** max_hosts,
+            hosts: [max_hosts]?*Host = @splat(null),
             host_count: usize = 0,
-            surfaces: [max_surfaces]?SurfaceRecord = .{null} ** max_surfaces,
+            surfaces: [max_surfaces]?SurfaceRecord = @splat(null),
             surface_count: usize = 0,
 
             pub fn init(self: *TestSession, options: Options) !void {
