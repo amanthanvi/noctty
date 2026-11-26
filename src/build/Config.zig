@@ -110,7 +110,7 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
             var query = result.query;
             if (query.abi == null) query.abi = .msvc;
             if (query.os_version_min == null or
-                @intFromEnum(query.os_version_min.?.windows) < @intFromEnum(std.Target.Os.WindowsVersion.win10_rs5))
+                @backingInt(query.os_version_min.?.windows) < @backingInt(std.Target.Os.WindowsVersion.win10_rs5))
             {
                 query.os_version_min = .{ .windows = .win10_rs5 };
             }

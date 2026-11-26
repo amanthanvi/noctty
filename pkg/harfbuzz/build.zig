@@ -201,12 +201,6 @@ const HarfBuzzC = struct {
             });
         }
 
-        // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig 0.15.2
-        // bundles Clang 20. The define only silences that version check.
-        if (self.options.target.result.abi == .msvc) {
-            try flag_builder.append(self.builder.allocator, "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
-        }
-
         // Freetype flags/non-system include paths
         if (self.options.freetype != null) {
             try flag_builder.appendSlice(self.builder.allocator, &.{

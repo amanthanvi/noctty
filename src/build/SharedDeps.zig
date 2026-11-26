@@ -164,6 +164,26 @@ fn initOptions(self: *SharedDeps, b: *std.Build, thread_roles: bool) !void {
     self.thread_role_options = options;
 }
 
+/// The uucode module for an artifact of `target` built in `optimize`, which
+/// the artifact and vaxis share. Zig 0.17 caches a dependency instance by its
+/// arguments, so every call with the same target and mode returns the same
+/// module, and each (target, mode) gets its own: the singleton `uucode_mod`
+/// would carry the first artifact's mode into the next (a ReleaseFast bench
+/// beside a Debug app fails `assertModuleOptimizeMode`).
+fn uucodeModule(
+    self: *const SharedDeps,
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) *std.Build.Module {
+    return b.dependency("uucode", .{
+        .target = target,
+        .optimize = optimize,
+        .tables_path = self.uucode_tables,
+        .build_config_path = b.path("src/build/uucode_config.zig"),
+    }).module("uucode");
+}
+
 /// The build options of an artifact built in `mode`: with the runtime
 /// thread-role layer when these deps give it and the mode has it.
 fn buildOptions(
@@ -199,8 +219,9 @@ pub fn add(
     // Every exe needs the terminal options
     self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);
 
-    // Every exe needs the uucode module
-    step.root_module.addImport("uucode", self.uucode_mod);
+    // Every exe needs the uucode module, in its own target and mode.
+    const uucode = self.uucodeModule(b, target, optimize);
+    step.root_module.addImport("uucode", uucode);
 
     // The bundled ConPTY pin document. scripts/conpty-redist.ps1 stages the
     // Microsoft pair from this file and the portable updater verifies the
@@ -543,7 +564,7 @@ pub fn add(
     })) |dep| {
         const vaxis = dep.module("vaxis");
         step.root_module.addImport("vaxis", vaxis);
-        vaxis.addImport("uucode", self.uucode_mod);
+        vaxis.addImport("uucode", uucode);
     }
     if (b.lazyDependency("wuffs", .{
         .target = target,
@@ -649,44 +670,9 @@ pub fn add(
     self.help_strings.addImport(step);
     self.unicode_tables.addImport(step);
 
-    harmonizeModuleOptimizeMode(b, step.root_module, optimize);
     try assertModuleOptimizeMode(b, step.root_module, optimize);
 
     return static_libs;
-}
-
-fn harmonizeModuleOptimizeMode(
-    b: *std.Build,
-    root: *std.Build.Module,
-    optimize: std.lang.Optimize,
-) void {
-    var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
-    defer visited.deinit(b.allocator);
-    harmonizeModuleOptimizeModeRecursive(
-        b,
-        root,
-        optimize,
-        &visited,
-    ) catch @panic("OOM while harmonizing product module optimize modes");
-}
-
-fn harmonizeModuleOptimizeModeRecursive(
-    b: *std.Build,
-    module: *std.Build.Module,
-    optimize: std.lang.Optimize,
-    visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
-) !void {
-    const entry = try visited.getOrPut(b.allocator, module);
-    if (entry.found_existing) return;
-
-    if (module.optimize == null) module.optimize = optimize;
-    var imports = module.import_table.iterator();
-    while (imports.next()) |import| try harmonizeModuleOptimizeModeRecursive(
-        b,
-        import.value_ptr.*,
-        optimize,
-        visited,
-    );
 }
 
 fn assertModuleOptimizeMode(
@@ -715,7 +701,14 @@ fn assertModuleOptimizeModeRecursive(
     const entry = try visited.getOrPut(b.allocator, module);
     if (entry.found_existing) return;
 
-    const actual = module.optimize orelse .debug;
+    // A module that names no mode inherits its importer's when it enters an
+    // import table (std.Build.Module.CreateOptions), so only a mode set
+    // explicitly can differ. Zig 0.17 hands out one module per dependency
+    // instance, shared by every artifact that imports it, so writing a mode
+    // into such a module (as the 0.15 build did) would carry the first
+    // artifact's mode into the next: a Debug app and a ReleaseFast bench share
+    // translate-c's c_builtins.
+    const actual = module.optimize orelse expected;
     if (actual != expected) {
         std.log.err(
             "product module optimize mismatch import={s} expected={s} actual={s}",
@@ -833,9 +826,6 @@ pub fn addSimd(
         if (target.result.os.tag == .windows) try flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",
-            // MSVC 14.52's STL rejects Clang older than 22 (STL1000); Zig
-            // 0.15.2 bundles Clang 20. This only silences that version check.
-            "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
         });
         if (target.result.abi == .msvc) try flags.appendSlice(b.allocator, &.{
             // -fno-autolink also drops UCRT's /alternatename fallback.
