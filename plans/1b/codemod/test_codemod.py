@@ -122,6 +122,17 @@ class RuleTests(unittest.TestCase):
                     self.assertEqual(once, twice)
                     self.assertEqual(hits, [])
 
+    def test_fork_lines_only(self):
+        # Only the allowed lines are rewritten, and a hit whose halves straddle a disallowed line is dropped whole.
+        src = ("const a = std.mem.trimLeft(u8, s, \" \");\nconst b = std.mem.trimLeft(u8, s, \" \");\n"
+               "const z = try alloc.dupeZ(\n    u8,\n    name,\n);\n")
+        got, hits = codemod.rewrite(src, None, {2, 3})
+        self.assertEqual(got, src.replace("const b = std.mem.trimLeft", "const b = std.mem.trimStart"))
+        self.assertEqual(hits, [("mem-trim", 2)])
+        got, hits = codemod.rewrite(src, None, {3, 4, 5, 6})
+        self.assertIn("dupeSentinel(\n    u8,\n    name,\n 0,);", got)
+        self.assertNotIn("trimStart", got)
+
     def test_all_rules_together_match_each_rule_alone(self):
         for rule_id, cases in FIXTURES.items():
             for source, expected in cases:

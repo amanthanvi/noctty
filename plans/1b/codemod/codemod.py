@@ -350,19 +350,73 @@ def apply_edits(text, edits):
     return "".join(out)
 
 
-def rewrite(text, rule_ids=None):
+def _line_of(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+def rewrite(text, rule_ids=None, lines=None):
     """(new text, [(rule id, line)]) for one file's text: each selected rule in order, over the previous rule's
-    output."""
+    output. With `lines` (a set of 1-based line numbers of the input), a hit is kept only when every edit of it
+    lies on those lines, so upstream's own lines in a shared file are left as upstream wrote them."""
     hits = []
     for rule_id, _, fn in RULES:
         if rule_ids is not None and rule_id not in rule_ids:
             continue
         edits = fn(text, code_tokens(text))
+        if lines is not None:
+            # A rule emits each hit's edit (the one with a line) and then its other halves (line-less), so the
+            # emission order groups them; a group is kept only if every edit in it sits on an allowed line.
+            groups, cur = [], []
+            for e in edits:
+                if e.line is not None and cur:
+                    groups.append(cur)
+                    cur = []
+                cur.append(e)
+            if cur:
+                groups.append(cur)
+            kept = []
+            for g in groups:
+                if all(_line_of(text, e.start) in lines and _line_of(text, max(e.start, e.end - 1)) in lines
+                       for e in g):
+                    kept.extend(g)
+            edits = kept
         if edits:
-            text = apply_edits(text, edits)
+            new = apply_edits(text, edits)
+            if lines is not None:
+                lines = _shift_lines(text, new, lines)
+            text = new
             # An edit with no line is the second half of a hit (an inserted argument), not a hit of its own.
             hits.extend((rule_id, e.line) for e in edits if e.line is not None)
     return text, hits
+
+
+def _shift_lines(old, new, lines):
+    """The allowed line set after a rewrite. Rules never add or remove a newline, so line numbers are stable."""
+    if old.count("\n") != new.count("\n"):
+        raise ValueError("a rule changed the number of lines")
+    return lines
+
+
+def changed_lines(path, rev):
+    """The 1-based lines of `path` (as it is in the work tree) that differ from `rev`, or None when `rev` lacks
+    the file (fork-only: every line). An empty set means the file is upstream's as it stands."""
+    import subprocess
+    root = Path(__file__).resolve().parents[3]
+    rel = Path(path).resolve().relative_to(root).as_posix()
+    exists = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{rev}:{rel}"],
+                            capture_output=True).returncode == 0
+    if not exists:
+        return None
+    out = subprocess.run(["git", "-C", str(root), "--no-optional-locks", "diff", "-U0", rev, "--", rel],
+                         capture_output=True, text=True, encoding="utf-8", check=True).stdout
+    lines = set()
+    for line in out.splitlines():
+        if line.startswith("@@"):
+            plus = line.split("+", 1)[1].split(" ", 1)[0]
+            start, _, count = plus.partition(",")
+            start, count = int(start), int(count) if count else 1
+            lines.update(range(start, start + count))
+    return lines
 
 
 def zig_files(paths):
@@ -383,6 +437,9 @@ def main(argv=None):
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--rules")
     ap.add_argument("--report")
+    ap.add_argument("--fork-lines", metavar="REV",
+                    help="rewrite only lines that differ from REV (the upstream tag); a file REV lacks is rewritten "
+                         "whole, a file equal to REV not at all")
     ap.add_argument("paths", nargs="+")
     args = ap.parse_args(argv)
     rule_ids = set(args.rules.split(",")) if args.rules else None
@@ -399,7 +456,10 @@ def main(argv=None):
             print(f"refused (CR bytes): {path}", file=sys.stderr)
             return 2
         text = raw.decode("utf-8")
-        new, hits = rewrite(text, rule_ids)
+        lines = changed_lines(path, args.fork_lines) if args.fork_lines else None
+        if lines is not None and not lines:
+            continue
+        new, hits = rewrite(text, rule_ids, lines)
         for rule_id, line in hits:
             counts[rule_id] += 1
             report.append(f"{path.as_posix()}\t{rule_id}\t{line}")
