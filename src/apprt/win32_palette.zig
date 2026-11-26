@@ -56,7 +56,7 @@ pub fn rankEntry(
     c: command.Command.C,
     tokens: []const []const u8,
 ) ?f64 {
-    const opts: zf.RankOptions = .{ .to_lower = true, .plain = true };
+    const opts: zf.RankOptions = .{ .case_sensitive = false, .plain = true };
     const title_r = zf.rank(cmd.title, tokens, opts);
     const action_r = zf.rank(std.mem.span(c.action), tokens, opts);
     if (title_r) |t| {

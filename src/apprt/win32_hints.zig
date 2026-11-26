@@ -67,7 +67,7 @@ const non_openable_schemes = [_][]const u8{"file:"};
 
 /// Compiled once: the scheme set is a compile-time constant and this runs on
 /// the UI thread for every fired label.
-var scheme_regex_once = std.once(initSchemeRegex);
+var scheme_regex_once = @import("../os/once.zig").once(initSchemeRegex);
 var scheme_regex: ?oni.Regex = null;
 var scheme_regex_err: ?anyerror = null;
 
@@ -832,7 +832,7 @@ pub fn labelPlacement(cells: CellRect, label_len: usize, metrics: PlacementMetri
 }
 
 fn renderFixture(alloc: Allocator, cols: u16, rows: u16, text: []const u8) !terminal.RenderState {
-    var term: terminal.Terminal = try .init(alloc, .{ .cols = cols, .rows = rows });
+    var term: terminal.Terminal = try .init(std.testing.io, alloc, .{ .cols = cols, .rows = rows });
     defer term.deinit(alloc);
     var stream = term.vtStream();
     defer stream.deinit();
@@ -1328,11 +1328,11 @@ test "hints: pathological custom pattern stays within the scan work budget" {
         .y = @intCast(index / 80),
     };
 
-    var timer = try std.time.Timer.start();
+    const started = std.Io.Timestamp.now(testing.io, .awake);
     const matches = try extractMatches(alloc, text, map, &.{"^(a+)+$"});
     defer alloc.free(matches);
     try testing.expectEqual(@as(usize, 0), matches.len);
-    try testing.expect(timer.read() < 250 * std.time.ns_per_ms);
+    try testing.expect(started.untilNow(testing.io, .awake).toNanoseconds() < 250 * std.time.ns_per_ms);
 }
 
 test "hints: custom pattern candidate count is bounded" {

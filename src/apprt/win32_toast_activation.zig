@@ -380,8 +380,19 @@ fn fuzzActivationParser(_: void, data: []const u8) !void {
     }
 }
 
+/// `fuzzActivationParser` behind Zig 0.17's fuzz interface, which hands a test a
+/// `std.testing.Smith` rather than the input bytes. Outside fuzz mode the
+/// Smith holds one corpus entry (or the empty smoke input), passed through
+/// verbatim as 0.15's runner passed it; in fuzz mode the fuzzer draws the
+/// input.
+fn fuzzActivationParserSmith(_: void, smith: *std.testing.Smith) anyerror!void {
+    if (smith.in) |input| return fuzzActivationParser({}, input);
+    var buf: [4096]u8 = undefined;
+    try fuzzActivationParser({}, buf[0..smith.slice(&buf)]);
+}
+
 test "fuzz win32 toast activation parser" {
-    try std.testing.fuzz({}, fuzzActivationParser, .{ .corpus = &.{
+    try std.testing.fuzz({}, fuzzActivationParserSmith, .{ .corpus = &.{
         "wgh://activate?surface=42&window=7&action=focus",
         "wgh://activate?surface=not-a-number",
         "wgh://other?surface=1",

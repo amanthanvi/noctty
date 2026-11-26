@@ -101,7 +101,16 @@ pub const Sink = struct {
     release: ?*const fn (ctx: *anyopaque) void = null,
 };
 
-var sink_mutex: std.Thread.Mutex = .{};
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+var sink_mutex: std.Io.Mutex = .init;
 var sink: ?Sink = null;
 var cookie: ?DWORD = null;
 
@@ -110,10 +119,10 @@ var cookie: ?DWORD = null;
 /// sink or none.
 pub fn bind(new: ?Sink) void {
     if (new) |s| if (s.retain) |retain| retain(s.ctx);
-    sink_mutex.lock();
+    sink_mutex.lockUncancelable(mutexIo());
     const old = sink;
     sink = new;
-    sink_mutex.unlock();
+    sink_mutex.unlock(mutexIo());
     if (old) |s| if (s.release) |release| release(s.ctx);
 }
 
@@ -246,8 +255,8 @@ fn activate(
 ) callconv(.winapi) HRESULT {
     var buf: [max_launch_bytes]u8 = undefined;
     const launch = launchUtf8(&buf, invoked_args);
-    sink_mutex.lock();
-    defer sink_mutex.unlock();
+    sink_mutex.lockUncancelable(mutexIo());
+    defer sink_mutex.unlock(mutexIo());
     if (sink) |s| s.deliver(s.ctx, launch);
     return com.S_OK;
 }

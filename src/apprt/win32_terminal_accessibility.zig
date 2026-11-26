@@ -67,10 +67,19 @@ pub const PublishPolicy = struct {
     emit_events: bool,
 };
 
+/// The `Io` of this file's mutex waits and wakes. `std.Io.Mutex`'s
+/// `lockUncancelable` and `unlock` reach only `futexWaitUncancelable` and
+/// `futexWake`, which `std.Io.Threaded` runs on the OS futex whatever the
+/// instance, so the single-threaded instance keeps 0.15's Io-free locking
+/// with no cancelation point (as `sync/state_mutex.zig`'s `innerIo`).
+fn mutexIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 pub const TerminalAccessibilitySession = struct {
     alloc: Allocator,
     refcount: std.atomic.Value(u32) = .init(1),
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ops: Ops,
     query_message: UINT,
     timer_id: usize,
@@ -181,10 +190,10 @@ pub const TerminalAccessibilitySession = struct {
     }
 
     pub fn outputInterested(self: *TerminalAccessibilitySession) bool {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         const attached = self.attached;
         const provider_ready = self.provider != null;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         return semanticOutputInterestPolicy(
             attached,
             provider_ready,
@@ -202,20 +211,20 @@ pub const TerminalAccessibilitySession = struct {
     /// or frozen range needs to outlive this asynchronous request.
     pub fn handleScroll(self: *TerminalAccessibilitySession) void {
         self.scroll_retry_pending = false;
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         const request = self.pending_scroll;
         self.pending_scroll = null;
         self.scroll_message_inflight = false;
         const attached = self.attached;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         if (!attached) return;
         if (request) |value| {
             if (self.ops.scroll) |scroll| scroll(self.ops.ctx, value) catch |err| {
                 if (err == error.WouldBlock) {
-                    self.mutex.lock();
+                    self.mutex.lockUncancelable(mutexIo());
                     // Keep a newer client request if it arrived meanwhile.
                     if (self.attached and self.pending_scroll == null) self.pending_scroll = value;
-                    self.mutex.unlock();
+                    self.mutex.unlock(mutexIo());
                     self.scroll_retry_pending = true;
                     self.armContentionRetry();
                 }
@@ -228,8 +237,8 @@ pub const TerminalAccessibilitySession = struct {
     fn providerScroll(ctx: *anyopaque, request: win32_uia.widgets.ScrollRequest) !void {
         const self: *TerminalAccessibilitySession = @ptrCast(@alignCast(ctx));
         const hwnd = dispatch: {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(mutexIo());
+            defer self.mutex.unlock(mutexIo());
             if (!self.attached) return error.ElementNotAvailable;
             if (self.ops.scroll == null) return error.NotSupported;
             const hwnd = self.ops.hwnd(self.ops.ctx) orelse return error.ElementNotAvailable;
@@ -242,8 +251,8 @@ pub const TerminalAccessibilitySession = struct {
         // Only a by-value request in this retained session survives timeout.
         var handled: usize = 0;
         if (sys.SendMessageTimeoutW(hwnd, self.query_message, 2, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, cold_query_timeout_ms, &handled) != 0 and handled == 1) return;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return error.ElementNotAvailable;
         // A timed-out send may already have started or completed handling.
         if (self.pending_scroll == null or !self.scroll_message_inflight) return;
@@ -257,13 +266,13 @@ pub const TerminalAccessibilitySession = struct {
     /// UI-thread-only, allocation-free geometry capture. Contention must not
     /// expose old rectangles or block a reentrant renderer owner.
     pub fn handleViewportRefresh(self: *TerminalAccessibilitySession) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         const attached = self.attached;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         if (!attached) return;
         const viewport = if (self.ops.viewport) |capture| capture(self.ops.ctx) catch null else null;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         self.current_viewport = if (self.attached) viewport else null;
     }
 
@@ -280,11 +289,11 @@ pub const TerminalAccessibilitySession = struct {
         self.cached_focused.store(focused_now, .release);
         if (!focused_now) {
             self.cancelTimer();
-            self.mutex.lock();
+            self.mutex.lockUncancelable(mutexIo());
             self.clearPendingAnnouncements();
             self.clearRecentInput();
             self.announcement_normalizer = .{};
-            self.mutex.unlock();
+            self.mutex.unlock(mutexIo());
             if (self.scroll_retry_pending) self.armContentionRetry();
             return;
         }
@@ -308,9 +317,9 @@ pub const TerminalAccessibilitySession = struct {
     }
 
     pub fn nameChanged(self: *TerminalAccessibilitySession) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         self.cacheName();
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         const provider = self.provider orelse return;
         if (!win32_uia.events.clientsAreListening()) return;
         win32_uia.events.raiseNameChanged(&provider.base);
@@ -331,8 +340,8 @@ pub const TerminalAccessibilitySession = struct {
 
     pub fn noteInput(self: *TerminalAccessibilitySession, input: []const u8) void {
         if (input.len == 0) return;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (appendInputQueue(
             &self.recent_input,
             &self.recent_input_len,
@@ -348,8 +357,8 @@ pub const TerminalAccessibilitySession = struct {
         if (output.len == 0) return;
         const should_announce = self.cached_focused.load(.acquire) and
             win32_uia.events.clientsAreListening();
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return;
         const without_echo = self.stripRecentInputEcho(output, sys.GetTickCount64());
         const candidate = self.normalizeSemanticOutputLocked(
@@ -386,8 +395,8 @@ pub const TerminalAccessibilitySession = struct {
     }
 
     pub fn resetSemanticOutputContinuity(self: *TerminalAccessibilitySession) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         self.clearRecentInput();
         self.announcement_normalizer = .{};
     }
@@ -403,8 +412,8 @@ pub const TerminalAccessibilitySession = struct {
         self: *TerminalAccessibilitySession,
         should_announce: bool,
     ) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return;
         self.clearRecentInput();
         self.announcement_normalizer = .{};
@@ -415,13 +424,13 @@ pub const TerminalAccessibilitySession = struct {
 
     pub fn deinit(self: *TerminalAccessibilitySession) void {
         self.cancelTimer();
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         self.attached = false;
         self.pending_scroll = null;
         self.scroll_message_inflight = false;
         self.current_viewport = null;
         self.query_refresh_post_pending.store(false, .release);
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         if (self.provider) |provider| {
             self.provider = null;
             provider.detach();
@@ -538,8 +547,8 @@ pub const TerminalAccessibilitySession = struct {
         const selection_range = snapshot.selection_range;
         const selection_active_offset = snapshot.selection_active_offset;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) {
             self.alloc.free(cells);
             self.alloc.free(text);
@@ -763,8 +772,8 @@ pub const TerminalAccessibilitySession = struct {
 
     fn providerName(ctx: *anyopaque, buf: []u8) []const u8 {
         const self: *TerminalAccessibilitySession = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return std.fmt.bufPrint(buf, "Terminal", .{}) catch "Terminal";
         const len = @min(buf.len, self.cached_name_len);
         @memcpy(buf[0..len], self.cached_name[0..len]);
@@ -774,8 +783,8 @@ pub const TerminalAccessibilitySession = struct {
     fn providerValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
         const self: *TerminalAccessibilitySession = @ptrCast(@alignCast(ctx));
         self.noteTextQuery();
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return error.ElementNotAvailable;
         return alloc.dupe(u8, self.cached_text);
     }
@@ -783,8 +792,8 @@ pub const TerminalAccessibilitySession = struct {
     fn providerSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
         const self: *TerminalAccessibilitySession = @ptrCast(@alignCast(ctx));
         self.noteTextQuery();
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return error.ElementNotAvailable;
         const document_text = try alloc.dupe(u8, self.cached_text);
         errdefer alloc.free(document_text);
@@ -813,31 +822,31 @@ pub const TerminalAccessibilitySession = struct {
 
     fn providerViewport(ctx: *anyopaque) !?win32_uia.widgets.TerminalViewportGeometry {
         const self: *TerminalAccessibilitySession = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         const hwnd = if (self.attached) self.ops.hwnd(self.ops.ctx) else null;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         const target = hwnd orelse return error.ElementNotAvailable;
         var handled: usize = 0;
         if (sys.SendMessageTimeoutW(target, self.query_message, 3, 0, SMTO_BLOCK | SMTO_ABORTIFHUNG, cold_query_timeout_ms, &handled) == 0 or handled != 1) return null;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         if (!self.attached) return error.ElementNotAvailable;
         return self.current_viewport;
     }
 
     fn providerFocused(ctx: *anyopaque) bool {
         const self: *TerminalAccessibilitySession = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(mutexIo());
+        defer self.mutex.unlock(mutexIo());
         return self.attached and self.cached_focused.load(.acquire);
     }
 
     fn noteTextQuery(self: *TerminalAccessibilitySession) void {
         const now_ms = sys.GetTickCount64();
         const previous_query_ms = self.last_query_ms.swap(now_ms, .acq_rel);
-        self.mutex.lock();
+        self.mutex.lockUncancelable(mutexIo());
         const hwnd = if (self.attached) self.ops.hwnd(self.ops.ctx) else null;
-        self.mutex.unlock();
+        self.mutex.unlock(mutexIo());
         if (hwnd == null) return;
         if (queryNeedsSynchronousRefresh(previous_query_ms, now_ms)) {
             var ignored: usize = 0;
@@ -944,7 +953,7 @@ test "PKG71 scroll completes on responsive UI thread before returning without ho
                     self.lock_was_held = true;
                     return 1;
                 }
-                session.mutex.unlock();
+                session.mutex.unlock(mutexIo());
                 if (wp == 2) session.handleScroll() else session.handleViewportRefresh();
                 return 1;
             }
@@ -1500,9 +1509,9 @@ test "terminal output announcement normalization allocation failure becomes orde
     );
     const original_alloc = session.alloc;
     session.alloc = failing.allocator();
-    session.mutex.lock();
+    session.mutex.lockUncancelable(mutexIo());
     const candidate = session.normalizeSemanticOutputLocked("", "output", true);
-    session.mutex.unlock();
+    session.mutex.unlock(mutexIo());
     session.alloc = original_alloc;
 
     try std.testing.expect(candidate == null);
@@ -2127,9 +2136,9 @@ test "terminal output omission remains ordered before newer output" {
 
 test "terminal output stream survives more than six hundred lines in order" {
     var bytes: [7_000]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&bytes);
-    for (0..650) |index| try stream.writer().print("line-{d:0>3}\n", .{index});
-    const readable = try normalizeSemanticAnnouncement(std.testing.allocator, stream.getWritten());
+    var stream: std.Io.Writer = .fixed(&bytes);
+    for (0..650) |index| try stream.print("line-{d:0>3}\n", .{index});
+    const readable = try normalizeSemanticAnnouncement(std.testing.allocator, stream.buffered());
     defer std.testing.allocator.free(readable);
 
     var session: TerminalAccessibilitySession = undefined;

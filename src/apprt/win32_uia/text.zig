@@ -135,8 +135,8 @@ fn snapshotDocumentWindow(
     var text_writer: std.Io.Writer.Allocating = .init(alloc);
     defer text_writer.deinit();
 
-    var pin_map: std.ArrayList(terminal.Pin) = .empty;
-    defer pin_map.deinit(alloc);
+    var pin_points: terminal.formatter.PinMap.Map = .empty;
+    defer pin_points.deinit(alloc);
 
     const screen = terminal_state.screens.active;
     const pages = &screen.pages;
@@ -190,12 +190,20 @@ fn snapshotDocumentWindow(
     var formatter = terminal.formatter.PageListFormatter.init(pages, .plain);
     formatter.top_left = document_top;
     formatter.bottom_right = document_bottom;
-    formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
+    formatter.pin_map = .{ .alloc = alloc, .map = &pin_points };
     try formatter.format(&text_writer.writer);
 
     const text = try text_writer.toOwnedSlice();
     errdefer alloc.free(text);
-    if (pin_map.items.len != text.len) return error.PinMapLengthMismatch;
+    if (pin_points.count() != text.len) return error.PinMapLengthMismatch;
+
+    // The formatter's map keeps a coordinate per byte and a page node per run
+    // of bytes; the reads below take one pin per byte.
+    const pin_map = try alloc.alloc(terminal.Pin, text.len);
+    defer alloc.free(pin_map);
+    for (pin_map, 0..) |*pin, index| {
+        pin.* = pin_points.get(index) orelse return error.PinMapLengthMismatch;
+    }
 
     const cell_for_byte = try alloc.alloc(TerminalCellPosition, text.len);
     errdefer alloc.free(cell_for_byte);
@@ -221,7 +229,7 @@ fn snapshotDocumentWindow(
     var rows: ScreenRows = .{ .pages = pages };
     var visible_start: ?usize = null;
     var visible_end: usize = 0;
-    for (pin_map.items, 0..) |pin, index| {
+    for (pin_map, 0..) |pin, index| {
         const screen_y = rows.of(pin) orelse return error.UnknownPoint;
         const cell = pin.node.page().getRowAndCell(pin.x, pin.y).cell;
         cell_for_byte[index] = .{
@@ -252,7 +260,7 @@ fn snapshotDocumentWindow(
         cursor_row,
         @intCast(screen.cursor.x),
     );
-    const selection = selectionOffsets(text, pin_map.items, screen);
+    const selection = selectionOffsets(text, pin_map, screen);
     return .{
         .alloc = alloc,
         .text = text,
@@ -432,7 +440,7 @@ fn caretOffsetForGridPosition(
 
 test "PKG71 frozen scroll reuses the same range after scrolling and mouse viewport motion" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 20, .rows = 3, .max_scrollback = 100_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 3, .max_scrollback_bytes = 100_000 });
     defer t.deinit(alloc);
     try t.printString("zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
     var frozen = try snapshotTerminalAccessiblePlainText(alloc, &t);
@@ -464,7 +472,7 @@ test "PKG71 frozen scroll reuses the same range after scrolling and mouse viewpo
 
 test "PKG71 row numbering rejects partial history erasure and regrowth" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3, .max_scrollback = 100_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3, .max_scrollback_bytes = 100_000 });
     defer t.deinit(alloc);
     try t.printString("one\r\ntwo\r\nthree\r\nfour\r\nfive");
     const pages = &t.screens.active.pages;
@@ -488,7 +496,7 @@ test "PKG71 row numbering rejects partial history erasure and regrowth" {
 
 test "PKG71 frozen scroll rejects erased history regrown with identical text" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3, .max_scrollback = 100_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3, .max_scrollback_bytes = 100_000 });
     defer t.deinit(alloc);
     try t.printString("same\r\nsame\r\nsame\r\nsame\r\nsame");
     var before = try snapshotTerminalAccessiblePlainText(alloc, &t);
@@ -509,7 +517,7 @@ test "PKG71 frozen scroll rejects erased history regrown with identical text" {
 
 test "PKG71 held row numbering rejects no-scrollback row erasure" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 20, .rows = 3 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 3 });
     defer t.deinit(alloc);
     _ = try t.switchScreen(.alternate);
     try std.testing.expect(t.screens.active.no_scrollback);
@@ -528,7 +536,7 @@ test "PKG71 held row numbering rejects no-scrollback row erasure" {
 
 test "PKG71 held row numbering rejects bounded row erasure" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 20, .rows = 3 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 3 });
     defer t.deinit(alloc);
     try t.printString("old\r\nnext\r\ntail");
     const first = t.screens.active.pages.pages.first.?;
@@ -543,7 +551,7 @@ test "PKG71 held row numbering rejects bounded row erasure" {
 
 test "PKG71 row numbering rejects alternate screen replacement after reset" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3 });
     defer t.deinit(alloc);
     _ = try t.switchScreen(.alternate);
     try t.printString("old");
@@ -573,7 +581,7 @@ test "PKG71 held row numbering rejects scroll above status line" {
 
 fn testRowShiftInvalidates(mode: enum { reverse_index, delete_lines, scroll_above }) !void {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 20, .rows = 4, .max_scrollback = 100_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 4, .max_scrollback_bytes = 100_000 });
     defer t.deinit(alloc);
     if (mode == .reverse_index) _ = try t.switchScreen(.alternate);
     try t.printString("one\r\ntwo\r\nthree\r\nstatus");
@@ -604,7 +612,7 @@ fn testRowShiftInvalidates(mode: enum { reverse_index, delete_lines, scroll_abov
 
 test "PKG71 row numbering rejects a later-page shift with identical text" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3, .max_scrollback = 1_000_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3, .max_scrollback_bytes = 1_000_000 });
     defer t.deinit(alloc);
     const pages = &t.screens.active.pages;
     const first = pages.pages.first.?;
@@ -636,7 +644,7 @@ test "PKG71 row numbering rejects a later-page shift with identical text" {
 
 test "PKG71 frozen scroll rejects identical alternate screen replacement after reset" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3 });
     defer t.deinit(alloc);
     _ = try t.switchScreen(.alternate);
     try t.printString("same");
@@ -653,7 +661,7 @@ test "PKG71 frozen scroll rejects identical alternate screen replacement after r
 
 test "PKG71 row numbering rejects resize round trips" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3, .max_scrollback = 100_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3, .max_scrollback_bytes = 100_000 });
     defer t.deinit(alloc);
     try t.printString("one\r\ntwo\r\nthree\r\nfour");
     const before = rowNumbering(&t);
@@ -664,7 +672,7 @@ test "PKG71 row numbering rejects resize round trips" {
 
 test "PKG71 frozen scroll rejects output resize screen switch and history recycling" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 12, .rows = 3, .max_scrollback = 1000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 12, .rows = 3, .max_scrollback_bytes = 1000 });
     defer t.deinit(alloc);
     try t.printString("old\r\nrow\r\ntail\r\n");
     var original = try snapshotTerminalAccessiblePlainText(alloc, &t);
@@ -688,7 +696,7 @@ test "PKG71 frozen scroll rejects output resize screen switch and history recycl
 
 test "PKG71 held scroll range survives motion beyond the bounded history window" {
     const alloc = std.testing.allocator;
-    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 3, .max_scrollback = 100_000 });
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 80, .rows = 3, .max_scrollback_bytes = 100_000 });
     defer t.deinit(alloc);
     for (0..650) |_| try t.printString("history\r\n");
     var frozen = try snapshotTerminalAccessiblePlainText(alloc, &t);
@@ -709,10 +717,10 @@ test "PKG71 held scroll range survives motion beyond the bounded history window"
 }
 
 test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 3,
-        .max_scrollback = 10_000,
+        .max_scrollback_bytes = 10_000,
     });
     defer t.deinit(std.testing.allocator);
 
@@ -750,10 +758,10 @@ test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
 }
 
 test "accessible snapshot keeps the live caret truthful while scrolled back" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 20,
         .rows = 3,
-        .max_scrollback = 100,
+        .max_scrollback_bytes = 100,
     });
     defer t.deinit(std.testing.allocator);
 
@@ -775,10 +783,10 @@ test "accessible snapshot keeps the live caret truthful while scrolled back" {
 }
 
 test "accessible snapshot keeps a deeply scrolled viewport inside the document window" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 20,
         .rows = 3,
-        .max_scrollback = 10_000_000,
+        .max_scrollback_bytes = 10_000_000,
     });
     defer t.deinit(std.testing.allocator);
 
@@ -815,10 +823,10 @@ test "accessible snapshot keeps a deeply scrolled viewport inside the document w
 }
 
 test "accessible snapshot exposes ordered terminal selection and active end" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 8,
         .rows = 3,
-        .max_scrollback = 10,
+        .max_scrollback_bytes = 10,
     });
     defer t.deinit(std.testing.allocator);
     try t.printString("abcdef\nghijkl\nmnopqr");
@@ -841,10 +849,10 @@ test "accessible snapshot exposes ordered terminal selection and active end" {
 }
 
 test "accessible selection includes every scalar in the endpoint grapheme" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 8,
         .rows = 3,
-        .max_scrollback = 10,
+        .max_scrollback_bytes = 10,
     });
     defer t.deinit(std.testing.allocator);
     try t.printString("Ae\u{301}B");
@@ -862,10 +870,10 @@ test "accessible selection includes every scalar in the endpoint grapheme" {
 }
 
 test "accessible selection endpoint excludes the formatter newline" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 8,
         .rows = 3,
-        .max_scrollback = 10,
+        .max_scrollback_bytes = 10,
     });
     defer t.deinit(std.testing.allocator);
     try t.printString("ABCD\nEFGH");
@@ -883,10 +891,10 @@ test "accessible selection endpoint excludes the formatter newline" {
 }
 
 test "accessible selection clamps trimmed trailing-cell endpoints" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 8,
         .rows = 3,
-        .max_scrollback = 10,
+        .max_scrollback_bytes = 10,
     });
     defer t.deinit(std.testing.allocator);
     try t.printString("AB\nCD");
@@ -909,10 +917,10 @@ test "accessible selection clamps trimmed trailing-cell endpoints" {
 }
 
 test "accessible selection clamps endpoints outside the document window" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 8,
         .rows = 3,
-        .max_scrollback = 10,
+        .max_scrollback_bytes = 10,
     });
     defer t.deinit(std.testing.allocator);
 
@@ -938,10 +946,10 @@ test "accessible selection clamps endpoints outside the document window" {
 }
 
 test "rectangular terminal selection exposes only its active row" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 8,
         .rows = 3,
-        .max_scrollback = 10,
+        .max_scrollback_bytes = 10,
     });
     defer t.deinit(std.testing.allocator);
     try t.printString("abcdef\nghijkl\nmnopqr");
@@ -1020,10 +1028,10 @@ fn printNumberedRows(t: *terminal.Terminal) !void {
 }
 
 test "screen rows are derived from the page, not walked per pin" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 10_000_000,
+        .max_scrollback_bytes = 10_000_000,
     });
     defer t.deinit(std.testing.allocator);
     try printNumberedRows(&t);
@@ -1054,10 +1062,10 @@ test "screen rows are derived from the page, not walked per pin" {
 }
 
 test "accessible snapshot rows match the page list across many pages" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 10_000_000,
+        .max_scrollback_bytes = 10_000_000,
     });
     defer t.deinit(std.testing.allocator);
     try printNumberedRows(&t);
@@ -1096,10 +1104,10 @@ test "accessible snapshot rows match the page list across many pages" {
 }
 
 test "rectangular selection finds its active row past the first page" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
+    var t = try terminal.Terminal.init(std.testing.io, std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 10_000_000,
+        .max_scrollback_bytes = 10_000_000,
     });
     defer t.deinit(std.testing.allocator);
     try printNumberedRows(&t);

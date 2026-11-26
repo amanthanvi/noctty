@@ -1570,8 +1570,8 @@ const testing = std.testing;
 fn testConfig(alloc: Allocator, text: []const u8, args: []const []const u8) !Config {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config", .data = text });
-    const path = try tmp.dir.realpathAlloc(alloc, "config");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = text });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config", alloc);
     defer alloc.free(path);
     var config = try Config.default(alloc);
     errdefer config.deinit();

@@ -42,6 +42,8 @@ const profile_map = @import("../config/profile_map.zig");
 const LineIterator = @import("../cli/args.zig").LineIterator;
 const bench_trace = @import("win32/bench_trace.zig");
 const local_path = @import("../os/local_path.zig");
+const global = @import("../global.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const config_file_load = @import("../config/file_load.zig");
 const windows_shell = @import("../config/windows_shell.zig");
 const pane_launch = @import("../config/pane_launch.zig");
@@ -730,12 +732,12 @@ comptime {
             if (matches != 1) @compileError("Owned Settings descriptor needs exactly one adapter");
         }
     }
-    for (std.meta.fields(@TypeOf(field_adapters))) |adapter| {
+    for (@typeInfo(@TypeOf(field_adapters)).@"struct".field_names) |adapter_name| {
         var matches: usize = 0;
         for (field_model.form_fields) |row| {
-            if (std.mem.eql(u8, adapter.name, row.native.binding)) matches += 1;
+            if (std.mem.eql(u8, adapter_name, row.native.binding)) matches += 1;
         }
-        if (matches != 1) @compileError("Settings adapter needs exactly one editable descriptor: " ++ adapter.name);
+        if (matches != 1) @compileError("Settings adapter needs exactly one editable descriptor: " ++ adapter_name);
     }
     for (std.enums.values(OwnedSettingField)) |owned| {
         var matches: usize = 0;
@@ -749,7 +751,7 @@ comptime {
 /// The complete persistence allowlist. Effective config contains derived fields
 /// and expanded include/shader paths which the native form does not edit.
 pub const editable_keys = .{
-    Config.Key.@"scrollback-limit",       Config.Key.@"font-size",         Config.Key.@"background-opacity",
+    Config.Key.@"scrollback-limit-bytes", Config.Key.@"font-size",         Config.Key.@"background-opacity",
     Config.Key.@"window-padding-x",       Config.Key.@"window-padding-y",  Config.Key.@"clipboard-trim-trailing-spaces",
     Config.Key.@"desktop-notifications",  Config.Key.@"app-notifications", Config.Key.@"confirm-close-surface",
     Config.Key.@"copy-on-select",         Config.Key.@"clipboard-read",    Config.Key.@"clipboard-write",
@@ -1345,10 +1347,11 @@ const viewport_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32
 const edit_text_max_code_units: usize = 4096;
 const edit_text_max_utf8: usize = edit_text_max_code_units * 3;
 
-/// `scrollback-limit` is a byte budget per terminal, and 0 turns scrollback off
-/// (Config.zig, Screen.zig); there is no "unlimited". Only new terminals read it.
+/// `scrollback-limit-bytes` is a byte budget per terminal, and 0 turns
+/// scrollback off (Config.zig, Screen.zig); its `unlimited` is a config-file
+/// value this number field does not offer. Only new terminals read it.
 /// The accessible name stays the prefix, "Scrollback limit".
-const scrollback_label = field_model.forKey(.@"scrollback-limit").?.native.?.form_label.?;
+const scrollback_label = field_model.forKey(.@"scrollback-limit-bytes").?.native.?.form_label.?;
 
 const SettingsControlRole = win32_uia.SettingsControlProvider.Role;
 const FormControl = struct {
@@ -10476,7 +10479,7 @@ test "settings save preserves untouched scalar precision and legacy ranges" {
         original.@"background-opacity" = 0.875;
         var pending = try original.clone(std.testing.allocator);
         defer pending.deinit();
-        pending.@"copy-on-select" = .true;
+        pending.@"copy-on-select" = .clipboard;
         var capture: Capture = .{};
         var settings: SettingsWindow = .{
             .handle = .{ .ctx = &capture, .alloc = std.testing.allocator, .hinstance = undefined, .chromeBg = undefined, .textPrimary = undefined, .openInEditor = undefined, .currentConfig = undefined, .saveAndReload = Capture.save, .notifySuccess = undefined, .onClosed = undefined },
@@ -11553,7 +11556,7 @@ test "settings the quiet period is a real timer and leaving the field ends it" {
                     _ = sys.DispatchMessageW(&msg);
                 }
                 if (std.mem.startsWith(u8, try statusTextOf(settings, &buf), "Error: ")) break;
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
             }
             // The message came from the timer, not from the key, and not late.
             try std.testing.expect(elapsed >= validation_quiet_ms - 100);
@@ -13560,9 +13563,9 @@ fn layoutChildren(self: *SettingsWindow) void {
     // was and where it is now.
     const background = backgroundGeometry(self, rect);
     if (self.background_geometry) |previous| {
-        inline for (std.meta.fields(BackgroundGeometry)) |field| {
-            const old_rect = @field(previous, field.name);
-            const new_rect = @field(background, field.name);
+        inline for (@typeInfo(BackgroundGeometry).@"struct".field_names) |field_name| {
+            const old_rect = @field(previous, field_name);
+            const new_rect = @field(background, field_name);
             if (!std.meta.eql(old_rect, new_rect)) {
                 _ = InvalidateRect(hwnd, &old_rect, 0);
                 _ = InvalidateRect(hwnd, &new_rect, 0);
@@ -13890,12 +13893,12 @@ const dialog_test = struct {
     /// `NOCTTY_SETTINGS_CAPTURE_DIR` names, when it is set: evidence for a
     /// reviewer, never read back.
     fn saveCapture(capture: Capture, name: []const u8) !void {
-        const dir_path = std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_SETTINGS_CAPTURE_DIR") catch return;
+        const dir_path = std.testing.environ.getAlloc(std.testing.allocator, "NOCTTY_SETTINGS_CAPTURE_DIR") catch return;
         defer std.testing.allocator.free(dir_path);
-        var dir = try std.fs.openDirAbsolute(dir_path, .{});
-        defer dir.close();
-        const file = try dir.createFile(name, .{});
-        defer file.close();
+        var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, dir_path, .{});
+        defer dir.close(std.testing.io);
+        const file = try dir.createFile(std.testing.io, name, .{});
+        defer file.close(std.testing.io);
         const width: u32 = @intCast(capture.width);
         const height: u32 = @intCast(capture.height);
         var header: [54]u8 = @splat(0);
@@ -13908,8 +13911,8 @@ const dialog_test = struct {
         std.mem.writeInt(i32, header[22..26], -@as(i32, @intCast(height)), .little);
         std.mem.writeInt(u16, header[26..28], 1, .little);
         std.mem.writeInt(u16, header[28..30], 32, .little);
-        try file.writeAll(&header);
-        try file.writeAll(std.mem.sliceAsBytes(capture.pixels));
+        try file.writeStreamingAll(std.testing.io, &header);
+        try file.writeStreamingAll(std.testing.io, std.mem.sliceAsBytes(capture.pixels));
     }
 
     /// comctl32 6 active on this thread while it lasts. The app's manifest
@@ -13947,8 +13950,8 @@ const dialog_test = struct {
                 \\  </dependentAssembly></dependency>
                 \\</assembly>
             ;
-            try tmp.dir.writeFile(.{ .sub_path = "comctl6.manifest", .data = manifest });
-            const path = try tmp.dir.realpathAlloc(std.testing.allocator, "comctl6.manifest");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "comctl6.manifest", .data = manifest });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "comctl6.manifest", std.testing.allocator);
             defer std.testing.allocator.free(path);
             const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
             defer std.testing.allocator.free(path_w);
@@ -14169,7 +14172,7 @@ const dialog_test = struct {
             pinned.release();
         }
         body() catch |err| {
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             result.* = err;
         };
     }
@@ -14348,8 +14351,8 @@ const dialog_test = struct {
             errdefer self.finish();
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(.{ .sub_path = "changed.ghostty", .data = field_model.round_trip_config });
-            const path = try tmp.dir.realpathAlloc(std.testing.allocator, "changed.ghostty");
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "changed.ghostty", .data = field_model.round_trip_config });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "changed.ghostty", std.testing.allocator);
             defer std.testing.allocator.free(path);
             try self.config.loadFile(std.testing.allocator, path);
             try std.testing.expect(self.config._diagnostics.empty());
@@ -15613,17 +15616,17 @@ test "settings the All settings page never follows a link to a share to read the
         errdefer std.debug.print("settings reading the config file at {s}\n", .{case.rel});
         const path = try join(alloc, base, case.rel);
         defer alloc.free(path);
-        var timer = try std.time.Timer.start();
+        var started = std.Io.Timestamp.now(std.testing.io, .awake);
         var source = readConfigSource(alloc, path);
         defer source.deinit(alloc);
-        try std.testing.expect(timer.read() < 5 * std.time.ns_per_s);
+        try std.testing.expect(started.untilNow(std.testing.io, .awake).toNanoseconds() < 5 * std.time.ns_per_s);
         try std.testing.expectEqualStrings(path, source.path.?);
         try std.testing.expectEqual(case.want, std.meta.activeTag(source.file));
         // The default path's probes go the same way: a candidate behind such
         // a link cannot be named, rather than opened.
-        timer.reset();
+        started = std.Io.Timestamp.now(std.testing.io, .awake);
         const state = localFileState(alloc, path);
-        try std.testing.expect(timer.read() < 5 * std.time.ns_per_s);
+        try std.testing.expect(started.untilNow(std.testing.io, .awake).toNanoseconds() < 5 * std.time.ns_per_s);
         try std.testing.expectEqual(@as(?config_file_load.FileState, switch (case.want) {
             .bytes => .content,
             .missing => .missing,
@@ -16573,7 +16576,7 @@ test "settings a search and an edit of a found field change only that field's dr
             const field = settings.fields.edit_scrollback.?;
             try std.testing.expectEqual(field, GetFocus().?);
             _ = sys.SetWindowTextW(field, std.unicode.utf8ToUtf16LeStringLiteral("5000"));
-            try std.testing.expectEqual(@as(usize, 5000), settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(@as(usize, 5000), settings.pending.?.@"scrollback-limit-bytes".value);
             try std.testing.expectEqual(@as(usize, 1), settings.pendingFieldCount());
             // Save hands that draft to the App, whose save patches only the
             // keys a draft changed (`persistSettings`, tested with the file).
@@ -16738,9 +16741,9 @@ test "settings later labeled checkbox starts a layout run" {
 
 test "settings forgetting form clears every generated HWND" {
     var settings: SettingsWindow = undefined;
-    inline for (std.meta.fields(FieldWindows)) |field| @field(settings.fields, field.name) = @ptrFromInt(1);
+    inline for (@typeInfo(FieldWindows).@"struct".field_names) |field_name| @field(settings.fields, field_name) = @ptrFromInt(1);
     settings.forgetFormWindows();
-    inline for (std.meta.fields(FieldWindows)) |field| try std.testing.expect(@field(settings.fields, field.name) == null);
+    inline for (@typeInfo(FieldWindows).@"struct".field_names) |field_name| try std.testing.expect(@field(settings.fields, field_name) == null);
 }
 
 test "settings labeled checkbox arrow group never visits its static label" {
@@ -17435,7 +17438,7 @@ test "settings pending changes read in the form's words" {
     current.@"font-size" = 12;
     current.@"window-padding-x" = .{ .top_left = 2, .bottom_right = 2 };
     current.@"clipboard-trim-trailing-spaces" = true;
-    current.@"copy-on-select" = .false;
+    current.@"copy-on-select" = .none;
     current.@"window-theme" = .auto;
     current.@"cursor-style" = .block;
     var settings: SettingsWindow = .{
@@ -17457,7 +17460,7 @@ test "settings pending changes read in the form's words" {
     settings.trackEdit(.window_padding_x, true);
     pending.@"clipboard-trim-trailing-spaces" = false;
     settings.trackEdit(.trim_trailing_spaces, false);
-    pending.@"copy-on-select" = .true;
+    pending.@"copy-on-select" = .clipboard;
     settings.trackEdit(.copy_on_select, false);
     pending.@"window-theme" = .dark;
     settings.trackEdit(.window_theme, true);
@@ -17631,10 +17634,11 @@ test "settings diff writes every field's values without debug syntax" {
 }
 
 test "settings scrollback label states the unit, that 0 turns scrollback off, and who it applies to" {
-    // `scrollback-limit` is bytes per terminal, 0 disables scrollback and
-    // there is no unlimited setting (Config.zig, Screen.zig); a change reaches
-    // terminals created afterwards. The old label said "rows, 0 = unlimited".
-    comptime std.debug.assert(@FieldType(Config, "scrollback-limit") == usize);
+    // `scrollback-limit-bytes` is bytes per terminal, 0 disables scrollback
+    // and `unlimited` is a config-file value the field does not offer
+    // (Config.zig, Screen.zig); a change reaches terminals created
+    // afterwards. The old label said "rows, 0 = unlimited".
+    comptime std.debug.assert(@FieldType(@FieldType(Config, "scrollback-limit-bytes"), "value") == usize);
     try std.testing.expectEqualStrings(scrollback_label, settings_label_specs[0]);
     for ([_][]const u8{ "bytes", "0 = off", "new terminals" }) |fact| {
         try std.testing.expect(std.mem.indexOf(u8, scrollback_label, fact) != null);
@@ -17781,7 +17785,7 @@ fn expectComboMapping(
 
 test "settings dropdown text changes while the index and the saved token stay put" {
     try expectComboMapping(&confirm_close_labels, confirmCloseFromComboIndex, comboIndexFromConfirmClose, &.{ "false", "true", "always" });
-    try expectComboMapping(&copy_on_select_labels, copyOnSelectFromComboIndex, comboIndexFromCopyOnSelect, &.{ "false", "true", "clipboard" });
+    try expectComboMapping(&copy_on_select_labels, copyOnSelectFromComboIndex, comboIndexFromCopyOnSelect, &.{ "none", "clipboard", "both", "primary" });
     try expectComboMapping(&clipboard_access_labels, clipboardAccessFromComboIndex, comboIndexFromClipboardAccess, &.{ "ask", "allow", "deny" });
     try expectComboMapping(&link_previews_labels, linkPreviewsFromComboIndex, comboIndexFromLinkPreviews, &.{ "true", "osc8", "false" });
     try expectComboMapping(&window_theme_labels, windowThemeFromComboIndex, comboIndexFromWindowTheme, &.{ "auto", "system", "light", "dark", "ghostty" });
@@ -19196,7 +19200,7 @@ test "settings a row says where its saved value comes from, in its label and its
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "included.conf", .data = "\nfont-size = 15\n" });
             const theme_path = try tmp.dir.realPathFileAlloc(std.testing.io, "mytheme", alloc);
             defer alloc.free(theme_path);
-            const text = try std.fmt.allocPrint(alloc, "scrollback-limit = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
+            const text = try std.fmt.allocPrint(alloc, "scrollback-limit-bytes = 5000\nfont-size = 12\nconfig-file = included.conf\ntheme = {s}\nclipboard-trim-trailing-spaces = true\n", .{theme_path});
             defer alloc.free(text);
             try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = text });
             const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
@@ -19469,7 +19473,7 @@ test "settings an origin-note says when the line it names has changed since the 
             const alloc = std.testing.allocator;
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit = 5000\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "font-size = 13\nscrollback-limit-bytes = 5000\n" });
             const path = try tmp.dir.realPathFileAlloc(std.testing.io, "noctty.conf", alloc);
             defer alloc.free(path);
 
@@ -19487,7 +19491,7 @@ test "settings an origin-note says when the line it names has changed since the 
 
             // The first line taken out, and the config not read again: both
             // lines named no longer hold what was read there.
-            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "scrollback-limit = 5000\n" });
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = "scrollback-limit-bytes = 5000\n" });
             settings.externalConfigChanged(&fixture.config, 2);
             try std.testing.expectEqualStrings("Set in noctty.conf, line 1; the file has changed since", settings.origin_notes[font].text());
             try std.testing.expectEqualStrings("Set in noctty.conf, line 2; the file has changed since", settings.origin_notes[scrollback].text());
@@ -22892,7 +22896,7 @@ fn readConfigFile(alloc: std.mem.Allocator, path: []const u8) settings_reference
         .refused => return .unavailable,
     };
     defer found.deinit(alloc);
-    return .{ .bytes = found.file.readToEndAlloc(alloc, reference_config_max_bytes) catch return .unavailable };
+    return .{ .bytes = compat_file.readToEndAlloc(found.file, alloc, reference_config_max_bytes) catch return .unavailable };
 }
 
 /// A default-path candidate's state for `preferredXdgPathProbed`, looked at
@@ -22904,7 +22908,7 @@ fn localFileState(alloc: std.mem.Allocator, path: []const u8) ?config_file_load.
         .refused => return null,
     };
     defer found.deinit(alloc);
-    const stat = found.file.stat() catch return null;
+    const stat = found.file.stat(global.io()) catch return null;
     return if (stat.size == 0) .empty else .content;
 }
 
@@ -23248,13 +23252,21 @@ fn expectSameText(expected: []const u8, actual: []const u8) !void {
     try std.testing.expect(std.mem.eql(u8, expected, actual));
 }
 
+/// `sub_path`'s absolute path, owned without a sentinel as 0.15's
+/// `realpathAlloc` returned it (the fixtures free it as `[]u8`).
+fn testRealPathAlloc(dir: std.Io.Dir, alloc: std.mem.Allocator, sub_path: []const u8) ![]u8 {
+    const path = try dir.realPathFileAlloc(std.testing.io, sub_path, alloc);
+    defer alloc.free(path);
+    return alloc.dupe(u8, path);
+}
+
 /// A Settings window on the config file `text` (`noctty.conf` in `tmp`),
 /// which its Save writes and reads back. `path` is the caller's to free once
 /// the fixture is finished.
 fn profileFixture(tmp: *std.testing.TmpDir, text: []const u8, path: *[]u8) !*dialog_test.Fixture {
     const alloc = std.testing.allocator;
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = text });
+    path.* = try testRealPathAlloc(tmp.dir, alloc, "noctty.conf");
     errdefer alloc.free(path.*);
     const fixture = try dialog_test.Fixture.prepare(true);
     errdefer fixture.finish();
@@ -23278,16 +23290,16 @@ fn profileFixture(tmp: *std.testing.TmpDir, text: []const u8, path: *[]u8) !*dia
 /// fields first, as the App does (`Fixture.check_profiles`).
 fn themedProfileFixture(tmp: *std.testing.TmpDir, body: []const u8, light: []const u8, dark: []const u8, path: *[]u8) !*dialog_test.Fixture {
     const alloc = std.testing.allocator;
-    try tmp.dir.writeFile(.{ .sub_path = "light-theme", .data = light });
-    try tmp.dir.writeFile(.{ .sub_path = "dark-theme", .data = dark });
-    const light_path = try tmp.dir.realpathAlloc(alloc, "light-theme");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "light-theme", .data = light });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dark-theme", .data = dark });
+    const light_path = try tmp.dir.realPathFileAlloc(std.testing.io, "light-theme", alloc);
     defer alloc.free(light_path);
-    const dark_path = try tmp.dir.realpathAlloc(alloc, "dark-theme");
+    const dark_path = try tmp.dir.realPathFileAlloc(std.testing.io, "dark-theme", alloc);
     defer alloc.free(dark_path);
     const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n{s}", .{ light_path, dark_path, body });
     defer alloc.free(text);
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = text });
+    path.* = try testRealPathAlloc(tmp.dir, alloc, "noctty.conf");
     errdefer alloc.free(path.*);
     const fixture = try dialog_test.Fixture.prepare(true);
     errdefer fixture.finish();
@@ -23316,8 +23328,8 @@ fn switchFixtureTheme(fixture: *dialog_test.Fixture, state: @TypeOf(fixture.conf
 fn layeredProfileFixture(tmp: *std.testing.TmpDir, text: []const u8, cli: []const []const u8, path: *[]u8) !*dialog_test.Fixture {
     const alloc = std.testing.allocator;
     const cli_args = @import("../cli/args.zig");
-    try tmp.dir.writeFile(.{ .sub_path = "noctty.conf", .data = text });
-    path.* = try tmp.dir.realpathAlloc(alloc, "noctty.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "noctty.conf", .data = text });
+    path.* = try testRealPathAlloc(tmp.dir, alloc, "noctty.conf");
     errdefer alloc.free(path.*);
     const fixture = try dialog_test.Fixture.prepare(true);
     errdefer fixture.finish();
@@ -28700,15 +28712,15 @@ test "settings an up-down steps its number field, held to the field's range, and
             settings.showSection(.terminal, false);
             const scrollback = settings.fields.edit_scrollback.?;
             const scrollback_spin = settings.companions[@backingInt(Companion.scrollback_spin)].?;
-            const limit = settings.pending.?.@"scrollback-limit";
+            const limit = settings.pending.?.@"scrollback-limit-bytes".value;
             _ = sys.SetFocus(scrollback);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
-            try std.testing.expectEqual(limit + 1_000_000, settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(limit + 1_000_000, settings.pending.?.@"scrollback-limit-bytes".value);
             try std.testing.expectEqual(@as(LRESULT, @intCast(@min(limit + 1_000_000, std.math.maxInt(i32)))), position(scrollback_spin));
             typeInto(scrollback, "0");
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
             try std.testing.expectEqualStrings("0", readEditUtf8(scrollback, &buf).?);
-            try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(@as(usize, 0), settings.pending.?.@"scrollback-limit-bytes".value);
             // Nor above what the limit holds, and exactly: a step from the
             // top is held there, and one down is a megabyte less.
             const top = std.math.maxInt(@TypeOf(limit));
@@ -28717,7 +28729,7 @@ test "settings an up-down steps its number field, held to the field's range, and
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_up));
             try std.testing.expectEqualStrings(top_text, readEditUtf8(scrollback, &buf).?);
             try std.testing.expect(fixture.pumpKey(focus_cue.vk_down));
-            try std.testing.expectEqual(top - 1_000_000, settings.pending.?.@"scrollback-limit");
+            try std.testing.expectEqual(top - 1_000_000, settings.pending.?.@"scrollback-limit-bytes".value);
         }
     }.body);
 }
@@ -28746,7 +28758,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
             const settings = &fixture.settings;
             try settings.open();
             const size = settings.pending.?.@"font-size";
-            const limit = settings.pending.?.@"scrollback-limit";
+            const limit = settings.pending.?.@"scrollback-limit-bytes".value;
 
             // The opacity, which the file sets: a step down on its trackbar.
             const slider = settings.companions[@backingInt(Companion.opacity_slider)].?;
@@ -28774,7 +28786,7 @@ test "settings the trackbar and up-downs round-trip through Save, the rest of th
                 "  # an indented comment, and a line Settings has no control for\n" ++
                 "keybind = ctrl+shift+t=new_tab\n" ++
                 "font-size = {d}\n" ++
-                "scrollback-limit = {d}\n", .{ size + 1, limit + 1_000_000 }), after);
+                "scrollback-limit-bytes = {d}\n", .{ size + 1, limit + 1_000_000 }), after);
         }
     }.body);
 }
@@ -29090,7 +29102,7 @@ test "settings an up-down it paints repaints through its own paint, never the st
             var waited: u32 = 0;
             var msg: sys.MSG = undefined;
             while (ticks == 0 and waited < 2000) : (waited += 20) {
-                std.Thread.sleep(20 * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
                 while (sys.PeekMessageW(&msg, spin, WM_TIMER, WM_TIMER, 1) != 0) {
                     _ = sys.DispatchMessageW(&msg);
                     ticks += 1;

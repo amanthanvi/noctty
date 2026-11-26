@@ -639,7 +639,7 @@ fn expandAndParseForTest(
     const expanded_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, expanded.written());
     defer alloc.free(expanded_w);
 
-    var iter = try std.process.ArgIteratorWindows.init(alloc, expanded_w);
+    var iter = try std.process.Args.Iterator.Windows.init(alloc, expanded_w);
     defer iter.deinit();
 
     var argv: std.ArrayList([]const u8) = .empty;

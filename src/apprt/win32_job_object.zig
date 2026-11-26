@@ -183,10 +183,10 @@ test "win32 job object ABI declarations match expected Win32 values" {
     try std.testing.expectEqual(@as(DWORD, 0x00000008), JOB_OBJECT_LIMIT_ACTIVE_PROCESS);
     try std.testing.expectEqual(@as(DWORD, 0x00000200), JOB_OBJECT_LIMIT_JOB_MEMORY);
     try std.testing.expectEqual(@as(DWORD, 0x00002000), JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
-    try std.testing.expect(create_fn.params[0].type.? == ?*SECURITY_ATTRIBUTES);
-    try std.testing.expect(create_fn.params[1].type.? == ?LPCWSTR);
+    try std.testing.expect(create_fn.param_types[0].? == ?*SECURITY_ATTRIBUTES);
+    try std.testing.expect(create_fn.param_types[1].? == ?LPCWSTR);
     try std.testing.expect(create_fn.return_type.? == ?HANDLE);
-    try std.testing.expect(set_info_fn.params[2].type.? == *const anyopaque);
+    try std.testing.expect(set_info_fn.param_types[2].? == *const anyopaque);
 }
 
 test "win32 job object ABI layouts stay compatible on x64" {

@@ -6,6 +6,7 @@
 //! C12 jump-list work; this module deliberately contains no jump-list UI.
 
 const std = @import("std");
+const global = @import("../global.zig");
 const session_persistence = @import("win32_session_persistence.zig");
 const session_state = @import("win32_session_state.zig");
 
@@ -108,14 +109,15 @@ pub fn listNamesAlloc(
     }
     if (limit == 0) return try names.toOwnedSlice(alloc);
 
-    var directory = std.fs.openDirAbsolute(absolute_directory, .{ .iterate = true }) catch |err| switch (err) {
+    const io = global.io();
+    var directory = std.Io.Dir.openDirAbsolute(io, absolute_directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return try names.toOwnedSlice(alloc),
         else => return err,
     };
-    defer directory.close();
+    defer directory.close(io);
 
     var iterator = directory.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         if (entry.kind != .file) continue;
         // Match only the exact extension `relativePathAlloc` writes, so every
         // enumerated name maps back to a launchable path even on a
