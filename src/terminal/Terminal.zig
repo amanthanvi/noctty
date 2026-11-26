@@ -17760,10 +17760,12 @@ test "Terminal: softReset status display and checksum" {
 
     t.status_display = .status_line;
     t.flags.xt_checksum = .{ .positive = true };
+    t.flags.modify_other_keys_2 = true;
     t.softReset();
 
     try testing.expectEqual(.main, t.status_display);
     try testing.expectEqual(xt_checksum.Flags{}, t.flags.xt_checksum);
+    try testing.expect(!t.flags.modify_other_keys_2);
 }
 
 test "Terminal: softReset palette" {
