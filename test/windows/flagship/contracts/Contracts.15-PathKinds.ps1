@@ -48,9 +48,9 @@ if ($pathKindsFound.Count -ne 0) {
 }
 
 # Negative control: the same check, in a scratch repository with planted files, one under a
-# group pattern, one an explicit delete-list path, one an Apple build step, one a nested gtk
-# file, and one that is allowed (a fork file beside them), must find exactly the four planted
-# ones. The scratch
+# group pattern, one an explicit delete-list path, each of the three Apple build steps, one a
+# nested gtk file, and one that is allowed (a fork file beside them), must find exactly the six
+# planted ones. The scratch
 # repository sits under the checkout's git-ignored .zig-cache, where the contracts' Zig
 # fixture batch already installs (.zig-cache\flagship-fixtures), not under %TEMP%, and is
 # removed again whatever the control found.
@@ -61,7 +61,8 @@ try {
     [void](New-Item -ItemType Directory -Path $pathKindsScratch)
     & git -C $pathKindsScratch -c init.templateDir= init -q
     if ($LASTEXITCODE -ne 0) { throw 'git init failed for the path-kinds control.' }
-    $planted = @('macos/Planted.swift', 'src/build/GhosttyLib.zig', 'src/build/LipoStep.zig', 'src/apprt/gtk/Planted.zig', 'src/apprt/win32.zig')
+    $planted = @('macos/Planted.swift', 'src/build/GhosttyLib.zig', 'src/build/LipoStep.zig', 'src/build/LibtoolStep.zig',
+        'src/build/XCFrameworkStep.zig', 'src/apprt/gtk/Planted.zig', 'src/apprt/win32.zig')
     foreach ($p in $planted) {
         $full = Join-Path $pathKindsScratch $p
         [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $full))
@@ -70,7 +71,8 @@ try {
     & git -C $pathKindsScratch -c core.autocrlf=false -c core.safecrlf=false add -- @planted
     if ($LASTEXITCODE -ne 0) { throw 'git add failed for the path-kinds control.' }
     $controlFound = @(Get-PathKindsViolations $pathKindsScratch | Sort-Object)
-    $expected = @('macos/Planted.swift', 'src/apprt/gtk/Planted.zig', 'src/build/GhosttyLib.zig', 'src/build/LipoStep.zig')
+    $expected = @('macos/Planted.swift', 'src/apprt/gtk/Planted.zig', 'src/build/GhosttyLib.zig', 'src/build/LibtoolStep.zig',
+        'src/build/LipoStep.zig', 'src/build/XCFrameworkStep.zig')
     if (($controlFound -join '|') -cne ($expected -join '|')) {
         throw ("The path-kinds negative control found '" + ($controlFound -join ', ') + "', expected '" + ($expected -join ', ') + "'.")
     }
@@ -78,4 +80,4 @@ try {
 finally {
     if (Test-Path -LiteralPath $pathKindsScratch) { Remove-Item -LiteralPath $pathKindsScratch -Recurse -Force }
 }
-Write-Host "Path kinds (PLAN section 2.5): $($pathKindsMustBeEmpty.Count) must-be-empty pathspecs, 0 tracked; negative control found its 4 planted paths and passed the allowed one"
+Write-Host "Path kinds (PLAN section 2.5): $($pathKindsMustBeEmpty.Count) must-be-empty pathspecs, 0 tracked; negative control found its 6 planted paths and passed the allowed one"
