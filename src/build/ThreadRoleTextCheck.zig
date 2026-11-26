@@ -151,7 +151,7 @@ test "src/sync imports no src/renderer file (acceptance test 14)" {
     var read_state_mutex = false;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        const source = try entry.dir.readFileAllocOptions(io, entry.basename, gpa, .limited(16 * 1024 * 1024), .of(u8), 0);
+        const source = try entry.dir.readFileAllocOptions(io, entry.basename, gpa, .limited(16 * 1024 * 1024 + 1), .of(u8), 0); // + 1: 0.15 read a file of exactly 16 MiB
         defer gpa.free(source);
         var dir: std.ArrayList(u8) = .empty;
         defer dir.deinit(gpa);

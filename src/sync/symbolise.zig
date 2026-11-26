@@ -631,7 +631,8 @@ fn runDirectories(a: Allocator) !u8 {
 
     var totals: struct { dumps: usize = 0, pairs: usize = 0, unresolved: usize = 0, problems: usize = 0 } = .{};
     for (names.items) |name| {
-        const raw = try raw_dir.readFileAlloc(io, name, a, .limited(16 << 20));
+        // + 1: a dump of exactly 16 MiB is read, as 0.15 did (QR-30).
+        const raw = try raw_dir.readFileAlloc(io, name, a, .limited((16 << 20) + 1));
         defer a.free(raw);
         const result = try symboliseFile(a, raw, images_path, root);
         defer result.deinit(a);
