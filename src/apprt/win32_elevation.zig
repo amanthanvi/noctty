@@ -714,7 +714,7 @@ fn launchElevatedWithShellApi(
     log.warn(
         "ShellExecuteExW runas failed win32_error={d} hInstApp=0x{x}",
         .{
-            @intFromEnum(err),
+            @backingInt(err),
             if (info.instance) |instance| @intFromPtr(instance) else 0,
         },
     );
@@ -1108,8 +1108,8 @@ test "elevation relaunch parameters pass on --visual-studio-profiles with a vs: 
     // its command line.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "visual-studio-profiles = none\n" });
-    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "visual-studio-profiles = none\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", alloc);
     const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
     const args = try alloc.alloc([]const u8, child_argv.len - 1);
@@ -1206,10 +1206,10 @@ test "elevated profile env wins over env in forwarded and included config files"
     // A forwarded --config-file that includes another file; both set `env`.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "outer.ghostty", .data = "env = MODE=outer\nconfig-file = inner.ghostty\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outer.ghostty", .data = "env = MODE=outer\nconfig-file = inner.ghostty\n" });
     // A file cannot use the relaunch argument to win either.
-    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\nelevated-profile-env = MODE=file\n" });
-    const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\nelevated-profile-env = MODE=file\n" });
+    const outer = try tmp.dir.realPathFileAlloc(std.testing.io, "outer.ghostty", alloc);
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
     const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
     const env = [_]configpkg.windows_shell.EnvEntry{
@@ -1258,11 +1258,11 @@ test "an elevated window names a file-defined profile, which the elevated proces
     const line = "cmd.exe /k \"\"C:\\Tools Dir\\init.cmd\" \"y&z\"\"";
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "outer.ghostty", .data = "profile-command = py: " ++ line ++ "\n" ++
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "outer.ghostty", .data = "profile-command = py: " ++ line ++ "\n" ++
         "profile-env = py: TOKEN=s3cret-value\n" ++
         "config-file = inner.ghostty\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "command = vim.exe\ninitial-command = other.exe\n" });
-    const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "inner.ghostty", .data = "command = vim.exe\ninitial-command = other.exe\n" });
+    const outer = try tmp.dir.realPathFileAlloc(std.testing.io, "outer.ghostty", alloc);
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
     const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
 

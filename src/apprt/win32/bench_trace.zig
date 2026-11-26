@@ -280,13 +280,13 @@ test "Settings open trace refuses relative paths and preserves an existing file"
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "trace.jsonl" });
     defer alloc.free(path);
-    try tmp.dir.writeFile(.{ .sub_path = "trace.jsonl", .data = "preserve-me" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = "preserve-me" });
     try std.testing.expectError(error.PathAlreadyExists, SettingsOpenTrace.initPath(path));
-    const data = try tmp.dir.readFileAlloc(alloc, "trace.jsonl", 100);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", alloc, .limited(100));
     defer alloc.free(data);
     try std.testing.expectEqualStrings("preserve-me", data);
 }
@@ -295,7 +295,7 @@ test "Settings open trace caps output and closes its owned handle" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "trace.jsonl" });
     defer alloc.free(path);
@@ -304,7 +304,7 @@ test "Settings open trace caps output and closes its owned handle" {
     for (0..SettingsOpenTrace.max_records + 10) |_| trace.note(.open_config_action);
     try std.testing.expectEqual(@as(u16, SettingsOpenTrace.max_records), trace.records);
     try std.testing.expect(!trace.enabled());
-    const data = try tmp.dir.readFileAlloc(alloc, "trace.jsonl", SettingsOpenTrace.max_records * SettingsOpenTrace.max_record_bytes);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", alloc, .limited(SettingsOpenTrace.max_records * SettingsOpenTrace.max_record_bytes));
     defer alloc.free(data);
     try std.testing.expectEqual(@as(usize, SettingsOpenTrace.max_records), std.mem.count(u8, data, "\n"));
     try std.testing.expectEqual(@as(usize, SettingsOpenTrace.max_records), std.mem.count(u8, data, "\"stage\":\"open_config_action\""));
@@ -341,7 +341,7 @@ test "Settings creation stamps are written once, in order, within the record cap
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
-    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir);
     const path = try std.fs.path.join(alloc, &.{ dir, "trace.jsonl" });
     defer alloc.free(path);
@@ -354,7 +354,7 @@ test "Settings creation stamps are written once, in order, within the record cap
     trace.noteCreation(&stamps);
     try std.testing.expectEqual(@as(usize, 0), stamps.len);
     try std.testing.expectEqual(@as(u16, 2), trace.records);
-    const data = try tmp.dir.readFileAlloc(alloc, "trace.jsonl", 4096);
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", alloc, .limited(4096));
     defer alloc.free(data);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, data, "\n"));
     const begin = std.mem.indexOf(u8, data, "\"stage\":\"create_begin\"").?;
@@ -597,7 +597,7 @@ pub const MemoryStageTrace = struct {
         self.wgl_stereo.store(value.stereo, .monotonic);
         self.wgl_accum_bits.store(value.accum_bits, .monotonic);
         self.wgl_aux_buffers.store(value.aux_buffers, .monotonic);
-        self.wgl_selection_source.store(@intFromEnum(value.selection_source), .monotonic);
+        self.wgl_selection_source.store(@backingInt(value.selection_source), .monotonic);
         self.wgl_srgb_capable.store(value.srgb_capable, .monotonic);
         self.wgl_multisample_query_supported.store(value.multisample_query_supported, .monotonic);
         self.wgl_sample_buffers.store(value.sample_buffers orelse 0, .monotonic);
@@ -619,7 +619,7 @@ pub const MemoryStageTrace = struct {
             .stereo = self.wgl_stereo.load(.monotonic),
             .accum_bits = self.wgl_accum_bits.load(.monotonic),
             .aux_buffers = self.wgl_aux_buffers.load(.monotonic),
-            .selection_source = @enumFromInt(self.wgl_selection_source.load(.monotonic)),
+            .selection_source = @fromBackingInt(@intCast(self.wgl_selection_source.load(.monotonic))),
             .srgb_capable = self.wgl_srgb_capable.load(.monotonic),
             .multisample_query_supported = self.wgl_multisample_query_supported.load(.monotonic),
             .sample_buffers = if (self.wgl_multisample_query_supported.load(.monotonic))
@@ -730,8 +730,8 @@ test "win32 memory stage trace claims first swap after a written reader stage ex
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-reader.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-reader.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage-reader.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage-reader.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -761,8 +761,8 @@ test "win32 memory stage trace preserves every surface identity record" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -771,9 +771,10 @@ test "win32 memory stage trace preserves every surface identity record" {
     try std.testing.expect(trace.note(.terminal_initialized, 11, 22));
 
     const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "memory-stage.jsonl",
-        4096,
+        std.testing.allocator,
+        .limited(4096),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
@@ -790,8 +791,8 @@ test "win32 memory stage trace publishes core identity before worker stages" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-worker-id.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-worker-id.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage-worker-id.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage-worker-id.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -802,9 +803,10 @@ test "win32 memory stage trace publishes core identity before worker stages" {
     trace.noteRendererThreadSpawned(11, trace.surfaceId(null));
 
     const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "memory-stage-worker-id.jsonl",
-        4096,
+        std.testing.allocator,
+        .limited(4096),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"renderer_thread_spawned\"") != null);
@@ -816,8 +818,8 @@ test "win32 memory stage trace retains published identity through teardown" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-teardown-id.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-teardown-id.jsonl");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "memory-stage-teardown-id.jsonl", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "memory-stage-teardown-id.jsonl", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
@@ -825,9 +827,10 @@ test "win32 memory stage trace retains published identity through teardown" {
     try std.testing.expect(trace.note(.destroy_begin, 11, null));
 
     const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
+        std.testing.io,
         "memory-stage-teardown-id.jsonl",
-        4096,
+        std.testing.allocator,
+        .limited(4096),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"destroy_begin\"") != null);

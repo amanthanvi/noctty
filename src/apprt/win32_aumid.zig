@@ -320,7 +320,7 @@ test "aumid icon uri is absent when the sibling icon is missing" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
     defer testing.allocator.free(dir);
     const exe_path = try std.fs.path.join(testing.allocator, &.{ dir, "noctty.exe" });
     defer testing.allocator.free(exe_path);
@@ -329,12 +329,12 @@ test "aumid icon uri is absent when the sibling icon is missing" {
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
 
     // A directory of that name is not an icon either.
-    try tmp.dir.makeDir(icon_file_name);
+    try tmp.dir.createDir(std.testing.io, icon_file_name, .default_dir);
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
-    try tmp.dir.deleteDir(icon_file_name);
+    try tmp.dir.deleteDir(std.testing.io, icon_file_name);
 
     // Once the icon is staged next to the exe it is preferred.
-    try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = icon_file_name, .data = "ico" });
     const resolved = (try iconUriPath(testing.allocator, exe_path)) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(resolved);
     try testing.expect(std.mem.endsWith(u8, resolved, icon_file_name));
@@ -426,8 +426,8 @@ test "portable and elevated copies register no toast activator" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = icon_file_name, .data = "ico" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     const exe = try std.fs.path.join(alloc, &.{ root, "noctty.exe" });
     defer alloc.free(exe);
@@ -473,15 +473,15 @@ test "aumid registration: installed copies always write, portable copies only cr
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(root);
     var exes: [5][]u8 = undefined;
     var icons: [5][]u8 = undefined;
     var icon_buf: [64]u8 = undefined;
     for (&exes, &icons, [_][]const u8{ "installed", "p1", "p2", "p3", "bare" }) |*exe, *icon, dir| {
         if (!std.mem.eql(u8, dir, "bare")) {
-            try tmp.dir.makeDir(dir);
-            try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&icon_buf, "{s}/{s}", .{ dir, icon_file_name }), .data = dir });
+            try tmp.dir.createDir(std.testing.io, dir, .default_dir);
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = try std.fmt.bufPrint(&icon_buf, "{s}/{s}", .{ dir, icon_file_name }), .data = dir });
         }
         exe.* = try std.fs.path.join(alloc, &.{ root, dir, "noctty.exe" });
         icon.* = try siblingIconPath(alloc, exe.*);
@@ -532,12 +532,12 @@ test "aumid registration: installed copies always write, portable copies only cr
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
 
         // Not even a registration whose icon has gone is repaired.
-        try tmp.dir.deleteFile("installed/" ++ icon_file_name);
+        try tmp.dir.deleteFile(std.testing.io, "installed/" ++ icon_file_name);
         const broken = try reg.snapshot();
         try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
         try std.testing.expectEqual(broken.written, (try reg.snapshot()).written);
-        try tmp.dir.writeFile(.{ .sub_path = "installed/" ++ icon_file_name, .data = "installed" });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "installed/" ++ icon_file_name, .data = "installed" });
     }
 
     // Copies starting together, released at once: portable copies alone

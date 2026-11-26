@@ -206,7 +206,7 @@ const AudioWarnings = struct {
     const Kind = enum(u3) { path, unavailable, playback };
 
     fn first(self: *AudioWarnings, kind: Kind) bool {
-        const mask = @as(u8, 1) << @intFromEnum(kind);
+        const mask = @as(u8, 1) << @backingInt(kind);
         return self.seen.fetchOr(mask, .monotonic) & mask == 0;
     }
 };

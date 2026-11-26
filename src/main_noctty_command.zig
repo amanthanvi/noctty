@@ -45,7 +45,7 @@ fn forward() !u32 {
         @memcpy(value[1..][0..image_z.len], image_z);
         value[value.len - 1] = '"';
         break :raw value;
-    } else try alloc.dupeZ(u16, command_line);
+    } else try alloc.dupeSentinel(u16, command_line, 0);
     defer alloc.free(raw);
     var parent: w.STARTUPINFOW = std.mem.zeroes(w.STARTUPINFOW);
     GetStartupInfoW(&parent);

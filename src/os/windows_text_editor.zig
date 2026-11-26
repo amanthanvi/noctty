@@ -146,8 +146,8 @@ test "SET text editor uses resolved txt ProgID for ghostty and extensionless fil
     Fake.queries = 0;
     Fake.fail = false;
     for ([_][]const u8{ "config.ghostty", "config" }) |name| {
-        try tmp.dir.writeFile(.{ .sub_path = name, .data = "font-size = 12\n" });
-        const path = try tmp.dir.realpathAlloc(alloc, name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "font-size = 12\n" });
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, name, alloc);
         defer alloc.free(path);
         Fake.expected = path;
         try openWith(alloc, path, Fake.query, Fake.executeFake);
@@ -177,7 +177,7 @@ test "SET text editor safety gates reject unsafe targets before shell dispatch" 
     }) |path| try std.testing.expectError(error.OpenConfigRejected, openWith(std.testing.allocator, path, Fake.unexpectedQuery, Fake.unexpected));
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expectError(error.OpenConfigRejected, openWith(std.testing.allocator, path, Fake.unexpectedQuery, Fake.unexpected));
 }
@@ -215,8 +215,8 @@ test "SET text editor query failure and invalid bounded ProgID never dispatch th
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.ghostty", .data = "font-size = 12\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "config.ghostty", std.testing.allocator);
     defer std.testing.allocator.free(path);
     for (std.enums.values(Fake.Mode)) |mode| {
         Fake.mode = mode;

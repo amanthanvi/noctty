@@ -2308,20 +2308,21 @@ test "handoff failure trace stays within its byte budget" {
     defer tmp.cleanup();
 
     {
-        var file = try tmp.dir.createFile("handoff.log", .{});
-        defer file.close();
+        var file = try tmp.dir.createFile(std.testing.io, "handoff.log", .{});
+        defer file.close(std.testing.io);
         try file.setEndPos(handoff_trace_max_bytes);
     }
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "handoff.log");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "handoff.log", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     try appendHandoffTraceAtPath(path, "reason=bounded_failure hr=0x80004005");
-    const stat = try std.fs.cwd().statFile(path);
+    const stat = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{});
     try std.testing.expect(stat.size <= handoff_trace_max_bytes);
-    const contents = try std.fs.cwd().readFileAlloc(
-        std.testing.allocator,
+    const contents = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
         path,
-        handoff_trace_max_bytes,
+        std.testing.allocator,
+        .limited(handoff_trace_max_bytes),
     );
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "reason=bounded_failure") != null);

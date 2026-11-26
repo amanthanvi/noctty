@@ -725,7 +725,7 @@ fn readHeader(pipe: anytype) !FrameHeader {
 fn sendFrame(pipe: anytype, tag: Tag, payload: []const u8) !void {
     if (payload.len > max_frame_payload) return error.FrameTooLarge;
     var header: [5]u8 = undefined;
-    header[0] = @intFromEnum(tag);
+    header[0] = @backingInt(tag);
     std.mem.writeInt(u32, header[1..5], @intCast(payload.len), .little);
     try writeAll(pipe, &header);
     try writeAll(pipe, payload);
@@ -760,7 +760,7 @@ fn writePtyInput(handle: windows.HANDLE, src: []const u8) !void {
             null,
             &overlapped,
         );
-        if (submitted == 0 and @intFromEnum(std.os.windows.GetLastError()) != error_io_pending) {
+        if (submitted == 0 and @backingInt(std.os.windows.GetLastError()) != error_io_pending) {
             return windows.unexpectedError(std.os.windows.GetLastError());
         }
         const write_len = try win32_sys.getOverlappedResult(handle, &overlapped, true);
@@ -919,7 +919,7 @@ fn connectClient(alloc: Allocator, pipe_name: [:0]const u16) !windows.HANDLE {
         }
 
         const last_error = std.os.windows.GetLastError();
-        const last_error_int = @intFromEnum(last_error);
+        const last_error_int = @backingInt(last_error);
         if ((last_error_int != error_pipe_busy and last_error_int != error_file_not_found) or
             std.time.nanoTimestamp() >= deadline)
         {

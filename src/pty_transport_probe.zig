@@ -621,7 +621,7 @@ pub fn runParentIfRequested() !void {
             });
             const self_path = try std.fs.selfExePathAlloc(allocator);
             defer allocator.free(self_path);
-            const self_path_z = try allocator.dupeZ(u8, self_path);
+            const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
             defer allocator.free(self_path_z);
             var child_env = try std.process.getEnvMap(allocator);
             defer child_env.deinit();
@@ -864,7 +864,7 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
             std.debug.print("transport-probe parent_pid={d}\n", .{windows.GetCurrentProcessId()});
             const self_path = try std.fs.selfExePathAlloc(allocator);
             defer allocator.free(self_path);
-            const self_path_z = try allocator.dupeZ(u8, self_path);
+            const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
             defer allocator.free(self_path_z);
             var child_env = try std.process.getEnvMap(allocator);
             defer child_env.deinit();
@@ -1056,7 +1056,7 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
             const allocator = std.testing.allocator;
             const self_path = try std.fs.selfExePathAlloc(allocator);
             defer allocator.free(self_path);
-            const self_path_z = try allocator.dupeZ(u8, self_path);
+            const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
             defer allocator.free(self_path_z);
             var child_env = try std.process.getEnvMap(allocator);
             defer child_env.deinit();

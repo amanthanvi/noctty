@@ -28,7 +28,7 @@ const NativeBackend = struct {
     }
 
     fn getLastError(_: *@This()) u32 {
-        return @intFromEnum(std.os.windows.GetLastError());
+        return @backingInt(std.os.windows.GetLastError());
     }
 
     fn setLastError(_: *@This(), err: u32) void {
@@ -166,7 +166,7 @@ pub fn coreProcAddress(name: [*:0]const u8) ?*const anyopaque {
 
 /// Zero before first use or after successful loading; never triggers loading.
 pub fn lastLoadError() windows.Win32Error {
-    return @enumFromInt(loader.lastLoadError());
+    return @fromBackingInt(@intCast(loader.lastLoadError()));
 }
 
 // Tests use fresh loader instances; none touches the process OpenGL loader.

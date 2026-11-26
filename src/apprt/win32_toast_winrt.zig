@@ -441,11 +441,11 @@ fn roInitializeNeedsUninitialize(hr: HRESULT) bool {
 
 fn notificationSettingFromInt(value: i32) ?NotificationSetting {
     return switch (value) {
-        @intFromEnum(NotificationSetting.Enabled) => .Enabled,
-        @intFromEnum(NotificationSetting.DisabledForApplication) => .DisabledForApplication,
-        @intFromEnum(NotificationSetting.DisabledForUser) => .DisabledForUser,
-        @intFromEnum(NotificationSetting.DisabledByGroupPolicy) => .DisabledByGroupPolicy,
-        @intFromEnum(NotificationSetting.DisabledByManifest) => .DisabledByManifest,
+        @backingInt(NotificationSetting.Enabled) => .Enabled,
+        @backingInt(NotificationSetting.DisabledForApplication) => .DisabledForApplication,
+        @backingInt(NotificationSetting.DisabledForUser) => .DisabledForUser,
+        @backingInt(NotificationSetting.DisabledByGroupPolicy) => .DisabledByGroupPolicy,
+        @backingInt(NotificationSetting.DisabledByManifest) => .DisabledByManifest,
         else => null,
     };
 }

@@ -164,19 +164,19 @@ pub const Fake = struct {
 
     /// The native error each failing call leaves, one value per kind.
     pub fn failureCode(how: Fail) Win32Error {
-        return @enumFromInt(@as(u16, switch (how) {
+        return @fromBackingInt(@intCast(@as(u16, switch (how) {
             .none => 0,
             .alloc => 8, // ERROR_NOT_ENOUGH_MEMORY
             .lock => 6, // ERROR_INVALID_HANDLE
             .open => 5, // ERROR_ACCESS_DENIED
             .empty => 1418, // ERROR_CLIPBOARD_NOT_OPEN
             .set_data => 1004, // ERROR_INVALID_FLAGS
-        }));
+        })));
     }
 
     /// What the cleanup calls (`GlobalUnlock`, `GlobalFree`, `CloseClipboard`)
     /// leave behind, as a real one can: a code unlike every failure's.
-    const cleanup_code: Win32Error = @enumFromInt(1);
+    const cleanup_code: Win32Error = @fromBackingInt(@intCast(1));
 
     /// The thread's last error as the code under test would read it now.
     pub fn lastErrorNow() Win32Error {

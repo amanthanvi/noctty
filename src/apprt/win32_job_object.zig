@@ -178,8 +178,8 @@ test "win32 job object ABI declarations match expected Win32 values" {
     const create_fn = @typeInfo(@TypeOf(CreateJobObjectW)).@"fn";
     const set_info_fn = @typeInfo(@TypeOf(SetInformationJobObject)).@"fn";
 
-    try std.testing.expectEqual(@as(i32, 9), @intFromEnum(JOBOBJECTINFOCLASS.extended_limit_information));
-    try std.testing.expectEqual(@as(i32, 3), @intFromEnum(JOBOBJECTINFOCLASS.basic_process_id_list));
+    try std.testing.expectEqual(@as(i32, 9), @backingInt(JOBOBJECTINFOCLASS.extended_limit_information));
+    try std.testing.expectEqual(@as(i32, 3), @backingInt(JOBOBJECTINFOCLASS.basic_process_id_list));
     try std.testing.expectEqual(@as(DWORD, 0x00000008), JOB_OBJECT_LIMIT_ACTIVE_PROCESS);
     try std.testing.expectEqual(@as(DWORD, 0x00000200), JOB_OBJECT_LIMIT_JOB_MEMORY);
     try std.testing.expectEqual(@as(DWORD, 0x00002000), JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);

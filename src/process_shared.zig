@@ -230,7 +230,7 @@ fn logFn(
     args: anytype,
 ) void {
     stderr: {
-        if (comptime builtin.mode != .Debug and level == .debug) break :stderr;
+        if (comptime builtin.mode != .debug and level == .debug) break :stderr;
         if (!state.logging.stderr) break :stderr;
 
         var buf: [64]u8 = undefined;
@@ -258,7 +258,7 @@ test "log prefixes the hidden-desktop suite reads" {
 
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
-        .Debug => .debug,
+        .debug => .debug,
         else => .info,
     },
     .logFn = logFn,
@@ -274,8 +274,8 @@ pub const std_options: std.Options = .{
 /// trace: debug info stripped". The trap raises an exception, so the minidump
 /// filter still writes a dump, and the dump is what the symbols zip reads.
 pub const panic = switch (builtin.mode) {
-    .Debug, .ReleaseSafe => std.debug.FullPanic(std.debug.defaultPanic),
-    .ReleaseFast, .ReleaseSmall => std.debug.FullPanic(releasePanic),
+    .debug, .safe => std.debug.FullPanic(std.debug.defaultPanic),
+    .fast, .small => std.debug.FullPanic(releasePanic),
 };
 
 fn releasePanic(msg: []const u8, _: ?usize) noreturn {

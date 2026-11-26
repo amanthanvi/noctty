@@ -220,7 +220,7 @@ pub fn encodeNewWindowRequest(
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(RequestKind.new_window));
+    try encoded.append(alloc, @backingInt(RequestKind.new_window));
 
     const argc: u32 = if (arguments) |argv| arg_count: {
         if (argv.len > max_new_window_argc) return error.InvalidIpcRequest;
@@ -255,7 +255,7 @@ fn encodeDeadlineOnlyRequest(alloc: Allocator, kind: RequestKind, deadline_ms: u
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(kind));
+    try encoded.append(alloc, @backingInt(kind));
     try appendU64(&encoded, alloc, deadline_ms);
 
     return try encoded.toOwnedSlice(alloc);
@@ -275,7 +275,7 @@ pub fn encodePerformActionRequest(
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(RequestKind.perform_action_timed));
+    try encoded.append(alloc, @backingInt(RequestKind.perform_action_timed));
     try appendU64(&encoded, alloc, deadline_ms);
     try encoded.append(alloc, switch (target) {
         .focused => 0,
@@ -302,7 +302,7 @@ pub fn encodeLaunchLayoutRequest(
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(RequestKind.launch_layout_timed));
+    try encoded.append(alloc, @backingInt(RequestKind.launch_layout_timed));
     try appendU64(&encoded, alloc, deadline_ms);
     try appendU32(&encoded, alloc, @intCast(name.len));
     try encoded.appendSlice(alloc, name);
@@ -320,7 +320,7 @@ fn encodeLaunchRequest(
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(kind));
+    try encoded.append(alloc, @backingInt(kind));
     try appendU64(&encoded, alloc, deadline_ms);
     try appendAutomationTarget(&encoded, alloc, target);
     if (direction) |value| try encoded.append(alloc, switch (value) {
@@ -362,7 +362,7 @@ pub fn encodeFocusRequest(
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(RequestKind.focus_timed));
+    try encoded.append(alloc, @backingInt(RequestKind.focus_timed));
     try appendU64(&encoded, alloc, deadline_ms);
     try appendAutomationTarget(&encoded, alloc, target);
     return try encoded.toOwnedSlice(alloc);
@@ -383,7 +383,7 @@ pub fn encodeSendTextRequest(
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
     try appendU32(&encoded, alloc, wire_version);
-    try encoded.append(alloc, @intFromEnum(RequestKind.send_text_timed));
+    try encoded.append(alloc, @backingInt(RequestKind.send_text_timed));
     try appendU64(&encoded, alloc, deadline_ms);
     try appendAutomationTarget(&encoded, alloc, target);
     try appendU32(&encoded, alloc, @intCast(text.len));
@@ -927,12 +927,12 @@ test "win32 automation numeric pins" {
         .send_text_timed,
         .launch_layout_timed,
     }, 1..) |kind, value| {
-        try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(kind));
+        try std.testing.expectEqual(@as(u8, @intCast(value)), @backingInt(kind));
     }
     const acks = [_]u8{ ack_success, ack_failure, ack_invalid_automation_action, ack_unsafe_automation_action, ack_invalid_automation_target, ack_no_automation_target, ack_automation_target_not_found, ack_automation_policy_refused };
     for (acks, 0..) |ack, value| try std.testing.expectEqual(@as(u8, @intCast(value)), ack);
     for ([_]apprt.ipc.AutomationSplitDirection{ .left, .right, .up, .down }, 1..) |direction, value| {
-        try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(direction));
+        try std.testing.expectEqual(@as(u8, @intCast(value)), @backingInt(direction));
         const request = try encodeNewSplitRequest(
             std.testing.allocator,
             .focused,
@@ -949,12 +949,12 @@ test "win32 automation keeps legacy v1 kinds decodable" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-legacy-v1.bin", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "automation-legacy-v1.bin", .{ .read = true });
+    defer file.close(std.testing.io);
 
     var list_request: [9]u8 = undefined;
     std.mem.writeInt(u32, list_request[0..4], wire_version, .little);
-    list_request[4] = @intFromEnum(RequestKind.list_windows);
+    list_request[4] = @backingInt(RequestKind.list_windows);
     std.mem.writeInt(u32, list_request[5..9], 0, .little);
     try writeAutomationBytes(&file, &list_request);
     try std.testing.expectEqual(RequestKind.list_windows, try decodeRequestKind(.{ .handle = file.handle }));
@@ -967,7 +967,7 @@ test "win32 automation keeps legacy v1 kinds decodable" {
     var action_request: std.ArrayList(u8) = .empty;
     defer action_request.deinit(std.testing.allocator);
     try appendU32(&action_request, std.testing.allocator, wire_version);
-    try action_request.append(std.testing.allocator, @intFromEnum(RequestKind.perform_action));
+    try action_request.append(std.testing.allocator, @backingInt(RequestKind.perform_action));
     try action_request.append(std.testing.allocator, 0);
     try appendU64(&action_request, std.testing.allocator, 0);
     try appendU32(&action_request, std.testing.allocator, @intCast(action_text.len));
@@ -985,8 +985,8 @@ test "win32 automation request and ack round trips" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-roundtrip.bin", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "automation-roundtrip.bin", .{ .read = true });
+    defer file.close(std.testing.io);
 
     for ([_]apprt.ipc.AutomationTarget{ .{ .surface_id = 42 }, .{ .window_id = 17 } }) |target| {
         const request = try encodeFocusRequest(std.testing.allocator, target, test_deadline_ms);
@@ -1087,8 +1087,8 @@ test "win32 automation malformed codecs free allocations" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-invalid.bin", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "automation-invalid.bin", .{ .read = true });
+    defer file.close(std.testing.io);
     try writeAutomationBytes(&file, max_send);
     _ = try decodeRequestKind(.{ .handle = file.handle });
     var max_payload = try decodeSendTextPayload(alloc, .{ .handle = file.handle }, true);
@@ -1222,10 +1222,10 @@ test "win32 IPC pending pipe states remain retryable" {
 }
 
 test "win32 IPC request kind values remain stable" {
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(RequestKind.new_window));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(RequestKind.list_windows));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(RequestKind.perform_action));
-    try std.testing.expectEqual(@as(u8, 8), @intFromEnum(RequestKind.launch_layout));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(RequestKind.new_window));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(RequestKind.list_windows));
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(RequestKind.perform_action));
+    try std.testing.expectEqual(@as(u8, 8), @backingInt(RequestKind.launch_layout));
 }
 
 test "win32 IPC deadline patching stays codec-owned" {
@@ -1250,8 +1250,8 @@ test "win32 toggle-quick-terminal IPC encodes and decodes the deadline" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("toggle-quick-terminal.bin", .{ .read = true });
-    defer file.close();
+    var file = try tmp.dir.createFile(std.testing.io, "toggle-quick-terminal.bin", .{ .read = true });
+    defer file.close(std.testing.io);
     try file.writeAll(request);
     try file.seekTo(0);
 
@@ -1272,11 +1272,11 @@ test "win32 launch-layout IPC encode decode round trip" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("launch-layout-round-trip.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "launch-layout-round-trip.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     try file.writeAll(request);
     try file.seekTo(0);
 
@@ -1336,11 +1336,11 @@ test "win32 launch-layout IPC decoder rejects invalid names without leaks" {
             .{index},
         );
         defer std.testing.allocator.free(file_name);
-        var file = try tmp.dir.createFile(file_name, .{
+        var file = try tmp.dir.createFile(std.testing.io, file_name, .{
             .read = true,
             .truncate = true,
         });
-        defer file.close();
+        defer file.close(std.testing.io);
 
         var deadline_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
@@ -1362,11 +1362,11 @@ test "win32 launch-layout IPC decoder cleans up on partial EOF" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("launch-layout-partial-eof.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "launch-layout-partial-eof.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var deadline_buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
@@ -1390,7 +1390,7 @@ test "win32 encodeListWindowsRequest carries the response deadline" {
 
     try std.testing.expectEqual(@as(usize, 13), request.len);
     try std.testing.expectEqual(wire_version, readU32(request[0..4]));
-    try std.testing.expectEqual(@intFromEnum(RequestKind.list_windows_timed), request[4]);
+    try std.testing.expectEqual(@backingInt(RequestKind.list_windows_timed), request[4]);
     try std.testing.expectEqual(test_deadline_ms, readU64(request[5..13]));
 }
 
@@ -1400,11 +1400,11 @@ test "win32 decodeNewWindowPayload rejects oversized argument length before allo
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var file = try tmp.dir.createFile("ipc-request-arg-too-large.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-request-arg-too-large.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], 1, .little);
@@ -1424,11 +1424,11 @@ test "win32 decodeNewWindowPayload rejects aggregate argument bytes before alloc
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var file = try tmp.dir.createFile("ipc-request-args-too-large.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-request-args-too-large.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var buf: [12]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], 2, .little);
@@ -1449,11 +1449,11 @@ test "win32 decodeNewWindowPayload cleans up initialized args on partial EOF" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var file = try tmp.dir.createFile("ipc-request-partial-eof.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-request-partial-eof.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var header: [13]u8 = undefined;
     std.mem.writeInt(u32, header[0..4], 2, .little);
@@ -1578,11 +1578,11 @@ test "win32 IPC new-window decoder rejects every truncated payload" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("ipc-fuzz-new-window-truncated.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-fuzz-new-window-truncated.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
     const payload = "\x01\x00\x00\x00\x03\x00\x00\x00cmd";
@@ -1600,11 +1600,11 @@ test "fuzz win32 IPC new-window payload decoder" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("ipc-fuzz-new-window.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-fuzz-new-window.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
     try std.testing.fuzz(&transport, fuzzDecodeNewWindowPayload, .{
@@ -1617,11 +1617,11 @@ test "bounded fuzz campaign win32 IPC new-window payload decoder" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("ipc-bounded-fuzz-new-window.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-bounded-fuzz-new-window.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
     const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
@@ -1695,11 +1695,11 @@ test "win32 IPC perform-action decoder rejects every truncated payload" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("ipc-fuzz-perform-action-truncated.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-fuzz-perform-action-truncated.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
     const payload =
@@ -1723,11 +1723,11 @@ test "fuzz win32 IPC perform-action payload decoder" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("ipc-fuzz-perform-action.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-fuzz-perform-action.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
     try std.testing.fuzz(&transport, fuzzDecodePerformActionPayload, .{ .corpus = &.{
@@ -1748,11 +1748,11 @@ test "bounded fuzz campaign win32 IPC perform-action payload decoder" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("ipc-bounded-fuzz-perform-action.bin", .{
+    var file = try tmp.dir.createFile(std.testing.io, "ipc-bounded-fuzz-perform-action.bin", .{
         .read = true,
         .truncate = true,
     });
-    defer file.close();
+    defer file.close(std.testing.io);
     var transport: FuzzTransport = .{ .file = file };
 
     const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
