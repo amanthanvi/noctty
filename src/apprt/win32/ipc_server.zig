@@ -1489,7 +1489,7 @@ fn connectIpcClient(
 }
 
 fn createIpcServerEvent() ?windows.HANDLE {
-    return windows.CreateEventExW(
+    return sys.createEventExW(
         null,
         null,
         win32_types.CREATE_EVENT_MANUAL_RESET,
