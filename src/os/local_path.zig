@@ -8,6 +8,7 @@
 //! reached through another local symlink, so nothing it opens contacts a
 //! share.
 const std = @import("std");
+const win32_sys = @import("../apprt/win32/sys.zig");
 const prefixed_path = @import("../apprt/win32_prefixed_path.zig");
 const win32_types = @import("../apprt/win32_types.zig");
 const builtin = @import("builtin");
@@ -572,8 +573,8 @@ fn unicodeString(wide: []const u16) windows.UNICODE_STRING {
 
 fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options: CreateOptions, handle: *windows.HANDLE) windows.NTSTATUS {
     var name = unicodeString(name_w);
-    var attrs: windows.OBJECT_ATTRIBUTES = .{
-        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
+    var attrs: win32_types.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(win32_types.OBJECT_ATTRIBUTES),
         .RootDirectory = parent,
         .ObjectName = &name,
         .Attributes = attributes,
@@ -581,7 +582,7 @@ fn create(name_w: []const u16, parent: ?windows.HANDLE, attributes: u32, options
         .SecurityQualityOfService = null,
     };
     var io: windows.IO_STATUS_BLOCK = undefined;
-    return windows.ntdll.NtCreateFile(
+    return win32_sys.NtCreateFile(
         handle,
         win32_types.FILE_READ_ATTRIBUTES | win32_types.SYNCHRONIZE | (if (options.read_data) @as(u32, win32_types.FILE_READ_DATA) else 0),
         &attrs,
@@ -706,12 +707,12 @@ noinline fn openRoot(path: []const u8, root_len: usize, parent: *windows.HANDLE)
 /// the walk's frame.
 noinline fn readLinkTarget(alloc: Allocator, link: windows.HANDLE, tag: u32, parent: []const u8) ?[]u8 {
     var buffer: [windows.MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(4) = @splat(0);
-    windows.DeviceIoControl(link, windows.FSCTL_GET_REPARSE_POINT, null, &buffer) catch return null;
+    win32_sys.deviceIoControl(link, win32_types.FSCTL_GET_REPARSE_POINT, null, &buffer) catch return null;
     return reparseTarget(alloc, &buffer, tag, parent);
 }
 
-fn attributeTag(handle: windows.HANDLE) ?windows.FILE_ATTRIBUTE_TAG_INFO {
-    var info: windows.FILE_ATTRIBUTE_TAG_INFO = undefined;
+fn attributeTag(handle: windows.HANDLE) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
+    var info: win32_types.FILE_ATTRIBUTE_TAG_INFO = undefined;
     var io: windows.IO_STATUS_BLOCK = undefined;
     if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .FileAttributeTagInformation) != .SUCCESS) return null;
     return info;
@@ -723,7 +724,7 @@ fn isCloudTag(tag: u32) bool {
 
 /// A cloud placeholder, or anything else marked for recall from remote
 /// storage: reading it (for some, opening it) fetches it from there first.
-fn recalls(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
+fn recalls(info: win32_types.FILE_ATTRIBUTE_TAG_INFO) bool {
     if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT != 0 and isCloudTag(info.ReparseTag)) return true;
     return info.FileAttributes & (win32_types.FILE_ATTRIBUTE_OFFLINE | win32_types.FILE_ATTRIBUTE_RECALL_ON_OPEN |
         win32_types.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
@@ -731,7 +732,7 @@ fn recalls(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
 
 /// `attributeTag` for the component `name`, which `test_cloud` can make look
 /// like a placeholder.
-fn componentInfo(handle: windows.HANDLE, name: []const u8) ?windows.FILE_ATTRIBUTE_TAG_INFO {
+fn componentInfo(handle: windows.HANDLE, name: []const u8) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
     var info = attributeTag(handle) orelse return null;
     if (builtin.is_test) if (test_cloud.name) |cloud| if (std.mem.eql(u8, cloud, name)) {
         info.FileAttributes |= test_cloud.attributes;
@@ -846,7 +847,7 @@ pub const test_links = struct {
     /// NT path such as `\??\UNC\host\share`. Needs no privilege.
     pub fn junction(alloc: Allocator, dir: []const u8, nt_target: []const u8) !void {
         var dir_w = try prefixed_path.sliceToPrefixedFileW(dir);
-        const handle = try windows.OpenFile(dir_w.span(), .{
+        const handle = try win32_sys.openFile(dir_w.span(), .{
             .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE,
             .creation = win32_types.FILE_OPEN,
             .filter = .dir_only,
@@ -867,7 +868,7 @@ pub const test_links = struct {
         std.mem.writeInt(u16, buffer[10..12], @intCast(target_bytes), .little);
         std.mem.writeInt(u16, buffer[12..14], @intCast(target_bytes + 2), .little);
         @memcpy(buffer[16..][0..target_bytes], std.mem.sliceAsBytes(target_w));
-        try windows.DeviceIoControl(handle, windows.FSCTL_SET_REPARSE_POINT, buffer, null);
+        try win32_sys.deviceIoControl(handle, win32_types.FSCTL_SET_REPARSE_POINT, buffer, null);
     }
 };
 

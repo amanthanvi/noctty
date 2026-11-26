@@ -2443,8 +2443,8 @@ pub fn ntOpenDontReparse(
         .MaximumLength = @intCast(span.len * 2),
         .Buffer = @constCast(span.ptr),
     };
-    var attrs: windows.OBJECT_ATTRIBUTES = .{
-        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
+    var attrs: win32_types.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(win32_types.OBJECT_ATTRIBUTES),
         .RootDirectory = null,
         .ObjectName = &name,
         .Attributes = 0x1000, // OBJ_DONT_REPARSE
@@ -2452,7 +2452,7 @@ pub fn ntOpenDontReparse(
         .SecurityQualityOfService = null,
     };
     var io: windows.IO_STATUS_BLOCK = undefined;
-    return windows.ntdll.NtCreateFile(
+    return win32_sys.NtCreateFile(
         handle,
         access,
         &attrs,
@@ -2468,10 +2468,10 @@ pub fn ntOpenDontReparse(
 }
 
 /// Attributes of the final object, with no ancestor or final link followed.
-fn pathInfo(path: []const u8) ?windows.FILE_ATTRIBUTE_TAG_INFO {
+fn pathInfo(path: []const u8) ?win32_types.FILE_ATTRIBUTE_TAG_INFO {
     const handle = openPathNoRedirect(path) orelse return null;
     defer windows.CloseHandle(handle);
-    var info: windows.FILE_ATTRIBUTE_TAG_INFO = undefined;
+    var info: win32_types.FILE_ATTRIBUTE_TAG_INFO = undefined;
     var io: windows.IO_STATUS_BLOCK = undefined;
     if (windows.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(@TypeOf(info)), .FileAttributeTagInformation) != .SUCCESS) return null;
     return info;
@@ -2496,7 +2496,7 @@ fn isLaunchableFile(path: []const u8) bool {
 
 /// WOF compression and deduplication keep file data on the local volume.
 /// Neither is a name redirect or a cloud placeholder that can fetch data.
-fn isLocalExecutableInfo(info: windows.FILE_ATTRIBUTE_TAG_INFO) bool {
+fn isLocalExecutableInfo(info: win32_types.FILE_ATTRIBUTE_TAG_INFO) bool {
     if (info.FileAttributes & win32_types.FILE_ATTRIBUTE_DIRECTORY != 0) return false;
     return info.FileAttributes & win32_types.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
         info.ReparseTag == 0x80000017 or info.ReparseTag == 0x80000013;
@@ -2508,7 +2508,7 @@ fn readReparseData(handle: windows.HANDLE, buf: []align(4) u8) ?[]const u8 {
     var returned: windows.DWORD = 0;
     if (internal_os.windows.DeviceIoControl(
         handle,
-        windows.FSCTL_GET_REPARSE_POINT,
+        win32_types.FSCTL_GET_REPARSE_POINT,
         null,
         0,
         buf.ptr,
@@ -5401,7 +5401,7 @@ fn createTestAppExecLink(dir: std.fs.Dir, name: []const u8, target: []const u8) 
     defer alloc.free(record);
 
     const FSCTL_SET_REPARSE_POINT: windows.DWORD = 0x900a4;
-    windows.DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, record, null) catch return error.SkipZigTest;
+    win32_sys.deviceIoControl(handle, FSCTL_SET_REPARSE_POINT, record, null) catch return error.SkipZigTest;
 }
 
 test "appExecLinkTarget reads the third string and rejects a cut, foreign or odd record" {
@@ -5525,7 +5525,7 @@ fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !voi
     try record.appendSlice(alloc, &.{ 0, 0 }); // empty print name
     try record.appendSlice(alloc, std.mem.sliceAsBytes(target_w));
     try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // terminators
-    try windows.DeviceIoControl(handle, 0x900a4, record.items, null);
+    try win32_sys.deviceIoControl(handle, 0x900a4, record.items, null);
 }
 
 test "explicit commands and child PATH keep junctions with spaces" {

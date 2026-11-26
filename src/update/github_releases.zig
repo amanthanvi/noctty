@@ -1113,7 +1113,7 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     defer dir.close();
     const final_buf = alloc.alloc(u16, windows.PATH_MAX_WIDE) catch return false;
     defer alloc.free(final_buf);
-    const final = windows.GetFinalPathNameByHandle(dir.fd, .{}, final_buf) catch return false;
+    const final = win32_sys.getFinalPathNameByHandle(dir.fd, final_buf) catch return false;
 
     var pids: []u32 = alloc.alloc(u32, 1024) catch return false;
     defer alloc.free(pids);
@@ -2314,12 +2314,12 @@ fn requireStageChildHandle(
 fn handleIsReparsePoint(handle: std.os.windows.HANDLE) !bool {
     const windows = std.os.windows;
     var io: windows.IO_STATUS_BLOCK = undefined;
-    var info: windows.FILE_BASIC_INFORMATION = undefined;
+    var info: win32_types.FILE_BASIC_INFORMATION = undefined;
     const rc = windows.ntdll.NtQueryInformationFile(
         handle,
         &io,
         &info,
-        @sizeOf(windows.FILE_BASIC_INFORMATION),
+        @sizeOf(win32_types.FILE_BASIC_INFORMATION),
         .FileBasicInformation,
     );
     return switch (rc) {
@@ -2929,11 +2929,7 @@ fn openLockedStageDirectory(path: []const u8) !std.fs.File {
 
 fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
     var final_buf: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
-    const final_w = try std.os.windows.GetFinalPathNameByHandle(
-        handle,
-        .{ .volume_name = .Dos },
-        &final_buf,
-    );
+    const final_w = try win32_sys.getFinalPathNameByHandle(handle, &final_buf);
     const final_utf8 = try std.unicode.utf16LeToUtf8Alloc(alloc, final_w);
     defer alloc.free(final_utf8);
     const final_path = if (std.mem.startsWith(u8, final_utf8, "\\\\?\\")) final_utf8[4..] else final_utf8;

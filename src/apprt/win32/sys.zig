@@ -1227,6 +1227,234 @@ pub fn eqlIgnoreCaseWtf16(a: []const u16, b: []const u16) bool {
     return RtlEqualUnicodeString(&a_string, &b_string, 1) != 0;
 }
 
+/// `NtCreateFile` over the fork's `OBJECT_ATTRIBUTES`; the flag words are the
+/// SDK's `ULONG`s.
+pub extern "ntdll" fn NtCreateFile(
+    FileHandle: *HANDLE,
+    DesiredAccess: u32,
+    ObjectAttributes: *const win32_types.OBJECT_ATTRIBUTES,
+    IoStatusBlock: *windows.IO_STATUS_BLOCK,
+    AllocationSize: ?*const i64,
+    FileAttributes: u32,
+    ShareAccess: u32,
+    CreateDisposition: u32,
+    CreateOptions: u32,
+    EaBuffer: ?*const anyopaque,
+    EaLength: u32,
+) callconv(.winapi) windows.NTSTATUS;
+
+pub const OpenError = error{
+    IsDir,
+    NotDir,
+    FileNotFound,
+    NoDevice,
+    AccessDenied,
+    PipeBusy,
+    PathAlreadyExists,
+    Unexpected,
+    NameTooLong,
+    WouldBlock,
+    NetworkNotFound,
+    AntivirusInterference,
+    BadPathName,
+};
+
+pub const OpenFileOptions = struct {
+    access_mask: u32,
+    dir: ?HANDLE = null,
+    sa: ?*SECURITY_ATTRIBUTES = null,
+    share_access: u32 = win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_DELETE,
+    creation: u32,
+    /// If true, tries to open path as a directory. Defaults to false.
+    filter: Filter = .file_only,
+    /// If false, tries to open path as a reparse point without dereferencing it.
+    follow_symlinks: bool = true,
+
+    pub const Filter = enum {
+        /// `OpenFile` returns `error.IsDir` if the opened handle would be a directory.
+        file_only,
+        /// `OpenFile` returns `error.NotDir` if the opened handle would be a file.
+        dir_only,
+        /// `OpenFile` does not discriminate between files and directories.
+        any,
+    };
+};
+
+/// Whether `path` is rooted or drive-absolute, as std's former
+/// `isAbsoluteWindowsWTF16` read it: a leading separator, or a drive letter
+/// and colon followed by a separator.
+fn isAbsoluteWtf16(path: []const u16) bool {
+    if (path.len < 1) return false;
+    if (path[0] == '/' or path[0] == '\\') return true;
+    if (path.len < 3) return false;
+    if (path[1] == ':') return path[2] == '/' or path[2] == '\\';
+    return false;
+}
+
+/// `NtCreateFile` of `sub_path_w` with std's former `OpenFile` mapping of
+/// statuses to errors, flags and retry on a pending delete.
+pub fn openFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HANDLE {
+    if (std.mem.eql(u16, sub_path_w, &[_]u16{'.'}) and options.filter == .file_only) return error.IsDir;
+    if (std.mem.eql(u16, sub_path_w, &[_]u16{ '.', '.' }) and options.filter == .file_only) return error.IsDir;
+
+    var result: HANDLE = undefined;
+
+    const path_len_bytes = std.math.cast(u16, sub_path_w.len * 2) orelse return error.NameTooLong;
+    var nt_name = windows.UNICODE_STRING{
+        .Length = path_len_bytes,
+        .MaximumLength = path_len_bytes,
+        .Buffer = @constCast(sub_path_w.ptr),
+    };
+    var attr = win32_types.OBJECT_ATTRIBUTES{
+        .Length = @sizeOf(win32_types.OBJECT_ATTRIBUTES),
+        .RootDirectory = if (isAbsoluteWtf16(sub_path_w)) null else options.dir,
+        // OBJ_CASE_INSENSITIVE is deliberately not set.
+        .Attributes = if (options.sa) |ptr| blk: {
+            const inherit: u32 = if (ptr.bInheritHandle == win32_types.TRUE) win32_types.OBJ_INHERIT else 0;
+            break :blk inherit;
+        } else 0,
+        .ObjectName = &nt_name,
+        .SecurityDescriptor = if (options.sa) |ptr| ptr.lpSecurityDescriptor else null,
+        .SecurityQualityOfService = null,
+    };
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    const blocking_flag: u32 = win32_types.FILE_SYNCHRONOUS_IO_NONALERT;
+    const file_or_dir_flag: u32 = switch (options.filter) {
+        .file_only => win32_types.FILE_NON_DIRECTORY_FILE,
+        .dir_only => win32_types.FILE_DIRECTORY_FILE,
+        .any => 0,
+    };
+    // Not following symlinks must not carry a synchronization flag.
+    const flags: u32 = if (options.follow_symlinks) file_or_dir_flag | blocking_flag else file_or_dir_flag | win32_types.FILE_OPEN_REPARSE_POINT;
+
+    while (true) {
+        const rc = NtCreateFile(
+            &result,
+            options.access_mask,
+            &attr,
+            &io,
+            null,
+            win32_types.FILE_ATTRIBUTE_NORMAL,
+            options.share_access,
+            options.creation,
+            flags,
+            null,
+            0,
+        );
+        switch (rc) {
+            .SUCCESS => return result,
+            .OBJECT_NAME_INVALID => return error.BadPathName,
+            .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
+            .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+            .BAD_NETWORK_PATH => return error.NetworkNotFound, // \\server was not found
+            .BAD_NETWORK_NAME => return error.NetworkNotFound, // \\server was found but \\server\share wasn't
+            .NO_MEDIA_IN_DEVICE => return error.NoDevice,
+            .INVALID_PARAMETER => unreachable,
+            .SHARING_VIOLATION => return error.AccessDenied,
+            .ACCESS_DENIED => return error.AccessDenied,
+            .PIPE_BUSY => return error.PipeBusy,
+            .PIPE_NOT_AVAILABLE => return error.NoDevice,
+            .OBJECT_PATH_SYNTAX_BAD => unreachable,
+            .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
+            .FILE_IS_A_DIRECTORY => return error.IsDir,
+            .NOT_A_DIRECTORY => return error.NotDir,
+            .USER_MAPPED_FILE => return error.AccessDenied,
+            .INVALID_HANDLE => unreachable,
+            .DELETE_PENDING => {
+                // A file was here and is deleted, but the OS has not finished:
+                // retry the creation once it has.
+                std.Thread.sleep(std.time.ns_per_ms);
+                continue;
+            },
+            .VIRUS_INFECTED, .VIRUS_DELETED => return error.AntivirusInterference,
+            else => return windows.unexpectedStatus(rc),
+        }
+    }
+}
+
+pub const DeviceIoControlError = error{
+    AccessDenied,
+    /// The volume does not contain a recognized file system.
+    UnrecognizedVolume,
+    Unexpected,
+};
+
+/// `NtDeviceIoControlFile` or `NtFsControlFile`, whichever the code asks for,
+/// with std's former `DeviceIoControl` mapping of statuses.
+pub fn deviceIoControl(h: HANDLE, io_control_code: u32, in: ?[]const u8, out: ?[]u8) DeviceIoControlError!void {
+    const is_fsctl = (io_control_code >> 16) == win32_types.FILE_DEVICE_FILE_SYSTEM;
+
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    const in_ptr = if (in) |i| i.ptr else null;
+    const in_len = if (in) |i| @as(u32, @intCast(i.len)) else 0;
+    const out_ptr = if (out) |o| o.ptr else null;
+    const out_len = if (out) |o| @as(u32, @intCast(o.len)) else 0;
+
+    const rc = blk: {
+        if (is_fsctl) {
+            break :blk windows.ntdll.NtFsControlFile(h, null, null, null, &io, io_control_code, in_ptr, in_len, out_ptr, out_len);
+        } else {
+            break :blk windows.ntdll.NtDeviceIoControlFile(h, null, null, null, &io, io_control_code, in_ptr, in_len, out_ptr, out_len);
+        }
+    };
+    switch (rc) {
+        .SUCCESS => {},
+        .PRIVILEGE_NOT_HELD => return error.AccessDenied,
+        .ACCESS_DENIED => return error.AccessDenied,
+        .INVALID_DEVICE_REQUEST => return error.AccessDenied, // Not supported by the underlying filesystem
+        .INVALID_PARAMETER => unreachable,
+        .UNRECOGNIZED_VOLUME => return error.UnrecognizedVolume,
+        else => return windows.unexpectedStatus(rc),
+    }
+}
+
+pub const GetFinalPathNameByHandleError = error{
+    AccessDenied,
+    BadPathName,
+    FileNotFound,
+    NameTooLong,
+    UnrecognizedVolume,
+    Unexpected,
+};
+
+/// The canonical path of `handle` with a DOS volume name and no `\\?\` prefix
+/// (`C:\dir\file`, `\\server\share\file`), as std's former
+/// `GetFinalPathNameByHandle(.{})` returned it, written into `out_buffer`.
+/// A volume mounted only at a folder has no DOS name here: the answer keeps
+/// the `\\?\Volume{...}` form.
+pub fn getFinalPathNameByHandle(handle: HANDLE, out_buffer: []u16) GetFinalPathNameByHandleError![]u16 {
+    const volume_name_dos = 0x0;
+    const capacity: DWORD = @intCast(@min(out_buffer.len, std.math.maxInt(DWORD)));
+    const written = GetFinalPathNameByHandleW(handle, out_buffer.ptr, capacity, volume_name_dos);
+    if (written == 0) {
+        return switch (windows.GetLastError()) {
+            .INVALID_HANDLE, .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+            .ACCESS_DENIED => error.AccessDenied,
+            .INVALID_NAME => error.BadPathName,
+            else => |err| windows.unexpectedError(err),
+        };
+    }
+    // Too small: the call returns the size it needs, terminator included.
+    if (written >= capacity) return error.NameTooLong;
+    const path = out_buffer[0..written];
+    const unc = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\UNC\\");
+    const verbatim = std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\");
+    if (std.mem.startsWith(u16, path, unc)) {
+        // `\\?\UNC\server\share` is `\\server\share`: keep the leading `\\`.
+        const rest = path[unc.len..];
+        out_buffer[0] = '\\';
+        out_buffer[1] = '\\';
+        std.mem.copyForwards(u16, out_buffer[2..][0..rest.len], rest);
+        return out_buffer[0 .. 2 + rest.len];
+    }
+    if (std.mem.startsWith(u16, path, verbatim)) {
+        const rest = path[verbatim.len..];
+        std.mem.copyForwards(u16, out_buffer[0..rest.len], rest);
+        return out_buffer[0..rest.len];
+    }
+    return path;
+}
+
 pub const GetOverlappedResultError = error{ WouldBlock, Unexpected };
 
 /// `GetOverlappedResult` with std's former error mapping: `WouldBlock` when the
@@ -1321,4 +1549,81 @@ test "the performance counter ticks at a fixed rate" {
     const second = queryPerformanceCounter();
     try std.testing.expect(second >= first);
     try std.testing.expect(queryPerformanceFrequency() > 0);
+}
+
+test "openFile keeps std's status mapping and flags" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "present.txt", .data = "x" });
+    try tmp.dir.makeDir("folder");
+
+    const read = win32_types.GENERIC_READ | win32_types.SYNCHRONIZE;
+    // A file opens through a directory handle, with a relative name.
+    const file = try openFile(w("present.txt"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN });
+    windows.CloseHandle(file);
+
+    // A name that is not there, in a folder that is or is not.
+    try std.testing.expectError(error.FileNotFound, openFile(w("absent.txt"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+    try std.testing.expectError(error.FileNotFound, openFile(w("no-folder\\absent.txt"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+
+    // The filter tells files and folders apart, and `.` and `..` are folders.
+    try std.testing.expectError(error.IsDir, openFile(w("folder"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+    try std.testing.expectError(error.NotDir, openFile(w("present.txt"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN, .filter = .dir_only }));
+    try std.testing.expectError(error.IsDir, openFile(w("."), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+    try std.testing.expectError(error.IsDir, openFile(w(".."), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+    const folder = try openFile(w("folder"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN, .filter = .dir_only });
+    windows.CloseHandle(folder);
+    const either = try openFile(w("folder"), .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN, .filter = .any });
+    windows.CloseHandle(either);
+
+    // A sharing violation is an access error, as std mapped it.
+    const held = try openFile(w("present.txt"), .{ .access_mask = read, .dir = tmp.dir.fd, .share_access = 0, .creation = win32_types.FILE_OPEN });
+    defer windows.CloseHandle(held);
+    try std.testing.expectError(error.AccessDenied, openFile(w("present.txt"), .{ .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+
+    // A name longer than a UNICODE_STRING holds.
+    var long: [40000]u16 = @splat('a');
+    try std.testing.expectError(error.NameTooLong, openFile(&long, .{ .access_mask = read, .dir = tmp.dir.fd, .creation = win32_types.FILE_OPEN }));
+
+    // An absolute NT name ignores the directory: `\Device\Null` opens.
+    const nul = try openFile(w("\\Device\\Null"), .{ .access_mask = win32_types.GENERIC_WRITE | win32_types.SYNCHRONIZE, .dir = tmp.dir.fd, .creation = win32_types.OPEN_EXISTING, .filter = .any });
+    windows.CloseHandle(nul);
+}
+
+test "deviceIoControl maps a refused control code the way std did" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile("plain.txt", .{ .read = true });
+    defer file.close();
+    // A file that is no reparse point: STATUS_NOT_A_REPARSE_POINT, which std
+    // reported as `error.Unexpected` (with its NTSTATUS trace).
+    var buffer: [windows.MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(4) = @splat(0);
+    try std.testing.expectError(error.Unexpected, deviceIoControl(file.handle, win32_types.FSCTL_GET_REPARSE_POINT, null, &buffer));
+}
+
+test "the final path name keeps std's DOS form" {
+    const std_final = @field(windows, "GetFinalPathNameByHandle");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "present.txt", .data = "x" });
+    const file = try tmp.dir.openFile("present.txt", .{});
+    defer file.close();
+    var system_dir = try std.fs.openDirAbsolute("C:\\Windows", .{});
+    defer system_dir.close();
+
+    for ([_]HANDLE{ file.handle, tmp.dir.fd, system_dir.fd }) |handle| {
+        var mine_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+        var theirs_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+        const mine = try getFinalPathNameByHandle(handle, &mine_buf);
+        const theirs = try std_final(handle, .{}, &theirs_buf);
+        try std.testing.expectEqualSlices(u16, theirs, mine);
+        // No `\\?\` prefix, and an absolute drive path.
+        try std.testing.expect(mine.len > 3 and mine[1] == ':' and mine[2] == '\\');
+    }
+
+    var small: [4]u16 = undefined;
+    try std.testing.expectError(error.NameTooLong, getFinalPathNameByHandle(file.handle, &small));
+    var any: [windows.PATH_MAX_WIDE]u16 = undefined;
+    try std.testing.expectError(error.FileNotFound, getFinalPathNameByHandle(windows.INVALID_HANDLE_VALUE, &any));
 }
