@@ -781,7 +781,9 @@ test "origin: the last line that parsed, an included file, the command line, com
     // The included file is read after the file that names it, and wins.
     try std.testing.expectEqual(@as(f32, 15), cfg.@"font-size");
     try expectFile(of(&cfg, .@"font-size", null), included_path, 2, .included);
-    try expectFile(of(&cfg, .@"scrollback-limit", null), path, 5, .config);
+    // `scrollback-limit` is the compatibility name of `scrollback-limit-bytes`
+    // since Ghostty 1.4.
+    try expectFile(of(&cfg, .@"scrollback-limit-bytes", null), path, 5, .config);
     try expectFile(of(&cfg, .@"config-file", null), path, 4, .config);
     // Compatibility names set the keys their handlers set, and only those.
     try expectFile(of(&cfg, .@"bold-color", null), path, 6, .config);
@@ -851,7 +853,7 @@ test "origin: -e sets the keys it implies, and its command's words set nothing" 
     try std.testing.expectEqual(Origin{ .cli = 0 }, of(&cfg, .@"font-size", null));
     try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"initial-command", null));
     try std.testing.expectEqual(Origin{ .cli = 1 }, of(&cfg, .@"quit-after-last-window-closed", null));
-    try std.testing.expect(of(&cfg, .@"scrollback-limit", null) == .default);
+    try std.testing.expect(of(&cfg, .@"scrollback-limit-bytes", null) == .default);
 }
 
 test "origin: a command-line value finalize restores over an included file is the command line's" {

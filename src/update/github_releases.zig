@@ -295,7 +295,9 @@ pub fn resolveReleaseFeedUrl(alloc: Allocator, configured: ?[]const u8) ![]u8 {
 }
 
 pub fn defaultStatePath(alloc: Allocator) ![]u8 {
-    return internal_os.xdg.state(alloc, .{
+    var environ_map = try update_util.processEnviron().createMap(alloc);
+    defer environ_map.deinit();
+    return internal_os.xdg.state(updateIo(), alloc, &environ_map, .{
         .subdir = build_config.data_dir_name ++ "/update-state.json",
     });
 }
