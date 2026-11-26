@@ -1136,6 +1136,7 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
     const final_buf = alloc.alloc(u16, windows.PATH_MAX_WIDE) catch return false;
     defer alloc.free(final_buf);
     const final = win32_sys.getFinalPathNameByHandle(dir.handle, final_buf) catch return false;
+    const stage_identity = directoryIdentity(dir.handle);
 
     var pids: []u32 = alloc.alloc(u32, 1024) catch return false;
     defer alloc.free(pids);
@@ -1163,8 +1164,78 @@ fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
         if (QueryFullProcessImageNameW(process, 0, image.ptr, &len) == 0) continue;
         if (len == 0 or len > image.len) continue;
         if (isStagedImage(final, image[0..len])) return true;
+        if (stage_identity) |identity| {
+            if (stagedImageByIdentity(alloc, image[0..len], identity)) return true;
+        }
     }
     return false;
+}
+
+/// A directory's identity: its volume and its 128-bit file ID, which every
+/// spelling of the folder shares (an 8.3 alias, another case, a junction).
+const DirectoryIdentity = struct { volume: u64, file_id: [16]u8 };
+
+/// fileapi.h `FILE_ID_INFO`, natural packing.
+const FILE_ID_INFO = extern struct {
+    VolumeSerialNumber: u64,
+    FileId: [16]u8,
+};
+/// `FILE_INFO_BY_HANDLE_CLASS`'s `FileIdInfo`.
+const file_id_info_class: c_int = 18;
+
+extern "kernel32" fn GetFileInformationByHandleEx(
+    file: std.os.windows.HANDLE,
+    class: c_int,
+    info: *anyopaque,
+    size: u32,
+) callconv(.winapi) win32_types.BOOL;
+
+fn directoryIdentity(handle: std.os.windows.HANDLE) ?DirectoryIdentity {
+    var info: FILE_ID_INFO = undefined;
+    if (GetFileInformationByHandleEx(handle, file_id_info_class, &info, @sizeOf(FILE_ID_INFO)) == 0) return null;
+    return .{ .volume = info.VolumeSerialNumber, .file_id = info.FileId };
+}
+
+/// The fallback when the spellings miss (council T3): a Setup started by the
+/// stage's long spelling while this instance opened it by its 8.3 alias, or
+/// the reverse. `image` has `isStagedImage`'s shape, `<dir>\<version>\<name>.exe`,
+/// and its `<dir>` is the stage itself by identity. Only an image whose
+/// `<dir>` is named `updates`, as every stage is (`stagedInstallerRunning`),
+/// is opened, for its attributes only.
+fn stagedImageByIdentity(alloc: Allocator, image: []const u16, stage: DirectoryIdentity) bool {
+    const sep: u16 = '\\';
+    const name_start = (std.mem.lastIndexOfScalar(u16, image, sep) orelse return false) + 1;
+    const name = image[name_start..];
+    const exe = std.unicode.utf8ToUtf16LeStringLiteral(".exe");
+    if (name.len <= exe.len or !win32_sys.eqlIgnoreCaseWtf16(name[name.len - exe.len ..], exe)) return false;
+    const version_end = name_start - 1;
+    const dir_end = std.mem.lastIndexOfScalar(u16, image[0..version_end], sep) orelse return false;
+    if (dir_end + 1 == version_end) return false;
+    const dir = image[0..dir_end];
+    const dir_name_start = (std.mem.lastIndexOfScalar(u16, dir, sep) orelse return false) + 1;
+    if (!win32_sys.eqlIgnoreCaseWtf16(dir[dir_name_start..], std.unicode.utf8ToUtf16LeStringLiteral("updates"))) return false;
+    const dir_z = alloc.allocSentinel(u16, dir.len, 0) catch return false;
+    defer alloc.free(dir_z);
+    @memcpy(dir_z, dir);
+    const handle = win32_sys.CreateFileW(
+        dir_z.ptr,
+        win32_types.FILE_READ_ATTRIBUTES,
+        win32_types.FILE_SHARE_READ | win32_types.FILE_SHARE_WRITE | win32_types.FILE_SHARE_DELETE,
+        null,
+        win32_types.OPEN_EXISTING,
+        win32_types.FILE_FLAG_BACKUP_SEMANTICS,
+        null,
+    );
+    if (handle == std.os.windows.INVALID_HANDLE_VALUE) return false;
+    defer std.os.windows.CloseHandle(handle);
+    const found = directoryIdentity(handle) orelse return false;
+    return found.volume == stage.volume and std.mem.eql(u8, &found.file_id, &stage.file_id);
+}
+
+test "FILE_ID_INFO layout" {
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(FILE_ID_INFO));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(FILE_ID_INFO, "VolumeSerialNumber"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(FILE_ID_INFO, "FileId"));
 }
 
 /// Whether `image` is `<updates>\<version>\<name>.exe`, where staging puts
@@ -4239,62 +4310,117 @@ test "a staged installer reads as running only while a process runs from it" {
     try std.testing.expect(!processRunsFromStage(alloc, self_dir));
 }
 
-test "a staged Setup started by the stage's 8.3 spelling reads as running (council P1)" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const io = std.testing.io;
-    const alloc = std.testing.allocator;
-    // In the temp folder: the checkout's drive may make no 8.3 names (a ReFS
-    // Dev Drive, a CI work volume). The state folder's own name has an alias,
-    // so the stage's short spelling differs from its long one.
-    var tmp = try internal_os.TempDir.init();
-    defer tmp.deinit();
-    const state = "noctty state folder";
-    const version = "1.3.200 staged version";
-    const name = "noctty staged setup.exe";
-    try tmp.dir.createDirPath(io, state ++ "\\updates\\" ++ version);
-    const state_long = try tmp.dir.realPathFileAlloc(io, state, alloc);
-    defer alloc.free(state_long);
-    const image_long = try std.fs.path.join(alloc, &.{ state_long, "updates", version, name });
-    defer alloc.free(image_long);
-    // A real image, never run: the system's cmd.exe, copied into the stage.
-    var system_w: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
-    const system_len = win32_sys.GetSystemDirectoryW(&system_w, system_w.len);
-    if (system_len == 0 or system_len >= system_w.len) return error.Unexpected;
-    const system = try std.unicode.wtf16LeToWtf8Alloc(alloc, system_w[0..system_len]);
-    defer alloc.free(system);
-    const cmd = try std.fs.path.join(alloc, &.{ system, "cmd.exe" });
-    defer alloc.free(cmd);
-    try std.Io.Dir.copyFileAbsolute(cmd, image_long, io, .{});
+/// For tests: a stage in the temp folder whose state folder has an 8.3 alias,
+/// with a copy of the system's cmd.exe as its Setup, and both spellings of
+/// each path. In the temp folder because the checkout's drive may make no 8.3
+/// names (a ReFS Dev Drive, a CI work volume); null where the temp volume
+/// makes none either.
+const StagedSetupFixture = struct {
+    tmp: internal_os.TempDir,
+    /// `realPathFileAlloc`'s, with its sentinel: freed at its own length.
+    state_long: [:0]u8,
+    state_short: []u8,
+    image_long: []u8,
+    image_short: []u8,
 
-    const state_short = try testShortPath(alloc, state_long);
-    defer alloc.free(state_short);
-    const image_short = try testShortPath(alloc, image_long);
-    defer alloc.free(image_short);
-    if (std.mem.eql(u8, state_short, state_long)) {
-        std.log.warn("no 8.3 alias for the fixture; 8.3 names are off on this volume", .{});
-        return error.SkipZigTest;
+    fn init(alloc: Allocator) !?StagedSetupFixture {
+        const io = std.testing.io;
+        var tmp = try internal_os.TempDir.init();
+        errdefer tmp.deinit();
+        const state = "noctty state folder";
+        const version = "1.3.200 staged version";
+        const name = "noctty staged setup.exe";
+        try tmp.dir.createDirPath(io, state ++ "\\updates\\" ++ version);
+        const state_long = try tmp.dir.realPathFileAlloc(io, state, alloc);
+        errdefer alloc.free(state_long);
+        const image_long = try std.fs.path.join(alloc, &.{ state_long, "updates", version, name });
+        errdefer alloc.free(image_long);
+        // A real image, never run: the system's cmd.exe, copied into the stage.
+        var system_w: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
+        const system_len = win32_sys.GetSystemDirectoryW(&system_w, system_w.len);
+        if (system_len == 0 or system_len >= system_w.len) return error.Unexpected;
+        const system = try std.unicode.wtf16LeToWtf8Alloc(alloc, system_w[0..system_len]);
+        defer alloc.free(system);
+        const cmd = try std.fs.path.join(alloc, &.{ system, "cmd.exe" });
+        defer alloc.free(cmd);
+        try std.Io.Dir.copyFileAbsolute(cmd, image_long, io, .{});
+        const state_short = try testShortPath(alloc, state_long);
+        errdefer alloc.free(state_short);
+        const image_short = try testShortPath(alloc, image_long);
+        errdefer alloc.free(image_short);
+        if (std.mem.eql(u8, state_short, state_long)) {
+            std.log.warn("no 8.3 alias for the fixture; 8.3 names are off on this volume", .{});
+            alloc.free(image_short);
+            alloc.free(state_short);
+            alloc.free(image_long);
+            alloc.free(state_long);
+            tmp.deinit();
+            return null;
+        }
+        return .{ .tmp = tmp, .state_long = state_long, .state_short = state_short, .image_long = image_long, .image_short = image_short };
     }
-    const state_path = try std.fs.path.join(alloc, &.{ state_short, "update-state.json" });
-    defer alloc.free(state_path);
-    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
 
-    // Setup started by the stage's short spelling, as a short-spelled state
-    // path launches it: suspended and detached, so it never runs, and ended
-    // before the folder goes.
-    const image_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, image_short);
-    defer alloc.free(image_w);
-    var startup = std.mem.zeroes(std.os.windows.STARTUPINFOW);
-    startup.cb = @sizeOf(std.os.windows.STARTUPINFOW);
-    var process: internal_os.windows.PROCESS_INFORMATION = undefined;
-    if (internal_os.windows_ext.CreateProcessW(image_w, null, null, null, 0, .{ .detached_process = true, .create_suspended = true }, null, null, &startup, &process) == 0)
-        return error.Unexpected;
-    defer {
+    fn deinit(self: *StagedSetupFixture, alloc: Allocator) void {
+        alloc.free(self.image_short);
+        alloc.free(self.image_long);
+        alloc.free(self.state_short);
+        alloc.free(self.state_long);
+        self.tmp.deinit();
+    }
+
+    /// Setup started from `image`: suspended and detached, so it never runs.
+    /// End it with `endSetup` before the fixture goes.
+    fn startSetup(alloc: Allocator, image: []const u8) !internal_os.windows.PROCESS_INFORMATION {
+        const image_w = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, image);
+        defer alloc.free(image_w);
+        var startup = std.mem.zeroes(std.os.windows.STARTUPINFOW);
+        startup.cb = @sizeOf(std.os.windows.STARTUPINFOW);
+        var process: internal_os.windows.PROCESS_INFORMATION = undefined;
+        if (internal_os.windows_ext.CreateProcessW(image_w, null, null, null, 0, .{ .detached_process = true, .create_suspended = true }, null, null, &startup, &process) == 0)
+            return error.Unexpected;
+        return process;
+    }
+
+    fn endSetup(process: internal_os.windows.PROCESS_INFORMATION) void {
         _ = win32_sys.TerminateProcess(process.hProcess, 1);
         _ = win32_sys.WaitForSingleObject(process.hProcess, 10_000);
         std.os.windows.CloseHandle(process.hThread);
         std.os.windows.CloseHandle(process.hProcess);
     }
+};
+
+/// For tests: whether a Setup started from `image` reads as running through
+/// the state path in `state_dir`'s spelling, and not before it starts.
+fn expectStagedSetupFound(alloc: Allocator, state_dir: []const u8, image: []const u8) !void {
+    const state_path = try std.fs.path.join(alloc, &.{ state_dir, "update-state.json" });
+    defer alloc.free(state_path);
+    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+    const process = try StagedSetupFixture.startSetup(alloc, image);
+    defer StagedSetupFixture.endSetup(process);
     try std.testing.expect(stagedInstallerRunning(alloc, state_path));
+}
+
+test "a staged Setup started by the stage's 8.3 spelling reads as running (council P1)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var fixture = (try StagedSetupFixture.init(alloc)) orelse return error.SkipZigTest;
+    defer fixture.deinit(alloc);
+    // Setup started by the stage's short spelling, as a short-spelled state
+    // path launches it.
+    try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_short);
+}
+
+test "a staged Setup and its stage spelled differently are matched by the folder's identity (council T3)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var fixture = (try StagedSetupFixture.init(alloc)) orelse return error.SkipZigTest;
+    defer fixture.deinit(alloc);
+    // The stage queried by its 8.3 alias, Setup started by the long spelling.
+    try expectStagedSetupFound(alloc, fixture.state_short, fixture.image_long);
+    // The stage queried by its long spelling, Setup started by the alias.
+    try expectStagedSetupFound(alloc, fixture.state_long, fixture.image_short);
+    // The long spelling both ways.
+    try expectStagedSetupFound(alloc, fixture.state_long, fixture.image_long);
 }
 
 /// For tests: `long` as GetShortPathNameW spells it, every component that has
