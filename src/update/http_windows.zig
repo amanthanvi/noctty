@@ -4,11 +4,13 @@
 const std = @import("std");
 const win32_repeat = @import("../apprt/win32_repeat.zig");
 const win32_types = @import("../apprt/win32_types.zig");
+const update_util = @import("util.zig");
 const builtin = @import("builtin");
 const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
 const Handle = *anyopaque;
 const WINAPI = std.builtin.CallingConvention.winapi;
+const updateIo = update_util.updateIo;
 const status_send_complete = 0x00400000;
 const status_headers_available = 0x00020000;
 const status_read_complete = 0x00080000;
@@ -41,8 +43,8 @@ pub const timeout_ms: i32 = 30_000;
 pub const user_agent = "noctty-updater";
 
 const Context = struct {
-    complete: std.Thread.ResetEvent = .{},
-    closing: std.Thread.ResetEvent = .{},
+    complete: std.Io.Event = .unset,
+    closing: std.Io.Event = .unset,
     closed: bool = false, // Worker-only; callbacks never access this field.
     err: ?u32 = null,
     read_len: usize = 0,
@@ -55,7 +57,10 @@ const Context = struct {
     }
 
     fn wait(self: *Context, request: Handle) !void {
-        self.complete.timedWait(@as(u64, @intCast(self.limit_ms)) * std.time.ns_per_ms) catch {
+        self.complete.waitTimeout(updateIo(), .{ .duration = .{
+            .raw = .fromMilliseconds(@as(u32, @intCast(self.limit_ms))),
+            .clock = .awake,
+        } }) catch {
             // In-flight async reads may still reference the caller's buffer.
             // Cancel and wait here, before any error can unwind that buffer.
             self.close(request);
@@ -68,28 +73,28 @@ const Context = struct {
         if (self.closed) return;
         self.closed = true;
         _ = WinHttpCloseHandle(request);
-        self.closing.wait();
+        self.closing.waitUncancelable(updateIo());
     }
 
     fn callback(_: Handle, opaque_context: usize, status: u32, info: ?*anyopaque, info_len: u32) callconv(WINAPI) void {
         if (opaque_context == 0) return;
         const self: *Context = @ptrFromInt(opaque_context);
         switch (status) {
-            status_handle_closing => self.closing.set(),
-            status_send_complete, status_headers_available => self.complete.set(),
+            status_handle_closing => self.closing.set(updateIo()),
+            status_send_complete, status_headers_available => self.complete.set(updateIo()),
             status_read_complete => {
                 self.read_len = info_len;
-                self.complete.set();
+                self.complete.set(updateIo());
             },
             status_data_available => {
                 self.read_len = @as(*const u32, @ptrCast(@alignCast(info.?))).*;
-                self.complete.set();
+                self.complete.set(updateIo());
             },
             status_request_error => {
                 const Result = extern struct { result: usize, err: u32 };
                 const result: *const Result = @ptrCast(@alignCast(info.?));
                 self.err = result.err;
-                self.complete.set();
+                self.complete.set(updateIo());
             },
             else => {},
         }
@@ -114,8 +119,8 @@ pub const Response = struct {
         if (!secure and !builtin.is_test) unreachable;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, if (secure) "https" else "http") or uri.user != null or uri.password != null)
             return error.InvalidUpdateUrl;
-        var host_buf: [std.Uri.host_name_max]u8 = undefined;
-        const host = try uri.getHost(&host_buf);
+        var host_buf: [host_name_max]u8 = undefined;
+        const host = try uriHost(uri, &host_buf);
         const host_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, host);
         defer alloc.free(host_w);
         var target: std.Io.Writer.Allocating = .init(alloc);
@@ -259,6 +264,21 @@ pub const Response = struct {
     }
 };
 
+/// 0.15's `std.Uri.host_name_max`, the buffer `uriHost` fills.
+const host_name_max = 255;
+
+/// 0.15's `std.Uri.getHost`: the host component, percent-decoded into
+/// `buffer` when it has to be. Zig 0.17 moved it to
+/// `std.Io.net.HostName.fromUri`, which also checks the name against
+/// RFC 1123 and so would refuse hosts this transport has always passed to
+/// WinHTTP as they are (an IPv6 literal, an underscore).
+fn uriHost(uri: std.Uri, buffer: []u8) error{ UriMissingHost, UriHostTooLong }![]const u8 {
+    const component = uri.host orelse return error.UriMissingHost;
+    return component.toRaw(buffer) catch |err| switch (err) {
+        error.NoSpaceLeft => return error.UriHostTooLong,
+    };
+}
+
 /// Pump `reader` into `writer`, refusing a body longer than `max_bytes`.
 /// At most one byte past the cap reaches `writer` before the error, and
 /// every caller discards its destination on error.
@@ -347,27 +367,33 @@ extern "winhttp" fn WinHttpQueryDataAvailable(Handle, ?*u32) callconv(WINAPI) wi
 extern "winhttp" fn WinHttpCloseHandle(Handle) callconv(WINAPI) win32_types.BOOL;
 
 const FakePeer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     mode: enum { tls, head, body, capture, progress },
     response: []const u8 = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     fragment_bytes: usize = 0,
-    stop: std.Thread.ResetEvent = .{},
+    stop: std.Io.Event = .unset,
     head: [4096]u8 = undefined,
     head_len: usize = 0,
 
+    /// Waits up to `ms`, or until `finish` sets `stop`.
+    fn pause(self: *FakePeer, ms: i64) void {
+        self.stop.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(ms), .clock = .awake } }) catch {};
+    }
+
     fn serve(self: *FakePeer) void {
-        const conn = self.server.accept() catch return;
-        defer conn.stream.close();
+        const io = std.testing.io;
+        const conn = self.server.accept(io) catch return;
+        defer conn.close(io);
         if (self.stop.isSet()) return;
         if (self.mode == .tls) {
-            self.stop.timedWait(2 * std.time.ns_per_s) catch {};
+            self.pause(2 * std.time.ms_per_s);
             return;
         }
         var read_buffer: [4096]u8 = undefined;
         var write_buffer: [256]u8 = undefined;
-        var reader = conn.stream.reader(&read_buffer);
-        var writer = conn.stream.writer(&write_buffer);
-        var server = std.http.Server.init(reader.interface(), &writer.interface);
+        var reader = conn.reader(io, &read_buffer);
+        var writer = conn.writer(io, &write_buffer);
+        var server = std.http.Server.init(&reader.interface, &writer.interface);
         const request = server.receiveHead() catch return;
         self.head_len = @min(request.head_buffer.len, self.head.len);
         @memcpy(self.head[0..self.head_len], request.head_buffer[0..self.head_len]);
@@ -382,7 +408,7 @@ const FakePeer = struct {
                     writer.interface.writeAll(self.response[offset..end]) catch return;
                     writer.interface.flush() catch return;
                     offset = end;
-                    self.stop.timedWait(std.time.ns_per_ms) catch {};
+                    self.pause(1);
                 }
                 return;
             }
@@ -394,7 +420,7 @@ const FakePeer = struct {
             writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n") catch return;
             writer.interface.flush() catch return;
             for ("progress") |byte| {
-                self.stop.timedWait(75 * std.time.ns_per_ms) catch {};
+                self.pause(75);
                 writer.interface.writeByte(byte) catch return;
                 writer.interface.flush() catch return;
             }
@@ -405,24 +431,26 @@ const FakePeer = struct {
             writer.interface.flush() catch return;
         }
         // Finite fallback makes removing the timeout fail instead of hanging.
-        self.stop.timedWait(2 * std.time.ns_per_s) catch {};
+        self.pause(2 * std.time.ms_per_s);
     }
 
-    fn listenLoopback() !std.net.Server {
-        return (try std.net.Address.parseIp("127.0.0.1", 0)).listen(.{});
+    fn listenLoopback() !std.Io.net.Server {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        return address.listen(std.testing.io, .{});
     }
 
     fn finish(self: *FakePeer, thread: std.Thread) void {
-        self.stop.set();
+        const io = std.testing.io;
+        self.stop.set(io);
         // Also release accept if request setup failed before connecting.
-        if (std.net.tcpConnectToAddress(self.server.listen_address)) |stream| stream.close() else |_| {}
+        if (self.server.socket.address.connect(io, .{ .mode = .stream, .protocol = .tcp })) |stream| stream.close(io) else |_| {}
         thread.join();
-        self.server.deinit();
+        self.server.deinit(io);
     }
 
     fn uri(self: *FakePeer, buffer: []u8) !std.Uri {
         const url = try std.fmt.bufPrint(buffer, "{s}://127.0.0.1:{d}/fake-feed?escaped=%2F", .{
-            @as([]const u8, if (self.mode == .tls) "https" else "http"), self.server.listen_address.getPort(),
+            @as([]const u8, if (self.mode == .tls) "https" else "http"), self.server.socket.address.getPort(),
         });
         return std.Uri.parse(url);
     }
@@ -446,9 +474,9 @@ test "update HTTPS timeout interrupts stalled TLS and permits another request" {
         const thread = try std.Thread.spawn(.{}, FakePeer.serve, .{&peer});
         defer peer.finish(thread);
         var url: [256]u8 = undefined;
-        var timer = try std.time.Timer.start();
+        const started = std.Io.Timestamp.now(std.testing.io, .awake);
         try std.testing.expectError(error.UpdateHttpTimeout, Response.openImpl(std.testing.allocator, try peer.uri(&url), &.{}, 100, true));
-        try std.testing.expect(timer.read() < 1500 * std.time.ns_per_ms);
+        try std.testing.expect(started.untilNow(std.testing.io, .awake).toNanoseconds() < 1500 * std.time.ns_per_ms);
     }
 }
 
@@ -459,7 +487,7 @@ test "update HTTP timeout interrupts stalled response headers and body" {
         const thread = try std.Thread.spawn(.{}, FakePeer.serve, .{&peer});
         defer peer.finish(thread);
         var url: [256]u8 = undefined;
-        var timer = try std.time.Timer.start();
+        const started = std.Io.Timestamp.now(std.testing.io, .awake);
         if (mode == .head) {
             try std.testing.expectError(error.UpdateHttpTimeout, Response.openImpl(std.testing.allocator, try peer.uri(&url), &.{}, 100, false));
         } else {
@@ -470,7 +498,7 @@ test "update HTTP timeout interrupts stalled response headers and body" {
                 try std.testing.expect(n != 0);
             } else |err| try std.testing.expectEqual(error.UpdateHttpTimeout, err);
         }
-        try std.testing.expect(timer.read() < 1500 * std.time.ns_per_ms);
+        try std.testing.expect(started.untilNow(std.testing.io, .awake).toNanoseconds() < 1500 * std.time.ns_per_ms);
     }
 }
 
@@ -645,8 +673,8 @@ test "update HTTP body reads reset the deadline while a slow fake feed progresse
     defer response.deinit();
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
-    var timer = try std.time.Timer.start();
+    const started = std.Io.Timestamp.now(std.testing.io, .awake);
     try response.streamBody(alloc, &out.writer, 8);
     try std.testing.expectEqualStrings("progress", out.written());
-    try std.testing.expect(timer.read() > 400 * std.time.ns_per_ms);
+    try std.testing.expect(started.untilNow(std.testing.io, .awake).toNanoseconds() > 400 * std.time.ns_per_ms);
 }
