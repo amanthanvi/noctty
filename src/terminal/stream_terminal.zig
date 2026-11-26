@@ -1768,19 +1768,6 @@ pub const Handler = struct {
                 self.writePty(resp);
             },
 
-            // DECXCPR: extended cursor position adds a page number. Ghostty has
-            // no page memory, so the page is always 1.
-            .cursor_position_extended => {
-                const pos = self.cursorReportPos();
-
-                var buf: [64]u8 = undefined;
-                const resp = std.fmt.bufPrintZ(&buf, "\x1B[?{};{};1R", .{
-                    pos.y + 1,
-                    pos.x + 1,
-                }) catch return;
-                self.writePty(resp);
-            },
-
             .color_scheme => {
                 const func = self.effects.color_scheme orelse return;
                 const scheme = func(self) orelse return;

@@ -1025,21 +1025,6 @@ pub const StreamHandler = struct {
                 self.messageWriter(msg);
             },
 
-            // DECXCPR: extended cursor position adds a page number. Ghostty has
-            // no page memory, so the page is always 1.
-            .cursor_position_extended => {
-                const pos = self.cursorReportPos();
-
-                var msg: termio.Message = .{ .write_small = .{} };
-                const resp = try std.fmt.bufPrint(&msg.write_small.data, "\x1B[?{};{};1R", .{
-                    pos.y + 1,
-                    pos.x + 1,
-                });
-                msg.write_small.len = @intCast(resp.len);
-
-                self.messageWriter(msg);
-            },
-
             .color_scheme => self.messageWriter(.{ .color_scheme_report = .{ .force = true } }),
 
             .visibility => self.messageWriter(.{ .visibility_report = .{
