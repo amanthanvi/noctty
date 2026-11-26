@@ -11556,7 +11556,7 @@ test "settings the quiet period is a real timer and leaving the field ends it" {
                     _ = sys.DispatchMessageW(&msg);
                 }
                 if (std.mem.startsWith(u8, try statusTextOf(settings, &buf), "Error: ")) break;
-                std.Thread.sleep(5 * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
             }
             // The message came from the timer, not from the key, and not late.
             try std.testing.expect(elapsed >= validation_quiet_ms - 100);
@@ -29102,7 +29102,7 @@ test "settings an up-down it paints repaints through its own paint, never the st
             var waited: u32 = 0;
             var msg: sys.MSG = undefined;
             while (ticks == 0 and waited < 2000) : (waited += 20) {
-                std.Thread.sleep(20 * std.time.ns_per_ms);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
                 while (sys.PeekMessageW(&msg, spin, WM_TIMER, WM_TIMER, 1) != 0) {
                     _ = sys.DispatchMessageW(&msg);
                     ticks += 1;

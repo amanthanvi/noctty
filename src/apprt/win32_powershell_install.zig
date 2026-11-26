@@ -56,6 +56,8 @@ const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 const thread_role = @import("../sync/thread_role.zig");
 const win32_terminfo = @import("win32_terminfo.zig");
+const global = @import("../global.zig");
+const compat_file = @import("../lib/compat/file.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.win32_powershell_install);
 
@@ -90,8 +92,8 @@ pub const integration_script_sha256: [32]u8 = blk: {
 pub fn resolveInstallPath(alloc: Allocator) ![]u8 {
     const portable_root = try internal_os.xdg.portableRoot(alloc);
     const base = portable_root orelse
-        (std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => known: {
+        (global.environ().getAlloc(alloc, "LOCALAPPDATA") catch |err| switch (err) {
+            error.EnvironmentVariableMissing => known: {
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
                 const path = try internal_os.windows_ext.knownFolderPathUtf8(
                     &internal_os.windows_ext.FOLDERID_LocalAppData,
@@ -111,7 +113,7 @@ pub fn resolveInstallPath(alloc: Allocator) ![]u8 {
     });
     errdefer alloc.free(path);
     const dir_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
-    try std.fs.cwd().makePath(dir_path);
+    try std.Io.Dir.cwd().createDirPath(global.io(), dir_path);
     return path;
 }
 
@@ -155,7 +157,7 @@ pub fn installIfStale(alloc: Allocator, path: []const u8) InstallResult {
     // leaves it to that one and the next launch.
     const lock_path = std.mem.concat(alloc, u8, &.{ path, ".lock" }) catch return .failed;
     defer alloc.free(lock_path);
-    const lock = std.fs.createFileAbsolute(lock_path, .{
+    const lock = std.Io.Dir.createFileAbsolute(global.io(), lock_path, .{
         .truncate = false,
         .lock = .exclusive,
         .lock_nonblocking = true,
@@ -167,7 +169,7 @@ pub fn installIfStale(alloc: Allocator, path: []const u8) InstallResult {
         // No lock file (a read-only folder, say) is how installs went before.
         else => return installLocked(alloc, path),
     };
-    defer lock.close();
+    defer lock.close(global.io());
     return installLocked(alloc, path);
 }
 
@@ -203,12 +205,14 @@ const Installed = struct {
 
 /// Null when there is no file.
 fn readInstalled(alloc: Allocator, path: []const u8) !?Installed {
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    const io = global.io();
+    // `allow_directory = false` keeps 0.15's file-only open.
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
-    defer file.close();
-    const contents = try file.readToEndAlloc(alloc, 1024 * 1024);
+    defer file.close(io);
+    const contents = try compat_file.readToEndAlloc(file, alloc, 1024 * 1024);
     defer alloc.free(contents);
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(contents, &hash, .{});
@@ -216,15 +220,16 @@ fn readInstalled(alloc: Allocator, path: []const u8) !?Installed {
 }
 
 /// Atomic write: temp file + rename. Falls back to direct overwrite
-/// if rename fails. Our Windows 1809 target lets `std.fs.Dir.rename`
+/// if rename fails. Our Windows 1809 target lets `std.Io.Dir.rename`
 /// try `FileRenameInformationEx` with POSIX replace semantics, which replaces
 /// a file whose opener shares delete access; filesystems without that support
 /// fall back to strict `FileRenameInformation`, and a holder without
 /// `FILE_SHARE_DELETE` still blocks either way.
 fn writeAtomically(path: []const u8) !InstallResult {
     const dir_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
-    var dir = try std.fs.openDirAbsolute(dir_path, .{});
-    defer dir.close();
+    const io = global.io();
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+    defer dir.close(io);
     const basename = std.fs.path.basename(path);
 
     // The temporary name is random and created exclusively, so two instances
@@ -233,9 +238,9 @@ fn writeAtomically(path: []const u8) !InstallResult {
         log.debug("powershell integration atomic write failed target={s} err={}", .{ basename, err });
 
         // Fallback: direct overwrite.
-        const file = try dir.createFile(basename, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(integration_script);
+        const file = try dir.createFile(io, basename, .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, integration_script);
     };
     return .installed;
 }
@@ -1274,32 +1279,32 @@ const TestProcessDeadline = struct {
     }
 };
 
-/// Spawn `child`, which collects no output, and wait for it to exit or be
-/// terminated after `milliseconds`.
-fn runWithDeadline(child: *std.process.Child, milliseconds: u32) !struct { term: std.process.Child.Term, timed_out: bool } {
-    try child.spawn();
+/// Spawn a child as `options` says, collecting no output, and wait for it to
+/// exit or be terminated after `milliseconds`.
+fn runWithDeadline(options: std.process.SpawnOptions, milliseconds: u32) !struct { term: std.process.Child.Term, timed_out: bool } {
+    const io = std.testing.io;
+    var child = try std.process.spawn(io, options);
     var running = true;
-    errdefer if (running) {
-        _ = child.kill() catch {};
-    };
-    var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = milliseconds };
+    errdefer if (running) child.kill(io);
+    var deadline: TestProcessDeadline = .{ .handle = child.id.?, .milliseconds = milliseconds };
     const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
     watcher.join();
-    const term = try child.wait();
+    const term = try child.wait(io);
     running = false;
     return .{ .term = term, .timed_out = deadline.timed_out };
 }
 
 test "PowerShell child deadline terminates and reaps a stalled host" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
-    var child = std.process.Child.init(&.{ "powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 300" }, std.testing.allocator);
-    child.create_no_window = true;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    const run = try runWithDeadline(&child, 100);
+    const run = try runWithDeadline(.{
+        .argv = &.{ "powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 300" },
+        .create_no_window = true,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }, 100);
     try std.testing.expect(run.timed_out);
-    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 124 }, run.term);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 124 }, run.term);
 }
 
 test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" {
@@ -1315,23 +1320,24 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
 
     // Each host rebuilds its own module paths. In particular, a pwsh parent
     // must not make Windows PowerShell load pwsh's manifests/binaries.
-    var host_env = try std.process.getEnvMap(alloc);
+    var host_env = try std.testing.environ.createMap(alloc);
     defer host_env.deinit();
-    host_env.remove("PSModulePath");
-    host_env.remove("GHOSTTY_SHELL_FEATURES");
+    _ = host_env.swapRemove("PSModulePath");
+    _ = host_env.swapRemove("GHOSTTY_SHELL_FEATURES");
 
     for ([_][]const u8{ "powershell.exe", "pwsh.exe" }) |host| {
         // Cold Windows PowerShell startup on hosted ARM64 can exceed 30s.
         // Warm each host once and allow the same generous bound for every
         // policy case. This is a liveness guard, not a performance assertion.
         const host_deadline_ms = 90_000;
-        var warmup = std.process.Child.init(&.{ host, "-NoProfile", "-NonInteractive", "-Command", "exit 0" }, alloc);
-        warmup.env_map = &host_env;
-        warmup.create_no_window = true;
-        warmup.stdin_behavior = .Ignore;
-        warmup.stdout_behavior = .Ignore;
-        warmup.stderr_behavior = .Ignore;
-        const warmup_run = runWithDeadline(&warmup, host_deadline_ms) catch |err| switch (err) {
+        const warmup_run = runWithDeadline(.{
+            .argv = &.{ host, "-NoProfile", "-NonInteractive", "-Command", "exit 0" },
+            .environ_map = &host_env,
+            .create_no_window = true,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }, host_deadline_ms) catch |err| switch (err) {
             // Only an absent optional host is omitted. Startup failures and
             // timeouts must fail rather than turn missing coverage into a pass.
             error.FileNotFound => if (std.mem.eql(u8, host, "pwsh.exe")) {
@@ -1340,11 +1346,11 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             } else return err,
             else => return err,
         };
-        if (warmup_run.timed_out or !std.meta.eql(warmup_run.term, std.process.Child.Term{ .Exited = 0 })) {
+        if (warmup_run.timed_out or !std.meta.eql(warmup_run.term, std.process.Child.Term{ .exited = 0 })) {
             std.debug.print("PowerShell bootstrap fixture: host={s} warmup_timed_out={} warmup_term={any}\n", .{ host, warmup_run.timed_out, warmup_run.term });
         }
         try std.testing.expect(!warmup_run.timed_out);
-        try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, warmup_run.term);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, warmup_run.term);
 
         for ([_][]const u8{ "Restricted", "RemoteSigned", "AllSigned" }) |policy| {
             const argv = [_][]const u8{ host, "-NoProfile", "-ExecutionPolicy", policy };
@@ -1374,65 +1380,76 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             run_argv[1] = "-NonInteractive";
             for (injected[1..], 2..) |arg, idx| run_argv[idx] = arg;
             run_argv[run_argv.len - 1] = command;
-            var child = std.process.Child.init(run_argv, alloc);
-            child.env_map = &host_env;
-            child.create_no_window = true;
-            child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Pipe;
-            child.stderr_behavior = .Pipe;
-            try child.spawn();
+            const io = std.testing.io;
+            var child = try std.process.spawn(io, .{
+                .argv = run_argv,
+                .environ_map = &host_env,
+                .create_no_window = true,
+                .stdin = .ignore,
+                .stdout = .pipe,
+                .stderr = .pipe,
+            });
             var running = true;
-            errdefer if (running) {
-                _ = child.kill() catch {};
-            };
-            var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = host_deadline_ms };
+            errdefer if (running) child.kill(io);
+            var deadline: TestProcessDeadline = .{ .handle = child.id.?, .milliseconds = host_deadline_ms };
             const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
             var watcher_joined = false;
             defer if (!watcher_joined) watcher.join();
-            var stdout: std.ArrayList(u8) = .empty;
-            defer stdout.deinit(alloc);
-            var stderr: std.ArrayList(u8) = .empty;
-            defer stderr.deinit(alloc);
-            try child.collectOutput(alloc, &stdout, &stderr, 50 * 1024);
+            // Both pipes read to their ends, at most 50 KiB each (0.15's
+            // `collectOutput` limit).
+            var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+            var multi_reader: std.Io.File.MultiReader = undefined;
+            multi_reader.init(alloc, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+            defer multi_reader.deinit();
+            while (multi_reader.fill(64, .none)) |_| {
+                if (multi_reader.reader(0).buffered().len > 50 * 1024) return error.StdoutStreamTooLong;
+                if (multi_reader.reader(1).buffered().len > 50 * 1024) return error.StderrStreamTooLong;
+            } else |err| switch (err) {
+                error.EndOfStream => {},
+                else => |e| return e,
+            }
+            try multi_reader.checkAnyError();
+            const stdout = multi_reader.reader(0).buffered();
+            const stderr = multi_reader.reader(1).buffered();
             watcher.join();
             watcher_joined = true;
-            const term = try child.wait();
+            const term = try child.wait(io);
             running = false;
-            const helper_loaded = std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null;
+            const helper_loaded = std.mem.indexOf(u8, stdout, "HELPER-LOADED") != null;
             const expect_helper = !std.mem.eql(u8, policy, "AllSigned");
             if (deadline.timed_out or helper_loaded != expect_helper or
-                std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=0") == null or
-                std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") == null)
+                std.mem.indexOf(u8, stdout, "ERROR-COUNT=0") == null or
+                std.mem.indexOf(u8, stdout, "BOOTSTRAP-PROBE> ") == null)
             {
                 std.debug.print("PowerShell bootstrap fixture: host={s} policy={s} timed_out={} helper_loaded={} error_count_seen={} prompt_seen={} load_warning={} stderr_bytes={d}\n", .{
                     host,
                     policy,
                     deadline.timed_out,
                     helper_loaded,
-                    std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=") != null,
-                    std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") != null,
-                    std.mem.indexOf(u8, stdout.items, "could not load") != null,
-                    stderr.items.len,
+                    std.mem.indexOf(u8, stdout, "ERROR-COUNT=") != null,
+                    std.mem.indexOf(u8, stdout, "BOOTSTRAP-PROBE> ") != null,
+                    std.mem.indexOf(u8, stdout, "could not load") != null,
+                    stderr.len,
                 });
             }
             try std.testing.expect(!deadline.timed_out);
-            try std.testing.expect(std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") != null);
-            try std.testing.expect(std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=0") != null);
+            try std.testing.expect(std.mem.indexOf(u8, stdout, "BOOTSTRAP-PROBE> ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, stdout, "ERROR-COUNT=0") != null);
             if (std.mem.eql(u8, policy, "AllSigned")) {
-                try std.testing.expect(std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") == null);
-                try std.testing.expect(std.mem.indexOf(u8, stdout.items, "noctty PowerShell integration could not load") != null);
+                try std.testing.expect(std.mem.indexOf(u8, stdout, "HELPER-LOADED") == null);
+                try std.testing.expect(std.mem.indexOf(u8, stdout, "noctty PowerShell integration could not load") != null);
             } else {
-                try std.testing.expect(std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null);
-                try std.testing.expect(std.mem.indexOf(u8, stdout.items, "]133;A;") != null);
+                try std.testing.expect(std.mem.indexOf(u8, stdout, "HELPER-LOADED") != null);
+                try std.testing.expect(std.mem.indexOf(u8, stdout, "]133;A;") != null);
             }
             // pwsh tries to autoload PSReadLine BEFORE -Command, which file
             // policy can deny. That host warning is independent of our load.
             // Accept only that exact diagnostic, never an integration error.
-            if (stderr.items.len != 0) {
-                try std.testing.expectEqualStrings("Cannot load PSReadline module.  Console is running without PSReadline.\r\n", stderr.items);
+            if (stderr.len != 0) {
+                try std.testing.expectEqualStrings("Cannot load PSReadline module.  Console is running without PSReadline.\r\n", stderr);
             }
             switch (term) {
-                .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+                .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
                 else => return error.UnexpectedChildTermination,
             }
         }
@@ -1710,14 +1727,14 @@ test "installIfStale: different content on disk triggers reinstall" {
     defer std.testing.allocator.free(fp);
 
     const f = try tmp.dir.createFile(std.testing.io, "integration.ps1", .{ .truncate = true });
-    try f.writeAll("# stale");
+    try f.writeStreamingAll(std.testing.io, "# stale");
     f.close(std.testing.io);
 
     try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fp));
 
     const verify = try tmp.dir.openFile(std.testing.io, "integration.ps1", .{});
     defer verify.close(std.testing.io);
-    const contents = try verify.readToEndAlloc(std.testing.allocator, 1024 * 1024);
+    const contents = try compat_file.readToEndAlloc(verify, std.testing.allocator, 1024 * 1024);
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings(integration_script, contents);
 }
@@ -1729,8 +1746,8 @@ const InstallFixture = struct {
     fn init(existing: ?[]const u8) !InstallFixture {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
-        if (existing) |text| try tmp.dir.writeFile(.{ .sub_path = "integration.ps1", .data = text });
-        const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+        if (existing) |text| try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "integration.ps1", .data = text });
+        const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
         defer std.testing.allocator.free(dir_path);
         return .{
             .tmp = tmp,
@@ -1744,7 +1761,7 @@ const InstallFixture = struct {
     }
 
     fn read(self: *InstallFixture) ![]u8 {
-        return self.tmp.dir.readFileAlloc(std.testing.allocator, "integration.ps1", 1024 * 1024);
+        return self.tmp.dir.readFileAlloc(std.testing.io, "integration.ps1", std.testing.allocator, .limited(1024 * 1024));
     }
 };
 
@@ -1821,8 +1838,8 @@ test "installIfStale: a copy that cannot be read is left for the next launch, on
     defer held_fx.deinit();
     {
         // Exclusive: its bytes cannot be read, as when a scanner has the file.
-        var held = try held_fx.tmp.dir.openFile("integration.ps1", .{ .mode = .read_write, .lock = .exclusive });
-        defer held.close();
+        var held = try held_fx.tmp.dir.openFile(std.testing.io, "integration.ps1", .{ .mode = .read_write, .lock = .exclusive });
+        defer held.close(std.testing.io);
         try std.testing.expectError(error.LockViolation, readInstalled(std.testing.allocator, held_fx.path));
         try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, held_fx.path));
     }
@@ -1833,10 +1850,10 @@ test "installIfStale: a copy that cannot be read is left for the next launch, on
     var big_fx = try InstallFixture.init(null);
     defer big_fx.deinit();
     {
-        const file = try big_fx.tmp.dir.createFile("integration.ps1", .{});
-        defer file.close();
+        const file = try big_fx.tmp.dir.createFile(std.testing.io, "integration.ps1", .{});
+        defer file.close(std.testing.io);
         const chunk = @as([4096]u8, @splat('#'));
-        for (0..257) |_| try file.writeAll(&chunk);
+        for (0..257) |_| try file.writeStreamingAll(std.testing.io, &chunk);
     }
     try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, big_fx.path));
     const script = try big_fx.read();
@@ -1850,8 +1867,8 @@ test "installIfStale: an install in progress in another instance is not raced" {
     {
         const lock_path = try std.mem.concat(std.testing.allocator, u8, &.{ fx.path, ".lock" });
         defer std.testing.allocator.free(lock_path);
-        const other = try std.fs.createFileAbsolute(lock_path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
-        defer other.close();
+        const other = try std.Io.Dir.createFileAbsolute(std.testing.io, lock_path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
+        defer other.close(std.testing.io);
         try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, fx.path));
         const untouched = try fx.read();
         defer std.testing.allocator.free(untouched);
@@ -1865,17 +1882,17 @@ test "installIfStale: an install in progress in another instance is not raced" {
 test "installIfStale: leaves a file with the old fixed temporary name alone" {
     var fx = try InstallFixture.init("# stale");
     defer fx.deinit();
-    try fx.tmp.dir.writeFile(.{ .sub_path = ".integration.ps1.tmp", .data = "another instance's copy" });
+    try fx.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".integration.ps1.tmp", .data = "another instance's copy" });
 
     try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fx.path));
-    const other = try fx.tmp.dir.readFileAlloc(std.testing.allocator, ".integration.ps1.tmp", 1024);
+    const other = try fx.tmp.dir.readFileAlloc(std.testing.io, ".integration.ps1.tmp", std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(other);
     try std.testing.expectEqualStrings("another instance's copy", other);
 
     // And no temporary of its own is left behind.
     var count: usize = 0;
     var names = fx.tmp.dir.iterate();
-    while (try names.next()) |entry| {
+    while (try names.next(std.testing.io)) |entry| {
         if (std.mem.endsWith(u8, entry.name, ".tmp")) count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);

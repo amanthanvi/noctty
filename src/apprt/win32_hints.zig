@@ -1328,11 +1328,11 @@ test "hints: pathological custom pattern stays within the scan work budget" {
         .y = @intCast(index / 80),
     };
 
-    var timer = try std.time.Timer.start();
+    const started = std.Io.Timestamp.now(testing.io, .awake);
     const matches = try extractMatches(alloc, text, map, &.{"^(a+)+$"});
     defer alloc.free(matches);
     try testing.expectEqual(@as(usize, 0), matches.len);
-    try testing.expect(timer.read() < 250 * std.time.ns_per_ms);
+    try testing.expect(started.untilNow(testing.io, .awake).toNanoseconds() < 250 * std.time.ns_per_ms);
 }
 
 test "hints: custom pattern candidate count is bounded" {
